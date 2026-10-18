@@ -62,15 +62,15 @@ func TestPhaseAttemptLaunchOrdinalIsSharedByRetriesAndNudges(t *testing.T) {
 		t.Fatalf("StopReason = %q, want incomplete_output", result.StopReason)
 	}
 
-	// Each retry emits its event before the next launch, so the retried member
-	// reports one event per consumed retry, numbered from the first retry.
+	// Each retry emits its event before the next launch, numbered from the
+	// first retry.
 	var attempts []int
 	for _, ev := range sink.events {
 		if ev.Event != "avenor.retry" {
 			continue
 		}
-		if got := ev.Fields["run_id"]; got != "run_ordinal" {
-			t.Fatalf("retry run_id = %v, want run_ordinal", got)
+		if ev.Fields["run_id"] != "run_ordinal" {
+			t.Fatalf("retry run_id = %v, want run_ordinal", ev.Fields["run_id"])
 		}
 		attempt, ok := ev.Fields["attempt"].(int)
 		if !ok {

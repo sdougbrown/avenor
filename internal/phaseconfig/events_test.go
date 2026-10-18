@@ -15,81 +15,69 @@ func (r *eventRecorder) Write(ev events.Event) error {
 	return nil
 }
 
-// TestPhaseEventsCarryRunKindWithoutChangingSectionKind pins the additive
-// phase-event contract: run_kind names the containing runner on both the start
-// and the end event, the start keeps its section kind, the end keeps its
-// terminal shape, and neither event grows per-attempt fields.
-func TestPhaseEventsCarryRunKindWithoutChangingSectionKind(t *testing.T) {
-	recorder := &eventRecorder{}
-	if err := EmitPhaseStart(recorder, "run_1", "code_review", 1, "pre", "loop"); err != nil {
-		t.Fatalf("EmitPhaseStart: %v", err)
+// TestPhaseEventsCarryRunKind pins the additive phase-event contract: run_kind
+// names the containing runner on both events, the start keeps its section kind,
+// the end keeps its terminal shape, and neither event grows per-attempt fields.
+func TestPhaseEventsCarryRunKind(t *testing.T) {
+	tests := []struct {
+		name        string
+		runID       string
+		runKind     string
+		wantRunID   bool
+		wantSection string // section kind the start must keep
+	}{
+		{name: "loop run", runID: "run_1", runKind: "loop", wantRunID: true, wantSection: "pre"},
+		{name: "team run", runID: "run_2", runKind: "team", wantRunID: true, wantSection: "post"},
+		{name: "empty run id still reports the run kind", runKind: "loop", wantSection: "loop"},
 	}
-	marker := &LoopMarker{Directive: "abort", Label: "stop-here"}
-	if err := EmitPhaseEnd(recorder, "run_1", "code_review", 1, "loop", "end_turn", marker); err != nil {
-		t.Fatalf("EmitPhaseEnd: %v", err)
-	}
-	if len(recorder.events) != 2 {
-		t.Fatalf("events = %d, want a start and an end", len(recorder.events))
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := &eventRecorder{}
+			if err := EmitPhaseStart(recorder, tt.runID, "code_review", 1, tt.wantSection, tt.runKind); err != nil {
+				t.Fatalf("EmitPhaseStart: %v", err)
+			}
+			marker := &LoopMarker{Directive: "abort", Label: "stop-here"}
+			if err := EmitPhaseEnd(recorder, tt.runID, "code_review", 1, tt.runKind, "end_turn", marker); err != nil {
+				t.Fatalf("EmitPhaseEnd: %v", err)
+			}
+			if len(recorder.events) != 2 {
+				t.Fatalf("events = %d, want a start and an end", len(recorder.events))
+			}
 
-	start := recorder.events[0]
-	if start.Event != "avenor.phase.start" {
-		t.Fatalf("event = %q, want avenor.phase.start", start.Event)
-	}
-	if got := start.Fields["run_kind"]; got != "loop" {
-		t.Fatalf("start run_kind = %v, want loop", got)
-	}
-	if got := start.Fields["kind"]; got != "pre" {
-		t.Fatalf("start kind = %v, want the unchanged section kind pre", got)
-	}
-	if got := start.Fields["phase"]; got != "code_review" {
-		t.Fatalf("start phase = %v, want code_review", got)
-	}
-	if got := start.Fields["iteration"]; got != 1 {
-		t.Fatalf("start iteration = %v, want 1", got)
-	}
-	if got := start.Fields["run_id"]; got != "run_1" {
-		t.Fatalf("start run_id = %v, want run_1", got)
-	}
-	if _, ok := start.Fields["attempt"]; ok {
-		t.Fatalf("start carries per-attempt fields: %v", start.Fields)
-	}
-
-	end := recorder.events[1]
-	if end.Event != "avenor.phase.end" {
-		t.Fatalf("event = %q, want avenor.phase.end", end.Event)
-	}
-	if got := end.Fields["run_kind"]; got != "loop" {
-		t.Fatalf("end run_kind = %v, want loop", got)
-	}
-	if _, ok := end.Fields["kind"]; ok {
-		t.Fatalf("end gained a section kind: %v", end.Fields)
-	}
-	if got := end.Fields["stop_reason"]; got != "end_turn" {
-		t.Fatalf("end stop_reason = %v, want end_turn", got)
-	}
-	if got := end.Fields["abort_marker"]; got != true {
-		t.Fatalf("end abort_marker = %v, want true", got)
-	}
-	if got := end.Fields["abort_marker_label"]; got != "stop-here" {
-		t.Fatalf("end abort_marker_label = %v, want stop-here", got)
-	}
-	if _, ok := end.Fields["attempt"]; ok {
-		t.Fatalf("end carries per-attempt fields: %v", end.Fields)
-	}
-}
-
-// TestPhaseEventWithoutRunIDOmitsIt keeps the existing conditional run_id
-// behavior intact for callers that tag the event elsewhere.
-func TestPhaseEventWithoutRunIDOmitsIt(t *testing.T) {
-	recorder := &eventRecorder{}
-	if err := EmitPhaseStart(recorder, "", "body", 0, "loop", "loop"); err != nil {
-		t.Fatalf("EmitPhaseStart: %v", err)
-	}
-	if _, ok := recorder.events[0].Fields["run_id"]; ok {
-		t.Fatalf("run_id present for an empty run id: %v", recorder.events[0].Fields)
-	}
-	if got := recorder.events[0].Fields["run_kind"]; got != "loop" {
-		t.Fatalf("run_kind = %v, want loop even without a run id", got)
+			start, end := recorder.events[0], recorder.events[1]
+			if start.Event != "avenor.phase.start" || end.Event != "avenor.phase.end" {
+				t.Fatalf("events = %q, %q", start.Event, end.Event)
+			}
+			for _, ev := range recorder.events {
+				if got := ev.Fields["run_kind"]; got != tt.runKind {
+					t.Errorf("%s run_kind = %v, want %q", ev.Event, got, tt.runKind)
+				}
+				if _, ok := ev.Fields["attempt"]; ok {
+					t.Errorf("%s carries per-attempt fields: %v", ev.Event, ev.Fields)
+				}
+				runID, ok := ev.Fields["run_id"]
+				if ok != tt.wantRunID {
+					t.Errorf("%s run_id present = %v, want %v", ev.Event, ok, tt.wantRunID)
+				}
+				if ok && runID != tt.runID {
+					t.Errorf("%s run_id = %v, want %q", ev.Event, runID, tt.runID)
+				}
+			}
+			if got := start.Fields["kind"]; got != tt.wantSection {
+				t.Errorf("start kind = %v, want the unchanged section kind %q", got, tt.wantSection)
+			}
+			if _, ok := end.Fields["kind"]; ok {
+				t.Errorf("end gained a section kind: %v", end.Fields)
+			}
+			if got := end.Fields["stop_reason"]; got != "end_turn" {
+				t.Errorf("end stop_reason = %v, want end_turn", got)
+			}
+			if got := end.Fields["abort_marker"]; got != true {
+				t.Errorf("end abort_marker = %v, want true", got)
+			}
+			if got := end.Fields["abort_marker_label"]; got != "stop-here" {
+				t.Errorf("end abort_marker_label = %v, want stop-here", got)
+			}
+		})
 	}
 }

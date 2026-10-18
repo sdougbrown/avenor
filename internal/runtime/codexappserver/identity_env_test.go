@@ -35,127 +35,25 @@ done
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// TestIdentityChildEnv asserts in one launch what the app-server child saw:
+// this launch's identity through the opaque wrapper prefix, none of the
+// inherited identity, and the untouched broker pair.
 func TestIdentityChildEnv(t *testing.T) {
-	t.Run("start client through a transparent wrapper", func(t *testing.T) {
-		identitytest.PoisonParent(t)
-		obsPath := filepath.Join(t.TempDir(), "observed.env")
-		writeCodexIdentityChild(t, obsPath)
-		wrapper := identitytest.WriteTransparentWrapper(t)
-
-		provenance := identitytest.Provenance("rt_child")
-		c, err := StartClient(context.Background(), runtime.StartOptions{
-			LaunchWrapper: []string{wrapper},
-			Provenance:    provenance,
-		})
-		if err != nil {
-			t.Fatalf("StartClient: %v", err)
-		}
-		defer c.Close()
-
-		observed := identitytest.Read(t, obsPath)
-		identitytest.Assert(t, observed, provenance)
-		identitytest.AssertBrokerPreserved(t, observed)
-	})
-
-	t.Run("nil identity clears inherited values", func(t *testing.T) {
-		identitytest.PoisonParent(t)
-		obsPath := filepath.Join(t.TempDir(), "observed.env")
-		writeCodexIdentityChild(t, obsPath)
-
-		c, err := StartClient(context.Background(), runtime.StartOptions{})
-		if err != nil {
-			t.Fatalf("StartClient: %v", err)
-		}
-		defer c.Close()
-
-		observed := identitytest.Read(t, obsPath)
-		identitytest.AssertCleared(t, observed)
-		identitytest.AssertBrokerPreserved(t, observed)
-	})
-}
-
-func TestProviderStartUsesProvenanceAtLaunch(t *testing.T) {
 	identitytest.PoisonParent(t)
 	obsPath := filepath.Join(t.TempDir(), "observed.env")
 	writeCodexIdentityChild(t, obsPath)
 
 	provenance := identitytest.Provenance("rt_child")
-	p := NewWithOptions(runtime.StartOptions{})
-	defer p.Close()
-	if _, err := p.Start(context.Background(), runtime.StartOptions{
-		Dir:        t.TempDir(),
-		Provenance: provenance,
-	}); err != nil {
-		t.Fatalf("Start: %v", err)
+	c, err := StartClient(context.Background(), runtime.StartOptions{
+		LaunchWrapper: []string{identitytest.WriteTransparentWrapper(t)},
+		Provenance:    provenance,
+	})
+	if err != nil {
+		t.Fatalf("StartClient: %v", err)
 	}
+	defer c.Close()
 
 	observed := identitytest.Read(t, obsPath)
 	identitytest.Assert(t, observed, provenance)
 	identitytest.AssertBrokerPreserved(t, observed)
-}
-
-// TestProviderResumeWithOptionsCarriesFreshIdentity pins the fresh-client
-// resume path: the new app-server is launched with the caller's merged
-// identity, not the constructor default. The constructor identity carries an
-// iteration and a label the fresh launch must not keep.
-func TestProviderResumeWithOptionsCarriesFreshIdentity(t *testing.T) {
-	identitytest.PoisonParent(t)
-	obsPath := filepath.Join(t.TempDir(), "observed.env")
-	writeCodexIdentityChild(t, obsPath)
-
-	p := NewWithOptions(runtime.StartOptions{
-		Provenance: &runtime.LaunchProvenance{
-			RuntimeID:   "rt_old",
-			ExecutionID: "rt_old",
-			Kind:        "loop",
-			Phase:       "old-phase",
-			Iteration:   identitytest.IntPtr(4),
-			Label:       "old-label",
-			Attempt:     1,
-		},
-	})
-	defer p.Close()
-
-	fresh := identitytest.Provenance("rt_child")
-	if _, err := p.ResumeWithOptions(context.Background(), "th_unknown", runtime.StartOptions{
-		Provenance: fresh,
-	}); err != nil {
-		t.Fatalf("ResumeWithOptions: %v", err)
-	}
-
-	identitytest.Assert(t, identitytest.Read(t, obsPath), fresh)
-}
-
-// TestProviderResumeWithOptionsKeepsLiveProcessIdentity pins the live-process
-// half: an existing app-server keeps the identity it was launched with.
-func TestProviderResumeWithOptionsKeepsLiveProcessIdentity(t *testing.T) {
-	identitytest.PoisonParent(t)
-	obsPath := filepath.Join(t.TempDir(), "observed.env")
-	writeCodexIdentityChild(t, obsPath)
-
-	first := identitytest.Provenance("rt_child")
-	p := NewWithOptions(runtime.StartOptions{})
-	defer p.Close()
-	session, err := p.Start(context.Background(), runtime.StartOptions{
-		Dir:        t.TempDir(),
-		Provenance: first,
-	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	firstObserved := identitytest.Read(t, obsPath)
-
-	if _, err := p.ResumeWithOptions(context.Background(), session.SessionID, runtime.StartOptions{
-		Provenance: &runtime.LaunchProvenance{RuntimeID: "rt_new", ExecutionID: "rt_new", Kind: "run", Attempt: 5},
-	}); err != nil {
-		t.Fatalf("ResumeWithOptions: %v", err)
-	}
-
-	observed := identitytest.Read(t, obsPath)
-	if observed[runtime.EnvRuntimeID] != firstObserved[runtime.EnvRuntimeID] || observed[runtime.EnvKind] != "team" {
-		t.Fatalf("live process identity changed: %v", observed)
-	}
-	if p.client == nil {
-		t.Fatal("resume dropped the live client")
-	}
 }

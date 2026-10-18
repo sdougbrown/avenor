@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,40 +16,24 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
-// UnsetValue is what the observer reports for a variable the child did not
+// unsetValue is what the observer reports for a variable the child did not
 // inherit, so a test can tell "unset" from "empty".
-const UnsetValue = "__UNSET__"
+const unsetValue = "__UNSET__"
 
-// Sentinel lines bracket every observation group. The completion sentinel is
-// written last, so a reader waits for a finished group instead of for
-// particular keys to appear.
-const (
-	groupSentinel = "IDENTITY_OBSERVATION_BEGIN"
-	doneSentinel  = "IDENTITY_OBSERVATION_END"
-)
-
-// OperationalKeys are the non-identity variables the observer records to show
-// the scrub is exact: a near miss of an identity name, an unrelated avenor
-// variable and the broker credentials.
-func OperationalKeys() []string {
-	return []string{
-		runtime.EnvRuntimeID + "_SUFFIX",
+// keys returns every environment name the observer serializes: launch identity
+// plus the operational variables that prove the scrub is exact.
+func keys() []string {
+	return append(runtime.IdentityEnvNames(),
+		runtime.EnvRuntimeID+"_SUFFIX", // near miss of an identity name
 		"AVENOR_TREE_BUDGET",
 		"AVENOR_RUN_ID",
 		"AVENOR_BROKER_TOKEN",
 		"AVENOR_BROKER_URL",
-	}
+	)
 }
 
-// Keys returns every environment name the observer serializes.
-func Keys(extra ...string) []string {
-	keys := runtime.IdentityEnvNames()
-	keys = append(keys, OperationalKeys()...)
-	return append(keys, extra...)
-}
-
-// ShellQuote quotes s for a POSIX shell.
-func ShellQuote(s string) string {
+// shellQuote quotes s for a POSIX shell.
+func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
@@ -65,113 +48,55 @@ func WriteTransparentWrapper(t *testing.T) string {
 	return path
 }
 
-// IsolateTmuxServer points tmux at a private socket directory and detaches the
-// test from any server this process inherited, so the pane is the only child
-// the test owns.
-func IsolateTmuxServer(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-	t.Setenv("TMUX_TMPDIR", t.TempDir())
-	prior, had := os.LookupEnv("TMUX")
-	if err := os.Unsetenv("TMUX"); err != nil {
-		t.Fatalf("unset TMUX: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "kill-server").Run()
-		if had {
-			_ = os.Setenv("TMUX", prior)
-		}
-	})
-}
-
-// Body renders a shell block that appends one observation group to obsPath as
-// KEY=hex(value) lines. Values are hex encoded so quotes, newlines and
-// command-substitution text stay unambiguous. Appending keeps every launch of
-// a session readable.
-func Body(obsPath string, extraKeys ...string) string {
+// Body renders a shell block that writes this launch's observation atomically
+// as KEY=hex(value) lines. Values are hex encoded so quotes, newlines and
+// command-substitution text stay unambiguous, and the rename means a reader
+// never sees a half-written file.
+func Body(obsPath string) string {
 	var b strings.Builder
 	b.WriteString("observe() {\n")
 	b.WriteString("  printf '%s=%s\\n' \"$1\" \"$(printf '%s' \"$2\" | od -An -tx1 | tr -d ' \\n')\"\n")
 	b.WriteString("}\n")
+	fmt.Fprintf(&b, "obs=%s\n", shellQuote(obsPath))
 	b.WriteString("{\n")
-	fmt.Fprintf(&b, "printf '%s\\n'\n", groupSentinel)
-	for _, key := range Keys(extraKeys...) {
-		fmt.Fprintf(&b, "observe %s \"${%s-%s}\"\n", key, key, UnsetValue)
+	for _, key := range keys() {
+		fmt.Fprintf(&b, "observe %s \"${%s-%s}\"\n", key, key, unsetValue)
 	}
-	fmt.Fprintf(&b, "printf '%s\\n'\n", doneSentinel)
-	fmt.Fprintf(&b, "} >> %s\n", ShellQuote(obsPath))
+	b.WriteString("} > \"$obs.tmp\" && mv \"$obs.tmp\" \"$obs\"\n")
 	return b.String()
 }
 
-// Read waits for the last finished observation group and decodes it.
+// Read waits for the observation file and decodes it.
 func Read(t *testing.T, path string) map[string]string {
-	t.Helper()
-	groups := ReadGroups(t, path, 1)
-	return groups[len(groups)-1]
-}
-
-// ReadGroups waits for want finished observation groups, so a session that
-// launches more than one process can read each launch.
-func ReadGroups(t *testing.T, path string, want int) []map[string]string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		raw, err := os.ReadFile(path)
-		if err == nil {
-			if groups := decode(t, raw); len(groups) >= want {
-				return groups
-			}
+		if err == nil && len(raw) > 0 {
+			return decode(t, raw)
 		}
 		if time.Now().After(deadline) {
-			raw, _ := os.ReadFile(path)
-			t.Fatalf("timed out waiting for %d identity observation groups; have:\n%s", want, raw)
+			t.Fatalf("timed out waiting for an identity observation in %s", path)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// decode returns every group the completion sentinel closed. A trailing group
-// that is still being written is ignored.
-func decode(t *testing.T, raw []byte) []map[string]string {
+func decode(t *testing.T, raw []byte) map[string]string {
 	t.Helper()
-	text := string(raw)
-	end := strings.LastIndexByte(text, '\n')
-	if end < 0 {
-		return nil
-	}
-	var (
-		groups  []map[string]string
-		current map[string]string
-	)
-	for _, line := range strings.Split(text[:end], "\n") {
-		switch line {
-		case groupSentinel:
-			current = map[string]string{}
-		case doneSentinel:
-			if current == nil {
-				t.Fatalf("identity observation sentinel without a group")
-			}
-			groups = append(groups, current)
-			current = nil
-		case "":
-		default:
-			if current == nil {
-				t.Fatalf("identity observation %q outside a group", line)
-			}
-			key, encoded, ok := strings.Cut(line, "=")
-			if !ok {
-				t.Fatalf("malformed observation line %q", line)
-			}
-			value, err := hex.DecodeString(encoded)
-			if err != nil {
-				t.Fatalf("decode %s observation: %v", key, err)
-			}
-			current[key] = string(value)
+	observed := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		key, encoded, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("malformed observation line %q", line)
 		}
+		value, err := hex.DecodeString(encoded)
+		if err != nil {
+			t.Fatalf("decode %s observation: %v", key, err)
+		}
+		observed[key] = string(value)
 	}
-	return groups
+	return observed
 }
 
 // PoisonParent exports inherited identity plus operational variables, so a
@@ -197,10 +122,6 @@ func PoisonParent(t *testing.T) {
 	}
 }
 
-// IntPtr returns a pointer to v, for provenance fields whose unset state is
-// distinct from zero.
-func IntPtr(v int) *int { return &v }
-
 // Provenance is a launch identity whose values a shell must not reinterpret.
 func Provenance(runtimeID string) *runtime.LaunchProvenance {
 	return &runtime.LaunchProvenance{
@@ -215,14 +136,9 @@ func Provenance(runtimeID string) *runtime.LaunchProvenance {
 
 // Assert requires the identity the launch supplied and an exact scrub: identity
 // names the launch did not set are unset, the superseded name is gone, and near
-// misses plus unrelated avenor variables survive. AlsoScrubbed names are
-// backend markers that must not reach the child.
-func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProvenance, alsoScrubbed ...string) {
+// misses plus unrelated avenor variables survive.
+func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProvenance) {
 	t.Helper()
-	if want == nil {
-		AssertCleared(t, observed, alsoScrubbed...)
-		return
-	}
 	supplied := map[string]string{}
 	for _, entry := range want.IdentityEnv() {
 		key, value, _ := strings.Cut(entry, "=")
@@ -235,13 +151,8 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 			}
 			continue
 		}
-		if observed[key] != UnsetValue {
+		if observed[key] != unsetValue {
 			t.Errorf("%s = %q, want it unset", key, observed[key])
-		}
-	}
-	for _, key := range alsoScrubbed {
-		if observed[key] != UnsetValue {
-			t.Errorf("%s = %q, want it scrubbed", key, observed[key])
 		}
 	}
 	if observed[runtime.EnvRuntimeID+"_SUFFIX"] != "near-miss" {
@@ -252,35 +163,11 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 	}
 }
 
-// AssertCleared requires that no identity name reached the child.
-func AssertCleared(t *testing.T, observed map[string]string, alsoScrubbed ...string) {
-	t.Helper()
-	for _, key := range runtime.IdentityEnvNames() {
-		if observed[key] != UnsetValue {
-			t.Errorf("%s = %q, want it scrubbed", key, observed[key])
-		}
-	}
-	for _, key := range alsoScrubbed {
-		if observed[key] != UnsetValue {
-			t.Errorf("%s = %q, want it scrubbed", key, observed[key])
-		}
-	}
-}
-
 // AssertBrokerPreserved requires the broker credential pair to survive an
 // identity scrub.
 func AssertBrokerPreserved(t *testing.T, observed map[string]string) {
 	t.Helper()
 	if observed["AVENOR_RUN_ID"] != "broker-run" || observed["AVENOR_BROKER_TOKEN"] != "broker-token" {
 		t.Errorf("broker pair = %q/%q, want it preserved", observed["AVENOR_RUN_ID"], observed["AVENOR_BROKER_TOKEN"])
-	}
-}
-
-// AssertBrokerURL requires the child to see the URL its own launch set, not the
-// stale one the parent exported.
-func AssertBrokerURL(t *testing.T, observed map[string]string, want string) {
-	t.Helper()
-	if observed["AVENOR_BROKER_URL"] != want {
-		t.Errorf("AVENOR_BROKER_URL = %q, want %q", observed["AVENOR_BROKER_URL"], want)
 	}
 }

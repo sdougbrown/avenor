@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +13,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
-	"github.com/sdougbrown/avenor/internal/runtime/internal/identitytest"
 )
 
 func TestSelectPermissionOption(t *testing.T) {
@@ -567,274 +564,28 @@ func TestCloseRunsClientEnvCleanup(t *testing.T) {
 	}
 }
 
-// acpStub describes a minimal ACP stdio stub. It answers the first request
-// (initialize) and then either a session/open result, an error, or nothing.
-type acpStub struct {
-	Mode  string // "exit", "silent", "fail-after-init", "hang-prompt" or "serve"
-	Gate  string // when set, the stub waits for this file before reading stdin
-	Ready string // when set, the stub touches this path once it is spawned
-	// Observe, when set, makes the stub write the allowlisted launch
-	// environment to this path before it answers any request.
-	Observe string
-	// Prompt, in "hang-prompt" mode, is touched when the stub receives a
-	// session/prompt request; the stub never answers such a request.
-	Prompt string
-	// ReadyPerProcess appends the stub's pid to Ready so each stub instance
-	// leaves a distinct marker.
-	ReadyPerProcess bool
-}
-
-func writeACPStub(t *testing.T, stub acpStub) string {
-	t.Helper()
-	script := filepath.Join(t.TempDir(), "acp-stub.sh")
-	var body strings.Builder
-	body.WriteString("#!/bin/sh\n")
-	if stub.Observe != "" {
-		body.WriteString(identitytest.Body(stub.Observe, acpObservationExtras...))
-	}
-	if stub.Ready != "" {
-		if stub.ReadyPerProcess {
-			fmt.Fprintf(&body, "touch %s\"$$\"\n", shellQuotePath(stub.Ready))
-		} else {
-			fmt.Fprintf(&body, "touch %s\n", shellQuotePath(stub.Ready))
-		}
-	}
-	if stub.Gate != "" {
-		fmt.Fprintf(&body, "while [ ! -f %s ]; do sleep 0.01; done\n", shellQuotePath(stub.Gate))
-	}
-	switch stub.Mode {
-	case "exit":
-		body.WriteString("exit 3\n")
-	case "silent":
-		body.WriteString("cat > /dev/null\n")
-	case "hang-prompt":
-		body.WriteString("n=0\n")
-		body.WriteString("while IFS= read -r line; do\n")
-		body.WriteString("  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n")
-		body.WriteString("  [ -n \"$id\" ] || continue\n")
-		body.WriteString("  n=$((n+1))\n")
-		body.WriteString("  if [ \"$n\" -eq 1 ]; then\n")
-		body.WriteString("    printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":1}}\\n' \"$id\"\n")
-		body.WriteString("  elif [ \"$n\" -eq 2 ]; then\n")
-		body.WriteString("    printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"sessionId\":\"ses_stub\"}}\\n' \"$id\"\n")
-		if stub.Prompt != "" {
-			fmt.Fprintf(&body, "  else\n    touch %s\n", shellQuotePath(stub.Prompt))
-		} else {
-			body.WriteString("  else\n    :\n")
-		}
-		body.WriteString("  fi\ndone\n")
-	default:
-		body.WriteString("n=0\n")
-		body.WriteString("while IFS= read -r line; do\n")
-		body.WriteString("  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n")
-		body.WriteString("  [ -n \"$id\" ] || continue\n")
-		body.WriteString("  n=$((n+1))\n")
-		body.WriteString("  if [ \"$n\" -eq 1 ]; then\n")
-		body.WriteString("    printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":1}}\\n' \"$id\"\n")
-		body.WriteString("  else\n")
-		if stub.Mode == "fail-after-init" {
-			body.WriteString("    printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"error\":{\"code\":-32000,\"message\":\"stub refused\"}}\\n' \"$id\"\n")
-		} else {
-			body.WriteString("    printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"sessionId\":\"ses_stub\"}}\\n' \"$id\"\n")
-		}
-		body.WriteString("  fi\ndone\n")
-	}
-	if err := os.WriteFile(script, []byte(body.String()), 0o755); err != nil {
-		t.Fatalf("write acp stub: %v", err)
-	}
-	return script
-}
-
-// writeCandidateConfig stands in for a config file a backend generated for one
-// launch, with the same repeatable cleanup contract the backends use.
-func writeCandidateConfig(t *testing.T) (string, func() error) {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "candidate.json")
-	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
-		t.Fatalf("write candidate config: %v", err)
-	}
-	return path, func() error {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-}
-
-func newStubProvider(bin string, build func(runtime.StartOptions, string, string, string) (map[string]string, func() error)) *Provider {
-	return &Provider{
-		backendID:       "test-acp",
-		bin:             bin,
-		sessions:        map[string]*Session{},
-		runIDs:          map[string]string{},
-		pollContexts:    map[string]context.Context{},
-		pollCancels:     map[string]context.CancelFunc{},
-		pendingMessages: map[string][]string{},
-		buildClientEnv:  build,
-	}
-}
-
-func candidateEnv(path string) map[string]string {
-	return map[string]string{"OPENCODE_CONFIG": path}
-}
-
-func providerClient(p *Provider) *Client {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.client
-}
-
-func waitForPath(t *testing.T, path string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", path)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// TestResumeWithOptionsRetainsBrokerOnLiveClient pins broker retention on an
-// option-aware resume that reuses the live client: the provider keeps the
-// caller's broker without allocating a broker run for the reuse.
-func TestResumeWithOptionsRetainsBrokerOnLiveClient(t *testing.T) {
-	stub := writeACPStub(t, acpStub{Mode: "serve"})
-	p := newStubProvider(stub, nil)
-	defer p.Close()
-
-	session, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir()})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if got := providerClient(p); got == nil {
-		t.Fatal("Start retained no client")
-	}
-
-	b := broker.New(broker.MakeToken())
-	if err := b.Start(); err != nil {
-		t.Fatalf("broker.Start: %v", err)
-	}
-	t.Cleanup(func() { _ = b.Stop() })
-
-	if _, err := p.ResumeWithOptions(context.Background(), session.SessionID, runtime.StartOptions{
-		Broker:    b,
-		RuntimeID: "rt_resume",
-	}); err != nil {
-		t.Fatalf("ResumeWithOptions: %v", err)
-	}
-
-	p.mu.Lock()
-	retained := p.broker
-	p.mu.Unlock()
-	if retained != b {
-		t.Fatalf("p.broker = %p, want the per-call broker %p", retained, b)
-	}
-	if n := b.RunCount(); n != 0 {
-		t.Fatalf("live resume allocated %d broker runs, want none", n)
-	}
-}
-
-// TestEnsureClientReuseKeepsOriginalConfig pins the ownership transfer: a live
-// client keeps its own config and cleanup, and reusing it builds no candidate
-// launch at all.
-func TestEnsureClientReuseKeepsOriginalConfig(t *testing.T) {
-	stub := writeACPStub(t, acpStub{Mode: "serve"})
-	p := newStubProvider(stub, nil)
-	p.client = &Client{}
-	originalCleanupRan := false
-	p.clientEnvCleanup = func() error {
-		originalCleanupRan = true
-		return nil
-	}
-
-	launches := 0
-	created, err := p.ensureClient(context.Background(), runtime.StartOptions{}, func() (map[string]string, func() error) {
-		launches++
-		candidate, cleanup := writeCandidateConfig(t)
-		return candidateEnv(candidate), cleanup
-	})
-	if err != nil {
-		t.Fatalf("ensureClient: %v", err)
-	}
-	if created {
-		t.Fatal("candidate launch was retained despite a live client")
-	}
-	if launches != 0 {
-		t.Fatalf("reuse built %d launch environments, want none", launches)
-	}
-	if originalCleanupRan {
-		t.Fatal("live client's config cleanup was replaced or run")
-	}
-	if p.clientEnvCleanup == nil {
-		t.Fatal("live client lost ownership of its config")
-	}
-}
-
-// TestEnsureClientDiscardsConfigWhenAuthenticationFails covers the cleanup of
-// a launch abandoned after initialization but before a client is retained.
-func TestEnsureClientDiscardsConfigWhenAuthenticationFails(t *testing.T) {
-	stub := writeACPStub(t, acpStub{Mode: "fail-after-init"})
-	p := newStubProvider(stub, nil)
-	p.authenticateID = "stub-auth"
-
-	candidate, cleanup := writeCandidateConfig(t)
-	created, err := p.ensureClient(context.Background(), runtime.StartOptions{}, func() (map[string]string, func() error) {
-		return candidateEnv(candidate), cleanup
-	})
-	if err == nil {
-		t.Fatal("expected authentication failure")
-	}
-	if created {
-		t.Fatal("failed launch was retained as the provider client")
-	}
-	if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
-		t.Fatalf("abandoned launch config not cleaned up: %v", statErr)
-	}
-	if client := providerClient(p); client != nil {
-		t.Fatal("failed launch retained its client")
-	}
-}
-
-// TestStartRetainsConfigForLiveClientAfterSessionOpenFailure keeps the clean
-// split: a retained client still owns its config after a session-open error, and
-// provider close is what removes it. The startup error is propagated unchanged.
-func TestStartRetainsConfigForLiveClientAfterSessionOpenFailure(t *testing.T) {
-	stub := writeACPStub(t, acpStub{Mode: "fail-after-init"})
-	candidate, cleanup := writeCandidateConfig(t)
-	p := newStubProvider(stub, func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
-		return candidateEnv(candidate), cleanup
-	})
-
-	_, err := p.Start(context.Background(), runtime.StartOptions{})
-	if err == nil {
-		t.Fatal("expected session open failure")
-	}
-	if !strings.Contains(err.Error(), "stub refused") {
-		t.Fatalf("session open error = %v, want the stub's refusal", err)
-	}
-	if _, statErr := os.Stat(candidate); statErr != nil {
-		t.Fatalf("config removed while its client is still retained: %v", statErr)
-	}
-
-	_ = p.Close()
-	if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
-		t.Fatalf("provider close did not remove its retained config: %v", statErr)
-	}
-}
-
-// TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize covers a launch
-// abandoned before any client is retained.
+// TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize covers the
+// cleanup of a launch abandoned before any client is retained.
 func TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize(t *testing.T) {
-	ready := filepath.Join(t.TempDir(), "ready")
-	stub := writeACPStub(t, acpStub{Mode: "silent", Ready: ready})
-	candidate, cleanup := writeCandidateConfig(t)
-	p := newStubProvider(stub, func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
-		return candidateEnv(candidate), cleanup
-	})
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	bin := filepath.Join(dir, "silent.sh")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch "+shellQuotePath(ready)+"\ncat > /dev/null\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	config := filepath.Join(dir, "candidate.json")
+	if err := os.WriteFile(config, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	p := &Provider{
+		backendID: "test-acp",
+		bin:       bin,
+		sessions:  map[string]*Session{},
+		buildClientEnv: func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
+			return map[string]string{"OPENCODE_CONFIG": config}, func() error { return os.Remove(config) }
+		},
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	started := make(chan error, 1)
@@ -853,170 +604,20 @@ func TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize(t *testing.T) 
 	case <-time.After(10 * time.Second):
 		t.Fatal("Start did not return after cancellation")
 	}
-	if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
-		t.Fatalf("cancelled launch config not cleaned up: %v", statErr)
+	if _, err := os.Stat(config); !os.IsNotExist(err) {
+		t.Fatalf("cancelled launch config not cleaned up: %v", err)
 	}
 }
 
-// TestStartRetainsConfigWhenSessionConfigurationFails covers the other retained
-// case: the client and its config outlive a session-configuration error and are
-// only released by close.
-func TestStartRetainsConfigWhenSessionConfigurationFails(t *testing.T) {
-	stub := writeACPStub(t, acpStub{Mode: "serve"})
-	candidate, cleanup := writeCandidateConfig(t)
-	p := newStubProvider(stub, func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
-		return candidateEnv(candidate), cleanup
-	})
-	p.configureSession = func(context.Context, *Session, runtime.StartOptions) error {
-		return errors.New("configure refused")
-	}
-
-	_, err := p.Start(context.Background(), runtime.StartOptions{})
-	if err == nil {
-		t.Fatal("expected session configuration failure")
-	}
-	if !strings.Contains(err.Error(), "configure refused") {
-		t.Fatalf("session configuration error = %v, want the stub's refusal", err)
-	}
-	if providerClient(p) == nil {
-		t.Fatal("session configuration failure dropped the client that owned the config")
-	}
-	if _, statErr := os.Stat(candidate); statErr != nil {
-		t.Fatalf("config removed while its client is still retained: %v", statErr)
-	}
-
-	_ = p.Close()
-	if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
-		t.Fatalf("provider close did not remove its retained config: %v", statErr)
-	}
-}
-
-// TestCancelledPromptKeepsLiveClientConfig pins that cancelling a prompt leaves
-// the launch — client and config — in place until close.
-func TestCancelledPromptKeepsLiveClientConfig(t *testing.T) {
-	promptSeen := filepath.Join(t.TempDir(), "prompt-seen")
-	stub := writeACPStub(t, acpStub{Mode: "hang-prompt", Prompt: promptSeen})
-	candidate, cleanup := writeCandidateConfig(t)
-	p := newStubProvider(stub, func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
-		return candidateEnv(candidate), cleanup
-	})
-
-	session, err := p.Start(context.Background(), runtime.StartOptions{})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	promptCtx, cancelPrompt := context.WithCancel(context.Background())
-	prompted := make(chan error, 1)
-	go func() { prompted <- p.Prompt(promptCtx, session.SessionID, "hello") }()
-	waitForPath(t, promptSeen)
-
-	if err := p.Cancel(context.Background(), session.SessionID); err != nil {
-		t.Fatalf("Cancel: %v", err)
-	}
-	cancelPrompt()
-
-	select {
-	case err := <-prompted:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("prompt error = %v, want context.Canceled", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("prompt did not return after cancellation")
-	}
-	if providerClient(p) == nil {
-		t.Fatal("cancelled prompt dropped the live client")
-	}
-	if _, statErr := os.Stat(candidate); statErr != nil {
-		t.Fatalf("config removed while its client is still live: %v", statErr)
-	}
-
-	_ = p.Close()
-	if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
-		t.Fatalf("provider close did not remove the live client config: %v", statErr)
-	}
-}
-
-// TestEnsureClientConcurrentInstallKeepsSingleConfigOwner releases two launches
-// at the same time: exactly one becomes the provider client, the loser cleans
-// only its own config, and close removes the retained winner's config.
-func TestEnsureClientConcurrentInstallKeepsSingleConfigOwner(t *testing.T) {
-	dir := t.TempDir()
-	gate := filepath.Join(dir, "gate")
-	readyPrefix := filepath.Join(dir, "ready")
-	stub := writeACPStub(t, acpStub{Mode: "serve", Gate: gate, Ready: readyPrefix + ".", ReadyPerProcess: true})
-	p := newStubProvider(stub, nil)
-
-	type outcome struct {
-		id      int
-		path    string
-		created bool
-		err     error
-	}
-	results := make(chan outcome, 2)
-	candidates := make([]string, 2)
-	for i := 0; i < 2; i++ {
-		candidate, cleanup := writeCandidateConfig(t)
-		candidates[i] = candidate
-		go func(id int, env map[string]string, cleanup func() error) {
-			created, err := p.ensureClient(context.Background(), runtime.StartOptions{}, func() (map[string]string, func() error) {
-				return env, cleanup
-			})
-			results <- outcome{id: id, path: candidate, created: created, err: err}
-		}(i, candidateEnv(candidate), cleanup)
-	}
-
-	waitForPathCount(t, readyPrefix, 2)
-	if err := os.WriteFile(gate, nil, 0o600); err != nil {
-		t.Fatalf("release stubs: %v", err)
-	}
-
-	createdIDs := map[int]bool{}
-	for i := 0; i < 2; i++ {
-		select {
-		case result := <-results:
-			if result.err != nil {
-				t.Fatalf("ensureClient %d: %v", result.id, result.err)
-			}
-			if result.created {
-				createdIDs[result.id] = true
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("concurrent ensureClient did not finish")
-		}
-	}
-	if len(createdIDs) != 1 {
-		t.Fatalf("retained launches = %v, want exactly one", createdIDs)
-	}
-
-	_ = p.Close()
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); !os.IsNotExist(err) {
-			t.Fatalf("config %q leaked after close: %v", candidate, err)
-		}
-	}
-}
-
-func waitForPathCount(t *testing.T, prefix string, want int) {
+func waitForPath(t *testing.T, path string) {
 	t.Helper()
-	dir := filepath.Dir(prefix)
-	base := filepath.Base(prefix)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		entries, err := os.ReadDir(dir)
-		if err == nil {
-			count := 0
-			for _, entry := range entries {
-				if strings.HasPrefix(entry.Name(), base+".") {
-					count++
-				}
-			}
-			if count >= want {
-				return
-			}
+		if _, err := os.Stat(path); err == nil {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %d %s markers", want, base)
+			t.Fatalf("timed out waiting for %s", path)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
-	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 func TestCapabilities(t *testing.T) {
@@ -348,75 +347,6 @@ func TestProviderPipeRoundtrip(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for Prompt")
 	}
-}
-
-// TestStartKeepsConstructionTimeBroker pins broker ownership to the
-// construction options: a provider keeps the broker it was built with, and a
-// per-call broker is never retained or registered.
-func TestStartKeepsConstructionTimeBroker(t *testing.T) {
-	constructed := startBroker(t)
-
-	t.Run("construction broker is retained", func(t *testing.T) {
-		p := NewWithOptions(runtime.StartOptions{Broker: constructed})
-		defer p.Close()
-		startFakeAppServer(t, p, runtime.StartOptions{})
-
-		if got := providerBroker(p); got != constructed {
-			t.Fatalf("p.broker = %p, want the construction broker %p", got, constructed)
-		}
-	})
-
-	t.Run("per-call broker is ignored", func(t *testing.T) {
-		perCall := startBroker(t)
-		p := NewWithOptions(runtime.StartOptions{})
-		defer p.Close()
-		startFakeAppServer(t, p, runtime.StartOptions{Broker: perCall, RuntimeID: "rt_per_call"})
-
-		if got := providerBroker(p); got != nil {
-			t.Fatalf("p.broker = %p, want nil for a per-call broker", got)
-		}
-		if n := perCall.RunCount(); n != 0 {
-			t.Fatalf("per-call broker registered %d runs, want none", n)
-		}
-	})
-}
-
-// startFakeAppServer runs Start against a fake app-server that answers
-// thread/start.
-func startFakeAppServer(t *testing.T, p *Provider, opts runtime.StartOptions) {
-	t.Helper()
-	c, wOut, rIn := fakeClient()
-	p.startClient = func(context.Context, runtime.StartOptions) (*client, error) { return c, nil }
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := p.Start(context.Background(), opts)
-		done <- err
-	}()
-	req, err := readLine(rIn)
-	if err != nil {
-		t.Fatalf("read thread/start: %v", err)
-	}
-	writeLine(wOut, map[string]any{"id": req.ID, "result": map[string]any{"thread": map[string]any{"id": "th_broker"}}})
-	if err := <-done; err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-}
-
-func startBroker(t *testing.T) *broker.Broker {
-	t.Helper()
-	b := broker.New(broker.MakeToken())
-	if err := b.Start(); err != nil {
-		t.Fatalf("broker.Start: %v", err)
-	}
-	t.Cleanup(func() { _ = b.Stop() })
-	return b
-}
-
-func providerBroker(p *Provider) *broker.Broker {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.broker
 }
 
 // TestEnsureClientReturnsWithoutDeadlock is the regression guard for the

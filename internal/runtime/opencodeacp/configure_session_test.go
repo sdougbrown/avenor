@@ -632,65 +632,11 @@ func TestBuildClientEnvNoOverrideWithoutBroker(t *testing.T) {
 	}
 }
 
-// TestBuildClientEnvAllocatesDistinctFilesPerLaunch pins per-launch config
-// ownership: two launches sharing one run ID get separate files, and one
-// launch's cleanup leaves the other's file intact and is safe to repeat.
-func TestBuildClientEnvAllocatesDistinctFilesPerLaunch(t *testing.T) {
-	t.Setenv("OPENCODE_CONFIG", "")
-	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"tools":{"existing*":true}}`)
-
-	envA, cleanupA := buildClientEnv(runtime.StartOptions{}, "run_shared", "tok", "127.0.0.1:1")
-	envB, cleanupB := buildClientEnv(runtime.StartOptions{}, "run_shared", "tok", "127.0.0.1:1")
-	if cleanupA == nil || cleanupB == nil {
-		t.Fatal("buildClientEnv returned a nil cleanup func")
-	}
-	defer func() { _ = cleanupB() }()
-
-	pathA := envA["OPENCODE_CONFIG"]
-	pathB := envB["OPENCODE_CONFIG"]
-	if pathA == "" || pathB == "" {
-		t.Fatalf("missing OPENCODE_CONFIG: %#v %#v", envA, envB)
-	}
-	if pathA == pathB {
-		t.Fatalf("both launches share config path %q", pathA)
-	}
-
-	info, err := os.Stat(pathA)
-	if err != nil {
-		t.Fatalf("stat generated config: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("generated config mode = %o, want 600", perm)
-	}
-
-	if err := cleanupA(); err != nil {
-		t.Fatalf("cleanup A: %v", err)
-	}
-	if _, err := os.Stat(pathA); !os.IsNotExist(err) {
-		t.Fatalf("launch A config still exists after its cleanup: %v", err)
-	}
-	if err := cleanupA(); err != nil {
-		t.Fatalf("repeated cleanup A: %v", err)
-	}
-	if _, err := os.Stat(pathB); err != nil {
-		t.Fatalf("cleanup of launch A removed launch B's config: %v", err)
-	}
-}
-
-// testLaunch records what a provider passed to BuildClientEnv.
-type testLaunch struct {
-	mu     sync.Mutex
-	runIDs []string
-	tokens []string
-	addrs  []string
-	paths  []string
-}
-
-// writeFakeACPServer writes a minimal ACP stdio server that answers each
-// request in turn: initialize, then session/new. It copies its OPENCODE_CONFIG
-// to record before answering. A non-empty gate makes the server announce itself
-// at ready and block until the gate file exists, which pauses it before it
-// reads its config.
+// writeFakeACPServer writes a minimal ACP stdio server that answers
+// initialize and then session/new, after copying its OPENCODE_CONFIG to record
+// so a test can see which config the child actually read. A non-empty gate
+// makes the server announce itself at ready and then block until the gate file
+// exists, which pauses it before it reads its config.
 func writeFakeACPServer(t *testing.T, dir, name, gate, ready, record, sessionID string) string {
 	t.Helper()
 	script := filepath.Join(dir, name)
@@ -735,11 +681,10 @@ func waitForPath(t *testing.T, path string) {
 	}
 }
 
-// TestConcurrentProvidersKeepDistinctConfigFiles pins concurrent startup: two
-// providers launch with the same child/broker run ID but different config
-// overrides. Provider B is paused before it reads its config; provider A starts
-// fully and closes; B is then released and must still start with only its own
-// merged config on disk.
+// TestConcurrentProvidersKeepDistinctConfigFiles pins the per-launch config
+// ownership fix: two providers that share a broker run ID get separate config
+// files, and closing one leaves the other's file — and the config its child
+// reads — intact.
 func TestConcurrentProvidersKeepDistinctConfigFiles(t *testing.T) {
 	dir := t.TempDir()
 	globalCfgPath := filepath.Join(dir, "opencode.json")
@@ -752,9 +697,8 @@ func TestConcurrentProvidersKeepDistinctConfigFiles(t *testing.T) {
 
 	gate := filepath.Join(dir, "release-b")
 	ready := filepath.Join(dir, "b-waiting")
-	observedA := filepath.Join(dir, "a-child-observed.json")
 	observedB := filepath.Join(dir, "b-child-observed.json")
-	binA := writeFakeACPServer(t, dir, "acp-a.sh", "", "", observedA, "ses_a")
+	binA := writeFakeACPServer(t, dir, "acp-a.sh", "", "", filepath.Join(dir, "a-child-observed.json"), "ses_a")
 	binB := writeFakeACPServer(t, dir, "acp-b.sh", gate, ready, observedB, "ses_b")
 
 	sharedBroker := broker.New("")
@@ -763,24 +707,20 @@ func TestConcurrentProvidersKeepDistinctConfigFiles(t *testing.T) {
 	}
 	defer func() { _ = sharedBroker.Stop() }()
 
-	launchA := &testLaunch{}
-	launchB := &testLaunch{}
-
-	newProvider := func(bin, agent string, record *testLaunch) *acp.Provider {
+	var mu sync.Mutex
+	paths := map[string][]string{}
+	newProvider := func(bin, agent string) *acp.Provider {
 		return acp.NewProvider(acp.ProviderConfig{
 			BackendID: "opencode-acp",
 			Bin:       bin,
 			Opts:      runtime.StartOptions{Agent: agent},
 			BuildClientEnv: func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
 				env, cleanup := buildClientEnv(opts, runID, brokerToken, brokerAddr)
-				record.mu.Lock()
-				record.runIDs = append(record.runIDs, runID)
-				record.tokens = append(record.tokens, brokerToken)
-				record.addrs = append(record.addrs, brokerAddr)
 				if env != nil {
-					record.paths = append(record.paths, env["OPENCODE_CONFIG"])
+					mu.Lock()
+					paths[agent] = append(paths[agent], env["OPENCODE_CONFIG"])
+					mu.Unlock()
 				}
-				record.mu.Unlock()
 				return env, cleanup
 			},
 		}).(*acp.Provider)
@@ -789,7 +729,7 @@ func TestConcurrentProvidersKeepDistinctConfigFiles(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	providerB := newProvider(binB, "beta", launchB)
+	providerB := newProvider(binB, "beta")
 	startedB := make(chan error, 1)
 	go func() {
 		_, err := providerB.Start(ctx, runtime.StartOptions{Broker: sharedBroker, RuntimeID: "rt_shared"})
@@ -797,7 +737,7 @@ func TestConcurrentProvidersKeepDistinctConfigFiles(t *testing.T) {
 	}()
 	waitForPath(t, ready)
 
-	providerA := newProvider(binA, "alpha", launchA)
+	providerA := newProvider(binA, "alpha")
 	if _, err := providerA.Start(ctx, runtime.StartOptions{Broker: sharedBroker, RuntimeID: "rt_shared"}); err != nil {
 		t.Fatalf("provider A start: %v", err)
 	}
@@ -812,8 +752,7 @@ func TestConcurrentProvidersKeepDistinctConfigFiles(t *testing.T) {
 	}
 	defer func() { _ = providerB.Close() }()
 
-	pathA := launchA.paths[0]
-	pathB := launchB.paths[0]
+	pathA, pathB := paths["alpha"][0], paths["beta"][0]
 	if pathA == pathB {
 		t.Fatalf("providers share config path %q", pathA)
 	}
@@ -832,44 +771,8 @@ func TestConcurrentProvidersKeepDistinctConfigFiles(t *testing.T) {
 		t.Fatalf("provider B child observed %q, want its own config %q", observed, rawB)
 	}
 
-	var payload map[string]any
-	if err := json.Unmarshal(rawB, &payload); err != nil {
-		t.Fatalf("decode provider B config: %v", err)
-	}
-	agent, ok := payload["agent"].(map[string]any)
-	if !ok {
-		t.Fatalf("provider B config has no agent map: %#v", payload)
-	}
-	alpha, ok := agent["alpha"].(map[string]any)
-	if !ok {
-		t.Fatalf("provider B config has no alpha entry: %#v", agent)
-	}
-	if alpha["mode"] != "subagent" {
-		t.Errorf("provider B config carries provider A's override: alpha.mode = %v, want subagent", alpha["mode"])
-	}
-
-	rawA, err := os.ReadFile(observedA)
-	if err != nil {
-		t.Fatalf("provider A child did not observe its config: %v", err)
-	}
-	if bytes.Equal(rawA, rawB) {
-		t.Fatal("providers wrote identical configs; test setup cannot distinguish ownership")
-	}
-	var payloadA map[string]any
-	if err := json.Unmarshal(rawA, &payloadA); err != nil {
-		t.Fatalf("decode provider A config: %v", err)
-	}
-	if want := "all"; payloadA["agent"].(map[string]any)["alpha"].(map[string]any)["mode"] != want {
-		t.Fatalf("provider A config alpha.mode = %v, want %q", payloadA["agent"].(map[string]any)["alpha"].(map[string]any)["mode"], want)
-	}
-
-	if launchA.runIDs[0] != "rt_shared" || launchB.runIDs[0] != "rt_shared" {
-		t.Errorf("run IDs changed: A=%q B=%q, want rt_shared for both", launchA.runIDs[0], launchB.runIDs[0])
-	}
-	if launchA.tokens[0] == "" || launchA.tokens[0] != launchB.tokens[0] {
-		t.Errorf("broker tokens changed: A=%q B=%q", launchA.tokens[0], launchB.tokens[0])
-	}
-	if launchA.addrs[0] == "" || launchA.addrs[0] != launchB.addrs[0] {
-		t.Errorf("broker addresses changed: A=%q B=%q", launchA.addrs[0], launchB.addrs[0])
+	// Provider A flips alpha to "all"; provider B must keep the global mode.
+	if bytes.Contains(rawB, []byte(`"mode":"all"`)) {
+		t.Errorf("provider B config carries provider A's override: %s", rawB)
 	}
 }

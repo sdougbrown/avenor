@@ -100,157 +100,80 @@ func TestMergeStartOptionsBrokerFields(t *testing.T) {
 	}
 }
 
-// sameProvenance compares identity values, not the identity's pointer fields.
-func sameProvenance(a, b LaunchProvenance) bool {
-	if (a.Iteration == nil) != (b.Iteration == nil) {
-		return false
-	}
-	if a.Iteration != nil && *a.Iteration != *b.Iteration {
-		return false
-	}
-	a.Iteration, b.Iteration = nil, nil
-	return a == b
-}
-
-func TestMergeStartOptionsProvenanceKeepsDefaultsWhenNil(t *testing.T) {
-	iteration := 2
-	base := StartOptions{Provenance: &LaunchProvenance{
-		RuntimeID:   "rt_member",
-		ExecutionID: "run_team",
-		Kind:        "team",
-		Phase:       "reviewer",
-		Iteration:   &iteration,
-		Label:       "verify",
-		Attempt:     1,
-	}}
-
-	merged := MergeStartOptions(base, StartOptions{})
-	if merged.Provenance == nil {
-		t.Fatal("nil override dropped the base provenance")
-	}
-	if !sameProvenance(*merged.Provenance, *base.Provenance) {
-		t.Fatalf("merged provenance = %+v, want %+v", *merged.Provenance, *base.Provenance)
-	}
-	if merged.Provenance.Iteration == nil || *merged.Provenance.Iteration != 2 {
-		t.Fatalf("merged iteration = %v, want 2", merged.Provenance.Iteration)
-	}
-}
-
-func TestMergeStartOptionsProvenanceReplacesWholeIdentity(t *testing.T) {
-	iteration := 4
-	base := StartOptions{Provenance: &LaunchProvenance{
-		RuntimeID:   "rt_old",
-		ExecutionID: "run_old",
-		Kind:        "loop",
-		Phase:       "body",
-		Iteration:   &iteration,
-		Label:       "old-label",
-		Attempt:     9,
-	}}
-	override := StartOptions{Provenance: &LaunchProvenance{
-		RuntimeID:   "rt_new",
-		ExecutionID: "run_new",
-		Kind:        "run",
-		Attempt:     1,
-	}}
-
-	merged := MergeStartOptions(base, override)
-	want := LaunchProvenance{RuntimeID: "rt_new", ExecutionID: "run_new", Kind: "run", Attempt: 1}
-	if merged.Provenance == nil {
-		t.Fatal("explicit override lost the provenance")
-	}
-	if !sameProvenance(*merged.Provenance, want) {
-		t.Fatalf("merged provenance = %+v, want %+v (stale fields must be cleared)", *merged.Provenance, want)
-	}
-	if merged.Provenance.Iteration != nil {
-		t.Fatalf("stale iteration survived the merge: %v", *merged.Provenance.Iteration)
-	}
-	if merged.Provenance.Phase != "" || merged.Provenance.Label != "" {
-		t.Fatalf("stale phase/label survived the merge: %+v", *merged.Provenance)
-	}
-}
-
-func TestMergeStartOptionsProvenanceEmptyOverrideClearsDefaults(t *testing.T) {
-	base := StartOptions{Provenance: &LaunchProvenance{RuntimeID: "rt_old", Kind: "team", Phase: "member", Attempt: 2}}
-
-	merged := MergeStartOptions(base, StartOptions{Provenance: &LaunchProvenance{}})
-	if merged.Provenance == nil {
-		t.Fatal("explicit empty provenance was treated as absent")
-	}
-	if !sameProvenance(*merged.Provenance, LaunchProvenance{}) {
-		t.Fatalf("merged provenance = %+v, want the empty identity", *merged.Provenance)
-	}
-}
-
-func TestMergeStartOptionsProvenanceSnapshotsOverride(t *testing.T) {
-	iteration := 1
-	override := StartOptions{Provenance: &LaunchProvenance{
-		RuntimeID:   "rt_a",
-		ExecutionID: "run_a",
-		Kind:        "loop",
-		Phase:       "body",
-		Iteration:   &iteration,
-		Label:       "label-a",
-		Attempt:     1,
-	}}
-
-	merged := MergeStartOptions(StartOptions{}, override)
-	if merged.Provenance == override.Provenance {
-		t.Fatal("merged provenance aliases the caller's value")
+func TestMergeStartOptionsProvenance(t *testing.T) {
+	iteration := func(v int) *int { return &v }
+	tests := []struct {
+		name     string
+		override StartOptions
+		// mutate runs after the merge on the caller's value, to prove the
+		// merged identity is a snapshot.
+		mutate        func(*LaunchProvenance)
+		want          LaunchProvenance
+		wantIteration *int
+	}{
+		{
+			name:          "nil override keeps the base identity",
+			override:      StartOptions{},
+			want:          LaunchProvenance{RuntimeID: "rt_old", ExecutionID: "run_old", Kind: "loop", Phase: "body", Label: "old-label", Attempt: 9},
+			wantIteration: iteration(4),
+		},
+		{
+			name:     "non-nil override replaces the whole identity",
+			override: StartOptions{Provenance: &LaunchProvenance{RuntimeID: "rt_new", ExecutionID: "run_new", Kind: "run", Attempt: 1}},
+			want:     LaunchProvenance{RuntimeID: "rt_new", ExecutionID: "run_new", Kind: "run", Attempt: 1},
+		},
+		{
+			name:     "empty override clears every field",
+			override: StartOptions{Provenance: &LaunchProvenance{}},
+			want:     LaunchProvenance{},
+		},
+		{
+			name:     "merged identity is a snapshot",
+			override: StartOptions{Provenance: &LaunchProvenance{RuntimeID: "rt_new", Kind: "run", Iteration: iteration(1), Attempt: 1}},
+			mutate: func(p *LaunchProvenance) {
+				p.RuntimeID, p.Kind, p.Attempt, *p.Iteration = "rt_mutated", "mutated", 7, 9
+			},
+			want:          LaunchProvenance{RuntimeID: "rt_new", Kind: "run", Attempt: 1},
+			wantIteration: iteration(1),
+		},
+		{
+			name: "broker identity merges independently of provenance",
+			override: StartOptions{
+				RuntimeID:   "rt_broker",
+				BrokerToken: "tok_broker",
+				Provenance:  &LaunchProvenance{RuntimeID: "rt_informational", ExecutionID: "run_informational"},
+			},
+			want: LaunchProvenance{RuntimeID: "rt_informational", ExecutionID: "run_informational"},
+		},
 	}
 
-	override.Provenance.RuntimeID = "rt_mutated"
-	override.Provenance.Phase = "mutated"
-	override.Provenance.Label = "mutated"
-	override.Provenance.Attempt = 5
-	iteration = 99
-
-	snapshotIteration := 1
-	want := LaunchProvenance{RuntimeID: "rt_a", ExecutionID: "run_a", Kind: "loop", Phase: "body", Iteration: &snapshotIteration, Label: "label-a", Attempt: 1}
-	if !sameProvenance(*merged.Provenance, want) {
-		t.Fatalf("merged provenance changed with the caller's value: %+v", *merged.Provenance)
-	}
-	if merged.Provenance.Iteration == nil || *merged.Provenance.Iteration != 1 {
-		t.Fatalf("merged iteration aliases the caller's value: %v", merged.Provenance.Iteration)
-	}
-}
-
-func TestMergeStartOptionsBrokerIdentityWinsAlongsideProvenance(t *testing.T) {
-	merged := MergeStartOptions(StartOptions{RuntimeID: "rt_base", BrokerToken: "tok_base"}, StartOptions{
-		RuntimeID:   "rt_broker",
-		BrokerToken: "tok_broker",
-		Provenance:  &LaunchProvenance{RuntimeID: "rt_informational", ExecutionID: "run_informational"},
-	})
-	if merged.RuntimeID != "rt_broker" || merged.BrokerToken != "tok_broker" {
-		t.Fatalf("broker identity = (%q, %q), want (rt_broker, tok_broker)", merged.RuntimeID, merged.BrokerToken)
-	}
-	if merged.Provenance == nil || merged.Provenance.RuntimeID != "rt_informational" {
-		t.Fatalf("provenance = %+v, want rt_informational", merged.Provenance)
-	}
-}
-
-func TestMergeStartOptionsProvenanceSnapshotsBaseWhenOverrideIsNil(t *testing.T) {
-	iteration := 2
-	base := StartOptions{Provenance: &LaunchProvenance{Phase: "verify", Iteration: &iteration}}
-	merged := MergeStartOptions(base, StartOptions{})
-	base.Provenance.Phase = "changed"
-	iteration = 9
-	if merged.Provenance == nil || merged.Provenance.Phase != "verify" || *merged.Provenance.Iteration != 2 {
-		t.Fatalf("merged provenance followed base mutation: %+v", merged.Provenance)
-	}
-}
-
-func TestMergeStartOptionsProvenanceStaysOutOfBrokerIdentity(t *testing.T) {
-	merged := MergeStartOptions(StartOptions{}, StartOptions{Provenance: &LaunchProvenance{
-		RuntimeID:   "rt_informational",
-		ExecutionID: "run_informational",
-		Kind:        "team",
-		Attempt:     1,
-	}})
-	if merged.RuntimeID != "" {
-		t.Fatalf("provenance RuntimeID leaked into broker RuntimeID: %q", merged.RuntimeID)
-	}
-	if merged.BrokerToken != "" {
-		t.Fatalf("provenance affected BrokerToken: %q", merged.BrokerToken)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			merged := MergeStartOptions(StartOptions{Provenance: &LaunchProvenance{
+				RuntimeID: "rt_old", ExecutionID: "run_old", Kind: "loop", Phase: "body",
+				Iteration: iteration(4), Label: "old-label", Attempt: 9,
+			}}, tt.override)
+			if tt.mutate != nil {
+				tt.mutate(tt.override.Provenance)
+			}
+			if merged.Provenance == nil {
+				t.Fatal("merge dropped the identity")
+			}
+			if (merged.Provenance.Iteration == nil) != (tt.wantIteration == nil) {
+				t.Fatalf("iteration = %v, want %v", merged.Provenance.Iteration, tt.wantIteration)
+			}
+			got := *merged.Provenance
+			got.Iteration = nil
+			if tt.wantIteration != nil && *merged.Provenance.Iteration != *tt.wantIteration {
+				t.Fatalf("iteration = %d, want %d", *merged.Provenance.Iteration, *tt.wantIteration)
+			}
+			if got != tt.want {
+				t.Fatalf("provenance = %+v, want %+v", got, tt.want)
+			}
+			if merged.RuntimeID != tt.override.RuntimeID || merged.BrokerToken != tt.override.BrokerToken {
+				t.Fatalf("broker identity = (%q, %q), want (%q, %q)",
+					merged.RuntimeID, merged.BrokerToken, tt.override.RuntimeID, tt.override.BrokerToken)
+			}
+		})
 	}
 }

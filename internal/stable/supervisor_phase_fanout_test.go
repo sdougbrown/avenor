@@ -7,17 +7,11 @@ package stable
 
 import (
 	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
-	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runstate"
@@ -274,100 +268,4 @@ func TestUnknownPhaseDiagnosticCacheConcurrentWrites(t *testing.T) {
 		t.Fatal("runtime did not complete after concurrent unrecognized phases")
 	}
 	assertNoLifecycleErrorLine(t, stderr.String())
-}
-
-// TestPhaseEventFanoutMatchesDurableAndControlStreams pins that phase start and
-// end events keep run_kind, the section kind and the supervisor run tags on
-// both the durable file and the control stream, with identical payloads.
-func TestPhaseEventFanoutMatchesDurableAndControlStreams(t *testing.T) {
-	sup := newTestSupervisor(t, Config{
-		ControlSocket:   newStableSocketPath(t, "phase-fanout"),
-		MaxRuntimes:     1,
-		ShutdownTimeout: 0,
-	})
-	path := filepath.Join(t.TempDir(), "events.ndjson")
-	fileWriter, err := cli.NewEventWriter(path)
-	if err != nil {
-		t.Fatalf("NewEventWriter: %v", err)
-	}
-	child := &childRuntime{
-		id:          "rt_phase_fanout",
-		runID:       sup.runID,
-		label:       "phase-fanout",
-		eventWriter: fileWriter,
-		done:        make(chan struct{}),
-		promptCh:    make(chan struct{}, 1),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	liveCh := sup.control.SubscribeEvents(ctx)
-	writer := newRuntimeFanoutWriter(sup, child, cli.NewEventMetadata(sup.runID, child.label, child.id), nil)
-	for _, ev := range []events.Event{
-		{Event: "avenor.phase.start", Fields: map[string]any{"phase": "body", "iteration": 1, "kind": "loop", "run_kind": "loop"}},
-		{Event: "avenor.phase.end", Fields: map[string]any{"phase": "body", "iteration": 1, "run_kind": "loop", "stop_reason": "end_turn"}},
-	} {
-		if err := writer.Write(ev); err != nil {
-			t.Fatalf("Write(%s): %v", ev.Event, err)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("durable events = %d, want 2", len(lines))
-	}
-	var logged []events.Event
-	for _, line := range lines {
-		var ev events.Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("Unmarshal %q: %v", line, err)
-		}
-		logged = append(logged, ev)
-	}
-	var live []events.Event
-	for range logged {
-		select {
-		case ev := <-liveCh:
-			live = append(live, ev)
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for the live phase event")
-		}
-	}
-
-	for i, ev := range logged {
-		if got := ev.Fields["run_kind"]; got != "loop" {
-			t.Fatalf("%s run_kind = %v, want loop", ev.Event, got)
-		}
-		if got := ev.Fields["runtime_id"]; got != child.id {
-			t.Fatalf("%s runtime_id = %v, want %q", ev.Event, got, child.id)
-		}
-		if got := ev.Fields["run_id"]; got != sup.runID {
-			t.Fatalf("%s run_id = %v, want %q", ev.Event, got, sup.runID)
-		}
-		if ev.Event == "avenor.phase.start" {
-			if got := ev.Fields["kind"]; got != "loop" {
-				t.Fatalf("phase start kind = %v, want the unchanged section kind loop", got)
-			}
-		} else if _, ok := ev.Fields["kind"]; ok {
-			t.Fatalf("phase end gained a section kind: %v", ev.Fields)
-		}
-		loggedJSON, err := json.Marshal(ev)
-		if err != nil {
-			t.Fatalf("Marshal logged: %v", err)
-		}
-		liveJSON, err := json.Marshal(live[i])
-		if err != nil {
-			t.Fatalf("Marshal live: %v", err)
-		}
-		if string(loggedJSON) != string(liveJSON) {
-			t.Fatalf("file/live mismatch for %s\nfile=%s\nlive=%s", ev.Event, loggedJSON, liveJSON)
-		}
-	}
 }

@@ -3,132 +3,69 @@ package stable
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
 
-	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
-// identityRecordingProvider records the launch options each start/resume
-// dispatch receives and delegates the session mechanics to another provider.
-type identityRecordingProvider struct {
-	inner runtime.Provider
-
-	mu            sync.Mutex
-	starts        []runtime.StartOptions
-	resumes       []runtime.StartOptions
-	plainResumes  int
-	resumeCallIDs []string
-}
-
-func (p *identityRecordingProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
-	p.mu.Lock()
-	p.starts = append(p.starts, snapshotOptions(opts))
-	p.mu.Unlock()
-	return p.inner.Start(ctx, opts)
-}
-
-func (p *identityRecordingProvider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
-	p.mu.Lock()
-	p.plainResumes++
-	p.mu.Unlock()
-	return p.inner.Resume(ctx, sessionID)
-}
-
-func (p *identityRecordingProvider) ResumeWithOptions(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
-	p.mu.Lock()
-	p.resumes = append(p.resumes, snapshotOptions(opts))
-	p.resumeCallIDs = append(p.resumeCallIDs, sessionID)
-	p.mu.Unlock()
-	return p.inner.Resume(ctx, sessionID)
-}
-
-func (p *identityRecordingProvider) Prompt(ctx context.Context, sessionID, text string) error {
-	return p.inner.Prompt(ctx, sessionID, text)
-}
-
-func (p *identityRecordingProvider) Cancel(ctx context.Context, sessionID string) error {
-	return p.inner.Cancel(ctx, sessionID)
-}
-
-func (p *identityRecordingProvider) Events(ctx context.Context, sessionID string) (<-chan events.Event, error) {
-	return p.inner.Events(ctx, sessionID)
-}
-
-func (p *identityRecordingProvider) AnswerPermission(ctx context.Context, sessionID, requestID string, resp runtime.PermissionResponse) error {
-	return p.inner.AnswerPermission(ctx, sessionID, requestID, resp)
-}
-
-func (p *identityRecordingProvider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
-	return p.inner.Capabilities(ctx)
-}
-
-func (p *identityRecordingProvider) snapshot() (starts, resumes []runtime.StartOptions, plainResumes int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]runtime.StartOptions(nil), p.starts...), append([]runtime.StartOptions(nil), p.resumes...), p.plainResumes
-}
-
-// snapshotOptions copies the launch options so later mutation cannot reach the
-// recorded value.
-func snapshotOptions(opts runtime.StartOptions) runtime.StartOptions {
-	if opts.Provenance == nil {
-		return runtime.StartOptions{Agent: opts.Agent, Thinking: opts.Thinking}
-	}
-	provenance := *opts.Provenance
-	if opts.Provenance.Iteration != nil {
-		iteration := *opts.Provenance.Iteration
-		provenance.Iteration = &iteration
-	}
-	opts.Provenance = &provenance
-	return opts
-}
-
-// launchIdentityLog records the provenance the supervisor hands to every
-// provider construction.
-type launchIdentityLog struct {
+// provenanceRecorder collects the launch provenance of every start and resume
+// dispatch the supervisor makes.
+type provenanceRecorder struct {
 	mu       sync.Mutex
 	launches []runtime.LaunchProvenance
-	pairs    [][2]string
 }
 
-func (l *launchIdentityLog) add(agent string, provenance *runtime.LaunchProvenance) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if provenance == nil {
-		l.launches = append(l.launches, runtime.LaunchProvenance{})
-		return
+func (r *provenanceRecorder) add(opts runtime.StartOptions) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var got runtime.LaunchProvenance
+	if opts.Provenance != nil {
+		got = *opts.Provenance
 	}
-	copied := *provenance
-	if provenance.Iteration != nil {
-		iteration := *provenance.Iteration
-		copied.Iteration = &iteration
-	}
-	l.launches = append(l.launches, copied)
-	l.pairs = append(l.pairs, [2]string{agent, copied.Phase})
+	r.launches = append(r.launches, got)
 }
 
-func (l *launchIdentityLog) all() []runtime.LaunchProvenance {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return append([]runtime.LaunchProvenance(nil), l.launches...)
+func (r *provenanceRecorder) all() []runtime.LaunchProvenance {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]runtime.LaunchProvenance(nil), r.launches...)
 }
 
-func (l *launchIdentityLog) agentPhases() [][2]string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return append([][2]string(nil), l.pairs...)
-}
-
-// captureLaunchIdentities wraps a provider factory, recording the launch
-// provenance of every construction.
-func captureLaunchIdentities(log *launchIdentityLog, inner func(runtime.StartOptions, string) (runtime.Provider, error)) func(runtime.StartOptions, string) (runtime.Provider, error) {
+// wrap records each dispatch built from inner's factory.
+func (r *provenanceRecorder) wrap(inner func(runtime.StartOptions, string) (runtime.Provider, error)) func(runtime.StartOptions, string) (runtime.Provider, error) {
 	return func(opts runtime.StartOptions, backend string) (runtime.Provider, error) {
-		log.add(opts.Agent, opts.Provenance)
-		return inner(opts, backend)
+		p, err := inner(opts, backend)
+		if err != nil {
+			return nil, err
+		}
+		return &recordingProvider{Provider: p, rec: r}, nil
 	}
+}
+
+// recordingProvider records each dispatch and delegates to an embedded
+// provider.
+type recordingProvider struct {
+	runtime.Provider
+	rec *provenanceRecorder
+}
+
+func (p *recordingProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	p.rec.add(opts)
+	return p.Provider.Start(ctx, opts)
+}
+
+func (p *recordingProvider) ResumeWithOptions(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
+	p.rec.add(opts)
+	resumer, ok := p.Provider.(interface {
+		ResumeWithOptions(context.Context, string, runtime.StartOptions) (runtime.Session, error)
+	})
+	if !ok {
+		return p.Provider.Resume(ctx, sessionID)
+	}
+	return resumer.ResumeWithOptions(ctx, sessionID, opts)
 }
 
 // perConstructionProvider returns a provider with one scripted attempt per
@@ -149,392 +86,129 @@ func okConstruction(n int) stableScriptedAttempt {
 	return itestAttempt(sessionID, itestSessionEnd(sessionID, "end_turn", "ok"))
 }
 
-// provenanceOf fails the test instead of dereferencing a missing identity, so
-// a regression reports the dispatch rather than panicking.
-func provenanceOf(t *testing.T, opts runtime.StartOptions) runtime.LaunchProvenance {
-	t.Helper()
-	if opts.Provenance == nil {
-		t.Fatalf("dispatch carried no launch provenance: %+v", opts)
+// TestLaunchProvenancePerPath pins the identity each supervisor path hands to
+// its launches: the child runtime ID is both the launch and the containing
+// execution, never the supervisor run ID, and each path reports its own kind,
+// phase, iteration and attempt.
+func TestLaunchProvenancePerPath(t *testing.T) {
+	iteration := func(v int) *int { return &v }
+	perConstruction := func() func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return perConstructionProvider(okConstruction)
 	}
-	return *opts.Provenance
-}
+	team := func(t *testing.T, h *itestHarness) string {
+		file := itestWorkflowConfig(t, "team", map[string]any{"team": []any{
+			map[string]any{"name": "alpha", "prompt": "a"},
+			map[string]any{"name": "beta", "prompt": "b"},
+		}})
+		return h.spawnWorkflow("team", file, map[string]any{"label": "provenance"})
+	}
+	loop := func(t *testing.T, h *itestHarness) string {
+		file := itestWorkflowConfig(t, "loop", map[string]any{
+			"max_iterations": 1,
+			"pre":            []any{map[string]any{"name": "setup", "prompt": "pre"}},
+			"loop":           []any{map[string]any{"name": "body", "prompt": "body"}},
+			"post":           []any{map[string]any{"name": "report", "prompt": "post"}},
+		})
+		return h.spawnWorkflow("loop", file, map[string]any{"label": "provenance"})
+	}
 
-func requireIdentity(t *testing.T, got runtime.LaunchProvenance, runtimeID, kind, phase, label string, iteration *int, attempt int) {
-	t.Helper()
-	if got.RuntimeID != runtimeID || got.ExecutionID != runtimeID {
-		t.Fatalf("identity = %q/%q, want the containing runtime %q", got.RuntimeID, got.ExecutionID, runtimeID)
-	}
-	if got.Kind != kind || got.Phase != phase || got.Label != label || got.Attempt != attempt {
-		t.Fatalf("provenance = %+v, want kind=%s phase=%q label=%q attempt=%d", got, kind, phase, label, attempt)
-	}
-	if iteration == nil {
-		if got.Iteration != nil {
-			t.Fatalf("iteration = %d, want it omitted", *got.Iteration)
-		}
-		return
-	}
-	if got.Iteration == nil || *got.Iteration != *iteration {
-		t.Fatalf("iteration = %v, want %d", got.Iteration, *iteration)
-	}
-}
-
-func TestSpawnCarriesDirectLaunchIdentity(t *testing.T) {
-	log := &launchIdentityLog{}
-	h := newItestHarness(t, Config{}, captureLaunchIdentities(log, perConstructionProvider(okConstruction)))
-	rt := h.spawn(map[string]any{"label": "direct-identity"})
-	h.log.waitFor(t, "session.end", itestStopReasonIs(rt, "end_turn"))
-
-	launches := log.all()
-	if len(launches) != 1 {
-		t.Fatalf("launches = %d, want 1", len(launches))
-	}
-	requireIdentity(t, launches[0], rt, "run", "", "direct-identity", nil, 1)
-}
-
-func TestDirectRetryAdvancesLaunchAttempt(t *testing.T) {
-	log := &launchIdentityLog{}
-	provider := &identityRecordingProvider{inner: newItestProvider(
-		itestAttempt("ses_try1", itestSessionEnd("ses_try1", "error", "")),
-		itestAttempt("ses_try2", itestSessionEnd("ses_try2", "end_turn", "recovered")),
-	)}
-	h := newItestHarness(t, Config{}, captureLaunchIdentities(log, itestSingleProvider(provider)))
-	rt := h.spawn(map[string]any{"label": "retry-identity", "max_retries": 1})
-	h.log.waitFor(t, "session.end", itestStopReasonIs(rt, "end_turn"))
-
-	starts, resumes, _ := provider.snapshot()
-	if len(starts) != 1 || len(resumes) != 1 {
-		t.Fatalf("dispatches = start:%d resume:%d, want 1/1", len(starts), len(resumes))
-	}
-	requireIdentity(t, provenanceOf(t, starts[0]), rt, "run", "", "retry-identity", nil, 1)
-	requireIdentity(t, provenanceOf(t, resumes[0]), rt, "run", "", "retry-identity", nil, 2)
-}
-
-func TestTeamMembersCarryDistinctLaunchIdentity(t *testing.T) {
-	log := &launchIdentityLog{}
-	h := newItestHarness(t, Config{}, captureLaunchIdentities(log, perConstructionProvider(okConstruction)))
-	file := itestWorkflowConfig(t, "team", map[string]any{
-		"team": []any{
-			map[string]any{"name": "alpha", "prompt": "a", "agent": "agent-a"},
-			map[string]any{"name": "beta", "prompt": "b", "agent": "agent-b"},
-			map[string]any{"name": "gamma", "prompt": "c", "agent": "agent-c"},
+	tests := []struct {
+		name    string
+		factory func() func(runtime.StartOptions, string) (runtime.Provider, error)
+		spawn   func(t *testing.T, h *itestHarness) string
+		want    []runtime.LaunchProvenance
+	}{
+		{
+			name:    "direct spawn",
+			factory: perConstruction,
+			spawn: func(t *testing.T, h *itestHarness) string {
+				rt := h.spawn(map[string]any{"label": "provenance"})
+				h.log.waitFor(t, "session.end", itestStopReasonIs(rt, "end_turn"))
+				return rt
+			},
+			want: []runtime.LaunchProvenance{{Kind: "run", Label: "provenance", Attempt: 1}},
 		},
-	})
-	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-identity"})
-	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
-
-	launches := log.all()
-	if len(launches) != 3 {
-		t.Fatalf("launches = %d, want one per member", len(launches))
-	}
-	seen := map[string]bool{}
-	for _, got := range launches {
-		requireIdentity(t, got, rt, "team", got.Phase, "team-identity", nil, 1)
-		seen[got.Phase] = true
-	}
-	for _, phase := range []string{"alpha", "beta", "gamma"} {
-		if !seen[phase] {
-			t.Fatalf("member %q not attributed: %v", phase, seen)
-		}
-	}
-	// Members are concurrent, so the factory must pair each member's own agent
-	// with its own phase rather than reading shared metadata.
-	agents := map[string]string{}
-	for _, pair := range log.agentPhases() {
-		agents[pair[0]] = pair[1]
-	}
-	if agents["agent-a"] != "alpha" || agents["agent-b"] != "beta" || agents["agent-c"] != "gamma" {
-		t.Fatalf("agent/phase pairs = %v, want each member's own phase", agents)
-	}
-}
-
-func TestLoopPhasesCarryLaunchIteration(t *testing.T) {
-	log := &launchIdentityLog{}
-	h := newItestHarness(t, Config{}, captureLaunchIdentities(log, perConstructionProvider(okConstruction)))
-	file := itestWorkflowConfig(t, "loop", map[string]any{
-		"max_iterations": 2,
-		"pre":            []any{map[string]any{"name": "setup", "prompt": "pre"}},
-		"loop":           []any{map[string]any{"name": "body", "prompt": "body"}},
-		"post":           []any{map[string]any{"name": "report", "prompt": "post"}},
-	})
-	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-identity"})
-	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
-
-	want := []struct {
-		phase     string
-		iteration int
-	}{{"setup", 0}, {"body", 1}, {"body", 2}, {"report", 0}}
-	launches := log.all()
-	if len(launches) != len(want) {
-		t.Fatalf("launches = %d, want %d", len(launches), len(want))
-	}
-	for i, expected := range want {
-		iteration := expected.iteration
-		requireIdentity(t, launches[i], rt, "loop", expected.phase, "loop-identity", &iteration, 1)
-	}
-}
-
-func TestLoopRetryThenNudgeUsesOneLaunchOrdinal(t *testing.T) {
-	log := &launchIdentityLog{}
-	h := newItestHarness(t, Config{}, captureLaunchIdentities(log, perConstructionProvider(func(n int) stableScriptedAttempt {
-		// The first construction fails retryably; every later attempt ends the
-		// turn without producing the required file, so the phase retries and
-		// then nudges.
-		sessionID := fmt.Sprintf("ses_ordinal_%d", n)
-		if n == 1 {
-			return itestAttempt(sessionID, itestSessionEnd(sessionID, "error", ""))
-		}
-		return itestAttempt(sessionID, itestSessionEnd(sessionID, "end_turn", "ok"))
-	})))
-	file := itestWorkflowConfig(t, "loop", map[string]any{
-		"max_iterations": 1,
-		"loop": []any{map[string]any{
-			"name":          "body",
-			"prompt":        "body",
-			"requires":      map[string]any{"files": []any{"NEVER_WRITTEN.md"}},
-			"on_incomplete": map[string]any{"max_nudges": 1},
-		}},
-	})
-	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "ordinal-identity", "max_retries": 1})
-	end := h.log.waitFor(t, "avenor.loop.end", itestEventIs("avenor.loop.end", rt))
-	if reason, _ := end.Fields["exit_reason"].(string); reason != "phase_failure" {
-		t.Fatalf("avenor.loop.end exit_reason = %q, want phase_failure", reason)
-	}
-
-	launches := log.all()
-	if len(launches) != 3 {
-		t.Fatalf("launches = %d, want retry plus nudge", len(launches))
-	}
-	iteration := 1
-	for i, got := range launches {
-		requireIdentity(t, got, rt, "loop", "body", "ordinal-identity", &iteration, i+1)
-	}
-}
-
-// TestAttemptSessionDispatchKeepsContainingIdentity pins the resume dispatch on
-// the supervisor's own attempt path: a fresh resume carries the current attempt
-// context, and returning a still-live session launches nothing.
-func TestAttemptSessionDispatchKeepsContainingIdentity(t *testing.T) {
-	provider := &identityRecordingProvider{inner: newItestProvider(
-		itestAttempt("ses_start", itestSessionEnd("ses_start", "end_turn", "ok")),
-		itestAttempt("ses_resume", itestSessionEnd("ses_resume", "end_turn", "ok")),
-	)}
-	child := &childRuntime{
-		id:               "rt_attempt",
-		provider:         provider,
-		backend:          "pony",
-		effectiveBackend: "pony",
-		effectiveAgent:   "agent",
-		label:            "attempt-identity",
-		dir:              t.TempDir(),
-	}
-	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "identity-attempt"), MaxRuntimes: 1})
-
-	if _, err := sup.attemptSession(context.Background(), child, "", 1); err != nil {
-		t.Fatalf("attemptSession start: %v", err)
-	}
-	if _, err := sup.attemptSession(context.Background(), child, "ses_start", 2); err != nil {
-		t.Fatalf("attemptSession resume: %v", err)
-	}
-
-	starts, resumes, plain := provider.snapshot()
-	if len(starts) != 1 || len(resumes) != 1 || plain != 0 {
-		t.Fatalf("dispatches = start:%d resume:%d plain:%d, want the option-aware resume", len(starts), len(resumes), plain)
-	}
-	requireIdentity(t, provenanceOf(t, starts[0]), child.id, "run", "", "attempt-identity", nil, 1)
-	requireIdentity(t, provenanceOf(t, resumes[0]), child.id, "run", "", "attempt-identity", nil, 2)
-	if resumes[0].Provenance.Phase != "" || resumes[0].Provenance.Iteration != nil {
-		t.Fatalf("resume provenance = %+v, want the optional fields cleared", resumes[0].Provenance)
-	}
-
-	// A still-live session is returned without consuming a launch ordinal or
-	// dispatching anything.
-	child.session = runtime.Session{SessionID: "ses_live"}
-	if _, err := sup.attemptSession(context.Background(), child, "", 7); err != nil {
-		t.Fatalf("attemptSession live: %v", err)
-	}
-	starts, resumes, plain = provider.snapshot()
-	if len(starts) != 1 || len(resumes) != 1 || plain != 0 {
-		t.Fatalf("live return dispatched = start:%d resume:%d plain:%d, want none", len(starts), len(resumes), plain)
-	}
-}
-
-// identityPhaseEvents selects the named phase event for one phase.
-func identityPhaseEvents(all []events.Event, name, phase string) []events.Event {
-	out := make([]events.Event, 0, 1)
-	for _, ev := range all {
-		if ev.Event != name {
-			continue
-		}
-		if value, _ := ev.Fields["phase"].(string); value == phase {
-			out = append(out, ev)
-		}
-	}
-	return out
-}
-
-// identityInt reads a numeric phase field regardless of whether it came from
-// the live stream (int) or a decoded file (float64).
-func identityInt(t *testing.T, ev events.Event, key string) int {
-	t.Helper()
-	value, ok := events.Int64(ev.Fields[key])
-	if !ok {
-		t.Fatalf("%s has no numeric %q: %v", ev.Event, key, ev.Fields)
-	}
-	return int(value)
-}
-
-// requirePhaseEventIdentity pins the containing identity on a phase event: the
-// child runtime ID, the supervisor-wide run ID, the runner kind and the phase.
-func requirePhaseEventIdentity(t *testing.T, ev events.Event, runtimeID, runID, runKind, label, phase string) {
-	t.Helper()
-	if got := ev.Fields["runtime_id"]; got != runtimeID {
-		t.Fatalf("%s runtime_id = %v, want %q", ev.Event, got, runtimeID)
-	}
-	if got := ev.Fields["run_id"]; got != runID {
-		t.Fatalf("%s run_id = %v, want %q", ev.Event, got, runID)
-	}
-	if got := ev.Fields["run_kind"]; got != runKind {
-		t.Fatalf("%s run_kind = %v, want %q", ev.Event, got, runKind)
-	}
-	if got := ev.Fields["run_label"]; got != label {
-		t.Fatalf("%s run_label = %v, want %q", ev.Event, got, label)
-	}
-	if got := ev.Fields["phase"]; got != phase {
-		t.Fatalf("%s phase = %v, want %q", ev.Event, got, phase)
-	}
-	if _, ok := ev.Fields["attempt"]; ok {
-		t.Fatalf("%s carries a per-attempt field: %v", ev.Event, ev.Fields)
-	}
-}
-
-// TestTeamLaunchIdentitiesJoinPhaseAndTeamEvents joins each member's launch
-// record to that member's phase pair and to the team's terminal outcome on the
-// supervisor control stream.
-func TestTeamLaunchIdentitiesJoinPhaseAndTeamEvents(t *testing.T) {
-	log := &launchIdentityLog{}
-	h := newItestHarness(t, Config{}, captureLaunchIdentities(log, perConstructionProvider(okConstruction)))
-	file := itestWorkflowConfig(t, "team", map[string]any{
-		"team": []any{
-			map[string]any{"name": "alpha", "prompt": "a", "agent": "agent-a"},
-			map[string]any{"name": "beta", "prompt": "b", "agent": "agent-b"},
-			map[string]any{"name": "gamma", "prompt": "c", "agent": "agent-c"},
+		{
+			name: "retry advances the attempt",
+			factory: func() func(runtime.StartOptions, string) (runtime.Provider, error) {
+				return itestSingleProvider(newItestProvider(
+					itestAttempt("ses_try1", itestSessionEnd("ses_try1", "error", "")),
+					itestAttempt("ses_try2", itestSessionEnd("ses_try2", "end_turn", "recovered")),
+				))
+			},
+			spawn: func(t *testing.T, h *itestHarness) string {
+				rt := h.spawn(map[string]any{"label": "provenance", "max_retries": 1})
+				h.log.waitFor(t, "session.end", itestStopReasonIs(rt, "end_turn"))
+				return rt
+			},
+			want: []runtime.LaunchProvenance{
+				{Kind: "run", Label: "provenance", Attempt: 1},
+				{Kind: "run", Label: "provenance", Attempt: 2},
+			},
 		},
-	})
-	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-join"})
-	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
-
-	launches := log.all()
-	if len(launches) != 3 {
-		t.Fatalf("launches = %d, want one per member", len(launches))
-	}
-	all := h.log.all()
-	for _, got := range launches {
-		requireIdentity(t, got, rt, "team", got.Phase, "team-join", nil, 1)
-		starts := identityPhaseEvents(all, "avenor.phase.start", got.Phase)
-		ends := identityPhaseEvents(all, "avenor.phase.end", got.Phase)
-		if len(starts) != 1 || len(ends) != 1 {
-			t.Fatalf("member %q has %d starts and %d ends, want one pair", got.Phase, len(starts), len(ends))
-		}
-		for _, ev := range []events.Event{starts[0], ends[0]} {
-			requirePhaseEventIdentity(t, ev, rt, h.sup.runID, "team", "team-join", got.Phase)
-		}
-		if sectionKind := starts[0].Fields["kind"]; sectionKind != "team" {
-			t.Fatalf("member %q section kind = %v, want team", got.Phase, sectionKind)
-		}
-		if iteration := identityInt(t, starts[0], "iteration"); iteration != 0 {
-			t.Fatalf("member %q iteration = %d, want the existing 0", got.Phase, iteration)
-		}
-		if stopReason := ends[0].Fields["stop_reason"]; stopReason != "end_turn" {
-			t.Fatalf("member %q stop_reason = %v, want end_turn", got.Phase, stopReason)
-		}
-		if _, ok := ends[0].Fields["kind"]; ok {
-			t.Fatalf("phase end gained a section kind: %v", ends[0].Fields)
-		}
+		{
+			name:    "team member",
+			factory: perConstruction,
+			spawn: func(t *testing.T, h *itestHarness) string {
+				rt := team(t, h)
+				h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+				return rt
+			},
+			want: []runtime.LaunchProvenance{
+				{Kind: "team", Phase: "alpha", Label: "provenance", Attempt: 1},
+				{Kind: "team", Phase: "beta", Label: "provenance", Attempt: 1},
+			},
+		},
+		{
+			name:    "loop phase",
+			factory: perConstruction,
+			spawn: func(t *testing.T, h *itestHarness) string {
+				rt := loop(t, h)
+				h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+				return rt
+			},
+			want: []runtime.LaunchProvenance{
+				{Kind: "loop", Phase: "setup", Iteration: iteration(0), Label: "provenance", Attempt: 1},
+				{Kind: "loop", Phase: "body", Iteration: iteration(1), Label: "provenance", Attempt: 1},
+				{Kind: "loop", Phase: "report", Iteration: iteration(0), Label: "provenance", Attempt: 1},
+			},
+		},
 	}
 
-	teamStart := h.log.waitFor(t, "team start", itestEventIs("avenor.team.start", rt))
-	if got := teamStart.Fields["runtime_id"]; got != rt {
-		t.Fatalf("team.start runtime_id = %v, want %q", got, rt)
-	}
-	if got := teamStart.Fields["run_id"]; got != h.sup.runID {
-		t.Fatalf("team.start run_id = %v, want the supervisor run %q", got, h.sup.runID)
-	}
-	teamEnd := h.log.waitFor(t, "team end", itestEventIs("avenor.team.end", rt))
-	if got := teamEnd.Fields["runtime_id"]; got != rt {
-		t.Fatalf("team.end runtime_id = %v, want %q", got, rt)
-	}
-	if got := teamEnd.Fields["run_id"]; got != h.sup.runID {
-		t.Fatalf("team.end run_id = %v, want the supervisor run %q", got, h.sup.runID)
-	}
-	if got := teamEnd.Fields["exit_reason"]; got != "end_turn" {
-		t.Fatalf("team.end exit_reason = %v, want end_turn", got)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &provenanceRecorder{}
+			h := newItestHarness(t, Config{}, rec.wrap(tt.factory()))
+			rt := tt.spawn(t, h)
 
-// TestLoopLaunchIdentitiesJoinIterationEvents joins each loop launch to the
-// phase pair for its own iteration while keeping the section kind.
-func TestLoopLaunchIdentitiesJoinIterationEvents(t *testing.T) {
-	log := &launchIdentityLog{}
-	h := newItestHarness(t, Config{}, captureLaunchIdentities(log, perConstructionProvider(okConstruction)))
-	file := itestWorkflowConfig(t, "loop", map[string]any{
-		"max_iterations": 2,
-		"pre":            []any{map[string]any{"name": "setup", "prompt": "pre"}},
-		"loop":           []any{map[string]any{"name": "body", "prompt": "body"}},
-		"post":           []any{map[string]any{"name": "report", "prompt": "post"}},
-	})
-	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-join"})
-	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
-
-	want := []struct {
-		phase     string
-		iteration int
-		kind      string
-	}{{"setup", 0, "pre"}, {"body", 1, "loop"}, {"body", 2, "loop"}, {"report", 0, "post"}}
-	launches := log.all()
-	if len(launches) != len(want) {
-		t.Fatalf("launches = %d, want %d", len(launches), len(want))
-	}
-	all := h.log.all()
-	for i, expected := range want {
-		iteration := expected.iteration
-		requireIdentity(t, launches[i], rt, "loop", expected.phase, "loop-join", &iteration, 1)
-
-		starts := identityPhaseEvents(all, "avenor.phase.start", expected.phase)
-		ends := identityPhaseEvents(all, "avenor.phase.end", expected.phase)
-		matching := func(evs []events.Event) []events.Event {
-			var out []events.Event
-			for _, ev := range evs {
-				if identityInt(t, ev, "iteration") == expected.iteration {
-					out = append(out, ev)
+			launches := rec.all()
+			if len(launches) != len(tt.want) {
+				t.Fatalf("launches = %d, want %d (%+v)", len(launches), len(tt.want), launches)
+			}
+			// Team members may complete in either order; compare by phase.
+			sort.SliceStable(launches, func(i, j int) bool { return launches[i].Phase < launches[j].Phase })
+			sort.SliceStable(tt.want, func(i, j int) bool { return tt.want[i].Phase < tt.want[j].Phase })
+			for i, want := range tt.want {
+				got := launches[i]
+				if got.RuntimeID == h.sup.runID {
+					t.Fatalf("launch %d carries the supervisor run ID %q, want the child runtime ID", i, h.sup.runID)
+				}
+				if got.RuntimeID != rt || got.ExecutionID != rt {
+					t.Fatalf("launch %d identity = %q/%q, want the child runtime %q", i, got.RuntimeID, got.ExecutionID, rt)
+				}
+				if (got.Iteration == nil) != (want.Iteration == nil) {
+					t.Fatalf("launch %d iteration = %v, want %v", i, got.Iteration, want.Iteration)
+				}
+				if got.Iteration != nil && *got.Iteration != *want.Iteration {
+					t.Fatalf("launch %d iteration = %d, want %d", i, *got.Iteration, *want.Iteration)
+				}
+				gotCopy, wantCopy := got, want
+				gotCopy.Iteration, wantCopy.Iteration = nil, nil
+				gotCopy.RuntimeID, gotCopy.ExecutionID = "", ""
+				if gotCopy != wantCopy {
+					t.Fatalf("launch %d = %+v, want %+v", i, gotCopy, wantCopy)
 				}
 			}
-			return out
-		}
-		starts = matching(starts)
-		ends = matching(ends)
-		if len(starts) != 1 || len(ends) != 1 {
-			t.Fatalf("phase %q iteration %d has %d starts and %d ends, want one pair",
-				expected.phase, expected.iteration, len(starts), len(ends))
-		}
-		for _, ev := range []events.Event{starts[0], ends[0]} {
-			requirePhaseEventIdentity(t, ev, rt, h.sup.runID, "loop", "loop-join", expected.phase)
-		}
-		if got := starts[0].Fields["kind"]; got != expected.kind {
-			t.Fatalf("phase %q section kind = %v, want %q", expected.phase, got, expected.kind)
-		}
-		if got := ends[0].Fields["stop_reason"]; got != "end_turn" {
-			t.Fatalf("phase %q stop_reason = %v, want end_turn", expected.phase, got)
-		}
-	}
-
-	loopEnd := h.log.waitFor(t, "loop end", itestEventIs("avenor.loop.end", rt))
-	if got := loopEnd.Fields["runtime_id"]; got != rt {
-		t.Fatalf("loop.end runtime_id = %v, want %q", got, rt)
-	}
-	if got := loopEnd.Fields["run_id"]; got != h.sup.runID {
-		t.Fatalf("loop.end run_id = %v, want the supervisor run %q", got, h.sup.runID)
-	}
-	if got := loopEnd.Fields["exit_reason"]; got != "max_iterations" {
-		t.Fatalf("loop.end exit_reason = %v, want max_iterations", got)
+		})
 	}
 }
