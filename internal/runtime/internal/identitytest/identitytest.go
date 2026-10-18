@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +52,38 @@ func Keys(extra ...string) []string {
 // ShellQuote quotes s for a POSIX shell.
 func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// WriteTransparentWrapper writes a launch wrapper that runs its argv and
+// environment unchanged, and returns its path.
+func WriteTransparentWrapper(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "wrapper.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	return path
+}
+
+// IsolateTmuxServer points tmux at a private socket directory and detaches the
+// test from any server this process inherited, so the pane is the only child
+// the test owns.
+func IsolateTmuxServer(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	prior, had := os.LookupEnv("TMUX")
+	if err := os.Unsetenv("TMUX"); err != nil {
+		t.Fatalf("unset TMUX: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "kill-server").Run()
+		if had {
+			_ = os.Setenv("TMUX", prior)
+		}
+	})
 }
 
 // Body renders a shell block that appends one observation group to obsPath as
@@ -162,6 +196,10 @@ func PoisonParent(t *testing.T) {
 		t.Setenv(key, value)
 	}
 }
+
+// IntPtr returns a pointer to v, for provenance fields whose unset state is
+// distinct from zero.
+func IntPtr(v int) *int { return &v }
 
 // Provenance is a launch identity whose values a shell must not reinterpret.
 func Provenance(runtimeID string) *runtime.LaunchProvenance {

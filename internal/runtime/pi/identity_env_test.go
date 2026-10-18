@@ -35,15 +35,6 @@ done
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func writeTransparentWrapper(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "wrapper.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
-		t.Fatalf("write wrapper: %v", err)
-	}
-	return path
-}
-
 func TestIdentityChildEnv(t *testing.T) {
 	provenance := identitytest.Provenance("rt_child")
 
@@ -77,7 +68,7 @@ func TestIdentityChildEnv(t *testing.T) {
 		identitytest.PoisonParent(t)
 		obsPath := filepath.Join(t.TempDir(), "observed.env")
 		writeIdentityPiChild(t, obsPath)
-		wrapper := writeTransparentWrapper(t)
+		wrapper := identitytest.WriteTransparentWrapper(t)
 
 		b := broker.New(broker.MakeToken())
 		if err := b.Start(); err != nil {

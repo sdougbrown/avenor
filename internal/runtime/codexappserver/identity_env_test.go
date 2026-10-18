@@ -10,15 +10,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/internal/identitytest"
 )
 
-func writeTransparentWrapper(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "wrapper.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
-		t.Fatalf("write wrapper: %v", err)
-	}
-	return path
-}
-
 // writeCodexIdentityChild installs a real `codex` child on PATH. It speaks the
 // minimal app-server handshake and records the allowlisted environment first.
 func writeCodexIdentityChild(t *testing.T, obsPath string) {
@@ -49,7 +40,7 @@ func TestIdentityChildEnv(t *testing.T) {
 		identitytest.PoisonParent(t)
 		obsPath := filepath.Join(t.TempDir(), "observed.env")
 		writeCodexIdentityChild(t, obsPath)
-		wrapper := writeTransparentWrapper(t)
+		wrapper := identitytest.WriteTransparentWrapper(t)
 
 		provenance := identitytest.Provenance("rt_child")
 		c, err := StartClient(context.Background(), runtime.StartOptions{
@@ -118,7 +109,7 @@ func TestProviderResumeWithOptionsCarriesFreshIdentity(t *testing.T) {
 			ExecutionID: "rt_old",
 			Kind:        "loop",
 			Phase:       "old-phase",
-			Iteration:   intPtr(4),
+			Iteration:   identitytest.IntPtr(4),
 			Label:       "old-label",
 			Attempt:     1,
 		},
@@ -168,5 +159,3 @@ func TestProviderResumeWithOptionsKeepsLiveProcessIdentity(t *testing.T) {
 		t.Fatal("resume dropped the live client")
 	}
 }
-
-func intPtr(v int) *int { return &v }

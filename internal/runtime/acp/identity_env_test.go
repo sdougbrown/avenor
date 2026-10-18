@@ -10,9 +10,10 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/internal/identitytest"
 )
 
-// acpObservationExtras is the backend hook variable the observer also records:
-// the scrub must not touch it.
-var acpObservationExtras = []string{"OPENCODE_CONFIG"}
+// acpObservationExtras are the non-identity variables the observer also
+// records: a backend hook variable the scrub must not touch, and a hook
+// variable with no identity-like name that must reach the child unchanged.
+var acpObservationExtras = []string{"OPENCODE_CONFIG", "AVENOR_NON_IDENTITY"}
 
 func identityProvenance() *runtime.LaunchProvenance {
 	provenance := identitytest.Provenance("rt_child")
@@ -36,10 +37,7 @@ func TestIdentityChildEnv(t *testing.T) {
 		if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 			t.Fatalf("write child: %v", err)
 		}
-		wrapper := filepath.Join(t.TempDir(), "wrapper.sh")
-		if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
-			t.Fatalf("write wrapper: %v", err)
-		}
+		wrapper := identitytest.WriteTransparentWrapper(t)
 
 		provenance := identityProvenance()
 		client, err := NewClient(context.Background(), ClientConfig{
@@ -69,6 +67,9 @@ func TestIdentityChildEnv(t *testing.T) {
 		identitytest.AssertBrokerPreserved(t, observed)
 		if observed["OPENCODE_CONFIG"] != configPath {
 			t.Errorf("OPENCODE_CONFIG = %q, want the hook config preserved", observed["OPENCODE_CONFIG"])
+		}
+		if observed["AVENOR_NON_IDENTITY"] != "kept" {
+			t.Errorf("AVENOR_NON_IDENTITY = %q, want kept", observed["AVENOR_NON_IDENTITY"])
 		}
 	})
 
@@ -158,7 +159,7 @@ func TestProviderResumeWithOptionsCarriesFreshIdentity(t *testing.T) {
 			ExecutionID: "rt_old",
 			Kind:        "team",
 			Phase:       "old-phase",
-			Iteration:   intPtr(4),
+			Iteration:   identitytest.IntPtr(4),
 			Label:       "old-label",
 			Attempt:     1,
 		},
@@ -237,5 +238,3 @@ func TestProviderResumeWithOptionsKeepsLiveClientIdentity(t *testing.T) {
 		t.Fatalf("live client identity changed: %v", got)
 	}
 }
-
-func intPtr(v int) *int { return &v }

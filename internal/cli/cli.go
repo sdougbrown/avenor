@@ -859,16 +859,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		if controlServer != nil {
 			state.Update(func(s *control.Snapshot) { s.RetryAttempt = attempt })
 		}
+		opts := startOptions
+		opts.Provenance = runtime.DirectLaunchProvenance(runID, *label, attempt)
 		result = runAttempt(runCtx, attemptConfig{
-			startOptions: runtime.StartOptions{
-				Agent:      startOptions.Agent,
-				Label:      startOptions.Label,
-				Dir:        startOptions.Dir,
-				ServerURL:  startOptions.ServerURL,
-				Model:      startOptions.Model,
-				Thinking:   startOptions.Thinking,
-				Provenance: runtime.DirectLaunchProvenance(runID, *label, attempt),
-			},
+			startOptions:           opts,
 			backend:                *backend,
 			resumeID:               resumeID,
 			sessionBackends:        sessionBackends,

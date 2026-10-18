@@ -132,8 +132,11 @@ func TestDirectRunRetryAdvancesAttempt(t *testing.T) {
 		}
 		return attemptResult{exitCode: 0, sessionID: "ses_2", stopReason: "end_turn"}
 	})
+	// The retry attempt reuses the CLI run ID and label, so the event log can
+	// corroborate the launch record.
+	eventsPath := filepath.Join(t.TempDir(), "events.ndjson")
 	sentinel := filepath.Join(t.TempDir(), "done")
-	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--prompt", "work", "--max-retries", "1", "--label", "retry-label", "--sentinel-file", sentinel)
+	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--prompt", "work", "--max-retries", "1", "--label", "retry-label", "--on-event", eventsPath, "--sentinel-file", sentinel)
 
 	launches := recorder.all()
 	if len(launches) != 2 {
@@ -151,6 +154,20 @@ func TestDirectRunRetryAdvancesAttempt(t *testing.T) {
 	}
 	if launches[0].provenance.ExecutionID != launches[1].provenance.ExecutionID {
 		t.Fatalf("execution id changed across retries: %q vs %q", launches[0].provenance.ExecutionID, launches[1].provenance.ExecutionID)
+	}
+
+	retries := eventsNamed(readEventLogForTest(t, eventsPath), "avenor.retry")
+	if len(retries) != 1 {
+		t.Fatalf("retry events = %d, want 1", len(retries))
+	}
+	if got := joinedNumber(t, retries[0], "attempt"); got != 2 {
+		t.Fatalf("retry attempt = %d, want the upcoming attempt 2", got)
+	}
+	if got := joinedString(t, retries[0], "run_id"); got != runID {
+		t.Fatalf("retry run_id = %q, want the CLI run id %q", got, runID)
+	}
+	if got := joinedString(t, retries[0], "run_label"); got != "retry-label" {
+		t.Fatalf("retry run_label = %q, want retry-label", got)
 	}
 }
 

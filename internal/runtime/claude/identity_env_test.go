@@ -3,7 +3,6 @@ package claude
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -35,24 +34,6 @@ func fakeClaudeIdentityChild(t *testing.T, obsPath string) {
 		t.Fatalf("write fake claude: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-func isolateTmuxServer(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-	t.Setenv("TMUX_TMPDIR", t.TempDir())
-	prior, had := os.LookupEnv("TMUX")
-	if err := os.Unsetenv("TMUX"); err != nil {
-		t.Fatalf("unset TMUX: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "kill-server").Run()
-		if had {
-			_ = os.Setenv("TMUX", prior)
-		}
-	})
 }
 
 func stopClaudeSession(t *testing.T, p *Provider, sessionID string) {
@@ -107,7 +88,7 @@ func TestIdentityChildEnv(t *testing.T) {
 	})
 
 	t.Run("tmux", func(t *testing.T) {
-		isolateTmuxServer(t)
+		identitytest.IsolateTmuxServer(t)
 		poisonParentIdentity(t)
 		t.Setenv("AVENOR_CLAUDE_TERMINAL", "tmux")
 		obsPath := filepath.Join(t.TempDir(), "observed.env")
@@ -130,7 +111,7 @@ func TestIdentityChildEnv(t *testing.T) {
 	})
 
 	t.Run("tmux nil identity clears inherited values", func(t *testing.T) {
-		isolateTmuxServer(t)
+		identitytest.IsolateTmuxServer(t)
 		poisonParentIdentity(t)
 		t.Setenv("AVENOR_CLAUDE_TERMINAL", "tmux")
 		obsPath := filepath.Join(t.TempDir(), "observed.env")

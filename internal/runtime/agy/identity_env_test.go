@@ -94,9 +94,9 @@ func TestIdentityChildEnv(t *testing.T) {
 		writeIdentityAgy(t, obsPath)
 
 		want := identityProvenance("rt_resumed")
-		want.Iteration = intPtr(3)
+		want.Iteration = identitytest.IntPtr(3)
 		caller := identityProvenance("rt_resumed")
-		caller.Iteration = intPtr(3)
+		caller.Iteration = identitytest.IntPtr(3)
 		p := testProvider(runtime.StartOptions{
 			Dir:        t.TempDir(),
 			Provenance: identityProvenance("rt_constructor"),
@@ -173,5 +173,3 @@ func TestIdentityChildEnv(t *testing.T) {
 		}
 	})
 }
-
-func intPtr(v int) *int { return &v }

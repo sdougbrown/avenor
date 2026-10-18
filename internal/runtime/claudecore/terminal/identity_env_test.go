@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -114,30 +113,9 @@ func TestPTYLauncherAddsLaunchIdentity(t *testing.T) {
 	})
 }
 
-// isolateTmuxServer points tmux at a private socket directory and detaches
-// from any server this process inherited from, so the pane is the only child
-// this test owns.
-func isolateTmuxServer(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not installed")
-	}
-	t.Setenv("TMUX_TMPDIR", t.TempDir())
-	prior, had := os.LookupEnv("TMUX")
-	if err := os.Unsetenv("TMUX"); err != nil {
-		t.Fatalf("unset TMUX: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "kill-server").Run()
-		if had {
-			_ = os.Setenv("TMUX", prior)
-		}
-	})
-}
-
 func TestTmuxLauncherAddsLaunchIdentityInPane(t *testing.T) {
 	t.Run("identity", func(t *testing.T) {
-		isolateTmuxServer(t)
+		identitytest.IsolateTmuxServer(t)
 		poisonParentIdentity(t)
 		obsPath := filepath.Join(t.TempDir(), "observed.env")
 		command := identitytest.Body(obsPath, terminalObservationExtras...) + "sleep 30"
@@ -159,7 +137,7 @@ func TestTmuxLauncherAddsLaunchIdentityInPane(t *testing.T) {
 	})
 
 	t.Run("nil identity clears inherited values", func(t *testing.T) {
-		isolateTmuxServer(t)
+		identitytest.IsolateTmuxServer(t)
 		poisonParentIdentity(t)
 		obsPath := filepath.Join(t.TempDir(), "observed.env")
 		command := identitytest.Body(obsPath, terminalObservationExtras...) + "sleep 30"
@@ -183,7 +161,7 @@ func TestTmuxLauncherAddsLaunchIdentityInPane(t *testing.T) {
 // pane inherits the tmux server's environment, which avenor does not own, so
 // inherited identity must be removed inside the command.
 func TestTmuxPaneInheritsPoisonedServerEnv(t *testing.T) {
-	isolateTmuxServer(t)
+	identitytest.IsolateTmuxServer(t)
 	obsPath := filepath.Join(t.TempDir(), "observed.env")
 	command := identitytest.Body(obsPath, terminalObservationExtras...) + "sleep 30"
 

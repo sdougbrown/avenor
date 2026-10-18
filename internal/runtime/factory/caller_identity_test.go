@@ -354,7 +354,7 @@ func TestStartSessionResumeIgnoresConstructorThinking(t *testing.T) {
 		ExecutionID: "rt_quiet",
 		Kind:        "loop",
 		Phase:       "body",
-		Iteration:   intPtr(1),
+		Iteration:   identitytest.IntPtr(1),
 		Label:       "quiet-label",
 		Attempt:     3,
 	}
@@ -482,7 +482,7 @@ func TestStartSessionAgyResumeSnapshotsCallerIdentity(t *testing.T) {
 		ExecutionID: "rt_agy",
 		Kind:        "loop",
 		Phase:       "body",
-		Iteration:   intPtr(2),
+		Iteration:   identitytest.IntPtr(2),
 		Label:       "agy-label",
 		Attempt:     4,
 	}
@@ -511,7 +511,7 @@ func TestStartSessionAgyResumeSnapshotsCallerIdentity(t *testing.T) {
 		ExecutionID: "rt_agy",
 		Kind:        "loop",
 		Phase:       "body",
-		Iteration:   intPtr(2),
+		Iteration:   identitytest.IntPtr(2),
 		Label:       "agy-label",
 		Attempt:     4,
 	}
@@ -571,5 +571,3 @@ func TestStartSessionAgyAutoTransportKeepsCallerIdentity(t *testing.T) {
 		identitytest.Assert(t, observed, want)
 	}
 }
-
-func intPtr(v int) *int { return &v }

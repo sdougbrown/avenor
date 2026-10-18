@@ -27,11 +27,12 @@ func TestPhaseAttemptLaunchOrdinalIsSharedByRetriesAndNudges(t *testing.T) {
 		OnIncomplete: phaseconfig.PhaseOnIncomplete{MaxNudges: 2},
 	}}, nil)
 
+	sink := &recordingEventWriter{}
 	var launches []int
 	result, err := Run(context.Background(), RunOptions{
 		WorkDir:    t.TempDir(),
 		RunID:      "run_ordinal",
-		EventSink:  discardEventWriter{},
+		EventSink:  sink,
 		Config:     cfg,
 		MaxRetries: 2,
 		PhaseAttempt: func(_ context.Context, phase phaseconfig.Phase, attemptNum int, _ string) (PhaseAttemptResult, error) {
@@ -59,5 +60,25 @@ func TestPhaseAttemptLaunchOrdinalIsSharedByRetriesAndNudges(t *testing.T) {
 	}
 	if result.StopReason != "incomplete_output" {
 		t.Fatalf("StopReason = %q, want incomplete_output", result.StopReason)
+	}
+
+	// Each retry emits its event before the next launch, so the retried member
+	// reports one event per consumed retry, numbered from the first retry.
+	var attempts []int
+	for _, ev := range sink.events {
+		if ev.Event != "avenor.retry" {
+			continue
+		}
+		if got := ev.Fields["run_id"]; got != "run_ordinal" {
+			t.Fatalf("retry run_id = %v, want run_ordinal", got)
+		}
+		attempt, ok := ev.Fields["attempt"].(int)
+		if !ok {
+			t.Fatalf("retry attempt = %v, want an int", ev.Fields["attempt"])
+		}
+		attempts = append(attempts, attempt)
+	}
+	if len(attempts) != 2 || attempts[0] != 1 || attempts[1] != 2 {
+		t.Fatalf("retry attempts = %v, want [1 2]; events=%+v", attempts, sink.events)
 	}
 }
