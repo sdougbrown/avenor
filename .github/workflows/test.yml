@@ -2,7 +2,15 @@ name: Test
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# A new push to a pull request cancels its superseded run. Each push to main
+# gets its own group, so none is cancelled or replaced while queued: Publish
+# waits on every one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   go:
@@ -41,6 +49,22 @@ jobs:
 
       - name: Test Go packages
         run: mise run go-test
+
+  go-race:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      # Two passes under the race detector on the concurrency-heavy packages,
+      # so an intermittent race or ordering bug fails here rather than later.
+      - name: Race-test supervisor, control and CLI packages
+        run: go test -race -count=2 ./internal/stable ./internal/control ./internal/cli
 
   python:
     runs-on: ubuntu-latest
