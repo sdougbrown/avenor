@@ -13,8 +13,8 @@ import (
 )
 
 // piObservationExtras are the pi-specific variables the observer also records:
-// a fresh broker URL and the agent name.
-var piObservationExtras = []string{"AVENOR_BROKER_URL", "PI_AGENT"}
+// the agent name.
+var piObservationExtras = []string{"PI_AGENT"}
 
 // writeIdentityPiChild installs a real `pi` child on PATH. The child records
 // the allowlisted environment before answering get_state, so the observation
@@ -106,9 +106,7 @@ func TestIdentityChildEnv(t *testing.T) {
 		if observed["AVENOR_RUN_ID"] != "rt_broker" {
 			t.Errorf("AVENOR_RUN_ID = %q, want rt_broker", observed["AVENOR_RUN_ID"])
 		}
-		if observed["AVENOR_BROKER_URL"] != brokerURL {
-			t.Errorf("AVENOR_BROKER_URL = %q, want %q", observed["AVENOR_BROKER_URL"], brokerURL)
-		}
+		identitytest.AssertBrokerURL(t, observed, brokerURL)
 		if observed["AVENOR_BROKER_TOKEN"] != brokerToken {
 			t.Errorf("AVENOR_BROKER_TOKEN = %q, want the fresh token", observed["AVENOR_BROKER_TOKEN"])
 		}

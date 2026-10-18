@@ -112,7 +112,9 @@ func TestProviderStartUsesProvenanceAtLaunch(t *testing.T) {
 	}
 	defer p.Close()
 
-	identitytest.Assert(t, identitytest.Read(t, obsPath), provenance)
+	observed := identitytest.Read(t, obsPath)
+	identitytest.Assert(t, observed, provenance)
+	identitytest.AssertBrokerPreserved(t, observed)
 }
 
 // TestProviderResumeClearsInheritedIdentity pins plain resume, which keeps the

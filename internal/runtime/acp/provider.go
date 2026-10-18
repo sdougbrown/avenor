@@ -142,9 +142,11 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 		return runtime.Session{}, errors.New("session id is required")
 	}
 	// Only a new client needs a launch environment. A live client keeps the
-	// identity and config it was started with, so resuming it builds nothing.
+	// identity and config it was started with, so resuming it builds nothing;
+	// an option-aware resume still retains the caller's broker.
 	var buildEnv func() (map[string]string, func() error)
 	if optionAware {
+		p.retainBroker(opts)
 		buildEnv = func() (map[string]string, func() error) {
 			runID, brokerToken, brokerRef := p.launchRun(opts)
 			return p.launchEnv(opts, runID, brokerToken, brokerRef)
@@ -176,18 +178,24 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	}, nil
 }
 
-// launchRun retains the broker reference and creates the broker run that
-// backend process config authenticates with, before the client starts, so it
-// can send from the first turn. It uses the supervisor-assigned RuntimeID when
-// available (parent-child routing) and a generated UUID otherwise.
-func (p *Provider) launchRun(opts runtime.StartOptions) (runID, brokerToken string, brokerRef *broker.Broker) {
+// retainBroker records the caller's broker when the provider holds none, so a
+// later launch without a per-call broker still finds one. It returns the broker
+// the provider holds afterwards.
+func (p *Provider) retainBroker(opts runtime.StartOptions) *broker.Broker {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if opts.Broker != nil && p.broker == nil {
 		p.broker = opts.Broker
 	}
-	brokerRef = p.broker
-	p.mu.Unlock()
+	return p.broker
+}
 
+// launchRun creates the broker run that backend process config authenticates
+// with, before the client starts, so it can send from the first turn. It uses
+// the supervisor-assigned RuntimeID when available (parent-child routing) and a
+// generated UUID otherwise.
+func (p *Provider) launchRun(opts runtime.StartOptions) (runID, brokerToken string, brokerRef *broker.Broker) {
+	brokerRef = p.retainBroker(opts)
 	if brokerRef == nil {
 		return "", "", nil
 	}

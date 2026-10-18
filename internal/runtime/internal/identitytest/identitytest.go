@@ -29,13 +29,14 @@ const (
 
 // OperationalKeys are the non-identity variables the observer records to show
 // the scrub is exact: a near miss of an identity name, an unrelated avenor
-// variable and the broker credential pair.
+// variable and the broker credentials.
 func OperationalKeys() []string {
 	return []string{
 		runtime.EnvRuntimeID + "_SUFFIX",
 		"AVENOR_TREE_BUDGET",
 		"AVENOR_RUN_ID",
 		"AVENOR_BROKER_TOKEN",
+		"AVENOR_BROKER_URL",
 	}
 }
 
@@ -234,5 +235,14 @@ func AssertBrokerPreserved(t *testing.T, observed map[string]string) {
 	t.Helper()
 	if observed["AVENOR_RUN_ID"] != "broker-run" || observed["AVENOR_BROKER_TOKEN"] != "broker-token" {
 		t.Errorf("broker pair = %q/%q, want it preserved", observed["AVENOR_RUN_ID"], observed["AVENOR_BROKER_TOKEN"])
+	}
+}
+
+// AssertBrokerURL requires the child to see the URL its own launch set, not the
+// stale one the parent exported.
+func AssertBrokerURL(t *testing.T, observed map[string]string, want string) {
+	t.Helper()
+	if observed["AVENOR_BROKER_URL"] != want {
+		t.Errorf("AVENOR_BROKER_URL = %q, want %q", observed["AVENOR_BROKER_URL"], want)
 	}
 }

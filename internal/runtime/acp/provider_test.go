@@ -698,6 +698,46 @@ func waitForPath(t *testing.T, path string) {
 	}
 }
 
+// TestResumeWithOptionsRetainsBrokerOnLiveClient pins broker retention on an
+// option-aware resume that reuses the live client: the provider keeps the
+// caller's broker without allocating a broker run for the reuse.
+func TestResumeWithOptionsRetainsBrokerOnLiveClient(t *testing.T) {
+	stub := writeACPStub(t, acpStub{Mode: "serve"})
+	p := newStubProvider(stub, nil)
+	defer p.Close()
+
+	session, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := providerClient(p); got == nil {
+		t.Fatal("Start retained no client")
+	}
+
+	b := broker.New(broker.MakeToken())
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	if _, err := p.ResumeWithOptions(context.Background(), session.SessionID, runtime.StartOptions{
+		Broker:    b,
+		RuntimeID: "rt_resume",
+	}); err != nil {
+		t.Fatalf("ResumeWithOptions: %v", err)
+	}
+
+	p.mu.Lock()
+	retained := p.broker
+	p.mu.Unlock()
+	if retained != b {
+		t.Fatalf("p.broker = %p, want the per-call broker %p", retained, b)
+	}
+	if n := b.RunCount(); n != 0 {
+		t.Fatalf("live resume allocated %d broker runs, want none", n)
+	}
+}
+
 // TestEnsureClientReuseKeepsOriginalConfig pins the ownership transfer: a live
 // client keeps its own config and cleanup, and reusing it builds no candidate
 // launch at all.

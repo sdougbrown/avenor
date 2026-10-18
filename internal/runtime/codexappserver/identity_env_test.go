@@ -98,7 +98,9 @@ func TestProviderStartUsesProvenanceAtLaunch(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	identitytest.Assert(t, identitytest.Read(t, obsPath), provenance)
+	observed := identitytest.Read(t, obsPath)
+	identitytest.Assert(t, observed, provenance)
+	identitytest.AssertBrokerPreserved(t, observed)
 }
 
 // TestProviderResumeWithOptionsCarriesFreshIdentity pins the fresh-client
