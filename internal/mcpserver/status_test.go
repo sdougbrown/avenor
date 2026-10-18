@@ -692,7 +692,7 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 	t.Run("recognized statuses never log", func(t *testing.T) {
 		var stderr bytes.Buffer
 		diag := &statusDiagnostics{stderr: &stderr}
-		for _, rawStatus := range []string{"running", "idle", "ended", "done"} {
+		for _, rawStatus := range []string{"idle", "running", "ended", "done", "failed", "timeout", "killed", "waiting", "blocked"} {
 			translateStatus(diag, "rt_1", map[string]any{"status": rawStatus, "phase": "working"}, "")
 		}
 		if stderr.String() != "" {

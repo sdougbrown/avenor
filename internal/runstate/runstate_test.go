@@ -20,6 +20,9 @@ func TestTranslate(t *testing.T) {
 		{name: "terminal", status: StatusTimeout, phase: "timeout", wantStatus: StatusTimeout, wantPhase: "timeout", wantComplete: true, wantRecognized: true},
 		{name: "waiting", status: StatusWaiting, phase: "waiting", wantStatus: StatusWaiting, wantPhase: "waiting", wantRecognized: true},
 		{name: "blocked", status: StatusBlocked, wantStatus: StatusFailed, wantComplete: true, wantRecognized: true},
+		{name: "done", status: StatusDone, phase: PhaseDone, wantStatus: StatusDone, wantPhase: PhaseDone, wantComplete: true, wantRecognized: true},
+		{name: "failed", status: StatusFailed, wantStatus: StatusFailed, wantComplete: true, wantRecognized: true},
+		{name: "killed", status: StatusKilled, phase: "killed", wantStatus: StatusKilled, wantPhase: "killed", wantComplete: true, wantRecognized: true},
 		{name: "unknown", status: StatusUnknown, phase: PhaseWorking, wantStatus: StatusUnknown, wantPhase: PhaseWorking, wantRecognized: false},
 		{name: "empty status", status: "", phase: PhaseWorking, wantStatus: StatusUnknown, wantPhase: PhaseWorking, wantRecognized: false},
 	}

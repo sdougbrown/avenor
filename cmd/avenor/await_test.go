@@ -601,8 +601,8 @@ func TestAwaitUnrecognizedStatusWarnsOnceAndKeepsWaiting(t *testing.T) {
 }
 
 func TestAwaitRecognizedStatusesNeverWarn(t *testing.T) {
-	// Running, idle, ended (and its consumer form done) are all recognized;
-	// none of them may produce an unrecognized-status warning.
+	// Every recognized raw and consumer status keeps its normal exit code and
+	// never produces an unrecognized-status warning.
 	tests := []struct {
 		name     string
 		status   map[string]any
@@ -612,6 +612,11 @@ func TestAwaitRecognizedStatusesNeverWarn(t *testing.T) {
 		{name: "idle", status: awaitStatus("idle", "done", false), exitCode: 0},
 		{name: "ended", status: awaitEndedStatus(0), exitCode: 0},
 		{name: "done", status: awaitStatus("done", "done", false), exitCode: 0},
+		{name: "failed", status: awaitStatus("failed", "failed", false), exitCode: awaitExitFailed},
+		{name: "timeout", status: awaitStatus("timeout", "timeout", false), exitCode: awaitExitPhaseTimeout},
+		{name: "killed", status: awaitStatus("killed", "killed", false), exitCode: awaitExitKilled},
+		{name: "blocked", status: awaitStatus("blocked", "", false), exitCode: awaitExitFailed},
+		{name: "waiting", status: awaitStatus("waiting", "waiting", false), exitCode: awaitExitWallTimeout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
