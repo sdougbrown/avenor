@@ -548,20 +548,45 @@ func TestAwaitRejectsMalformedStatusResponse(t *testing.T) {
 }
 
 func TestAwaitUnrecognizedStatusWarnsOnceAndKeepsWaiting(t *testing.T) {
-	// The initial fetch, the post-subscribe snapshot, and a lagged resnapshot
-	// all observe unrecognized statuses. Waiting continues — unknown is not
-	// terminal — and each distinct value warns exactly once.
+	// The initial fetch, the post-subscribe snapshot, and the lagged
+	// resnapshot all observe unrecognized statuses. Waiting continues —
+	// unknown is not terminal — and each distinct value warns exactly once.
 	server := newAwaitSocketServer(t,
 		[]map[string]any{
 			awaitStatus("mystery", "working", false),  // initial snapshot
 			awaitStatus("mystery", "working", false),  // post-subscribe snapshot
 			awaitStatus("mystery2", "working", false), // lag resnapshot
-			awaitStatus("mystery2", "working", false),
 		},
 		[]map[string]any{awaitEvent("subscriber.lagged", "rt_1", 10)},
 	)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "50ms"}, &stdout, &stderr); got != awaitExitWallTimeout {
+	// The lagged resnapshot is an asynchronous consequence of the replayed
+	// event, so wait until the server has served all three status fetches
+	// instead of racing a short wall timeout against event delivery; the
+	// generous timeout only bounds how long await keeps waiting afterwards.
+	exited := make(chan int, 1)
+	go func() {
+		exited <- runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "2s"}, &stdout, &stderr)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fetched := 0
+		calls, _ := server.calls()
+		for _, call := range calls {
+			if call == "status" {
+				fetched++
+			}
+		}
+		if fetched >= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status fetches = %d, want the lagged resnapshot to run (calls %v)", fetched, calls)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	got := <-exited
+	if got != awaitExitWallTimeout {
 		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitWallTimeout, stderr.String())
 	}
 	if stdout.String() != "" {

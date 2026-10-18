@@ -202,7 +202,9 @@ Exit codes appear once the runtime has ended.
 Consumers such as `avenor_status` (MCP) and `avenor await` translate these raw
 statuses into their own lifecycle vocabulary. A raw status a consumer does not
 recognize reads as `unknown`, which is not a finished state: waiters keep
-waiting until an existing completion, permission, or timeout rule applies.
+waiting until an existing completion, permission, or timeout rule applies. An
+unrecognized raw status reads as `unknown` unless a completion sentinel
+resolves it.
 
 ### Prompts and Interrupts
 

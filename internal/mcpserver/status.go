@@ -5,51 +5,35 @@ import (
 	"io"
 	"os"
 	"strings"
-	"sync"
 
+	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
-// unrecognizedStatusDiagnosticCap bounds the server's cache of distinct
-// unrecognized status values it logs.
-const unrecognizedStatusDiagnosticCap = 16
-
 // statusDiagnostics logs unrecognized raw statuses a runtime reported, once
-// per distinct value until the cap, then a single suppression line. A nil
-// receiver disables logging so translateStatus stays usable without a Server.
+// per (runtime, raw status) pair until the cap, then a single suppression
+// line. The pair key means the same bogus value reported by two runtimes logs
+// twice. A nil receiver disables logging so translateStatus stays usable
+// without a Server.
 type statusDiagnostics struct {
-	mu     sync.Mutex
 	stderr io.Writer
-	// seen records the distinct raw status values already logged; suppressed
-	// marks that the cap was reached and the suppression line was logged.
-	// Both are guarded by mu.
-	seen       map[string]struct{}
-	suppressed bool
+	gate   diagnote.Gate
 }
 
-// note logs one unrecognized raw status for a runtime.
+// note logs one unrecognized raw status for a runtime. The gate decides under
+// its lock; the write happens after so a blocked stderr cannot stall other
+// status translations.
 func (d *statusDiagnostics) note(runtimeID, rawStatus string) {
 	if d == nil {
 		return
 	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if _, ok := d.seen[rawStatus]; ok {
-		return
+	log, suppressed := d.gate.Admit(runtimeID + "\x00" + rawStatus)
+	switch {
+	case log:
+		fmt.Fprintf(d.stderr, "avenor mcp: runtime %q reported unrecognized status %q\n", runtimeID, rawStatus)
+	case suppressed:
+		fmt.Fprintln(d.stderr, "avenor mcp: further unrecognized values suppressed")
 	}
-	if len(d.seen) < unrecognizedStatusDiagnosticCap {
-		if d.seen == nil {
-			d.seen = make(map[string]struct{})
-		}
-		d.seen[rawStatus] = struct{}{}
-		fmt.Fprintf(d.stderr, "avenor mcp: runtime %s reported unrecognized status %q\n", runtimeID, rawStatus)
-		return
-	}
-	if d.suppressed {
-		return
-	}
-	d.suppressed = true
-	fmt.Fprintln(d.stderr, "avenor mcp: further unrecognized values suppressed")
 }
 
 type sentinelData struct {
@@ -269,7 +253,9 @@ func translateStatus(diag *statusDiagnostics, runtimeID string, raw map[string]a
 	rawPhase, _ := raw["phase"].(string)
 	translated := runstate.Translate(runstate.RuntimeStatus(rawStatus), runstate.Phase(rawPhase))
 	result["status"] = string(translated.Status)
-	if !translated.StatusRecognized {
+	// A missing or empty raw status is not unrecognized: it still translates
+	// to unknown, but stays silent rather than logging an empty value.
+	if !translated.StatusRecognized && rawStatus != "" {
 		diag.note(runtimeID, rawStatus)
 	}
 

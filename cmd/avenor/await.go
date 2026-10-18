@@ -12,10 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
@@ -384,48 +384,29 @@ type awaitSnapshot struct {
 	rawPhase   string
 }
 
-// awaitStatusDiagnosticCap bounds the per-invocation cache of distinct
-// unrecognized status values await logs.
-const awaitStatusDiagnosticCap = 16
-
 // awaitStatusDiagnostics warns about unrecognized raw statuses a runtime
 // reported. The state is shared by one await invocation's initial fetch, its
 // event resnapshots, and its cleanup polling. A nil receiver disables
 // warning.
 type awaitStatusDiagnostics struct {
-	mu     sync.Mutex
 	stderr io.Writer
-	// seen records the distinct raw status values already warned about;
-	// suppressed marks that the cap was reached and the suppression line was
-	// printed. Both are guarded by mu.
-	seen       map[string]struct{}
-	suppressed bool
+	gate   diagnote.Gate
 }
 
 // warn prints one line per distinct unrecognized status until the cap, then a
-// single suppression line.
+// single suppression line. The gate decides under its lock; the write happens
+// after so a blocked stderr cannot stall other fetches.
 func (d *awaitStatusDiagnostics) warn(rawStatus string) {
 	if d == nil {
 		return
 	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if _, ok := d.seen[rawStatus]; ok {
-		return
-	}
-	if len(d.seen) < awaitStatusDiagnosticCap {
-		if d.seen == nil {
-			d.seen = make(map[string]struct{})
-		}
-		d.seen[rawStatus] = struct{}{}
+	log, suppressed := d.gate.Admit(rawStatus)
+	switch {
+	case log:
 		fmt.Fprintf(d.stderr, "avenor await: runtime reported unrecognized status %q; waiting continues\n", rawStatus)
-		return
+	case suppressed:
+		fmt.Fprintln(d.stderr, "avenor await: further unrecognized values suppressed")
 	}
-	if d.suppressed {
-		return
-	}
-	d.suppressed = true
-	fmt.Fprintln(d.stderr, "avenor await: further unrecognized values suppressed")
 }
 
 func fetchAwaitStatus(ctx context.Context, c *client.Client, runtimeID string, diag *awaitStatusDiagnostics) (awaitSnapshot, error) {

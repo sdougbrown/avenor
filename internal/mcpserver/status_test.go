@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/diagnote"
 )
 
 func writeSentinel(t *testing.T, dir, name, content string) string {
@@ -17,6 +19,25 @@ func writeSentinel(t *testing.T, dir, name, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// syncWriter serializes writes to a buffer so diagnostics written outside the
+// gate lock can arrive from concurrent goroutines.
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
 }
 
 func TestTranslateStatusPreservesRosterIdentity(t *testing.T) {
@@ -615,16 +636,16 @@ func unrecognizedStatusLines(t *testing.T, output string) []string {
 			values = append(values, "")
 			continue
 		}
-		const prefix = "avenor mcp: runtime "
+		const prefix = `avenor mcp: runtime "`
 		if !strings.HasPrefix(line, prefix) {
 			t.Fatalf("log line = %q, want %q prefix", line, prefix)
 		}
-		const middle = " reported unrecognized status \""
-		_, rest, ok := strings.Cut(line, middle)
-		if !ok || !strings.HasSuffix(rest, "\"") {
+		const middle = `" reported unrecognized status "`
+		_, rest, ok := strings.Cut(line[len(prefix):], middle)
+		if !ok || !strings.HasSuffix(rest, `"`) {
 			t.Fatalf("log line = %q, want an unrecognized-status report", line)
 		}
-		values = append(values, strings.TrimSuffix(rest, "\""))
+		values = append(values, strings.TrimSuffix(rest, `"`))
 	}
 	return values
 }
@@ -645,7 +666,37 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 				t.Fatal("waitTerminal fired for unknown")
 			}
 		}
-		want := "avenor mcp: runtime rt_1 reported unrecognized status \"mystery\"\n"
+		want := "avenor mcp: runtime \"rt_1\" reported unrecognized status \"mystery\"\n"
+		if stderr.String() != want {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	})
+
+	t.Run("missing or empty raw status translates to unknown without logging", func(t *testing.T) {
+		var stderr bytes.Buffer
+		diag := &statusDiagnostics{stderr: &stderr}
+		for _, raw := range []map[string]any{
+			{"phase": "working"},
+			{"status": "", "phase": "working"},
+		} {
+			translated := translateStatus(diag, "rt_1", raw, "")
+			if got, ok := translated["status"].(string); !ok || got != "unknown" {
+				t.Fatalf("status = %#v, want string unknown", translated["status"])
+			}
+		}
+		if stderr.String() != "" {
+			t.Fatalf("stderr = %q, want no log lines for a missing or empty status", stderr.String())
+		}
+	})
+
+	t.Run("same status from two runtimes logs twice", func(t *testing.T) {
+		var stderr bytes.Buffer
+		diag := &statusDiagnostics{stderr: &stderr}
+		translateStatus(diag, "rt_1", map[string]any{"status": "mystery"}, "")
+		translateStatus(diag, "rt_2", map[string]any{"status": "mystery"}, "")
+		translateStatus(diag, "rt_1", map[string]any{"status": "mystery"}, "")
+		want := "avenor mcp: runtime \"rt_1\" reported unrecognized status \"mystery\"\n" +
+			"avenor mcp: runtime \"rt_2\" reported unrecognized status \"mystery\"\n"
 		if stderr.String() != want {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 		}
@@ -664,7 +715,7 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 		}
 		// The live status was still unrecognized, so the diagnostic is due even
 		// though the sentinel resolved the run.
-		want := "avenor mcp: runtime rt_1 reported unrecognized status \"mystery\"\n"
+		want := "avenor mcp: runtime \"rt_1\" reported unrecognized status \"mystery\"\n"
 		if stderr.String() != want {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 		}
@@ -678,8 +729,8 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 		}
 		translateStatus(diag, "rt_1", map[string]any{"status": "mystery_0"}, "")
 		values := unrecognizedStatusLines(t, stderr.String())
-		if len(values) != unrecognizedStatusDiagnosticCap+1 {
-			t.Fatalf("log lines = %d (%v), want %d value lines plus one suppression", len(values), values, unrecognizedStatusDiagnosticCap)
+		if len(values) != diagnote.Cap+1 {
+			t.Fatalf("log lines = %d (%v), want %d value lines plus one suppression", len(values), values, diagnote.Cap)
 		}
 		suppressions := 0
 		seen := make(map[string]bool)
@@ -699,7 +750,7 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 	})
 
 	t.Run("concurrent calls stay race-clean", func(t *testing.T) {
-		var stderr bytes.Buffer
+		var stderr syncWriter
 		diag := &statusDiagnostics{stderr: &stderr}
 		var wg sync.WaitGroup
 		for worker := 0; worker < 8; worker++ {
@@ -714,8 +765,8 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 		}
 		wg.Wait()
 		values := unrecognizedStatusLines(t, stderr.String())
-		if len(values) != unrecognizedStatusDiagnosticCap+1 {
-			t.Fatalf("log lines = %d, want %d value lines plus one suppression", len(values), unrecognizedStatusDiagnosticCap+1)
+		if len(values) != diagnote.Cap+1 {
+			t.Fatalf("log lines = %d, want %d value lines plus one suppression", len(values), diagnote.Cap+1)
 		}
 		suppressions := 0
 		seen := make(map[string]bool)
@@ -749,7 +800,7 @@ func TestServerDiagnosticsStderrRoutesUnrecognizedStatus(t *testing.T) {
 	if got, ok := result["status"].(string); !ok || got != "unknown" {
 		t.Fatalf("status = %#v, want string unknown", result["status"])
 	}
-	want := "avenor mcp: runtime rt_9 reported unrecognized status \"mystery\"\n"
+	want := "avenor mcp: runtime \"rt_9\" reported unrecognized status \"mystery\"\n"
 	if stderr.String() != want {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
