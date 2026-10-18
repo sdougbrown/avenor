@@ -18,8 +18,9 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/runtime"
-	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
@@ -123,12 +124,13 @@ type StableHandler interface {
 }
 
 // AskError carries the broker message ID of a failed ask plus whether the
-// ask edge may still be pending on the broker. Pending is true only when the
-// edge was not provably cleaned up; callers can then withdraw it with
+// ask edge may still be pending. Pending is true exactly when Outcome is
+// messaging.OutcomePossiblyPending; callers can then withdraw the ask with
 // broker_cancel instead of retrying blind.
 type AskError struct {
 	MessageID string
 	Pending   bool
+	Outcome   messaging.Outcome
 	Err       error
 }
 
@@ -139,7 +141,11 @@ func (e *AskError) Unwrap() error { return e.Err }
 func askErrorData(err error) any {
 	var ae *AskError
 	if errors.As(err, &ae) {
-		return map[string]any{"message_id": ae.MessageID, "pending": ae.Pending}
+		data := map[string]any{"message_id": ae.MessageID, "pending": ae.Pending}
+		if ae.Outcome != "" {
+			data["outcome"] = ae.Outcome
+		}
+		return data
 	}
 	return nil
 }
@@ -1047,9 +1053,9 @@ func (s *ControlServer) handleConn(c *connState) {
 const maxInflightAsksPerConn = 8
 
 // maxAskTimeoutMS is the server-side cap on a request's timeout_ms. It sits
-// below the broker's DefaultAskTimeout so a clamped value expires on the
+// below the ask store's DefaultAskTimeout so a clamped value expires on the
 // server (with structured error data) instead of racing the broker's 504.
-const maxAskTimeoutMS = int64(broker.DefaultAskTimeout-5*time.Second) / int64(time.Millisecond)
+const maxAskTimeoutMS = int64(askstore.DefaultAskTimeout-5*time.Second) / int64(time.Millisecond)
 
 // codeWaitTurnTimeout marks a wait_turn request whose timeout_ms elapsed
 // before the runtime's turn settled. Clients match this code to a typed
