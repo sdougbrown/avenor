@@ -293,7 +293,7 @@ Avenor sets `AVENOR_RUNTIME_ID` and `AVENOR_EXECUTION_ID` to the same value. Joi
 
 - Avenor exports only fields with a value. An unset field is absent, not empty.
 - Avenor removes inherited values for these seven names and for the superseded `AVENOR_PARENT_RUN_ID` before it adds the current launch values. Matching is on the exact name, so duplicates are removed too.
-- Near-miss names keep their values. So do `AVENOR_TREE_BUDGET`, backend selectors such as `AVENOR_AGY_TRANSPORT`, and broker values.
+- Near-miss names keep their values. So do `AVENOR_TREE_BUDGET`, backend selectors such as `AVENOR_AGY_TRANSPORT`, and broker values. The `pi` backend replaces the broker values it inherits; see [Backends → Launch identity](backends.md#launch-identity).
 - When broker credentials are present, the `pi` backend also receives `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN`. That pair lets the child poll its inbound asks and reply as its own broker run. `AVENOR_RUN_ID` is broker identity, not the containing execution.
 
 ### CLI and supervisor ID mapping
@@ -321,9 +321,10 @@ The environment describes a process launch.
 Assume an observation reported `AVENOR_EXECUTION_ID=a3f9c1`, `AVENOR_KIND=team`, `AVENOR_PHASE=security-reviewer`, `AVENOR_ATTEMPT=1`, and no `AVENOR_ITERATION`.
 
 1. Match `AVENOR_EXECUTION_ID` to the event `runtime_id`.
-2. Select the phase events whose `run_kind` is `AVENOR_KIND`, whose `phase` is `AVENOR_PHASE`, and whose `iteration` is `AVENOR_ITERATION`, or `0` when the variable is absent.
-3. For a non-nested run, expect exactly one `avenor.phase.start` and one `avenor.phase.end`. Read `stop_reason` from the end event.
-4. Match `avenor.team.end` or `avenor.loop.end` on the same `runtime_id`. Read `exit_reason` from that event.
+2. When `AVENOR_PHASE` is set, select the phase events whose `run_kind` is `AVENOR_KIND`, whose `phase` is `AVENOR_PHASE`, and whose `iteration` is `AVENOR_ITERATION`, or `0` when the variable is absent.
+3. When `AVENOR_PHASE` is set and the run is not nested, expect exactly one `avenor.phase.start` and one `avenor.phase.end`. Read `stop_reason` from the end event.
+4. When `AVENOR_KIND` is `team` or `loop`, match `avenor.team.end` or `avenor.loop.end` on the same `runtime_id`. Read `exit_reason` from that event.
+5. A direct run sets `AVENOR_KIND=run` and no `AVENOR_PHASE`, so it emits no phase events. Join it on `session.end` instead: match `runtime_id`, then read `stop_reason`.
 
 Example for a CLI team run:
 
