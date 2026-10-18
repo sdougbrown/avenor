@@ -3,11 +3,14 @@ import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { randomUUID } from 'node:crypto'
 import {
+  askViaBroker,
+  buildAgentMessage,
   formatInboundAskBody,
   parseControlMessage,
   postBroker,
   readSubAgentEnv,
   resolveReplyTarget,
+  withdrawPendingAsk,
   type SubAgentEnv,
 } from './subagent-broker.js'
 import {
@@ -1759,10 +1762,25 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         to_run_id: Type.String({ description: 'Target run ID' }),
         message: Type.String({ description: 'Question to ask the other agent' }),
         timeout_ms: Type.Optional(Type.Integer({ description: 'Optional timeout in milliseconds for the ask' })),
-        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
+        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path (ignored in a Pi sub-agent, which asks through its inherited broker)' })),
       }),
-      async execute(_toolCallId, params) {
-        return askTool({ toRunId: params.to_run_id, message: params.message, timeoutMs: params.timeout_ms, supervisorId: params.supervisor_id })
+      async execute(_toolCallId, params, signal) {
+        // In a pi sub-agent, ask through the inherited broker as its own run:
+        // the parent's control connection is not available to a child.
+        const result = isSubAgentBrokerMode && subAgentEnv
+          ? await askViaBroker(subAgentEnv, {
+            toRunId: params.to_run_id,
+            message: params.message,
+            timeoutMs: params.timeout_ms,
+            signal,
+          })
+          : await askTool({ toRunId: params.to_run_id, message: params.message, timeoutMs: params.timeout_ms, supervisorId: params.supervisor_id })
+        // Pi normalizes a result without content to an empty tool output, so
+        // the reply has to be text the model can read.
+        return {
+          content: [{ type: 'text', text: `Reply from ${result.from_run_id || params.to_run_id}:\n${result.reply}` }],
+          details: result,
+        }
       },
     })
 
@@ -1789,19 +1807,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           const generation = subAgentPollGeneration
           subAgentPendingAsks.delete(target.message_id)
           try {
-            await postBroker(subAgentEnv, '/send', {
-              from_run_id: subAgentEnv.runId,
-              to_run_id: target.from_run_id,
-              type: 'agent_message',
-              payload: {
-                id: randomUUID(),
-                from_run_id: subAgentEnv.runId,
-                to_run_id: target.from_run_id,
-                message: params.message,
-                role: 'agent',
-                reply_to: target.message_id,
-              },
-            })
+            await postBroker(subAgentEnv, '/send', buildAgentMessage({
+              fromRunId: subAgentEnv.runId,
+              toRunId: target.from_run_id,
+              messageId: randomUUID(),
+              message: params.message,
+              role: 'agent',
+              replyTo: target.message_id,
+            }))
           } catch (error) {
             // Restore only into the session that received the ask.
             if (generation === subAgentPollGeneration) subAgentPendingAsks.set(target.message_id, target)
@@ -1858,7 +1871,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         message_id: Type.String({ description: 'Message ID of the pending ask to cancel' }),
       }),
       async execute(_toolCallId, params) {
-        return cancelTool({ messageId: params.message_id })
+        // Withdrawing an ask is this tool's only operation, and the child's own
+        // run is its sender, so a pi sub-agent withdraws through the inherited
+        // broker instead of the parent's control connection (which it lacks).
+        if (isSubAgentBrokerMode && subAgentEnv) {
+          await withdrawPendingAsk(subAgentEnv, params.message_id)
+          return {
+            content: [{ type: 'text', text: `Cancelled ${params.message_id}` }],
+            details: { cancelled: true },
+          }
+        }
+        const result = await cancelTool({ messageId: params.message_id })
+        return {
+          content: [{ type: 'text', text: `Cancelled ${params.message_id}` }],
+          details: result,
+        }
       },
     })
     pi.registerTool({

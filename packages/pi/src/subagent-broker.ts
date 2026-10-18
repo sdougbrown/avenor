@@ -3,8 +3,16 @@
 // When the avenor pi provider launches a pi sub-process it injects broker
 // credentials via AVENOR_BROKER_URL / AVENOR_RUN_ID / AVENOR_BROKER_TOKEN. In
 // that mode the extension polls its own run for inbound asks (a host calling
-// avenor_ask on it) and can reply as its own run. These helpers are kept free
-// of extension-context dependencies so they can be exercised by unit tests.
+// avenor_ask on it), can reply as its own run, and asks its parent through the
+// same broker. These helpers are kept free of extension-context dependencies so
+// they can be exercised by unit tests.
+
+import { randomUUID } from 'node:crypto'
+import { extractReplyMessage, formatAskFailure, normalizeAskTimeoutMs } from '@dougbots/avenor-core'
+import type { AskResult } from '@dougbots/avenor-core'
+
+/** Deadline for a cleanup call whose caller's own deadline has already expired. */
+const ASK_CLEANUP_TIMEOUT_MS = 5000
 
 export interface SubAgentEnv {
   brokerUrl: string
@@ -57,18 +65,64 @@ export function formatInboundAskBody(ask: InboundAsk): string {
   return `**📨 Inbound ask**${from}\n\n${ask.message}\n\nTo answer, use avenor_reply({ reply_to_message_id: ${JSON.stringify(ask.message_id)}, message: "..." }).`
 }
 
+/** A broker HTTP response error, so callers can classify by status instead of
+ * matching digits in the request text. */
+export class BrokerHttpError extends Error {
+  readonly status: number
+
+  constructor(path: string, status: number, body: string) {
+    super(`broker ${path}: ${status} ${body}`)
+    this.name = 'BrokerHttpError'
+    this.status = status
+  }
+}
+
+export interface AgentMessageFields {
+  fromRunId: string
+  toRunId: string
+  messageId: string
+  message: string
+  role: string
+  /** Ask message id being answered; set only on a reply. */
+  replyTo?: string
+  /** Set only on an ask, so the broker tracks the waiting reply. */
+  expectsReply?: boolean
+}
+
+/** Build the `/send` body for one agent_message, as the broker child tools do. */
+export function buildAgentMessage(fields: AgentMessageFields): Record<string, unknown> {
+  return {
+    from_run_id: fields.fromRunId,
+    to_run_id: fields.toRunId,
+    type: 'agent_message',
+    payload: {
+      id: fields.messageId,
+      from: fields.fromRunId,
+      from_run_id: fields.fromRunId,
+      to_run_id: fields.toRunId,
+      message: fields.message,
+      role: fields.role,
+      ...(fields.expectsReply ? { expects_reply: true } : {}),
+      ...(fields.replyTo !== undefined ? { reply_to: fields.replyTo } : {}),
+    },
+  }
+}
+
 export async function postBroker(
   env: SubAgentEnv,
   path: string,
   body: Record<string, unknown>,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const res = await fetchImpl(`${env.brokerUrl}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ run_id: env.runId, token: env.token, ...body }),
+    // Spread the body first so a caller cannot override the credentials.
+    body: JSON.stringify({ ...body, run_id: env.runId, token: env.token }),
+    ...(signal ? { signal } : {}),
   })
-  if (!res.ok) throw new Error(`broker ${path}: ${res.status} ${(await res.text()).trim()}`)
+  if (!res.ok) throw new BrokerHttpError(path, res.status, (await res.text()).trim())
   return res.json()
 }
 
@@ -97,4 +151,208 @@ export function resolveReplyTarget(
     if (!fromRunId || entry.from_run_id === fromRunId) match = entry
   }
   return match ?? null
+}
+
+export interface BrokerAskArgs {
+  toRunId: string
+  message: string
+  role?: string
+  /** Bound on the wait for a reply; ignores a non-positive or non-finite value. */
+  timeoutMs?: number
+  /** Caller cancellation; an abort withdraws the ask before reporting. */
+  signal?: AbortSignal
+}
+
+function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const active = signals.filter((signal): signal is AbortSignal => signal !== undefined)
+  if (active.length === 0) return undefined
+  if (active.length === 1) return active[0]
+  return AbortSignal.any(active)
+}
+
+function describeFailure(error: unknown): string {
+  if (error instanceof Error) {
+    if (error.name === 'TimeoutError') return 'timed out'
+    if (error.name === 'AbortError') return 'cancelled'
+    return error.message || error.name
+  }
+  return String(error)
+}
+
+/**
+ * Withdraw a pending ask through the broker as this run. The broker's own error
+ * propagates so a caller reporting to a model shows its exact text.
+ */
+export async function withdrawPendingAsk(
+  env: SubAgentEnv,
+  messageId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  // A fresh deadline: the caller's own signal may already have aborted the
+  // wait this cleanup follows, and abandoning cleanup would lose the ask.
+  await postBroker(
+    env,
+    '/cancel_message',
+    { cancel_message_id: messageId },
+    fetchImpl,
+    AbortSignal.timeout(ASK_CLEANUP_TIMEOUT_MS),
+  )
+}
+
+/**
+ * Withdraw a pending ask and classify whether the edge may still exist on the
+ * broker: true means the cleanup could not be confirmed, false means it is gone.
+ */
+async function withdrawAsk(
+  env: SubAgentEnv,
+  messageId: string,
+  fetchImpl: typeof fetch,
+): Promise<boolean> {
+  try {
+    await withdrawPendingAsk(env, messageId, fetchImpl)
+    return false
+  } catch (error) {
+    // The broker clears the edge itself when a cancelled wait_reply request
+    // disconnects, so a 404 from /cancel_message means the ask is already gone.
+    // Anything else, including a transport failure that drew no response, may
+    // leave the edge behind.
+    if (error instanceof BrokerHttpError) {
+      return error.status !== 404
+    }
+    return true
+  }
+}
+
+/** Fetch causes for a dial that never opened, so no request reached the broker. */
+const NEVER_REACHED_CODES = new Set([
+  'ECONNREFUSED',
+  'ConnectionRefused',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'ERR_INVALID_URL',
+])
+
+/**
+ * Whether a fetch failure carries only dial-level causes, so no request was
+ * carried to the broker and no ask edge can exist. Undici aggregates one error
+ * per dialled address, so every attempt must have failed at the dial.
+ */
+function dialNeverOpened(error: unknown, depth = 0): boolean {
+  if (depth > 5 || error === null || error === undefined) return false
+  const node = error as { code?: unknown; cause?: unknown; errors?: unknown }
+  if (typeof node.code === 'string' && NEVER_REACHED_CODES.has(node.code)) return true
+  if (Array.isArray(node.errors) && node.errors.length > 0) {
+    return node.errors.every(cause => dialNeverOpened(cause, depth + 1))
+  }
+  return dialNeverOpened(node.cause, depth + 1)
+}
+
+/** Whether the failure came from a caller or timeout abort, not from the wire. */
+function abortedBeforeResponse(error: unknown, depth = 0): boolean {
+  if (depth > 5 || error === null || error === undefined) return false
+  const node = error as { name?: unknown; cause?: unknown; errors?: unknown }
+  if (node.name === 'AbortError' || node.name === 'TimeoutError') return true
+  if (Array.isArray(node.errors) && node.errors.some(cause => abortedBeforeResponse(cause, depth + 1))) return true
+  return abortedBeforeResponse(node.cause, depth + 1)
+}
+
+/** Deadline for the reachability probe, short enough to precede a cleanup. */
+const BROKER_PROBE_TIMEOUT_MS = 250
+
+/**
+ * Whether the broker still answers HTTP at all. The endpoint is unauthenticated
+ * and any response counts, so a live broker that rejects the request is still
+ * reachable. Only a dial that never opened means the broker is gone: the
+ * probe's own deadline, a reset, and every other transport failure are
+ * inconclusive, so a slow broker that already processed the send still counts
+ * as reachable and the caller withdraws rather than calling the ask gone.
+ */
+async function brokerReachable(env: SubAgentEnv, fetchImpl: typeof fetch): Promise<boolean> {
+  try {
+    await fetchImpl(`${env.brokerUrl}/health`, { signal: AbortSignal.timeout(BROKER_PROBE_TIMEOUT_MS) })
+    return true
+  } catch (error) {
+    return !dialNeverOpened(error)
+  }
+}
+
+/**
+ * Whether a failed send provably never reached the broker, mirroring the host's
+ * rule: a dial that never opened or an unusable broker address carries no
+ * request, and a send that drew no HTTP response while the broker no longer
+ * accepts a dial cannot have left its edge in a broker that is gone. An HTTP
+ * response, a reset, or an abort against a broker that answers at all may have
+ * been processed and still needs a withdraw.
+ */
+async function sendNeverReachedBroker(
+  error: unknown,
+  env: SubAgentEnv,
+  fetchImpl: typeof fetch,
+): Promise<boolean> {
+  if (error instanceof BrokerHttpError) return false
+  if (dialNeverOpened(error)) return true
+  if (abortedBeforeResponse(error)) return false
+  return !(await brokerReachable(env, fetchImpl))
+}
+
+/**
+ * Ask another run through the inherited broker as this run, then wait for the
+ * correlated reply. A failed send, wait, timeout, or abort withdraws the ask
+ * and reports its message id plus whether it is still pending, matching the
+ * host-side ask tool's contract.
+ */
+export async function askViaBroker(
+  env: SubAgentEnv,
+  args: BrokerAskArgs,
+  fetchImpl: typeof fetch = fetch,
+): Promise<AskResult> {
+  const messageId = randomUUID()
+  const role = args.role ?? 'agent'
+  const timeoutMs = normalizeAskTimeoutMs(args.timeoutMs)
+  const signal = combineSignals(args.signal, timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined)
+
+  const fail = async (detail: string): Promise<never> => {
+    const pending = await withdrawAsk(env, messageId, fetchImpl)
+    throw new Error(formatAskFailure(messageId, pending, detail))
+  }
+
+  try {
+    await postBroker(
+      env,
+      '/send',
+      buildAgentMessage({
+        fromRunId: env.runId,
+        toRunId: args.toRunId,
+        messageId,
+        message: args.message,
+        role,
+        expectsReply: true,
+      }),
+      fetchImpl,
+      signal,
+    )
+  } catch (error) {
+    // A send that never reached the broker cannot have registered an edge, so
+    // report it withdrawn instead of spending a cancel on it.
+    if (await sendNeverReachedBroker(error, env, fetchImpl)) {
+      throw new Error(formatAskFailure(messageId, false, `send ask: ${describeFailure(error)}`))
+    }
+    return fail(`send ask: ${describeFailure(error)}`)
+  }
+
+  let reply: unknown
+  try {
+    reply = await postBroker(env, '/wait_reply', { waiting_for: messageId }, fetchImpl, signal)
+  } catch (error) {
+    return fail(`wait for reply: ${describeFailure(error)}`)
+  }
+
+  const record = reply && typeof reply === 'object' ? (reply as Record<string, unknown>) : {}
+  return {
+    reply: extractReplyMessage(record),
+    from_run_id: (record.from_run_id as string) ?? '',
+  }
 }

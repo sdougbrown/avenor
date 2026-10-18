@@ -76,6 +76,16 @@ export async function waitFor(predicate: () => boolean, timeoutMs = 2000, interv
   }
 }
 
+/** Reject the way fetch does when its signal aborts, so abort paths are real. */
+export function waitUntilAborted(init: RequestInit | undefined): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal
+    if (!signal) throw new Error('request must receive an abort signal')
+    if (signal.aborted) return reject(signal.reason)
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+  })
+}
+
 export function buildSnapshot(): RunSnapshot {
   const reducer = new RunReducer()
   reducer.apply({ event: 'session.start', runtime_id: 'rt-1', run_id: 'run-1', run_label: 'demo', backend: 'pi', agent: 'horse', model: 'model-1', dir: '/tmp/demo' })

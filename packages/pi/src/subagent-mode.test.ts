@@ -1,7 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import type { ExtensionDeps } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
-import { startExtensionHarness, waitFor } from './test-fixtures.js'
+import { startExtensionHarness, waitFor, waitUntilAborted } from './test-fixtures.js'
 
 const subAgentEnv = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } as const
 
@@ -10,8 +10,19 @@ interface FetchCall {
   body: Record<string, unknown>
 }
 
-/** Stub global fetch with canned /poll-control responses; records /send bodies. */
-function stubBrokerFetch(pollResponses: unknown[], sendFailures = 0, pollDelayMs = 0, pollFailures = 0) {
+type BrokerHandler = (init: RequestInit | undefined) => Response | Promise<Response>
+
+/**
+ * Stub global fetch with canned /poll-control responses; records every call.
+ * A per-path handler replaces the canned response for that path.
+ */
+function stubBrokerFetch(
+  pollResponses: unknown[],
+  sendFailures = 0,
+  pollDelayMs = 0,
+  pollFailures = 0,
+  handlers: Record<string, BrokerHandler> = {},
+) {
   const calls: FetchCall[] = []
   let pollIndex = 0
   let pendingSendFailures = sendFailures
@@ -25,6 +36,8 @@ function stubBrokerFetch(pollResponses: unknown[], sendFailures = 0, pollDelayMs
       const path = new URL(href).pathname
       const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
       calls.push({ path, body })
+      const handler = handlers[path]
+      if (handler) return await handler(init)
       if (path === '/poll-control') {
         if (pollDelayMs > 0) await new Promise(resolve => setTimeout(resolve, pollDelayMs))
         if (pendingPollFailures > 0) {
@@ -94,12 +107,15 @@ describe('sub-agent broker mode (integration)', () => {
       expect(send).toBeDefined()
       expect(send!.body).toMatchObject({ run_id: 'rt_child', token: 'tok', type: 'agent_message' })
       const payload = send!.body.payload as Record<string, unknown>
-      expect(payload).toMatchObject({
+      expect(typeof payload.id).toBe('string')
+      expect(payload).toEqual({
+        id: payload.id,
+        from: 'rt_child',
         from_run_id: 'rt_child',
         to_run_id: 'supervisor',
-        reply_to: 'ask-1',
         message: 'yes, green',
         role: 'agent',
+        reply_to: 'ask-1',
       })
 
       // The pending ask is cleared after replying.
@@ -196,6 +212,32 @@ describe('sub-agent broker mode (integration)', () => {
       expect(result.content[0].text).toBe('Reply sent')
       const payload = fetchStub.calls.filter(call => call.path === '/send').at(-1)!.body.payload as Record<string, unknown>
       expect(payload).toMatchObject({ to_run_id: 'supervisor', reply_to: 'ask-r' })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it.each([
+    [404, 'no pending ask for this message id'],
+    [503, 'broker unavailable'],
+  ])('rejects a child-mode avenor_cancel with the broker error on %i', async (status, body) => {
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/cancel_message': () => new Response(body, { status }),
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const error = await harness.registeredTools.avenor_cancel.execute('t1', { message_id: 'ask-1' })
+        .catch((e: unknown) => e)
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain(String(status))
+      expect((error as Error).message).toContain(body)
+      expect(fetchStub.calls.find(call => call.path === '/cancel_message')?.body).toMatchObject({
+        run_id: 'rt_child',
+        token: 'tok',
+        cancel_message_id: 'ask-1',
+      })
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()
@@ -343,6 +385,130 @@ describe('sub-agent broker mode (integration)', () => {
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()
+    }
+  })
+
+  it('asks through the inherited broker as the child run', async () => {
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/wait_reply': () => Response.json({ from_run_id: 'supervisor', payload: { message: 'green' } }),
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const result = await harness.registeredTools.avenor_ask.execute('t1', {
+        to_run_id: 'supervisor',
+        message: 'is the build green?',
+        supervisor_id: '/tmp/parent-control.sock',
+      })
+      expect(result.content).toEqual([{ type: 'text', text: 'Reply from supervisor:\ngreen' }])
+      expect(result.details).toEqual({ reply: 'green', from_run_id: 'supervisor' })
+
+      const send = fetchStub.calls.find(call => call.path === '/send')
+      expect(send?.body).toMatchObject({
+        run_id: 'rt_child',
+        token: 'tok',
+        from_run_id: 'rt_child',
+        to_run_id: 'supervisor',
+        type: 'agent_message',
+      })
+      const payload = send?.body.payload as Record<string, unknown>
+      expect(typeof payload.id).toBe('string')
+      expect(payload).toEqual({
+        id: payload.id,
+        from: 'rt_child',
+        from_run_id: 'rt_child',
+        to_run_id: 'supervisor',
+        message: 'is the build green?',
+        role: 'agent',
+        expects_reply: true,
+      })
+      expect(fetchStub.calls.find(call => call.path === '/wait_reply')?.body).toMatchObject({
+        run_id: 'rt_child',
+        token: 'tok',
+        waiting_for: payload.id,
+      })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('names the target run when the reply carries no from_run_id', async () => {
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/wait_reply': () => Response.json({ payload: { message: 'green' } }),
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const result = await harness.registeredTools.avenor_ask.execute('t1', {
+        to_run_id: 'supervisor',
+        message: 'is the build green?',
+      })
+      expect(result.content).toEqual([{ type: 'text', text: 'Reply from supervisor:\ngreen' }])
+      expect(result.details).toEqual({ reply: 'green', from_run_id: '' })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('withdraws a child ask when the tool call aborts', async () => {
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/wait_reply': waitUntilAborted,
+      '/cancel_message': () => new Response('no pending ask for this message id', { status: 404 }),
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    const controller = new AbortController()
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const pending = harness.registeredTools.avenor_ask
+        .execute('t1', { to_run_id: 'supervisor', message: 'anyone there?' }, controller.signal)
+        .then(() => null, (error: unknown) => error)
+      await waitFor(() => fetchStub.calls.some(call => call.path === '/wait_reply'))
+      controller.abort()
+
+      const error = await pending
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain('wait for reply: cancelled')
+      expect((error as Error).message).toContain('already withdrawn')
+      const messageId = String(
+        (fetchStub.calls.find(call => call.path === '/send')?.body.payload as Record<string, unknown>).id,
+      )
+      expect(fetchStub.calls.find(call => call.path === '/cancel_message')?.body).toMatchObject({
+        run_id: 'rt_child',
+        token: 'tok',
+        cancel_message_id: messageId,
+      })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('withdraws avenor_cancel through the broker without starting a supervisor', async () => {
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/cancel_message': () => Response.json({ cancelled: true }),
+    })
+    // The host cancel path resolves a supervisor through AVENOR_BIN; pointing
+    // it at nothing makes any fall-through fail here instead of spawning one.
+    const previousBin = process.env.AVENOR_BIN
+    process.env.AVENOR_BIN = '/nonexistent/avenor-test-guard'
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const result = await harness.registeredTools.avenor_cancel.execute('t1', { message_id: 'ask-c1' })
+      expect(result.content).toEqual([{ type: 'text', text: 'Cancelled ask-c1' }])
+      expect(result.details).toEqual({ cancelled: true })
+      expect(fetchStub.calls.find(call => call.path === '/cancel_message')?.body).toMatchObject({
+        run_id: 'rt_child',
+        token: 'tok',
+        cancel_message_id: 'ask-c1',
+      })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+      if (previousBin === undefined) delete process.env.AVENOR_BIN
+      else process.env.AVENOR_BIN = previousBin
     }
   })
 })
