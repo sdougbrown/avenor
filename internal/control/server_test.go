@@ -1136,6 +1136,86 @@ func TestSubscriberBackpressureLaggedEvent(t *testing.T) {
 	}
 }
 
+// TestSubscriberBackpressureDropAgainstDrainingReader hammers the drop path while
+// a reader drains the channel. A drop that blocks on the channel while holding
+// the subscriber lock deadlocks against a reader that has already taken the
+// buffered event and is waiting for that same lock.
+func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
+	const (
+		iterations         = 100
+		eventsPerIteration = 64
+	)
+
+	var (
+		mu        sync.Mutex
+		lagged    int
+		delivered int
+	)
+
+	for i := 0; i < iterations; i++ {
+		s := NewServer(NewState("run_1", "", 0))
+		client, srv := net.Pipe()
+		cs := &connState{server: s, conn: srv}
+		sub := &subscriber{conn: cs, ch: make(chan events.Event, 1)}
+
+		readerDone := make(chan struct{})
+		go func() {
+			defer close(readerDone)
+			scanner := bufio.NewScanner(client)
+			for scanner.Scan() {
+				var n Notification
+				if err := json.Unmarshal(scanner.Bytes(), &n); err != nil || n.Method != "event" {
+					continue
+				}
+				m, _ := n.Params.(map[string]any)
+				mu.Lock()
+				if m["event"] == "subscriber.lagged" {
+					lagged++
+				} else {
+					delivered++
+				}
+				mu.Unlock()
+			}
+		}()
+		// Two events before the reader starts force one drop per iteration,
+		// so the lagged path runs regardless of how fast the reader drains.
+		sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"i": -2}})
+		sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"i": -1}})
+		go sub.loop()
+
+		enqueued := make(chan struct{})
+		go func() {
+			defer close(enqueued)
+			for j := 0; j < eventsPerIteration; j++ {
+				sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"i": j}})
+			}
+		}()
+
+		select {
+		case <-enqueued:
+		case <-time.After(5 * time.Second):
+			// Close the pipe so the reader goroutine exits; loop and the
+			// enqueuer stay blocked on sub.mu in a real deadlock.
+			_ = client.Close()
+			_ = srv.Close()
+			t.Fatalf("iteration %d: enqueue blocked for 5s against a draining reader (subscriber deadlock)", i)
+		}
+
+		sub.mu.Lock()
+		sub.closeLocked()
+		sub.mu.Unlock()
+		_ = client.Close()
+		_ = srv.Close()
+		<-readerDone
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if lagged == 0 {
+		t.Fatal("expected subscriber.lagged notifications; the drop path never ran")
+	}
+}
+
 func TestNormalizeHistoryLimit(t *testing.T) {
 	tests := []struct {
 		name  string
