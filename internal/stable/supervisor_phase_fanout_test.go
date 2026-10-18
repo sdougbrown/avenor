@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime/claudechannel"
@@ -132,11 +133,11 @@ func TestUnknownPhaseDiagnosticCacheSaturatesAtCap(t *testing.T) {
 	})
 	child, writer := newUnknownPhaseTestChild(t, sup)
 
-	for i := 0; i < unknownPhaseDiagnosticCap; i++ {
+	for i := 0; i < diagnote.Cap; i++ {
 		writeAgentStatus(t, writer, fmt.Sprintf("warp_%02d", i))
 	}
-	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != unknownPhaseDiagnosticCap {
-		t.Fatalf("unrecognized-phase log lines = %d, want %d", got, unknownPhaseDiagnosticCap)
+	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != diagnote.Cap {
+		t.Fatalf("unrecognized-phase log lines = %d, want %d", got, diagnote.Cap)
 	}
 	if strings.Contains(stderr.String(), "further unrecognized values suppressed") {
 		t.Fatal("suppression line logged before the cap was reached")
@@ -158,8 +159,8 @@ func TestUnknownPhaseDiagnosticCacheSaturatesAtCap(t *testing.T) {
 	}
 	// A repeat of a cached value stays silent too.
 	writeAgentStatus(t, writer, "warp_00")
-	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != unknownPhaseDiagnosticCap {
-		t.Fatalf("unrecognized-phase log lines after repeats = %d, want %d", got, unknownPhaseDiagnosticCap)
+	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != diagnote.Cap {
+		t.Fatalf("unrecognized-phase log lines after repeats = %d, want %d", got, diagnote.Cap)
 	}
 
 	// Saturation never blocks later valid updates or completion.
@@ -250,8 +251,8 @@ func TestUnknownPhaseDiagnosticCacheConcurrentWrites(t *testing.T) {
 
 	// Every distinct value up to the cap is logged exactly once, then the
 	// single suppression line covers the rest.
-	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != unknownPhaseDiagnosticCap {
-		t.Fatalf("unrecognized-phase log lines = %d, want %d", got, unknownPhaseDiagnosticCap)
+	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != diagnote.Cap {
+		t.Fatalf("unrecognized-phase log lines = %d, want %d", got, diagnote.Cap)
 	}
 	if got := strings.Count(stderr.String(), "further unrecognized values suppressed"); got != 1 {
 		t.Fatalf("suppression lines = %d, want 1", got)

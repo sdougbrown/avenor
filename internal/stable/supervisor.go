@@ -25,6 +25,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/permission"
@@ -332,15 +333,16 @@ type childRuntime struct {
 	// reflects only the most recent event across ALL runtimes).
 	phase      runstate.Phase
 	phaseLabel string
-	// unknownPhases records the distinct raw phase values the fanout could
-	// not parse, for one-line-per-value diagnostics; unknownPhasesSuppressed
-	// marks that the cap was reached and the suppression line was logged.
-	// Both are guarded by mu.
-	unknownPhases           map[string]struct{}
-	unknownPhasesSuppressed bool
-	pendingPermission       bool
-	permission              map[string]any
-	directAttempt           *sessionAttempt
+	// unknownPhases gates the one-line-per-value diagnostics for raw phase
+	// values the fanout could not parse. The gate serializes its own state
+	// with its internal lock; its Admit decisions are made inside
+	// writeLocked's child.mu critical section (every writeLocked caller also
+	// holds writeMu), next to the status mirror update it deduplicates. The
+	// diagnostic is logged after every lock is released.
+	unknownPhases     diagnote.Gate
+	pendingPermission bool
+	permission        map[string]any
+	directAttempt     *sessionAttempt
 	// lc is the closed lifecycle state owned by the pure machine
 	// (runtime_lifecycle.go) and committed field by field by the adapter
 	// (runtime_lifecycle_apply.go). Read it through the field-specific
@@ -5291,32 +5293,6 @@ func reportLifecycleDiagnostics(s *Supervisor, child *childRuntime, diagnostics 
 	}
 }
 
-// unknownPhaseDiagnosticCap bounds the per-runtime cache of unrecognized
-// phase values reported by the fanout.
-const unknownPhaseDiagnosticCap = 16
-
-// recordUnknownChildPhase adds a raw unrecognized phase value to the child's
-// diagnostic cache under mu. It reports whether a log line is due: once per
-// distinct value until the cap, then a single suppression line. The caller
-// logs the returned note only after releasing every lock.
-func recordUnknownChildPhase(child *childRuntime, runtimeID, phase string) (unrecognizedPhaseDiagnostic, bool) {
-	if child.unknownPhases == nil {
-		child.unknownPhases = make(map[string]struct{})
-	}
-	if _, seen := child.unknownPhases[phase]; seen {
-		return unrecognizedPhaseDiagnostic{}, false
-	}
-	if len(child.unknownPhases) < unknownPhaseDiagnosticCap {
-		child.unknownPhases[phase] = struct{}{}
-		return unrecognizedPhaseDiagnostic{runtimeID: runtimeID, phase: phase}, true
-	}
-	if child.unknownPhasesSuppressed {
-		return unrecognizedPhaseDiagnostic{}, false
-	}
-	child.unknownPhasesSuppressed = true
-	return unrecognizedPhaseDiagnostic{runtimeID: runtimeID}, true
-}
-
 // unrecognizedPhaseDiagnostic carries a fanout unrecognized-phase note out of
 // writeLocked so it is logged after every lock is released. An empty phase
 // marks the one-time suppression line.
@@ -5373,8 +5349,10 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 				signalPhase, recognized := runstate.ParsePhase(phase)
 				if !recognized {
 					signalPhase = runstate.PhaseUnknown
-					if note, log := recordUnknownChildPhase(w.child, w.runtimeID, phase); log {
-						*diagnostics = append(*diagnostics, note)
+					if log, suppressed := w.child.unknownPhases.Admit(phase); log {
+						*diagnostics = append(*diagnostics, unrecognizedPhaseDiagnostic{runtimeID: w.runtimeID, phase: phase})
+					} else if suppressed {
+						*diagnostics = append(*diagnostics, unrecognizedPhaseDiagnostic{runtimeID: w.runtimeID})
 					}
 				}
 				_, _, statusErr := w.supervisor.applyLifecycle(w.child, lifecycleSignal{
