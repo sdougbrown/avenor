@@ -211,7 +211,7 @@ func TestBrokerEventMapping(t *testing.T) {
 		{name: "child_question", state: "child_question", wantEv: "agent.status", wantPhase: "waiting"},
 		{name: "permission_requested", state: "permission_requested", wantEv: "permission.request"},
 		{name: "arbitrary state without payload phase", state: "started", wantEv: "agent.status", wantPhase: "working", wantLabel: "started"},
-		{name: "payload phase working passes", state: "working", payload: `{"phase":"working"}`, wantEv: "agent.status", wantPhase: "working"},
+		{name: "payload phase working overrides state", state: "started", payload: `{"phase":"working"}`, wantEv: "agent.status", wantPhase: "working"},
 		{name: "payload unknown phase maps to working with label", state: "working", payload: `{"phase":"warp"}`, wantEv: "agent.status", wantPhase: "working", wantLabel: "warp"},
 		{name: "payload unknown phase keeps existing label", state: "thinking", payload: `{"phase":"warp","label":"Channelling"}`, wantEv: "agent.status", wantPhase: "working", wantLabel: "Channelling"},
 		{name: "payload phase blocked maps to waiting with label", state: "working", payload: `{"phase":"blocked"}`, wantEv: "agent.status", wantPhase: "waiting", wantLabel: "blocked"},

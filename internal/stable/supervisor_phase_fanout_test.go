@@ -194,8 +194,8 @@ func TestClaudechannelReportPhaseReachesStoredPhase(t *testing.T) {
 	if got := storedChildPhase(t, child); got != runstate.PhaseWaiting {
 		t.Fatalf("stored phase after blocked report = %q, want waiting", got)
 	}
-	if got := countUnrecognizedPhaseLogs(stderr.String(), "waiting"); got != 0 {
-		t.Fatalf("recognized phase logged as unrecognized = %d, want 0", got)
+	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != 0 {
+		t.Fatalf("recognized phase logged as unrecognized: %d unrecognized-phase log lines, want 0", got)
 	}
 
 	// An arbitrary report state normalizes to working before the fanout, so it
@@ -207,8 +207,8 @@ func TestClaudechannelReportPhaseReachesStoredPhase(t *testing.T) {
 	if got := storedChildPhase(t, child); got != runstate.PhaseWorking {
 		t.Fatalf("stored phase after custom report = %q, want working", got)
 	}
-	if got := countUnrecognizedPhaseLogs(stderr.String(), "working"); got != 0 {
-		t.Fatalf("normalized phase logged as unrecognized = %d, want 0", got)
+	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != 0 {
+		t.Fatalf("normalized phase logged as unrecognized: %d unrecognized-phase log lines, want 0", got)
 	}
 
 	finishSyntheticChildLifecycle(sup, child)
