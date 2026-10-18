@@ -22,15 +22,31 @@ const (
 	envParentRunID = "AVENOR_PARENT_RUN_ID"
 )
 
-var identityEnvKeys = map[string]struct{}{
-	EnvRuntimeID:   {},
-	EnvExecutionID: {},
-	EnvKind:        {},
-	EnvPhase:       {},
-	EnvIteration:   {},
-	EnvLabel:       {},
-	EnvAttempt:     {},
-	envParentRunID: {},
+var identityEnvNames = []string{
+	EnvRuntimeID,
+	EnvExecutionID,
+	EnvKind,
+	EnvPhase,
+	EnvIteration,
+	EnvLabel,
+	EnvAttempt,
+	envParentRunID,
+}
+
+var identityEnvKeys = func() map[string]struct{} {
+	keys := make(map[string]struct{}, len(identityEnvNames))
+	for _, name := range identityEnvNames {
+		keys[name] = struct{}{}
+	}
+	return keys
+}()
+
+// IdentityEnvNames returns every environment name that describes launch
+// identity, including the superseded name that is scrubbed but never emitted.
+// A shell launcher that cannot set its child's environment needs the names to
+// remove inherited values itself.
+func IdentityEnvNames() []string {
+	return append([]string(nil), identityEnvNames...)
 }
 
 // LaunchProvenance is the informational identity of one harness launch. It is

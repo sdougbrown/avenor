@@ -78,42 +78,7 @@ var _ runtime.Provider = (*Provider)(nil)
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
 
-	// Store broker reference from the merged opts so sub-providers can
-	// create authenticated per-run MCP tool servers.
-	p.mu.Lock()
-	if merged.Broker != nil && p.broker == nil {
-		p.broker = merged.Broker
-	}
-	brokerRef := p.broker
-	buildClientEnv := p.buildClientEnv
-	p.mu.Unlock()
-
-	// Create a broker run for this session before the client starts so provider-specific
-	// process config can authenticate outbound sends from the first turn.
-	// Use the supervisor-assigned RuntimeID when available (parent-child routing),
-	// falling back to a generated UUID for standalone sessions.
-	runID := ""
-	brokerToken := ""
-	if brokerRef != nil {
-		runID = merged.RuntimeID
-		if runID == "" {
-			runID = uuid.New().String()
-		}
-		brokerToken, _ = brokerRef.EnsureRun(runID)
-	}
-	var clientEnv map[string]string
-	var cleanup func() error
-	if buildClientEnv != nil {
-		// Always call buildClientEnv so backends can inject config overrides
-		// (e.g. mode overrides for subagent-mode agents) even without a broker.
-		// The backend is responsible for returning nil when there's nothing to
-		// override, so no temp file is created unnecessarily.
-		brokerAddr := ""
-		if brokerRef != nil {
-			brokerAddr = brokerRef.Addr()
-		}
-		clientEnv, cleanup = buildClientEnv(merged, runID, brokerToken, brokerAddr)
-	}
+	runID, brokerToken, clientEnv, cleanup, brokerRef := p.launchEnv(merged)
 	if _, err := p.ensureClient(ctx, merged, clientEnv, cleanup); err != nil {
 		return runtime.Session{}, err
 	}
@@ -160,10 +125,26 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
+	return p.resume(ctx, sessionID, runtime.MergeStartOptions(p.opts, runtime.StartOptions{}), false)
+}
+
+// ResumeWithOptions dispatches a resume with the merged per-call launch
+// options, so a client started by this call carries the caller's identity and
+// configuration.
+func (p *Provider) ResumeWithOptions(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
+	return p.resume(ctx, sessionID, runtime.MergeStartOptions(p.opts, opts), true)
+}
+
+func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.StartOptions, optionAware bool) (runtime.Session, error) {
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
-	if _, err := p.ensureClient(ctx, p.opts, nil, nil); err != nil {
+	var env map[string]string
+	var cleanup func() error
+	if optionAware {
+		_, _, env, cleanup, _ = p.launchEnv(opts)
+	}
+	if _, err := p.ensureClient(ctx, opts, env, cleanup); err != nil {
 		return runtime.Session{}, err
 	}
 
@@ -172,7 +153,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 		return runtime.Session{}, err
 	}
 	if p.configureSession != nil {
-		if err := p.configureSession(ctx, session, p.opts); err != nil {
+		if err := p.configureSession(ctx, session, opts); err != nil {
 			return runtime.Session{}, err
 		}
 	}
@@ -184,9 +165,47 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	return runtime.Session{
 		SessionID: session.SessionID,
 		Backend:   p.backendID,
-		Dir:       p.opts.Dir,
+		Dir:       opts.Dir,
 		PID:       p.client.PID(),
 	}, nil
+}
+
+// launchEnv prepares one launch: it retains the broker reference, creates the
+// broker run that backend process config authenticates with, and builds the
+// backend's client environment and cleanup.
+func (p *Provider) launchEnv(opts runtime.StartOptions) (runID, brokerToken string, env map[string]string, cleanup func() error, brokerRef *broker.Broker) {
+	p.mu.Lock()
+	if opts.Broker != nil && p.broker == nil {
+		p.broker = opts.Broker
+	}
+	brokerRef = p.broker
+	buildClientEnv := p.buildClientEnv
+	p.mu.Unlock()
+
+	// Create a broker run for this session before the client starts so
+	// provider-specific process config can authenticate outbound sends from the
+	// first turn. Use the supervisor-assigned RuntimeID when available
+	// (parent-child routing), falling back to a generated UUID for standalone
+	// sessions.
+	if brokerRef != nil {
+		runID = opts.RuntimeID
+		if runID == "" {
+			runID = uuid.New().String()
+		}
+		brokerToken, _ = brokerRef.EnsureRun(runID)
+	}
+	if buildClientEnv != nil {
+		// Always call buildClientEnv so backends can inject config overrides
+		// (e.g. mode overrides for subagent-mode agents) even without a broker.
+		// The backend is responsible for returning nil when there's nothing to
+		// override, so no temp file is created unnecessarily.
+		brokerAddr := ""
+		if brokerRef != nil {
+			brokerAddr = brokerRef.Addr()
+		}
+		env, cleanup = buildClientEnv(opts, runID, brokerToken, brokerAddr)
+	}
+	return runID, brokerToken, env, cleanup, brokerRef
 }
 
 func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {
@@ -340,6 +359,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 		Env:                  env,
 		AutoAnswerPermission: false,
 		AppendCWDArg:         p.appendCWDArg,
+		Provenance:           opts.Provenance,
 	})
 	if err != nil {
 		runCleanup(cleanup)

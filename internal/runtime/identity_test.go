@@ -172,3 +172,19 @@ func TestScrubIdentityEnvEmptyInput(t *testing.T) {
 		t.Fatalf("ScrubIdentityEnv(identity only) = %q, want nothing", got)
 	}
 }
+
+func TestIdentityEnvNamesCoversScrubbableNames(t *testing.T) {
+	names := IdentityEnvNames()
+	want := []string{
+		EnvRuntimeID, EnvExecutionID, EnvKind, EnvPhase, EnvIteration, EnvLabel, EnvAttempt,
+		"AVENOR_PARENT_RUN_ID",
+	}
+	if !slices.Equal(names, want) {
+		t.Fatalf("IdentityEnvNames() = %q, want %q", names, want)
+	}
+	// The returned slice is a copy: callers cannot redefine the scrub set.
+	names[0] = "AVENOR_RUNTIME_ID_CHANGED"
+	if got := IdentityEnvNames(); got[0] != EnvRuntimeID {
+		t.Fatalf("IdentityEnvNames() = %q after caller mutation, want it unchanged", got)
+	}
+}

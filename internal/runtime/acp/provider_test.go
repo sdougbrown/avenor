@@ -572,6 +572,9 @@ type acpStub struct {
 	Mode  string // "exit", "silent", "fail-after-init", "hang-prompt" or "serve"
 	Gate  string // when set, the stub waits for this file before reading stdin
 	Ready string // when set, the stub touches this path once it is spawned
+	// Observe, when set, makes the stub write the allowlisted launch
+	// environment to this path before it answers any request.
+	Observe string
 	// Prompt, in "hang-prompt" mode, is touched when the stub receives a
 	// session/prompt request; the stub never answers such a request.
 	Prompt string
@@ -585,6 +588,9 @@ func writeACPStub(t *testing.T, stub acpStub) string {
 	script := filepath.Join(t.TempDir(), "acp-stub.sh")
 	var body strings.Builder
 	body.WriteString("#!/bin/sh\n")
+	if stub.Observe != "" {
+		body.WriteString(observerBody(stub.Observe))
+	}
 	if stub.Ready != "" {
 		if stub.ReadyPerProcess {
 			fmt.Fprintf(&body, "touch %s\"$$\"\n", shellQuotePath(stub.Ready))

@@ -102,7 +102,7 @@ func captureStartClient(t *testing.T, launchWrapper []string) []string {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	c, err := StartClient(ctx, launchWrapper)
+	c, err := StartClient(ctx, runtime.StartOptions{LaunchWrapper: launchWrapper})
 	if err == nil {
 		_ = c.Close()
 	}
