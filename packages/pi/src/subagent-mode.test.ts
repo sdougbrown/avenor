@@ -249,6 +249,21 @@ describe('sub-agent broker mode (integration)', () => {
     }
   })
 
+  it('does not start a host supervisor from a sub-agent session', async () => {
+    const fetchStub = stubBrokerFetch([])
+    const brokerReceiveTool = mock(async () => ({ asks: [] }))
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub, deps: { brokerReceiveTool } })
+      await new Promise(resolve => setTimeout(resolve, 2100))
+      expect(fetchStub.calls.some(call => call.path === '/poll-control')).toBe(true)
+      expect(brokerReceiveTool).not.toHaveBeenCalled()
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
   it('does not reschedule when shutdown lands during an in-flight poll', async () => {
     const fetchStub = stubBrokerFetch([], 0, 40)
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined

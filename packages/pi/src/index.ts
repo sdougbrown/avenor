@@ -1212,7 +1212,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       lastStatusEntries = []
       pollingErrorCount = 0
       pollingErrors.length = 0
-      void startHostAskPoll(pi, deps)
+      if (!isSubAgentBrokerMode) void startHostAskPoll(pi, deps)
       void startSubAgentPoll()
     })
 
@@ -1805,7 +1805,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (!messageId) {
           let match: { from_run_id: string; message_id: string } | undefined
           for (const [, pending] of hostPendingAsks) {
-            if (pending.from_run_id === fromRunId && (!match || pending.message_id > match.message_id)) {
+            if (pending.from_run_id === fromRunId) {
               match = pending
             }
           }

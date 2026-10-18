@@ -54,9 +54,12 @@ describe('host inbound ask delivery', () => {
     }
   })
 
-  it('lets avenor_reply answer a polled ask without an explicit message ID', async () => {
+  it('lets avenor_reply answer the latest polled ask without an explicit message ID', async () => {
     const brokerReceiveTool = mock(async () => ({
-      asks: [{ message_id: 'ask-2', from_run_id: 'rt_child', message: 'need a decision', role: 'agent' }],
+      asks: [
+        { message_id: 'f-old', from_run_id: 'rt_child', message: 'old question', role: 'agent' },
+        { message_id: '0-new', from_run_id: 'rt_child', message: 'need a decision', role: 'agent' },
+      ],
     }))
     const brokerReplyTool = mock(async () => ({ ok: true }))
     const harness = await startHostExtension(brokerReceiveTool, brokerReplyTool)
@@ -64,7 +67,7 @@ describe('host inbound ask delivery', () => {
       await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
       const result = await harness.registeredTools.avenor_reply.execute('t1', { from_run_id: 'rt_child', message: 'go ahead' })
       expect(result.content[0].text).toBe('Reply sent')
-      expect(brokerReplyTool.mock.calls[0][0]).toMatchObject({ toRunId: 'rt_child', replyTo: 'ask-2', message: 'go ahead' })
+      expect(brokerReplyTool.mock.calls[0][0]).toMatchObject({ toRunId: 'rt_child', replyTo: '0-new', message: 'go ahead' })
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
     }
