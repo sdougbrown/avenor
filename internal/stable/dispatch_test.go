@@ -1165,7 +1165,7 @@ func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
 	}
 	// A further routing attempt must not spawn another decider: the routed
 	// mark stays once the bound is exhausted.
-	f.sup.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
+	f.sup.permissions.routePermissionRequest(out.RuntimeID, requestID, []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
 	if got := deciderSpawns.Load(); got != maxPermissionDeciderSpawnFailures {
 		t.Fatalf("decider spawns after exhaustion = %d, want no further spawns", got)
 	}
@@ -1230,12 +1230,12 @@ func TestDispatchPermissionDeciderConcurrencyCapHolds(t *testing.T) {
 	// fanout entry (cachePermissionOptions), which caches the options a re-route
 	// needs after a failed spawn or a freed slot.
 	for i := 0; i < maxConcurrentPermissionDeciders; i++ {
-		f.sup.cachePermissionOptions(out.RuntimeID, fmt.Sprintf("perm_req_cap_%d", i), options)
+		f.sup.permissions.cachePermissionOptions(out.RuntimeID, fmt.Sprintf("perm_req_cap_%d", i), options)
 		waitFor(t, fmt.Sprintf("decider spawn %d", i+1), func() bool { return deciderSpawns.Load() >= int64(i+1) })
 	}
 	// A further distinct request hits the cap: no spawn fires, the routed mark
 	// stays, and the request stays pending for a human gate.
-	f.sup.cachePermissionOptions(out.RuntimeID, blockedID, options)
+	f.sup.permissions.cachePermissionOptions(out.RuntimeID, blockedID, options)
 	// Quiesce before the exact-count assert: a broken cap launches the
 	// overflow spawn asynchronously, and the count read could otherwise race
 	// ahead of the spawn's own counter increment.
@@ -1294,7 +1294,7 @@ func TestPermissionDeciderMarshalFailureDoesNotSpawnBlind(t *testing.T) {
 	// A channel value cannot marshal: every attempt must fail before any
 	// provider call instead of spawning a decider that judges blind.
 	for i := 0; i < maxPermissionDeciderSpawnFailures; i++ {
-		f.sup.spawnPermissionDecider(decider, out.RuntimeID, requestID, []any{make(chan int)}, "worker")
+		f.sup.permissions.spawnPermissionDecider(decider, out.RuntimeID, requestID, []any{make(chan int)}, "worker")
 	}
 	if got := deciderSpawns.Load(); got != 0 {
 		t.Fatalf("decider spawns = %d, want none from marshal failures", got)
@@ -1379,7 +1379,7 @@ func TestPermissionDeciderSkipsAlreadyResolvedRequest(t *testing.T) {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 	// The already-resolved request must not start another decider run.
-	f.sup.spawnPermissionDecider(workflow.PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
+	f.sup.permissions.spawnPermissionDecider(workflow.PermissionDecider{Entry: "rm-guard", Backend: "pi", Agent: "rm-guard", Model: "guard-m"},
 		out.RuntimeID, requestID, nil, "worker")
 	if got := deciderSpawns.Load(); got != 1 {
 		t.Fatalf("decider spawns = %d, want the resolved request to spawn none", got)
@@ -2334,9 +2334,9 @@ func TestDispatchModelDeciderFailuresBounded(t *testing.T) {
 	// Every acquire must be paired with exactly one release: a leaked slot
 	// would permanently shrink the concurrency pool (four exhausted requests
 	// would kill the decider for the process lifetime).
-	f.sup.permDeciderMu.Lock()
-	active := f.sup.modelDeciderActive
-	f.sup.permDeciderMu.Unlock()
+	f.sup.permissions.mu.Lock()
+	active := f.sup.permissions.modelDeciderActive
+	f.sup.permissions.mu.Unlock()
 	if active != 0 {
 		t.Fatalf("modelDeciderActive = %d after exhausted retries, want 0 (no leaked slots)", active)
 	}
@@ -2397,7 +2397,7 @@ func TestDispatchModelDeciderBudgetBoundsCalls(t *testing.T) {
 	seedPendingPermission(t, f.sup, out.RuntimeID)
 	options := []any{map[string]any{"optionId": "allow_once", "kind": "allow"}}
 	for i := 1; i <= maxModelDeciderCallsPerRuntime; i++ {
-		f.sup.cachePermissionOptions(out.RuntimeID, fmt.Sprintf("perm_req_model_budget_%d", i), options)
+		f.sup.permissions.cachePermissionOptions(out.RuntimeID, fmt.Sprintf("perm_req_model_budget_%d", i), options)
 	}
 	waitFor(t, "budget exhausted", func() bool {
 		calls, _, _ := capture.snapshot()
@@ -2467,7 +2467,7 @@ func TestDispatchModelDeciderHumanAnswerWinsRace(t *testing.T) {
 		return calls >= 1
 	})
 	// The human answers while the model call is still in flight.
-	if err := f.sup.answerPermission(out.RuntimeID, requestID, "reject_once", "human override"); err != nil {
+	if err := f.sup.permissions.answerPermission(out.RuntimeID, requestID, "reject_once", "human override"); err != nil {
 		t.Fatalf("human answerPermission: %v", err)
 	}
 	// Past the in-flight decision: the model's allow must not be applied and
@@ -2621,7 +2621,7 @@ func TestDispatchModelDeciderDecisionFiresWithoutMirror(t *testing.T) {
 	// runtime holds no pending request, then route a second request whose
 	// mirror never lands: its decision fires only once the mirror wait
 	// expires.
-	if err := f.sup.answerPermission(out.RuntimeID, requestID, "allow_once", "test"); err != nil {
+	if err := f.sup.permissions.answerPermission(out.RuntimeID, requestID, "allow_once", "test"); err != nil {
 		t.Fatalf("answerPermission: %v", err)
 	}
 	waitFor(t, "permission mirror cleared after the human answer", func() bool {
@@ -2634,7 +2634,7 @@ func TestDispatchModelDeciderDecisionFiresWithoutMirror(t *testing.T) {
 		return !pending
 	})
 	base := time.Now()
-	f.sup.cachePermissionOptions(out.RuntimeID, "perm_req_model_nomirror_2", []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
+	f.sup.permissions.cachePermissionOptions(out.RuntimeID, "perm_req_model_nomirror_2", []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
 	waitFor(t, "decision call fired after mirror-wait deadline", func() bool {
 		calls, _, _ := capture.snapshot()
 		return calls >= calls0+1
@@ -2701,13 +2701,13 @@ func TestDispatchModelDeciderConcurrencyCapHolds(t *testing.T) {
 	// needs after a freed slot.
 	seedPendingPermission(t, f.sup, out.RuntimeID)
 	for i := 0; i < maxConcurrentModelDeciders; i++ {
-		f.sup.cachePermissionOptions(out.RuntimeID, fmt.Sprintf("perm_req_model_cap_%d", i), options)
+		f.sup.permissions.cachePermissionOptions(out.RuntimeID, fmt.Sprintf("perm_req_model_cap_%d", i), options)
 		want := int64(i + 1)
 		waitFor(t, fmt.Sprintf("in-flight decision call %d", i+1), func() bool { return calls.Load() >= want })
 	}
 	// A further distinct request hits the cap: no decision call fires, the
 	// routed mark stays, and the request stays pending.
-	f.sup.cachePermissionOptions(out.RuntimeID, blockedID, options)
+	f.sup.permissions.cachePermissionOptions(out.RuntimeID, blockedID, options)
 	assertNotWithin(t, "an overflow decision call past the cap", 250*time.Millisecond, func() bool {
 		return calls.Load() > int64(maxConcurrentModelDeciders)
 	})
@@ -2813,7 +2813,7 @@ func TestDispatchModelDeciderUnappliableDecisionStaysPending(t *testing.T) {
 	// A second routed request offers only an option that requires a message;
 	// the model's allow carries no reason the resolver could apply.
 	messageOption := []any{map[string]any{"optionId": "allow", "kind": "allow", "requiresMessage": true}}
-	f.sup.cachePermissionOptions(out.RuntimeID, "perm_req_model_msg", messageOption)
+	f.sup.permissions.cachePermissionOptions(out.RuntimeID, "perm_req_model_msg", messageOption)
 	waitFor(t, "second decision call", func() bool {
 		calls, _, _ := capture.snapshot()
 		return calls >= 2

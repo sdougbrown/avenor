@@ -92,7 +92,7 @@ func resolvePermissionModelDeciderKey(md *workflow.PermissionModelDecider) (stri
 // strictly paired and the retry cannot contend with the slot the failed
 // call held.
 func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow.PermissionModelDecider, key, slotKey, runtimeID, requestID string, options []any, label string) (retry bool) {
-	defer s.releaseModelDeciderSlot(slotKey)
+	defer s.permissions.releaseModelDeciderSlot(slotKey)
 	if s.control.PermissionResolverState(runtimeID, requestID) == control.PermissionResolverResolved {
 		return false
 	}
@@ -162,7 +162,7 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 			md.Provider, md.Model, decision, requestID, runtimeID)
 		return false
 	}
-	if err := s.answerPermission(runtimeID, requestID, optionID, message); err != nil {
+	if err := s.permissions.answerPermission(runtimeID, requestID, optionID, message); err != nil {
 		// A request answered by a human while the call was in flight resolves
 		// cleanly; anything else is a failed attempt with the shared bound.
 		if resolved, _ := s.control.ResolvedPermissionMatches(runtimeID, requestID, optionID, message); resolved {
@@ -181,7 +181,7 @@ func (s *Supervisor) resolvePermissionWithModel(ctx context.Context, md workflow
 // retry, mirroring failSpawn), so acquire and release stay strictly paired.
 func (s *Supervisor) failModelDecision(runtimeID, requestID string, err error) bool {
 	fmt.Fprintf(s.stderrWriter(), "avenor: model decider for runtime %s request %s: %v\n", runtimeID, requestID, err)
-	exhausted := s.recordPermissionDeciderFailure(runtimeID, requestID)
+	exhausted := s.permissions.recordPermissionDeciderFailure(runtimeID, requestID)
 	if exhausted {
 		fmt.Fprintf(s.stderrWriter(), "avenor: model decider for runtime %s request %s failed %d times; no further decision calls for this request — it stays pending for a human gate\n",
 			runtimeID, requestID, maxPermissionDeciderSpawnFailures)
