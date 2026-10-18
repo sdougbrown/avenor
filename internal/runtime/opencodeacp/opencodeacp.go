@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/acp"
@@ -103,20 +102,33 @@ func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerAddr st
 		return nil, nil
 	}
 
-	// Write per-run config to a temp file. OPENCODE_CONFIG_CONTENT does not
-	// reliably register MCP servers in opencode acp; file-based config does.
-	cfgPath := filepath.Join(os.TempDir(), "avenor-opencode-acp-"+runIDWithFallback(runID)+".json")
-	if err := os.WriteFile(cfgPath, encoded, 0o600); err != nil {
+	// Write this launch's config to its own private temp file.
+	// OPENCODE_CONFIG_CONTENT does not reliably register MCP servers in
+	// opencode acp; file-based config does.
+	file, err := os.CreateTemp("", "avenor-opencode-acp-*.json")
+	if err != nil {
 		return nil, nil
 	}
-	return map[string]string{"OPENCODE_CONFIG": cfgPath}, func() error { return os.Remove(cfgPath) }
+	cfgPath := file.Name()
+	if _, err := file.Write(encoded); err != nil {
+		_ = file.Close()
+		_ = removeConfigFile(cfgPath)
+		return nil, nil
+	}
+	if err := file.Close(); err != nil {
+		_ = removeConfigFile(cfgPath)
+		return nil, nil
+	}
+	return map[string]string{"OPENCODE_CONFIG": cfgPath}, func() error { return removeConfigFile(cfgPath) }
 }
 
-func runIDWithFallback(runID string) string {
-	if runID != "" {
-		return runID
+// removeConfigFile deletes a generated config, treating an already absent file
+// as success so cleanup may run more than once.
+func removeConfigFile(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	return uuid.New().String()
+	return nil
 }
 
 func mergeConfigFile(dst map[string]any, path string) {

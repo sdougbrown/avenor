@@ -114,19 +114,8 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 		clientEnv, cleanup = buildClientEnv(merged, runID, brokerToken, brokerAddr)
 	}
-	created, err := p.ensureClient(ctx, merged, clientEnv)
-	if err != nil {
-		if cleanup != nil {
-			_ = cleanup()
-		}
+	if _, err := p.ensureClient(ctx, merged, clientEnv, cleanup); err != nil {
 		return runtime.Session{}, err
-	}
-	if created {
-		p.mu.Lock()
-		p.clientEnvCleanup = cleanup
-		p.mu.Unlock()
-	} else if cleanup != nil {
-		_ = cleanup()
 	}
 
 	session, err := p.client.NewSessionWithOptions(ctx, SessionOpenOptions{})
@@ -174,7 +163,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
-	if _, err := p.ensureClient(ctx, p.opts, nil); err != nil {
+	if _, err := p.ensureClient(ctx, p.opts, nil, nil); err != nil {
 		return runtime.Session{}, err
 	}
 
@@ -324,15 +313,22 @@ func (p *Provider) Close() error {
 	return client.Close()
 }
 
-func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, env map[string]string) (bool, error) {
+// ensureClient starts the backend client when none is retained yet. A launch
+// that does not become the provider's client — because a client is already
+// live, another launch won the install, or startup failed — cleans up its own
+// generated config before returning. A retained client takes ownership of its
+// config until Close.
+func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, env map[string]string, cleanup func() error) (bool, error) {
 	p.mu.Lock()
 	if p.client != nil {
 		p.mu.Unlock()
+		runCleanup(cleanup)
 		return false, nil
 	}
 	p.mu.Unlock()
 
 	if opts.ServerURL != "" {
+		runCleanup(cleanup)
 		return false, fmt.Errorf("%s external server URL transport is not implemented by the stdio client", p.backendID)
 	}
 
@@ -346,15 +342,18 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 		AppendCWDArg:         p.appendCWDArg,
 	})
 	if err != nil {
+		runCleanup(cleanup)
 		return false, err
 	}
 	if _, err := client.Initialize(ctx); err != nil {
 		_ = client.Close()
+		runCleanup(cleanup)
 		return false, err
 	}
 	if p.authenticateID != "" {
 		if err := client.Authenticate(ctx, p.authenticateID); err != nil {
 			_ = client.Close()
+			runCleanup(cleanup)
 			return false, err
 		}
 	}
@@ -363,12 +362,20 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 	defer p.mu.Unlock()
 	if p.client != nil {
 		_ = client.Close()
+		runCleanup(cleanup)
 		return false, nil
 	}
 	p.client = client
+	p.clientEnvCleanup = cleanup
 	p.events = make(chan events.Event, 256)
 	go p.pumpClientEvents(client, p.events)
 	return true, nil
+}
+
+func runCleanup(cleanup func() error) {
+	if cleanup != nil {
+		_ = cleanup()
+	}
 }
 
 func (p *Provider) pumpClientEvents(client *Client, out chan<- events.Event) {
