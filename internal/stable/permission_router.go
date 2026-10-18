@@ -59,14 +59,6 @@ func newPermissionRouter(host permissionRouterHost, control *control.ControlServ
 	}
 }
 
-// warnings returns the writer routing diagnostics are reported to.
-func (r *permissionRouter) warnings() io.Writer {
-	if r.diag != nil {
-		return r.diag
-	}
-	return os.Stderr
-}
-
 // permissionRouterHost is the supervisor side of permission routing. Every
 // method returns a value or a bounded snapshot; none exposes the runtime
 // registry or a general child lookup, and none may be called with mu held.
@@ -456,7 +448,7 @@ func (r *permissionRouter) routePermissionRequest(runtimeID, requestID string, o
 			// request pending — do not call and do not re-route. When an
 			// in-flight call finishes, releaseModelDeciderSlot re-routes the
 			// blocked request internally from its cached options.
-			fmt.Fprintf(r.warnings(), "avenor: model decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentModelDeciders, requestID, runtimeID)
+			fmt.Fprintf(r.diag, "avenor: model decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentModelDeciders, requestID, runtimeID)
 			r.blockModelDecisionForRetry(runtimeID, requestID)
 			return
 		}
@@ -478,7 +470,7 @@ func (r *permissionRouter) routePermissionRequest(runtimeID, requestID string, o
 		// the request pending — do not spawn and do not re-route. When a
 		// decider run tears down and frees capacity, releasePermissionDecider
 		// re-routes the blocked request internally from its cached options.
-		fmt.Fprintf(r.warnings(), "avenor: permission decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentPermissionDeciders, requestID, runtimeID)
+		fmt.Fprintf(r.diag, "avenor: permission decider concurrency cap (%d) reached; request %s on runtime %s stays pending until capacity frees\n", maxConcurrentPermissionDeciders, requestID, runtimeID)
 		r.blockPermissionRequestForRetry(runtimeID, requestID)
 		return
 	}
@@ -497,10 +489,10 @@ func (r *permissionRouter) routePermissionRequest(runtimeID, requestID string, o
 func (r *permissionRouter) spawnPermissionDecider(decider workflow.PermissionDecider, runtimeID, requestID string, options []any, label string) {
 	deciderLabel := permdecLabelPrefix + runtimeID + ":" + requestID
 	failSpawn := func(what string, err error) {
-		fmt.Fprintf(r.warnings(), "avenor: %s for runtime %s request %s: %v\n", what, runtimeID, requestID, err)
+		fmt.Fprintf(r.diag, "avenor: %s for runtime %s request %s: %v\n", what, runtimeID, requestID, err)
 		exhausted := r.recordPermissionDeciderFailure(runtimeID, requestID)
 		if exhausted {
-			fmt.Fprintf(r.warnings(), "avenor: permission decider for runtime %s request %s failed %d times; no further decider spawns for this request — it stays pending for a human gate\n", runtimeID, requestID, maxPermissionDeciderSpawnFailures)
+			fmt.Fprintf(r.diag, "avenor: permission decider for runtime %s request %s failed %d times; no further decider spawns for this request — it stays pending for a human gate\n", runtimeID, requestID, maxPermissionDeciderSpawnFailures)
 		}
 		r.releasePermissionDecider(deciderLabel)
 		if !exhausted {

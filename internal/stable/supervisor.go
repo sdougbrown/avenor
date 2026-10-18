@@ -704,7 +704,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 	sup.control.SetWorkflowHandler(lazyWorkflowHandler{sup})
 	sup.control.SetWorkflowControllerHandler(sup)
 	sup.newProviderFunc = factory.NewProvider
-	sup.permissions = newPermissionRouter(supervisorPermissionHost{sup: sup}, sup.control, cfg.Stderr)
+	sup.permissions = newPermissionRouter(supervisorPermissionHost{sup: sup}, sup.control, sup.stderrWriter())
 	sup.initTreeBudget()
 	return sup
 }
