@@ -173,7 +173,9 @@ type Capabilities struct {
 
 // MergeStartOptions returns a new StartOptions with non-zero fields from
 // override applied over base. Use this to combine provider-scoped defaults
-// with per-start overrides.
+// with per-start overrides. Provenance follows a pointer rule instead: a nil
+// override keeps base's identity, and any non-nil override, including an
+// empty one, replaces it whole.
 func MergeStartOptions(base, override StartOptions) StartOptions {
 	merged := base
 	if override.Agent != "" {
@@ -213,12 +215,21 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	// phase, iteration or label never survive a merge. The stored value is a
 	// snapshot: later mutation of the caller's identity cannot reach it.
 	if override.Provenance != nil {
-		snapshot := *override.Provenance
-		if override.Provenance.Iteration != nil {
-			iteration := *override.Provenance.Iteration
-			snapshot.Iteration = &iteration
-		}
-		merged.Provenance = &snapshot
+		merged.Provenance = snapshotProvenance(override.Provenance)
+	} else {
+		merged.Provenance = snapshotProvenance(base.Provenance)
 	}
 	return merged
+}
+
+func snapshotProvenance(p *LaunchProvenance) *LaunchProvenance {
+	if p == nil {
+		return nil
+	}
+	snapshot := *p
+	if p.Iteration != nil {
+		iteration := *p.Iteration
+		snapshot.Iteration = &iteration
+	}
+	return &snapshot
 }

@@ -64,6 +64,12 @@ func TestIdentityEnvFormatsNumbers(t *testing.T) {
 			want:      []string{"AVENOR_ITERATION=12", "AVENOR_ATTEMPT=10"},
 		},
 		{
+			name:      "negative values are omitted",
+			iteration: intPtr(-1),
+			attempt:   -1,
+			want:      nil,
+		},
+		{
 			name:    "no iteration and no attempt",
 			attempt: 0,
 			want:    nil,

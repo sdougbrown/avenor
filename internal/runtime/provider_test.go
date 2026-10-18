@@ -215,6 +215,31 @@ func TestMergeStartOptionsProvenanceSnapshotsOverride(t *testing.T) {
 	}
 }
 
+func TestMergeStartOptionsBrokerIdentityWinsAlongsideProvenance(t *testing.T) {
+	merged := MergeStartOptions(StartOptions{RuntimeID: "rt_base", BrokerToken: "tok_base"}, StartOptions{
+		RuntimeID:   "rt_broker",
+		BrokerToken: "tok_broker",
+		Provenance:  &LaunchProvenance{RuntimeID: "rt_informational", ExecutionID: "run_informational"},
+	})
+	if merged.RuntimeID != "rt_broker" || merged.BrokerToken != "tok_broker" {
+		t.Fatalf("broker identity = (%q, %q), want (rt_broker, tok_broker)", merged.RuntimeID, merged.BrokerToken)
+	}
+	if merged.Provenance == nil || merged.Provenance.RuntimeID != "rt_informational" {
+		t.Fatalf("provenance = %+v, want rt_informational", merged.Provenance)
+	}
+}
+
+func TestMergeStartOptionsProvenanceSnapshotsBaseWhenOverrideIsNil(t *testing.T) {
+	iteration := 2
+	base := StartOptions{Provenance: &LaunchProvenance{Phase: "verify", Iteration: &iteration}}
+	merged := MergeStartOptions(base, StartOptions{})
+	base.Provenance.Phase = "changed"
+	iteration = 9
+	if merged.Provenance == nil || merged.Provenance.Phase != "verify" || *merged.Provenance.Iteration != 2 {
+		t.Fatalf("merged provenance followed base mutation: %+v", merged.Provenance)
+	}
+}
+
 func TestMergeStartOptionsProvenanceStaysOutOfBrokerIdentity(t *testing.T) {
 	merged := MergeStartOptions(StartOptions{}, StartOptions{Provenance: &LaunchProvenance{
 		RuntimeID:   "rt_informational",

@@ -65,7 +65,7 @@ func (p *LaunchProvenance) IdentityEnv() []string {
 	if p.Phase != "" {
 		env = append(env, EnvPhase+"="+p.Phase)
 	}
-	if p.Iteration != nil {
+	if p.Iteration != nil && *p.Iteration >= 0 {
 		env = append(env, EnvIteration+"="+strconv.Itoa(*p.Iteration))
 	}
 	if p.Label != "" {
