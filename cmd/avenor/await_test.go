@@ -600,6 +600,33 @@ func TestAwaitUnrecognizedStatusWarnsOnceAndKeepsWaiting(t *testing.T) {
 	}
 }
 
+func TestAwaitRecognizedStatusesNeverWarn(t *testing.T) {
+	// Running, idle, ended (and its consumer form done) are all recognized;
+	// none of them may produce an unrecognized-status warning.
+	tests := []struct {
+		name     string
+		status   map[string]any
+		exitCode int
+	}{
+		{name: "running", status: awaitStatus("running", "working", false), exitCode: awaitExitWallTimeout},
+		{name: "idle", status: awaitStatus("idle", "done", false), exitCode: 0},
+		{name: "ended", status: awaitEndedStatus(0), exitCode: 0},
+		{name: "done", status: awaitStatus("done", "done", false), exitCode: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newAwaitSocketServer(t, []map[string]any{tt.status}, nil)
+			var stdout, stderr bytes.Buffer
+			if got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "200ms"}, &stdout, &stderr); got != tt.exitCode {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", got, tt.exitCode, stderr.String())
+			}
+			if bytes.Contains(stderr.Bytes(), []byte("unrecognized")) {
+				t.Fatalf("stderr = %q, want no unrecognized-status warning", stderr.String())
+			}
+		})
+	}
+}
+
 func TestAwaitRetryAndLaggedEventsKeepWaitingThenResnapshot(t *testing.T) {
 	// A retry can publish session.end before its next attempt starts; active
 	// status must not be mistaken for a completed turn. A lag notification then

@@ -689,6 +689,17 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("recognized statuses never log", func(t *testing.T) {
+		var stderr bytes.Buffer
+		diag := &statusDiagnostics{stderr: &stderr}
+		for _, rawStatus := range []string{"running", "idle", "ended", "done"} {
+			translateStatus(diag, "rt_1", map[string]any{"status": rawStatus, "phase": "working"}, "")
+		}
+		if stderr.String() != "" {
+			t.Fatalf("stderr = %q, want no log lines for recognized statuses", stderr.String())
+		}
+	})
+
 	t.Run("same status from two runtimes logs twice", func(t *testing.T) {
 		var stderr bytes.Buffer
 		diag := &statusDiagnostics{stderr: &stderr}
