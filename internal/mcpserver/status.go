@@ -223,8 +223,8 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	rawStatus, _ := raw["status"].(string)
 	rawSession, _ := raw["session_id"].(string)
 	rawPhase, _ := raw["phase"].(string)
-	translated := runstate.Translate(rawStatus, rawPhase)
-	result["status"] = translated.Status
+	translated := runstate.Translate(runstate.RuntimeStatus(rawStatus), runstate.Phase(rawPhase))
+	result["status"] = string(translated.Status)
 
 	switch rawStatus {
 	case "running":
@@ -232,9 +232,9 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 		// phase before the attempt defer clears child.active; retry selection can
 		// still be pending. Team members share child.active, so this also covers
 		// concurrent work.
-		if translated.Phase != rawPhase {
+		if translated.Phase != runstate.Phase(rawPhase) {
 			// Keep phase empty until deferred cleanup sets child.active false.
-			result["phase"] = translated.Phase
+			result["phase"] = string(translated.Phase)
 			result["phase_label"] = ""
 		}
 		if rawSession != "" {
@@ -351,7 +351,7 @@ func readSentinelSession(path string) (string, error) {
 }
 
 func applySentinelStatus(result map[string]any, sd *sentinelData) {
-	result["status"] = runstate.SentinelStatus(sd.Status)
+	result["status"] = string(runstate.SentinelStatus(sd.Status))
 	if sd.SessionID != "" {
 		result["session_id"] = sd.SessionID
 	}

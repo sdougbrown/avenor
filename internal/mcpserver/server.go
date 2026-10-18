@@ -697,7 +697,7 @@ func (s *Server) checkLabelAvailable(cl ControlClient, supervisorPath, label str
 	live := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
 		status, _ := entry["status"].(string)
-		if runstate.IsTerminalStatus(status) {
+		if runstate.IsTerminalStatus(runstate.RuntimeStatus(status)) {
 			continue
 		}
 		live = append(live, entry)

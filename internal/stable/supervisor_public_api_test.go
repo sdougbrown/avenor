@@ -277,8 +277,8 @@ func (h *itestHarness) view(rtID string) itestView {
 	raw, _ := out.(map[string]any)
 	rawStatus, _ := raw["status"].(string)
 	rawPhase, _ := raw["phase"].(string)
-	tr := runstate.Translate(rawStatus, rawPhase)
-	v := itestView{Status: tr.Status, Phase: tr.Phase, TurnComplete: tr.TurnComplete}
+	tr := runstate.Translate(runstate.RuntimeStatus(rawStatus), runstate.Phase(rawPhase))
+	v := itestView{Status: string(tr.Status), Phase: string(tr.Phase), TurnComplete: tr.TurnComplete}
 	v.ExitCode, _ = raw["exit_code"].(int)
 	v.PendingPermission, _ = raw["pending_permission"].(bool)
 	v.DeciderExhausted, _ = raw["permission_decider_exhausted"].(bool)
@@ -288,7 +288,7 @@ func (h *itestHarness) view(rtID string) itestView {
 			if data, err := os.ReadFile(path); err == nil {
 				var sentinelExit int
 				v.Status, v.StopReason, sentinelExit = itestSentinelStatus(string(data))
-				v.TurnComplete = runstate.IsTerminalStatus(v.Status)
+				v.TurnComplete = runstate.IsTerminalStatus(runstate.RuntimeStatus(v.Status))
 				if sentinelExit >= 0 {
 					v.ExitCode = sentinelExit
 				}
@@ -304,7 +304,7 @@ func (h *itestHarness) view(rtID string) itestView {
 func itestSentinelStatus(sentinel string) (status, stopReason string, exitCode int) {
 	exitCode = -1
 	lines := strings.Split(strings.TrimSpace(sentinel), "\n")
-	status = runstate.SentinelStatus(lines[0])
+	status = string(runstate.SentinelStatus(lines[0]))
 	for _, line := range lines[1:] {
 		if v, ok := strings.CutPrefix(line, "STOP_REASON="); ok {
 			stopReason = v

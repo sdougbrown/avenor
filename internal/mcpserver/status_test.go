@@ -158,8 +158,8 @@ func TestTranslateStatusNoLiveStatusWithSentinel(t *testing.T) {
 func TestTranslateStatusNoLiveStatusNoSentinel(t *testing.T) {
 	raw := map[string]any{}
 	result := translateStatus(raw, "")
-	if result["status"] != "running" {
-		t.Errorf("expected running fallback, got %v", result["status"])
+	if result["status"] != "unknown" {
+		t.Errorf("expected unknown fallback, got %v", result["status"])
 	}
 }
 
@@ -494,6 +494,105 @@ func TestStatusRunFromMapFieldTypes(t *testing.T) {
 		run := statusRunFromMap(map[string]any{"status": 123})
 		if run.Status != nil {
 			t.Fatalf("Status = %v, want nil for mismatched type", run.Status)
+		}
+	})
+}
+
+// TestTranslateStatusTypedBoundaryKeepsWireFields proves that translated and
+// sentinel-derived statuses survive the map[string]any boundary as plain
+// strings: the typed output mapping and the wait predicates both read fields
+// with .(string) assertions, so a named string type written into the map
+// would silently disappear. It also pins the presence semantics for an
+// explicitly empty phase and that terminal waits still fire.
+func TestTranslateStatusTypedBoundaryKeepsWireFields(t *testing.T) {
+	t.Run("translated values keep fields through the typed mapping", func(t *testing.T) {
+		translated := translateStatus(map[string]any{
+			"runtime_id": "rt_1",
+			"status":     "ended",
+			"phase":      "working",
+			"session_id": "ses_1",
+		}, "")
+		if got, ok := translated["status"].(string); !ok || got != "done" {
+			t.Fatalf("status = %#v, want string done", translated["status"])
+		}
+		run := statusRunFromMap(translated)
+		if run.Status == nil || *run.Status != "done" {
+			t.Fatalf("Status = %v, want done", run.Status)
+		}
+		if run.Phase == nil || *run.Phase != "working" {
+			t.Fatalf("Phase = %v, want working", run.Phase)
+		}
+		if run.RuntimeID == nil || *run.RuntimeID != "rt_1" {
+			t.Fatalf("RuntimeID = %v, want rt_1", run.RuntimeID)
+		}
+		if run.SessionID == nil || *run.SessionID != "ses_1" {
+			t.Fatalf("SessionID = %v, want ses_1", run.SessionID)
+		}
+	})
+
+	t.Run("explicit empty phase stays present", func(t *testing.T) {
+		translated := translateStatus(map[string]any{"status": "running", "phase": ""}, "")
+		if got, ok := translated["status"].(string); !ok || got != "running" {
+			t.Fatalf("status = %#v, want string running", translated["status"])
+		}
+		phase, ok := translated["phase"].(string)
+		if !ok {
+			t.Fatalf("phase = %#v, want present string", translated["phase"])
+		}
+		if phase != "" {
+			t.Fatalf("phase = %q, want empty", phase)
+		}
+		run := statusRunFromMap(translated)
+		if run.Phase == nil || *run.Phase != "" {
+			t.Fatalf("Phase = %v, want pointer to empty string", run.Phase)
+		}
+	})
+
+	t.Run("sentinel-derived status satisfies terminal wait", func(t *testing.T) {
+		path := writeSentinel(t, t.TempDir(), "typed.sentinel", "DONE\nSESSION=ses_sentinel\n")
+		translated := translateStatus(map[string]any{"status": "mystery"}, path)
+		if got, ok := translated["status"].(string); !ok || got != "done" {
+			t.Fatalf("status = %#v, want string done from sentinel", translated["status"])
+		}
+		run := statusRunFromMap(translated)
+		if run.Status == nil || *run.Status != "done" {
+			t.Fatalf("Status = %v, want done", run.Status)
+		}
+		if run.SessionID == nil || *run.SessionID != "ses_sentinel" {
+			t.Fatalf("SessionID = %v, want ses_sentinel", run.SessionID)
+		}
+		if !isTerminalStatus(translated) {
+			t.Fatal("isTerminalStatus = false, want true for sentinel-derived done")
+		}
+		if !waitConditionSatisfied(waitTerminal, translated, "") {
+			t.Fatal("waitTerminal did not fire for sentinel-derived done")
+		}
+	})
+
+	t.Run("unrecognized status reads unknown and keeps waiting", func(t *testing.T) {
+		translated := translateStatus(map[string]any{"status": "mystery", "phase": "working"}, "")
+		if got, ok := translated["status"].(string); !ok || got != "unknown" {
+			t.Fatalf("status = %#v, want string unknown", translated["status"])
+		}
+		run := statusRunFromMap(translated)
+		if run.Status == nil || *run.Status != "unknown" {
+			t.Fatalf("Status = %v, want unknown", run.Status)
+		}
+		if run.Phase == nil || *run.Phase != "working" {
+			t.Fatalf("Phase = %v, want working", run.Phase)
+		}
+		if isTerminalStatus(translated) {
+			t.Fatal("isTerminalStatus = true, want false for unknown")
+		}
+		if waitConditionSatisfied(waitTerminal, translated, "") {
+			t.Fatal("waitTerminal fired for unknown")
+		}
+	})
+
+	t.Run("phase change wait fires on rewritten phase", func(t *testing.T) {
+		translated := translateStatus(map[string]any{"status": "running", "phase": "done"}, "")
+		if !waitConditionSatisfied(waitPhaseChange, translated, "working") {
+			t.Fatal("waitPhaseChange did not fire after the running terminal-phase rewrite")
 		}
 	})
 }

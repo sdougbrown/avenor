@@ -3,8 +3,8 @@ package runstate
 // Snapshot contains the authoritative lifecycle fields used to decide whether
 // an await operation keeps waiting or returns.
 type Snapshot struct {
-	Status            string
-	Phase             string
+	Status            RuntimeStatus
+	Phase             Phase
 	PendingPermission bool
 }
 
@@ -81,15 +81,16 @@ func stateFromSnapshot(snapshot Snapshot) State {
 	}
 
 	switch Translate(snapshot.Status, snapshot.Phase).Status {
-	case "done":
+	case StatusDone:
 		return StateDone
-	case "failed":
+	case StatusFailed:
 		return StateFailed
-	case "timeout":
+	case StatusTimeout:
 		return StateTimeout
-	case "killed":
+	case StatusKilled:
 		return StateKilled
 	default:
+		// StatusUnknown and every other non-terminal status stay active.
 		return StateActive
 	}
 }
