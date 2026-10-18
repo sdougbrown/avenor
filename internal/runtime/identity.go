@@ -127,6 +127,13 @@ func (p *LaunchProvenance) IdentityEnv() []string {
 	return env
 }
 
+// LaunchEnv returns environ without inherited launch identity, followed by p's
+// identity. Scrubbing first keeps the launch's own values; a nil p yields the
+// scrubbed environment alone.
+func LaunchEnv(environ []string, p *LaunchProvenance) []string {
+	return append(ScrubIdentityEnv(environ), p.IdentityEnv()...)
+}
+
 // ScrubIdentityEnv returns environ without inherited launch identity. Matching
 // is on the exact key, so duplicates and bare-key entries are removed too,
 // while near-miss names and every other variable keep their order.

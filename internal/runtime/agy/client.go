@@ -216,7 +216,7 @@ func (c *client) LaunchInitial(ctx context.Context, prompt, model, agent, dir st
 	argv := launcher.Argv("agy", args, c.launchWrapper)
 	proc := agyLaunchCommandContext(context.Background(), argv[0], argv[1:]...)
 	proc.Dir = dir
-	proc.Env = append(runtime.ScrubIdentityEnv(proc.Environ()), c.provenance.IdentityEnv()...)
+	proc.Env = runtime.LaunchEnv(proc.Environ(), c.provenance)
 	stdout, err := proc.StdoutPipe()
 	if err != nil {
 		return sessionInfo{}, fmt.Errorf("agy stdout pipe: %w", err)
@@ -457,7 +457,7 @@ func (c *client) LaunchResumed(ctx context.Context, conversationID, prompt, mode
 	argv := launcher.Argv("agy", args, c.launchWrapper)
 	proc := agyLaunchCommandContext(context.Background(), argv[0], argv[1:]...)
 	proc.Dir = dir
-	proc.Env = append(runtime.ScrubIdentityEnv(proc.Environ()), c.provenance.IdentityEnv()...)
+	proc.Env = runtime.LaunchEnv(proc.Environ(), c.provenance)
 
 	stdin, err := proc.StdinPipe()
 	if err != nil {

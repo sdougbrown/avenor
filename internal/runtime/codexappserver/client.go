@@ -81,7 +81,7 @@ var appServerCommandContext = exec.CommandContext
 func StartClient(ctx context.Context, opts runtime.StartOptions) (*client, error) {
 	argv := launcher.Argv("codex", []string{"app-server"}, opts.LaunchWrapper)
 	proc := appServerCommandContext(ctx, argv[0], argv[1:]...)
-	proc.Env = append(runtime.ScrubIdentityEnv(proc.Environ()), opts.Provenance.IdentityEnv()...)
+	proc.Env = runtime.LaunchEnv(proc.Environ(), opts.Provenance)
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("codex stdin pipe: %w", err)

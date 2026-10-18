@@ -75,7 +75,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		args = append(args, "--cwd", absDir)
 	}
 	cmd := launcher.Command(ctx, cfg.Wrapper, cfg.Bin, args...)
-	cmd.Env = append(runtime.ScrubIdentityEnv(mergeEnviron(os.Environ(), cfg.Env)), cfg.Provenance.IdentityEnv()...)
+	cmd.Env = runtime.LaunchEnv(mergeEnviron(os.Environ(), cfg.Env), cfg.Provenance)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

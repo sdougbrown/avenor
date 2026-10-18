@@ -122,3 +122,14 @@ func TestScrubIdentityEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestLaunchEnvKeepsLaunchIdentityOverInherited(t *testing.T) {
+	env := LaunchEnv(
+		[]string{"PATH=/bin", EnvPhase + "=inherited", EnvExecutionID + "=outer"},
+		&LaunchProvenance{ExecutionID: "run_1", Phase: "reviewer"},
+	)
+	want := []string{"PATH=/bin", EnvExecutionID + "=run_1", EnvPhase + "=reviewer"}
+	if !slices.Equal(env, want) {
+		t.Fatalf("LaunchEnv = %v, want %v", env, want)
+	}
+}

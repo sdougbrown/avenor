@@ -48,7 +48,7 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 	// Scrubbing after the append also means a caller-provided Env entry cannot
 	// reintroduce a scrubbed variable.
 	combined := ScrubParentClaudeEnv(append(os.Environ(), env...))
-	cmd.Env = append(runtime.ScrubIdentityEnv(combined), opts.Provenance.IdentityEnv()...)
+	cmd.Env = runtime.LaunchEnv(combined, opts.Provenance)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: uint16(opts.Cols),
