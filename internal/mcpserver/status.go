@@ -2,11 +2,55 @@ package mcpserver
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/sdougbrown/avenor/internal/runstate"
 )
+
+// unrecognizedStatusDiagnosticCap bounds the server's cache of distinct
+// unrecognized status values it logs.
+const unrecognizedStatusDiagnosticCap = 16
+
+// statusDiagnostics logs unrecognized raw statuses a runtime reported, once
+// per distinct value until the cap, then a single suppression line. A nil
+// receiver disables logging so translateStatus stays usable without a Server.
+type statusDiagnostics struct {
+	mu     sync.Mutex
+	stderr io.Writer
+	// seen records the distinct raw status values already logged; suppressed
+	// marks that the cap was reached and the suppression line was logged.
+	// Both are guarded by mu.
+	seen       map[string]struct{}
+	suppressed bool
+}
+
+// note logs one unrecognized raw status for a runtime.
+func (d *statusDiagnostics) note(runtimeID, rawStatus string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.seen[rawStatus]; ok {
+		return
+	}
+	if len(d.seen) < unrecognizedStatusDiagnosticCap {
+		if d.seen == nil {
+			d.seen = make(map[string]struct{})
+		}
+		d.seen[rawStatus] = struct{}{}
+		fmt.Fprintf(d.stderr, "avenor mcp: runtime %s reported unrecognized status %q\n", runtimeID, rawStatus)
+		return
+	}
+	if d.suppressed {
+		return
+	}
+	d.suppressed = true
+	fmt.Fprintln(d.stderr, "avenor mcp: further unrecognized values suppressed")
+}
 
 type sentinelData struct {
 	Status     string
@@ -211,7 +255,7 @@ func readSentinel(path string) (*sentinelData, error) {
 	return sd, nil
 }
 
-func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
+func translateStatus(diag *statusDiagnostics, runtimeID string, raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
 	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "permission", "permission_decider", "permission_model_decider", "permission_decider_exhausted", "backend", "agent", "agent_profile", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated", "started_at"} {
@@ -225,6 +269,9 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	rawPhase, _ := raw["phase"].(string)
 	translated := runstate.Translate(runstate.RuntimeStatus(rawStatus), runstate.Phase(rawPhase))
 	result["status"] = string(translated.Status)
+	if !translated.StatusRecognized {
+		diag.note(runtimeID, rawStatus)
+	}
 
 	switch rawStatus {
 	case "running":

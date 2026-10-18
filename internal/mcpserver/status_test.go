@@ -1,8 +1,12 @@
 package mcpserver
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -16,7 +20,7 @@ func writeSentinel(t *testing.T, dir, name, content string) string {
 }
 
 func TestTranslateStatusPreservesRosterIdentity(t *testing.T) {
-	result := translateStatus(map[string]any{
+	result := translateStatus(nil, "", map[string]any{
 		"status":            "running",
 		"roster_file":       "/repo/roster.json",
 		"roster_entry":      "planner",
@@ -55,7 +59,7 @@ func TestApplyRunInfoIdentityFallback(t *testing.T) {
 }
 
 func TestApplyRunInfoIdentityDoesNotResurrectAuthoritativelyClearedFields(t *testing.T) {
-	status := translateStatus(map[string]any{
+	status := translateStatus(nil, "", map[string]any{
 		"status": "ended", "agent": "", "model": "", "agent_profile": "",
 		"effective_agent": "", "effective_model": "", "effective_backend": "agy",
 	}, "")
@@ -76,7 +80,7 @@ func TestApplyRunInfoIdentityDoesNotResurrectAuthoritativelyClearedFields(t *tes
 
 func TestTranslateStatusIdle(t *testing.T) {
 	raw := map[string]any{"status": "idle", "session_id": "ses_1", "phase": "working"}
-	result := translateStatus(raw, "")
+	result := translateStatus(nil, "", raw, "")
 	if result["status"] != "running" {
 		t.Errorf("expected running, got %v", result["status"])
 	}
@@ -87,7 +91,7 @@ func TestTranslateStatusIdle(t *testing.T) {
 
 func TestTranslateStatusRunning(t *testing.T) {
 	raw := map[string]any{"status": "running", "session_id": "ses_2"}
-	result := translateStatus(raw, "")
+	result := translateStatus(nil, "", raw, "")
 	if result["status"] != "running" {
 		t.Errorf("expected running, got %v", result["status"])
 	}
@@ -98,7 +102,7 @@ func TestTranslateStatusEndedWithDoneSentinel(t *testing.T) {
 	path := writeSentinel(t, dir, "done.sentinel", "DONE\nSESSION=ses_done\nSTOP_REASON=end_turn\n")
 
 	raw := map[string]any{"status": "ended", "session_id": "ses_live"}
-	result := translateStatus(raw, path)
+	result := translateStatus(nil, "", raw, path)
 	if result["status"] != "done" {
 		t.Errorf("expected done, got %v", result["status"])
 	}
@@ -115,7 +119,7 @@ func TestTranslateStatusEndedWithFailedSentinel(t *testing.T) {
 	path := writeSentinel(t, dir, "failed.sentinel", "FAILED\nSESSION=ses_fail\nSTOP_REASON=refusal\n")
 
 	raw := map[string]any{"status": "ended"}
-	result := translateStatus(raw, path)
+	result := translateStatus(nil, "", raw, path)
 	if result["status"] != "failed" {
 		t.Errorf("expected failed, got %v", result["status"])
 	}
@@ -129,7 +133,7 @@ func TestTranslateStatusEndedWithFailedSentinel(t *testing.T) {
 
 func TestTranslateStatusEndedWithoutSentinel(t *testing.T) {
 	raw := map[string]any{"status": "ended", "session_id": "ses_none"}
-	result := translateStatus(raw, "")
+	result := translateStatus(nil, "", raw, "")
 	if result["status"] != "done" {
 		t.Errorf("expected done, got %v", result["status"])
 	}
@@ -143,7 +147,7 @@ func TestTranslateStatusNoLiveStatusWithSentinel(t *testing.T) {
 	path := writeSentinel(t, dir, "timeout.sentinel", "TIMEOUT\nSESSION=ses_to\nSTOP_REASON=timeout\n")
 
 	raw := map[string]any{}
-	result := translateStatus(raw, path)
+	result := translateStatus(nil, "", raw, path)
 	if result["status"] != "timeout" {
 		t.Errorf("expected timeout, got %v", result["status"])
 	}
@@ -157,14 +161,14 @@ func TestTranslateStatusNoLiveStatusWithSentinel(t *testing.T) {
 
 func TestTranslateStatusNoLiveStatusNoSentinel(t *testing.T) {
 	raw := map[string]any{}
-	result := translateStatus(raw, "")
+	result := translateStatus(nil, "", raw, "")
 	if result["status"] != "unknown" {
 		t.Errorf("expected unknown fallback, got %v", result["status"])
 	}
 }
 
 func TestTranslateStatusBlockedLiveStatus(t *testing.T) {
-	result := translateStatus(map[string]any{"status": "blocked", "session_id": "ses_block"}, "")
+	result := translateStatus(nil, "", map[string]any{"status": "blocked", "session_id": "ses_block"}, "")
 	if result["status"] != "failed" {
 		t.Errorf("expected failed, got %v", result["status"])
 	}
@@ -177,7 +181,7 @@ func TestTranslateStatusKilledSentinel(t *testing.T) {
 	dir := t.TempDir()
 	path := writeSentinel(t, dir, "killed.sentinel", "KILLED\nSESSION=ses_kill\nSTOP_REASON=cancelled\n")
 
-	result := translateStatus(map[string]any{}, path)
+	result := translateStatus(nil, "", map[string]any{}, path)
 	if result["status"] != "killed" {
 		t.Errorf("expected killed, got %v", result["status"])
 	}
@@ -193,7 +197,7 @@ func TestTranslateStatusBlockedSentinel(t *testing.T) {
 	dir := t.TempDir()
 	path := writeSentinel(t, dir, "blocked.sentinel", "BLOCKED\nSESSION=ses_block\nSTOP_REASON=permission\n")
 
-	result := translateStatus(map[string]any{}, path)
+	result := translateStatus(nil, "", map[string]any{}, path)
 	if result["status"] != "failed" {
 		t.Errorf("expected failed, got %v", result["status"])
 	}
@@ -214,7 +218,7 @@ func TestTranslateStatusIdleTerminalPhases(t *testing.T) {
 			"phase":       phase,
 			"stop_reason": "raw_reason",
 		}
-		result := translateStatus(raw, "")
+		result := translateStatus(nil, "", raw, "")
 		if result["status"] == "running" {
 			t.Errorf("idle phase %s returned running: %#v", phase, result)
 		}
@@ -238,7 +242,7 @@ func TestTranslateStatusRunningTerminalPhaseStaysRunning(t *testing.T) {
 			"phase":       phase,
 			"stop_reason": "active_failure",
 		}
-		result := translateStatus(raw, "")
+		result := translateStatus(nil, "", raw, "")
 		if result["status"] != "running" {
 			t.Errorf("running phase %s status = %v, want running (transient race must not promote)", phase, result["status"])
 		}
@@ -265,7 +269,7 @@ func TestTranslateStatusPermissionDeciderReachesLifecycleView(t *testing.T) {
 		"permission_decider":           "rm-guard",
 		"permission_decider_exhausted": true,
 	}
-	shaped := shapeStatusForView(translateStatus(raw, ""), "lifecycle")
+	shaped := shapeStatusForView(translateStatus(nil, "", raw, ""), "lifecycle")
 	if got, _ := shaped["permission_decider"].(string); got != "rm-guard" {
 		t.Fatalf("shaped permission_decider = %q, want rm-guard", got)
 	}
@@ -293,7 +297,7 @@ func TestTranslateStatusPermissionModelDeciderReachesLifecycleView(t *testing.T)
 		"session_id":               "ses_mdec",
 		"permission_model_decider": "groq/llama-3.3-70b",
 	}
-	shaped := shapeStatusForView(translateStatus(raw, ""), "lifecycle")
+	shaped := shapeStatusForView(translateStatus(nil, "", raw, ""), "lifecycle")
 	if got, _ := shaped["permission_model_decider"].(string); got != "groq/llama-3.3-70b" {
 		t.Fatalf("shaped permission_model_decider = %q, want groq/llama-3.3-70b", got)
 	}
@@ -306,7 +310,7 @@ func TestTranslateStatusPermissionModelDeciderReachesLifecycleView(t *testing.T)
 func TestTranslateStatusParkedSuccessUsesCurrentMetadata(t *testing.T) {
 	path := writeSentinel(t, t.TempDir(), "parked.sentinel", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
 
-	result := translateStatus(map[string]any{
+	result := translateStatus(nil, "", map[string]any{
 		"status":      "idle",
 		"session_id":  "ses_live",
 		"phase":       "done",
@@ -318,7 +322,7 @@ func TestTranslateStatusParkedSuccessUsesCurrentMetadata(t *testing.T) {
 }
 
 func TestTranslateStatusIdleTerminalPhaseWithoutSentinel(t *testing.T) {
-	result := translateStatus(map[string]any{
+	result := translateStatus(nil, "", map[string]any{
 		"status":      "idle",
 		"session_id":  "ses_raw",
 		"phase":       "timeout",
@@ -336,7 +340,7 @@ func TestTranslateStatusRunningTerminalPhaseIgnoresStaleSentinel(t *testing.T) {
 	dir := t.TempDir()
 	path := writeSentinel(t, dir, "stale.sentinel", "DONE\nSESSION=ses_stale\nSTOP_REASON=stale\n")
 
-	result := translateStatus(map[string]any{
+	result := translateStatus(nil, "", map[string]any{
 		"status":      "running",
 		"session_id":  "ses_active",
 		"phase":       "failed",
@@ -363,7 +367,7 @@ func TestTranslateStatusIdleTerminalPhaseIgnoresStaleSentinel(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeSentinel(t, t.TempDir(), tc.name+".sentinel", tc.status+"\nSESSION=ses_stale\nSTOP_REASON=stale_reason\n")
-			result := translateStatus(map[string]any{
+			result := translateStatus(nil, "", map[string]any{
 				"status":      "idle",
 				"session_id":  "ses_current",
 				"phase":       tc.name,
@@ -390,7 +394,7 @@ func TestTranslateStatusLiveNonTerminalPhaseIgnoresSentinel(t *testing.T) {
 				{name: "stale", path: stalePath},
 			} {
 				t.Run(rawStatus+"/phase="+phase+"/sentinel="+sentinel.name, func(t *testing.T) {
-					result := translateStatus(map[string]any{
+					result := translateStatus(nil, "", map[string]any{
 						"status":      rawStatus,
 						"session_id":  "ses_live",
 						"phase":       phase,
@@ -506,7 +510,7 @@ func TestStatusRunFromMapFieldTypes(t *testing.T) {
 // explicitly empty phase and that terminal waits still fire.
 func TestTranslateStatusTypedBoundaryKeepsWireFields(t *testing.T) {
 	t.Run("translated values keep fields through the typed mapping", func(t *testing.T) {
-		translated := translateStatus(map[string]any{
+		translated := translateStatus(nil, "", map[string]any{
 			"runtime_id": "rt_1",
 			"status":     "ended",
 			"phase":      "working",
@@ -531,7 +535,7 @@ func TestTranslateStatusTypedBoundaryKeepsWireFields(t *testing.T) {
 	})
 
 	t.Run("explicit empty phase stays present", func(t *testing.T) {
-		translated := translateStatus(map[string]any{"status": "running", "phase": ""}, "")
+		translated := translateStatus(nil, "", map[string]any{"status": "running", "phase": ""}, "")
 		if got, ok := translated["status"].(string); !ok || got != "running" {
 			t.Fatalf("status = %#v, want string running", translated["status"])
 		}
@@ -550,7 +554,7 @@ func TestTranslateStatusTypedBoundaryKeepsWireFields(t *testing.T) {
 
 	t.Run("sentinel-derived status satisfies terminal wait", func(t *testing.T) {
 		path := writeSentinel(t, t.TempDir(), "typed.sentinel", "DONE\nSESSION=ses_sentinel\n")
-		translated := translateStatus(map[string]any{"status": "mystery"}, path)
+		translated := translateStatus(nil, "", map[string]any{"status": "mystery"}, path)
 		if got, ok := translated["status"].(string); !ok || got != "done" {
 			t.Fatalf("status = %#v, want string done from sentinel", translated["status"])
 		}
@@ -570,7 +574,7 @@ func TestTranslateStatusTypedBoundaryKeepsWireFields(t *testing.T) {
 	})
 
 	t.Run("unrecognized status reads unknown and keeps waiting", func(t *testing.T) {
-		translated := translateStatus(map[string]any{"status": "mystery", "phase": "working"}, "")
+		translated := translateStatus(nil, "", map[string]any{"status": "mystery", "phase": "working"}, "")
 		if got, ok := translated["status"].(string); !ok || got != "unknown" {
 			t.Fatalf("status = %#v, want string unknown", translated["status"])
 		}
@@ -590,9 +594,163 @@ func TestTranslateStatusTypedBoundaryKeepsWireFields(t *testing.T) {
 	})
 
 	t.Run("phase change wait fires on rewritten phase", func(t *testing.T) {
-		translated := translateStatus(map[string]any{"status": "running", "phase": "done"}, "")
+		translated := translateStatus(nil, "", map[string]any{"status": "running", "phase": "done"}, "")
 		if !waitConditionSatisfied(waitPhaseChange, translated, "working") {
 			t.Fatal("waitPhaseChange did not fire after the running terminal-phase rewrite")
 		}
 	})
+}
+
+// unrecognizedStatusLines parses a diagnostics buffer into one entry per log
+// line, with suppression lines marked by an empty status value.
+func unrecognizedStatusLines(t *testing.T, output string) []string {
+	t.Helper()
+	if output == "" {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	values := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasSuffix(line, "further unrecognized values suppressed") {
+			values = append(values, "")
+			continue
+		}
+		const prefix = "avenor mcp: runtime "
+		if !strings.HasPrefix(line, prefix) {
+			t.Fatalf("log line = %q, want %q prefix", line, prefix)
+		}
+		const middle = " reported unrecognized status \""
+		_, rest, ok := strings.Cut(line, middle)
+		if !ok || !strings.HasSuffix(rest, "\"") {
+			t.Fatalf("log line = %q, want an unrecognized-status report", line)
+		}
+		values = append(values, strings.TrimSuffix(rest, "\""))
+	}
+	return values
+}
+
+func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
+	t.Run("unknown status is not terminal and logs once across repeated calls", func(t *testing.T) {
+		var stderr bytes.Buffer
+		diag := &statusDiagnostics{stderr: &stderr}
+		for i := 0; i < 3; i++ {
+			translated := translateStatus(diag, "rt_1", map[string]any{"status": "mystery", "phase": "working"}, "")
+			if got, ok := translated["status"].(string); !ok || got != "unknown" {
+				t.Fatalf("status = %#v, want string unknown", translated["status"])
+			}
+			if isTerminalStatus(translated) {
+				t.Fatal("isTerminalStatus = true, want false for unknown")
+			}
+			if waitConditionSatisfied(waitTerminal, translated, "") {
+				t.Fatal("waitTerminal fired for unknown")
+			}
+		}
+		want := "avenor mcp: runtime rt_1 reported unrecognized status \"mystery\"\n"
+		if stderr.String() != want {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	})
+
+	t.Run("unknown status with a completion sentinel resolves through the sentinel", func(t *testing.T) {
+		path := writeSentinel(t, t.TempDir(), "unknown.sentinel", "DONE\nSESSION=ses_sentinel\n")
+		var stderr bytes.Buffer
+		diag := &statusDiagnostics{stderr: &stderr}
+		translated := translateStatus(diag, "rt_1", map[string]any{"status": "mystery"}, path)
+		if got, ok := translated["status"].(string); !ok || got != "done" {
+			t.Fatalf("status = %#v, want string done from sentinel", translated["status"])
+		}
+		if got := translated["session_id"]; got != "ses_sentinel" {
+			t.Fatalf("session_id = %#v, want ses_sentinel", got)
+		}
+		// The live status was still unrecognized, so the diagnostic is due even
+		// though the sentinel resolved the run.
+		want := "avenor mcp: runtime rt_1 reported unrecognized status \"mystery\"\n"
+		if stderr.String() != want {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	})
+
+	t.Run("cap saturation logs the suppression line once", func(t *testing.T) {
+		var stderr bytes.Buffer
+		diag := &statusDiagnostics{stderr: &stderr}
+		for i := 0; i < 18; i++ {
+			translateStatus(diag, "rt_1", map[string]any{"status": fmt.Sprintf("mystery_%d", i)}, "")
+		}
+		translateStatus(diag, "rt_1", map[string]any{"status": "mystery_0"}, "")
+		values := unrecognizedStatusLines(t, stderr.String())
+		if len(values) != unrecognizedStatusDiagnosticCap+1 {
+			t.Fatalf("log lines = %d (%v), want %d value lines plus one suppression", len(values), values, unrecognizedStatusDiagnosticCap)
+		}
+		suppressions := 0
+		seen := make(map[string]bool)
+		for _, value := range values {
+			if value == "" {
+				suppressions++
+				continue
+			}
+			if seen[value] {
+				t.Fatalf("value %q logged twice", value)
+			}
+			seen[value] = true
+		}
+		if suppressions != 1 {
+			t.Fatalf("suppression lines = %d, want 1", suppressions)
+		}
+	})
+
+	t.Run("concurrent calls stay race-clean", func(t *testing.T) {
+		var stderr bytes.Buffer
+		diag := &statusDiagnostics{stderr: &stderr}
+		var wg sync.WaitGroup
+		for worker := 0; worker < 8; worker++ {
+			wg.Add(1)
+			go func(worker int) {
+				defer wg.Done()
+				for i := 0; i < 5; i++ {
+					status := fmt.Sprintf("mystery_%d", (worker*3+i)%20)
+					translateStatus(diag, "rt_1", map[string]any{"status": status}, "")
+				}
+			}(worker)
+		}
+		wg.Wait()
+		values := unrecognizedStatusLines(t, stderr.String())
+		if len(values) != unrecognizedStatusDiagnosticCap+1 {
+			t.Fatalf("log lines = %d, want %d value lines plus one suppression", len(values), unrecognizedStatusDiagnosticCap+1)
+		}
+		suppressions := 0
+		seen := make(map[string]bool)
+		for _, value := range values {
+			if value == "" {
+				suppressions++
+				continue
+			}
+			if seen[value] {
+				t.Fatalf("value %q logged twice", value)
+			}
+			seen[value] = true
+		}
+		if suppressions != 1 {
+			t.Fatalf("suppression lines = %d, want 1", suppressions)
+		}
+	})
+}
+
+func TestServerDiagnosticsStderrRoutesUnrecognizedStatus(t *testing.T) {
+	var stderr bytes.Buffer
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, Stderr: &stderr, ControlClient: &fakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeClient{statusResult: map[string]any{"runtime_id": "rt_9", "status": "mystery", "phase": "working"}}
+	result, err := s.queryRunStatus(cl, "/sup.sock", "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := result["status"].(string); !ok || got != "unknown" {
+		t.Fatalf("status = %#v, want string unknown", result["status"])
+	}
+	want := "avenor mcp: runtime rt_9 reported unrecognized status \"mystery\"\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
 }

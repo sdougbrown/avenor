@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
@@ -63,12 +64,13 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 	runtimeID := resolved.runtimeID
 
 	out := newAwaitOutput(stdout, opts.format, runtimeID)
+	diag := &awaitStatusDiagnostics{stderr: stderr}
 	var machine runstate.Machine
 	var previous runstate.State
 
 	// A snapshot is deliberately first. It is authoritative for both terminal
 	// and permission-gated runs which existed before this client attached.
-	snapshot, err := fetchAwaitStatus(ctx, c, runtimeID)
+	snapshot, err := fetchAwaitStatus(ctx, c, runtimeID, diag)
 	if err != nil {
 		return awaitCallError(stderr, err)
 	}
@@ -101,11 +103,11 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 	// A second authoritative snapshot immediately after subscribing covers a
 	// transition that lands between the first snapshot and the subscription.
 	settling := false
-	snapshot, decision, previous, err = resnapshotAwait(ctx, c, runtimeID, &machine, out, previous)
+	snapshot, decision, previous, err = resnapshotAwait(ctx, c, runtimeID, &machine, out, previous, diag)
 	if err != nil {
 		return awaitCallError(stderr, err)
 	}
-	snapshot, decision, previous, settling, err = settleAwaitCleanup(ctx, c, runtimeID, &machine, out, previous, snapshot, decision, settling)
+	snapshot, decision, previous, settling, err = settleAwaitCleanup(ctx, c, runtimeID, &machine, out, previous, snapshot, decision, settling, diag)
 	if err != nil {
 		return awaitCallError(stderr, err)
 	}
@@ -138,11 +140,11 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 			if decision.Action != runstate.ActionResnapshot {
 				continue
 			}
-			snapshot, decision, previous, err = resnapshotAwait(ctx, c, runtimeID, &machine, out, previous)
+			snapshot, decision, previous, err = resnapshotAwait(ctx, c, runtimeID, &machine, out, previous, diag)
 			if err != nil {
 				return awaitCallError(stderr, err)
 			}
-			snapshot, decision, previous, settling, err = settleAwaitCleanup(ctx, c, runtimeID, &machine, out, previous, snapshot, decision, settling)
+			snapshot, decision, previous, settling, err = settleAwaitCleanup(ctx, c, runtimeID, &machine, out, previous, snapshot, decision, settling, diag)
 			if err != nil {
 				return awaitCallError(stderr, err)
 			}
@@ -382,7 +384,51 @@ type awaitSnapshot struct {
 	rawPhase   string
 }
 
-func fetchAwaitStatus(ctx context.Context, c *client.Client, runtimeID string) (awaitSnapshot, error) {
+// awaitStatusDiagnosticCap bounds the per-invocation cache of distinct
+// unrecognized status values await logs.
+const awaitStatusDiagnosticCap = 16
+
+// awaitStatusDiagnostics warns about unrecognized raw statuses a runtime
+// reported. The state is shared by one await invocation's initial fetch, its
+// event resnapshots, and its cleanup polling. A nil receiver disables
+// warning.
+type awaitStatusDiagnostics struct {
+	mu     sync.Mutex
+	stderr io.Writer
+	// seen records the distinct raw status values already warned about;
+	// suppressed marks that the cap was reached and the suppression line was
+	// printed. Both are guarded by mu.
+	seen       map[string]struct{}
+	suppressed bool
+}
+
+// warn prints one line per distinct unrecognized status until the cap, then a
+// single suppression line.
+func (d *awaitStatusDiagnostics) warn(rawStatus string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.seen[rawStatus]; ok {
+		return
+	}
+	if len(d.seen) < awaitStatusDiagnosticCap {
+		if d.seen == nil {
+			d.seen = make(map[string]struct{})
+		}
+		d.seen[rawStatus] = struct{}{}
+		fmt.Fprintf(d.stderr, "avenor await: runtime reported unrecognized status %q; waiting continues\n", rawStatus)
+		return
+	}
+	if d.suppressed {
+		return
+	}
+	d.suppressed = true
+	fmt.Fprintln(d.stderr, "avenor await: further unrecognized values suppressed")
+}
+
+func fetchAwaitStatus(ctx context.Context, c *client.Client, runtimeID string, diag *awaitStatusDiagnostics) (awaitSnapshot, error) {
 	var raw map[string]any
 	if err := awaitCall(ctx, c, func() error {
 		var err error
@@ -426,6 +472,9 @@ func fetchAwaitStatus(ctx context.Context, c *client.Client, runtimeID string) (
 		reason:    runtimeString(raw, "stop_reason"),
 		rawStatus: rawStatus,
 		rawPhase:  rawPhase,
+	}
+	if translated := runstate.Translate(snapshot.state.Status, snapshot.state.Phase); !translated.StatusRecognized {
+		diag.warn(rawStatus)
 	}
 	if permission, ok := raw["permission"].(map[string]any); ok {
 		snapshot.permission = permission
@@ -505,8 +554,8 @@ func runtimeExitCode(value any) (int, bool) {
 
 // resnapshotAwait observes every status through Machine so the await command
 // never makes lifecycle decisions from raw status fields directly.
-func resnapshotAwait(ctx context.Context, c *client.Client, runtimeID string, machine *runstate.Machine, out *awaitOutput, previous runstate.State) (awaitSnapshot, runstate.Decision, runstate.State, error) {
-	snapshot, err := fetchAwaitStatus(ctx, c, runtimeID)
+func resnapshotAwait(ctx context.Context, c *client.Client, runtimeID string, machine *runstate.Machine, out *awaitOutput, previous runstate.State, diag *awaitStatusDiagnostics) (awaitSnapshot, runstate.Decision, runstate.State, error) {
+	snapshot, err := fetchAwaitStatus(ctx, c, runtimeID, diag)
 	if err != nil {
 		return awaitSnapshot{}, runstate.Decision{}, previous, err
 	}
@@ -523,7 +572,7 @@ func resnapshotAwait(ctx context.Context, c *client.Client, runtimeID string, ma
 // no further event. So from the first terminal signal we poll until the outcome
 // resolves or the caller's wall-clock context expires. A fresh non-empty,
 // non-terminal phase (a new attempt) resumes normal event-driven waiting.
-func settleAwaitCleanup(ctx context.Context, c *client.Client, runtimeID string, machine *runstate.Machine, out *awaitOutput, previous runstate.State, snapshot awaitSnapshot, decision runstate.Decision, settling bool) (awaitSnapshot, runstate.Decision, runstate.State, bool, error) {
+func settleAwaitCleanup(ctx context.Context, c *client.Client, runtimeID string, machine *runstate.Machine, out *awaitOutput, previous runstate.State, snapshot awaitSnapshot, decision runstate.Decision, settling bool, diag *awaitStatusDiagnostics) (awaitSnapshot, runstate.Decision, runstate.State, bool, error) {
 	if settling = settling || opensSettle(snapshot); !settling {
 		return snapshot, decision, previous, false, nil
 	}
@@ -542,7 +591,7 @@ func settleAwaitCleanup(ctx context.Context, c *client.Client, runtimeID string,
 		}
 
 		var err error
-		snapshot, decision, previous, err = resnapshotAwait(ctx, c, runtimeID, machine, out, previous)
+		snapshot, decision, previous, err = resnapshotAwait(ctx, c, runtimeID, machine, out, previous, diag)
 		if err != nil {
 			return awaitSnapshot{}, runstate.Decision{}, previous, settling, err
 		}

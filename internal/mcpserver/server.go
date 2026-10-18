@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -63,6 +64,10 @@ type Options struct {
 	AllowedHosts     []string
 	ControlClient    ControlClient
 
+	// Stderr is the writer unrecognized-status diagnostics are reported to.
+	// Nil means os.Stderr. Tests inject a buffer to capture output.
+	Stderr io.Writer
+
 	// MCPLaunchWrapperPolicyPath is forwarded to a supervisor this server
 	// autostarts, giving that supervisor its MCP launch wrapper allowlist.
 	// Attaching to an already-running supervisor never changes its policy:
@@ -77,6 +82,7 @@ type Server struct {
 	lifecycle             *supervisorLifecycle
 	registry              *RunRegistry
 	defaultSupervisorPath string
+	diag                  *statusDiagnostics
 	toolNames             []string
 	clock                 func() time.Time
 	sleep                 func(context.Context, time.Duration) error
@@ -260,6 +266,15 @@ type workflowCancelArgs struct {
 	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
+// stderrOr resolves the server's diagnostic writer: the configured writer
+// when set, else the process stderr.
+func stderrOr(w io.Writer) io.Writer {
+	if w != nil {
+		return w
+	}
+	return os.Stderr
+}
+
 func NewServer(opts Options) (*Server, error) {
 	if opts.Transport == "" {
 		return nil, fmt.Errorf("transport is required")
@@ -304,6 +319,7 @@ func NewServer(opts Options) (*Server, error) {
 			"avenor_workflow_cancel",
 			"avenor_workflow_controller_status",
 		},
+		diag: &statusDiagnostics{stderr: stderrOr(opts.Stderr)},
 	}
 
 	// Explicit sockets keep their socket path for lazy acquisition: the first
@@ -488,7 +504,7 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 			if ri != nil {
 				sentinelPath = ri.SentinelPath
 			}
-			ts := translateStatus(entry, sentinelPath)
+			ts := translateStatus(s.diag, runtimeID, entry, sentinelPath)
 			if len(ts) > 0 {
 				if ri != nil {
 					seenRegistryRuns[ri.RunID] = true
@@ -794,7 +810,7 @@ func (s *Server) queryRunStatus(cl ControlClient, supervisorPath, runID string) 
 			}
 			return nil, fmt.Errorf("status: %w", err)
 		}
-		ts := translateStatus(result, ri.SentinelPath)
+		ts := translateStatus(s.diag, ri.RuntimeID, result, ri.SentinelPath)
 		applyRunInfoIdentity(ts, ri)
 		ts["run_id"] = ri.RunID
 		ts["label"] = ri.Label
@@ -805,7 +821,11 @@ func (s *Server) queryRunStatus(cl ControlClient, supervisorPath, runID string) 
 	if err != nil {
 		return nil, fmt.Errorf("status: %w", err)
 	}
-	ts := translateStatus(result, "")
+	runtimeID := stringField(result, "runtime_id")
+	if runtimeID == "" {
+		runtimeID = runID
+	}
+	ts := translateStatus(s.diag, runtimeID, result, "")
 	ts["run_id"] = runID
 	if _, ok := ts["label"]; !ok {
 		ts["label"] = runID

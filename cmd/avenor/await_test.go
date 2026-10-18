@@ -547,6 +547,34 @@ func TestAwaitRejectsMalformedStatusResponse(t *testing.T) {
 	}
 }
 
+func TestAwaitUnrecognizedStatusWarnsOnceAndKeepsWaiting(t *testing.T) {
+	// The initial fetch, the post-subscribe snapshot, and a lagged resnapshot
+	// all observe unrecognized statuses. Waiting continues — unknown is not
+	// terminal — and each distinct value warns exactly once.
+	server := newAwaitSocketServer(t,
+		[]map[string]any{
+			awaitStatus("mystery", "working", false),  // initial snapshot
+			awaitStatus("mystery", "working", false),  // post-subscribe snapshot
+			awaitStatus("mystery2", "working", false), // lag resnapshot
+			awaitStatus("mystery2", "working", false),
+		},
+		[]map[string]any{awaitEvent("subscriber.lagged", "rt_1", 10)},
+	)
+	var stdout, stderr bytes.Buffer
+	if got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "50ms"}, &stdout, &stderr); got != awaitExitWallTimeout {
+		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitWallTimeout, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want no transition records", stdout.String())
+	}
+	want := "avenor await: runtime reported unrecognized status \"mystery\"; waiting continues\n" +
+		"avenor await: runtime reported unrecognized status \"mystery2\"; waiting continues\n" +
+		"avenor await: timeout elapsed\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
 func TestAwaitRetryAndLaggedEventsKeepWaitingThenResnapshot(t *testing.T) {
 	// A retry can publish session.end before its next attempt starts; active
 	// status must not be mistaken for a completed turn. A lag notification then
