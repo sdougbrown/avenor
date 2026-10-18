@@ -75,11 +75,11 @@ func Translate(status RuntimeStatus, phase Phase) Translation {
 	switch status {
 	case StatusRunning:
 		translatedStatus = StatusRunning
-		if isTerminalPhase(phase) {
+		if IsTerminalPhase(phase) {
 			translatedPhase = PhaseNone
 		}
 	case StatusIdle:
-		if isTerminalPhase(phase) {
+		if IsTerminalPhase(phase) {
 			translatedStatus = RuntimeStatus(phase)
 		} else {
 			translatedStatus = StatusRunning
@@ -120,7 +120,9 @@ func IsTerminalStatus(status RuntimeStatus) bool {
 	}
 }
 
-func isTerminalPhase(phase Phase) bool {
+// IsTerminalPhase reports whether a phase value is one of the terminal
+// consumer-facing statuses.
+func IsTerminalPhase(phase Phase) bool {
 	return IsTerminalStatus(RuntimeStatus(phase))
 }
 

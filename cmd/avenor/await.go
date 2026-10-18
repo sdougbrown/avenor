@@ -583,7 +583,7 @@ func settleAwaitCleanup(ctx context.Context, c *client.Client, runtimeID string,
 // opensSettle reports whether this observation opens the post-session cleanup
 // window: a terminal phase has arrived for a run that is not yet settled.
 func opensSettle(snapshot awaitSnapshot) bool {
-	return runstate.IsTerminalStatus(runstate.RuntimeStatus(snapshot.rawPhase))
+	return runstate.IsTerminalPhase(runstate.Phase(snapshot.rawPhase))
 }
 
 // cleanupWaitsForOutcome reports whether the await should keep polling instead
@@ -593,7 +593,7 @@ func opensSettle(snapshot awaitSnapshot) bool {
 // fresh non-empty, non-terminal phase means a new attempt started, which
 // resumes normal event-driven waiting.
 func cleanupWaitsForOutcome(snapshot awaitSnapshot) bool {
-	return snapshot.rawPhase == "" || runstate.IsTerminalStatus(runstate.RuntimeStatus(snapshot.rawPhase))
+	return snapshot.rawPhase == "" || runstate.IsTerminalPhase(runstate.Phase(snapshot.rawPhase))
 }
 
 func awaitShouldExit(state runstate.State, until string) bool {
