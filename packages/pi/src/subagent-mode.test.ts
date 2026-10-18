@@ -1,8 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import type { ExtensionDeps } from './index.js'
-import { createExtension } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
-import { buildMockDeps } from './test-fixtures.js'
+import { startExtensionHarness, waitFor } from './test-fixtures.js'
 
 const subAgentEnv = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } as const
 
@@ -59,35 +58,11 @@ async function startSubAgentExtension(opts: {
   subAgentEnv?: SubAgentEnv | null
   deps?: Partial<ExtensionDeps>
 }) {
-  const registeredTools: Record<string, any> = {}
-  const eventHandlers: Record<string, any> = {}
-  const sendUserMessage = mock(() => {})
-  const mockPi = {
-    on: (event: string, handler: any) => {
-      eventHandlers[event] = handler
-    },
-    registerTool: (definition: { name: string }) => {
-      registeredTools[definition.name] = definition
-    },
-    registerCommand: () => {},
-    registerMessageRenderer: () => {},
-    sendUserMessage,
-    events: { emit: mock(() => {}), on: mock(() => () => {}) },
-  }
   // null must stay null: it is the declared way to force non-sub-agent mode.
-  const subAgentEnvOption = opts.subAgentEnv === undefined ? subAgentEnv : opts.subAgentEnv
-  await createExtension(buildMockDeps(opts.deps), { pollIntervalMs: 5, subAgentEnv: subAgentEnvOption })(mockPi as any)
-  const ctx = { cwd: '/tmp', ui: { setStatus: mock(() => {}), setWidget: mock(() => {}), notify: mock(() => {}) } }
-  await eventHandlers.session_start({}, ctx)
-  return { ctx, eventHandlers, registeredTools, sendUserMessage }
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!predicate()) {
-    if (Date.now() > deadline) throw new Error('timed out waiting for condition')
-    await new Promise(resolve => setTimeout(resolve, 5))
-  }
+  return startExtensionHarness({
+    deps: opts.deps,
+    subAgentEnv: opts.subAgentEnv === undefined ? subAgentEnv : opts.subAgentEnv,
+  })
 }
 
 describe('sub-agent broker mode (integration)', () => {
@@ -229,10 +204,15 @@ describe('sub-agent broker mode (integration)', () => {
 
   it('routes avenor_reply through the host broker tool outside sub-agent mode', async () => {
     const fetchStub = stubBrokerFetch([])
+    const brokerReceiveTool = mock(async () => ({
+      asks: [{ message_id: 'ask-h', from_run_id: 'rt_sub', message: 'host question', role: 'agent' }],
+    }))
     const brokerReplyTool = mock(async () => ({ ok: true }))
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
-      harness = await startSubAgentExtension({ fetchStub, subAgentEnv: null, deps: { brokerReplyTool } })
+      harness = await startSubAgentExtension({ fetchStub, subAgentEnv: null, deps: { brokerReceiveTool, brokerReplyTool } })
+      // The host ask poll fires on a hardcoded 2s interval; wait past one tick.
+      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0, 6000)
       const result = await harness.registeredTools.avenor_reply.execute('t1', {
         from_run_id: 'rt_sub',
         reply_to_message_id: 'ask-h',

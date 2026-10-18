@@ -1798,24 +1798,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           return { content: [{ type: 'text', text: 'Reply sent' }] }
         }
 
-        // Resolve the asker + message id: prefer explicit params, else the
-        // most recent pending ask from that sub-agent.
-        let fromRunId = params.from_run_id
-        let messageId = params.reply_to_message_id
-        if (!messageId) {
-          let match: { from_run_id: string; message_id: string } | undefined
-          for (const [, pending] of hostPendingAsks) {
-            if (pending.from_run_id === fromRunId) {
-              match = pending
-            }
-          }
-          if (match) messageId = match.message_id
-        }
-        if (!fromRunId || !messageId) {
+        const target = resolveReplyTarget(hostPendingAsks, params.from_run_id, params.reply_to_message_id)
+        if (!target) {
           return { content: [{ type: 'text', text: 'No pending ask found to reply to. Pass from_run_id and/or reply_to_message_id.' }], details: { error: true } }
         }
-        await deps.brokerReplyTool({ toRunId: fromRunId, replyTo: messageId, message: params.message, supervisorId: params.supervisor_id })
-        hostPendingAsks.delete(messageId)
+        // Claim the ask before awaiting the send so a concurrent reply for
+        // the same ask cannot resolve the same target and double-answer it.
+        hostPendingAsks.delete(target.message_id)
+        try {
+          await deps.brokerReplyTool({ toRunId: target.from_run_id, replyTo: target.message_id, message: params.message, supervisorId: params.supervisor_id })
+        } catch (error) {
+          // A failed send leaves the asker waiting; keep the ask retryable.
+          hostPendingAsks.set(target.message_id, target)
+          throw error
+        }
         return { content: [{ type: 'text', text: 'Reply sent' }] }
       },
     })

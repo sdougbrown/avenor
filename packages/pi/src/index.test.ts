@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { createHash } from 'node:crypto'
 import type { ExtensionDeps } from './index.js'
+import type { SubAgentEnv } from './subagent-broker.js'
 import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
@@ -42,7 +43,7 @@ async function withoutAmbientAgentProfile<T>(run: () => Promise<T>): Promise<T> 
 
 async function createHarnessBase(options: {
   deps?: Partial<ExtensionDeps>
-  extOptions?: { pollIntervalMs?: number }
+  extOptions?: { pollIntervalMs?: number; subAgentEnv?: SubAgentEnv | null }
   ui?: Record<string, any>
   onEmit?: (channel: string, payload: unknown) => void
   sendUserMessage?: any
@@ -90,7 +91,9 @@ async function createHarnessBase(options: {
     dial: mock(async () => ({ close() {} })),
     Supervisor: class {} as any,
   }
-  await createExtension({ ...baseDeps, ...options.deps }, options.extOptions)(mockPi as any)
+  // Pin host mode so ambient AVENOR_* broker credentials can't turn these
+  // harnesses into polling sub-agents.
+  await createExtension({ ...baseDeps, ...options.deps }, { subAgentEnv: null, ...options.extOptions })(mockPi as any)
 
   const ctx = { cwd: '/tmp', ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) } }
   await eventHandlers.session_start({}, ctx)
@@ -563,7 +566,7 @@ describe('Avenor Pi extension', () => {
           return { supervisorId: '/tmp/sock', getClient: () => singletonClient }
         }
       } as any,
-    })(mockPi as any)
+    }, { subAgentEnv: null })(mockPi as any)
 
     expect(Object.keys(registeredTools)).toContain('avenor_spawn')
     expect(Object.keys(registeredTools)).toContain('avenor_status')
@@ -841,7 +844,7 @@ describe('Avenor Pi extension', () => {
       observeRun: mock(() => null),
       dial: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })),
       Supervisor: class {} as any,
-    })(mockPi as any)
+    }, { subAgentEnv: null })(mockPi as any)
 
     const status = await registeredTools.avenor_status.execute('tool-status', { run_id: 'status-run' })
     expect(status.content[0]?.text).toBe(JSON.stringify(statusPayload, null, 2))
@@ -915,7 +918,7 @@ describe('Avenor Pi extension', () => {
           }
         } as any,
       })
-    })(mockPi as any)
+    }, { subAgentEnv: null })(mockPi as any)
 
     const result = await inspectToolDef.execute('tool-1', { run_id: 'run-1' })
     expect(result.content[0].text).toContain('"final_output": "hello world"')

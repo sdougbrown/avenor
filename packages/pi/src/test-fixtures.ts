@@ -4,6 +4,8 @@ import { mock } from 'bun:test'
 import type { InspectResult, RunSnapshot, StatusResult } from '@dougbots/avenor-core'
 import { RunReducer } from '@dougbots/avenor-core'
 import type { ExtensionDeps } from './index.js'
+import { createExtension } from './index.js'
+import type { SubAgentEnv } from './subagent-broker.js'
 
 /** Build minimal mock ExtensionDeps with all tools stubbed via bun:test.mock(). */
 export function buildMockDeps(partial: Partial<ExtensionDeps> = {}): ExtensionDeps {
@@ -29,6 +31,40 @@ export function buildMockDeps(partial: Partial<ExtensionDeps> = {}): ExtensionDe
     dial: mock(async () => ({ close() {} })),
     Supervisor: class {} as any,
     ...partial,
+  }
+}
+
+/** Keep message delivery on Pi so context mocks cannot hide API misuse. */
+export async function startExtensionHarness(opts: {
+  deps?: Partial<ExtensionDeps>
+  subAgentEnv?: SubAgentEnv | null
+} = {}) {
+  const registeredTools: Record<string, any> = {}
+  const eventHandlers: Record<string, any> = {}
+  const sendUserMessage = mock(() => {})
+  const mockPi = {
+    on: (event: string, handler: any) => {
+      eventHandlers[event] = handler
+    },
+    registerTool: (definition: { name: string }) => {
+      registeredTools[definition.name] = definition
+    },
+    registerCommand: () => {},
+    registerMessageRenderer: () => {},
+    sendUserMessage,
+    events: { emit: mock(() => {}), on: mock(() => () => {}) },
+  }
+  await createExtension(buildMockDeps(opts.deps), { pollIntervalMs: 5, subAgentEnv: opts.subAgentEnv ?? null })(mockPi as any)
+  const ctx = { cwd: '/tmp', ui: { setStatus: mock(() => {}), setWidget: mock(() => {}), notify: mock(() => {}) } }
+  await eventHandlers.session_start({}, ctx)
+  return { ctx, eventHandlers, registeredTools, sendUserMessage }
+}
+
+export async function waitFor(predicate: () => boolean, timeoutMs = 2000, intervalMs = 5): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for condition')
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
   }
 }
 
