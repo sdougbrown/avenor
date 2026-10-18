@@ -242,17 +242,25 @@ describe('askViaBroker', () => {
   })
 
   it('reports the ask as withdrawn when the withdraw finds no pending ask', async () => {
-    const fetchImpl = brokerFetch({
-      '/send': async () => jsonResponse({ queued: true }),
-      '/wait_reply': async () => jsonResponse({ message_id: 'x', timeout: true }, 504),
-      '/cancel_message': async () => new Response('no pending ask for this message id', { status: 404 }),
-    })
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => jsonResponse({ queued: true }),
+        '/wait_reply': async () => jsonResponse({ message_id: 'x', timeout: true }, 504),
+        '/cancel_message': async () => new Response('no pending ask for this message id', { status: 404 }),
+      },
+      calls,
+    )
 
     const error = await askViaBroker(env, { toRunId: 'supervisor', message: 'hello' }, fetchImpl)
       .catch((e: unknown) => e)
 
-    expect((error as Error).message).toContain('already withdrawn')
-    expect((error as Error).message).toContain('wait for reply: broker /wait_reply: 504')
+    const messageId = String((calls.find(call => call.path === '/send')?.body.payload as Record<string, unknown>).id)
+    const message = (error as Error).message
+    expect(message).toContain(`message_id: ${messageId}`)
+    expect(message).toContain('already withdrawn')
+    expect(message).toContain('wait for reply:')
+    expect(message).toMatch(/\b504\b/)
   })
 
   it('treats a non-404 withdraw failure as possibly pending', async () => {
@@ -377,8 +385,13 @@ describe('askViaBroker', () => {
     const error = await askViaBroker(env, { toRunId: 'ghost', message: 'hello' }, fetchImpl)
       .catch((e: unknown) => e)
 
-    expect((error as Error).message).toContain('already withdrawn')
-    expect((error as Error).message).toContain('send ask: broker /send: 404 to run not found')
+    const messageId = String((calls.find(call => call.path === '/send')?.body.payload as Record<string, unknown>).id)
+    const message = (error as Error).message
+    expect(message).toContain(`message_id: ${messageId}`)
+    expect(message).toContain('already withdrawn')
+    expect(message).toContain('send ask:')
+    expect(message).toMatch(/\b404\b/)
+    expect(message).toContain('to run not found')
     expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
   })
 

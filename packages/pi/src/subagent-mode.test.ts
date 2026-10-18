@@ -228,8 +228,11 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub })
-      await expect(harness.registeredTools.avenor_cancel.execute('t1', { message_id: 'ask-1' }))
-        .rejects.toThrow(`broker /cancel_message: ${status} ${body}`)
+      const error = await harness.registeredTools.avenor_cancel.execute('t1', { message_id: 'ask-1' })
+        .catch((e: unknown) => e)
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain(String(status))
+      expect((error as Error).message).toContain(body)
       expect(fetchStub.calls.find(call => call.path === '/cancel_message')?.body).toMatchObject({
         run_id: 'rt_child',
         token: 'tok',

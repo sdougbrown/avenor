@@ -37,6 +37,14 @@ export function formatAskFailure(messageId: string, pending: boolean, detail: st
     : `ask failed (message_id: ${messageId} — the pending ask was already withdrawn): ${detail}`
 }
 
+/**
+ * Reduce a caller-supplied ask timeout to what the broker accepts: a positive
+ * finite number of milliseconds, or undefined to keep the broker's own wait.
+ */
+export function normalizeAskTimeoutMs(timeoutMs: number | undefined): number | undefined {
+  return timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined
+}
+
 async function executeAskTool(
   args: AskToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
@@ -52,10 +60,7 @@ async function executeAskTool(
       ? findLocalRunByReference(sup, args.toRunId)
       : findExternalRun(supervisorId, args.toRunId)
     const target = runInfo?.runtimeId ?? args.toRunId
-    const timeoutMs =
-      args.timeoutMs !== undefined && Number.isFinite(args.timeoutMs) && args.timeoutMs > 0
-        ? args.timeoutMs
-        : undefined
+    const timeoutMs = normalizeAskTimeoutMs(args.timeoutMs)
     try {
       const result = await client.brokerAsk(target, args.message, undefined, timeoutMs)
       return {

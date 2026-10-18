@@ -8,7 +8,7 @@
 // they can be exercised by unit tests.
 
 import { randomUUID } from 'node:crypto'
-import { extractReplyMessage, formatAskFailure } from '@dougbots/avenor-core'
+import { extractReplyMessage, formatAskFailure, normalizeAskTimeoutMs } from '@dougbots/avenor-core'
 import type { AskResult } from '@dougbots/avenor-core'
 
 /** Deadline for a cleanup call whose caller's own deadline has already expired. */
@@ -311,10 +311,7 @@ export async function askViaBroker(
 ): Promise<AskResult> {
   const messageId = randomUUID()
   const role = args.role ?? 'agent'
-  const timeoutMs =
-    args.timeoutMs !== undefined && Number.isFinite(args.timeoutMs) && args.timeoutMs > 0
-      ? args.timeoutMs
-      : undefined
+  const timeoutMs = normalizeAskTimeoutMs(args.timeoutMs)
   const signal = combineSignals(args.signal, timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined)
 
   const fail = async (detail: string): Promise<never> => {
