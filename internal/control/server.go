@@ -1918,14 +1918,23 @@ func (s *subscriber) recordSeqLocked(ev events.Event) bool {
 	return true
 }
 
+// enqueueLocked offers ev to the subscriber channel while the caller holds s.mu.
+// Every send happens under that lock and only loop receives, so a channel this
+// call has just drained always accepts the retry. Blocking on the channel here
+// would deadlock against a loop that has already taken the buffered event and is
+// waiting for s.mu.
 func (s *subscriber) enqueueLocked(ev events.Event) {
 	select {
 	case s.ch <- ev:
+		return
 	default:
-		<-s.ch
-		s.dropped++
-		s.ch <- ev
 	}
+	select {
+	case <-s.ch:
+		s.dropped++
+	default:
+	}
+	s.ch <- ev
 }
 
 func (s *subscriber) enqueue(ev events.Event) {
