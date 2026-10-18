@@ -243,6 +243,69 @@ describe('sub-agent broker mode (integration)', () => {
     }
   })
 
+  it('does not deliver an old sub-agent receive into a restarted session', async () => {
+    const fetchStub = stubBrokerFetch([])
+    const delegate = globalThis.fetch
+    const receive = Promise.withResolvers<Response>()
+    let polls = 0
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(url)).pathname === '/poll-control' && ++polls === 1) return receive.promise
+      return delegate(url, init)
+    }) as typeof fetch
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      await waitFor(() => polls === 1)
+      await harness.eventHandlers.session_shutdown({}, {})
+      await harness.eventHandlers.session_start({}, harness.ctx)
+      receive.resolve(new Response(JSON.stringify([
+        { type: 'agent_message', payload: { id: 'old-child-ask', from_run_id: 'supervisor', message: 'old session question' } },
+      ])))
+      await waitFor(() => polls > 1)
+      expect(harness.sendUserMessage).not.toHaveBeenCalled()
+      const reply = await harness.registeredTools.avenor_reply.execute('t1', { message: 'stale answer' })
+      expect(reply.details?.error).toBe(true)
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      receive.resolve(new Response('[]'))
+      fetchStub.restore()
+    }
+  })
+
+  it('does not restore a sub-agent ask when its failed send outlives the session', async () => {
+    const fetchStub = stubBrokerFetch([
+      [{ type: 'agent_message', payload: { id: 'old-child-reply', from_run_id: 'supervisor', message: 'reply before shutdown' } }],
+    ])
+    const delegate = globalThis.fetch
+    const send = Promise.withResolvers<Response>()
+    let sendCalls = 0
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(url)).pathname === '/send' && ++sendCalls === 1) {
+        return send.promise
+      }
+      return delegate(url, init)
+    }) as typeof fetch
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
+      const reply = harness.registeredTools.avenor_reply.execute('t1', { message: 'late answer' })
+        .then(() => null, (error: unknown) => error)
+      await waitFor(() => sendCalls === 1)
+      await harness.eventHandlers.session_shutdown({}, {})
+      await harness.eventHandlers.session_start({}, harness.ctx)
+      send.resolve(new Response('broker down', { status: 503 }))
+      expect(await reply).toBeInstanceOf(Error)
+      const retry = await harness.registeredTools.avenor_reply.execute('t2', { message: 'stale retry' })
+      expect(retry.details?.error).toBe(true)
+      expect(sendCalls).toBe(1)
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      send.resolve(new Response('{}'))
+      fetchStub.restore()
+    }
+  })
+
   it('does not reschedule when shutdown lands during an in-flight poll', async () => {
     const fetchStub = stubBrokerFetch([], 0, 40)
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
