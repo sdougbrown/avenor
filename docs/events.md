@@ -23,7 +23,7 @@ Events use a flat envelope. In addition to the event-specific fields below, Aven
 - `seq` — monotonically increasing, runtime-local sequence number.
 - `session_id` — backend session identifier.
 - `run_id` and `run_label` — Avenor run identity.
-- `runtime_id` — stable-supervisor runtime identifier.
+- `runtime_id` — containing launch identity. Under `avenor stable` this is the child runtime ID. On a CLI run it equals `run_id`.
 
 Use `seq`, not arrival time, to reconcile replayed and live events from the same runtime. Sequence numbers are not globally comparable across runtimes.
 
@@ -105,17 +105,19 @@ Example:
 {"event":"avenor.loop.start","run_id":"run_1","max_iterations":5,"pre_phase_count":1,"loop_phase_count":2,"ts":1234567890}
 ```
 
-**`avenor.phase.start`** — One phase is starting. Emitted before invoking the Claude backend for this phase. Fields: `phase` (phase name from config), `iteration` (0 for pre-phases, 1+ for loop iterations), `kind` (`"pre"` or `"loop"`), `ts`.
+**`avenor.phase.start`** — One phase is starting. Emitted before invoking the Claude backend for this phase. Fields: `phase` (phase name from config), `iteration` (0 for pre-phases, 1+ for loop iterations), `kind` (the section: `"pre"`, `"loop"`, `"team"`, or `"post"`), `run_kind` (the containing runner: `"loop"` or `"team"`), `ts`.
 
 Classifies as ACTIVITY.
 
 Example:
 
 ```json
-{"event":"avenor.phase.start","run_id":"run_1","phase":"code_review","iteration":1,"kind":"loop","ts":1234567890}
+{"event":"avenor.phase.start","run_id":"run_1","phase":"code_review","iteration":1,"kind":"loop","run_kind":"loop","ts":1234567890}
 ```
 
-**`avenor.phase.end`** — Phase completed (or failed). Emitted after the Claude invocation returns. Fields: `phase`, `iteration`, `stop_reason` (why the phase ended: `"end_turn"` for normal completion, `"max_tokens"`, `"tool_use"`, etc.), `ts`.
+**`avenor.phase.end`** — Phase completed (or failed). Emitted after the Claude invocation returns. Fields: `phase`, `iteration`, `run_kind`, `stop_reason` (why the phase ended: `"end_turn"` for normal completion, `"max_tokens"`, `"tool_use"`, etc.), `ts`.
+
+`avenor.phase.end` does not carry the section `kind`, and neither phase event carries a launch attempt.
 
 If the phase exit text contained a workflow directive marker (for example, `<|workflow: abort | reason|>` or `<|workflow: exit | tests green|>`), additional fields capture it: `abort_marker` (boolean) with optional `abort_marker_label`, or `exit_marker` (boolean) with optional `exit_marker_label`.
 
@@ -124,7 +126,7 @@ Classifies as ACTIVITY.
 Example:
 
 ```json
-{"event":"avenor.phase.end","run_id":"run_1","phase":"code_review","iteration":1,"stop_reason":"end_turn","ts":1234567890}
+{"event":"avenor.phase.end","run_id":"run_1","phase":"code_review","iteration":1,"run_kind":"loop","stop_reason":"end_turn","ts":1234567890}
 ```
 
 **`avenor.loop.end`** — Loop finished (or stopped early). Emitted after the final phase completes or when a phase directive halts the loop. Fields: `exit_reason` (one of `"end_turn"`, `"abort"`, `"exit"`, `"max_iterations"`, `"phase_failure"`, `"timeout"`, `"cancelled"`), `iterations_completed` (count of fully-executed iterations), `ts`.
@@ -268,6 +270,77 @@ Example (cancelled):
 ```json
 {"event":"session.end","session_id":"ses_123","stop_reason":"cancelled"}
 ```
+
+## Launch identity
+
+Avenor starts each harness process with an environment that describes the launch. A local MCP server or another harness child can read that environment and attribute its tool calls to the run that contained it.
+
+The values are informational. A child can change them, and nothing authorizes on them. Use them to join to the event stream. Never use them as credentials.
+
+| Variable | Value | Matching event field |
+|---|---|---|
+| `AVENOR_RUNTIME_ID` | Runtime identity of the launch: the CLI run ID, or the supervisor child ID. | `runtime_id` |
+| `AVENOR_EXECUTION_ID` | Containing execution: the CLI run ID, or the supervisor child ID. | `runtime_id`, which equals `run_id` on a CLI run |
+| `AVENOR_KIND` | Containing runner: `run`, `team`, or `loop`. | `run_kind` |
+| `AVENOR_PHASE` | Member or phase name. Absent for a direct run. | `phase` |
+| `AVENOR_ITERATION` | Loop iteration, including `0` for pre and post phases. Absent for team and direct runs. | `iteration` |
+| `AVENOR_LABEL` | Run label, when one was supplied. | `run_label` |
+| `AVENOR_ATTEMPT` | 1-based launch-attempt ordinal. | No event field |
+
+Avenor sets `AVENOR_RUNTIME_ID` and `AVENOR_EXECUTION_ID` to the same value. Join on `AVENOR_EXECUTION_ID`, because it names the containing execution.
+
+### Omission and scrubbing
+
+- Avenor exports only fields with a value. An unset field is absent, not empty.
+- Avenor removes inherited values for these seven names and for the superseded `AVENOR_PARENT_RUN_ID` before it adds the current launch values. Matching is on the exact name, so duplicates are removed too.
+- Near-miss names keep their values. So do `AVENOR_TREE_BUDGET`, backend selectors such as `AVENOR_AGY_TRANSPORT`, and broker values.
+- When broker credentials are present, the `pi` backend also receives `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN`. That pair lets the child poll its inbound asks and reply as its own broker run. `AVENOR_RUN_ID` is broker identity, not the containing execution.
+
+### CLI and supervisor ID mapping
+
+- A CLI run sets both IDs to the CLI run ID. That ID is `run_id` and `runtime_id` on every event of the run.
+- A supervisor child sets both IDs to the child runtime ID (`rt_N`). That ID is `runtime_id` on the child's events; those events keep `run_id` set to the supervisor run ID.
+- A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` names the inner runner, so a team inside a loop reports `team`.
+
+### Attempt numbering
+
+- A direct run uses the retry counter of its owning CLI or supervisor run. The first launch is `1`; each retry increments it.
+- A loop or team phase uses one counter per phase invocation. The first launch is `1`. Retries and requirement nudges increment it. A new phase invocation or loop iteration starts again at `1`.
+- Phase events do not carry the attempt. One `avenor.phase.start`/`avenor.phase.end` pair encloses every attempt of a phase invocation. A consumer that needs per-attempt attribution keeps its own record of repeated tool calls.
+
+### Launch, not prompt
+
+The environment describes a process launch.
+
+- A follow-up prompt to a live process does not change its environment. The process keeps the identity of its launch.
+- A fresh start or resume that starts a process receives the identity of that request.
+- A transport relaunch inside one attempt, such as the `agy` print continuation, keeps that attempt's identity.
+
+### Join a finding to its completion
+
+Assume an observation reported `AVENOR_EXECUTION_ID=a3f9c1`, `AVENOR_KIND=team`, `AVENOR_PHASE=security-reviewer`, `AVENOR_ATTEMPT=1`, and no `AVENOR_ITERATION`.
+
+1. Match `AVENOR_EXECUTION_ID` to the event `runtime_id`.
+2. Select the phase events whose `run_kind` is `AVENOR_KIND`, whose `phase` is `AVENOR_PHASE`, and whose `iteration` is `AVENOR_ITERATION`, or `0` when the variable is absent.
+3. For a non-nested run, expect exactly one `avenor.phase.start` and one `avenor.phase.end`. Read `stop_reason` from the end event.
+4. Match `avenor.team.end` or `avenor.loop.end` on the same `runtime_id`. Read `exit_reason` from that event.
+
+Example for a CLI team run:
+
+```json
+{"event":"avenor.phase.end","run_id":"a3f9c1","runtime_id":"a3f9c1","run_label":"verify-provenance","run_kind":"team","phase":"security-reviewer","iteration":0,"stop_reason":"end_turn","ts":1715000000200}
+{"event":"avenor.team.end","run_id":"a3f9c1","runtime_id":"a3f9c1","run_label":"verify-provenance","exit_reason":"end_turn","members_completed":3,"members_aborted":0,"ts":1715000000300}
+```
+
+Under a supervisor, the same join uses `runtime_id: "rt_4"` while `run_id` stays the supervisor run ID.
+
+### Coverage limits
+
+- `opencode-http` attaches to an external server and starts no backend process. `pony` runs in-process. Neither delivers an environment to a harness child.
+- Repeated nested phase names with the same iteration produce identical tuples. The join is ambiguous; no scope ID is generated.
+- An opaque launch wrapper can drop or rewrite the environment. Avenor does not verify wrapper behavior.
+
+See [Backends → Launch identity](backends.md#launch-identity) for per-backend delivery and the wrapper boundary.
 
 ## Classification system
 

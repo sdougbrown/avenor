@@ -300,11 +300,12 @@ Emitted immediately before each phase's session begins.
   "ts": 1715000000000,
   "phase": "test",
   "iteration": 2,
-  "kind": "loop"
+  "kind": "loop",
+  "run_kind": "loop"
 }
 ```
 
-`kind` is `"pre"` or `"loop"`. `iteration` is 0 for pre-phases, 1-indexed for loop phases.
+`kind` is the section: `"pre"`, `"loop"`, or `"post"`. `run_kind` is always `"loop"` for a loop run. `iteration` is 0 for pre and post phases, 1-indexed for loop phases.
 
 ### avenor.phase.end
 
@@ -317,11 +318,14 @@ Emitted after each phase's session ends (before any backoff or retry).
   "ts": 1715000000000,
   "phase": "test",
   "iteration": 2,
+  "run_kind": "loop",
   "stop_reason": "end_turn",
   "exit_marker": true,
   "exit_marker_label": "tests green"
 }
 ```
+
+The end event carries `run_kind` but not the section `kind`. One start/end pair covers every retry and requirement nudge of that phase invocation.
 
 Marker fields appear only when a marker fired during the phase:
 
@@ -333,6 +337,12 @@ Marker fields appear only when a marker fired during the phase:
 | `abort_marker_label` | abort marker had a label |
 
 If both markers appear in the same phase, only the abort fields are set (abort takes priority).
+
+### Phase identity
+
+Each phase launch receives `AVENOR_KIND=loop`, `AVENOR_PHASE` set to the phase name, and `AVENOR_ITERATION` set to the phase's `iteration` value, including `0` for pre and post phases. `AVENOR_ATTEMPT` counts launches of that phase invocation, including retries and requirement nudges.
+
+To attribute a child observation to a phase, match `AVENOR_EXECUTION_ID` to the event `runtime_id`, then select the phase events with the same `run_kind`, `phase` and `iteration`. See [Event stream → Launch identity](events.md#launch-identity) for the variable table, trust rules and the join steps.
 
 ### avenor.loop.end
 
