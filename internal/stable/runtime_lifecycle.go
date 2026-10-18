@@ -173,10 +173,12 @@ func shutdownRequestedEffects(alreadyRequested bool) []lifecycleEffect {
 func (l *lifecycleState) isActive() bool { return l.exec == execRunning }
 
 // runtimeStatus is the caller-facing raw status for this lifecycle state. A
-// published child that has not started an attempt is still running: it has not
-// produced a turn yet. A workflow child stays running across the gaps between
-// attempts because its loop or team runner owns the whole run, and it is
-// running until completion is published.
+// spawned child that has not started an attempt is running: it has not
+// produced a turn yet. A workflow child is running across the gaps between
+// attempts because its loop or team runner owns the whole run; it reads idle
+// only in the window after the run ended and before completion is published.
+// A direct child reads idle whenever no attempt is live: after a settled turn
+// and during a pending retry probe.
 func (l *lifecycleState) runtimeStatus() runstate.RuntimeStatus {
 	if l.isCompleted() {
 		return runstate.StatusEnded

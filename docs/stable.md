@@ -193,8 +193,8 @@ Status values:
 
 | Status | Meaning |
 |---|---|
-| `idle` | Runtime exists but no session is currently active (waiting for next prompt after previous one completed) |
-| `running` | Session is active (provider processing) |
+| `idle` | No attempt is live: a direct run settled a turn and is waiting for the next prompt, or is in a pending retry probe. A workflow runtime reads `idle` only briefly, between its run ending and its completion being published |
+| `running` | Runtime is live: an active attempt, a spawned child that has not produced a turn yet, or a workflow (loop/team) child before its first attempt and between attempts |
 | `ended` | Runtime has finished and will not accept new prompts |
 
 Exit codes appear once the runtime has ended.
