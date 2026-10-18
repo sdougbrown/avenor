@@ -357,3 +357,184 @@ func TestAttemptSessionDispatchKeepsContainingIdentity(t *testing.T) {
 		t.Fatalf("live return dispatched = start:%d resume:%d plain:%d, want none", len(starts), len(resumes), plain)
 	}
 }
+
+// identityPhaseEvents selects the named phase event for one phase.
+func identityPhaseEvents(all []events.Event, name, phase string) []events.Event {
+	out := make([]events.Event, 0, 1)
+	for _, ev := range all {
+		if ev.Event != name {
+			continue
+		}
+		if value, _ := ev.Fields["phase"].(string); value == phase {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// identityInt reads a numeric phase field regardless of whether it came from
+// the live stream (int) or a decoded file (float64).
+func identityInt(t *testing.T, ev events.Event, key string) int {
+	t.Helper()
+	value, ok := events.Int64(ev.Fields[key])
+	if !ok {
+		t.Fatalf("%s has no numeric %q: %v", ev.Event, key, ev.Fields)
+	}
+	return int(value)
+}
+
+// requirePhaseEventIdentity pins the containing identity on a phase event: the
+// child runtime ID, the supervisor-wide run ID, the runner kind and the phase.
+func requirePhaseEventIdentity(t *testing.T, ev events.Event, runtimeID, runID, runKind, label, phase string) {
+	t.Helper()
+	if got := ev.Fields["runtime_id"]; got != runtimeID {
+		t.Fatalf("%s runtime_id = %v, want %q", ev.Event, got, runtimeID)
+	}
+	if got := ev.Fields["run_id"]; got != runID {
+		t.Fatalf("%s run_id = %v, want %q", ev.Event, got, runID)
+	}
+	if got := ev.Fields["run_kind"]; got != runKind {
+		t.Fatalf("%s run_kind = %v, want %q", ev.Event, got, runKind)
+	}
+	if got := ev.Fields["run_label"]; got != label {
+		t.Fatalf("%s run_label = %v, want %q", ev.Event, got, label)
+	}
+	if got := ev.Fields["phase"]; got != phase {
+		t.Fatalf("%s phase = %v, want %q", ev.Event, got, phase)
+	}
+	if _, ok := ev.Fields["attempt"]; ok {
+		t.Fatalf("%s carries a per-attempt field: %v", ev.Event, ev.Fields)
+	}
+}
+
+// TestTeamLaunchIdentitiesJoinPhaseAndTeamEvents joins each member's launch
+// record to that member's phase pair and to the team's terminal outcome on the
+// supervisor control stream.
+func TestTeamLaunchIdentitiesJoinPhaseAndTeamEvents(t *testing.T) {
+	log := &launchIdentityLog{}
+	h := newItestHarness(t, Config{}, captureLaunchIdentities(log, perConstructionProvider(okConstruction)))
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []any{
+			map[string]any{"name": "alpha", "prompt": "a", "agent": "agent-a"},
+			map[string]any{"name": "beta", "prompt": "b", "agent": "agent-b"},
+			map[string]any{"name": "gamma", "prompt": "c", "agent": "agent-c"},
+		},
+	})
+	rt := h.spawnWorkflow("team", file, map[string]any{"label": "team-join"})
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+
+	launches := log.all()
+	if len(launches) != 3 {
+		t.Fatalf("launches = %d, want one per member", len(launches))
+	}
+	all := h.log.all()
+	for _, got := range launches {
+		requireIdentity(t, got, rt, "team", got.Phase, "team-join", nil, 1)
+		starts := identityPhaseEvents(all, "avenor.phase.start", got.Phase)
+		ends := identityPhaseEvents(all, "avenor.phase.end", got.Phase)
+		if len(starts) != 1 || len(ends) != 1 {
+			t.Fatalf("member %q has %d starts and %d ends, want one pair", got.Phase, len(starts), len(ends))
+		}
+		for _, ev := range []events.Event{starts[0], ends[0]} {
+			requirePhaseEventIdentity(t, ev, rt, h.sup.runID, "team", "team-join", got.Phase)
+		}
+		if sectionKind := starts[0].Fields["kind"]; sectionKind != "team" {
+			t.Fatalf("member %q section kind = %v, want team", got.Phase, sectionKind)
+		}
+		if iteration := identityInt(t, starts[0], "iteration"); iteration != 0 {
+			t.Fatalf("member %q iteration = %d, want the existing 0", got.Phase, iteration)
+		}
+		if stopReason := ends[0].Fields["stop_reason"]; stopReason != "end_turn" {
+			t.Fatalf("member %q stop_reason = %v, want end_turn", got.Phase, stopReason)
+		}
+		if _, ok := ends[0].Fields["kind"]; ok {
+			t.Fatalf("phase end gained a section kind: %v", ends[0].Fields)
+		}
+	}
+
+	teamStart := h.log.waitFor(t, "team start", itestEventIs("avenor.team.start", rt))
+	if got := teamStart.Fields["runtime_id"]; got != rt {
+		t.Fatalf("team.start runtime_id = %v, want %q", got, rt)
+	}
+	if got := teamStart.Fields["run_id"]; got != h.sup.runID {
+		t.Fatalf("team.start run_id = %v, want the supervisor run %q", got, h.sup.runID)
+	}
+	teamEnd := h.log.waitFor(t, "team end", itestEventIs("avenor.team.end", rt))
+	if got := teamEnd.Fields["runtime_id"]; got != rt {
+		t.Fatalf("team.end runtime_id = %v, want %q", got, rt)
+	}
+	if got := teamEnd.Fields["run_id"]; got != h.sup.runID {
+		t.Fatalf("team.end run_id = %v, want the supervisor run %q", got, h.sup.runID)
+	}
+	if got := teamEnd.Fields["exit_reason"]; got != "end_turn" {
+		t.Fatalf("team.end exit_reason = %v, want end_turn", got)
+	}
+}
+
+// TestLoopLaunchIdentitiesJoinIterationEvents joins each loop launch to the
+// phase pair for its own iteration while keeping the section kind.
+func TestLoopLaunchIdentitiesJoinIterationEvents(t *testing.T) {
+	log := &launchIdentityLog{}
+	h := newItestHarness(t, Config{}, captureLaunchIdentities(log, perConstructionProvider(okConstruction)))
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 2,
+		"pre":            []any{map[string]any{"name": "setup", "prompt": "pre"}},
+		"loop":           []any{map[string]any{"name": "body", "prompt": "body"}},
+		"post":           []any{map[string]any{"name": "report", "prompt": "post"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-join"})
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+
+	want := []struct {
+		phase     string
+		iteration int
+		kind      string
+	}{{"setup", 0, "pre"}, {"body", 1, "loop"}, {"body", 2, "loop"}, {"report", 0, "post"}}
+	launches := log.all()
+	if len(launches) != len(want) {
+		t.Fatalf("launches = %d, want %d", len(launches), len(want))
+	}
+	all := h.log.all()
+	for i, expected := range want {
+		iteration := expected.iteration
+		requireIdentity(t, launches[i], rt, "loop", expected.phase, "loop-join", &iteration, 1)
+
+		starts := identityPhaseEvents(all, "avenor.phase.start", expected.phase)
+		ends := identityPhaseEvents(all, "avenor.phase.end", expected.phase)
+		matching := func(evs []events.Event) []events.Event {
+			var out []events.Event
+			for _, ev := range evs {
+				if identityInt(t, ev, "iteration") == expected.iteration {
+					out = append(out, ev)
+				}
+			}
+			return out
+		}
+		starts = matching(starts)
+		ends = matching(ends)
+		if len(starts) != 1 || len(ends) != 1 {
+			t.Fatalf("phase %q iteration %d has %d starts and %d ends, want one pair",
+				expected.phase, expected.iteration, len(starts), len(ends))
+		}
+		for _, ev := range []events.Event{starts[0], ends[0]} {
+			requirePhaseEventIdentity(t, ev, rt, h.sup.runID, "loop", "loop-join", expected.phase)
+		}
+		if got := starts[0].Fields["kind"]; got != expected.kind {
+			t.Fatalf("phase %q section kind = %v, want %q", expected.phase, got, expected.kind)
+		}
+		if got := ends[0].Fields["stop_reason"]; got != "end_turn" {
+			t.Fatalf("phase %q stop_reason = %v, want end_turn", expected.phase, got)
+		}
+	}
+
+	loopEnd := h.log.waitFor(t, "loop end", itestEventIs("avenor.loop.end", rt))
+	if got := loopEnd.Fields["runtime_id"]; got != rt {
+		t.Fatalf("loop.end runtime_id = %v, want %q", got, rt)
+	}
+	if got := loopEnd.Fields["run_id"]; got != h.sup.runID {
+		t.Fatalf("loop.end run_id = %v, want the supervisor run %q", got, h.sup.runID)
+	}
+	if got := loopEnd.Fields["exit_reason"]; got != "max_iterations" {
+		t.Fatalf("loop.end exit_reason = %v, want max_iterations", got)
+	}
+}
