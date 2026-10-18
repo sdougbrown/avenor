@@ -466,7 +466,7 @@ describe('askViaBroker', () => {
     expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(0)
   })
 
-  it('reports a reset send as withdrawn when the reachability probe times out', async () => {
+  it('withdraws a reset send when the reachability probe times out', async () => {
     const calls: RecordedCall[] = []
     const fetchImpl = brokerFetch(
       {
@@ -476,6 +476,38 @@ describe('askViaBroker', () => {
           })
         },
         '/health': waitUntilAborted,
+        '/cancel_message': async () => new Response('cancel failed', { status: 500 }),
+      },
+      calls,
+    )
+
+    const startedAt = Date.now()
+    const error = await askViaBroker(env, { toRunId: 'supervisor', message: 'hello' }, fetchImpl)
+      .catch((e: unknown) => e)
+    const elapsedMs = Date.now() - startedAt
+
+    // A probe deadline of its own proves nothing about whether the send landed,
+    // so the ask is withdrawn and its unconfirmed cancel reported as pending.
+    expect(elapsedMs).toBeLessThan(5000)
+    expect(calls.filter(call => call.path === '/health')).toHaveLength(1)
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
+    expect((error as Error).message).toContain('pass to avenor_cancel to withdraw')
+  })
+
+  it('withdraws a reset send when the reachability probe is reset', async () => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => {
+          throw new TypeError('fetch failed', {
+            cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+          })
+        },
+        '/health': async () => {
+          throw new TypeError('fetch failed', {
+            cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+          })
+        },
         '/cancel_message': async () => jsonResponse({ cancelled: true }),
       },
       calls,
@@ -485,7 +517,8 @@ describe('askViaBroker', () => {
       .catch((e: unknown) => e)
 
     expect((error as Error).message).toContain('already withdrawn')
-    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(0)
+    expect(calls.filter(call => call.path === '/health')).toHaveLength(1)
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
   })
 
   it('withdraws when only some of several dial attempts failed at the dial', async () => {

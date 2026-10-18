@@ -146,6 +146,15 @@ describe('Avenor Pi extension', () => {
     })
   })
 
+  it('propagates a host-mode avenor_cancel rejection', async () => {
+    const harness = await startExtensionHarness({ extOptions: { subAgentEnv: null } })
+    cancelToolMock.mockImplementationOnce(async () => {
+      throw new Error('no pending ask')
+    })
+    await expect(harness.registeredTools.avenor_cancel.execute('tool-cancel', { message_id: 'ask-1' }))
+      .rejects.toThrow('no pending ask')
+  })
+
   it('enriches controller status details with an advisory candidate count', async () => {
     const statusPayload = { controller_id: 'ctl', desired_state: 'enabled', inflight: 1 }
     const harness = await startExtensionHarness({

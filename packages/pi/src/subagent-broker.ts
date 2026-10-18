@@ -265,24 +265,27 @@ const BROKER_PROBE_TIMEOUT_MS = 250
 /**
  * Whether the broker still answers HTTP at all. The endpoint is unauthenticated
  * and any response counts, so a live broker that rejects the request is still
- * reachable; only a transport failure or the probe timeout means it is not.
+ * reachable. Only a dial that never opened means the broker is gone: the
+ * probe's own deadline, a reset, and every other transport failure are
+ * inconclusive, so a slow broker that already processed the send still counts
+ * as reachable and the caller withdraws rather than calling the ask gone.
  */
 async function brokerReachable(env: SubAgentEnv, fetchImpl: typeof fetch): Promise<boolean> {
   try {
     await fetchImpl(`${env.brokerUrl}/health`, { signal: AbortSignal.timeout(BROKER_PROBE_TIMEOUT_MS) })
     return true
-  } catch {
-    return false
+  } catch (error) {
+    return !dialNeverOpened(error)
   }
 }
 
 /**
  * Whether a failed send provably never reached the broker, mirroring the host's
  * rule: a dial that never opened or an unusable broker address carries no
- * request, and a send that drew no HTTP response while the broker is now
- * unreachable cannot have left its edge in a broker that is gone. An HTTP
- * response, a reset, or an abort against a reachable broker may have been
- * processed and still needs a withdraw.
+ * request, and a send that drew no HTTP response while the broker no longer
+ * accepts a dial cannot have left its edge in a broker that is gone. An HTTP
+ * response, a reset, or an abort against a broker that answers at all may have
+ * been processed and still needs a withdraw.
  */
 async function sendNeverReachedBroker(
   error: unknown,
