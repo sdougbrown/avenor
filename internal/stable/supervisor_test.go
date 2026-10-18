@@ -7696,9 +7696,26 @@ func TestRunChildEventSeqMonotonicAcrossTurns(t *testing.T) {
 	if err := sup.RuntimePrompt(child.id, "follow up", ""); err != nil {
 		t.Fatalf("RuntimePrompt: %v", err)
 	}
-	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
-		return !active && !completed && phase == "done"
-	})
+	// The child still reports done from the first turn until the follow-up
+	// starts, so wait for the second turn's session.end itself.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sink.mu.Lock()
+		ends := 0
+		for _, ev := range sink.events {
+			if ev.Event == "session.end" {
+				ends++
+			}
+		}
+		sink.mu.Unlock()
+		if ends >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("captured %d session.end events after the follow-up, want 2", ends)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	cancel()
 	waitForStableDone(t, child)
 
