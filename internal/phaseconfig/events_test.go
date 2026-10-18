@@ -89,4 +89,7 @@ func TestPhaseEventWithoutRunIDOmitsIt(t *testing.T) {
 	if _, ok := recorder.events[0].Fields["run_id"]; ok {
 		t.Fatalf("run_id present for an empty run id: %v", recorder.events[0].Fields)
 	}
+	if got := recorder.events[0].Fields["run_kind"]; got != "loop" {
+		t.Fatalf("run_kind = %v, want loop even without a run id", got)
+	}
 }

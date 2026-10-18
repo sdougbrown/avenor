@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -552,6 +554,111 @@ func TestControlStreamCarriesSamePhaseTagsAsDurableLog(t *testing.T) {
 	}
 	if launches[1].Phase != "second" {
 		t.Fatalf("second launch = %+v, want the second phase", launches[1])
+	}
+}
+
+// gatedPromptProvider serves one scripted turn behind two gates: it holds the
+// prompt until emit is released so a subscriber registers before anything is
+// published, and holds it again after the terminal event until observed is
+// released so the CLI cannot exit and close the socket first. The event channel
+// stays open, since closing it lets the CLI settle the turn without waiting for
+// the prompt call.
+type gatedPromptProvider struct {
+	*scriptedProvider
+	ready    chan struct{}
+	emit     chan struct{}
+	observed chan struct{}
+}
+
+func (p *gatedPromptProvider) Prompt(ctx context.Context, sessionID, _ string) error {
+	p.mu.Lock()
+	session, ok := p.sessions[sessionID]
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown session %q", sessionID)
+	}
+	close(p.ready)
+	<-p.emit
+	session.events <- events.Event{
+		Event:     "session.end",
+		SessionID: sessionID,
+		Fields:    map[string]any{"stop_reason": "end_turn"},
+	}
+	<-p.observed
+	return nil
+}
+
+// TestControlStreamCarriesSameSessionEndTagsAsDurableLog joins the terminal
+// identity of a control-enabled direct run: the session.end a subscriber
+// observes carries the same run identity the durable log persists, and both
+// match the CLI run ID and label.
+func TestControlStreamCarriesSameSessionEndTagsAsDurableLog(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "control.sock")
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.ndjson")
+	provider := &gatedPromptProvider{
+		scriptedProvider: newScriptedProvider(),
+		ready:            make(chan struct{}),
+		emit:             make(chan struct{}),
+		observed:         make(chan struct{}),
+	}
+	oldNewProvider := newProvider
+	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	t.Cleanup(func() { newProvider = oldNewProvider })
+	releaseEmit := sync.OnceFunc(func() { close(provider.emit) })
+	releaseObserved := sync.OnceFunc(func() { close(provider.observed) })
+	defer releaseObserved()
+	defer releaseEmit()
+
+	type runResult struct {
+		code   int
+		stderr string
+	}
+	done := make(chan runResult, 1)
+	go func() {
+		stderr := &safeStringBuilder{}
+		code := run([]string{"--backend", "pi", "--dir", dir, "--prompt", "work",
+			"--on-event", eventsPath, "--control-socket", socket,
+			"--run-id", "run_direct_control", "--label", "direct-control"}, func(string) string { return "" }, stderr)
+		done <- runResult{code: code, stderr: stderr.String()}
+	}()
+
+	<-provider.ready
+	control, err := client.Dial(socket)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer control.Close()
+	controlEvents := control.Events()
+
+	releaseEmit()
+	observed := collectControlEvents(t, controlEvents, func(ev client.Event) bool {
+		return ev.Event == "session.end"
+	})
+	releaseObserved()
+
+	result := <-done
+	if result.code != 0 {
+		t.Fatalf("run = %d, want 0; stderr=%s", result.code, result.stderr)
+	}
+
+	terminal := observed[len(observed)-1]
+	fromControl := events.Event{Event: terminal.Event, SessionID: terminal.SessionID, Fields: terminal.Raw}
+	fromLog := eventsNamed(readEventLogForTest(t, eventsPath), "session.end")
+	if len(fromLog) != 1 {
+		t.Fatalf("durable session ends = %d, want 1", len(fromLog))
+	}
+	for _, expected := range []struct{ key, value string }{
+		{"runtime_id", "run_direct_control"},
+		{"run_id", "run_direct_control"},
+		{"run_label", "direct-control"},
+	} {
+		if got := joinedString(t, fromControl, expected.key); got != expected.value {
+			t.Fatalf("session.end %s on the control stream = %q, want %q", expected.key, got, expected.value)
+		}
+		if got := joinedString(t, fromLog[0], expected.key); got != expected.value {
+			t.Fatalf("session.end %s in the durable log = %q, want %q", expected.key, got, expected.value)
+		}
 	}
 }
 
