@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -560,5 +561,64 @@ func TestCloseRunsClientEnvCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("config file still exists after Close cleanup: %v", err)
+	}
+}
+
+// TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize covers the
+// cleanup of a launch abandoned before any client is retained.
+func TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize(t *testing.T) {
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	bin := filepath.Join(dir, "silent.sh")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\ntouch "+shellQuotePath(ready)+"\ncat > /dev/null\n"), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	config := filepath.Join(dir, "candidate.json")
+	if err := os.WriteFile(config, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	p := &Provider{
+		backendID: "test-acp",
+		bin:       bin,
+		sessions:  map[string]*Session{},
+		buildClientEnv: func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
+			return map[string]string{"OPENCODE_CONFIG": config}, func() error { return os.Remove(config) }
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan error, 1)
+	go func() {
+		_, err := p.Start(ctx, runtime.StartOptions{})
+		started <- err
+	}()
+	waitForPath(t, ready)
+	cancel()
+
+	select {
+	case err := <-started:
+		if err == nil {
+			t.Fatal("expected cancelled startup to fail")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after cancellation")
+	}
+	if _, err := os.Stat(config); !os.IsNotExist(err) {
+		t.Fatalf("cancelled launch config not cleaned up: %v", err)
+	}
+}
+
+func waitForPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

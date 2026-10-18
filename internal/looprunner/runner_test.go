@@ -235,9 +235,15 @@ func TestRunPostPhasesEmitCorrectKind(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	kinds := map[string]string{}
+	runKinds := map[string]string{}
 	for _, ev := range sink.events {
+		if ev.Event != "avenor.phase.start" && ev.Event != "avenor.phase.end" {
+			continue
+		}
+		phase := ev.Fields["phase"].(string)
+		runKinds[ev.Event+"|"+phase], _ = ev.Fields["run_kind"].(string)
 		if ev.Event == "avenor.phase.start" {
-			kinds[ev.Fields["phase"].(string)] = ev.Fields["kind"].(string)
+			kinds[phase] = ev.Fields["kind"].(string)
 		}
 	}
 	if kinds["work"] != "loop" {
@@ -245,6 +251,13 @@ func TestRunPostPhasesEmitCorrectKind(t *testing.T) {
 	}
 	if kinds["report"] != "post" {
 		t.Fatalf("report kind = %q, want post", kinds["report"])
+	}
+	for _, phase := range []string{"work", "report"} {
+		for _, name := range []string{"avenor.phase.start", "avenor.phase.end"} {
+			if got := runKinds[name+"|"+phase]; got != "loop" {
+				t.Fatalf("%s %s run_kind = %q, want loop", name, phase, got)
+			}
+		}
 	}
 }
 

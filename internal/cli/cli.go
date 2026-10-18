@@ -357,7 +357,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		return exitWithSentinel(1)
 	}
 	defer baseWriter.Close()
-	metadata := NewEventMetadata(runID, *label, "")
+	metadata := NewEventMetadata(runID, *label, runID)
 
 	state := control.NewState(runID, *label, *maxRetries)
 	var controlServer *control.ControlServer
@@ -440,13 +440,13 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	// the authoritative session/backend relationship local to this CLI run.
 	sessionBackends := newSessionBackendMap()
 
-	execAttempt := func(ctx context.Context, selection rosterconfig.ResolvedSelection, resumeID, prompt string) attemptResult {
+	execAttempt := func(ctx context.Context, selection rosterconfig.ResolvedSelection, resumeID, prompt string, provenance *runtime.LaunchProvenance) attemptResult {
 		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
 		return runAttempt(ctx, attemptConfig{
-			startOptions:           runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking},
+			startOptions:           runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance},
 			backend:                selection.Backend,
 			resumeID:               resumeID,
 			sessionBackends:        sessionBackends,
@@ -488,7 +488,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	makePhaseAttemptForLoop := func(roster *rosterconfig.Config) func(context.Context, phaseconfig.Phase, int, int, string) (looprunner.PhaseAttemptResult, error) {
 		var selectionMu sync.Mutex
 		resolvedSelections := make(map[string]rosterconfig.ResolvedSelection)
-		return func(ctx context.Context, phase phaseconfig.Phase, _ int, _ int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
+		return func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
 			selectionMu.Unlock()
@@ -523,7 +523,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				resolvedSelections[phase.Name] = selection
 				selectionMu.Unlock()
 			}
-			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt)
+			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
+				runID, runtime.LaunchKindLoop, phase.Name, *label, &iteration, attemptNum))
 			if r.err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, r.err
 			}
@@ -541,7 +542,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	makePhaseAttemptForTeam := func(roster *rosterconfig.Config) func(context.Context, phaseconfig.Phase, int, string) (teamrunner.PhaseAttemptResult, error) {
 		var selectionMu sync.Mutex
 		resolvedSelections := make(map[string]rosterconfig.ResolvedSelection)
-		return func(ctx context.Context, phase phaseconfig.Phase, _ int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
+		return func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
 			selectionMu.Lock()
 			selection, cached := resolvedSelections[phase.Name]
 			selectionMu.Unlock()
@@ -586,7 +587,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				resolvedSelections[phase.Name] = selection
 				selectionMu.Unlock()
 			}
-			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt)
+			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
+				runID, runtime.LaunchKindTeam, phase.Name, *label, nil, attemptNum))
 			if r.err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, r.err
 			}
@@ -857,8 +859,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		if controlServer != nil {
 			state.Update(func(s *control.Snapshot) { s.RetryAttempt = attempt })
 		}
+		opts := startOptions
+		opts.Provenance = runtime.DirectLaunchProvenance(runID, *label, attempt)
 		result = runAttempt(runCtx, attemptConfig{
-			startOptions:           startOptions,
+			startOptions:           opts,
 			backend:                *backend,
 			resumeID:               resumeID,
 			sessionBackends:        sessionBackends,
@@ -932,17 +936,16 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 	if resumeID == "" {
 		return provider.Start(ctx, opts)
 	}
-	if opts.Thinking == "" {
-		return provider.Resume(ctx, resumeID)
+	if resumer, ok := provider.(resumeWithOptionser); ok {
+		return resumer.ResumeWithOptions(ctx, resumeID, opts)
 	}
-	resumer, ok := provider.(resumeWithOptionser)
-	if !ok {
+	if opts.Thinking != "" {
 		if backend == "claude" || backend == "claude-channel" {
 			return runtime.Session{}, runtime.NewStartOnlyThinkingError(backend, opts.Thinking)
 		}
 		return runtime.Session{}, runtime.NewUnsupportedThinkingError(backend)
 	}
-	return resumer.ResumeWithOptions(ctx, resumeID, opts)
+	return provider.Resume(ctx, resumeID)
 }
 
 var runAttempt = runSingleAttempt

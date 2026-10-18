@@ -459,15 +459,16 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	renderedPhase := phase
 	renderedPhase.Prompt = rendered
 
-	if err := phaseconfig.EmitPhaseStart(opts.EventSink, opts.RunID, phase.Name, 0, kind); err != nil {
+	if err := phaseconfig.EmitPhaseStart(opts.EventSink, opts.RunID, phase.Name, 0, kind, runtime.LaunchKindTeam); err != nil {
 		return PhaseAttemptResult{}, err
 	}
 
 	defer func() {
-		_ = phaseconfig.EmitPhaseEnd(opts.EventSink, opts.RunID, phase.Name, 0, phaseStopReason(result), markerFromResult(result))
+		_ = phaseconfig.EmitPhaseEnd(opts.EventSink, opts.RunID, phase.Name, 0, runtime.LaunchKindTeam, phaseStopReason(result), markerFromResult(result))
 	}()
 
 	var retryCount int
+	var launchCount int
 	var accDirective string
 	var accLabel string
 
@@ -475,7 +476,9 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 		if retryCount > 0 && retryCount <= opts.MaxRetries {
 			phaseconfig.EmitRetry(opts.EventSink, opts.RunID, retryCount, opts.MaxRetries)
 		}
-		r, err := opts.PhaseAttempt(ctx, renderedPhase, retryCount, prevSessionID)
+		launch := launchCount
+		launchCount++
+		r, err := opts.PhaseAttempt(ctx, renderedPhase, launch, prevSessionID)
 		retryCount++
 		if err != nil {
 			return r, err
@@ -497,11 +500,11 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	if rerr != nil {
 		return
 	}
-	result, rerr = completePhaseRequirements(ctx, opts, renderedPhase, result)
+	result, rerr = completePhaseRequirements(ctx, opts, renderedPhase, result, &launchCount)
 	return
 }
 
-func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, result PhaseAttemptResult) (PhaseAttemptResult, error) {
+func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, result PhaseAttemptResult, launchCount *int) (PhaseAttemptResult, error) {
 	missing := phaseconfig.MissingRequiredFiles(opts.WorkDir, phase.Requires)
 	if len(missing) == 0 || result.ExitCode != 0 || phaseStopReason(result) != "end_turn" {
 		return result, nil
@@ -532,7 +535,9 @@ func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phase
 		}
 		nudgePhase := phase
 		nudgePhase.Prompt = phaseconfig.IncompleteNudgePrompt(customNudge, missing)
-		result, err := opts.PhaseAttempt(ctx, nudgePhase, i+1, sessionID)
+		launch := *launchCount
+		*launchCount = launch + 1
+		result, err := opts.PhaseAttempt(ctx, nudgePhase, launch, sessionID)
 		if err != nil {
 			return result, err
 		}

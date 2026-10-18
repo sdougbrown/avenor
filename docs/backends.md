@@ -70,6 +70,37 @@ The wrapper is documented, not enforced. Whatever argv you supply must satisfy t
 - **Same-path mounts** — `--dir` and the paths Avenor injects (config files, event/sentinel files, permission-handler directories) must resolve identically inside the wrapper.
 - **MCP-server reachability** — stdio MCP servers launched by the backend inherit the wrapper's environment automatically; socket or HTTP MCP servers must be exposed by the wrapper (port forwarding, network namespace sharing, or equivalent).
 
+## Launch identity
+
+A backend that starts a harness process exports Avenor's launch identity in that process's environment. A local MCP server started by the backend can read it. The variable table, omission rules, attempt numbering and join recipe are in [Event stream → Launch identity](events.md#launch-identity).
+
+| Backend | Harness child receives identity |
+|---|---|
+| `pi` | ✓ RPC subprocess |
+| `opencode-acp`, `gemini-acp`, `cursor-acp` | ✓ ACP subprocess |
+| `codex-app-server` | ✓ app-server subprocess |
+| `agy` | ✓ headless print process, and RPC host when the RPC transport is active |
+| `claude` | ✓ PTY or tmux pane |
+| `claude-channel` | ✓ tmux pane |
+| `opencode-http` | ✗ no child process |
+| `pony` | ✗ in-process |
+
+- `opencode-http` attaches to an external `opencode serve` instance. Avenor starts no backend process, so it cannot inject a per-session environment. MCP servers loaded by that server do not see the identity. A successful attach also leaves the Avenor process environment unchanged.
+- `pony` runs in-process. It has no harness child.
+- With the tmux launcher, Avenor removes inherited identity and exports the launch values inside the pane command. The tmux server environment keeps its values.
+
+Each spawning backend removes inherited identity before it adds the current launch values. Other variables keep their values, including `AVENOR_TREE_BUDGET` and backend selectors such as `AVENOR_CLAUDE_TERMINAL` and `AVENOR_AGY_TRANSPORT`.
+
+`pi` also removes inherited `PI_AGENT`, `PI_AGENT_PROFILE`, `AVENOR_BROKER_URL`, `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN`. It then adds the agent, the agent profile and the broker credentials of the current launch only. The `pi` agent process receives a broker value only when its own launch supplies that value, so an inherited credential never reaches it. The short `pi --help` capability probe runs with the inherited environment. The other backends keep inherited broker values.
+
+A prompt to an already-running process cannot change that process's environment. A fresh start or resume that starts a process receives the identity of that request. A backend that reuses a live process keeps the identity of the original launch. The `agy` print continuation inside one attempt keeps that attempt's identity.
+
+A launch wrapper receives the environment and passes it to the backend process. A wrapper that drops, filters or rewrites variables hides the identity from the backend's children. Avenor does not verify wrapper behavior.
+
+Avenor's identity variables are informational and forgeable. They are never credentials and never authorization inputs. The `pi` broker pair `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN` is separate: `AVENOR_RUN_ID` is broker run identity, not the containing execution.
+
+A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` names the inner runner. Repeated nested phase names with the same iteration produce identical tuples, so the join is ambiguous. Avenor does not generate a scope ID.
+
 ## Capability matrix
 
 | Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | claude-channel | pony |

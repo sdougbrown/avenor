@@ -1,14 +1,21 @@
 package opencodeacp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/acp"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 type fakeSessionConfigurer struct {
@@ -622,5 +629,150 @@ func TestBuildClientEnvNoOverrideWithoutBroker(t *testing.T) {
 	}
 	if env != nil {
 		t.Errorf("buildClientEnv should return nil env when no overrides needed, got: %#v", env)
+	}
+}
+
+// writeFakeACPServer writes a minimal ACP stdio server that answers
+// initialize and then session/new, after copying its OPENCODE_CONFIG to record
+// so a test can see which config the child actually read. A non-empty gate
+// makes the server announce itself at ready and then block until the gate file
+// exists, which pauses it before it reads its config.
+func writeFakeACPServer(t *testing.T, dir, name, gate, ready, record, sessionID string) string {
+	t.Helper()
+	script := filepath.Join(dir, name)
+	var body strings.Builder
+	body.WriteString("#!/bin/sh\n")
+	if ready != "" {
+		fmt.Fprintf(&body, "touch %s\n", shellQuotePath(ready))
+	}
+	if gate != "" {
+		fmt.Fprintf(&body, "while [ ! -f %s ]; do sleep 0.01; done\n", shellQuotePath(gate))
+	}
+	body.WriteString("if [ ! -r \"$OPENCODE_CONFIG\" ]; then echo 'missing OPENCODE_CONFIG' >&2; exit 3; fi\n")
+	fmt.Fprintf(&body, "cp \"$OPENCODE_CONFIG\" %s\n", shellQuotePath(record))
+	body.WriteString("n=0\n")
+	body.WriteString("while IFS= read -r line; do\n")
+	body.WriteString("  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n")
+	body.WriteString("  [ -n \"$id\" ] || continue\n")
+	body.WriteString("  n=$((n+1))\n")
+	body.WriteString("  if [ \"$n\" -eq 1 ]; then\n")
+	body.WriteString("    printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":1}}\\n' \"$id\"\n")
+	fmt.Fprintf(&body, "  else\n    printf '{\"jsonrpc\":\"2.0\",\"id\":%%s,\"result\":{\"sessionId\":%q}}\\n' \"$id\"\n", sessionID)
+	body.WriteString("  fi\ndone\n")
+	if err := os.WriteFile(script, []byte(body.String()), 0o755); err != nil {
+		t.Fatalf("write fake ACP server: %v", err)
+	}
+	return script
+}
+
+// waitForPath blocks until path exists. The fake child writes the marker, so
+// coordination does not depend on a fixed delay.
+func waitForPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestConcurrentProvidersKeepDistinctConfigFiles pins the per-launch config
+// ownership fix: two providers that share a broker run ID get separate config
+// files, and closing one leaves the other's file — and the config its child
+// reads — intact.
+func TestConcurrentProvidersKeepDistinctConfigFiles(t *testing.T) {
+	dir := t.TempDir()
+	globalCfgPath := filepath.Join(dir, "opencode.json")
+	globalCfg := `{"agent": {"alpha": {"mode": "subagent"}, "beta": {"mode": "primary"}}}`
+	if err := os.WriteFile(globalCfgPath, []byte(globalCfg), 0o600); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	t.Setenv("OPENCODE_CONFIG", globalCfgPath)
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+
+	gate := filepath.Join(dir, "release-b")
+	ready := filepath.Join(dir, "b-waiting")
+	observedB := filepath.Join(dir, "b-child-observed.json")
+	binA := writeFakeACPServer(t, dir, "acp-a.sh", "", "", filepath.Join(dir, "a-child-observed.json"), "ses_a")
+	binB := writeFakeACPServer(t, dir, "acp-b.sh", gate, ready, observedB, "ses_b")
+
+	sharedBroker := broker.New("")
+	if err := sharedBroker.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer func() { _ = sharedBroker.Stop() }()
+
+	var mu sync.Mutex
+	paths := map[string][]string{}
+	newProvider := func(bin, agent string) *acp.Provider {
+		return acp.NewProvider(acp.ProviderConfig{
+			BackendID: "opencode-acp",
+			Bin:       bin,
+			Opts:      runtime.StartOptions{Agent: agent},
+			BuildClientEnv: func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
+				env, cleanup := buildClientEnv(opts, runID, brokerToken, brokerAddr)
+				if env != nil {
+					mu.Lock()
+					paths[agent] = append(paths[agent], env["OPENCODE_CONFIG"])
+					mu.Unlock()
+				}
+				return env, cleanup
+			},
+		}).(*acp.Provider)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	providerB := newProvider(binB, "beta")
+	startedB := make(chan error, 1)
+	go func() {
+		_, err := providerB.Start(ctx, runtime.StartOptions{Broker: sharedBroker, RuntimeID: "rt_shared"})
+		startedB <- err
+	}()
+	waitForPath(t, ready)
+
+	providerA := newProvider(binA, "alpha")
+	if _, err := providerA.Start(ctx, runtime.StartOptions{Broker: sharedBroker, RuntimeID: "rt_shared"}); err != nil {
+		t.Fatalf("provider A start: %v", err)
+	}
+	// The stub exits on SIGTERM, so Close reports the terminated client.
+	_ = providerA.Close()
+
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatalf("release provider B: %v", err)
+	}
+	if err := <-startedB; err != nil {
+		t.Fatalf("provider B start after provider A closed: %v", err)
+	}
+	defer func() { _ = providerB.Close() }()
+
+	pathA, pathB := paths["alpha"][0], paths["beta"][0]
+	if pathA == pathB {
+		t.Fatalf("providers share config path %q", pathA)
+	}
+	if _, err := os.Stat(pathA); !os.IsNotExist(err) {
+		t.Fatalf("provider A config still exists after its close: %v", err)
+	}
+	rawB, err := os.ReadFile(pathB)
+	if err != nil {
+		t.Fatalf("provider B config missing after provider A closed: %v", err)
+	}
+	observed, err := os.ReadFile(observedB)
+	if err != nil {
+		t.Fatalf("provider B child did not observe its config: %v", err)
+	}
+	if !bytes.Equal(observed, rawB) {
+		t.Fatalf("provider B child observed %q, want its own config %q", observed, rawB)
+	}
+
+	// Provider A flips alpha to "all"; provider B must keep the global mode.
+	if bytes.Contains(rawB, []byte(`"mode":"all"`)) {
+		t.Errorf("provider B config carries provider A's override: %s", rawB)
 	}
 }

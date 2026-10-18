@@ -1,7 +1,11 @@
 // Package terminal provides an abstraction for interactive terminal sessions.
 package terminal
 
-import "context"
+import (
+	"context"
+
+	"github.com/sdougbrown/avenor/internal/runtime"
+)
 
 // Key represents a terminal key for send-keys operations.
 type Key string
@@ -43,6 +47,9 @@ type StartOptions struct {
 	Cols    int
 	Rows    int
 	Command string
+	// Provenance is the informational launch identity exported to the hosted
+	// process. Inherited identity is removed before it is added.
+	Provenance *runtime.LaunchProvenance
 }
 
 // Launcher creates and manages terminal sessions.

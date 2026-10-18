@@ -11,6 +11,7 @@ state named in each file is the acceptance bar for that feature.
 | Event stream reader | [watch.md](watch.md) | `avenor watch` |
 | Permission answering | [permissions.md](permissions.md) | `avenor answer` + permission handler files |
 | Config validation | [verify-command.md](verify-command.md) | `avenor verify` |
+| Launch identity | [provenance.md](provenance.md) | `avenor run --team-file` → MCP env + phase/team events |
 
 Known secondary surfaces not yet mapped: embedded board web UI (built with
 `-tags board`, see `mise.toml:go-build-full`), MCP server (`avenor mcp`,

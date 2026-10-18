@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 )
 
@@ -33,6 +34,10 @@ type ClientConfig struct {
 	Env                  map[string]string
 	AutoAnswerPermission bool
 	AppendCWDArg         bool
+	// Provenance is the informational launch identity exported to the child.
+	// Inherited identity is scrubbed from the combined environment before it
+	// is added.
+	Provenance *runtime.LaunchProvenance
 }
 
 type Client struct {
@@ -70,7 +75,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		args = append(args, "--cwd", absDir)
 	}
 	cmd := launcher.Command(ctx, cfg.Wrapper, cfg.Bin, args...)
-	cmd.Env = mergeEnviron(os.Environ(), cfg.Env)
+	cmd.Env = runtime.LaunchEnv(mergeEnviron(os.Environ(), cfg.Env), cfg.Provenance)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

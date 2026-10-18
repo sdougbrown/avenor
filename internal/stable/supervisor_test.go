@@ -482,7 +482,7 @@ func TestRunChildAttemptUsesInitialSpawnSession(t *testing.T) {
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	trackTestChildCompletion(t, child)
 	finishUnrunChildAtCleanup(t, sup, child)
-	result := sup.runChildAttempt(context.Background(), child, "", "hello")
+	result := sup.runChildAttempt(context.Background(), child, "", "hello", 1)
 	if result.exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", result.exitCode)
 	}
@@ -574,7 +574,7 @@ func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass, phase: "done", phaseLabel: "finished"})
 	trackTestChildCompletion(t, child)
 	finishUnrunChildAtCleanup(t, sup, child)
-	result := sup.runChildAttempt(context.Background(), child, "", "hello")
+	result := sup.runChildAttempt(context.Background(), child, "", "hello", 1)
 	if result.exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", result.exitCode)
 	}
@@ -3561,7 +3561,7 @@ func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
 	attemptDone := make(chan struct{})
 	go func() {
 		defer close(attemptDone)
-		sup.runChildAttempt(ctx, child, "", "do it")
+		sup.runChildAttempt(ctx, child, "", "do it", 1)
 	}()
 
 	select {

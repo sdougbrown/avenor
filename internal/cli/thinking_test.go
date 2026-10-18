@@ -44,9 +44,13 @@ func (*thinkingProvider) Capabilities(context.Context) (runtime.Capabilities, er
 	return runtime.Capabilities{}, nil
 }
 
-type plainThinkingProvider struct{ resumeCalls int }
+type plainThinkingProvider struct {
+	resumeCalls int
+	startCalls  int
+}
 
-func (*plainThinkingProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+func (p *plainThinkingProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+	p.startCalls++
 	return runtime.Session{SessionID: "started"}, nil
 }
 func (p *plainThinkingProvider) Resume(context.Context, string) (runtime.Session, error) {
@@ -75,11 +79,23 @@ func TestStartSessionThinkingResumeDispatch(t *testing.T) {
 	}
 
 	p = &thinkingProvider{}
-	if _, err := StartSession(context.Background(), p, "codex-app-server", runtime.StartOptions{}, "session"); err != nil {
+	provenance := &runtime.LaunchProvenance{RuntimeID: "rt_resume", ExecutionID: "rt_resume", Kind: "run", Attempt: 2}
+	if _, err := StartSession(context.Background(), p, "codex-app-server", runtime.StartOptions{Provenance: provenance}, "session"); err != nil {
 		t.Fatalf("empty StartSession: %v", err)
 	}
-	if p.resumeCalls != 1 || p.resumeOptsCalls != 0 {
+	if p.resumeOptsCalls != 1 || p.resumeCalls != 0 {
 		t.Fatalf("empty resume calls = plain:%d options:%d", p.resumeCalls, p.resumeOptsCalls)
+	}
+	if p.lastResumeOption.Provenance != provenance {
+		t.Fatalf("identity-only resume dropped the per-call options: %+v", p.lastResumeOption)
+	}
+
+	plain := &plainThinkingProvider{}
+	if _, err := StartSession(context.Background(), plain, "claude", runtime.StartOptions{}, "session"); err != nil {
+		t.Fatalf("plain StartSession: %v", err)
+	}
+	if plain.resumeCalls != 1 {
+		t.Fatalf("plain resume calls = %d, want the legacy plain resume", plain.resumeCalls)
 	}
 }
 
@@ -91,8 +107,8 @@ func TestStartSessionRejectsExplicitResumeWithoutNativePath(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), backend) || !strings.Contains(err.Error(), "only when starting a session") || !strings.Contains(err.Error(), `value "`+level+`"`) {
 				t.Fatalf("%s/%s error = %v", backend, level, err)
 			}
-			if p.resumeCalls != 0 {
-				t.Fatalf("%s/%s called Resume", backend, level)
+			if p.resumeCalls != 0 || p.startCalls != 0 {
+				t.Fatalf("%s/%s started a replacement process", backend, level)
 			}
 		}
 	}

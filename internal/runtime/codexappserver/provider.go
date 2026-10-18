@@ -27,7 +27,7 @@ type Provider struct {
 
 	// startClient constructs a new app-server client. Overridable in tests;
 	// defaults to StartClient when nil.
-	startClient func(context.Context, []string) (*client, error)
+	startClient func(context.Context, runtime.StartOptions) (*client, error)
 
 	// Broker fields for channel-wrapped prompt injection.
 	broker          *broker.Broker
@@ -53,7 +53,7 @@ var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
-	c, err := p.ensureClient(ctx, merged.LaunchWrapper)
+	c, err := p.ensureClient(ctx, merged)
 	if err != nil {
 		return runtime.Session{}, err
 	}
@@ -111,14 +111,18 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
-	return p.resume(ctx, sessionID, "")
+	return p.resume(ctx, sessionID, runtime.MergeStartOptions(p.opts, runtime.StartOptions{}), "")
 }
 
+// ResumeWithOptions dispatches a resume with the merged per-call launch
+// options, so a newly started app-server carries the caller's identity. An
+// existing app-server keeps the identity it was launched with; thinking is
+// taken from the per-call request only.
 func (p *Provider) ResumeWithOptions(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
-	return p.resume(ctx, sessionID, opts.Thinking)
+	return p.resume(ctx, sessionID, runtime.MergeStartOptions(p.opts, opts), opts.Thinking)
 }
 
-func (p *Provider) resume(ctx context.Context, sessionID, effort string) (runtime.Session, error) {
+func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.StartOptions, effort string) (runtime.Session, error) {
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
@@ -127,11 +131,11 @@ func (p *Provider) resume(ctx context.Context, sessionID, effort string) (runtim
 	if _, ok := p.threads[sessionID]; ok {
 		p.efforts[sessionID] = effort
 		p.mu.Unlock()
-		return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: p.opts.Dir}, nil
+		return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: opts.Dir}, nil
 	}
 	p.mu.Unlock()
 
-	c, err := p.ensureClient(ctx, p.opts.LaunchWrapper)
+	c, err := p.ensureClient(ctx, opts)
 	if err != nil {
 		return runtime.Session{}, err
 	}
@@ -156,7 +160,7 @@ func (p *Provider) resume(ctx context.Context, sessionID, effort string) (runtim
 	return runtime.Session{
 		SessionID: threadID,
 		Backend:   backendID,
-		Dir:       p.opts.Dir,
+		Dir:       opts.Dir,
 	}, nil
 }
 
@@ -318,7 +322,7 @@ func (p *Provider) Close() error {
 	return c.Close()
 }
 
-func (p *Provider) ensureClient(ctx context.Context, launchWrapper []string) (*client, error) {
+func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) (*client, error) {
 	p.mu.Lock()
 	if p.client != nil {
 		c := p.client
@@ -335,7 +339,7 @@ func (p *Provider) ensureClient(ctx context.Context, launchWrapper []string) (*c
 	if starter == nil {
 		starter = StartClient
 	}
-	c, err := starter(ctx, launchWrapper)
+	c, err := starter(ctx, opts)
 	if err != nil {
 		return nil, err
 	}

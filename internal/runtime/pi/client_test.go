@@ -483,7 +483,7 @@ func TestStartClientForwardsThinkingFlag(t *testing.T) {
 	}
 	client, err := StartClientWithAgentProfileThinkingAndDir(
 		context.Background(), "", "", "", "", "", "high", "", "", "", "",
-		nil,
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -1048,7 +1048,7 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 
 	client, err := StartClientWithAgentProfileThinkingAndDir(
 		context.Background(), "", "sonnet", "", "jockey", "", "", "",
-		"http://127.0.0.1:9999", "rt_1", "secret-token", nil,
+		"http://127.0.0.1:9999", "rt_1", "secret-token", nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -1080,7 +1080,7 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 	// With no broker identity at all, stale AVENOR_*/PI_AGENT env must be
 	// stripped from the child rather than leaked through unfiltered.
 	client2, err := StartClientWithAgentProfileThinkingAndDir(
-		context.Background(), "", "sonnet", "", "", "", "", "", "", "", "", nil,
+		context.Background(), "", "sonnet", "", "", "", "", "", "", "", "", nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("second StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -1108,7 +1108,7 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 	// Intermediate case: PI_AGENT injected while broker credentials are empty
 	// must still strip the stale AVENOR_* vars.
 	client3, err := StartClientWithAgentProfileThinkingAndDir(
-		context.Background(), "", "sonnet", "", "jockey", "", "", "", "", "", "", nil,
+		context.Background(), "", "sonnet", "", "jockey", "", "", "", "", "", "", nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("third StartClientWithAgentProfileThinkingAndDir: %v", err)

@@ -119,11 +119,12 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	})
 
 	term, err := p.launcher.Start(s.Ctx, terminal.StartOptions{
-		Name:    "avenor-" + sessionID[:8],
-		Dir:     merged.Dir,
-		Cols:    220,
-		Rows:    50,
-		Command: shellCmd,
+		Name:       "avenor-" + sessionID[:8],
+		Dir:        merged.Dir,
+		Cols:       220,
+		Rows:       50,
+		Command:    shellCmd,
+		Provenance: merged.Provenance,
 	})
 	if err != nil {
 		s.CancelFn()

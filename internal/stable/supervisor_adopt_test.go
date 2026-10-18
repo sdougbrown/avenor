@@ -180,7 +180,7 @@ func TestRunChildAttemptAdoptsExternalConversationID(t *testing.T) {
 
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	finishUnrunChildAtCleanup(t, sup, child)
-	result := sup.runChildAttempt(context.Background(), child, "", "hello")
+	result := sup.runChildAttempt(context.Background(), child, "", "hello", 1)
 	if result.exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", result.exitCode)
 	}
@@ -216,7 +216,7 @@ func TestRuntimeStatusAndListUseAdoptedSessionID(t *testing.T) {
 
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	finishUnrunChildAtCleanup(t, sup, child)
-	if res := sup.runChildAttempt(context.Background(), child, "", "hello"); res.exitCode != 0 {
+	if res := sup.runChildAttempt(context.Background(), child, "", "hello", 1); res.exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", res.exitCode)
 	}
 
@@ -247,7 +247,7 @@ func TestAdoptChildSessionIDIgnoresStaleAttempt(t *testing.T) {
 
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	finishUnrunChildAtCleanup(t, sup, child)
-	if res := sup.runChildAttempt(context.Background(), child, "", "hello"); res.exitCode != 0 {
+	if res := sup.runChildAttempt(context.Background(), child, "", "hello", 1); res.exitCode != 0 {
 		t.Fatalf("first attempt exitCode = %d, want 0", res.exitCode)
 	}
 	// After the attempt completes, simulate a newer active session replacing
@@ -290,7 +290,7 @@ func TestSessionStartUpdatesChildBeforeEventForwarding(t *testing.T) {
 	resultCh := make(chan childAttemptResult, 1)
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	finishUnrunChildAtCleanup(t, sup, child)
-	go func() { resultCh <- sup.runChildAttempt(context.Background(), child, "", "hello") }()
+	go func() { resultCh <- sup.runChildAttempt(context.Background(), child, "", "hello", 1) }()
 
 	// Wait until the attempt is active (Prompt goroutine subscribed and blocked
 	// on the release gate), then assert the provisional identity is still live.

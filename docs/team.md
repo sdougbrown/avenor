@@ -327,11 +327,12 @@ Emitted immediately before each phase's session begins. For team members, this f
   "ts": 1715000000000,
   "phase": "auth-tests",
   "iteration": 0,
-  "kind": "team"
+  "kind": "team",
+  "run_kind": "team"
 }
 ```
 
-`kind` is `"pre"`, `"team"`, or `"post"`. `iteration` is always `0` in team runs.
+`kind` is the section: `"pre"`, `"team"`, or `"post"`. `run_kind` is always `"team"` for a team run. `iteration` is always `0` in team runs.
 
 ### avenor.phase.end
 
@@ -344,9 +345,12 @@ Emitted after each phase's session ends (before any retry).
   "ts": 1715000000000,
   "phase": "auth-tests",
   "iteration": 0,
+  "run_kind": "team",
   "stop_reason": "end_turn"
 }
 ```
+
+The end event carries `run_kind` but not the section `kind`. One start/end pair covers every retry of that member.
 
 Abort marker fields appear when a member emitted an abort:
 
@@ -385,6 +389,12 @@ Emitted once after the team run finishes, regardless of how it ended.
 `exit_label` carries the label from the first abort marker when `exit_reason` is `"abort"`; absent otherwise.
 
 `members_completed` and `members_aborted` count how many team members finished (completed) and how many were counted as aborted. Pre and post phase counts are not reflected here.
+
+### Member identity
+
+Each member launch receives the launch identity in its environment: `AVENOR_KIND=team`, `AVENOR_PHASE` set to the member name, no `AVENOR_ITERATION`, and a 1-based `AVENOR_ATTEMPT`. Pre and post phases also report `AVENOR_KIND=team` with their own phase name.
+
+To attribute a child observation to a member, match `AVENOR_EXECUTION_ID` to the event `runtime_id`. Then read the member's `stop_reason` from its `avenor.phase.end` and the run's `exit_reason` from `avenor.team.end`. See [Event stream → Launch identity](events.md#launch-identity) for the variable table, trust rules and the join steps.
 
 ## Sentinel outcomes
 

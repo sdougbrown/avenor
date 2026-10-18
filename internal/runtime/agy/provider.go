@@ -273,6 +273,17 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 // Resume sets firstTurn=true but client=nil so that Prompt uses the resumed
 // command construction path rather than the "write to pending process stdin" path.
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
+	return p.resume(ctx, sessionID, runtime.MergeStartOptions(p.opts, runtime.StartOptions{}))
+}
+
+// ResumeWithOptions dispatches a resume with the merged per-call launch
+// options, so a session that has not launched yet starts its process with the
+// caller's identity. An already-owned session keeps its launch identity.
+func (p *Provider) ResumeWithOptions(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
+	return p.resume(ctx, sessionID, runtime.MergeStartOptions(p.opts, opts))
+}
+
+func (p *Provider) resume(ctx context.Context, sessionID string, startOpts runtime.StartOptions) (runtime.Session, error) {
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
@@ -299,7 +310,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	p.mu.Unlock()
 
 	version := p.validatedVersion()
-	selection, diagnostic, err := p.selectTransport(opCtx, p.opts, sessionID, version)
+	selection, diagnostic, err := p.selectTransport(opCtx, startOpts, sessionID, version)
 	if err != nil {
 		if selection.rpc != nil {
 			p.retainCleanupHost(selection.rpc)
@@ -318,10 +329,10 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 		diagnostic: diagnostic,
 		sessionID:  sessionID,
 		externalID: sessionID,
-		startOpts:  p.opts,
+		startOpts:  startOpts,
 		initCache: map[string]any{
 			"conversation_id": sessionID,
-			"model":           p.opts.Model,
+			"model":           startOpts.Model,
 			"agy_version":     version,
 		},
 		firstTurn: true,
@@ -345,7 +356,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	p.sessions[sessionID] = s
 	p.mu.Unlock()
 
-	return runtime.Session{SessionID: sessionID, Backend: BackendID, Dir: p.opts.Dir}, nil
+	return runtime.Session{SessionID: sessionID, Backend: BackendID, Dir: startOpts.Dir}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +483,7 @@ func (p *Provider) runInitialPrompt(ctx context.Context, s *sessionState, provis
 	s.client = cl
 	startOpts := s.startOpts
 	cl.launchWrapper = startOpts.LaunchWrapper
+	cl.provenance = startOpts.Provenance
 	s.mu.Unlock()
 
 	cl.mu.Lock()
@@ -612,6 +624,7 @@ func (p *Provider) runResumedPrompt(ctx context.Context, s *sessionState, sessio
 	cl := p.clientFactory()
 	cl.version = p.version
 	cl.launchWrapper = startOpts.LaunchWrapper
+	cl.provenance = startOpts.Provenance
 
 	s.mu.Lock()
 	s.client = cl // Publish before launch so concurrent Cancel can stop it.

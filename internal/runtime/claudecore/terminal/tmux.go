@@ -14,9 +14,10 @@ import (
 type TmuxLauncher struct{}
 
 // tmuxNewSessionArgs renders the new-session argv. It prefixes the command with
-// UnsetParentClaudeEnvPrefix rather than setting the child's environment. A pane
-// inherits the tmux server's environment, not avenor's, so the command itself is
-// the only place a leaked variable can be removed.
+// UnsetParentClaudeEnvPrefix and the launch identity exports rather than setting
+// the child's environment. A pane inherits the tmux server's environment, not
+// avenor's, so the command itself is the only place a leaked variable can be
+// removed and a new value can be added.
 func tmuxNewSessionArgs(opts StartOptions) []string {
 	return []string{
 		"new-session", "-d",
@@ -24,7 +25,7 @@ func tmuxNewSessionArgs(opts StartOptions) []string {
 		"-c", opts.Dir,
 		"-x", strconv.Itoa(opts.Cols),
 		"-y", strconv.Itoa(opts.Rows),
-		UnsetParentClaudeEnvPrefix() + opts.Command,
+		UnsetParentClaudeEnvPrefix() + identityEnvPrefix(opts.Provenance) + opts.Command,
 	}
 }
 

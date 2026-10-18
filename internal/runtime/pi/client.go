@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 )
 
@@ -95,10 +96,10 @@ func StartClientWithAgentAndDir(ctx context.Context, provider string, model stri
 }
 
 func StartClientWithAgentProfileAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, cwd string) (*client, error) {
-	return StartClientWithAgentProfileThinkingAndDir(ctx, provider, model, sessionDir, agent, agentProfile, "", cwd, "", "", "", nil)
+	return StartClientWithAgentProfileThinkingAndDir(ctx, provider, model, sessionDir, agent, agentProfile, "", cwd, "", "", "", nil, nil)
 }
 
-func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, thinking string, cwd string, brokerURL string, brokerRunID string, brokerToken string, launchWrapper []string) (*client, error) {
+func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, thinking string, cwd string, brokerURL string, brokerRunID string, brokerToken string, launchWrapper []string, provenance *runtime.LaunchProvenance) (*client, error) {
 	args := []string{"--mode", "rpc", "--no-session"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
@@ -116,9 +117,11 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 	argv := launcher.Argv("pi", args, launchWrapper)
 	proc := piExecCommandContext(ctx, argv[0], argv[1:]...)
 	proc.Dir = cwd
-	// Stale PI_AGENT / broker credentials from the parent must never leak into
-	// the child: they would activate sub-agent broker mode under the wrong
-	// identity, so the filter runs regardless of which values are injected.
+	// Stale PI_AGENT and broker credentials from the parent must never leak into
+	// the child: they would activate sub-agent broker mode or authenticate as
+	// the wrong run. Inherited launch identity would misattribute the child
+	// too. Filtering and scrubbing run regardless of which values are injected,
+	// then this launch's identity is added.
 	env := proc.Environ()
 	filtered := env[:0]
 	for _, e := range env {
@@ -147,7 +150,7 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 	if brokerToken != "" {
 		filtered = append(filtered, "AVENOR_BROKER_TOKEN="+brokerToken)
 	}
-	proc.Env = filtered
+	proc.Env = runtime.LaunchEnv(filtered, provenance)
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pi stdin pipe: %w", err)

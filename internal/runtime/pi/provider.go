@@ -98,12 +98,17 @@ func (p *Provider) ResumeWithOptions(ctx context.Context, sessionID string, opts
 	return p.resume(ctx, sessionID, opts, true)
 }
 
-func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.StartOptions, applyThinking bool) (runtime.Session, error) {
+func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.StartOptions, optionAware bool) (runtime.Session, error) {
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
 	merged := runtime.MergeStartOptions(p.opts, opts)
-	if !applyThinking {
+	// Thinking is a per-call request: the option-aware path applies only what
+	// the caller asked for, never a constructor default, and plain resume keeps
+	// its existing empty behavior.
+	if optionAware {
+		merged.Thinking = opts.Thinking
+	} else {
 		merged.Thinking = ""
 	}
 	if err := runtime.ValidateThinkingForBackend(backendID, merged.Thinking); err != nil {
@@ -351,7 +356,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 			}
 			return StartClientWithAgentProfileThinkingAndDir(
 				ctx, "", opts.Model, "", opts.Agent, opts.AgentProfile, opts.Thinking, opts.Dir,
-				brokerURL, brokerRunID, brokerToken, opts.LaunchWrapper,
+				brokerURL, brokerRunID, brokerToken, opts.LaunchWrapper, opts.Provenance,
 			)
 		}
 	}

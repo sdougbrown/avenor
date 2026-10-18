@@ -99,3 +99,81 @@ func TestMergeStartOptionsBrokerFields(t *testing.T) {
 		t.Fatalf("override broker fields lost: %+v", merged)
 	}
 }
+
+func TestMergeStartOptionsProvenance(t *testing.T) {
+	iteration := func(v int) *int { return &v }
+	tests := []struct {
+		name     string
+		override StartOptions
+		// mutate runs after the merge on the caller's value, to prove the
+		// merged identity is a snapshot.
+		mutate        func(*LaunchProvenance)
+		want          LaunchProvenance
+		wantIteration *int
+	}{
+		{
+			name:          "nil override keeps the base identity",
+			override:      StartOptions{},
+			want:          LaunchProvenance{RuntimeID: "rt_old", ExecutionID: "run_old", Kind: "loop", Phase: "body", Label: "old-label", Attempt: 9},
+			wantIteration: iteration(4),
+		},
+		{
+			name:     "non-nil override replaces the whole identity",
+			override: StartOptions{Provenance: &LaunchProvenance{RuntimeID: "rt_new", ExecutionID: "run_new", Kind: "run", Attempt: 1}},
+			want:     LaunchProvenance{RuntimeID: "rt_new", ExecutionID: "run_new", Kind: "run", Attempt: 1},
+		},
+		{
+			name:     "empty override clears every field",
+			override: StartOptions{Provenance: &LaunchProvenance{}},
+			want:     LaunchProvenance{},
+		},
+		{
+			name:     "merged identity is a snapshot",
+			override: StartOptions{Provenance: &LaunchProvenance{RuntimeID: "rt_new", Kind: "run", Iteration: iteration(1), Attempt: 1}},
+			mutate: func(p *LaunchProvenance) {
+				p.RuntimeID, p.Kind, p.Attempt, *p.Iteration = "rt_mutated", "mutated", 7, 9
+			},
+			want:          LaunchProvenance{RuntimeID: "rt_new", Kind: "run", Attempt: 1},
+			wantIteration: iteration(1),
+		},
+		{
+			name: "broker identity merges independently of provenance",
+			override: StartOptions{
+				RuntimeID:   "rt_broker",
+				BrokerToken: "tok_broker",
+				Provenance:  &LaunchProvenance{RuntimeID: "rt_informational", ExecutionID: "run_informational"},
+			},
+			want: LaunchProvenance{RuntimeID: "rt_informational", ExecutionID: "run_informational"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			merged := MergeStartOptions(StartOptions{Provenance: &LaunchProvenance{
+				RuntimeID: "rt_old", ExecutionID: "run_old", Kind: "loop", Phase: "body",
+				Iteration: iteration(4), Label: "old-label", Attempt: 9,
+			}}, tt.override)
+			if tt.mutate != nil {
+				tt.mutate(tt.override.Provenance)
+			}
+			if merged.Provenance == nil {
+				t.Fatal("merge dropped the identity")
+			}
+			if (merged.Provenance.Iteration == nil) != (tt.wantIteration == nil) {
+				t.Fatalf("iteration = %v, want %v", merged.Provenance.Iteration, tt.wantIteration)
+			}
+			got := *merged.Provenance
+			got.Iteration = nil
+			if tt.wantIteration != nil && *merged.Provenance.Iteration != *tt.wantIteration {
+				t.Fatalf("iteration = %d, want %d", *merged.Provenance.Iteration, *tt.wantIteration)
+			}
+			if got != tt.want {
+				t.Fatalf("provenance = %+v, want %+v", got, tt.want)
+			}
+			if merged.RuntimeID != tt.override.RuntimeID || merged.BrokerToken != tt.override.BrokerToken {
+				t.Fatalf("broker identity = (%q, %q), want (%q, %q)",
+					merged.RuntimeID, merged.BrokerToken, tt.override.RuntimeID, tt.override.BrokerToken)
+			}
+		})
+	}
+}
