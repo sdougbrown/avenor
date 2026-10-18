@@ -113,7 +113,7 @@ It reads the `.req` file, validates your chosen option against the offered set, 
 ### Basic usage
 
 ```sh
-avenor answer /tmp/avenor-permission --option allow
+avenor answer --option allow /tmp/avenor-permission
 ```
 
 This reads `/tmp/avenor-permission.req`, validates that `allow` is in the offered options, and writes to `/tmp/avenor-permission.req.response`. The `<perm-base>` argument (here `/tmp/avenor-permission`) must match the path you passed to `--permission-handler file:<path>`.
@@ -132,19 +132,19 @@ This reads `/tmp/avenor-permission.req`, validates that `allow` is in the offere
 Select an option and include a message:
 
 ```sh
-avenor answer /tmp/avenor-permission --option allow --message "Approved by operator"
+avenor answer --option allow --message "Approved by operator" /tmp/avenor-permission
 ```
 
 Cancel the request (block execution):
 
 ```sh
-avenor answer /tmp/avenor-permission --option deny --outcome cancelled
+avenor answer --option deny --outcome cancelled /tmp/avenor-permission
 ```
 
 Overwrite a previous response:
 
 ```sh
-avenor answer /tmp/avenor-permission --option allow --force
+avenor answer --option allow --force /tmp/avenor-permission
 ```
 
 ### Validation behavior
@@ -168,14 +168,14 @@ avenor answer: option "invalid" is not in the offered set; valid options: allow,
 The response file is written atomically via a temporary file to avoid partial writes. Without `--force`, the link operation fails with exit 2 if a response already exists (TOCTOU-safe).
 
 ```sh
-avenor answer /tmp/avenor-permission --option allow
+avenor answer --option allow /tmp/avenor-permission
 avenor answer: response already exists at /tmp/avenor-permission.req.response; pass --force to overwrite
 ```
 
 With `--force`, the temporary file is renamed, overwriting the existing response:
 
 ```sh
-avenor answer /tmp/avenor-permission --option allow --force
+avenor answer --option allow --force /tmp/avenor-permission
 ```
 
 ### What not to do
@@ -183,7 +183,7 @@ avenor answer /tmp/avenor-permission --option allow --force
 Calling `avenor answer` when no `.req` file exists fails with exit 2:
 
 ```sh
-avenor answer /tmp/avenor-permission --option allow
+avenor answer --option allow /tmp/avenor-permission
 avenor answer: request file /tmp/avenor-permission.req does not exist
 ```
 
@@ -192,8 +192,8 @@ The command does not create or manage the `.req` file — only Avenor does. If y
 Calling `avenor answer` multiple times without `--force` fails on the second call:
 
 ```sh
-avenor answer /tmp/avenor-permission --option allow
-avenor answer /tmp/avenor-permission --option deny  # exit 2: response already exists
+avenor answer --option allow /tmp/avenor-permission
+avenor answer --option deny /tmp/avenor-permission  # exit 2: response already exists
 ```
 
 Use `--force` to overwrite, or manually remove the `.req.response` file first.
