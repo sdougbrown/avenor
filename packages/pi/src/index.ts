@@ -153,40 +153,6 @@ const defaultDeps: ExtensionDeps = {
   Supervisor,
 }
 
-
-// Host-side inbound ask reception (sub-agent asks surfaced into the top-level session).
-let hostPollTimer: ReturnType<typeof setInterval> | null = null
-// pending inbound asks keyed by broker message_id, so a host avenor_reply can target them.
-const hostPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
-
-function stopHostAskPoll(): void {
-  if (hostPollTimer) {
-    clearInterval(hostPollTimer)
-    hostPollTimer = null
-  }
-}
-async function startHostAskPoll(ctx: ExtensionContext): Promise<void> {
-  stopHostAskPoll()
-  // Poll every 2s (mirrors the sidecar's pollControlLoop cadence) for inbound asks.
-  hostPollTimer = setInterval(async () => {
-    try {
-      const { asks } = await deps.brokerReceiveTool({})
-      for (const ask of asks) {
-        hostPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
-        const from = ask.role && ask.role !== 'agent' ? `${ask.from_run_id} (${ask.role})` : ask.from_run_id
-        const body =
-          `**📨 Ask from sub-agent** (\`${from}\`)\n\n` +
-          `${ask.message}\n\n` +
-          `To answer, use the intercom tool: avenor_reply({ from_run_id: ${JSON.stringify(ask.from_run_id)}, reply_to_message_id: ${JSON.stringify(ask.message_id)}, message: "..." })`
-        await ctx.sendUserMessage(body, { deliverAs: 'steer' as const })
-      }
-    } catch (error) {
-      // No supervisor/broker yet — this is expected until a supervisor starts a broker.
-    }
-  }, 2000)
-  hostPollTimer.unref?.()
-}
-
 export function statusSupervisorId(
   requestedSupervisorId: string | undefined,
   spawnedSupervisorId: string,
@@ -552,7 +518,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
     }
 
-    async function startSubAgentPoll(ctx: ExtensionContext): Promise<void> {
+    async function startSubAgentPoll(): Promise<void> {
       if (!subAgentEnv) return
       stopSubAgentPoll()
       const generation = subAgentPollGeneration
@@ -564,13 +530,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         try {
           // The broker encodes an empty queue as JSON null.
           const msgs = ((await postBroker(subAgentEnv, '/poll-control', {})) ?? []) as Array<Record<string, unknown>>
+          if (generation !== subAgentPollGeneration) return
           if (consecutiveFailures >= 3) console.error('[avenor] sub-agent broker poll recovered')
           consecutiveFailures = 0
           for (const msg of msgs) {
             const ask = parseControlMessage(msg)
             if (!ask) continue
             subAgentPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
-            await ctx.sendUserMessage(formatInboundAskBody(ask), { deliverAs: 'steer' as const })
+            pi.sendUserMessage(formatInboundAskBody(ask), { deliverAs: 'steer' as const })
           }
         } catch (error) {
           // Broker unreachable while it is starting up is expected; persistent
@@ -586,6 +553,52 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
       subAgentPollTimer = setTimeout(() => void tick(), intervalMs)
       subAgentPollTimer.unref?.()
+    }
+
+    // Host asks belong to this extension instance, not to other Pi sessions.
+    let hostPollTimer: ReturnType<typeof setTimeout> | null = null
+    // Bumped on every start/stop so an in-flight tick cannot deliver or
+    // reschedule itself after the poll was invalidated.
+    let hostPollGeneration = 0
+    // pending inbound asks keyed by broker message_id so avenor_reply can target them.
+    const hostPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
+
+    function stopHostAskPoll(): void {
+      hostPollGeneration++
+      if (hostPollTimer) {
+        clearTimeout(hostPollTimer)
+        hostPollTimer = null
+      }
+    }
+
+    function startHostAskPoll(): void {
+      stopHostAskPoll()
+      const generation = hostPollGeneration
+      const intervalMs = options.pollIntervalMs ?? 2000
+      // Recursive setTimeout (not setInterval): a slow receive must not overlap
+      // the next tick and surface asks out of order.
+      const tick = async (): Promise<void> => {
+        try {
+          const { asks } = await deps.brokerReceiveTool({})
+          if (generation !== hostPollGeneration) return
+          for (const ask of asks) {
+            hostPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
+            const from = ask.role && ask.role !== 'agent' ? `${ask.from_run_id} (${ask.role})` : ask.from_run_id
+            const body =
+              `**📨 Ask from sub-agent** (\`${from}\`)\n\n` +
+              `${ask.message}\n\n` +
+              `To answer, use the intercom tool: avenor_reply({ from_run_id: ${JSON.stringify(ask.from_run_id)}, reply_to_message_id: ${JSON.stringify(ask.message_id)}, message: "..." })`
+            pi.sendUserMessage(body, { deliverAs: 'steer' as const })
+          }
+        } catch {
+          // No supervisor/broker yet — this is expected until a supervisor starts a broker.
+        }
+        if (generation !== hostPollGeneration) return
+        hostPollTimer = setTimeout(() => void tick(), intervalMs)
+        hostPollTimer.unref?.()
+      }
+      hostPollTimer = setTimeout(() => void tick(), intervalMs)
+      hostPollTimer.unref?.()
     }
 
     function recordPollingError(
@@ -1209,16 +1222,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       lastStatusEntries = []
       pollingErrorCount = 0
       pollingErrors.length = 0
-      void startHostAskPoll(ctx)
-      void startSubAgentPoll(ctx)
+      if (!isSubAgentBrokerMode) startHostAskPoll()
+      void startSubAgentPoll()
     })
 
     pi.on('session_shutdown', async () => {
-      await stopPolling()
+      // Invalidate broker work before the first await so late receives and failed replies cannot repopulate a closed session.
       stopHostAskPoll()
       stopSubAgentPoll()
       hostPendingAsks.clear()
       subAgentPendingAsks.clear()
+      await stopPolling()
       // Release any still-blocking waiters so their tool calls return instead
       // of parking on a session that no longer exists.
       for (const wait of [...pendingWaits]) {
@@ -1772,6 +1786,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
           // Claim the ask before awaiting the send so a concurrent reply for
           // the same ask cannot resolve the same target and double-answer it.
+          const generation = subAgentPollGeneration
           subAgentPendingAsks.delete(target.message_id)
           try {
             await postBroker(subAgentEnv, '/send', {
@@ -1788,31 +1803,29 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               },
             })
           } catch (error) {
-            // A failed send leaves the asker waiting; keep the ask retryable.
-            subAgentPendingAsks.set(target.message_id, target)
+            // Restore only into the session that received the ask.
+            if (generation === subAgentPollGeneration) subAgentPendingAsks.set(target.message_id, target)
             throw error
           }
           return { content: [{ type: 'text', text: 'Reply sent' }] }
         }
 
-        // Resolve the asker + message id: prefer explicit params, else the
-        // most recent pending ask from that sub-agent.
-        let fromRunId = params.from_run_id
-        let messageId = params.reply_to_message_id
-        if (!messageId) {
-          let match: { from_run_id: string; message_id: string } | undefined
-          for (const [, pending] of hostPendingAsks) {
-            if (pending.from_run_id === fromRunId && (!match || pending.message_id > match.message_id)) {
-              match = pending
-            }
-          }
-          if (match) messageId = match.message_id
-        }
-        if (!fromRunId || !messageId) {
+        const target = resolveReplyTarget(hostPendingAsks, params.from_run_id, params.reply_to_message_id)
+        if (!target) {
           return { content: [{ type: 'text', text: 'No pending ask found to reply to. Pass from_run_id and/or reply_to_message_id.' }], details: { error: true } }
         }
-        await deps.brokerReplyTool({ toRunId: fromRunId, replyTo: messageId, message: params.message, supervisorId: params.supervisor_id })
-        hostPendingAsks.delete(messageId)
+        // Claim the ask before awaiting the send so a concurrent reply for
+        // the same ask cannot resolve the same target and double-answer it.
+        const generation = hostPollGeneration
+        hostPendingAsks.delete(target.message_id)
+        try {
+          await deps.brokerReplyTool({ toRunId: target.from_run_id, replyTo: target.message_id, message: params.message, supervisorId: params.supervisor_id })
+        } catch (error) {
+          // A failed send leaves the asker waiting, so keep the ask retryable —
+          // but only while the session that received it is still current.
+          if (generation === hostPollGeneration) hostPendingAsks.set(target.message_id, target)
+          throw error
+        }
         return { content: [{ type: 'text', text: 'Reply sent' }] }
       },
     })

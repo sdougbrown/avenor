@@ -1,6 +1,5 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { createHash } from 'node:crypto'
-import type { ExtensionDeps } from './index.js'
 import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
@@ -15,7 +14,7 @@ import extensionFactory, {
   statusSupervisorId,
 } from './index.js'
 import { findLiveStatusForTrackedRun } from './types.js'
-import { makeInspectResult } from './test-fixtures.js'
+import { makeInspectResult, startExtensionHarness } from './test-fixtures.js'
 import * as coreModule from '@dougbots/avenor-core'
 
 // Stub the core askTool (imported directly by the extension, not via deps) so
@@ -40,67 +39,10 @@ async function withoutAmbientAgentProfile<T>(run: () => Promise<T>): Promise<T> 
   }
 }
 
-async function createHarnessBase(options: {
-  deps?: Partial<ExtensionDeps>
-  extOptions?: { pollIntervalMs?: number }
-  ui?: Record<string, any>
-  onEmit?: (channel: string, payload: unknown) => void
-  sendUserMessage?: any
-}) {
-  const registeredTools: Record<string, any> = {}
-  const registeredCommands: Record<string, any> = {}
-  const eventHandlers: Record<string, any> = {}
-  const setStatus = mock((..._args: any[]) => {})
-  const setWidget = mock((..._args: any[]) => {})
-  const notify = mock((..._args: any[]) => {})
-  const sendUserMessage = options.sendUserMessage ?? mock(() => {})
-  const emitted: Array<[string, unknown]> = []
-  const mockPi = {
-    on: (event: string, handler: any) => { eventHandlers[event] = handler },
-    registerTool: (definition: { name: string }) => { registeredTools[definition.name] = definition },
-    registerCommand: (name: string, definition: any) => { registeredCommands[name] = definition },
-    registerMessageRenderer: () => {},
-    sendUserMessage,
-    events: {
-      emit: mock((channel: string, payload: unknown) => {
-        emitted.push([channel, payload])
-        options.onEmit?.(channel, payload)
-      }),
-      on: mock(() => () => {}),
-    },
-  }
-  const baseDeps: ExtensionDeps = {
-    spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock', runtime_id: 'rt-1' })),
-    statusTool: mock(async () => ({ runs: [], count: 0 })),
-    eventsTool: mock(async () => ({ events: [] })),
-    answerPermissionTool: mock(async () => ({ ok: true })),
-    followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
-    inspectTool: mock(async () => makeInspectResult({ status: 'running' })),
-    resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
-    shutdownTool: mock(async () => ({ ok: true })),
-    workflowStatusTool: mock(async () => ({})),
-    workflowWaitTool: mock(async () => ({})),
-    workflowInspectTool: mock(async () => ({})),
-    workflowEventsTool: mock(async () => ({})),
-    workflowCompleteTool: mock(async () => ({})),
-    workflowGateTool: mock(async () => ({})),
-    workflowControllerStatusTool: mock(async () => ({})),
-    workflowReadyTool: mock(async () => ({})),
-    observeRun: mock(() => null),
-    dial: mock(async () => ({ close() {} })),
-    Supervisor: class {} as any,
-  }
-  await createExtension({ ...baseDeps, ...options.deps }, options.extOptions)(mockPi as any)
-
-  const ctx = { cwd: '/tmp', ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) } }
-  await eventHandlers.session_start({}, ctx)
-  return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, setStatus, setWidget }
-}
-
 async function createPollingHarness(statusTool: any, observeRun = mock(() => null)) {
   let resolvePollCompleted: (() => void) | undefined
   const waitForPoll = () => new Promise<void>(resolve => { resolvePollCompleted = resolve })
-  const h = await createHarnessBase({
+  const h = await startExtensionHarness({
     deps: { statusTool, observeRun },
     onEmit: (channel) => {
       if (channel === CHANNEL_POLL_COMPLETED) resolvePollCompleted?.()
@@ -133,7 +75,7 @@ async function createMultiSupervisorHarness(options: {
   const waitPollMatching = (match: (payload: any) => boolean) => new Promise<void>(resolve => {
     matchWaiters.push({ match, resolve })
   })
-  const h = await createHarnessBase({
+  const h = await startExtensionHarness({
     deps: {
       statusTool: options.statusTool,
       ...(options.spawnTool !== undefined && { spawnTool: options.spawnTool }),
@@ -165,7 +107,7 @@ describe('Avenor Pi extension', () => {
   })
 
   it('wires avenor_ask timeout_ms through to the ask tool', async () => {
-    const harness = await createHarnessBase({})
+    const harness = await startExtensionHarness({})
     await harness.registeredTools.avenor_ask.execute(
       'tool-ask',
       { to_run_id: 'run-1', message: 'hello', timeout_ms: 2500 },
@@ -183,7 +125,7 @@ describe('Avenor Pi extension', () => {
 
   it('enriches controller status details with an advisory candidate count', async () => {
     const statusPayload = { controller_id: 'ctl', desired_state: 'enabled', inflight: 1 }
-    const harness = await createHarnessBase({
+    const harness = await startExtensionHarness({
       deps: {
         workflowControllerStatusTool: mock(async () => statusPayload),
         workflowReadyTool: mock(async () => ({ advisory: true, controller_id: 'ctl', candidates: [{}, {}] })),
@@ -196,7 +138,7 @@ describe('Avenor Pi extension', () => {
   })
 
   it('omits the candidate count when the ready query fails', async () => {
-    const harness = await createHarnessBase({
+    const harness = await startExtensionHarness({
       deps: {
         workflowControllerStatusTool: mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' })),
         workflowReadyTool: mock(async () => {
@@ -212,7 +154,7 @@ describe('Avenor Pi extension', () => {
 
   it('forwards controller status to the supervisor client with the requested supervisor', async () => {
     const statusTool = mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' }))
-    const harness = await createHarnessBase({
+    const harness = await startExtensionHarness({
       deps: {
         workflowControllerStatusTool: statusTool,
         workflowReadyTool: mock(async () => ({})),
@@ -226,7 +168,7 @@ describe('Avenor Pi extension', () => {
   it('lists all controllers and skips the advisory ready query when controller_id is omitted', async () => {
     const statusTool = mock(async () => ({ controllers: [] }))
     const readyTool = mock(async () => ({}))
-    const harness = await createHarnessBase({
+    const harness = await startExtensionHarness({
       deps: {
         workflowControllerStatusTool: statusTool,
         workflowReadyTool: readyTool,
@@ -563,7 +505,7 @@ describe('Avenor Pi extension', () => {
           return { supervisorId: '/tmp/sock', getClient: () => singletonClient }
         }
       } as any,
-    })(mockPi as any)
+    }, { subAgentEnv: null })(mockPi as any)
 
     expect(Object.keys(registeredTools)).toContain('avenor_spawn')
     expect(Object.keys(registeredTools)).toContain('avenor_status')
@@ -841,7 +783,7 @@ describe('Avenor Pi extension', () => {
       observeRun: mock(() => null),
       dial: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })),
       Supervisor: class {} as any,
-    })(mockPi as any)
+    }, { subAgentEnv: null })(mockPi as any)
 
     const status = await registeredTools.avenor_status.execute('tool-status', { run_id: 'status-run' })
     expect(status.content[0]?.text).toBe(JSON.stringify(statusPayload, null, 2))
@@ -915,7 +857,7 @@ describe('Avenor Pi extension', () => {
           }
         } as any,
       })
-    })(mockPi as any)
+    }, { subAgentEnv: null })(mockPi as any)
 
     const result = await inspectToolDef.execute('tool-1', { run_id: 'run-1' })
     expect(result.content[0].text).toContain('"final_output": "hello world"')
