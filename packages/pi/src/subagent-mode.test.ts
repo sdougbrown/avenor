@@ -1,7 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import type { ExtensionDeps } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
-import { startExtensionHarness, waitFor } from './test-fixtures.js'
+import { startExtensionHarness, waitFor, waitUntilAborted } from './test-fixtures.js'
 
 const subAgentEnv = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } as const
 
@@ -11,15 +11,6 @@ interface FetchCall {
 }
 
 type BrokerHandler = (init: RequestInit | undefined) => Response | Promise<Response>
-
-/** Reject the way fetch does when its signal aborts. */
-const waitUntilAborted: BrokerHandler = init =>
-  new Promise((_resolve, reject) => {
-    const signal = init?.signal
-    if (!signal) throw new Error('wait_reply must receive an abort signal')
-    if (signal.aborted) return reject(signal.reason)
-    signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-  })
 
 /**
  * Stub global fetch with canned /poll-control responses; records every call.
@@ -116,12 +107,15 @@ describe('sub-agent broker mode (integration)', () => {
       expect(send).toBeDefined()
       expect(send!.body).toMatchObject({ run_id: 'rt_child', token: 'tok', type: 'agent_message' })
       const payload = send!.body.payload as Record<string, unknown>
-      expect(payload).toMatchObject({
+      expect(typeof payload.id).toBe('string')
+      expect(payload).toEqual({
+        id: payload.id,
+        from: 'rt_child',
         from_run_id: 'rt_child',
         to_run_id: 'supervisor',
-        reply_to: 'ask-1',
         message: 'yes, green',
         role: 'agent',
+        reply_to: 'ask-1',
       })
 
       // The pending ask is cleared after replying.
@@ -392,7 +386,10 @@ describe('sub-agent broker mode (integration)', () => {
         type: 'agent_message',
       })
       const payload = send?.body.payload as Record<string, unknown>
-      expect(payload).toMatchObject({
+      expect(typeof payload.id).toBe('string')
+      expect(payload).toEqual({
+        id: payload.id,
+        from: 'rt_child',
         from_run_id: 'rt_child',
         to_run_id: 'supervisor',
         message: 'is the build green?',
@@ -404,6 +401,25 @@ describe('sub-agent broker mode (integration)', () => {
         token: 'tok',
         waiting_for: payload.id,
       })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('names the target run when the reply carries no from_run_id', async () => {
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/wait_reply': () => Response.json({ payload: { message: 'green' } }),
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const result = await harness.registeredTools.avenor_ask.execute('t1', {
+        to_run_id: 'supervisor',
+        message: 'is the build green?',
+      })
+      expect(result.content).toEqual([{ type: 'text', text: 'Reply from supervisor:\ngreen' }])
+      expect(result.details).toEqual({ reply: 'green', from_run_id: '' })
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()

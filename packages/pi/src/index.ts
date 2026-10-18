@@ -4,6 +4,7 @@ import { Type } from 'typebox'
 import { randomUUID } from 'node:crypto'
 import {
   askViaBroker,
+  buildAgentMessage,
   formatInboundAskBody,
   parseControlMessage,
   postBroker,
@@ -1806,19 +1807,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           const generation = subAgentPollGeneration
           subAgentPendingAsks.delete(target.message_id)
           try {
-            await postBroker(subAgentEnv, '/send', {
-              from_run_id: subAgentEnv.runId,
-              to_run_id: target.from_run_id,
-              type: 'agent_message',
-              payload: {
-                id: randomUUID(),
-                from_run_id: subAgentEnv.runId,
-                to_run_id: target.from_run_id,
-                message: params.message,
-                role: 'agent',
-                reply_to: target.message_id,
-              },
-            })
+            await postBroker(subAgentEnv, '/send', buildAgentMessage({
+              fromRunId: subAgentEnv.runId,
+              toRunId: target.from_run_id,
+              messageId: randomUUID(),
+              message: params.message,
+              role: 'agent',
+              replyTo: target.message_id,
+            }))
           } catch (error) {
             // Restore only into the session that received the ask.
             if (generation === subAgentPollGeneration) subAgentPendingAsks.set(target.message_id, target)

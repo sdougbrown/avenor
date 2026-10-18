@@ -7,7 +7,7 @@ import {
   readSubAgentEnv,
   resolveReplyTarget,
 } from './subagent-broker.js'
-import { waitFor } from './test-fixtures.js'
+import { waitFor, waitUntilAborted } from './test-fixtures.js'
 
 const env = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_1', token: 'tok' } as const
 
@@ -154,15 +154,6 @@ function brokerFetch(
 const jsonResponse = (value: unknown, status = 200): Response =>
   new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 
-/** Reject the way fetch does when its signal aborts, so timeout paths are real. */
-const waitUntilAborted = (init: RequestInit | undefined): Promise<Response> =>
-  new Promise((_resolve, reject) => {
-    const signal = init?.signal
-    if (!signal) throw new Error('wait_reply must receive an abort signal')
-    if (signal.aborted) return reject(signal.reason)
-    signal.addEventListener('abort', () => reject(signal.reason), { once: true })
-  })
-
 describe('askViaBroker', () => {
   it('sends the ask as the child run and returns the correlated reply', async () => {
     const calls: RecordedCall[] = []
@@ -188,7 +179,8 @@ describe('askViaBroker', () => {
     })
     const payload = send?.body.payload as Record<string, unknown>
     expect(typeof payload.id).toBe('string')
-    expect(payload).toMatchObject({
+    expect(payload).toEqual({
+      id: payload.id,
       from: 'rt_1',
       from_run_id: 'rt_1',
       to_run_id: 'supervisor',
@@ -282,7 +274,11 @@ describe('askViaBroker', () => {
       {
         '/send': async () => jsonResponse({ queued: true }),
         '/wait_reply': waitUntilAborted,
-        '/cancel_message': async () => new Response('no pending ask for this message id', { status: 404 }),
+        '/cancel_message': async (init) => {
+          // Cleanup runs on its own deadline: the caller's signal is already aborted.
+          expect(init?.signal?.aborted).toBe(false)
+          return new Response('no pending ask for this message id', { status: 404 })
+        },
       },
       calls,
     )
@@ -343,6 +339,28 @@ describe('askViaBroker', () => {
     expect(controller.signal.aborted).toBe(false)
     expect((error as Error).message).toContain('wait for reply: timed out')
     expect((error as Error).message).toContain('already withdrawn')
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
+  })
+
+  it('withdraws when the caller aborts while the send is in flight', async () => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': waitUntilAborted,
+        '/cancel_message': async () => new Response('cancel failed', { status: 500 }),
+      },
+      calls,
+    )
+    const controller = new AbortController()
+    const pending = askViaBroker(env, { toRunId: 'supervisor', message: 'hello', signal: controller.signal }, fetchImpl)
+    await waitFor(() => calls.some(call => call.path === '/send'))
+    controller.abort()
+
+    const error = await pending.catch((e: unknown) => e)
+    // The send may have registered an edge before aborting, so it still needs a
+    // withdraw, and an unconfirmable withdraw leaves the ask possibly pending.
+    expect((error as Error).message).toContain('send ask: cancelled')
+    expect((error as Error).message).toContain('pass to avenor_cancel to withdraw')
     expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
   })
 

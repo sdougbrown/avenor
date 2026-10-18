@@ -77,6 +77,37 @@ export class BrokerHttpError extends Error {
   }
 }
 
+export interface AgentMessageFields {
+  fromRunId: string
+  toRunId: string
+  messageId: string
+  message: string
+  role: string
+  /** Ask message id being answered; set only on a reply. */
+  replyTo?: string
+  /** Set only on an ask, so the broker tracks the waiting reply. */
+  expectsReply?: boolean
+}
+
+/** Build the `/send` body for one agent_message, as the broker child tools do. */
+export function buildAgentMessage(fields: AgentMessageFields): Record<string, unknown> {
+  return {
+    from_run_id: fields.fromRunId,
+    to_run_id: fields.toRunId,
+    type: 'agent_message',
+    payload: {
+      id: fields.messageId,
+      from: fields.fromRunId,
+      from_run_id: fields.fromRunId,
+      to_run_id: fields.toRunId,
+      message: fields.message,
+      role: fields.role,
+      ...(fields.expectsReply ? { expects_reply: true } : {}),
+      ...(fields.replyTo !== undefined ? { reply_to: fields.replyTo } : {}),
+    },
+  }
+}
+
 export async function postBroker(
   env: SubAgentEnv,
   path: string,
@@ -257,20 +288,14 @@ export async function askViaBroker(
     await postBroker(
       env,
       '/send',
-      {
-        from_run_id: env.runId,
-        to_run_id: args.toRunId,
-        type: 'agent_message',
-        payload: {
-          id: messageId,
-          from: env.runId,
-          from_run_id: env.runId,
-          to_run_id: args.toRunId,
-          message: args.message,
-          role,
-          expects_reply: true,
-        },
-      },
+      buildAgentMessage({
+        fromRunId: env.runId,
+        toRunId: args.toRunId,
+        messageId,
+        message: args.message,
+        role,
+        expectsReply: true,
+      }),
       fetchImpl,
       signal,
     )
