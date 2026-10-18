@@ -272,8 +272,10 @@ print(conn.makefile().readline().strip())
 PY
 )
 printf '%s\n' "$SPAWN"
-RT=$(printf '%s' "$SPAWN" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["runtime_id"])')
-./avenor await --socket "$SOCK" --until done --timeout 240s "$RT"
+# Wait on the sentinel, not a control client: a status or await connection
+# opened while members start can make every member fail.
+for _ in $(seq 1 480); do [ -s "$SCRATCH/sup-done.env" ] && break; sleep 0.5; done
+cat "$SCRATCH/sup-done.env"
 python3 "$SCRATCH/join.py" "$SCRATCH/observations.ndjson" "$SCRATCH/sup-events.ndjson" supervisor
 ```
 
@@ -305,8 +307,9 @@ The drive passes when all of these are captured:
 4. The supervisor drive prints the same three member joins. Its final line shows
    `execution_id=rt_N`, and the checker requires that `run_id` on those events
    is the supervisor run, not the execution ID.
-5. `avenor await` exits 0 for the supervisor run. Exit 10 or 11 is a failed run
-   and therefore a finding, not a pass.
+5. `sup-done.env` for the supervisor run contains `DONE` and
+   `STOP_REASON=end_turn`. Any other status is a failed run and therefore a
+   finding, not a pass.
 
 ## Gotchas
 
@@ -323,7 +326,7 @@ The drive passes when all of these are captured:
 - A member that calls the tool twice makes its attribution ambiguous. Rerun the
   drive; do not edit the event log.
 - `--dir` is where the agents work. Point it at the scratch dir, never the repo.
-- `--timeout 180s` on the CLI run and `--timeout 240s` on `avenor await` bound
+- `--timeout 180s` on the CLI run and the 240s sentinel wait bound
   a wedged backend. The supervisor PID must come from `$!`; never kill by
   process name.
 - The supervisor writes child state under `/tmp/avenor-stable/`. Copy evidence
