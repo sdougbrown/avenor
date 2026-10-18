@@ -17,21 +17,24 @@ import (
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
-// permissionRouter owns supervisor-level permission routing: the options
-// cached for each pending request, the exact provider generation a direct
-// answer must reach, and the decider and direct-model concurrency accounting.
-// Runtime-local routing marks, failure counts, exhaustion and the model-call
-// budget stay with the child runtime and are reached only through
+// permissionRouter owns supervisor-level permission routing:
+//   - the options cached for each pending request;
+//   - the exact provider generation a direct answer must reach;
+//   - decider and direct-model concurrency accounting.
+//
+// The child runtime keeps its own routing marks, failure counts, exhaustion
+// and model-call budget. The router reaches them only through
 // permissionRouterHost.
 //
-// mu is a leaf lock. The option cache and direct cleanup also run inside the
-// supervisor controlMu envelope (controlMu -> mu) so a replacement request ID
-// cannot be cached between option removal and claim resolution; answer-option
-// reads and retry snapshots use that same envelope. A claim-registration
-// callback stores its binding under mu alone. Nothing that can block or
-// re-enter is invoked with mu held: no control-server call, spawn, provider or
-// model call, retry, filesystem removal, logging or callback. Snapshot under
-// mu, unlock, then act.
+// mu is a leaf lock. Option caching, direct cleanup, answer-option reads and
+// retry snapshots take mu inside the supervisor's controlMu (controlMu -> mu).
+// That keeps a replacement request ID from being cached between option
+// removal and claim resolution. A claim-registration callback stores its
+// binding under mu alone.
+//
+// Never call anything that can block or re-enter while holding mu: no
+// control-server call, spawn, provider or model call, retry, filesystem
+// removal, logging or callback. Snapshot under mu, unlock, then act.
 type permissionRouter struct {
 	mu                     sync.Mutex
 	permOptions            map[string][]any                     // keyed by "runtimeID:requestID"
