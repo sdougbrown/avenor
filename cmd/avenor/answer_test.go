@@ -170,7 +170,35 @@ func TestRunAnswerFlagPositionVariants(t *testing.T) {
 		stderrSub string // non-empty: stderr must contain this
 		wantOpt   string // when wantCode == 0, expected option_id in the response
 		wantMsg   string // when wantCode == 0, expected message in the response
+		wantOut   string // when non-empty and wantCode == 0, expected outcome in the response
 	}{
+		{
+			name: "outcome after path",
+			args: func(p string) []string {
+				return []string{"--option", "allow", p, "--outcome", "cancelled"}
+			},
+			wantCode: 0,
+			wantOpt:  "allow",
+			wantOut:  "cancelled",
+		},
+		{
+			// A flag repeated before the path keeps the plain flag-package
+			// rule: the last value wins.
+			name: "repeated flag before path last wins",
+			args: func(p string) []string {
+				return []string{"--option", "allow", "--option", "deny", p}
+			},
+			wantCode: 0,
+			wantOpt:  "deny",
+		},
+		{
+			name: "terminator with no preceding flags",
+			args: func(p string) []string {
+				return []string{"--", p}
+			},
+			wantCode:  2,
+			stderrSub: "--option <id> is required",
+		},
 		{
 			name: "flags after path",
 			args: func(p string) []string {
@@ -264,6 +292,9 @@ func TestRunAnswerFlagPositionVariants(t *testing.T) {
 			}
 			if resp.Message != tt.wantMsg {
 				t.Errorf("message = %q, want %q", resp.Message, tt.wantMsg)
+			}
+			if tt.wantOut != "" && resp.Outcome != tt.wantOut {
+				t.Errorf("outcome = %q, want %q", resp.Outcome, tt.wantOut)
 			}
 			noTmpFiles(t, dir)
 		})
