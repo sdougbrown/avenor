@@ -2607,15 +2607,33 @@ func TestDispatchModelDeciderDecisionFiresWithoutMirror(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	// The worker's own request carries a mirror and fires first; answer it
-	// as a human so the runtime holds no pending request, then route a
-	// second request whose mirror never lands: its decision fires only once
-	// the mirror wait expires.
-	base := time.Now()
+	// The worker's own request carries a mirror and its decision call fires
+	// first. Account for that call before taking the baseline: still in
+	// flight, it would otherwise satisfy the deadline wait below and be
+	// measured as the second request's decision.
+	waitFor(t, "decision call for the mirrored request", func() bool {
+		calls, _, _ := capture.snapshot()
+		return calls >= 1
+	})
 	calls0, _, _ := capture.snapshot()
+	// The human answer reaches the worker through its permission resolver,
+	// so the mirror clears asynchronously. Answer the request, wait until the
+	// runtime holds no pending request, then route a second request whose
+	// mirror never lands: its decision fires only once the mirror wait
+	// expires.
 	if err := f.sup.answerPermission(out.RuntimeID, requestID, "allow_once", "test"); err != nil {
 		t.Fatalf("answerPermission: %v", err)
 	}
+	waitFor(t, "permission mirror cleared after the human answer", func() bool {
+		status, err := f.sup.RuntimeStatus(out.RuntimeID)
+		if err != nil {
+			return false
+		}
+		rtStatus, _ := status.(map[string]any)
+		pending, _ := rtStatus["pending_permission"].(bool)
+		return !pending
+	})
+	base := time.Now()
 	f.sup.cachePermissionOptions(out.RuntimeID, "perm_req_model_nomirror_2", []any{map[string]any{"optionId": "allow_once", "kind": "allow"}})
 	waitFor(t, "decision call fired after mirror-wait deadline", func() bool {
 		calls, _, _ := capture.snapshot()
