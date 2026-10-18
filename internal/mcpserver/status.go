@@ -32,7 +32,7 @@ func (d *statusDiagnostics) note(runtimeID, rawStatus string) {
 	case log:
 		fmt.Fprintf(d.stderr, "avenor mcp: runtime %q reported unrecognized status %q\n", runtimeID, rawStatus)
 	case suppressed:
-		fmt.Fprintln(d.stderr, "avenor mcp: further unrecognized values suppressed")
+		fmt.Fprintln(d.stderr, "avenor mcp: "+diagnote.SuppressedNote)
 	}
 }
 

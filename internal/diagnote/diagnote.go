@@ -9,6 +9,11 @@ import "sync"
 // to one-shot suppression.
 const Cap = 16
 
+// SuppressedNote is the shared wording of the one-time line a caller emits
+// after the cap is reached; each caller prefixes it with its own component
+// label when writing the line.
+const SuppressedNote = "further unrecognized values suppressed"
+
 // Gate deduplicates diagnostic keys and caps how many distinct keys it
 // remembers. The zero value is ready to use; a nil *Gate admits nothing.
 type Gate struct {

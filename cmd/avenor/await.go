@@ -405,7 +405,7 @@ func (d *awaitStatusDiagnostics) warn(rawStatus string) {
 	case log:
 		fmt.Fprintf(d.stderr, "avenor await: runtime reported unrecognized status %q; waiting continues\n", rawStatus)
 	case suppressed:
-		fmt.Fprintln(d.stderr, "avenor await: further unrecognized values suppressed")
+		fmt.Fprintln(d.stderr, "avenor await: "+diagnote.SuppressedNote)
 	}
 }
 

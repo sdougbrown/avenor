@@ -5303,7 +5303,7 @@ type unrecognizedPhaseDiagnostic struct {
 
 func (e unrecognizedPhaseDiagnostic) Error() string {
 	if e.phase == "" {
-		return fmt.Sprintf("runtime %s further unrecognized values suppressed", e.runtimeID)
+		return fmt.Sprintf("runtime %s %s", e.runtimeID, diagnote.SuppressedNote)
 	}
 	return fmt.Sprintf("runtime %s reported unrecognized phase %q", e.runtimeID, e.phase)
 }
