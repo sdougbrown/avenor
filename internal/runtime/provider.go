@@ -38,6 +38,9 @@ type StartOptions struct {
 	RuntimeID     string         // supervisor-assigned runtime ID (rt_N), for parent-child routing
 	Broker        *broker.Broker // optional shared broker instance; backends may create their own if nil
 	BrokerToken   string         // broker token for RuntimeID, so the child can poll/reply as itself
+	// Provenance is the informational launch identity exported to the child
+	// process. It never carries broker routing or credential meaning.
+	Provenance *LaunchProvenance
 }
 
 // Session represents an active ACP session.
@@ -205,6 +208,17 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	}
 	if override.BrokerToken != "" {
 		merged.BrokerToken = override.BrokerToken
+	}
+	// An explicit provenance replaces the whole previous identity so cleared
+	// phase, iteration or label never survive a merge. The stored value is a
+	// snapshot: later mutation of the caller's identity cannot reach it.
+	if override.Provenance != nil {
+		snapshot := *override.Provenance
+		if override.Provenance.Iteration != nil {
+			iteration := *override.Provenance.Iteration
+			snapshot.Iteration = &iteration
+		}
+		merged.Provenance = &snapshot
 	}
 	return merged
 }
