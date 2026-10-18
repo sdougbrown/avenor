@@ -39,8 +39,7 @@ import (
 const (
 	itestTimeout = 10 * time.Second
 	// Decider limits as callers experience them.
-	itestDeciderSpawnBound = 3
-	itestDeciderCap        = 3
+	itestDeciderCap = 3
 )
 
 // itestEventLog records every event published on the control stream so tests
@@ -1335,17 +1334,238 @@ func itestWorker(sessionID, requestID, output string) *itestProvider {
 	return p
 }
 
+// itestAgentStatus scripts an agent.status event carrying a phase, as a
+// backend publishes working state mid-turn. A non-nil release holds the
+// scripted turn before the event is emitted.
+func itestAgentStatus(sessionID, phase string, release <-chan struct{}) stableScriptedEvent {
+	return stableScriptedEvent{
+		release: release,
+		event: events.Event{
+			Event:     "agent.status",
+			SessionID: sessionID,
+			Fields:    map[string]any{"phase": phase},
+		},
+	}
+}
+
+// itestDeliveryWorker is an opt-in worker whose continuation output encodes
+// the answer its provider actually received — the request ID, the option ID,
+// and the normalized allow/reject value — as
+// "answered:<requestID>:<optionID>:<allow|reject>". A canonical response
+// event can look right while the provider payload is wrong; this output makes
+// such a mismatch fail the test. Scenarios without a delivery proof keep the
+// plain itestWorker output.
+func itestDeliveryWorker(sessionID, requestID string) *itestProvider {
+	gate := newItestGate()
+	p := newItestProvider(itestAttempt(sessionID,
+		itestPermissionRequest(sessionID, requestID),
+		gate.step(),
+		itestSessionEnd(sessionID, "end_turn", ""),
+	))
+	p.onAnswer = func(received string, resp runtime.PermissionResponse) {
+		value := "reject"
+		if resp.Allow {
+			value = "allow"
+		}
+		// The worker is still parked on the gate when the answer is delivered,
+		// so the continuation step has not run yet. Recording the encoded
+		// output before opening the gate publishes it to the scripted turn.
+		p.mu.Lock()
+		p.scripts[0].events[len(p.scripts[0].events)-1] = itestSessionEnd(sessionID, "end_turn",
+			fmt.Sprintf("answered:%s:%s:%s", received, resp.OptionID, value))
+		p.mu.Unlock()
+		gate.open()
+	}
+	return p
+}
+
+// rawRuntimeStatus returns the runtime's raw RuntimeStatus document before
+// any consumer-side translation, the strict oracle for permission scenarios.
+func (h *itestHarness) rawRuntimeStatus(rtID string) map[string]any {
+	h.t.Helper()
+	out, err := h.sup.RuntimeStatus(rtID)
+	if err != nil {
+		h.t.Fatalf("RuntimeStatus(%s): %v", rtID, err)
+	}
+	raw, _ := out.(map[string]any)
+	return raw
+}
+
+// awaitRawStatus polls raw RuntimeStatus until the raw status equals want.
+// Transitions that follow a settled turn have no wake-up channel of their own.
+func (h *itestHarness) awaitRawStatus(rtID, want string) map[string]any {
+	h.t.Helper()
+	deadline := time.Now().Add(itestTimeout)
+	for {
+		raw := h.rawRuntimeStatus(rtID)
+		if status, _ := raw["status"].(string); status == want {
+			return raw
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("runtime %s raw status = %v, want %q", rtID, raw["status"], want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// awaitPermissionCleared polls raw RuntimeStatus until the runtime no longer
+// reports a pending permission, and returns the final raw document.
+func (h *itestHarness) awaitPermissionCleared(rtID string) map[string]any {
+	h.t.Helper()
+	deadline := time.Now().Add(itestTimeout)
+	for {
+		raw := h.rawRuntimeStatus(rtID)
+		if pending, _ := raw["pending_permission"].(bool); !pending {
+			return raw
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("runtime %s still reports pending_permission after %s", rtID, itestTimeout)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// itestEventRunLabel extracts the run label the supervisor stamps on events.
+func itestEventRunLabel(ev events.Event) string {
+	label, _ := ev.Fields["run_label"].(string)
+	return label
+}
+
+// itestDeciderEventIs matches any event published by the decider run spawned
+// for workerRT's request; the run's label is "permdec:<runtime>:<request>".
+func itestDeciderEventIs(workerRT, reqID string) func(events.Event) bool {
+	want := "permdec:" + workerRT + ":" + reqID
+	return func(ev events.Event) bool { return itestEventRunLabel(ev) == want }
+}
+
+// deciderRuntimeID returns the runtime ID the supervisor published for the
+// decider run spawned for workerRT's request, discovered from the decider's
+// own events.
+func (h *itestHarness) deciderRuntimeID(workerRT, reqID string) string {
+	h.t.Helper()
+	ev := h.log.waitFor(h.t, "decider event for "+reqID, itestDeciderEventIs(workerRT, reqID))
+	id, _ := ev.Fields["runtime_id"].(string)
+	return id
+}
+
+// deciderIdentityCount counts the distinct decider runtime IDs that published
+// events, so scenarios can pin how many decider runs ever existed.
+func (h *itestHarness) deciderIdentityCount() int {
+	seen := map[string]bool{}
+	for _, ev := range h.log.all() {
+		if !strings.HasPrefix(itestEventRunLabel(ev), "permdec:") {
+			continue
+		}
+		if id, _ := ev.Fields["runtime_id"].(string); id != "" {
+			seen[id] = true
+		}
+	}
+	return len(seen)
+}
+
+// requirePermissionResponse asserts the canonical response contract on the
+// event log: exactly one permission.request for the runtime and request ID,
+// and exactly one permission.response carrying the selected option and its
+// normalized kind.
+func (h *itestHarness) requirePermissionResponse(rtID, requestID, optionID, kind string) {
+	h.t.Helper()
+	// Event publication reaches the subscription stream asynchronously, so
+	// wait for the response before counting anything.
+	h.log.waitFor(h.t, "permission.response for "+requestID, func(ev events.Event) bool {
+		id, _ := ev.Fields["runtime_id"].(string)
+		req, _ := ev.Fields["request_id"].(string)
+		return ev.Event == "permission.response" && id == rtID && req == requestID
+	})
+	var requests, responses int
+	for _, ev := range h.log.all() {
+		id, _ := ev.Fields["runtime_id"].(string)
+		req, _ := ev.Fields["request_id"].(string)
+		if id != rtID || req != requestID {
+			continue
+		}
+		switch ev.Event {
+		case "permission.request":
+			requests++
+		case "permission.response":
+			responses++
+			if got, _ := ev.Fields["option_id"].(string); got != optionID {
+				h.t.Fatalf("permission.response option_id = %q, want %q", got, optionID)
+			}
+			if got, _ := ev.Fields["kind"].(string); got != kind {
+				h.t.Fatalf("permission.response kind = %q, want %q", got, kind)
+			}
+		}
+	}
+	if requests != 1 {
+		h.t.Fatalf("permission.request events for %s/%s = %d, want 1", rtID, requestID, requests)
+	}
+	if responses != 1 {
+		h.t.Fatalf("permission.response events for %s/%s = %d, want 1", rtID, requestID, responses)
+	}
+}
+
+// requireEncodedContinuation asserts the worker's continuation through events
+// and raw RuntimeStatus: the session.end output encodes the answer the
+// provider received, the canonical response was published, and the raw
+// status no longer reports a pending permission.
+func (h *itestHarness) requireEncodedContinuation(rtID, requestID, optionID, kind string) {
+	h.t.Helper()
+	want := fmt.Sprintf("answered:%s:%s:%s", requestID, optionID, kind)
+	h.log.waitFor(h.t, "continuation session.end for "+rtID, func(ev events.Event) bool {
+		out, _ := ev.Fields["final_output"].(string)
+		return itestEventIs("session.end", rtID)(ev) && out == want
+	})
+	// The canonical permission.response and the worker's continuation are
+	// not ordered: the direct-answer path publishes the response only after
+	// the provider call returns, and the worker may already have finished
+	// its resumed turn by then. Wait for the response with a bounded wait
+	// rather than assuming it precedes the continuation in the log.
+	h.log.waitFor(h.t, "permission.response for "+requestID, func(ev events.Event) bool {
+		id, _ := ev.Fields["runtime_id"].(string)
+		req, _ := ev.Fields["request_id"].(string)
+		return ev.Event == "permission.response" && id == rtID && req == requestID
+	})
+	all := h.log.all()
+	respIdx, endIdx := -1, -1
+	for i, ev := range all {
+		id, _ := ev.Fields["runtime_id"].(string)
+		out, _ := ev.Fields["final_output"].(string)
+		switch {
+		case ev.Event == "permission.response" && id == rtID && respIdx == -1:
+			respIdx = i
+		case ev.Event == "session.end" && id == rtID && out == want && endIdx == -1:
+			endIdx = i
+			if code, _ := ev.Fields["exit_code"].(int); code != 0 {
+				h.t.Fatalf("continuation session.end exit_code = %d, want 0", code)
+			}
+		}
+	}
+	if respIdx == -1 || endIdx == -1 {
+		h.t.Fatalf("missing canonical response (%d) or encoded continuation (%d)", respIdx, endIdx)
+	}
+	raw := h.awaitPermissionCleared(rtID)
+	if got, _ := raw["final_output"].(string); got != want {
+		h.t.Fatalf("raw RuntimeStatus final_output = %q, want %q", got, want)
+	}
+	if code, _ := raw["exit_code"].(int); code != 0 {
+		h.t.Fatalf("raw RuntimeStatus exit_code = %d, want 0", code)
+	}
+}
+
 func TestSupervisorPublicAPIPermissionRequestAnswerContinue(t *testing.T) {
 	t.Parallel()
-	worker := itestWorker("ses_pw", "req_human", "after answer")
+	worker := itestDeliveryWorker("ses_pw", "req_human")
 	h := newItestHarness(t, Config{}, itestSingleProvider(worker))
 	h.connectClient()
 
 	rt := h.spawn(nil)
 	h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
-	v := h.view(rt)
-	if !v.PendingPermission || v.Status != "running" {
-		t.Fatalf("view with a pending request = %+v, want running with pending_permission", v)
+	raw := h.rawRuntimeStatus(rt)
+	if pending, _ := raw["pending_permission"].(bool); !pending {
+		t.Fatalf("raw RuntimeStatus with a pending request = %v, want pending_permission", raw["pending_permission"])
+	}
+	if status, _ := raw["status"].(string); status != "running" {
+		t.Fatalf("raw RuntimeStatus with a pending request = %q, want running", status)
 	}
 	if got := h.log.count(itestStopReasonIs(rt, "end_turn")); got != 0 {
 		t.Fatalf("runtime finished before the request was answered (%d session.end events)", got)
@@ -1353,18 +1573,8 @@ func TestSupervisorPublicAPIPermissionRequestAnswerContinue(t *testing.T) {
 	if err := h.sup.RuntimeAnswerPermission(rt, "req_human", "allow_once", ""); err != nil {
 		t.Fatalf("RuntimeAnswerPermission: %v", err)
 	}
-	h.log.waitFor(t, "permission.response", itestEventIs("permission.response", rt))
-	h.awaitStatus(rt, "done")
-	if v := h.view(rt); v.PendingPermission {
-		t.Fatal("pending_permission still set after the answer")
-	}
-	if got := h.result(rt); got != "after answer" {
-		t.Fatalf("RuntimeResult = %q, want %q", got, "after answer")
-	}
-	answers := worker.recordedAnswers()
-	if len(answers) != 1 || !answers[0].Allow || answers[0].OptionID != "allow_once" {
-		t.Fatalf("backend permission answers = %+v, want one allow_once", answers)
-	}
+	h.requirePermissionResponse(rt, "req_human", "allow_once", "allow")
+	h.requireEncodedContinuation(rt, "req_human", "allow_once", "allow")
 }
 
 func itestDecider() map[string]any {
@@ -1413,7 +1623,7 @@ func itestAnsweringDecider(harness func() *itestHarness, optionID string, answer
 
 func TestSupervisorPublicAPIDeciderAllow(t *testing.T) {
 	t.Parallel()
-	worker := itestWorker("ses_dw_allow", "req_allow", "allowed work")
+	worker := itestDeliveryWorker("ses_dw_allow", "req_allow")
 	answered := make(chan error, 1)
 	var h *itestHarness
 	decider := itestAnsweringDecider(func() *itestHarness { return h }, "allow_once", answered)
@@ -1423,26 +1633,21 @@ func TestSupervisorPublicAPIDeciderAllow(t *testing.T) {
 	if err := itestRecv(t, answered, "decider answer"); err != nil {
 		t.Fatalf("decider answer: %v", err)
 	}
-	h.awaitStatus(rt, "done")
-	if got := h.result(rt); got != "allowed work" {
-		t.Fatalf("RuntimeResult = %q, want %q", got, "allowed work")
+	h.requirePermissionResponse(rt, "req_allow", "allow_once", "allow")
+	h.requireEncodedContinuation(rt, "req_allow", "allow_once", "allow")
+	// The decider run that answered ends after its single turn: its terminal
+	// state is read from its own raw RuntimeStatus, keyed by the runtime ID
+	// its events carried.
+	deciderRT := h.deciderRuntimeID(rt, "req_allow")
+	raw := h.awaitRawStatus(deciderRT, "ended")
+	if code, _ := raw["exit_code"].(int); code != 0 {
+		t.Fatalf("decider raw RuntimeStatus exit_code = %v, want 0", raw["exit_code"])
 	}
-	answers := worker.recordedAnswers()
-	if len(answers) != 1 || !answers[0].Allow || answers[0].OptionID != "allow_once" {
-		t.Fatalf("backend permission answers = %+v, want one allow_once", answers)
-	}
-	// The decider ends after its single turn, and its row can settle after
-	// the worker, so poll until it reads ended with the turn's zero exit
-	// code.
-	h.awaitCondition("finished decider row to read ended with exit code 0", func() bool {
-		rows := h.listed("permdec:")
-		return len(rows) == 1 && rows[0]["status"] == "ended" && rows[0]["exit_code"] == 0
-	})
 }
 
 func TestSupervisorPublicAPIDeciderDeny(t *testing.T) {
 	t.Parallel()
-	worker := itestWorker("ses_dw_deny", "req_deny", "continued after deny")
+	worker := itestDeliveryWorker("ses_dw_deny", "req_deny")
 	answered := make(chan error, 1)
 	var h *itestHarness
 	decider := itestAnsweringDecider(func() *itestHarness { return h }, "reject_once", answered)
@@ -1452,21 +1657,17 @@ func TestSupervisorPublicAPIDeciderDeny(t *testing.T) {
 	if err := itestRecv(t, answered, "decider answer"); err != nil {
 		t.Fatalf("decider answer: %v", err)
 	}
-	h.log.waitFor(t, "permission.response", itestEventIs("permission.response", rt))
-	answers := worker.recordedAnswers()
-	if len(answers) != 1 || answers[0].Allow || answers[0].OptionID != "reject_once" {
-		t.Fatalf("backend permission answers = %+v, want one reject_once", answers)
-	}
-	resp, _ := h.log.find(itestEventIs("permission.response", rt))
-	if kind, _ := resp.Fields["kind"].(string); kind != "reject" {
-		t.Fatalf("permission.response kind = %v, want reject", resp.Fields["kind"])
-	}
-	h.awaitStatus(rt, "done")
+	// A reject_once decision must reach the provider as a rejection, not an
+	// implicit allow: the continuation output encodes what was delivered.
+	h.requirePermissionResponse(rt, "req_deny", "reject_once", "reject")
+	h.requireEncodedContinuation(rt, "req_deny", "reject_once", "reject")
+	deciderRT := h.deciderRuntimeID(rt, "req_deny")
+	h.awaitRawStatus(deciderRT, "ended")
 }
 
 func TestSupervisorPublicAPIDeciderSpawnFailureRetries(t *testing.T) {
 	t.Parallel()
-	worker := itestWorker("ses_dw_retry", "req_retry", "after retry")
+	worker := itestDeliveryWorker("ses_dw_retry", "req_retry")
 	var deciderCalls atomic.Int64
 	var h *itestHarness
 	answering := itestAnsweringDecider(func() *itestHarness { return h }, "allow_once", nil)
@@ -1482,149 +1683,153 @@ func TestSupervisorPublicAPIDeciderSpawnFailureRetries(t *testing.T) {
 
 	rt := h.spawn(map[string]any{"label": "worker", "permission_decider": itestDecider()})
 	// The backend sends permission.request once and blocks; the failed decider
-	// spawn must be retried without a further event.
-	h.awaitStatus(rt, "done")
-	if got := deciderCalls.Load(); got != 2 {
-		t.Fatalf("decider spawns = %d, want 2 (one failure, one retry)", got)
-	}
+	// spawn must be retried without a further event, and the retry's allow
+	// must let the worker continue.
+	h.requirePermissionResponse(rt, "req_retry", "allow_once", "allow")
+	h.requireEncodedContinuation(rt, "req_retry", "allow_once", "allow")
 	if got := h.log.count(itestEventIs("permission.request", rt)); got != 1 {
 		t.Fatalf("permission.request events = %d, want 1", got)
 	}
-	answers := worker.recordedAnswers()
-	if len(answers) != 1 || !answers[0].Allow {
-		t.Fatalf("backend permission answers = %+v, want one allow", answers)
-	}
-	if v := h.view(rt); v.DeciderExhausted {
+	raw := h.rawRuntimeStatus(rt)
+	if exhausted, _ := raw["permission_decider_exhausted"].(bool); exhausted {
 		t.Fatal("permission_decider_exhausted set although the retry succeeded")
 	}
+	deciderRT := h.deciderRuntimeID(rt, "req_retry")
+	h.awaitRawStatus(deciderRT, "ended")
 }
 
 func TestSupervisorPublicAPIDeciderSpawnFailuresExhaustToHuman(t *testing.T) {
 	t.Parallel()
-	worker := itestWorker("ses_dw_exhaust", "req_exhaust", "human approved")
-	var deciderCalls atomic.Int64
+	worker := itestDeliveryWorker("ses_dw_exhaust", "req_exhaust")
 	h := newItestHarness(t, Config{}, itestDeciderFactory(
 		func(string) runtime.Provider { return worker },
 		func(runtime.StartOptions) (runtime.Provider, error) {
-			deciderCalls.Add(1)
 			return nil, errors.New("decider backend unavailable")
 		},
 	))
 
 	rt := h.spawn(map[string]any{"label": "worker", "permission_decider": itestDecider()})
-	h.awaitCondition("decider retries to be exhausted", func() bool { return h.view(rt).DeciderExhausted })
-	if got := deciderCalls.Load(); got != itestDeciderSpawnBound {
-		t.Fatalf("decider spawns = %d, want the bound of %d", got, itestDeciderSpawnBound)
-	}
-	h.consistentlyFor(backoffDelay(1)+500*time.Millisecond, "exhausted request stays pending without further spawns", func() bool {
-		v := h.view(rt)
-		return deciderCalls.Load() == itestDeciderSpawnBound && v.PendingPermission && v.Status == "running"
+	h.awaitCondition("decider retries to be exhausted", func() bool {
+		raw := h.rawRuntimeStatus(rt)
+		exhausted, _ := raw["permission_decider_exhausted"].(bool)
+		return exhausted
+	})
+	h.consistentlyFor(backoffDelay(1)+500*time.Millisecond, "exhausted request stays pending without a decider run", func() bool {
+		raw := h.rawRuntimeStatus(rt)
+		pending, _ := raw["pending_permission"].(bool)
+		status, _ := raw["status"].(string)
+		return pending && status == "running" && h.deciderIdentityCount() == 0
 	})
 	// The request stays open for a human, who can still answer it.
 	if err := h.sup.RuntimeAnswerPermission(rt, "req_exhaust", "allow_once", ""); err != nil {
 		t.Fatalf("human RuntimeAnswerPermission: %v", err)
 	}
-	h.awaitStatus(rt, "done")
-	if got := h.result(rt); got != "human approved" {
-		t.Fatalf("RuntimeResult = %q, want %q", got, "human approved")
-	}
+	h.requirePermissionResponse(rt, "req_exhaust", "allow_once", "allow")
+	h.requireEncodedContinuation(rt, "req_exhaust", "allow_once", "allow")
 }
 
 func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testing.T) {
 	t.Parallel()
 	const workers = itestDeciderCap + 1
+	blockedReq := fmt.Sprintf("req_w%d", workers)
 	providers := map[string]*itestProvider{}
 	for i := 1; i <= workers; i++ {
 		label := fmt.Sprintf("w%d", i)
-		providers[label] = itestWorker("ses_cap_"+label, "req_"+label, label+" finished")
+		providers[label] = itestDeliveryWorker("ses_cap_"+label, "req_"+label)
 	}
-	var spawns atomic.Int64
 	holds := map[string]*itestGate{}
-	var holdsMu sync.Mutex
-	hold := func(label string) *itestGate {
-		holdsMu.Lock()
-		defer holdsMu.Unlock()
-		if holds[label] == nil {
-			holds[label] = newItestGate()
+	answered := map[string]*itestGate{}
+	var gatesMu sync.Mutex
+	gate := func(m map[string]*itestGate, reqID string) *itestGate {
+		gatesMu.Lock()
+		defer gatesMu.Unlock()
+		if m[reqID] == nil {
+			m[reqID] = newItestGate()
 		}
-		return holds[label]
+		return m[reqID]
 	}
-	started := make(chan string, workers)
 	var h *itestHarness
 	h = newItestHarness(t, Config{}, itestDeciderFactory(
 		func(label string) runtime.Provider { return providers[label] },
 		func(opts runtime.StartOptions) (runtime.Provider, error) {
-			spawns.Add(1)
-			rtID, reqID := itestDeciderLabel(opts.Label)
-			sessionID := fmt.Sprintf("ses_cap_decider_%d", spawns.Load())
-			p := newItestProvider(itestAttempt(sessionID, itestSessionEnd(sessionID, "end_turn", "")))
-			g := hold(reqID)
-			p.onPrompt = func(ctx context.Context) {
-				started <- reqID
-				// The first deciders hold their slot until released; the
-				// request that was blocked by the cap gets a decider that
-				// answers at once.
-				if reqID != fmt.Sprintf("req_w%d", workers) {
-					select {
-					case <-g.ch:
-					case <-ctx.Done():
-						return
-					}
+			workerRT, reqID := itestDeciderLabel(opts.Label)
+			sessionID := fmt.Sprintf("ses_cap_decider_%s", reqID)
+			if reqID == blockedReq {
+				// The request the cap blocked gets a decider that answers at
+				// once once it finally runs.
+				p := newItestProvider(itestAttempt(sessionID,
+					itestAgentStatus(sessionID, "working", nil),
+					itestSessionEnd(sessionID, "end_turn", ""),
+				))
+				p.onPrompt = func(context.Context) {
+					_ = h.sup.RuntimeAnswerPermission(workerRT, reqID, "allow_once", "")
 				}
-				_ = h.sup.RuntimeAnswerPermission(rtID, reqID, "allow_once", "")
+				return p, nil
 			}
-			return p, nil
+			// A held decider publishes its identity first, then holds its slot
+			// on a scripted gate; after the test releases it and answers its
+			// request, a second gate lets the turn end.
+			return newItestProvider(itestAttempt(sessionID,
+				itestAgentStatus(sessionID, "working", nil),
+				itestAgentStatus(sessionID, "working", gate(holds, reqID).ch),
+				stableScriptedEvent{release: gate(answered, reqID).ch, event: itestSessionEnd(sessionID, "end_turn", "").event},
+			)), nil
 		},
 	))
 	t.Cleanup(func() {
-		holdsMu.Lock()
-		defer holdsMu.Unlock()
+		gatesMu.Lock()
+		defer gatesMu.Unlock()
 		for _, g := range holds {
+			g.open()
+		}
+		for _, g := range answered {
 			g.open()
 		}
 	})
 
+	// Fill the cap with three held deciders, discovering each decider's
+	// runtime ID from the start event its scripted turn publishes before the
+	// hold, and confirming each holds a live running run.
 	ids := map[string]string{}
+	deciders := map[string]string{}
 	for i := 1; i <= itestDeciderCap; i++ {
 		label := fmt.Sprintf("w%d", i)
 		ids[label] = h.spawn(map[string]any{"label": label, "permission_decider": itestDecider()})
-		itestRecv(t, started, "decider start for "+label)
+		reqID := "req_" + label
+		deciders[reqID] = h.deciderRuntimeID(ids[label], reqID)
+		h.awaitRawStatus(deciders[reqID], "running")
 	}
-	// The cap is full: the next request is routed but no decider runs for it.
+	// The cap is full: the next request is routed but no decider runs for it,
+	// and no response resolves it while the three deciders stay held.
 	blockedLabel := fmt.Sprintf("w%d", workers)
 	ids[blockedLabel] = h.spawn(map[string]any{"label": blockedLabel, "permission_decider": itestDecider()})
 	h.log.waitFor(t, "blocked permission.request", itestEventIs("permission.request", ids[blockedLabel]))
 	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "decider cap holds", func() bool {
-		v := h.view(ids[blockedLabel])
-		return spawns.Load() == itestDeciderCap && v.PendingPermission && v.Status == "running"
+		raw := h.rawRuntimeStatus(ids[blockedLabel])
+		pending, _ := raw["pending_permission"].(bool)
+		status, _ := raw["status"].(string)
+		return pending && status == "running" &&
+			h.log.count(itestEventIs("permission.response", ids[blockedLabel])) == 0 &&
+			h.deciderIdentityCount() == itestDeciderCap
 	})
-	// Each listed decider run is mid-turn holding its concurrency slot.
-	for _, row := range h.listed("permdec:") {
-		if got := row["status"]; got != "running" {
-			t.Fatalf("decider run status = %v, want running", got)
-		}
+	// Release the first held decider: it answers its worker's request, which
+	// continues the worker, and its turn ends and frees the slot.
+	holds["req_w1"].open()
+	if err := h.sup.RuntimeAnswerPermission(ids["w1"], "req_w1", "allow_once", ""); err != nil {
+		t.Fatalf("released decider answer: %v", err)
 	}
-	if rows := h.listed("permdec:"); len(rows) != itestDeciderCap {
-		t.Fatalf("decider runs listed = %d, want %d", len(rows), itestDeciderCap)
-	}
-	// Cancelling a decider run frees its slot; the blocked request is routed
-	// to a new decider without another permission.request event.
-	rows := h.listed("permdec:" + ids["w1"] + ":")
-	if len(rows) != 1 {
-		t.Fatalf("decider runs for w1 = %d, want 1", len(rows))
-	}
-	if got := rows[0]["status"]; got != "running" {
-		t.Fatalf("decider run for w1 status = %v, want running", got)
-	}
-	if err := h.sup.RuntimeCancel(rows[0]["runtime_id"].(string)); err != nil {
-		t.Fatalf("cancel decider: %v", err)
-	}
-	h.awaitStatus(ids[blockedLabel], "done")
-	if got := h.result(ids[blockedLabel]); got != blockedLabel+" finished" {
-		t.Fatalf("blocked worker result = %q", got)
-	}
-	if got := spawns.Load(); got != itestDeciderCap+1 {
-		t.Fatalf("decider spawns = %d, want %d", got, itestDeciderCap+1)
+	h.requirePermissionResponse(ids["w1"], "req_w1", "allow_once", "allow")
+	h.requireEncodedContinuation(ids["w1"], "req_w1", "allow_once", "allow")
+	answered["req_w1"].open()
+	h.awaitRawStatus(deciders["req_w1"], "ended")
+	// The freed slot routes the blocked request to a new decider identity,
+	// which answers it once; the worker never sends a second request.
+	fourthDecider := h.deciderRuntimeID(ids[blockedLabel], blockedReq)
+	h.requirePermissionResponse(ids[blockedLabel], blockedReq, "allow_once", "allow")
+	h.requireEncodedContinuation(ids[blockedLabel], blockedReq, "allow_once", "allow")
+	h.awaitRawStatus(fourthDecider, "ended")
+	if got := h.deciderIdentityCount(); got != itestDeciderCap+1 {
+		t.Fatalf("decider identities = %d, want %d (three held, one replacement)", got, itestDeciderCap+1)
 	}
 	if got := h.log.count(itestEventIs("permission.request", ids[blockedLabel])); got != 1 {
 		t.Fatalf("permission.request events for the blocked worker = %d, want 1", got)
@@ -1863,20 +2068,16 @@ func TestSupervisorPublicAPIDeciderSlotSurvivesLabelCollision(t *testing.T) {
 
 func TestSupervisorPublicAPIPermissionClaimTimeoutFallsBackToFileHandler(t *testing.T) {
 	t.Parallel()
-	worker := itestWorker("ses_claim_file", "req_claim", "answered by file")
+	worker := itestDeliveryWorker("ses_claim_file", "req_claim")
 	h := newItestHarness(t, Config{PermissionClaimTimeout: 100 * time.Millisecond}, itestSingleProvider(worker))
 	h.connectClient()
 	base := filepath.Join(t.TempDir(), "perm")
 
 	rt := h.spawn(map[string]any{"permission_handler": "file:" + base})
-	h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
+	req := h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
 	// The connected client reserves the request first: a claim that times out
 	// falls back to the file handler, so the request must start reserved
 	// rather than go straight to the file handler.
-	req, ok := h.log.find(itestEventIs("permission.request", rt))
-	if !ok {
-		t.Fatal("permission.request event not found")
-	}
 	if got, _ := req.Fields["resolver"].(string); got != "reserved" {
 		t.Fatalf("permission.request resolver = %q, want %q (control claim before the file fallback)", got, "reserved")
 	}
@@ -1886,62 +2087,51 @@ func TestSupervisorPublicAPIPermissionClaimTimeoutFallsBackToFileHandler(t *test
 		_, err := os.Stat(base + ".req")
 		return err == nil
 	})
-	if v := h.view(rt); !v.PendingPermission || v.Status != "running" {
-		t.Fatalf("view after claim timeout = %+v, want running with pending_permission", v)
+	raw := h.rawRuntimeStatus(rt)
+	if pending, _ := raw["pending_permission"].(bool); !pending {
+		t.Fatal("raw RuntimeStatus after claim timeout does not report pending_permission")
 	}
 	if err := os.WriteFile(base+".req.response", []byte(`{"outcome":"selected","option_id":"allow_once"}`), 0o600); err != nil {
 		t.Fatalf("write permission response: %v", err)
 	}
-	h.awaitStatus(rt, "done")
-	if got := h.result(rt); got != "answered by file" {
-		t.Fatalf("RuntimeResult = %q, want %q", got, "answered by file")
-	}
-	answers := worker.recordedAnswers()
-	if len(answers) != 1 || !answers[0].Allow || answers[0].OptionID != "allow_once" {
-		t.Fatalf("backend permission answers = %+v, want one allow_once", answers)
-	}
+	h.requirePermissionResponse(rt, "req_claim", "allow_once", "allow")
+	h.requireEncodedContinuation(rt, "req_claim", "allow_once", "allow")
 }
 
 func TestSupervisorPublicAPIDeciderDeferLeavesRequestForHuman(t *testing.T) {
 	t.Parallel()
-	worker := itestWorker("ses_defer", "req_defer", "human decided")
-	var deciderSpawns atomic.Int64
-	deciderRan := make(chan struct{}, 1)
+	worker := itestDeliveryWorker("ses_defer", "req_defer")
 	h := newItestHarness(t, Config{}, itestDeciderFactory(
 		func(string) runtime.Provider { return worker },
 		func(runtime.StartOptions) (runtime.Provider, error) {
-			// A deferring decider exits without answering.
-			deciderSpawns.Add(1)
-			p := newItestProvider(itestAttempt("ses_defer_decider", itestSessionEnd("ses_defer_decider", "end_turn", "")))
-			p.onPrompt = func(context.Context) {
-				// Non-blocking send: a second decider run must surface in the
-				// spawn count instead of stalling silently on the channel.
-				select {
-				case deciderRan <- struct{}{}:
-				default:
-				}
-			}
-			return p, nil
+			// A deferring decider publishes its identity, then exits without
+			// answering.
+			return newItestProvider(itestAttempt("ses_defer_decider",
+				itestAgentStatus("ses_defer_decider", "working", nil),
+				itestSessionEnd("ses_defer_decider", "end_turn", ""),
+			)), nil
 		},
 	))
 
 	rt := h.spawn(map[string]any{"label": "worker", "permission_decider": itestDecider()})
-	itestRecv(t, deciderRan, "decider turn")
+	// Exactly one decider identity ever ran, and its turn ended deferred.
+	deciderRT := h.deciderRuntimeID(rt, "req_defer")
+	raw := h.awaitRawStatus(deciderRT, "ended")
+	if code, _ := raw["exit_code"].(int); code != 0 {
+		t.Fatalf("deferring decider raw RuntimeStatus exit_code = %v, want 0", raw["exit_code"])
+	}
 	// The decider deferred. No control client is connected, so nothing claims
 	// the request; it stays pending on the human gate, with no re-route or
 	// respawn of the decider.
-	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "deferred request stays pending with exactly one decider spawn", func() bool {
-		v := h.view(rt)
-		return v.PendingPermission && v.Status == "running" && deciderSpawns.Load() == 1
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "deferred request stays pending with exactly one decider identity", func() bool {
+		raw := h.rawRuntimeStatus(rt)
+		pending, _ := raw["pending_permission"].(bool)
+		status, _ := raw["status"].(string)
+		return pending && status == "running" && h.deciderIdentityCount() == 1
 	})
 	if err := h.sup.RuntimeAnswerPermission(rt, "req_defer", "allow_once", ""); err != nil {
 		t.Fatalf("human RuntimeAnswerPermission: %v", err)
 	}
-	h.awaitStatus(rt, "done")
-	if got := h.result(rt); got != "human decided" {
-		t.Fatalf("RuntimeResult = %q, want %q", got, "human decided")
-	}
-	if got := deciderSpawns.Load(); got != 1 {
-		t.Fatalf("decider spawns = %d, want 1 (a deferred request is not re-routed)", got)
-	}
+	h.requirePermissionResponse(rt, "req_defer", "allow_once", "allow")
+	h.requireEncodedContinuation(rt, "req_defer", "allow_once", "allow")
 }
