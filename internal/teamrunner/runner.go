@@ -459,12 +459,12 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	renderedPhase := phase
 	renderedPhase.Prompt = rendered
 
-	if err := phaseconfig.EmitPhaseStart(opts.EventSink, opts.RunID, phase.Name, 0, kind); err != nil {
+	if err := phaseconfig.EmitPhaseStart(opts.EventSink, opts.RunID, phase.Name, 0, kind, runtime.LaunchKindTeam); err != nil {
 		return PhaseAttemptResult{}, err
 	}
 
 	defer func() {
-		_ = phaseconfig.EmitPhaseEnd(opts.EventSink, opts.RunID, phase.Name, 0, phaseStopReason(result), markerFromResult(result))
+		_ = phaseconfig.EmitPhaseEnd(opts.EventSink, opts.RunID, phase.Name, 0, runtime.LaunchKindTeam, phaseStopReason(result), markerFromResult(result))
 	}()
 
 	var retryCount int

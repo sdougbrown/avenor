@@ -25,12 +25,13 @@ func EmitRetry(w EventWriter, runID string, attempt, maxRetries int) {
 	})
 }
 
-func EmitPhaseStart(w EventWriter, runID, phase string, iteration int, kind string) error {
+func EmitPhaseStart(w EventWriter, runID, phase string, iteration int, kind, runKind string) error {
 	fields := map[string]any{
 		"ts":        time.Now().UnixMilli(),
 		"phase":     phase,
 		"iteration": iteration,
 		"kind":      kind,
+		"run_kind":  runKind,
 	}
 	if runID != "" {
 		fields["run_id"] = runID
@@ -41,11 +42,12 @@ func EmitPhaseStart(w EventWriter, runID, phase string, iteration int, kind stri
 	})
 }
 
-func EmitPhaseEnd(w EventWriter, runID, phase string, iteration int, stopReason string, marker *LoopMarker) error {
+func EmitPhaseEnd(w EventWriter, runID, phase string, iteration int, runKind, stopReason string, marker *LoopMarker) error {
 	fields := map[string]any{
 		"ts":          time.Now().UnixMilli(),
 		"phase":       phase,
 		"iteration":   iteration,
+		"run_kind":    runKind,
 		"stop_reason": stopReason,
 	}
 	if runID != "" {

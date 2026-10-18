@@ -531,9 +531,15 @@ func TestRunEventPayloads(t *testing.T) {
 
 	// Check phase start events have correct kind values
 	kinds := map[string]string{}
+	runKinds := map[string]string{}
 	for _, ev := range sink.events {
+		if ev.Event != "avenor.phase.start" && ev.Event != "avenor.phase.end" {
+			continue
+		}
+		phase := ev.Fields["phase"].(string)
+		runKinds[ev.Event+"|"+phase], _ = ev.Fields["run_kind"].(string)
 		if ev.Event == "avenor.phase.start" {
-			kinds[ev.Fields["phase"].(string)] = ev.Fields["kind"].(string)
+			kinds[phase] = ev.Fields["kind"].(string)
 		}
 	}
 	if kinds["setup"] != "pre" {
@@ -544,6 +550,13 @@ func TestRunEventPayloads(t *testing.T) {
 	}
 	if kinds["report"] != "post" {
 		t.Fatalf("report kind = %q, want post", kinds["report"])
+	}
+	for _, phase := range []string{"setup", "review", "report"} {
+		for _, name := range []string{"avenor.phase.start", "avenor.phase.end"} {
+			if got := runKinds[name+"|"+phase]; got != "team" {
+				t.Fatalf("%s %s run_kind = %q, want team", name, phase, got)
+			}
+		}
 	}
 
 	// Check avenor.team.end with end_turn

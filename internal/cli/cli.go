@@ -357,7 +357,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		return exitWithSentinel(1)
 	}
 	defer baseWriter.Close()
-	metadata := NewEventMetadata(runID, *label, "")
+	metadata := NewEventMetadata(runID, *label, runID)
 
 	state := control.NewState(runID, *label, *maxRetries)
 	var controlServer *control.ControlServer
