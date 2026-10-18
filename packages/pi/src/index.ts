@@ -168,9 +168,9 @@ function stopHostAskPoll(): void {
 async function startHostAskPoll(
   pi: Pick<ExtensionAPI, 'sendUserMessage'>,
   deps: Pick<ExtensionDeps, 'brokerReceiveTool'>,
+  intervalMs: number,
 ): Promise<void> {
   stopHostAskPoll()
-  // Poll every 2s (mirrors the sidecar's pollControlLoop cadence) for inbound asks.
   hostPollTimer = setInterval(async () => {
     try {
       const { asks } = await deps.brokerReceiveTool({})
@@ -186,7 +186,7 @@ async function startHostAskPoll(
     } catch (error) {
       // No supervisor/broker yet — this is expected until a supervisor starts a broker.
     }
-  }, 2000)
+  }, intervalMs)
   hostPollTimer.unref?.()
 }
 
@@ -1212,7 +1212,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       lastStatusEntries = []
       pollingErrorCount = 0
       pollingErrors.length = 0
-      if (!isSubAgentBrokerMode) void startHostAskPoll(pi, deps)
+      if (!isSubAgentBrokerMode) void startHostAskPoll(pi, deps, options.pollIntervalMs ?? 2000)
       void startSubAgentPoll()
     })
 

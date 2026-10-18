@@ -61,7 +61,7 @@ async function startSubAgentExtension(opts: {
   // null must stay null: it is the declared way to force non-sub-agent mode.
   return startExtensionHarness({
     deps: opts.deps,
-    subAgentEnv: opts.subAgentEnv === undefined ? subAgentEnv : opts.subAgentEnv,
+    extOptions: { subAgentEnv: opts.subAgentEnv === undefined ? subAgentEnv : opts.subAgentEnv },
   })
 }
 
@@ -211,8 +211,7 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub, subAgentEnv: null, deps: { brokerReceiveTool, brokerReplyTool } })
-      // The host ask poll fires on a hardcoded 2s interval; wait past one tick.
-      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0, 6000)
+      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
       const result = await harness.registeredTools.avenor_reply.execute('t1', {
         from_run_id: 'rt_sub',
         reply_to_message_id: 'ask-h',
@@ -235,7 +234,7 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub, deps: { brokerReceiveTool } })
-      await new Promise(resolve => setTimeout(resolve, 2100))
+      await new Promise(resolve => setTimeout(resolve, 50))
       expect(fetchStub.calls.some(call => call.path === '/poll-control')).toBe(true)
       expect(brokerReceiveTool).not.toHaveBeenCalled()
     } finally {

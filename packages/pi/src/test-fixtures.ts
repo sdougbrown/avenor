@@ -7,15 +7,43 @@ import type { ExtensionDeps } from './index.js'
 import { createExtension } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
 
-/** Build minimal mock ExtensionDeps with all tools stubbed via bun:test.mock(). */
-export function buildMockDeps(partial: Partial<ExtensionDeps> = {}): ExtensionDeps {
-  return {
-    spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock' })),
-    statusTool: mock(async () => []),
+/** Keep message delivery on Pi so context mocks cannot hide API misuse. */
+export async function startExtensionHarness(options: {
+  deps?: Partial<ExtensionDeps>
+  extOptions?: { pollIntervalMs?: number; subAgentEnv?: SubAgentEnv | null }
+  ui?: Record<string, any>
+  onEmit?: (channel: string, payload: unknown) => void
+  sendUserMessage?: any
+} = {}) {
+  const registeredTools: Record<string, any> = {}
+  const registeredCommands: Record<string, any> = {}
+  const eventHandlers: Record<string, any> = {}
+  const setStatus = mock((..._args: any[]) => {})
+  const setWidget = mock((..._args: any[]) => {})
+  const notify = mock((..._args: any[]) => {})
+  const sendUserMessage = options.sendUserMessage ?? mock(() => {})
+  const emitted: Array<[string, unknown]> = []
+  const mockPi = {
+    on: (event: string, handler: any) => { eventHandlers[event] = handler },
+    registerTool: (definition: { name: string }) => { registeredTools[definition.name] = definition },
+    registerCommand: (name: string, definition: any) => { registeredCommands[name] = definition },
+    registerMessageRenderer: () => {},
+    sendUserMessage,
+    events: {
+      emit: mock((channel: string, payload: unknown) => {
+        emitted.push([channel, payload])
+        options.onEmit?.(channel, payload)
+      }),
+      on: mock(() => () => {}),
+    },
+  }
+  const baseDeps: ExtensionDeps = {
+    spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock', runtime_id: 'rt-1' })),
+    statusTool: mock(async () => ({ runs: [], count: 0 })),
     eventsTool: mock(async () => ({ events: [] })),
     answerPermissionTool: mock(async () => ({ ok: true })),
     followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
-    inspectTool: mock(async () => makeInspectResult()),
+    inspectTool: mock(async () => makeInspectResult({ status: 'running' })),
     resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
     brokerReceiveTool: mock(async () => ({ asks: [] })),
     brokerReplyTool: mock(async () => ({ ok: true })),
@@ -27,37 +55,17 @@ export function buildMockDeps(partial: Partial<ExtensionDeps> = {}): ExtensionDe
     workflowEventsTool: mock(async () => ({})),
     workflowCompleteTool: mock(async () => ({})),
     workflowGateTool: mock(async () => ({})),
+    workflowControllerStatusTool: mock(async () => ({})),
+    workflowReadyTool: mock(async () => ({})),
     observeRun: mock(() => null),
     dial: mock(async () => ({ close() {} })),
     Supervisor: class {} as any,
-    ...partial,
   }
-}
+  await createExtension({ ...baseDeps, ...options.deps }, { pollIntervalMs: 5, subAgentEnv: null, ...options.extOptions })(mockPi as any)
 
-/** Keep message delivery on Pi so context mocks cannot hide API misuse. */
-export async function startExtensionHarness(opts: {
-  deps?: Partial<ExtensionDeps>
-  subAgentEnv?: SubAgentEnv | null
-} = {}) {
-  const registeredTools: Record<string, any> = {}
-  const eventHandlers: Record<string, any> = {}
-  const sendUserMessage = mock(() => {})
-  const mockPi = {
-    on: (event: string, handler: any) => {
-      eventHandlers[event] = handler
-    },
-    registerTool: (definition: { name: string }) => {
-      registeredTools[definition.name] = definition
-    },
-    registerCommand: () => {},
-    registerMessageRenderer: () => {},
-    sendUserMessage,
-    events: { emit: mock(() => {}), on: mock(() => () => {}) },
-  }
-  await createExtension(buildMockDeps(opts.deps), { pollIntervalMs: 5, subAgentEnv: opts.subAgentEnv ?? null })(mockPi as any)
-  const ctx = { cwd: '/tmp', ui: { setStatus: mock(() => {}), setWidget: mock(() => {}), notify: mock(() => {}) } }
+  const ctx = { cwd: '/tmp', ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) } }
   await eventHandlers.session_start({}, ctx)
-  return { ctx, eventHandlers, registeredTools, sendUserMessage }
+  return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, setStatus, setWidget }
 }
 
 export async function waitFor(predicate: () => boolean, timeoutMs = 2000, intervalMs = 5): Promise<void> {

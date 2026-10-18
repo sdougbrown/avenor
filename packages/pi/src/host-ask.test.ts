@@ -1,14 +1,10 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { startExtensionHarness, waitFor } from './test-fixtures.js'
 
-// The host ask poll fires on a hardcoded 2s interval, so give the predicate a
-// wider window than the shared default.
-const HOST_WAIT_MS = 6000
-
 async function startHostExtension(brokerReceiveTool: any, brokerReplyTool?: any) {
   return startExtensionHarness({
     deps: { brokerReceiveTool, brokerReplyTool: brokerReplyTool ?? mock(async () => ({ ok: true })) },
-    subAgentEnv: null,
+    extOptions: { subAgentEnv: null },
   })
 }
 
@@ -19,11 +15,31 @@ describe('host inbound ask delivery', () => {
     }))
     const harness = await startHostExtension(brokerReceiveTool)
     try {
-      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0, HOST_WAIT_MS)
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
       const [body, options] = harness.sendUserMessage.mock.calls[0] as [string, { deliverAs: string }]
       expect(body).toContain('Ask from sub-agent')
       expect(body).toContain('is the build green?')
       expect(body).toContain('"ask-1"')
+      expect(options.deliverAs).toBe('steer')
+    } finally {
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('recovers a transient broker receive failure on the next poll', async () => {
+    const brokerReceiveTool = mock(async () => {
+      if (brokerReceiveTool.mock.calls.length === 1) throw new Error('broker down')
+      return {
+        asks: [{ message_id: 'ask-recover', from_run_id: 'rt_child', message: 'recover me', role: 'agent' }],
+      }
+    })
+    const harness = await startHostExtension(brokerReceiveTool)
+    try {
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0, 500)
+      expect(brokerReceiveTool.mock.calls.length).toBeGreaterThanOrEqual(2)
+      const [body, options] = harness.sendUserMessage.mock.calls[0] as [string, { deliverAs: string }]
+      expect(body).toContain('Ask from sub-agent')
+      expect(body).toContain('recover me')
       expect(options.deliverAs).toBe('steer')
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
@@ -40,7 +56,7 @@ describe('host inbound ask delivery', () => {
     const brokerReplyTool = mock(async () => ({ ok: true }))
     const harness = await startHostExtension(brokerReceiveTool, brokerReplyTool)
     try {
-      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0, HOST_WAIT_MS)
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
       const result = await harness.registeredTools.avenor_reply.execute('t1', { from_run_id: 'rt_child', message: 'go ahead' })
       expect(result.content[0].text).toBe('Reply sent')
       expect(brokerReplyTool.mock.calls[0][0]).toMatchObject({ toRunId: 'rt_child', replyTo: '0-new', message: 'go ahead' })
@@ -56,7 +72,7 @@ describe('host inbound ask delivery', () => {
     const brokerReplyTool = mock(async () => ({ ok: true }))
     const harness = await startHostExtension(brokerReceiveTool, brokerReplyTool)
     try {
-      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0, HOST_WAIT_MS)
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
 
       const [first, second] = await Promise.all([
         harness.registeredTools.avenor_reply.execute('t1', { from_run_id: 'rt_child', message: 'A' }),
@@ -80,7 +96,7 @@ describe('host inbound ask delivery', () => {
     })
     const harness = await startHostExtension(brokerReceiveTool, brokerReplyTool)
     try {
-      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0, HOST_WAIT_MS)
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
 
       await expect(harness.registeredTools.avenor_reply.execute('t1', { from_run_id: 'rt_child', message: 'first try' })).rejects.toThrow('broker down')
 
@@ -101,14 +117,14 @@ describe('host inbound ask delivery', () => {
     const brokerReplyTool = mock(async () => ({ ok: true }))
     const harness = await startHostExtension(brokerReceiveTool, brokerReplyTool)
     try {
-      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0, HOST_WAIT_MS)
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
 
       const result = await harness.registeredTools.avenor_reply.execute('t1', {
         from_run_id: 'rt_child',
         reply_to_message_id: 'ghost-ask',
         message: 'host answer',
       })
-      expect(result.details).toEqual({ error: true })
+      expect(result.details?.error).toBe(true)
       expect(brokerReplyTool).not.toHaveBeenCalled()
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
@@ -122,7 +138,7 @@ describe('host inbound ask delivery', () => {
     const brokerReplyTool = mock(async () => ({ ok: true }))
     const harness = await startHostExtension(brokerReceiveTool, brokerReplyTool)
     try {
-      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0, HOST_WAIT_MS)
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
 
       const result = await harness.registeredTools.avenor_reply.execute('t1', {
         reply_to_message_id: 'ask-host-i',
