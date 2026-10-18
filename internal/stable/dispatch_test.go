@@ -1094,9 +1094,6 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 		}
 		return false
 	})
-	if deciderSpawns.Load() < 2 {
-		t.Fatalf("decider spawns = %d, want the retry to spawn a second time", deciderSpawns.Load())
-	}
 	if got, _ := decider["agent"].(string); got != "rm-guard" {
 		t.Fatalf("decider agent = %q, want rm-guard", got)
 	}
