@@ -1077,8 +1077,15 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 	// The failed spawn must re-route the request on its own: the retry runs
 	// internally from the cached options, with no further permission.request
 	// event (the CLI session loop would refuse a concurrent second one).
+	// A decider runtime is published before its provider factory runs, so the
+	// listing alone can match the first (failing) spawn before the factory
+	// has counted it; wait for the second factory call before reading the
+	// listing.
 	var decider map[string]any
 	waitFor(t, "retried decider runtime", func() bool {
+		if deciderSpawns.Load() < 2 {
+			return false
+		}
 		for _, rt := range f.sup.listRuntimes() {
 			if label, _ := rt["label"].(string); strings.HasPrefix(label, "permdec:") {
 				decider = rt
@@ -1087,9 +1094,6 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 		}
 		return false
 	})
-	if deciderSpawns.Load() < 2 {
-		t.Fatalf("decider spawns = %d, want the retry to spawn a second time", deciderSpawns.Load())
-	}
 	if got, _ := decider["agent"].(string); got != "rm-guard" {
 		t.Fatalf("decider agent = %q, want rm-guard", got)
 	}
