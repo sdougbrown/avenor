@@ -345,4 +345,53 @@ describe('sub-agent broker mode (integration)', () => {
       fetchStub.restore()
     }
   })
+
+  it('asks through the inherited broker as the child run', async () => {
+    const calls: FetchCall[] = []
+    const previous = globalThis.fetch
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname
+      calls.push({ path, body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
+      if (path === '/poll-control') return Response.json([])
+      if (path === '/wait_reply') {
+        return Response.json({ from_run_id: 'supervisor', payload: { message: 'green' } })
+      }
+      return Response.json({ queued: true })
+    }) as typeof fetch
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startExtensionHarness({ extOptions: { pollIntervalMs: 5, subAgentEnv } })
+      const result = await harness.registeredTools.avenor_ask.execute('t1', {
+        to_run_id: 'supervisor',
+        message: 'is the build green?',
+        supervisor_id: '/tmp/parent-control.sock',
+      })
+      expect(result.content).toEqual([{ type: 'text', text: 'Reply from supervisor:\ngreen' }])
+      expect(result.details).toEqual({ reply: 'green', from_run_id: 'supervisor' })
+
+      const send = calls.find(call => call.path === '/send')
+      expect(send?.body).toMatchObject({
+        run_id: 'rt_child',
+        token: 'tok',
+        from_run_id: 'rt_child',
+        to_run_id: 'supervisor',
+        type: 'agent_message',
+      })
+      const payload = send?.body.payload as Record<string, unknown>
+      expect(payload).toMatchObject({
+        from_run_id: 'rt_child',
+        to_run_id: 'supervisor',
+        message: 'is the build green?',
+        role: 'agent',
+        expects_reply: true,
+      })
+      expect(calls.find(call => call.path === '/wait_reply')?.body).toMatchObject({
+        run_id: 'rt_child',
+        waiting_for: payload.id,
+      })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      globalThis.fetch = previous
+    }
+  })
 })

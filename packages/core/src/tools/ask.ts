@@ -15,7 +15,7 @@ export interface AskResult {
   from_run_id: string
 }
 
-function extractReplyMessage(result: Record<string, unknown>): string {
+export function extractReplyMessage(result: Record<string, unknown>): string {
   if (result.timeout === true) return '(timeout: no reply received)'
   if (result.cancelled === true) return '(cancelled)'
   const payload = result.payload
@@ -24,6 +24,17 @@ function extractReplyMessage(result: Record<string, unknown>): string {
     if (typeof msg === 'string' && msg) return msg
   }
   return JSON.stringify(result)
+}
+
+/**
+ * Build the failure message every ask path reports: the broker message id plus
+ * whether the ask edge is still pending (withdrawable via avenor_cancel) or
+ * already gone.
+ */
+export function formatAskFailure(messageId: string, pending: boolean, detail: string): string {
+  return pending
+    ? `ask failed (message_id: ${messageId} — pass to avenor_cancel to withdraw): ${detail}`
+    : `ask failed (message_id: ${messageId} — the pending ask was already withdrawn): ${detail}`
 }
 
 async function executeAskTool(
@@ -59,17 +70,9 @@ async function executeAskTool(
         const data = error.data as Record<string, unknown>
         const messageId = data.message_id
         if (typeof messageId === 'string' && messageId) {
-          const pending = data.pending
-          if (pending === false) {
-            throw new Error(
-              `ask failed (message_id: ${messageId} — the pending ask was already withdrawn): ${error.message}`,
-            )
-          }
           // pending === true, or absent/unknown (legacy shape): the ask edge
           // may still exist, so the caller can withdraw it.
-          throw new Error(
-            `ask failed (message_id: ${messageId} — pass to avenor_cancel to withdraw): ${error.message}`,
-          )
+          throw new Error(formatAskFailure(messageId, data.pending !== false, error.message))
         }
       }
       throw error

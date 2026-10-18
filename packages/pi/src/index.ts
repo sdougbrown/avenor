@@ -3,6 +3,7 @@ import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { randomUUID } from 'node:crypto'
 import {
+  askViaBroker,
   formatInboundAskBody,
   parseControlMessage,
   postBroker,
@@ -1759,10 +1760,25 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         to_run_id: Type.String({ description: 'Target run ID' }),
         message: Type.String({ description: 'Question to ask the other agent' }),
         timeout_ms: Type.Optional(Type.Integer({ description: 'Optional timeout in milliseconds for the ask' })),
-        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
+        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path (ignored in a Pi sub-agent, which asks through its inherited broker)' })),
       }),
-      async execute(_toolCallId, params) {
-        return askTool({ toRunId: params.to_run_id, message: params.message, timeoutMs: params.timeout_ms, supervisorId: params.supervisor_id })
+      async execute(_toolCallId, params, signal) {
+        // In a pi sub-agent, ask through the inherited broker as its own run:
+        // the parent's control connection is not available to a child.
+        const result = isSubAgentBrokerMode && subAgentEnv
+          ? await askViaBroker(subAgentEnv, {
+            toRunId: params.to_run_id,
+            message: params.message,
+            timeoutMs: params.timeout_ms,
+            signal,
+          })
+          : await askTool({ toRunId: params.to_run_id, message: params.message, timeoutMs: params.timeout_ms, supervisorId: params.supervisor_id })
+        // Pi normalizes a result without content to an empty tool output, so
+        // the reply has to be text the model can read.
+        return {
+          content: [{ type: 'text', text: `Reply from ${result.from_run_id || params.to_run_id}:\n${result.reply}` }],
+          details: result,
+        }
       },
     })
 

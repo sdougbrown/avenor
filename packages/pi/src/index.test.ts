@@ -108,11 +108,15 @@ describe('Avenor Pi extension', () => {
 
   it('wires avenor_ask timeout_ms through to the ask tool', async () => {
     const harness = await startExtensionHarness({})
-    await harness.registeredTools.avenor_ask.execute(
+    const result = await harness.registeredTools.avenor_ask.execute(
       'tool-ask',
       { to_run_id: 'run-1', message: 'hello', timeout_ms: 2500 },
     )
     expect(askCalls.at(-1)).toEqual({ toRunId: 'run-1', message: 'hello', timeoutMs: 2500, supervisorId: undefined })
+    expect(result).toEqual({
+      content: [{ type: 'text', text: 'Reply from run-1:\nok' }],
+      details: { reply: 'ok', from_run_id: 'run-1' },
+    })
 
     // A fractional timeout_ms round-trips through the wiring as-is; schema-level
     // Integer coercion is TypeBox's concern, not the extension's.

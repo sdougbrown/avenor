@@ -63,7 +63,7 @@ export { inspectTool } from './tools/inspect.js'
 export type { InspectResult } from './tools/inspect.js'
 export { shutdownTool } from './tools/shutdown.js'
 
-export { askTool } from './tools/ask.js'
+export { askTool, extractReplyMessage, formatAskFailure } from './tools/ask.js'
 export type { AskToolArgs, AskResult } from './tools/ask.js'
 export { peersTool } from './tools/peers.js'
 export type { PeersResult, PeerEntry } from './tools/peers.js'
