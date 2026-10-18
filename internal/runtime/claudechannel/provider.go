@@ -707,9 +707,12 @@ func normalizeStatusPhase(fields map[string]any) {
 		fields["phase"] = string(runstate.PhaseWorking)
 		return
 	}
-	switch phase {
-	case "", string(runstate.PhaseThinking), string(runstate.PhaseWorking), string(runstate.PhaseWaiting), string(runstate.PhaseDone):
+	// A recognized phase passes through unchanged; the empty phase is
+	// recognized too, so it needs no separate case.
+	if _, ok := runstate.ParsePhase(phase); ok {
 		return
+	}
+	switch phase {
 	case "blocked", "child_question":
 		fields["phase"] = string(runstate.PhaseWaiting)
 	default:
