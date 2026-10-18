@@ -7,6 +7,7 @@ import {
   readSubAgentEnv,
   resolveReplyTarget,
 } from './subagent-broker.js'
+import { waitFor } from './test-fixtures.js'
 
 const env = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_1', token: 'tok' } as const
 
@@ -262,6 +263,19 @@ describe('askViaBroker', () => {
     expect((error as Error).message).toContain('wait for reply: broker /wait_reply: 504')
   })
 
+  it('treats a non-404 withdraw failure as possibly pending', async () => {
+    const fetchImpl = brokerFetch({
+      '/send': async () => jsonResponse({ queued: true }),
+      '/wait_reply': async () => jsonResponse({ message_id: 'x', timeout: true }, 504),
+      '/cancel_message': async () => new Response('no pending ask for this message id', { status: 503 }),
+    })
+
+    const error = await askViaBroker(env, { toRunId: 'supervisor', message: 'hello' }, fetchImpl)
+      .catch((e: unknown) => e)
+
+    expect((error as Error).message).toContain('pass to avenor_cancel to withdraw')
+  })
+
   it('withdraws when the caller aborts the ask', async () => {
     const calls: RecordedCall[] = []
     const fetchImpl = brokerFetch(
@@ -274,11 +288,60 @@ describe('askViaBroker', () => {
     )
     const controller = new AbortController()
     const pending = askViaBroker(env, { toRunId: 'supervisor', message: 'hello', signal: controller.signal }, fetchImpl)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    await waitFor(() => calls.some(call => call.path === '/wait_reply'))
     controller.abort()
 
     const error = await pending.catch((e: unknown) => e)
     expect((error as Error).message).toContain('wait for reply: cancelled')
+    expect((error as Error).message).toContain('already withdrawn')
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
+  })
+
+  it('withdraws when the caller aborts an ask that also carries a timeout', async () => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => jsonResponse({ queued: true }),
+        '/wait_reply': waitUntilAborted,
+        '/cancel_message': async () => new Response('no pending ask for this message id', { status: 404 }),
+      },
+      calls,
+    )
+    const controller = new AbortController()
+    const pending = askViaBroker(
+      env,
+      { toRunId: 'supervisor', message: 'hello', timeoutMs: 10_000, signal: controller.signal },
+      fetchImpl,
+    )
+    await waitFor(() => calls.some(call => call.path === '/wait_reply'))
+    controller.abort()
+
+    const error = await pending.catch((e: unknown) => e)
+    expect((error as Error).message).toContain('wait for reply: cancelled')
+    expect((error as Error).message).toContain('already withdrawn')
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
+  })
+
+  it('reports the deadline when the timeout fires before a present caller signal', async () => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => jsonResponse({ queued: true }),
+        '/wait_reply': waitUntilAborted,
+        '/cancel_message': async () => new Response('no pending ask for this message id', { status: 404 }),
+      },
+      calls,
+    )
+    const controller = new AbortController()
+
+    const error = await askViaBroker(
+      env,
+      { toRunId: 'supervisor', message: 'hello', timeoutMs: 10, signal: controller.signal },
+      fetchImpl,
+    ).catch((e: unknown) => e)
+
+    expect(controller.signal.aborted).toBe(false)
+    expect((error as Error).message).toContain('wait for reply: timed out')
     expect((error as Error).message).toContain('already withdrawn')
     expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
   })

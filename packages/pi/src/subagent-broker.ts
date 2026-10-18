@@ -9,6 +9,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { extractReplyMessage, formatAskFailure } from '@dougbots/avenor-core'
+import type { AskResult } from '@dougbots/avenor-core'
 
 /** Deadline for a cleanup call whose caller's own deadline has already expired. */
 const ASK_CLEANUP_TIMEOUT_MS = 5000
@@ -131,12 +132,6 @@ export interface BrokerAskArgs {
   signal?: AbortSignal
 }
 
-/** Same result shape the host-side ask tool returns. */
-export interface BrokerAskResult {
-  reply: string
-  from_run_id: string
-}
-
 function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => signal !== undefined)
   if (active.length === 0) return undefined
@@ -187,11 +182,11 @@ async function withdrawAsk(
     return false
   } catch (error) {
     // The broker clears the edge itself when a cancelled wait_reply request
-    // disconnects, so a 404 "no pending ask" response means it is already gone.
+    // disconnects, so a 404 from /cancel_message means the ask is already gone.
     // Anything else, including a transport failure that drew no response, may
     // leave the edge behind.
     if (error instanceof BrokerHttpError) {
-      return !(error.status === 404 || error.message.includes('no pending ask for this message id'))
+      return error.status !== 404
     }
     return true
   }
@@ -244,7 +239,7 @@ export async function askViaBroker(
   env: SubAgentEnv,
   args: BrokerAskArgs,
   fetchImpl: typeof fetch = fetch,
-): Promise<BrokerAskResult> {
+): Promise<AskResult> {
   const messageId = randomUUID()
   const role = args.role ?? 'agent'
   const timeoutMs =
