@@ -86,7 +86,8 @@ export async function postBroker(
   const res = await fetchImpl(`${env.brokerUrl}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ run_id: env.runId, token: env.token, ...body }),
+    // Spread the body first so a caller cannot override the credentials.
+    body: JSON.stringify({ ...body, run_id: env.runId, token: env.token }),
     ...(signal ? { signal } : {}),
   })
   if (!res.ok) throw new BrokerHttpError(path, res.status, (await res.text()).trim())
@@ -153,6 +154,26 @@ function describeFailure(error: unknown): string {
 }
 
 /**
+ * Withdraw a pending ask through the broker as this run. The broker's own error
+ * propagates so a caller reporting to a model shows its exact text.
+ */
+export async function withdrawPendingAsk(
+  env: SubAgentEnv,
+  messageId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  // A fresh deadline: the caller's own signal may already have aborted the
+  // wait this cleanup follows, and abandoning cleanup would lose the ask.
+  await postBroker(
+    env,
+    '/cancel_message',
+    { cancel_message_id: messageId },
+    fetchImpl,
+    AbortSignal.timeout(ASK_CLEANUP_TIMEOUT_MS),
+  )
+}
+
+/**
  * Withdraw a pending ask and classify whether the edge may still exist on the
  * broker: true means the cleanup could not be confirmed, false means it is gone.
  */
@@ -162,15 +183,7 @@ async function withdrawAsk(
   fetchImpl: typeof fetch,
 ): Promise<boolean> {
   try {
-    // A fresh deadline: the caller's own signal may already have aborted the
-    // wait this cleanup follows, and abandoning cleanup would lose the ask.
-    await postBroker(
-      env,
-      '/cancel_message',
-      { cancel_message_id: messageId },
-      fetchImpl,
-      AbortSignal.timeout(ASK_CLEANUP_TIMEOUT_MS),
-    )
+    await withdrawPendingAsk(env, messageId, fetchImpl)
     return false
   } catch (error) {
     // The broker clears the edge itself when a cancelled wait_reply request
@@ -182,6 +195,43 @@ async function withdrawAsk(
     }
     return true
   }
+}
+
+/** Fetch causes for a dial that never opened, so no request reached the broker. */
+const NEVER_REACHED_CODES = new Set([
+  'ECONNREFUSED',
+  'ConnectionRefused',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'ERR_INVALID_URL',
+])
+
+/**
+ * Whether a fetch failure carries only dial-level causes, so no request was
+ * carried to the broker and no ask edge can exist. Undici aggregates one error
+ * per dialled address, so every attempt must have failed at the dial.
+ */
+function dialNeverOpened(error: unknown, depth = 0): boolean {
+  if (depth > 5 || error === null || error === undefined) return false
+  const node = error as { code?: unknown; cause?: unknown; errors?: unknown }
+  if (typeof node.code === 'string' && NEVER_REACHED_CODES.has(node.code)) return true
+  if (Array.isArray(node.errors) && node.errors.length > 0) {
+    return node.errors.every(cause => dialNeverOpened(cause, depth + 1))
+  }
+  return dialNeverOpened(node.cause, depth + 1)
+}
+
+/**
+ * Whether a failed send provably never reached the broker, mirroring the host's
+ * rule: a dial that never opened or an unusable broker address carries no
+ * request; an HTTP response, a reset, or an abort may have been processed and
+ * still needs a withdraw.
+ */
+function sendNeverReachedBroker(error: unknown): boolean {
+  return !(error instanceof BrokerHttpError) && dialNeverOpened(error)
 }
 
 /**
@@ -230,6 +280,11 @@ export async function askViaBroker(
       signal,
     )
   } catch (error) {
+    // A send that never opened a connection cannot have registered an edge, so
+    // report it withdrawn instead of spending a cancel on it.
+    if (sendNeverReachedBroker(error)) {
+      throw new Error(formatAskFailure(messageId, false, `send ask: ${describeFailure(error)}`))
+    }
     return fail(`send ask: ${describeFailure(error)}`)
   }
 

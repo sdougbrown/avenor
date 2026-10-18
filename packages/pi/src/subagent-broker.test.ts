@@ -83,6 +83,13 @@ describe('postBroker', () => {
     const fetchMock = mock(async () => ({ ok: false, status: 404, text: async () => 'nope' }))
     await expect(postBroker(env, '/send', {}, fetchMock as unknown as typeof fetch)).rejects.toThrow('broker /send: 404 nope')
   })
+
+  it('keeps the credentials when the body carries its own', async () => {
+    const fetchMock = mock(async () => ({ ok: true, json: async () => ({}) }))
+    await postBroker(env, '/send', { run_id: 'other', token: 'stolen' }, fetchMock as unknown as typeof fetch)
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ run_id: 'rt_1', token: 'tok' })
+  })
 })
 
 describe('resolveReplyTarget', () => {
@@ -261,7 +268,7 @@ describe('askViaBroker', () => {
       {
         '/send': async () => jsonResponse({ queued: true }),
         '/wait_reply': waitUntilAborted,
-        '/cancel_message': async () => jsonResponse({ cancelled: true }),
+        '/cancel_message': async () => new Response('no pending ask for this message id', { status: 404 }),
       },
       calls,
     )
@@ -272,6 +279,105 @@ describe('askViaBroker', () => {
 
     const error = await pending.catch((e: unknown) => e)
     expect((error as Error).message).toContain('wait for reply: cancelled')
+    expect((error as Error).message).toContain('already withdrawn')
     expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
+  })
+
+  it('withdraws an ask whose send drew an HTTP error response', async () => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => new Response('to run not found', { status: 404 }),
+        '/cancel_message': async () => new Response('no pending ask for this message id', { status: 404 }),
+      },
+      calls,
+    )
+
+    const error = await askViaBroker(env, { toRunId: 'ghost', message: 'hello' }, fetchImpl)
+      .catch((e: unknown) => e)
+
+    expect((error as Error).message).toContain('already withdrawn')
+    expect((error as Error).message).toContain('send ask: broker /send: 404 to run not found')
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
+  })
+
+  it.each([
+    ['a Node dial failure cause', () => new TypeError('fetch failed', {
+      cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' }),
+    })],
+    ['a Node connect timeout cause', () => new TypeError('fetch failed', {
+      cause: Object.assign(new Error('Connect Timeout Error'), { code: 'UND_ERR_CONNECT_TIMEOUT' }),
+    })],
+    ['a Bun connection-refused code', () => Object.assign(new TypeError('Unable to connect.'), { code: 'ConnectionRefused' })],
+    ['an unresolvable broker host', () => Object.assign(new TypeError('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' })],
+    ['an unusable broker address', () => Object.assign(new TypeError('fetch() URL is invalid'), { code: 'ERR_INVALID_URL' })],
+  ])('reports an ask that never reached the broker as withdrawn on %s', async (_name, makeError) => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => {
+          throw makeError()
+        },
+        '/cancel_message': async () => jsonResponse({ cancelled: true }),
+      },
+      calls,
+    )
+
+    const error = await askViaBroker(env, { toRunId: 'supervisor', message: 'hello' }, fetchImpl)
+      .catch((e: unknown) => e)
+
+    const messageId = String((calls.find(call => call.path === '/send')?.body.payload as Record<string, unknown>).id)
+    expect((error as Error).message).toContain(`message_id: ${messageId}`)
+    expect((error as Error).message).toContain('already withdrawn')
+    expect((error as Error).message).not.toContain('pass to avenor_cancel to withdraw')
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(0)
+  })
+
+  it('withdraws when only some of several dial attempts failed at the dial', async () => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => {
+          // Undici reports one error per dialled address; a reset on another
+          // address may have carried the request.
+          throw new TypeError('fetch failed', {
+            cause: new AggregateError([
+              Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' }),
+              Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+            ], 'aggregate error'),
+          })
+        },
+        '/cancel_message': async () => new Response('no pending ask for this message id', { status: 404 }),
+      },
+      calls,
+    )
+
+    const error = await askViaBroker(env, { toRunId: 'supervisor', message: 'hello' }, fetchImpl)
+      .catch((e: unknown) => e)
+
+    expect((error as Error).message).toContain('already withdrawn')
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
+  })
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['NaN', NaN],
+    ['Infinity', Infinity],
+  ])('ignores a %s timeoutMs and keeps the default role', async (_name, timeoutMs) => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => jsonResponse({ queued: true }),
+        '/wait_reply': async () => jsonResponse({ from_run_id: 'supervisor', payload: { message: 'still here' } }),
+      },
+      calls,
+    )
+
+    const result = await askViaBroker(env, { toRunId: 'supervisor', message: 'hello', timeoutMs }, fetchImpl)
+    expect(result).toEqual({ reply: 'still here', from_run_id: 'supervisor' })
+    const payload = calls.find(call => call.path === '/send')?.body.payload as Record<string, unknown>
+    expect(payload.role).toBe('agent')
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(0)
   })
 })

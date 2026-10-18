@@ -9,6 +9,7 @@ import {
   postBroker,
   readSubAgentEnv,
   resolveReplyTarget,
+  withdrawPendingAsk,
   type SubAgentEnv,
 } from './subagent-broker.js'
 import {
@@ -1874,6 +1875,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         message_id: Type.String({ description: 'Message ID of the pending ask to cancel' }),
       }),
       async execute(_toolCallId, params) {
+        // Withdrawing an ask is this tool's only operation, and the child's own
+        // run is its sender, so a pi sub-agent withdraws through the inherited
+        // broker instead of the parent's control connection (which it lacks).
+        if (isSubAgentBrokerMode && subAgentEnv) {
+          await withdrawPendingAsk(subAgentEnv, params.message_id)
+          return {
+            content: [{ type: 'text', text: `Cancelled ${params.message_id}` }],
+            details: { cancelled: true },
+          }
+        }
         return cancelTool({ messageId: params.message_id })
       },
     })

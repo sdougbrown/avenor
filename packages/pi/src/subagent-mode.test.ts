@@ -387,11 +387,87 @@ describe('sub-agent broker mode (integration)', () => {
       })
       expect(calls.find(call => call.path === '/wait_reply')?.body).toMatchObject({
         run_id: 'rt_child',
+        token: 'tok',
         waiting_for: payload.id,
       })
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       globalThis.fetch = previous
+    }
+  })
+
+  it('withdraws a child ask when the tool call aborts', async () => {
+    const calls: FetchCall[] = []
+    const previous = globalThis.fetch
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname
+      calls.push({ path, body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
+      if (path === '/poll-control') return Response.json([])
+      if (path === '/wait_reply') {
+        const signal = init?.signal
+        if (!signal) throw new Error('wait_reply must receive an abort signal')
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      }
+      if (path === '/cancel_message') return new Response('no pending ask for this message id', { status: 404 })
+      return Response.json({ queued: true })
+    }) as typeof fetch
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    const controller = new AbortController()
+    try {
+      harness = await startExtensionHarness({ extOptions: { pollIntervalMs: 5, subAgentEnv } })
+      const pending = harness.registeredTools.avenor_ask
+        .execute('t1', { to_run_id: 'supervisor', message: 'anyone there?' }, controller.signal)
+        .then(() => null, (error: unknown) => error)
+      await waitFor(() => calls.some(call => call.path === '/wait_reply'))
+      controller.abort()
+
+      const error = await pending
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain('wait for reply: cancelled')
+      expect((error as Error).message).toContain('already withdrawn')
+      const messageId = String((calls.find(call => call.path === '/send')?.body.payload as Record<string, unknown>).id)
+      expect(calls.find(call => call.path === '/cancel_message')?.body).toMatchObject({
+        run_id: 'rt_child',
+        token: 'tok',
+        cancel_message_id: messageId,
+      })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      globalThis.fetch = previous
+    }
+  })
+
+  it('withdraws avenor_cancel through the broker without starting a supervisor', async () => {
+    const calls: FetchCall[] = []
+    const previous = globalThis.fetch
+    // The host cancel path resolves a supervisor through AVENOR_BIN; pointing
+    // it at nothing makes any fall-through fail here instead of spawning one.
+    const previousBin = process.env.AVENOR_BIN
+    process.env.AVENOR_BIN = '/nonexistent/avenor-test-guard'
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname
+      calls.push({ path, body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
+      if (path === '/poll-control') return Response.json([])
+      return Response.json({ cancelled: true })
+    }) as typeof fetch
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startExtensionHarness({ extOptions: { pollIntervalMs: 5, subAgentEnv } })
+      const result = await harness.registeredTools.avenor_cancel.execute('t1', { message_id: 'ask-c1' })
+      expect(result.content).toEqual([{ type: 'text', text: 'Cancelled ask-c1' }])
+      expect(result.details).toEqual({ cancelled: true })
+      expect(calls.find(call => call.path === '/cancel_message')?.body).toMatchObject({
+        run_id: 'rt_child',
+        token: 'tok',
+        cancel_message_id: 'ask-c1',
+      })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      globalThis.fetch = previous
+      if (previousBin === undefined) delete process.env.AVENOR_BIN
+      else process.env.AVENOR_BIN = previousBin
     }
   })
 })
