@@ -157,6 +157,108 @@ func TestRunAnswer(t *testing.T) {
 	}
 }
 
+// ---- flag position tests (path first, flags first, mixed) ----
+
+// TestRunAnswerFlagPositionVariants: flags must be accepted both before and
+// after the <perm-base> positional, since the flag package stops at the first
+// positional but callers may use either order.
+func TestRunAnswerFlagPositionVariants(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      func(permBase string) []string
+		wantCode  int
+		stderrSub string // non-empty: stderr must contain this
+		wantOpt   string // when wantCode == 0, expected option_id in the response
+		wantMsg   string // when wantCode == 0, expected message in the response
+	}{
+		{
+			name: "flags after path",
+			args: func(p string) []string {
+				return []string{p, "--option", "allow", "--message", "after path"}
+			},
+			wantCode: 0,
+			wantOpt:  "allow",
+			wantMsg:  "after path",
+		},
+		{
+			name: "flags before path",
+			args: func(p string) []string {
+				return []string{"--option", "allow", "--message", "before path", p}
+			},
+			wantCode: 0,
+			wantOpt:  "allow",
+			wantMsg:  "before path",
+		},
+		{
+			name: "mixed flag positions",
+			args: func(p string) []string {
+				return []string{"--message", "mixed", p, "--option", "allow"}
+			},
+			wantCode: 0,
+			wantOpt:  "allow",
+			wantMsg:  "mixed",
+		},
+		{
+			name: "missing --option with path first",
+			args: func(p string) []string {
+				return []string{p}
+			},
+			wantCode:  2,
+			stderrSub: "--option",
+		},
+		{
+			name: "two positionals",
+			args: func(p string) []string {
+				return []string{p, filepath.Join("dir", "other.perm"), "--option", "allow"}
+			},
+			wantCode:  2,
+			stderrSub: "expected exactly one",
+		},
+		{
+			name: "unknown flag after path",
+			args: func(p string) []string {
+				return []string{p, "--bogus", "x"}
+			},
+			wantCode:  2,
+			stderrSub: "flag provided but not defined",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			permBase := writeReqFile(t, dir, "test.perm", []string{"allow", "deny"})
+			code, stderr := answerRun(tt.args(permBase))
+
+			if code != tt.wantCode {
+				t.Fatalf("exit code = %d, want %d; stderr: %s", code, tt.wantCode, stderr)
+			}
+			if tt.stderrSub != "" && !containsStr(stderr, tt.stderrSub) {
+				t.Errorf("stderr %q does not contain %q", stderr, tt.stderrSub)
+			}
+			if tt.wantCode != 0 {
+				return
+			}
+
+			data, err := os.ReadFile(permBase + ".req.response")
+			if err != nil {
+				t.Fatalf("read response: %v", err)
+			}
+			var resp answerResponse
+			if err := json.Unmarshal(data, &resp); err != nil {
+				t.Fatalf("parse response: %v", err)
+			}
+			if resp.OptionID != tt.wantOpt {
+				t.Errorf("option_id = %q, want %q", resp.OptionID, tt.wantOpt)
+			}
+			if resp.Message != tt.wantMsg {
+				t.Errorf("message = %q, want %q", resp.Message, tt.wantMsg)
+			}
+			noTmpFiles(t, dir)
+		})
+	}
+}
+
 // ---- focused tests for response file content ----
 
 func TestRunAnswerResponseContent(t *testing.T) {

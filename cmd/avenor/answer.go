@@ -47,8 +47,24 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 	outcomeFlag := fs.String("outcome", "selected", "outcome: selected or cancelled")
 	forceFlag := fs.Bool("force", false, "overwrite an existing response file")
 
-	if err := fs.Parse(args); err != nil {
-		return 2
+	// The flag package stops at the first positional argument, so flags that
+	// follow <perm-base> would be left in fs.Args() unprocessed. Parse
+	// repeatedly, lifting the positional out, until only flags remain.
+	var permBase string
+	rest := args
+	for {
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		if permBase != "" {
+			fmt.Fprintln(errOut, "avenor answer: expected exactly one <perm-base>")
+			return 2
+		}
+		permBase = fs.Arg(0)
+		rest = fs.Args()[1:]
 	}
 
 	// Validate --outcome before anything else.
@@ -63,17 +79,11 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 		return 2
 	}
 
-	// Validate exactly one positional arg.
-	if fs.NArg() == 0 {
+	if permBase == "" {
 		fmt.Fprintln(errOut, "avenor answer: <perm-base> is required")
 		return 2
 	}
-	if fs.NArg() > 1 {
-		fmt.Fprintln(errOut, "avenor answer: expected exactly one <perm-base>")
-		return 2
-	}
 
-	permBase := fs.Arg(0)
 	reqPath := permBase + ".req"
 	responsePath := reqPath + ".response"
 
