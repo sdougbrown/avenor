@@ -1177,6 +1177,10 @@ func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
 				mu.Unlock()
 			}
 		}()
+		// Two events before the reader starts force one drop per iteration,
+		// so the lagged path runs regardless of how fast the reader drains.
+		sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"i": -2}})
+		sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"i": -1}})
 		go sub.loop()
 
 		enqueued := make(chan struct{})
