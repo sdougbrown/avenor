@@ -41,7 +41,7 @@ func (c waitCondition) valid() bool {
 
 func isTerminalStatus(status map[string]any) bool {
 	state, _ := status["status"].(string)
-	return runstate.IsTerminalStatus(state)
+	return runstate.IsTerminalStatus(runstate.RuntimeStatus(state))
 }
 
 func hasPendingPermission(status map[string]any) bool {

@@ -2,11 +2,39 @@ package mcpserver
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
+	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/runstate"
 )
+
+// statusDiagnostics logs unrecognized raw statuses a runtime reported, once
+// per (runtime, raw status) pair until the cap, then a single suppression
+// line. The pair key means the same bogus value reported by two runtimes logs
+// twice. A nil receiver disables logging so translateStatus stays usable
+// without a Server.
+type statusDiagnostics struct {
+	stderr io.Writer
+	gate   diagnote.Gate
+}
+
+// note logs one unrecognized raw status for a runtime. The gate decides under
+// its lock; the write happens after so a blocked stderr cannot stall other
+// status translations.
+func (d *statusDiagnostics) note(runtimeID, rawStatus string) {
+	if d == nil {
+		return
+	}
+	log, suppressed := d.gate.Admit(runtimeID + "\x00" + rawStatus)
+	switch {
+	case log:
+		fmt.Fprintf(d.stderr, "avenor mcp: runtime %q reported unrecognized status %q\n", runtimeID, rawStatus)
+	case suppressed:
+		fmt.Fprintln(d.stderr, "avenor mcp: "+diagnote.SuppressedNote)
+	}
+}
 
 type sentinelData struct {
 	Status     string
@@ -211,7 +239,7 @@ func readSentinel(path string) (*sentinelData, error) {
 	return sd, nil
 }
 
-func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
+func translateStatus(diag *statusDiagnostics, runtimeID string, raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
 	for _, k := range []string{"runtime_id", "label", "dir", "phase", "phase_label", "pending_permission", "permission", "permission_decider", "permission_model_decider", "permission_decider_exhausted", "backend", "agent", "agent_profile", "model", "roster_file", "roster_entry", "effective_backend", "effective_agent", "effective_model", "parent_id", "children", "event_path", "usage", "latest_seq", "final_output", "final_output_truncated", "started_at"} {
@@ -223,8 +251,13 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 	rawStatus, _ := raw["status"].(string)
 	rawSession, _ := raw["session_id"].(string)
 	rawPhase, _ := raw["phase"].(string)
-	translated := runstate.Translate(rawStatus, rawPhase)
-	result["status"] = translated.Status
+	translated := runstate.Translate(runstate.RuntimeStatus(rawStatus), runstate.Phase(rawPhase))
+	result["status"] = string(translated.Status)
+	// A missing or empty raw status is not unrecognized: it still translates
+	// to unknown, but stays silent rather than logging an empty value.
+	if !translated.StatusRecognized && rawStatus != "" {
+		diag.note(runtimeID, rawStatus)
+	}
 
 	switch rawStatus {
 	case "running":
@@ -232,9 +265,9 @@ func translateStatus(raw map[string]any, sentinelPath string) map[string]any {
 		// phase before the attempt defer clears child.active; retry selection can
 		// still be pending. Team members share child.active, so this also covers
 		// concurrent work.
-		if translated.Phase != rawPhase {
+		if translated.Phase != runstate.Phase(rawPhase) {
 			// Keep phase empty until deferred cleanup sets child.active false.
-			result["phase"] = translated.Phase
+			result["phase"] = string(translated.Phase)
 			result["phase_label"] = ""
 		}
 		if rawSession != "" {
@@ -351,7 +384,7 @@ func readSentinelSession(path string) (string, error) {
 }
 
 func applySentinelStatus(result map[string]any, sd *sentinelData) {
-	result["status"] = runstate.SentinelStatus(sd.Status)
+	result["status"] = string(runstate.SentinelStatus(sd.Status))
 	if sd.SessionID != "" {
 		result["session_id"] = sd.SessionID
 	}

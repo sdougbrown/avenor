@@ -146,7 +146,7 @@ Returns the current state snapshot:
 }
 ```
 
-- `phase` — high-level state: `"idle"`, `"working"`, `"ended"`.
+- `phase` — high-level state: `""`, `"thinking"`, `"working"`, `"waiting"`, `"done"`, or `"unknown"` when the runtime reported a phase outside that set.
 - `phase_label` — human-readable description of the current turn (e.g. a test name).
 - `last_event` — the event type of the most recent published event.
 - `retry_attempt` / `max_retries` — counts for automatic retry after backend errors.

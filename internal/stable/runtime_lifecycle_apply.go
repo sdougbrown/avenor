@@ -25,6 +25,7 @@ import (
 	"fmt"
 
 	"github.com/sdougbrown/avenor/internal/cli"
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 // spawnIsWorkflow reports whether a spawn runs a loop or team workflow
@@ -214,22 +215,22 @@ func (s *Supervisor) applyOwnedLifecycleEffects(child *childRuntime, eff []lifec
 	for _, e := range eff {
 		switch e.kind {
 		case effectClearPresentation:
-			child.phase, child.phaseLabel = "", ""
+			child.phase, child.phaseLabel = runstate.PhaseNone, ""
 		case effectSetAgentPresentation:
 			child.phase = e.phase
 			if e.label != "" {
 				child.phaseLabel = e.label
 			}
 		case effectSetSuccessPresentation:
-			child.phase = "done"
+			child.phase = runstate.PhaseDone
 		case effectSetSessionEndPresentation:
-			child.phase = "done"
+			child.phase = runstate.PhaseDone
 			if e.reason != "" {
 				child.lastStopReason = e.reason
 			}
 		case effectSetIdleEndData:
 			child.exitCode = e.exitCode
-			child.phase = "done"
+			child.phase = runstate.PhaseDone
 			child.lastStopReason = e.reason
 		case effectRecordOutcomeExit:
 			child.exitCode = e.exitCode

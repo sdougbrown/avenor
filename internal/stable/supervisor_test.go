@@ -1650,7 +1650,7 @@ func waitForStableChild(t *testing.T, child *childRuntime, condition func(active
 		child.mu.Lock()
 		active, completed, phase, phaseLabel := child.lc.isActive(), child.lc.isCompleted(), child.phase, child.phaseLabel
 		child.mu.Unlock()
-		if condition(active, completed, phase, phaseLabel) {
+		if condition(active, completed, string(phase), phaseLabel) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -1658,7 +1658,7 @@ func waitForStableChild(t *testing.T, child *childRuntime, condition func(active
 	child.mu.Lock()
 	active, completed, phase, phaseLabel := child.lc.isActive(), child.lc.isCompleted(), child.phase, child.phaseLabel
 	child.mu.Unlock()
-	t.Fatalf("timed out waiting for child state: active=%v completed=%v phase=%q phase_label=%q", active, completed, phase, phaseLabel)
+	t.Fatalf("timed out waiting for child state: active=%v completed=%v phase=%q phase_label=%q", active, completed, string(phase), phaseLabel)
 }
 
 func waitForStableDone(t *testing.T, child *childRuntime) {

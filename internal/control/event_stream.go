@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 const (
@@ -124,7 +125,7 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 		}
 		if event.Event == "agent.status" {
 			if phase, _ := event.Fields["phase"].(string); phase != "" {
-				ss.Phase = phase
+				ss.Phase, _ = runstate.ParsePhase(phase)
 			}
 			if label, _ := event.Fields["label"].(string); label != "" {
 				ss.PhaseLabel = label

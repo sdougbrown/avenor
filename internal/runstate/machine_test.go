@@ -163,6 +163,15 @@ func TestMachinePreservesTranslationSemantics(t *testing.T) {
 	}
 }
 
+func TestMachineUnknownStatusStaysActive(t *testing.T) {
+	var machine Machine
+	snapshot := Snapshot{Status: StatusUnknown, Phase: PhaseWorking}
+	want := Decision{State: StateActive, Action: ActionContinue}
+	if got := machine.ObserveSnapshot(snapshot); got != want {
+		t.Fatalf("ObserveSnapshot(%+v) = %+v, want %+v", snapshot, got, want)
+	}
+}
+
 func TestMachinePendingPermissionPrecedence(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -193,17 +202,17 @@ func TestMachinePendingPermissionPrecedence(t *testing.T) {
 
 func TestMachineTerminalStatusSnapshots(t *testing.T) {
 	tests := []struct {
-		status string
+		status RuntimeStatus
 		state  State
 	}{
-		{status: "done", state: StateDone},
-		{status: "failed", state: StateFailed},
-		{status: "timeout", state: StateTimeout},
-		{status: "killed", state: StateKilled},
+		{status: StatusDone, state: StateDone},
+		{status: StatusFailed, state: StateFailed},
+		{status: StatusTimeout, state: StateTimeout},
+		{status: StatusKilled, state: StateKilled},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.status, func(t *testing.T) {
+		t.Run(string(tt.status), func(t *testing.T) {
 			var machine Machine
 			want := Decision{State: tt.state, Action: ActionExit}
 			if got := machine.ObserveSnapshot(Snapshot{Status: tt.status}); got != want {

@@ -25,11 +25,13 @@ import (
 	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
+	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
@@ -329,8 +331,15 @@ type childRuntime struct {
 	// event fanout so RuntimeStatus can surface phase, phase_label, and
 	// pending_permission without consulting the shared ControlState (which
 	// reflects only the most recent event across ALL runtimes).
-	phase             string
-	phaseLabel        string
+	phase      runstate.Phase
+	phaseLabel string
+	// unknownPhases gates the one-line-per-value diagnostics for raw phase
+	// values the fanout could not parse. The gate serializes its own state
+	// with its internal lock; its Admit decisions are made inside
+	// writeLocked's child.mu critical section (every writeLocked caller also
+	// holds writeMu), next to the status mirror update it deduplicates. The
+	// diagnostic is logged after every lock is released.
+	unknownPhases     diagnote.Gate
 	pendingPermission bool
 	permission        map[string]any
 	directAttempt     *sessionAttempt
@@ -4048,12 +4057,12 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 	out := make([]map[string]any, 0, len(s.runtimes))
 	for _, rt := range s.runtimes {
 		rt.mu.Lock()
-		status := "idle"
+		status := runstate.StatusIdle
 		if rt.lc.isActive() {
-			status = "running"
+			status = runstate.StatusRunning
 		}
 		if rt.lc.isCompleted() {
-			status = "ended"
+			status = runstate.StatusEnded
 		}
 		identity := s.statusIdentity(rt, rt.session.SessionID)
 		entry := map[string]any{
@@ -4072,7 +4081,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"effective_model":    identity.Model,
 			"effective_backend":  identity.Backend,
 			"dir":                rt.dir,
-			"status":             status,
+			"status":             string(status),
 			"started_at":         rt.startedAt,
 			"exit_code":          rt.exitCode,
 			"on_event":           rt.onEvent,
@@ -4081,7 +4090,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"parent_id":          rt.parentID,
 			"children":           rt.children,
 			"pid":                rt.session.PID,
-			"phase":              rt.phase,
+			"phase":              string(rt.phase),
 			"phase_label":        rt.phaseLabel,
 			"pending_permission": rt.pendingPermission,
 			"latest_seq":         rt.latestSeq,
@@ -5276,8 +5285,27 @@ func reportLifecycleDiagnostics(s *Supervisor, child *childRuntime, diagnostics 
 		return
 	}
 	for _, err := range diagnostics {
+		if note, ok := err.(unrecognizedPhaseDiagnostic); ok {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: %v\n", note)
+			continue
+		}
 		s.reportLifecycleError(child, err)
 	}
+}
+
+// unrecognizedPhaseDiagnostic carries a fanout unrecognized-phase note out of
+// writeLocked so it is logged after every lock is released. An empty phase
+// marks the one-time suppression line.
+type unrecognizedPhaseDiagnostic struct {
+	runtimeID string
+	phase     string
+}
+
+func (e unrecognizedPhaseDiagnostic) Error() string {
+	if e.phase == "" {
+		return fmt.Sprintf("runtime %s %s", e.runtimeID, diagnote.SuppressedNote)
+	}
+	return fmt.Sprintf("runtime %s reported unrecognized phase %q", e.runtimeID, e.phase)
 }
 
 // writeLocked is the canonical event path for callers that already hold the
@@ -5313,14 +5341,23 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 		}
 		switch presentation.Event {
 		case "agent.status":
-			if phase, _ := presentation.Fields["phase"].(string); phase != "" && w.child.phase != "done" {
+			if phase, _ := presentation.Fields["phase"].(string); phase != "" && w.child.phase != runstate.PhaseDone {
 				// The adapter owns the agent-status presentation write; the caller's
 				// done guard is the only dedup point. The label is only replaced
 				// when nonempty.
 				label, _ := presentation.Fields["label"].(string)
+				signalPhase, recognized := runstate.ParsePhase(phase)
+				if !recognized {
+					signalPhase = runstate.PhaseUnknown
+					if log, suppressed := w.child.unknownPhases.Admit(phase); log {
+						*diagnostics = append(*diagnostics, unrecognizedPhaseDiagnostic{runtimeID: w.runtimeID, phase: phase})
+					} else if suppressed {
+						*diagnostics = append(*diagnostics, unrecognizedPhaseDiagnostic{runtimeID: w.runtimeID})
+					}
+				}
 				_, _, statusErr := w.supervisor.applyLifecycle(w.child, lifecycleSignal{
 					kind: signalAgentStatusObserved, class: w.child.lc.class,
-					phase: phase, label: label,
+					phase: signalPhase, label: label,
 				})
 				if statusErr != nil {
 					*diagnostics = append(*diagnostics, statusErr)
@@ -5589,12 +5626,12 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		return nil, fmt.Errorf("runtime %q not found", rtID)
 	}
 	rt.mu.Lock()
-	status := "idle"
+	status := runstate.StatusIdle
 	if rt.lc.isActive() {
-		status = "running"
+		status = runstate.StatusRunning
 	}
 	if rt.lc.isCompleted() {
-		status = "ended"
+		status = runstate.StatusEnded
 	}
 	identity := s.statusIdentity(rt, rt.session.SessionID)
 	entry := map[string]any{
@@ -5613,7 +5650,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"effective_model":    identity.Model,
 		"effective_backend":  identity.Backend,
 		"dir":                rt.dir,
-		"status":             status,
+		"status":             string(status),
 		"started_at":         rt.startedAt,
 		"exit_code":          rt.exitCode,
 		"on_event":           rt.onEvent,
@@ -5622,7 +5659,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"parent_id":          rt.parentID,
 		"children":           rt.children,
 		"pid":                rt.session.PID,
-		"phase":              rt.phase,
+		"phase":              string(rt.phase),
 		"phase_label":        rt.phaseLabel,
 		"pending_permission": rt.pendingPermission,
 		"latest_seq":         rt.latestSeq,

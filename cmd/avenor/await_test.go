@@ -547,6 +547,91 @@ func TestAwaitRejectsMalformedStatusResponse(t *testing.T) {
 	}
 }
 
+func TestAwaitUnrecognizedStatusWarnsOnceAndKeepsWaiting(t *testing.T) {
+	// The initial fetch, the post-subscribe snapshot, and the lagged
+	// resnapshot all observe unrecognized statuses. Waiting continues —
+	// unknown is not terminal — and each distinct value warns exactly once.
+	server := newAwaitSocketServer(t,
+		[]map[string]any{
+			awaitStatus("mystery", "working", false),  // initial snapshot
+			awaitStatus("mystery", "working", false),  // post-subscribe snapshot
+			awaitStatus("mystery2", "working", false), // lag resnapshot
+		},
+		[]map[string]any{awaitEvent("subscriber.lagged", "rt_1", 10)},
+	)
+	var stdout, stderr bytes.Buffer
+	// The lagged resnapshot is an asynchronous consequence of the replayed
+	// event, so wait until the server has served all three status fetches
+	// instead of racing a short wall timeout against event delivery; the
+	// generous timeout only bounds how long await keeps waiting afterwards.
+	exited := make(chan int, 1)
+	go func() {
+		exited <- runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "2s"}, &stdout, &stderr)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fetched := 0
+		calls, _ := server.calls()
+		for _, call := range calls {
+			if call == "status" {
+				fetched++
+			}
+		}
+		if fetched >= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status fetches = %d, want the lagged resnapshot to run (calls %v)", fetched, calls)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	got := <-exited
+	if got != awaitExitWallTimeout {
+		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitWallTimeout, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("stdout = %q, want no transition records", stdout.String())
+	}
+	want := "avenor await: runtime reported unrecognized status \"mystery\"; waiting continues\n" +
+		"avenor await: runtime reported unrecognized status \"mystery2\"; waiting continues\n" +
+		"avenor await: timeout elapsed\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestAwaitRecognizedStatusesNeverWarn(t *testing.T) {
+	// Every recognized raw and consumer status keeps its normal exit code and
+	// never produces an unrecognized-status warning.
+	tests := []struct {
+		name     string
+		status   map[string]any
+		exitCode int
+	}{
+		{name: "running", status: awaitStatus("running", "working", false), exitCode: awaitExitWallTimeout},
+		{name: "idle", status: awaitStatus("idle", "done", false), exitCode: 0},
+		{name: "ended", status: awaitEndedStatus(0), exitCode: 0},
+		{name: "done", status: awaitStatus("done", "done", false), exitCode: 0},
+		{name: "failed", status: awaitStatus("failed", "failed", false), exitCode: awaitExitFailed},
+		{name: "timeout", status: awaitStatus("timeout", "timeout", false), exitCode: awaitExitPhaseTimeout},
+		{name: "killed", status: awaitStatus("killed", "killed", false), exitCode: awaitExitKilled},
+		{name: "blocked", status: awaitStatus("blocked", "", false), exitCode: awaitExitFailed},
+		{name: "waiting", status: awaitStatus("waiting", "waiting", false), exitCode: awaitExitWallTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newAwaitSocketServer(t, []map[string]any{tt.status}, nil)
+			var stdout, stderr bytes.Buffer
+			if got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "200ms"}, &stdout, &stderr); got != tt.exitCode {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", got, tt.exitCode, stderr.String())
+			}
+			if bytes.Contains(stderr.Bytes(), []byte("unrecognized")) {
+				t.Fatalf("stderr = %q, want no unrecognized-status warning", stderr.String())
+			}
+		})
+	}
+}
+
 func TestAwaitRetryAndLaggedEventsKeepWaitingThenResnapshot(t *testing.T) {
 	// A retry can publish session.end before its next attempt starts; active
 	// status must not be mistaken for a completed turn. A lag notification then
