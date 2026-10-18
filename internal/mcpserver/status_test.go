@@ -632,7 +632,7 @@ func unrecognizedStatusLines(t *testing.T, output string) []string {
 	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
 	values := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if strings.HasSuffix(line, "further unrecognized values suppressed") {
+		if strings.HasSuffix(line, diagnote.SuppressedNote) {
 			values = append(values, "")
 			continue
 		}
@@ -666,9 +666,9 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 				t.Fatal("waitTerminal fired for unknown")
 			}
 		}
-		want := "avenor mcp: runtime \"rt_1\" reported unrecognized status \"mystery\"\n"
-		if stderr.String() != want {
-			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		values := unrecognizedStatusLines(t, stderr.String())
+		if len(values) != 1 || values[0] != "mystery" {
+			t.Fatalf("log lines = %#v, want one line for mystery", values)
 		}
 	})
 
@@ -706,10 +706,9 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 		translateStatus(diag, "rt_1", map[string]any{"status": "mystery"}, "")
 		translateStatus(diag, "rt_2", map[string]any{"status": "mystery"}, "")
 		translateStatus(diag, "rt_1", map[string]any{"status": "mystery"}, "")
-		want := "avenor mcp: runtime \"rt_1\" reported unrecognized status \"mystery\"\n" +
-			"avenor mcp: runtime \"rt_2\" reported unrecognized status \"mystery\"\n"
-		if stderr.String() != want {
-			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		values := unrecognizedStatusLines(t, stderr.String())
+		if len(values) != 2 || values[0] != "mystery" || values[1] != "mystery" {
+			t.Fatalf("log lines = %#v, want mystery logged once per runtime", values)
 		}
 	})
 
@@ -726,9 +725,9 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 		}
 		// The live status was still unrecognized, so the diagnostic is due even
 		// though the sentinel resolved the run.
-		want := "avenor mcp: runtime \"rt_1\" reported unrecognized status \"mystery\"\n"
-		if stderr.String() != want {
-			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		values := unrecognizedStatusLines(t, stderr.String())
+		if len(values) != 1 || values[0] != "mystery" {
+			t.Fatalf("log lines = %#v, want one line for mystery", values)
 		}
 	})
 
@@ -757,6 +756,10 @@ func TestTranslateStatusLogsUnrecognizedStatus(t *testing.T) {
 		}
 		if suppressions != 1 {
 			t.Fatalf("suppression lines = %d, want 1", suppressions)
+		}
+		suppressionLine := "avenor mcp: " + diagnote.SuppressedNote + "\n"
+		if got := strings.Count(stderr.String(), suppressionLine); got != 1 {
+			t.Fatalf("stderr = %q, want exactly one %q line", stderr.String(), suppressionLine)
 		}
 	})
 
@@ -811,8 +814,8 @@ func TestServerDiagnosticsStderrRoutesUnrecognizedStatus(t *testing.T) {
 	if got, ok := result["status"].(string); !ok || got != "unknown" {
 		t.Fatalf("status = %#v, want string unknown", result["status"])
 	}
-	want := "avenor mcp: runtime \"rt_9\" reported unrecognized status \"mystery\"\n"
-	if stderr.String() != want {
-		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	values := unrecognizedStatusLines(t, stderr.String())
+	if len(values) != 1 || values[0] != "mystery" {
+		t.Fatalf("log lines = %#v, want one line for mystery", values)
 	}
 }
