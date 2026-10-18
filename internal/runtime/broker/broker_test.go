@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 )
 
 func TestBrokerHealth(t *testing.T) {
@@ -1123,7 +1125,7 @@ func fireAndForgetSend(t *testing.T, addr, fromToken, fromRunID, toRunID, messag
 func waitReply(t *testing.T, addr, token, runID, waitingFor string) map[string]any {
 	t.Helper()
 	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":%q,"token":%q,"waiting_for":%q}`, runID, token, waitingFor)))
-	// Use a short timeout so tests don't hang for DefaultAskTimeout (10m) on failure.
+	// Use a short timeout so tests don't hang for the ask retention window on failure.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -1221,19 +1223,8 @@ func TestBrokerAskReplyHappyPath(t *testing.T) {
 	}
 
 	// Verify the ask edge was cleaned up
-	st := b.GetRun("asker")
-	if st == nil {
-		t.Fatal("asker run not found")
-	}
-	st.Mu.Lock()
-	_, pendingOk := st.PendingAsks[msgID]
-	_, waitOk := st.WaitingReply[msgID]
-	st.Mu.Unlock()
-	if pendingOk {
+	if b.Store().Pending("asker", msgID) {
 		t.Error("ask edge should have been removed after reply")
-	}
-	if waitOk {
-		t.Error("waiting reply channel should have been removed after reply")
 	}
 }
 
@@ -1260,14 +1251,7 @@ func TestBrokerAskReplyFireAndForgetRemainsUnchanged(t *testing.T) {
 	}
 
 	// Verify no ask edge was created
-	st := b.GetRun("ff_sender")
-	if st == nil {
-		t.Fatal("ff_sender run not found")
-	}
-	st.Mu.Lock()
-	pendingCount := len(st.PendingAsks)
-	st.Mu.Unlock()
-	if pendingCount != 0 {
+	if pendingCount := b.Store().PendingCount("ff_sender"); pendingCount != 0 {
 		t.Errorf("expected 0 pending asks for fire-and-forget, got %d", pendingCount)
 	}
 
@@ -1409,11 +1393,8 @@ func TestBrokerMutualAskGuardConcurrent(t *testing.T) {
 		t.Errorf("expected exactly one accepted (200) and one rejected (409), got %v", statuses)
 	}
 
-	// Exactly one edge should remain in the global registry.
-	b.globalAskEdgesMu.RLock()
-	n := len(b.globalAskEdges)
-	b.globalAskEdgesMu.RUnlock()
-	if n != 1 {
+	// Exactly one edge should survive.
+	if n := b.Store().ActiveCount(); n != 1 {
 		t.Errorf("expected exactly 1 surviving ask edge, got %d", n)
 	}
 }
@@ -1467,31 +1448,20 @@ func TestBrokerDeleteRunCleansAskEdges(t *testing.T) {
 	if r := sendAsk(t, addr, aToken, "del_a", "del_b", "del-ask-1", "hi"); r["status"] != http.StatusOK {
 		t.Fatalf("ask should succeed, got %d", r["status"])
 	}
-
-	key := edgeKey("del_a", "del-ask-1")
-	b.globalAskEdgesMu.RLock()
-	_, existed := b.globalAskEdges[key]
-	b.globalAskEdgesMu.RUnlock()
-	if !existed {
+	if !b.Store().Pending("del_a", "del-ask-1") {
 		t.Fatal("ask edge should exist before DeleteRun")
 	}
 
 	b.DeleteRun("del_a")
 
-	b.globalAskEdgesMu.RLock()
-	_, gEdge := b.globalAskEdges[key]
-	_, gCh := b.globalReplyChannels[key]
-	b.globalAskEdgesMu.RUnlock()
-	if gEdge || gCh {
-		t.Error("DeleteRun should remove the run's ask edges from global registries")
+	if b.Store().Pending("del_a", "del-ask-1") {
+		t.Error("DeleteRun should remove the run's ask edges")
 	}
 	if b.GetRun("del_a") != nil {
 		t.Error("run should no longer exist after DeleteRun")
 	}
 }
 
-// TestBrokerResetCleansAskEdges verifies Reset drops all run state including
-// the global ask-edge registries.
 func TestBrokerResetCleansAskEdges(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -1514,11 +1484,8 @@ func TestBrokerResetCleansAskEdges(t *testing.T) {
 
 	b.Reset()
 
-	b.globalAskEdgesMu.RLock()
-	n := len(b.globalAskEdges)
-	b.globalAskEdgesMu.RUnlock()
-	if n != 0 {
-		t.Errorf("Reset should clear global ask edges, got %d remaining", n)
+	if n := b.Store().ActiveCount(); n != 0 {
+		t.Errorf("Reset should clear ask edges, got %d remaining", n)
 	}
 	if b.RunCount() != 0 {
 		t.Errorf("Reset should clear runs, got %d", b.RunCount())
@@ -1551,14 +1518,7 @@ func TestBrokerCancelMessage(t *testing.T) {
 	}
 
 	// Verify the ask edge exists
-	st := b.GetRun("canceller")
-	if st == nil {
-		t.Fatal("canceller run not found")
-	}
-	st.Mu.Lock()
-	_, pendingOk := st.PendingAsks[msgID]
-	st.Mu.Unlock()
-	if !pendingOk {
+	if !b.Store().Pending("canceller", msgID) {
 		t.Fatal("ask edge should exist before cancel")
 	}
 
@@ -1610,15 +1570,8 @@ func TestBrokerCancelMessage(t *testing.T) {
 	}
 
 	// Verify the ask edge was cleaned up
-	st.Mu.Lock()
-	_, pendingOk = st.PendingAsks[msgID]
-	_, waitOk := st.WaitingReply[msgID]
-	st.Mu.Unlock()
-	if pendingOk {
+	if b.Store().Pending("canceller", msgID) {
 		t.Error("ask edge should have been removed after cancel")
-	}
-	if waitOk {
-		t.Error("waiting reply channel should have been removed after cancel")
 	}
 
 	// Cancelling a non-existent message should fail
@@ -1630,6 +1583,74 @@ func TestBrokerCancelMessage(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("cancel nonexistent expected 404, got %d", resp2.StatusCode)
+	}
+}
+
+// TestBrokerRemovalTerminatesWaiters verifies that removing a participating
+// run terminates an in-flight wait instead of leaving it until the deadline.
+func TestBrokerRemovalTerminatesWaiters(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("removal_sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("removal_target"); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	msgID := "removal-ask"
+	if r := sendAsk(t, b.Addr(), senderToken, "removal_sender", "removal_target", msgID, "hi"); r["status"] != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", r["status"])
+	}
+
+	resultCh := make(chan map[string]any, 1)
+	go func() {
+		resultCh <- waitReply(t, b.Addr(), senderToken, "removal_sender", msgID)
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	b.DeleteRun("removal_target")
+
+	select {
+	case result := <-resultCh:
+		if result["status"] != http.StatusGone || result["lost"] != true {
+			t.Fatalf("wait result = %+v, want 410 lost", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter outlived the removed run")
+	}
+}
+
+// TestBrokerSessionsAdvertisesGeneration pins the generation the local router
+// exposes to versioned clients.
+func TestBrokerSessionsAdvertisesGeneration(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	token, err := b.CreateRun("gen_reader")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	resp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=gen_reader&token=%s", b.Addr(), token))
+	if err != nil {
+		t.Fatalf("sessions: %v", err)
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Generation string `json:"generation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Generation == "" || payload.Generation != b.Store().Generation() {
+		t.Fatalf("generation = %q, want %q", payload.Generation, b.Store().Generation())
 	}
 }
 
@@ -1682,21 +1703,11 @@ func TestBrokerReplyAfterEdgeExpired(t *testing.T) {
 		t.Fatalf("sendAsk status = %d", st)
 	}
 
-	// Manually remove the ask edge from both per-run and global registries
-	// to simulate expiry. Use the namespaced key.
-	st := b.GetRun("sender_expired")
-	if st == nil {
-		t.Fatal("sender_expired run not found")
+	// Expire the ask edge by pruning beyond its retention deadline.
+	b.Store().Prune(time.Now().Add(askstore.DefaultAskTimeout + time.Second))
+	if b.Store().Pending("sender_expired", msgID) {
+		t.Fatal("ask edge should be gone after expiry")
 	}
-	key := edgeKey("sender_expired", msgID)
-	b.globalAskEdgesMu.Lock()
-	delete(b.globalAskEdges, key)
-	delete(b.globalReplyChannels, key)
-	b.globalAskEdgesMu.Unlock()
-	st.Mu.Lock()
-	delete(st.PendingAsks, msgID)
-	delete(st.WaitingReply, msgID)
-	st.Mu.Unlock()
 
 	// Send a reply from target -> sender (correct direction).
 	// Since the edge is gone, this should fall back to fire-and-forget.
@@ -1865,107 +1876,39 @@ func TestBrokerUpdateSessionInfo(t *testing.T) {
 }
 
 func TestBrokerPruneExpiredAskEdges(t *testing.T) {
-	// Test the pruning logic directly with an expired edge.
-	// We use a very short expiration override by directly manipulating the map.
 	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
 
 	token, err := b.CreateRun("pruner")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	_ = token
-
-	st := b.GetRun("pruner")
-	if st == nil {
-		t.Fatal("run not found")
+	if _, err := b.CreateRun("pruner_target"); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if r := sendAsk(t, b.Addr(), token, "pruner", "pruner_target", "stale-edge", "hi"); r["status"] != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", r["status"])
 	}
 
-	// Add an ask edge that's already expired
-	edge := &AskEdge{
-		FromRunID: "pruner",
-		ToRunID:   "other",
-		MessageID: "stale-edge",
-		CreatedAt: time.Now().Add(-DefaultAskTimeout - time.Second),
+	// Pruning past the retention deadline removes the edge; a fresh ask
+	// survives a prune at the current time.
+	b.Store().Prune(time.Now().Add(askstore.DefaultAskTimeout + time.Second))
+	if b.Store().Pending("pruner", "stale-edge") {
+		t.Error("stale edge should be removed after pruning")
 	}
-	replyCh := make(chan AskReply, 1)
-	st.Mu.Lock()
-	st.PendingAsks["stale-edge"] = edge
-	st.WaitingReply["stale-edge"] = replyCh
-	st.Mu.Unlock()
-	b.globalAskEdgesMu.Lock()
-	b.globalAskEdges[edgeKey("pruner", "stale-edge")] = edge
-	b.globalReplyChannels[edgeKey("pruner", "stale-edge")] = replyCh
-	b.globalAskEdgesMu.Unlock()
-
-	// Run pruning
-	b.pruneExpiredAskEdges()
-
-	// Pruning sends a timeout signal to the channel but does NOT delete
-	// the registry entries — the wait_reply handler is responsible for
-	// that after receiving.
-	select {
-	case sig := <-replyCh:
-		if sig.FromRunID != "" {
-			t.Errorf("timeout signal from_run_id = %q, want empty", sig.FromRunID)
-		}
-		var payload struct{ Timeout bool }
-		if err := json.Unmarshal(sig.Payload, &payload); err != nil {
-			t.Errorf("unmarshal timeout payload: %v", err)
-		} else if !payload.Timeout {
-			t.Errorf("expected timeout=true in signal payload")
-		}
-	case <-time.After(time.Second):
-		t.Error("expected timeout signal on channel")
+	if r := sendAsk(t, b.Addr(), token, "pruner", "pruner_target", "fresh-edge", "hi"); r["status"] != http.StatusOK {
+		t.Fatalf("fresh sendAsk status = %d", r["status"])
 	}
-
-	// Entries should be removed after pruning (leak fix: no /wait_reply needed).
-	st.Mu.Lock()
-	_, pendingOk := st.PendingAsks["stale-edge"]
-	_, waitOk := st.WaitingReply["stale-edge"]
-	st.Mu.Unlock()
-	if pendingOk {
-		t.Error("stale edge should be removed from run state after pruning")
-	}
-	if waitOk {
-		t.Error("stale channel should be removed from run state after pruning")
-	}
-	// Global registry entries should also be removed.
-	b.globalAskEdgesMu.RLock()
-	_, gPendingOk := b.globalAskEdges[edgeKey("pruner", "stale-edge")]
-	_, gWaitOk := b.globalReplyChannels[edgeKey("pruner", "stale-edge")]
-	b.globalAskEdgesMu.RUnlock()
-	if gPendingOk {
-		t.Error("global edge should be removed after pruning")
-	}
-	if gWaitOk {
-		t.Error("global wait channel should be removed after pruning")
-	}
-
-	// A fresh edge should NOT receive a timeout signal
-	st.Mu.Lock()
-	st.PendingAsks["fresh-edge"] = &AskEdge{
-		FromRunID: "pruner",
-		ToRunID:   "other",
-		MessageID: "fresh-edge",
-		CreatedAt: time.Now(),
-	}
-	st.WaitingReply["fresh-edge"] = make(chan AskReply, 1)
-	st.Mu.Unlock()
-
-	b.pruneExpiredAskEdges()
-
-	st.Mu.Lock()
-	_, freshOk := st.PendingAsks["fresh-edge"]
-	st.Mu.Unlock()
-	if !freshOk {
-		t.Error("fresh ask edge should still exist after pruning")
+	b.Store().Prune(time.Now())
+	if !b.Store().Pending("pruner", "fresh-edge") {
+		t.Error("fresh ask edge should survive pruning")
 	}
 }
 
 func TestBrokerAskReplyWaitTimeout(t *testing.T) {
-	// Override the ask timeout to be very short so the test doesn't take 10 minutes.
-	// We do this by calling pruneExpiredAskEdges after placing an edge with an
-	// expired timestamp, avoiding the need to actually wait real wall time.
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1976,39 +1919,18 @@ func TestBrokerAskReplyWaitTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
+	if _, err := b.CreateRun("timeout_target"); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
 
 	addr := b.Addr()
 	msgID := "will-timeout"
-
-	// Place the ask edge directly (bypassing /send) with an expired timestamp.
-	// Must register in both the per-run state and the global registry.
-	st := b.GetRun("timeout_asker")
-	if st == nil {
-		t.Fatal("run not found")
+	if r := sendAsk(t, addr, senderToken, "timeout_asker", "timeout_target", msgID, "wait forever"); r["status"] != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", r["status"])
 	}
-	edge := &AskEdge{
-		FromRunID: "timeout_asker",
-		ToRunID:   "somewhere",
-		MessageID: msgID,
-		CreatedAt: time.Now().Add(-DefaultAskTimeout - time.Second),
-	}
-	replyCh := make(chan AskReply, 1)
 
-	st.Mu.Lock()
-	st.PendingAsks[msgID] = edge
-	st.WaitingReply[msgID] = replyCh
-	st.Mu.Unlock()
-
-	b.globalAskEdgesMu.Lock()
-	b.globalAskEdges[edgeKey("timeout_asker", msgID)] = edge
-	b.globalReplyChannels[edgeKey("timeout_asker", msgID)] = replyCh
-	b.globalAskEdgesMu.Unlock()
-
-	// Start the waiter in-flight so it looks up the reply channel before
-	// pruning, then trigger pruning to deliver the timeout signal to the
-	// blocked request. The /wait_reply handler captures the channel pointer
-	// at request start, so it still receives the signal even though pruning
-	// removes the registry entries.
+	// Start the waiter in flight, then prune past the deadline so the prune
+	// terminates the captured waiter.
 	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"timeout_asker","token":%q,"waiting_for":%q}`, senderToken, msgID)))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -2034,9 +1956,9 @@ func TestBrokerAskReplyWaitTimeout(t *testing.T) {
 		result["status"] = resp.StatusCode
 		resultCh <- result
 	}()
-	// Allow the wait_reply handler to register and block on the channel.
+	// Allow the wait_reply handler to capture the edge.
 	time.Sleep(100 * time.Millisecond)
-	b.pruneExpiredAskEdges()
+	b.Store().Prune(time.Now().Add(askstore.DefaultAskTimeout + time.Second))
 
 	var result map[string]any
 	select {
@@ -2052,21 +1974,8 @@ func TestBrokerAskReplyWaitTimeout(t *testing.T) {
 	if result["timeout"] != true {
 		t.Errorf("expected timeout=true in response")
 	}
-
-	// The expired edge should have been cleaned up from the global registry
-	// and the run state by pruning (leak fix).
-	b.globalAskEdgesMu.RLock()
-	_, gOk := b.globalAskEdges[edgeKey("timeout_asker", msgID)]
-	b.globalAskEdgesMu.RUnlock()
-	if gOk {
-		t.Error("expired ask edge should be removed from global registry after prune")
-	}
-	st.Mu.Lock()
-	_, pendingOk := st.PendingAsks[msgID]
-	_, waitOk := st.WaitingReply[msgID]
-	st.Mu.Unlock()
-	if pendingOk || waitOk {
-		t.Error("expired ask edge should be removed from run state after prune")
+	if b.Store().Pending("timeout_asker", msgID) {
+		t.Error("expired ask edge should be removed after prune")
 	}
 }
 
@@ -2400,14 +2309,10 @@ func TestBrokerCancelDropOnFullChannel(t *testing.T) {
 		t.Errorf("expected cancelled=true, got %v", cr)
 	}
 
-	// The cancel also cleans up the registries even though the signal was
-	// dropped, so nothing leaks.
-	b.globalAskEdgesMu.RLock()
-	_, gOk := b.globalAskEdges[edgeKey("cdrop_sender", msgID)]
-	_, gCh := b.globalReplyChannels[edgeKey("cdrop_sender", msgID)]
-	b.globalAskEdgesMu.RUnlock()
-	if gOk || gCh {
-		t.Error("ask edge should be removed after cancel even when the signal is dropped")
+	// The cancel also cleans up the edge even though the reply won the race,
+	// so nothing leaks.
+	if b.Store().Pending("cdrop_sender", msgID) {
+		t.Error("ask edge should be removed after cancel")
 	}
 }
 
@@ -2422,30 +2327,13 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
+	if _, err := b.CreateRun("disco_target"); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
 	msgID := "disco-test"
-
-	// Directly register an ask edge (no reply expected).
-	key := edgeKey("disco_sender", msgID)
-	edge := &AskEdge{
-		FromRunID: "disco_sender",
-		ToRunID:   "somewhere",
-		MessageID: msgID,
-		CreatedAt: time.Now(),
+	if r := sendAsk(t, b.Addr(), senderToken, "disco_sender", "disco_target", msgID, "hi"); r["status"] != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", r["status"])
 	}
-	replyCh := make(chan AskReply, 1)
-
-	st := b.GetRun("disco_sender")
-	if st == nil {
-		t.Fatal("run not found")
-	}
-	st.Mu.Lock()
-	st.PendingAsks[msgID] = edge
-	st.WaitingReply[msgID] = replyCh
-	st.Mu.Unlock()
-	b.globalAskEdgesMu.Lock()
-	b.globalAskEdges[key] = edge
-	b.globalReplyChannels[key] = replyCh
-	b.globalAskEdgesMu.Unlock()
 
 	// Start wait_reply, then cancel the context mid-wait to trigger cleanup.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2468,21 +2356,8 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	// Wait for the handler to process context cancellation.
 	time.Sleep(10 * time.Millisecond)
 
-	// Verify the edge was cleaned up.
-	b.globalAskEdgesMu.RLock()
-	_, edgeExists := b.globalAskEdges[key]
-	_, chExists := b.globalReplyChannels[key]
-	b.globalAskEdgesMu.RUnlock()
-	if edgeExists || chExists {
-		t.Error("expected edge and channel to be cleaned up on context cancellation")
-	}
-
-	st.Mu.Lock()
-	_, pendingExists := st.PendingAsks[msgID]
-	_, waitExists := st.WaitingReply[msgID]
-	st.Mu.Unlock()
-	if pendingExists || waitExists {
-		t.Error("expected per-run state to be cleaned up on context cancellation")
+	if b.Store().Pending("disco_sender", msgID) {
+		t.Error("expected the ask edge to be cleaned up on context cancellation")
 	}
 }
 
