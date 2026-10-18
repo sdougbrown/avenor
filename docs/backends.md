@@ -91,7 +91,7 @@ A backend that starts a harness process exports Avenor's launch identity in that
 
 Each spawning backend removes inherited identity before it adds the current launch values. Other variables keep their values, including `AVENOR_TREE_BUDGET` and backend selectors such as `AVENOR_CLAUDE_TERMINAL` and `AVENOR_AGY_TRANSPORT`.
 
-`pi` also removes inherited `PI_AGENT`, `PI_AGENT_PROFILE`, `AVENOR_BROKER_URL`, `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN`. It then adds the agent, the agent profile and the broker credentials of the current launch only. A `pi` child receives a broker value only when its own launch supplies that value, so an inherited credential never reaches it. The other backends keep inherited broker values.
+`pi` also removes inherited `PI_AGENT`, `PI_AGENT_PROFILE`, `AVENOR_BROKER_URL`, `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN`. It then adds the agent, the agent profile and the broker credentials of the current launch only. The `pi` agent process receives a broker value only when its own launch supplies that value, so an inherited credential never reaches it. The short `pi --help` capability probe runs with the inherited environment. The other backends keep inherited broker values.
 
 A prompt to an already-running process cannot change that process's environment. A fresh start or resume that starts a process receives the identity of that request. A backend that reuses a live process keeps the identity of the original launch. The `agy` print continuation inside one attempt keeps that attempt's identity.
 
