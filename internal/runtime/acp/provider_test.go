@@ -15,6 +15,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/internal/identitytest"
 )
 
 func TestSelectPermissionOption(t *testing.T) {
@@ -589,7 +590,7 @@ func writeACPStub(t *testing.T, stub acpStub) string {
 	var body strings.Builder
 	body.WriteString("#!/bin/sh\n")
 	if stub.Observe != "" {
-		body.WriteString(observerBody(stub.Observe))
+		body.WriteString(identitytest.Body(stub.Observe, acpObservationExtras...))
 	}
 	if stub.Ready != "" {
 		if stub.ReadyPerProcess {
