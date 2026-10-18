@@ -525,6 +525,12 @@ type testHooks struct {
 	// state, no effects), so a test can drive the fault fail-safe at a chosen
 	// site. nil in production.
 	lifecycleTransitionFailure func(site signalKind) bool
+	// directCleanupPost, when non-nil (set by tests before the goroutine that
+	// runs the cleanup starts), runs inside a delivered direct answer's cleanup
+	// after the request state is removed and before the claim is resolved. The
+	// cleanup's control lock is held and the router lock is not. nil in
+	// production.
+	directCleanupPost func()
 }
 
 type Supervisor struct {
@@ -704,7 +710,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 	sup.control.SetWorkflowHandler(lazyWorkflowHandler{sup})
 	sup.control.SetWorkflowControllerHandler(sup)
 	sup.newProviderFunc = factory.NewProvider
-	sup.permissions = newPermissionRouter(supervisorPermissionHost{sup: sup}, sup.control, sup.stderrWriter())
+	sup.permissions = newPermissionRouter(supervisorPermissionHost{sup: sup}, sup.control, sup.stderrWriter(), &sup.testHooks)
 	sup.initTreeBudget()
 	return sup
 }

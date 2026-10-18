@@ -5363,6 +5363,47 @@ func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
 	}
 }
 
+// holdDirectCleanup installs the directCleanupPost test seam and runs one
+// delivered direct answer's cleanup on its own goroutine. It returns once the
+// hook is reached and the router lock is free, which it asserts because the
+// hook runs with only the control envelope held. release ends the hook's
+// window; cleanupDone closes when the cleanup returns.
+func holdDirectCleanup(t *testing.T, sup *Supervisor, runtimeID, requestID, optionID string) (release func(), cleanupDone <-chan struct{}) {
+	t.Helper()
+	cleanupReached := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	var reachedOnce, releaseOnce sync.Once
+	release = func() { releaseOnce.Do(func() { close(releaseCleanup) }) }
+	t.Cleanup(release)
+	sup.testHooks.directCleanupPost = func() {
+		reachedOnce.Do(func() { close(cleanupReached) })
+		<-releaseCleanup
+	}
+	done := make(chan struct{})
+	go func() {
+		sup.permissions.cleanupDirectPermission(runtimeID, requestID, optionID, "")
+		close(done)
+	}()
+	select {
+	case <-cleanupReached:
+	case <-time.After(time.Second):
+		t.Fatal("production cleanup did not reach claim release")
+	}
+
+	muFree := make(chan struct{})
+	go func() {
+		sup.permissions.mu.Lock()
+		sup.permissions.mu.Unlock()
+		close(muFree)
+	}()
+	select {
+	case <-muFree:
+	case <-time.After(time.Second):
+		t.Fatal("router lock stayed held inside the cleanup window")
+	}
+	return release, done
+}
+
 func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.T) {
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-answer-cleanup-order.sock",
@@ -5381,25 +5422,7 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 		t.Fatalf("direct delivery = %v, want no-resolver", got)
 	}
 
-	cleanupReached := make(chan struct{})
-	releaseCleanup := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseCleanup) }) }
-	t.Cleanup(release)
-	cleanupDone := make(chan struct{})
-	sup.permissions.directCleanupHook = func() {
-		close(cleanupReached)
-		<-releaseCleanup
-	}
-	go func() {
-		sup.permissions.cleanupDirectPermission("rt_reuse", "req_reuse", "old", "")
-		close(cleanupDone)
-	}()
-	select {
-	case <-cleanupReached:
-	case <-time.After(time.Second):
-		t.Fatal("production cleanup did not reach claim release")
-	}
+	release, cleanupDone := holdDirectCleanup(t, sup, "rt_reuse", "req_reuse", "old")
 
 	replacementAttempt := make(chan bool, 1)
 	go func() {
@@ -5475,25 +5498,7 @@ func TestAnswerPermissionOptionReadWaitsForDirectCleanupEnvelope(t *testing.T) {
 		t.Fatalf("direct delivery = %v, want no-resolver", got)
 	}
 
-	cleanupReached := make(chan struct{})
-	releaseCleanup := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseCleanup) }) }
-	t.Cleanup(release)
-	cleanupDone := make(chan struct{})
-	sup.permissions.directCleanupHook = func() {
-		close(cleanupReached)
-		<-releaseCleanup
-	}
-	go func() {
-		sup.permissions.cleanupDirectPermission(child.id, "req_envelope", "allow_it", "")
-		close(cleanupDone)
-	}()
-	select {
-	case <-cleanupReached:
-	case <-time.After(time.Second):
-		t.Fatal("production cleanup did not reach claim release")
-	}
+	release, cleanupDone := holdDirectCleanup(t, sup, child.id, "req_envelope", "allow_it")
 
 	// The option read shares the cleanup's control envelope, so it cannot see
 	// the removed options before the claim is marked resolved, and an identical

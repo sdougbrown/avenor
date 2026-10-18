@@ -49,20 +49,21 @@ type permissionRouter struct {
 	modelDeciderSlots      map[string]struct{} // "runtimeID:requestID" → slot held
 	modelDeciderBlocked    map[string]struct{} // "runtimeID\x00requestID"
 
-	// directCleanupHook runs inside permissionRequestState.cleanupDelivered
-	// after the request state is removed and before the claim is resolved. It
-	// exists so tests can hold that window open; production leaves it nil.
-	directCleanupHook func()
+	// hooks are the supervisor's test seams. cleanupDelivered consults
+	// hooks.directCleanupPost, which a test sets before it starts the cleanup
+	// goroutine. Set once at construction.
+	hooks *testHooks
 
 	host    permissionRouterHost
 	control *control.ControlServer
 	diag    io.Writer
 }
 
-func newPermissionRouter(host permissionRouterHost, control *control.ControlServer, diag io.Writer) *permissionRouter {
+func newPermissionRouter(host permissionRouterHost, control *control.ControlServer, diag io.Writer, hooks *testHooks) *permissionRouter {
 	return &permissionRouter{
 		permOptions:         map[string][]any{},
 		permissionProviders: map[string]permissionProviderBinding{},
+		hooks:               hooks,
 		host:                host,
 		control:             control,
 		diag:                diag,
@@ -288,9 +289,8 @@ func (s permissionRequestState) cleanupDelivered(runtimeID, requestID, optionID,
 	defer s.control.Unlock()
 	s.router.mu.Lock()
 	s.router.deleteRequest(runtimeID, requestID)
-	hook := s.router.directCleanupHook
 	s.router.mu.Unlock()
-	if hook != nil {
+	if hook := s.router.hooks.directCleanupPost; hook != nil {
 		hook()
 	}
 	s.router.control.MarkPermissionClaimResolved(runtimeID, requestID, "direct", optionID, message)
