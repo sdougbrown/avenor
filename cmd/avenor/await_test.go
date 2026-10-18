@@ -754,6 +754,9 @@ func TestAwaitTimeoutDoesNotWaitForClientCallDeadline(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("timeout took %v, expected wall-clock bound", elapsed)
 	}
+	if !bytes.Contains(stderr.Bytes(), []byte("avenor await: timeout elapsed")) {
+		t.Fatalf("stderr = %q, want the timeout message", stderr.String())
+	}
 }
 
 func TestAwaitDiscoveryTimeout(t *testing.T) {
