@@ -333,6 +333,27 @@ describe('askViaBroker', () => {
     expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(0)
   })
 
+  it('withdraws an ask whose send connection was reset after it opened', async () => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => {
+          throw new TypeError('fetch failed', {
+            cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+          })
+        },
+        '/cancel_message': async () => jsonResponse({ cancelled: true }),
+      },
+      calls,
+    )
+
+    const error = await askViaBroker(env, { toRunId: 'supervisor', message: 'hello' }, fetchImpl)
+      .catch((e: unknown) => e)
+
+    expect((error as Error).message).toContain('send ask: fetch failed')
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
+  })
+
   it('withdraws when only some of several dial attempts failed at the dial', async () => {
     const calls: RecordedCall[] = []
     const fetchImpl = brokerFetch(
