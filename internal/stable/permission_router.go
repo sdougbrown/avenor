@@ -26,11 +26,13 @@ import (
 // and model-call budget. The router reaches them only through
 // permissionRouterHost.
 //
-// mu is a leaf lock. Option caching, direct cleanup, answer-option reads and
-// retry snapshots take mu inside the supervisor's controlMu (controlMu -> mu).
-// That keeps a replacement request ID from being cached between option
-// removal and claim resolution. A claim-registration callback stores its
-// binding under mu alone.
+// mu is a leaf lock. A pending request's options and provider binding are
+// read or changed through permissionRequestState, the envelope the host opens
+// over the supervisor's control lock: it takes controlMu, then mu (controlMu
+// -> mu). A delivered direct answer releases mu before it resolves the claim,
+// so a replacement request ID cannot be cached between option removal and
+// claim resolution. Every other access takes mu alone, and a
+// claim-registration callback stores its binding under mu alone.
 //
 // Never call anything that can block or re-enter while holding mu: no
 // control-server call, spawn, provider or model call, retry, filesystem
@@ -46,6 +48,11 @@ type permissionRouter struct {
 	modelDeciderActive     int
 	modelDeciderSlots      map[string]struct{} // "runtimeID:requestID" → slot held
 	modelDeciderBlocked    map[string]struct{} // "runtimeID\x00requestID"
+
+	// directCleanupHook runs inside permissionRequestState.cleanupDelivered
+	// after the request state is removed and before the claim is resolved. It
+	// exists so tests can hold that window open; production leaves it nil.
+	directCleanupHook func()
 
 	host    permissionRouterHost
 	control *control.ControlServer
@@ -79,9 +86,10 @@ type permissionRouterHost interface {
 	callDirectProvider(reservation *directPermissionReservation, requestID string, response runtime.PermissionResponse) error
 	abandonDirectAnswer(reservation *directPermissionReservation, requestID string)
 	writeDirectAnswer(reservation *directPermissionReservation, requestID string, ev events.Event, published func()) error
-	// withControl runs fn while holding the supervisor control lock. fn runs
-	// without mu and must not hold mu across a control-server call.
-	withControl(fn func())
+	// requestState opens the control envelope over the router's pending-request
+	// state. The envelope owns the controlMu -> mu order, so no other code
+	// writes it and no caller runs its own code under controlMu.
+	requestState() permissionRequestState
 }
 
 // permissionRouteTarget is the child-owned routing input for one request: the
@@ -230,23 +238,102 @@ func (h supervisorPermissionHost) writeDirectAnswer(reservation *directPermissio
 	return nil
 }
 
-func (h supervisorPermissionHost) withControl(fn func()) {
-	h.sup.controlMu.Lock()
-	defer h.sup.controlMu.Unlock()
-	fn()
+func (h supervisorPermissionHost) requestState() permissionRequestState {
+	return permissionRequestState{control: &h.sup.controlMu, router: h.sup.permissions}
+}
+
+// permissionRequestState is the router's pending-request state seen through
+// the supervisor control lock. It is the only place that writes the
+// controlMu -> mu order: each named operation takes controlMu, takes mu for
+// its map access, and a delivered direct answer releases mu before it resolves
+// the claim, so no control-server call runs under mu.
+type permissionRequestState struct {
+	control *sync.Mutex
+	router  *permissionRouter
+}
+
+// readOptions returns the options cached for a pending request, or nil.
+func (s permissionRequestState) readOptions(runtimeID, requestID string) []any {
+	s.control.Lock()
+	defer s.control.Unlock()
+	s.router.mu.Lock()
+	defer s.router.mu.Unlock()
+	return s.router.permOptions[runtimeID+":"+requestID]
+}
+
+// storeOptions records the options a pending request arrived with.
+func (s permissionRequestState) storeOptions(runtimeID, requestID string, options []any) {
+	s.control.Lock()
+	defer s.control.Unlock()
+	s.router.mu.Lock()
+	defer s.router.mu.Unlock()
+	s.router.permOptions[runtimeID+":"+requestID] = options
+}
+
+// forgetRequest drops a request the control server accepted for delivery.
+func (s permissionRequestState) forgetRequest(runtimeID, requestID string) {
+	s.control.Lock()
+	defer s.control.Unlock()
+	s.router.mu.Lock()
+	defer s.router.mu.Unlock()
+	s.router.deleteRequest(runtimeID, requestID)
+}
+
+// cleanupDelivered removes a delivered direct answer's request state and
+// resolves its claim in one controlMu transaction, so a replacement request
+// cannot be cached between the removal and the resolution. mu is released
+// before the direct-cleanup hook and the control-server call.
+func (s permissionRequestState) cleanupDelivered(runtimeID, requestID, optionID, message string) {
+	s.control.Lock()
+	defer s.control.Unlock()
+	s.router.mu.Lock()
+	s.router.deleteRequest(runtimeID, requestID)
+	hook := s.router.directCleanupHook
+	s.router.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	s.router.control.MarkPermissionClaimResolved(runtimeID, requestID, "direct", optionID, message)
+}
+
+// clearRuntime drops every cached option and provider binding for a runtime.
+func (s permissionRequestState) clearRuntime(runtimeID string) {
+	s.control.Lock()
+	defer s.control.Unlock()
+	s.router.mu.Lock()
+	defer s.router.mu.Unlock()
+	s.router.deleteRuntime(runtimeID)
+}
+
+// deleteRequest drops one request's cached options and provider binding. mu
+// must be held.
+func (r *permissionRouter) deleteRequest(runtimeID, requestID string) {
+	key := runtimeID + ":" + requestID
+	delete(r.permOptions, key)
+	delete(r.permissionProviders, key)
+}
+
+// deleteRuntime drops every cached option and provider binding for a runtime.
+// mu must be held.
+func (r *permissionRouter) deleteRuntime(runtimeID string) {
+	prefix := runtimeID + ":"
+	for k := range r.permOptions {
+		if len(k) > len(prefix) && k[:len(prefix)] == prefix {
+			delete(r.permOptions, k)
+		}
+	}
+	for k := range r.permissionProviders {
+		if len(k) > len(prefix) && k[:len(prefix)] == prefix {
+			delete(r.permissionProviders, k)
+		}
+	}
 }
 
 // cachedOptions reads the options cached for a pending request inside the
-// controlMu envelope, so a direct cleanup cannot delete them before it
-// resolves the claim.
+// control envelope, so a direct cleanup cannot delete them before it resolves
+// the claim.
 func (r *permissionRouter) cachedOptions(runtimeID, requestID string) []any {
-	var options []any
-	r.host.withControl(func() {
-		r.mu.Lock()
-		options = r.permOptions[runtimeID+":"+requestID]
-		r.mu.Unlock()
-	})
-	return options
+	return r.host.requestState().readOptions(runtimeID, requestID)
 }
 
 // providerBinding returns the exact provider generation a request's direct
@@ -382,49 +469,29 @@ func (r *permissionRouter) answerPermission(rtID, requestID, optionID, message s
 			"ts":     time.Now().UnixMilli(),
 		},
 	}, func() {
-		r.cleanupDirectPermission(rtID, requestID, optionID, message, nil)
+		r.cleanupDirectPermission(rtID, requestID, optionID, message)
 	})
 }
 
 // forget drops the cached options and provider binding for a request the
 // control server accepted for resolver delivery.
 func (r *permissionRouter) forget(runtimeID, requestID string) {
-	key := runtimeID + ":" + requestID
-	r.host.withControl(func() {
-		r.mu.Lock()
-		delete(r.permOptions, key)
-		delete(r.permissionProviders, key)
-		r.mu.Unlock()
-	})
+	r.host.requestState().forgetRequest(runtimeID, requestID)
 }
 
 // cleanupDirectPermission removes a delivered direct answer's cached state and
 // marks its claim resolved inside one controlMu transaction, so a
 // replacement cannot be cached between the removal and the resolution. mu is
-// released before the callback and the control-server call.
-func (r *permissionRouter) cleanupDirectPermission(runtimeID, requestID, optionID, message string, beforeRelease func()) {
-	key := runtimeID + ":" + requestID
-	r.host.withControl(func() {
-		r.mu.Lock()
-		delete(r.permOptions, key)
-		delete(r.permissionProviders, key)
-		r.mu.Unlock()
-		if beforeRelease != nil {
-			beforeRelease()
-		}
-		r.control.MarkPermissionClaimResolved(runtimeID, requestID, "direct", optionID, message)
-	})
+// released before the direct-cleanup hook and the control-server call.
+func (r *permissionRouter) cleanupDirectPermission(runtimeID, requestID, optionID, message string) {
+	r.host.requestState().cleanupDelivered(runtimeID, requestID, optionID, message)
 }
 
 // cachePermissionOptions records the options a pending request arrived with,
-// inside the controlMu envelope, then routes the request after both locks are
+// inside the control envelope, then routes the request after both locks are
 // released.
 func (r *permissionRouter) cachePermissionOptions(runtimeID, requestID string, options []any) {
-	r.host.withControl(func() {
-		r.mu.Lock()
-		r.permOptions[runtimeID+":"+requestID] = options
-		r.mu.Unlock()
-	})
+	r.host.requestState().storeOptions(runtimeID, requestID, options)
 	r.routePermissionRequest(runtimeID, requestID, options)
 }
 
@@ -757,20 +824,6 @@ func (r *permissionRouter) bindProvider(scope, requestID string, binding permiss
 // binding for a runtime, then releases its control claims. Removal is
 // unconditional, so teardown always completes.
 func (r *permissionRouter) clearRuntimePermissionOptions(runtimeID string) {
-	prefix := runtimeID + ":"
-	r.host.withControl(func() {
-		r.mu.Lock()
-		for k := range r.permOptions {
-			if len(k) > len(prefix) && k[:len(prefix)] == prefix {
-				delete(r.permOptions, k)
-			}
-		}
-		for k := range r.permissionProviders {
-			if len(k) > len(prefix) && k[:len(prefix)] == prefix {
-				delete(r.permissionProviders, k)
-			}
-		}
-		r.mu.Unlock()
-	})
+	r.host.requestState().clearRuntime(runtimeID)
 	r.control.ClearPermissionClaims(runtimeID)
 }

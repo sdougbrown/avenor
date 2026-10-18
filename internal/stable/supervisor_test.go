@@ -5387,11 +5387,12 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 	release := func() { releaseOnce.Do(func() { close(releaseCleanup) }) }
 	t.Cleanup(release)
 	cleanupDone := make(chan struct{})
+	sup.permissions.directCleanupHook = func() {
+		close(cleanupReached)
+		<-releaseCleanup
+	}
 	go func() {
-		sup.permissions.cleanupDirectPermission("rt_reuse", "req_reuse", "old", "", func() {
-			close(cleanupReached)
-			<-releaseCleanup
-		})
+		sup.permissions.cleanupDirectPermission("rt_reuse", "req_reuse", "old", "")
 		close(cleanupDone)
 	}()
 	select {
@@ -5480,11 +5481,12 @@ func TestAnswerPermissionOptionReadWaitsForDirectCleanupEnvelope(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(releaseCleanup) }) }
 	t.Cleanup(release)
 	cleanupDone := make(chan struct{})
+	sup.permissions.directCleanupHook = func() {
+		close(cleanupReached)
+		<-releaseCleanup
+	}
 	go func() {
-		sup.permissions.cleanupDirectPermission(child.id, "req_envelope", "allow_it", "", func() {
-			close(cleanupReached)
-			<-releaseCleanup
-		})
+		sup.permissions.cleanupDirectPermission(child.id, "req_envelope", "allow_it", "")
 		close(cleanupDone)
 	}()
 	select {
