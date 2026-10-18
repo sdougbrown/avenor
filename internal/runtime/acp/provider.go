@@ -78,8 +78,10 @@ var _ runtime.Provider = (*Provider)(nil)
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	merged := runtime.MergeStartOptions(p.opts, opts)
 
-	runID, brokerToken, clientEnv, cleanup, brokerRef := p.launchEnv(merged)
-	if _, err := p.ensureClient(ctx, merged, clientEnv, cleanup); err != nil {
+	runID, brokerToken, brokerRef := p.launchRun(merged)
+	if _, err := p.ensureClient(ctx, merged, func() (map[string]string, func() error) {
+		return p.launchEnv(merged, runID, brokerToken, brokerRef)
+	}); err != nil {
 		return runtime.Session{}, err
 	}
 
@@ -139,12 +141,16 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
-	var env map[string]string
-	var cleanup func() error
+	// Only a new client needs a launch environment. A live client keeps the
+	// identity and config it was started with, so resuming it builds nothing.
+	var buildEnv func() (map[string]string, func() error)
 	if optionAware {
-		_, _, env, cleanup, _ = p.launchEnv(opts)
+		buildEnv = func() (map[string]string, func() error) {
+			runID, brokerToken, brokerRef := p.launchRun(opts)
+			return p.launchEnv(opts, runID, brokerToken, brokerRef)
+		}
 	}
-	if _, err := p.ensureClient(ctx, opts, env, cleanup); err != nil {
+	if _, err := p.ensureClient(ctx, opts, buildEnv); err != nil {
 		return runtime.Session{}, err
 	}
 
@@ -170,42 +176,47 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	}, nil
 }
 
-// launchEnv prepares one launch: it retains the broker reference, creates the
-// broker run that backend process config authenticates with, and builds the
-// backend's client environment and cleanup.
-func (p *Provider) launchEnv(opts runtime.StartOptions) (runID, brokerToken string, env map[string]string, cleanup func() error, brokerRef *broker.Broker) {
+// launchRun retains the broker reference and creates the broker run that
+// backend process config authenticates with, before the client starts, so it
+// can send from the first turn. It uses the supervisor-assigned RuntimeID when
+// available (parent-child routing) and a generated UUID otherwise.
+func (p *Provider) launchRun(opts runtime.StartOptions) (runID, brokerToken string, brokerRef *broker.Broker) {
 	p.mu.Lock()
 	if opts.Broker != nil && p.broker == nil {
 		p.broker = opts.Broker
 	}
 	brokerRef = p.broker
-	buildClientEnv := p.buildClientEnv
 	p.mu.Unlock()
 
-	// Create a broker run for this session before the client starts so
-	// provider-specific process config can authenticate outbound sends from the
-	// first turn. Use the supervisor-assigned RuntimeID when available
-	// (parent-child routing), falling back to a generated UUID for standalone
-	// sessions.
+	if brokerRef == nil {
+		return "", "", nil
+	}
+	runID = opts.RuntimeID
+	if runID == "" {
+		runID = uuid.New().String()
+	}
+	brokerToken, _ = brokerRef.EnsureRun(runID)
+	return runID, brokerToken, brokerRef
+}
+
+// launchEnv builds the backend's client environment and its cleanup for one
+// launch.
+func (p *Provider) launchEnv(opts runtime.StartOptions, runID, brokerToken string, brokerRef *broker.Broker) (map[string]string, func() error) {
+	p.mu.Lock()
+	buildClientEnv := p.buildClientEnv
+	p.mu.Unlock()
+	if buildClientEnv == nil {
+		return nil, nil
+	}
+	// Always call buildClientEnv so backends can inject config overrides (e.g.
+	// mode overrides for subagent-mode agents) even without a broker. The
+	// backend is responsible for returning nil when there's nothing to override,
+	// so no temp file is created unnecessarily.
+	brokerAddr := ""
 	if brokerRef != nil {
-		runID = opts.RuntimeID
-		if runID == "" {
-			runID = uuid.New().String()
-		}
-		brokerToken, _ = brokerRef.EnsureRun(runID)
+		brokerAddr = brokerRef.Addr()
 	}
-	if buildClientEnv != nil {
-		// Always call buildClientEnv so backends can inject config overrides
-		// (e.g. mode overrides for subagent-mode agents) even without a broker.
-		// The backend is responsible for returning nil when there's nothing to
-		// override, so no temp file is created unnecessarily.
-		brokerAddr := ""
-		if brokerRef != nil {
-			brokerAddr = brokerRef.Addr()
-		}
-		env, cleanup = buildClientEnv(opts, runID, brokerToken, brokerAddr)
-	}
-	return runID, brokerToken, env, cleanup, brokerRef
+	return buildClientEnv(opts, runID, brokerToken, brokerAddr)
 }
 
 func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {
@@ -332,23 +343,30 @@ func (p *Provider) Close() error {
 	return client.Close()
 }
 
-// ensureClient starts the backend client when none is retained yet. A launch
-// that does not become the provider's client — because a client is already
-// live, another launch won the install, or startup failed — cleans up its own
-// generated config before returning. A retained client takes ownership of its
-// config until Close.
-func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, env map[string]string, cleanup func() error) (bool, error) {
+// ensureClient starts the backend client when none is retained yet. buildEnv,
+// when non-nil, builds the environment for that new client only, so a retained
+// client never pays for a launch it will not use. A launch that does not become
+// the provider's client — because a client is already live, another launch won
+// the install, or startup failed — cleans up its own generated config before
+// returning. A retained client takes ownership of its config until Close.
+func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, buildEnv func() (map[string]string, func() error)) (bool, error) {
 	p.mu.Lock()
 	if p.client != nil {
 		p.mu.Unlock()
-		runCleanup(cleanup)
 		return false, nil
 	}
 	p.mu.Unlock()
 
 	if opts.ServerURL != "" {
-		runCleanup(cleanup)
 		return false, fmt.Errorf("%s external server URL transport is not implemented by the stdio client", p.backendID)
+	}
+
+	var (
+		env     map[string]string
+		cleanup func() error
+	)
+	if buildEnv != nil {
+		env, cleanup = buildEnv()
 	}
 
 	client, err := NewClient(ctx, ClientConfig{

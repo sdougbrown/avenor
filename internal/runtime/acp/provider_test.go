@@ -698,8 +698,8 @@ func waitForPath(t *testing.T, path string) {
 }
 
 // TestEnsureClientReuseKeepsOriginalConfig pins the ownership transfer: a live
-// client keeps its own config and cleanup, while the candidate launch that was
-// never retained cleans up only itself.
+// client keeps its own config and cleanup, and reusing it builds no candidate
+// launch at all.
 func TestEnsureClientReuseKeepsOriginalConfig(t *testing.T) {
 	stub := writeACPStub(t, acpStub{Mode: "serve"})
 	p := newStubProvider(stub, nil)
@@ -710,16 +710,20 @@ func TestEnsureClientReuseKeepsOriginalConfig(t *testing.T) {
 		return nil
 	}
 
-	candidate, cleanup := writeCandidateConfig(t)
-	created, err := p.ensureClient(context.Background(), runtime.StartOptions{}, candidateEnv(candidate), cleanup)
+	launches := 0
+	created, err := p.ensureClient(context.Background(), runtime.StartOptions{}, func() (map[string]string, func() error) {
+		launches++
+		candidate, cleanup := writeCandidateConfig(t)
+		return candidateEnv(candidate), cleanup
+	})
 	if err != nil {
 		t.Fatalf("ensureClient: %v", err)
 	}
 	if created {
 		t.Fatal("candidate launch was retained despite a live client")
 	}
-	if _, err := os.Stat(candidate); !os.IsNotExist(err) {
-		t.Fatalf("unused candidate config not cleaned up: %v", err)
+	if launches != 0 {
+		t.Fatalf("reuse built %d launch environments, want none", launches)
 	}
 	if originalCleanupRan {
 		t.Fatal("live client's config cleanup was replaced or run")
@@ -737,7 +741,9 @@ func TestEnsureClientDiscardsConfigWhenAuthenticationFails(t *testing.T) {
 	p.authenticateID = "stub-auth"
 
 	candidate, cleanup := writeCandidateConfig(t)
-	created, err := p.ensureClient(context.Background(), runtime.StartOptions{}, candidateEnv(candidate), cleanup)
+	created, err := p.ensureClient(context.Background(), runtime.StartOptions{}, func() (map[string]string, func() error) {
+		return candidateEnv(candidate), cleanup
+	})
 	if err == nil {
 		t.Fatal("expected authentication failure")
 	}
@@ -912,7 +918,9 @@ func TestEnsureClientConcurrentInstallKeepsSingleConfigOwner(t *testing.T) {
 		candidate, cleanup := writeCandidateConfig(t)
 		candidates[i] = candidate
 		go func(id int, env map[string]string, cleanup func() error) {
-			created, err := p.ensureClient(context.Background(), runtime.StartOptions{}, env, cleanup)
+			created, err := p.ensureClient(context.Background(), runtime.StartOptions{}, func() (map[string]string, func() error) {
+				return env, cleanup
+			})
 			results <- outcome{id: id, path: candidate, created: created, err: err}
 		}(i, candidateEnv(candidate), cleanup)
 	}

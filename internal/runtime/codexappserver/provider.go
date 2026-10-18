@@ -354,8 +354,8 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 		return existing, nil
 	}
 	// Store broker reference if provided.
-	if opts.Broker != nil {
-		p.broker = opts.Broker
+	if p.opts.Broker != nil {
+		p.broker = p.opts.Broker
 	}
 	p.client = c
 	p.mu.Unlock()
