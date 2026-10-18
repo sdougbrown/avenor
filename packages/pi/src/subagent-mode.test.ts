@@ -218,6 +218,29 @@ describe('sub-agent broker mode (integration)', () => {
     }
   })
 
+  it.each([
+    [404, 'no pending ask for this message id'],
+    [503, 'broker unavailable'],
+  ])('rejects a child-mode avenor_cancel with the broker error on %i', async (status, body) => {
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/cancel_message': () => new Response(body, { status }),
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      await expect(harness.registeredTools.avenor_cancel.execute('t1', { message_id: 'ask-1' }))
+        .rejects.toThrow(`broker /cancel_message: ${status} ${body}`)
+      expect(fetchStub.calls.find(call => call.path === '/cancel_message')?.body).toMatchObject({
+        run_id: 'rt_child',
+        token: 'tok',
+        cancel_message_id: 'ask-1',
+      })
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
   it('routes avenor_reply through the host broker tool outside sub-agent mode', async () => {
     const fetchStub = stubBrokerFetch([])
     const brokerReceiveTool = mock(async () => ({

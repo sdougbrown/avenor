@@ -250,14 +250,49 @@ function dialNeverOpened(error: unknown, depth = 0): boolean {
   return dialNeverOpened(node.cause, depth + 1)
 }
 
+/** Whether the failure came from a caller or timeout abort, not from the wire. */
+function abortedBeforeResponse(error: unknown, depth = 0): boolean {
+  if (depth > 5 || error === null || error === undefined) return false
+  const node = error as { name?: unknown; cause?: unknown; errors?: unknown }
+  if (node.name === 'AbortError' || node.name === 'TimeoutError') return true
+  if (Array.isArray(node.errors) && node.errors.some(cause => abortedBeforeResponse(cause, depth + 1))) return true
+  return abortedBeforeResponse(node.cause, depth + 1)
+}
+
+/** Deadline for the reachability probe, short enough to precede a cleanup. */
+const BROKER_PROBE_TIMEOUT_MS = 250
+
+/**
+ * Whether the broker still answers HTTP at all. The endpoint is unauthenticated
+ * and any response counts, so a live broker that rejects the request is still
+ * reachable; only a transport failure or the probe timeout means it is not.
+ */
+async function brokerReachable(env: SubAgentEnv, fetchImpl: typeof fetch): Promise<boolean> {
+  try {
+    await fetchImpl(`${env.brokerUrl}/health`, { signal: AbortSignal.timeout(BROKER_PROBE_TIMEOUT_MS) })
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * Whether a failed send provably never reached the broker, mirroring the host's
  * rule: a dial that never opened or an unusable broker address carries no
- * request; an HTTP response, a reset, or an abort may have been processed and
- * still needs a withdraw.
+ * request, and a send that drew no HTTP response while the broker is now
+ * unreachable cannot have left its edge in a broker that is gone. An HTTP
+ * response, a reset, or an abort against a reachable broker may have been
+ * processed and still needs a withdraw.
  */
-function sendNeverReachedBroker(error: unknown): boolean {
-  return !(error instanceof BrokerHttpError) && dialNeverOpened(error)
+async function sendNeverReachedBroker(
+  error: unknown,
+  env: SubAgentEnv,
+  fetchImpl: typeof fetch,
+): Promise<boolean> {
+  if (error instanceof BrokerHttpError) return false
+  if (dialNeverOpened(error)) return true
+  if (abortedBeforeResponse(error)) return false
+  return !(await brokerReachable(env, fetchImpl))
 }
 
 /**
@@ -300,9 +335,9 @@ export async function askViaBroker(
       signal,
     )
   } catch (error) {
-    // A send that never opened a connection cannot have registered an edge, so
+    // A send that never reached the broker cannot have registered an edge, so
     // report it withdrawn instead of spending a cancel on it.
-    if (sendNeverReachedBroker(error)) {
+    if (await sendNeverReachedBroker(error, env, fetchImpl)) {
       throw new Error(formatAskFailure(messageId, false, `send ask: ${describeFailure(error)}`))
     }
     return fail(`send ask: ${describeFailure(error)}`)

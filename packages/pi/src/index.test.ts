@@ -17,8 +17,8 @@ import { findLiveStatusForTrackedRun } from './types.js'
 import { makeInspectResult, startExtensionHarness } from './test-fixtures.js'
 import * as coreModule from '@dougbots/avenor-core'
 
-// Stub the core askTool (imported directly by the extension, not via deps) so
-// the avenor_ask wiring test never dials a live supervisor. Everything else in
+// Stub the core askTool and cancelTool (imported directly by the extension, not
+// via deps) so the wiring tests never dial a live supervisor. Everything else in
 // the core module is preserved via the captured original.
 const originalCore = { ...coreModule }
 const askCalls: Array<Record<string, unknown>> = []
@@ -26,7 +26,16 @@ const askToolMock = mock(async (args: Record<string, unknown>) => {
   askCalls.push(args)
   return { reply: 'ok', from_run_id: 'run-1' }
 })
-mock.module('@dougbots/avenor-core', () => ({ ...originalCore, askTool: askToolMock }))
+const cancelCalls: Array<Record<string, unknown>> = []
+const cancelToolMock = mock(async (args: Record<string, unknown>) => {
+  cancelCalls.push(args)
+  return { cancelled: true }
+})
+mock.module('@dougbots/avenor-core', () => ({
+  ...originalCore,
+  askTool: askToolMock,
+  cancelTool: cancelToolMock,
+}))
 
 async function withoutAmbientAgentProfile<T>(run: () => Promise<T>): Promise<T> {
   const previous = process.env.PI_AGENT_PROFILE
@@ -125,6 +134,16 @@ describe('Avenor Pi extension', () => {
       { to_run_id: 'run-1', message: 'hello', timeout_ms: 5.5 },
     )
     expect(askCalls.at(-1)?.timeoutMs).toBe(5.5)
+  })
+
+  it('wraps a host-mode avenor_cancel in text content and details', async () => {
+    const harness = await startExtensionHarness({ extOptions: { subAgentEnv: null } })
+    const result = await harness.registeredTools.avenor_cancel.execute('tool-cancel', { message_id: 'ask-1' })
+    expect(cancelCalls.at(-1)).toEqual({ messageId: 'ask-1' })
+    expect(result).toEqual({
+      content: [{ type: 'text', text: 'Cancelled ask-1' }],
+      details: { cancelled: true },
+    })
   })
 
   it('enriches controller status details with an advisory candidate count', async () => {

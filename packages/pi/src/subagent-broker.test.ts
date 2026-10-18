@@ -411,6 +411,7 @@ describe('askViaBroker', () => {
     expect((error as Error).message).toContain(`message_id: ${messageId}`)
     expect((error as Error).message).toContain('already withdrawn')
     expect((error as Error).message).not.toContain('pass to avenor_cancel to withdraw')
+    expect(calls.filter(call => call.path === '/health')).toHaveLength(0)
     expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(0)
   })
 
@@ -423,6 +424,7 @@ describe('askViaBroker', () => {
             cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
           })
         },
+        '/health': async () => new Response('ok'),
         '/cancel_message': async () => jsonResponse({ cancelled: true }),
       },
       calls,
@@ -432,7 +434,58 @@ describe('askViaBroker', () => {
       .catch((e: unknown) => e)
 
     expect((error as Error).message).toContain('send ask: fetch failed')
+    expect((error as Error).message).toContain('already withdrawn')
     expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(1)
+  })
+
+  it('reports a reset send as withdrawn when the broker no longer answers', async () => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => {
+          throw new TypeError('fetch failed', {
+            cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+          })
+        },
+        '/health': async () => {
+          throw new TypeError('fetch failed', {
+            cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' }),
+          })
+        },
+        '/cancel_message': async () => jsonResponse({ cancelled: true }),
+      },
+      calls,
+    )
+
+    const error = await askViaBroker(env, { toRunId: 'supervisor', message: 'hello' }, fetchImpl)
+      .catch((e: unknown) => e)
+
+    expect((error as Error).message).toContain('send ask: fetch failed')
+    expect((error as Error).message).toContain('already withdrawn')
+    expect(calls.filter(call => call.path === '/health')).toHaveLength(1)
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(0)
+  })
+
+  it('reports a reset send as withdrawn when the reachability probe times out', async () => {
+    const calls: RecordedCall[] = []
+    const fetchImpl = brokerFetch(
+      {
+        '/send': async () => {
+          throw new TypeError('fetch failed', {
+            cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+          })
+        },
+        '/health': waitUntilAborted,
+        '/cancel_message': async () => jsonResponse({ cancelled: true }),
+      },
+      calls,
+    )
+
+    const error = await askViaBroker(env, { toRunId: 'supervisor', message: 'hello' }, fetchImpl)
+      .catch((e: unknown) => e)
+
+    expect((error as Error).message).toContain('already withdrawn')
+    expect(calls.filter(call => call.path === '/cancel_message')).toHaveLength(0)
   })
 
   it('withdraws when only some of several dial attempts failed at the dial', async () => {
@@ -449,6 +502,7 @@ describe('askViaBroker', () => {
             ], 'aggregate error'),
           })
         },
+        '/health': async () => new Response('ok'),
         '/cancel_message': async () => new Response('no pending ask for this message id', { status: 404 }),
       },
       calls,

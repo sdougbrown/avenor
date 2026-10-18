@@ -1881,7 +1881,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             details: { cancelled: true },
           }
         }
-        return cancelTool({ messageId: params.message_id })
+        const result = await cancelTool({ messageId: params.message_id })
+        return {
+          content: [{ type: 'text', text: `Cancelled ${params.message_id}` }],
+          details: result,
+        }
       },
     })
     pi.registerTool({
