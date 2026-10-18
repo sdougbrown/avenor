@@ -139,13 +139,13 @@ func TestUnknownPhaseDiagnosticCacheSaturatesAtCap(t *testing.T) {
 	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != diagnote.Cap {
 		t.Fatalf("unrecognized-phase log lines = %d, want %d", got, diagnote.Cap)
 	}
-	if strings.Contains(stderr.String(), "further unrecognized values suppressed") {
+	if strings.Contains(stderr.String(), diagnote.SuppressedNote) {
 		t.Fatal("suppression line logged before the cap was reached")
 	}
 
 	// The cap is reached: the next distinct value logs only the suppression line.
 	writeAgentStatus(t, writer, "warp_overflow")
-	if got := strings.Count(stderr.String(), "further unrecognized values suppressed"); got != 1 {
+	if got := strings.Count(stderr.String(), diagnote.SuppressedNote); got != 1 {
 		t.Fatalf("suppression lines = %d, want 1", got)
 	}
 	if got := countUnrecognizedPhaseLogs(stderr.String(), "warp_overflow"); got != 0 {
@@ -154,7 +154,7 @@ func TestUnknownPhaseDiagnosticCacheSaturatesAtCap(t *testing.T) {
 
 	// Further distinct values stay silent and the suppression line stays single.
 	writeAgentStatus(t, writer, "warp_overflow_2")
-	if got := strings.Count(stderr.String(), "further unrecognized values suppressed"); got != 1 {
+	if got := strings.Count(stderr.String(), diagnote.SuppressedNote); got != 1 {
 		t.Fatalf("suppression lines after further values = %d, want 1", got)
 	}
 	// A repeat of a cached value stays silent too.
@@ -254,7 +254,7 @@ func TestUnknownPhaseDiagnosticCacheConcurrentWrites(t *testing.T) {
 	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != diagnote.Cap {
 		t.Fatalf("unrecognized-phase log lines = %d, want %d", got, diagnote.Cap)
 	}
-	if got := strings.Count(stderr.String(), "further unrecognized values suppressed"); got != 1 {
+	if got := strings.Count(stderr.String(), diagnote.SuppressedNote); got != 1 {
 		t.Fatalf("suppression lines = %d, want 1", got)
 	}
 
