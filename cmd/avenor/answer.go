@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -36,6 +37,52 @@ func runAnswer(args []string) int {
 	return runAnswerTo(args, os.Stderr)
 }
 
+// countedValue wraps a flag.Value and counts Set calls so a caller that parses
+// the same FlagSet in multiple passes can detect that a flag set in an earlier
+// pass was set again.
+type countedValue struct {
+	flag.Value
+	sets int
+}
+
+func (c *countedValue) Set(s string) error {
+	c.sets++
+	return c.Value.Set(s)
+}
+
+// IsBoolFlag forwards the bool-flag marker so wrapped bool flags still parse
+// without an explicit value.
+func (c *countedValue) IsBoolFlag() bool {
+	b, ok := c.Value.(interface{ IsBoolFlag() bool })
+	return ok && b.IsBoolFlag()
+}
+
+// String is nil-safe because the flag package constructs a zero value of this
+// type when rendering usage output.
+func (c *countedValue) String() string {
+	if c.Value == nil {
+		return ""
+	}
+	return c.Value.String()
+}
+
+// answerConsumedTerminator reports whether the "--" token at args[idx-1] acted
+// as the end-of-flags terminator during the first parse pass rather than as a
+// flag value. Re-parsing the tokens before it on a throwaway FlagSet fails
+// exactly when a flag was left waiting for that "--" as its value.
+func answerConsumedTerminator(args []string, idx int) bool {
+	if idx == 0 || args[idx-1] != "--" {
+		return false
+	}
+	probe := flag.NewFlagSet("avenor answer", flag.ContinueOnError)
+	probe.SetOutput(io.Discard)
+	probe.String("option", "", "")
+	probe.String("message", "", "")
+	probe.String("outcome", "", "")
+	probe.Bool("force", false, "")
+	return probe.Parse(args[:idx-1]) == nil
+}
+
 // runAnswerTo is the testable entry point that accepts an io.Writer for
 // error output so tests can capture stderr without OS-level redirection.
 func runAnswerTo(args []string, errOut io.Writer) int {
@@ -47,24 +94,59 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 	outcomeFlag := fs.String("outcome", "selected", "outcome: selected or cancelled")
 	forceFlag := fs.Bool("force", false, "overwrite an existing response file")
 
-	// The flag package stops at the first positional argument, so flags that
-	// follow <perm-base> would be left in fs.Args() unprocessed. Parse
-	// repeatedly, lifting the positional out, until only flags remain.
-	var permBase string
-	rest := args
-	for {
-		if err := fs.Parse(rest); err != nil {
-			return 2
-		}
-		if fs.NArg() == 0 {
-			break
-		}
-		if permBase != "" {
-			fmt.Fprintln(errOut, "avenor answer: expected exactly one <perm-base>")
-			return 2
-		}
+	// Wrap each value with a Set counter so a second parse pass can detect that
+	// a flag set in the first pass was set again. Swapping the Value in place
+	// preserves parsing behavior; the pointers above still receive the values.
+	setCounts := make(map[string]*int, 4)
+	for _, name := range []string{"option", "message", "outcome", "force"} {
+		f := fs.Lookup(name)
+		counted := &countedValue{Value: f.Value}
+		setCounts[name] = &counted.sets
+		f.Value = counted
+	}
+
+	// Parse once to locate the <perm-base> positional. The flag package stops
+	// at the first positional argument, so any tokens after it stay in
+	// fs.Args() and are handled below.
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	// extraPositional records that more than one positional was supplied. It is
+	// held until the validations below run so that error priority matches a
+	// plain single-pass parse.
+	permBase := ""
+	extraPositional := false
+	if fs.NArg() > 0 {
 		permBase = fs.Arg(0)
-		rest = fs.Args()[1:]
+		rest := fs.Args()[1:]
+		if answerConsumedTerminator(args, len(args)-len(fs.Args())) {
+			// The first pass ended at a "--" terminator, so every remaining
+			// token is positional and must not be parsed as flags.
+			extraPositional = len(rest) > 0
+		} else {
+			// Remember how many times each flag was set in the first pass so a
+			// set in the pass below counts as a duplicate.
+			passOne := make(map[string]int, len(setCounts))
+			for name, count := range setCounts {
+				passOne[name] = *count
+			}
+			if err := fs.Parse(rest); err != nil {
+				return 2
+			}
+			names := make([]string, 0, len(setCounts))
+			for name := range setCounts {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if passOne[name] > 0 && *setCounts[name] > passOne[name] {
+					fmt.Fprintf(errOut, "avenor answer: flag -%s given more than once\n", name)
+					return 2
+				}
+			}
+			extraPositional = fs.NArg() > 0
+		}
 	}
 
 	// Validate --outcome before anything else.
@@ -81,6 +163,11 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 
 	if permBase == "" {
 		fmt.Fprintln(errOut, "avenor answer: <perm-base> is required")
+		return 2
+	}
+
+	if extraPositional {
+		fmt.Fprintln(errOut, "avenor answer: expected exactly one <perm-base>")
 		return 2
 	}
 
