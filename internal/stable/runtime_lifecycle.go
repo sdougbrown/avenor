@@ -1,5 +1,7 @@
 package stable
 
+import "github.com/sdougbrown/avenor/internal/runstate"
+
 // Pure childRuntime lifecycle machine.
 //
 // This file owns the closed lifecycle dimensions (exec, attempts, shutdown,
@@ -298,7 +300,7 @@ type lifecycleSignal struct {
 	idleContextErr     error
 
 	// agentStatusObserved snapshot, sampled under child.mu.
-	phase string
+	phase runstate.Phase
 	label string
 
 	// idleContextEnded carries caller-normalized reason/exitCode computed with
@@ -364,8 +366,8 @@ type lifecycleEffect struct {
 	reason    string // writeSentinel (normalized), setIdleEndData; setSessionEndPresentation may be empty
 	sessionID string // writeSentinel
 
-	phase string // setAgentPresentation
-	label string // setAgentPresentation
+	phase runstate.Phase // setAgentPresentation
+	label string         // setAgentPresentation
 
 	boundary completionBoundary // publishCompletion
 }
@@ -906,7 +908,7 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		// Any valid state. The presentation write is emitted only when the
 		// phase is nonempty; the caller's guard already deduplicates a done
 		// presentation. Nonempty labels replace, empty labels retain.
-		if sig.phase != "" {
+		if sig.phase != runstate.PhaseNone {
 			eff = append(eff, lifecycleEffect{kind: effectSetAgentPresentation, phase: sig.phase, label: sig.label})
 		}
 

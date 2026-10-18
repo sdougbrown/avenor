@@ -30,6 +30,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
+	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
@@ -329,11 +330,17 @@ type childRuntime struct {
 	// event fanout so RuntimeStatus can surface phase, phase_label, and
 	// pending_permission without consulting the shared ControlState (which
 	// reflects only the most recent event across ALL runtimes).
-	phase             string
-	phaseLabel        string
-	pendingPermission bool
-	permission        map[string]any
-	directAttempt     *sessionAttempt
+	phase      runstate.Phase
+	phaseLabel string
+	// unknownPhases records the distinct raw phase values the fanout could
+	// not parse, for one-line-per-value diagnostics; unknownPhasesSuppressed
+	// marks that the cap was reached and the suppression line was logged.
+	// Both are guarded by mu.
+	unknownPhases           map[string]struct{}
+	unknownPhasesSuppressed bool
+	pendingPermission       bool
+	permission              map[string]any
+	directAttempt           *sessionAttempt
 	// lc is the closed lifecycle state owned by the pure machine
 	// (runtime_lifecycle.go) and committed field by field by the adapter
 	// (runtime_lifecycle_apply.go). Read it through the field-specific
@@ -4048,12 +4055,12 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 	out := make([]map[string]any, 0, len(s.runtimes))
 	for _, rt := range s.runtimes {
 		rt.mu.Lock()
-		status := "idle"
+		status := runstate.StatusIdle
 		if rt.lc.isActive() {
-			status = "running"
+			status = runstate.StatusRunning
 		}
 		if rt.lc.isCompleted() {
-			status = "ended"
+			status = runstate.StatusEnded
 		}
 		identity := s.statusIdentity(rt, rt.session.SessionID)
 		entry := map[string]any{
@@ -4072,7 +4079,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"effective_model":    identity.Model,
 			"effective_backend":  identity.Backend,
 			"dir":                rt.dir,
-			"status":             status,
+			"status":             string(status),
 			"started_at":         rt.startedAt,
 			"exit_code":          rt.exitCode,
 			"on_event":           rt.onEvent,
@@ -4081,7 +4088,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"parent_id":          rt.parentID,
 			"children":           rt.children,
 			"pid":                rt.session.PID,
-			"phase":              rt.phase,
+			"phase":              string(rt.phase),
 			"phase_label":        rt.phaseLabel,
 			"pending_permission": rt.pendingPermission,
 			"latest_seq":         rt.latestSeq,
@@ -5276,8 +5283,53 @@ func reportLifecycleDiagnostics(s *Supervisor, child *childRuntime, diagnostics 
 		return
 	}
 	for _, err := range diagnostics {
+		if note, ok := err.(unrecognizedPhaseDiagnostic); ok {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: %v\n", note)
+			continue
+		}
 		s.reportLifecycleError(child, err)
 	}
+}
+
+// unknownPhaseDiagnosticCap bounds the per-runtime cache of unrecognized
+// phase values reported by the fanout.
+const unknownPhaseDiagnosticCap = 16
+
+// recordUnknownChildPhase adds a raw unrecognized phase value to the child's
+// diagnostic cache under mu. It reports whether a log line is due: once per
+// distinct value until the cap, then a single suppression line. The caller
+// logs the returned note only after releasing every lock.
+func recordUnknownChildPhase(child *childRuntime, runtimeID, phase string) (unrecognizedPhaseDiagnostic, bool) {
+	if child.unknownPhases == nil {
+		child.unknownPhases = make(map[string]struct{})
+	}
+	if _, seen := child.unknownPhases[phase]; seen {
+		return unrecognizedPhaseDiagnostic{}, false
+	}
+	if len(child.unknownPhases) < unknownPhaseDiagnosticCap {
+		child.unknownPhases[phase] = struct{}{}
+		return unrecognizedPhaseDiagnostic{runtimeID: runtimeID, phase: phase}, true
+	}
+	if child.unknownPhasesSuppressed {
+		return unrecognizedPhaseDiagnostic{}, false
+	}
+	child.unknownPhasesSuppressed = true
+	return unrecognizedPhaseDiagnostic{runtimeID: runtimeID}, true
+}
+
+// unrecognizedPhaseDiagnostic carries a fanout unrecognized-phase note out of
+// writeLocked so it is logged after every lock is released. An empty phase
+// marks the one-time suppression line.
+type unrecognizedPhaseDiagnostic struct {
+	runtimeID string
+	phase     string
+}
+
+func (e unrecognizedPhaseDiagnostic) Error() string {
+	if e.phase == "" {
+		return fmt.Sprintf("runtime %s further unrecognized values suppressed", e.runtimeID)
+	}
+	return fmt.Sprintf("runtime %s reported unrecognized phase %q", e.runtimeID, e.phase)
 }
 
 // writeLocked is the canonical event path for callers that already hold the
@@ -5313,14 +5365,21 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 		}
 		switch presentation.Event {
 		case "agent.status":
-			if phase, _ := presentation.Fields["phase"].(string); phase != "" && w.child.phase != "done" {
+			if phase, _ := presentation.Fields["phase"].(string); phase != "" && w.child.phase != runstate.PhaseDone {
 				// The adapter owns the agent-status presentation write; the caller's
 				// done guard is the only dedup point. The label is only replaced
 				// when nonempty.
 				label, _ := presentation.Fields["label"].(string)
+				signalPhase, recognized := runstate.ParsePhase(phase)
+				if !recognized {
+					signalPhase = runstate.PhaseUnknown
+					if note, log := recordUnknownChildPhase(w.child, w.runtimeID, phase); log {
+						*diagnostics = append(*diagnostics, note)
+					}
+				}
 				_, _, statusErr := w.supervisor.applyLifecycle(w.child, lifecycleSignal{
 					kind: signalAgentStatusObserved, class: w.child.lc.class,
-					phase: phase, label: label,
+					phase: signalPhase, label: label,
 				})
 				if statusErr != nil {
 					*diagnostics = append(*diagnostics, statusErr)
@@ -5589,12 +5648,12 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		return nil, fmt.Errorf("runtime %q not found", rtID)
 	}
 	rt.mu.Lock()
-	status := "idle"
+	status := runstate.StatusIdle
 	if rt.lc.isActive() {
-		status = "running"
+		status = runstate.StatusRunning
 	}
 	if rt.lc.isCompleted() {
-		status = "ended"
+		status = runstate.StatusEnded
 	}
 	identity := s.statusIdentity(rt, rt.session.SessionID)
 	entry := map[string]any{
@@ -5613,7 +5672,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"effective_model":    identity.Model,
 		"effective_backend":  identity.Backend,
 		"dir":                rt.dir,
-		"status":             status,
+		"status":             string(status),
 		"started_at":         rt.startedAt,
 		"exit_code":          rt.exitCode,
 		"on_event":           rt.onEvent,
@@ -5622,7 +5681,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"parent_id":          rt.parentID,
 		"children":           rt.children,
 		"pid":                rt.session.PID,
-		"phase":              rt.phase,
+		"phase":              string(rt.phase),
 		"phase_label":        rt.phaseLabel,
 		"pending_permission": rt.pendingPermission,
 		"latest_seq":         rt.latestSeq,

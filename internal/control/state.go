@@ -3,13 +3,15 @@ package control
 import (
 	"sync"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 type Snapshot struct {
 	SessionID         string         `json:"session_id,omitempty"`
 	RunID             string         `json:"run_id,omitempty"`
 	RunLabel          string         `json:"run_label,omitempty"`
-	Phase             string         `json:"phase,omitempty"`
+	Phase             runstate.Phase `json:"phase,omitempty"`
 	PhaseLabel        string         `json:"phase_label,omitempty"`
 	LastEvent         string         `json:"last_event,omitempty"`
 	RetryAttempt      int            `json:"retry_attempt,omitempty"`

@@ -9,6 +9,8 @@ package stable
 import (
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 // testLifecycleOptions declares the explicit lifecycle initialization for a
@@ -61,7 +63,7 @@ func initializeTestLifecycle(t testing.TB, child *childRuntime, opts testLifecyc
 		t.Fatalf("test child %s: invalid declared lifecycle state: %v", child.id, err)
 	}
 	child.lc = st
-	child.phase = opts.phase
+	child.phase = runstate.Phase(opts.phase)
 	child.phaseLabel = opts.phaseLabel
 	child.exitCode = opts.exitCode
 	child.lastStopReason = opts.lastStopReason

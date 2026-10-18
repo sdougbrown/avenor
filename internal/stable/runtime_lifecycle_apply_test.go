@@ -7,6 +7,8 @@ package stable
 import (
 	"io"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 // TestEffectExecutionPartitionCoversEveryKind pins the effectKind partition:
@@ -97,7 +99,7 @@ func TestApplyLifecycleCommitsOwnedEffects(t *testing.T) {
 			t.Fatalf("applyLifecycle(%v): %v", sig.kind, err)
 		}
 	}
-	lifecycleSnapshot := func(t *testing.T, child *childRuntime) (active bool, attempts int, phase, phaseLabel string) {
+	lifecycleSnapshot := func(t *testing.T, child *childRuntime) (active bool, attempts int, phase runstate.Phase, phaseLabel string) {
 		t.Helper()
 		child.mu.Lock()
 		defer child.mu.Unlock()
