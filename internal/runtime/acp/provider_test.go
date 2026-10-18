@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -568,9 +569,12 @@ func TestCloseRunsClientEnvCleanup(t *testing.T) {
 // acpStub describes a minimal ACP stdio stub. It answers the first request
 // (initialize) and then either a session/open result, an error, or nothing.
 type acpStub struct {
-	Mode  string // "exit", "silent", "fail-after-init" or "serve"
+	Mode  string // "exit", "silent", "fail-after-init", "hang-prompt" or "serve"
 	Gate  string // when set, the stub waits for this file before reading stdin
 	Ready string // when set, the stub touches this path once it is spawned
+	// Prompt, in "hang-prompt" mode, is touched when the stub receives a
+	// session/prompt request; the stub never answers such a request.
+	Prompt string
 	// ReadyPerProcess appends the stub's pid to Ready so each stub instance
 	// leaves a distinct marker.
 	ReadyPerProcess bool
@@ -596,6 +600,22 @@ func writeACPStub(t *testing.T, stub acpStub) string {
 		body.WriteString("exit 3\n")
 	case "silent":
 		body.WriteString("cat > /dev/null\n")
+	case "hang-prompt":
+		body.WriteString("n=0\n")
+		body.WriteString("while IFS= read -r line; do\n")
+		body.WriteString("  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n")
+		body.WriteString("  [ -n \"$id\" ] || continue\n")
+		body.WriteString("  n=$((n+1))\n")
+		body.WriteString("  if [ \"$n\" -eq 1 ]; then\n")
+		body.WriteString("    printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":1}}\\n' \"$id\"\n")
+		body.WriteString("  elif [ \"$n\" -eq 2 ]; then\n")
+		body.WriteString("    printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"sessionId\":\"ses_stub\"}}\\n' \"$id\"\n")
+		if stub.Prompt != "" {
+			fmt.Fprintf(&body, "  else\n    touch %s\n", shellQuotePath(stub.Prompt))
+		} else {
+			body.WriteString("  else\n    :\n")
+		}
+		body.WriteString("  fi\ndone\n")
 	default:
 		body.WriteString("n=0\n")
 		body.WriteString("while IFS= read -r line; do\n")
@@ -782,6 +802,85 @@ func TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize(t *testing.T) 
 	}
 	if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
 		t.Fatalf("cancelled launch config not cleaned up: %v", statErr)
+	}
+}
+
+// TestStartRetainsConfigWhenSessionConfigurationFails covers the other retained
+// case: the client and its config outlive a session-configuration error and are
+// only released by close.
+func TestStartRetainsConfigWhenSessionConfigurationFails(t *testing.T) {
+	stub := writeACPStub(t, acpStub{Mode: "serve"})
+	candidate, cleanup := writeCandidateConfig(t)
+	p := newStubProvider(stub, func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
+		return candidateEnv(candidate), cleanup
+	})
+	p.configureSession = func(context.Context, *Session, runtime.StartOptions) error {
+		return errors.New("configure refused")
+	}
+
+	_, err := p.Start(context.Background(), runtime.StartOptions{})
+	if err == nil {
+		t.Fatal("expected session configuration failure")
+	}
+	if !strings.Contains(err.Error(), "configure refused") {
+		t.Fatalf("session configuration error = %v, want the stub's refusal", err)
+	}
+	if providerClient(p) == nil {
+		t.Fatal("session configuration failure dropped the client that owned the config")
+	}
+	if _, statErr := os.Stat(candidate); statErr != nil {
+		t.Fatalf("config removed while its client is still retained: %v", statErr)
+	}
+
+	_ = p.Close()
+	if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
+		t.Fatalf("provider close did not remove its retained config: %v", statErr)
+	}
+}
+
+// TestCancelledPromptKeepsLiveClientConfig pins that cancelling a prompt leaves
+// the launch — client and config — in place until close.
+func TestCancelledPromptKeepsLiveClientConfig(t *testing.T) {
+	promptSeen := filepath.Join(t.TempDir(), "prompt-seen")
+	stub := writeACPStub(t, acpStub{Mode: "hang-prompt", Prompt: promptSeen})
+	candidate, cleanup := writeCandidateConfig(t)
+	p := newStubProvider(stub, func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
+		return candidateEnv(candidate), cleanup
+	})
+
+	session, err := p.Start(context.Background(), runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	promptCtx, cancelPrompt := context.WithCancel(context.Background())
+	prompted := make(chan error, 1)
+	go func() { prompted <- p.Prompt(promptCtx, session.SessionID, "hello") }()
+	waitForPath(t, promptSeen)
+
+	if err := p.Cancel(context.Background(), session.SessionID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	cancelPrompt()
+
+	select {
+	case err := <-prompted:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("prompt error = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("prompt did not return after cancellation")
+	}
+	if providerClient(p) == nil {
+		t.Fatal("cancelled prompt dropped the live client")
+	}
+	if _, statErr := os.Stat(candidate); statErr != nil {
+		t.Fatalf("config removed while its client is still live: %v", statErr)
+	}
+
+	_ = p.Close()
+	if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
+		t.Fatalf("provider close did not remove the live client config: %v", statErr)
 	}
 }
 
