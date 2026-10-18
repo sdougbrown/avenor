@@ -380,6 +380,176 @@ func TestRunAnswerForceOverwrites(t *testing.T) {
 	}
 }
 
+// TestRunAnswerUsageMatchesOriginMain: the usage output for unknown flags (and
+// -h) must render exactly as origin/main prints it: plain string placeholders
+// for the three string flags, no placeholder for -force, and the
+// (default "selected") note on -outcome. Wrapping flag values in custom Value
+// types would change both UnquoteUsage and isZeroValue output.
+func TestRunAnswerUsageMatchesOriginMain(t *testing.T) {
+	code, stderr := answerRun([]string{"--bogus", "x"})
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
+	}
+	wantLines := []string{
+		"Usage of avenor answer:",
+		"  -force\n    \toverwrite an existing response file\n",
+		"  -message string\n    \tfree-text message to include in the response\n",
+		"  -option string\n    \toption id to select (required)\n",
+		"  -outcome string\n    \toutcome: selected or cancelled (default \"selected\")\n",
+		"(default \"selected\")",
+	}
+	for _, want := range wantLines {
+		if !containsStr(stderr, want) {
+			t.Errorf("usage output missing %q; got:\n%s", want, stderr)
+		}
+	}
+	// UnquoteUsage must render "string" placeholders, not the generic "value"
+	// that a custom Value type would produce.
+	for _, bad := range []string{"-message value", "-option value", "-outcome value", "-force value"} {
+		if containsStr(stderr, bad) {
+			t.Errorf("usage output contains %q; origin/main renders string placeholders instead:\n%s", bad, stderr)
+		}
+	}
+}
+
+// TestRunAnswerForceAfterPathOverwrites mirrors TestRunAnswerForceOverwrites
+// with the flags placed after the <perm-base> positional.
+func TestRunAnswerForceAfterPathOverwrites(t *testing.T) {
+	dir := t.TempDir()
+	permBase := writeReqFile(t, dir, "test.perm", []string{"allow"})
+	responsePath := permBase + ".req.response"
+
+	// Write first response.
+	code, stderr := answerRun([]string{permBase, "--option", "allow", "--message", "first"})
+	if code != 0 {
+		t.Fatalf("first write exit code = %d, stderr: %s", code, stderr)
+	}
+
+	// Overwrite with --force after the path.
+	code, stderr = answerRun([]string{permBase, "--force", "--option", "allow", "--message", "second"})
+	if code != 0 {
+		t.Fatalf("force overwrite exit code = %d, stderr: %s", code, stderr)
+	}
+
+	data, err := os.ReadFile(responsePath)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var resp answerResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp.Message != "second" {
+		t.Errorf("message = %q, want %q (force overwrite did not take effect)", resp.Message, "second")
+	}
+	noTmpFiles(t, dir)
+}
+
+// TestRunAnswerDuplicateAfterPathLastWins: the same flag given twice in the
+// single pass that follows the path is not a duplicate-across-passes error;
+// the flag package applies last-wins.
+func TestRunAnswerDuplicateAfterPathLastWins(t *testing.T) {
+	dir := t.TempDir()
+	permBase := writeReqFile(t, dir, "test.perm", []string{"allow", "deny"})
+
+	code, stderr := answerRun([]string{permBase, "--option", "allow", "--option", "deny"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	if containsStr(stderr, "given more than once") {
+		t.Errorf("repeating a flag within the same pass must not be a duplicate error: %q", stderr)
+	}
+
+	var resp answerResponse
+	data, err := os.ReadFile(permBase + ".req.response")
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp.OptionID != "deny" {
+		t.Errorf("option_id = %q, want %q (last value must win)", resp.OptionID, "deny")
+	}
+	noTmpFiles(t, dir)
+}
+
+// TestRunAnswerTerminatorExtraPositional: after a "--" terminator every token
+// is a positional. With --option supplied the extra positional is the reported
+// error; without it the missing --option error wins (origin/main priority).
+func TestRunAnswerTerminatorExtraPositional(t *testing.T) {
+	dir := t.TempDir()
+	permBase := writeReqFile(t, dir, "test.perm", []string{"allow"})
+	other := filepath.Join(dir, "other.perm")
+
+	code, stderr := answerRun([]string{"--option", "allow", "--", permBase, other})
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
+	}
+	if !containsStr(stderr, "expected exactly one") {
+		t.Errorf("stderr %q does not contain the extra-positional message", stderr)
+	}
+	if _, err := os.Stat(permBase + ".req.response"); !os.IsNotExist(err) {
+		t.Errorf("response file should not have been written; stat err: %v", err)
+	}
+
+	code, stderr = answerRun([]string{"--", permBase, other})
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
+	}
+	if !containsStr(stderr, "--option <id> is required") {
+		t.Errorf("stderr %q does not contain the missing --option message", stderr)
+	}
+	noTmpFiles(t, dir)
+}
+
+// TestRunAnswerMessageAfterPath: --message after the path consumes the next
+// token as its value even when that token looks like a <perm-base> path, and
+// the response is written for the positional that started the argument list.
+func TestRunAnswerMessageAfterPath(t *testing.T) {
+	dir := t.TempDir()
+	permBase := writeReqFile(t, dir, "test.perm", []string{"allow"})
+	lookalike := filepath.Join(dir, "other.perm")
+
+	code, stderr := answerRun([]string{permBase, "--message", lookalike, "--option", "allow"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+
+	var resp answerResponse
+	data, err := os.ReadFile(permBase + ".req.response")
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp.Message != lookalike {
+		t.Errorf("message = %q, want %q", resp.Message, lookalike)
+	}
+	if resp.OptionID != "allow" {
+		t.Errorf("option_id = %q, want %q", resp.OptionID, "allow")
+	}
+	// The look-alike path must not have gained its own response file.
+	if _, err := os.Stat(lookalike + ".req.response"); !os.IsNotExist(err) {
+		t.Errorf("look-alike path should not have a response file; stat err: %v", err)
+	}
+	noTmpFiles(t, dir)
+}
+
+// TestRunAnswerEmptyPathPositional: an explicitly supplied empty-string path
+// behaves as on origin/main: the positional check passes and the read of
+// ".req" fails with the does-not-exist message.
+func TestRunAnswerEmptyPathPositional(t *testing.T) {
+	code, stderr := answerRun([]string{"--option", "allow", ""})
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
+	}
+	if !containsStr(stderr, "request file .req does not exist") {
+		t.Errorf("stderr %q does not contain the missing-request-file message", stderr)
+	}
+}
+
 func TestRunAnswerUnknownOptionListsValid(t *testing.T) {
 	dir := t.TempDir()
 	permBase := writeReqFile(t, dir, "test.perm", []string{"allow", "deny", "ignore"})
@@ -565,7 +735,7 @@ func TestRunAnswerDuplicateFlagAcrossPath(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "flag -option given more than once") {
+	if !containsStr(stderr, "avenor answer: flag -option given more than once") {
 		t.Errorf("stderr %q does not contain duplicate-flag message", stderr)
 	}
 	if _, err := os.Stat(permBase + ".req.response"); !os.IsNotExist(err) {
@@ -583,7 +753,7 @@ func TestRunAnswerDuplicateOutcomeAcrossPath(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "flag -outcome given more than once") {
+	if !containsStr(stderr, "avenor answer: flag -outcome given more than once") {
 		t.Errorf("stderr %q does not contain duplicate-flag message", stderr)
 	}
 	if _, err := os.Stat(permBase + ".req.response"); !os.IsNotExist(err) {

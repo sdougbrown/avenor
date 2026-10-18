@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -37,33 +36,24 @@ func runAnswer(args []string) int {
 	return runAnswerTo(args, os.Stderr)
 }
 
-// countedValue wraps a flag.Value and counts Set calls so a caller that parses
-// the same FlagSet in multiple passes can detect that a flag set in an earlier
-// pass was set again.
-type countedValue struct {
-	flag.Value
-	sets int
+// answerFlags holds the four answer flags. Values from separate parse passes
+// are kept in separate answerFlags values and merged by the caller.
+type answerFlags struct {
+	option  string
+	message string
+	outcome string
+	force   bool
 }
 
-func (c *countedValue) Set(s string) error {
-	c.sets++
-	return c.Value.Set(s)
-}
-
-// IsBoolFlag forwards the bool-flag marker so wrapped bool flags still parse
-// without an explicit value.
-func (c *countedValue) IsBoolFlag() bool {
-	b, ok := c.Value.(interface{ IsBoolFlag() bool })
-	return ok && b.IsBoolFlag()
-}
-
-// String is nil-safe because the flag package constructs a zero value of this
-// type when rendering usage output.
-func (c *countedValue) String() string {
-	if c.Value == nil {
-		return ""
-	}
-	return c.Value.String()
+// defineAnswerFlags registers the answer flags on fs, binding to the fields of
+// v. Every FlagSet that parses answer arguments (the main parse, the second
+// pass over tokens after the positional, and the "--" terminator probe) uses
+// this helper so the flag list is declared exactly once.
+func defineAnswerFlags(fs *flag.FlagSet, v *answerFlags) {
+	fs.StringVar(&v.option, "option", "", "option id to select (required)")
+	fs.StringVar(&v.message, "message", "", "free-text message to include in the response")
+	fs.StringVar(&v.outcome, "outcome", "selected", "outcome: selected or cancelled")
+	fs.BoolVar(&v.force, "force", false, "overwrite an existing response file")
 }
 
 // answerConsumedTerminator reports whether the "--" token at args[idx-1] acted
@@ -76,34 +66,17 @@ func answerConsumedTerminator(args []string, idx int) bool {
 	}
 	probe := flag.NewFlagSet("avenor answer", flag.ContinueOnError)
 	probe.SetOutput(io.Discard)
-	probe.String("option", "", "")
-	probe.String("message", "", "")
-	probe.String("outcome", "", "")
-	probe.Bool("force", false, "")
+	defineAnswerFlags(probe, &answerFlags{})
 	return probe.Parse(args[:idx-1]) == nil
 }
 
 // runAnswerTo is the testable entry point that accepts an io.Writer for
 // error output so tests can capture stderr without OS-level redirection.
 func runAnswerTo(args []string, errOut io.Writer) int {
+	var passOne answerFlags
 	fs := flag.NewFlagSet("avenor answer", flag.ContinueOnError)
 	fs.SetOutput(errOut)
-
-	optionFlag := fs.String("option", "", "option id to select (required)")
-	messageFlag := fs.String("message", "", "free-text message to include in the response")
-	outcomeFlag := fs.String("outcome", "selected", "outcome: selected or cancelled")
-	forceFlag := fs.Bool("force", false, "overwrite an existing response file")
-
-	// Wrap each value with a Set counter so a second parse pass can detect that
-	// a flag set in the first pass was set again. Swapping the Value in place
-	// preserves parsing behavior; the pointers above still receive the values.
-	setCounts := make(map[string]*int, 4)
-	for _, name := range []string{"option", "message", "outcome", "force"} {
-		f := fs.Lookup(name)
-		counted := &countedValue{Value: f.Value}
-		setCounts[name] = &counted.sets
-		f.Value = counted
-	}
+	defineAnswerFlags(fs, &passOne)
 
 	// Parse once to locate the <perm-base> positional. The flag package stops
 	// at the first positional argument, so any tokens after it stay in
@@ -111,13 +84,18 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	passOneSet := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { passOneSet[f.Name] = true })
 
-	// extraPositional records that more than one positional was supplied. It is
-	// held until the validations below run so that error priority matches a
-	// plain single-pass parse.
+	// positionalSupplied records that a <perm-base> token was present, even if
+	// that token was the empty string. extraPositional records that more than
+	// one positional was supplied. Both are held until the validations below
+	// run so that error priority matches a plain single-pass parse.
+	positionalSupplied := fs.NArg() > 0
 	permBase := ""
 	extraPositional := false
-	if fs.NArg() > 0 {
+	flags := passOne
+	if positionalSupplied {
 		permBase = fs.Arg(0)
 		rest := fs.Args()[1:]
 		if answerConsumedTerminator(args, len(args)-len(fs.Args())) {
@@ -125,43 +103,56 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 			// token is positional and must not be parsed as flags.
 			extraPositional = len(rest) > 0
 		} else {
-			// Remember how many times each flag was set in the first pass so a
-			// set in the pass below counts as a duplicate.
-			passOne := make(map[string]int, len(setCounts))
-			for name, count := range setCounts {
-				passOne[name] = *count
-			}
-			if err := fs.Parse(rest); err != nil {
+			var passTwo answerFlags
+			fs2 := flag.NewFlagSet("avenor answer", flag.ContinueOnError)
+			fs2.SetOutput(errOut)
+			defineAnswerFlags(fs2, &passTwo)
+			if err := fs2.Parse(rest); err != nil {
 				return 2
 			}
-			names := make([]string, 0, len(setCounts))
-			for name := range setCounts {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			for _, name := range names {
-				if passOne[name] > 0 && *setCounts[name] > passOne[name] {
-					fmt.Fprintf(errOut, "avenor answer: flag -%s given more than once\n", name)
-					return 2
+			// A flag set in both passes is a duplicate; within a single pass
+			// the flag package already applies last-wins.
+			duplicateName := ""
+			fs2.Visit(func(f *flag.Flag) {
+				if passOneSet[f.Name] && duplicateName == "" {
+					duplicateName = f.Name
 				}
+			})
+			if duplicateName != "" {
+				fmt.Fprintf(errOut, "avenor answer: flag -%s given more than once\n", duplicateName)
+				return 2
 			}
-			extraPositional = fs.NArg() > 0
+			// Pass-two values win; flags it did not set keep their pass-one
+			// values.
+			fs2.Visit(func(f *flag.Flag) {
+				switch f.Name {
+				case "option":
+					flags.option = passTwo.option
+				case "message":
+					flags.message = passTwo.message
+				case "outcome":
+					flags.outcome = passTwo.outcome
+				case "force":
+					flags.force = passTwo.force
+				}
+			})
+			extraPositional = fs2.NArg() > 0
 		}
 	}
 
 	// Validate --outcome before anything else.
-	if *outcomeFlag != "selected" && *outcomeFlag != "cancelled" {
-		fmt.Fprintf(errOut, "avenor answer: --outcome must be \"selected\" or \"cancelled\", got %q\n", *outcomeFlag)
+	if flags.outcome != "selected" && flags.outcome != "cancelled" {
+		fmt.Fprintf(errOut, "avenor answer: --outcome must be \"selected\" or \"cancelled\", got %q\n", flags.outcome)
 		return 2
 	}
 
 	// Validate --option is present.
-	if *optionFlag == "" {
+	if flags.option == "" {
 		fmt.Fprintln(errOut, "avenor answer: --option <id> is required")
 		return 2
 	}
 
-	if permBase == "" {
+	if !positionalSupplied {
 		fmt.Fprintln(errOut, "avenor answer: <perm-base> is required")
 		return 2
 	}
@@ -202,25 +193,25 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 			continue
 		}
 		validIDs = append(validIDs, opt.OptionID)
-		if opt.OptionID == *optionFlag {
+		if opt.OptionID == flags.option {
 			found = true
 		}
 	}
 	if !found {
 		if len(validIDs) == 0 {
-			fmt.Fprintf(errOut, "avenor answer: option %q is not in the offered set; no options were offered\n", *optionFlag)
+			fmt.Fprintf(errOut, "avenor answer: option %q is not in the offered set; no options were offered\n", flags.option)
 		} else {
 			fmt.Fprintf(errOut, "avenor answer: option %q is not in the offered set; valid options: %s\n",
-				*optionFlag, strings.Join(validIDs, ", "))
+				flags.option, strings.Join(validIDs, ", "))
 		}
 		return 2
 	}
 
 	// Build response JSON with HTML escaping disabled.
 	resp := answerResponse{
-		Outcome:  *outcomeFlag,
-		OptionID: *optionFlag,
-		Message:  *messageFlag,
+		Outcome:  flags.outcome,
+		OptionID: flags.option,
+		Message:  flags.message,
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -260,7 +251,7 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 		return 1
 	}
 
-	if *forceFlag {
+	if flags.force {
 		// Atomic overwrite.
 		if err := os.Rename(tmpPath, responsePath); err != nil {
 			fmt.Fprintf(errOut, "avenor answer: rename to %s: %v\n", responsePath, err)
