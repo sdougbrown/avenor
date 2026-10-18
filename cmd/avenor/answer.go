@@ -36,8 +36,9 @@ func runAnswer(args []string) int {
 	return runAnswerTo(args, os.Stderr)
 }
 
-// answerFlags holds the four answer flags. Values from separate parse passes
-// are kept in separate answerFlags values and merged by the caller.
+// answerFlags holds the four answer flags. Both parse passes bind to the same
+// answerFlags value, so a flag set after <perm-base> overwrites only its own
+// field.
 type answerFlags struct {
 	option  string
 	message string
@@ -103,10 +104,12 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 			// token is positional and must not be parsed as flags.
 			extraPositional = len(rest) > 0
 		} else {
-			var passTwo answerFlags
 			fs2 := flag.NewFlagSet("avenor answer", flag.ContinueOnError)
 			fs2.SetOutput(errOut)
-			defineAnswerFlags(fs2, &passTwo)
+			defineAnswerFlags(fs2, &flags)
+			// Registering the flags writes their defaults into flags; put the
+			// pass-one values back so fs2 overwrites only what it parses.
+			flags = passOne
 			if err := fs2.Parse(rest); err != nil {
 				return 2
 			}
@@ -122,20 +125,6 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 				fmt.Fprintf(errOut, "avenor answer: flag -%s given more than once\n", duplicateName)
 				return 2
 			}
-			// Pass-two values win; flags it did not set keep their pass-one
-			// values.
-			fs2.Visit(func(f *flag.Flag) {
-				switch f.Name {
-				case "option":
-					flags.option = passTwo.option
-				case "message":
-					flags.message = passTwo.message
-				case "outcome":
-					flags.outcome = passTwo.outcome
-				case "force":
-					flags.force = passTwo.force
-				}
-			})
 			extraPositional = fs2.NArg() > 0
 		}
 	}

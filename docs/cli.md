@@ -435,7 +435,7 @@ Write a permission response file to answer a pending permission request. Specifi
 avenor answer [flags] <perm-base>
 ```
 
-The permission handler expects files at `<perm-base>.req` (request) and `<perm-base>.req.response` (response). Flags may appear before or after `<perm-base>`; the examples below show them before the path.
+The permission handler expects files at `<perm-base>.req` (request) and `<perm-base>.req.response` (response). Flags may appear before or after `<perm-base>`; the examples below show them before the path. Repeating a flag on the same side of the path keeps the last value. Giving the same flag on both sides is an error, so a later flag cannot silently override an earlier one across the path.
 
 ### Flags
 

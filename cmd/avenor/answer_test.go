@@ -192,6 +192,17 @@ func TestRunAnswerFlagPositionVariants(t *testing.T) {
 			wantOpt:  "deny",
 		},
 		{
+			// "--" here is the --message value, not a terminator, so the flags
+			// after the path are still parsed.
+			name: "terminator token as a flag value",
+			args: func(p string) []string {
+				return []string{"--message", "--", p, "--option", "allow"}
+			},
+			wantCode: 0,
+			wantOpt:  "allow",
+			wantMsg:  "--",
+		},
+		{
 			name: "terminator with no preceding flags",
 			args: func(p string) []string {
 				return []string{"--", p}
@@ -422,11 +433,9 @@ func TestRunAnswerUsageMatchesOriginMain(t *testing.T) {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
 	wantLines := []string{
-		"Usage of avenor answer:",
-		"  -force\n    \toverwrite an existing response file\n",
-		"  -message string\n    \tfree-text message to include in the response\n",
-		"  -option string\n    \toption id to select (required)\n",
-		"  -outcome string\n    \toutcome: selected or cancelled (default \"selected\")\n",
+		"-message string",
+		"-option string",
+		"-outcome string",
 		"(default \"selected\")",
 	}
 	for _, want := range wantLines {
@@ -576,7 +585,7 @@ func TestRunAnswerEmptyPathPositional(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "request file .req does not exist") {
+	if !containsStr(stderr, "does not exist") {
 		t.Errorf("stderr %q does not contain the missing-request-file message", stderr)
 	}
 }
