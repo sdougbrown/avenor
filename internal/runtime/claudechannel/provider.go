@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore"
@@ -381,7 +382,7 @@ func (p *Provider) pollBrokerEvents(s *session) {
 				"source":  "channel",
 			},
 		}
-		s.Events <- brokerEvent(s.SessionID, rep.State, rep.Payload)
+		s.Events <- BrokerEvent(s.SessionID, rep.State, rep.Payload)
 	}
 	for _, fin := range finishes {
 		s.Events <- events.Event{
@@ -645,22 +646,28 @@ func shortRunID(runID string) string {
 	return runID + strings.Repeat("0", 8-len(runID))
 }
 
-func brokerEvent(sessionID, state string, payload json.RawMessage) events.Event {
+// BrokerEvent maps a broker report state and payload onto the event emitted on
+// the session stream. The state-derived phase and the merged payload phase are
+// normalized so an agent.status event only ever carries a known phase.
+func BrokerEvent(sessionID, state string, payload json.RawMessage) events.Event {
 	var ev string
 	var fields map[string]any
 	switch state {
 	case "thinking":
 		ev = "agent.status"
-		fields = map[string]any{"phase": "thinking"}
+		fields = map[string]any{"phase": string(runstate.PhaseThinking)}
 	case "working":
 		ev = "agent.status"
-		fields = map[string]any{"phase": "working"}
+		fields = map[string]any{"phase": string(runstate.PhaseWorking)}
 	case "checkpoint":
 		ev = "agent.message_chunk"
 		fields = map[string]any{"payload": json.RawMessage(payload)}
 	case "blocked":
 		ev = "agent.status"
-		fields = map[string]any{"phase": "waiting"}
+		fields = map[string]any{"phase": string(runstate.PhaseWaiting)}
+	case "child_question":
+		ev = "agent.status"
+		fields = map[string]any{"phase": string(runstate.PhaseWaiting)}
 	case "permission_requested":
 		ev = "permission.request"
 		fields = map[string]any{"payload": json.RawMessage(payload)}
@@ -676,7 +683,41 @@ func brokerEvent(sessionID, state string, payload json.RawMessage) events.Event 
 			}
 		}
 	}
+	if ev == "agent.status" {
+		normalizeStatusPhase(fields)
+	}
 	return events.Event{Event: ev, SessionID: sessionID, Fields: fields}
+}
+
+// normalizeStatusPhase rewrites the merged fields["phase"] so an agent.status
+// event only carries a phase from the runstate vocabulary. It runs after the
+// payload merge because a report payload can override the state-derived phase.
+// A missing key stays missing; a string outside the vocabulary maps to working
+// with the original string kept as the label when the event has none; a
+// non-string value (null, number, object, array) maps to working and never
+// produces a label. Every value written here is a plain string: the downstream
+// readers use .(string) assertions and would silently drop a named type.
+func normalizeStatusPhase(fields map[string]any) {
+	raw, ok := fields["phase"]
+	if !ok {
+		return
+	}
+	phase, isString := raw.(string)
+	if !isString {
+		fields["phase"] = string(runstate.PhaseWorking)
+		return
+	}
+	switch phase {
+	case "", string(runstate.PhaseThinking), string(runstate.PhaseWorking), string(runstate.PhaseWaiting), string(runstate.PhaseDone):
+		return
+	case "blocked", "child_question":
+		fields["phase"] = string(runstate.PhaseWaiting)
+	default:
+		fields["phase"] = string(runstate.PhaseWorking)
+	}
+	if label, ok := fields["label"]; !ok || label == "" {
+		fields["label"] = phase
+	}
 }
 
 func mapFinishStatus(status string) string {

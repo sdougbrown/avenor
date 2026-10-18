@@ -197,30 +197,67 @@ func TestAnswerPermissionNotStarted(t *testing.T) {
 
 func TestBrokerEventMapping(t *testing.T) {
 	cases := []struct {
+		name      string
 		state     string
+		payload   string
 		wantEv    string
-		wantPhase string
+		wantPhase any // nil asserts the phase key is absent
+		wantLabel any // nil asserts the label key is absent
 	}{
-		{"thinking", "agent.status", "thinking"},
-		{"working", "agent.status", "working"},
-		{"checkpoint", "agent.message_chunk", ""},
-		{"blocked", "agent.status", "waiting"},
-		{"permission_requested", "permission.request", ""},
-		{"started", "agent.status", "started"},
-		{"unknown", "agent.status", "unknown"},
+		{name: "thinking", state: "thinking", wantEv: "agent.status", wantPhase: "thinking"},
+		{name: "working", state: "working", wantEv: "agent.status", wantPhase: "working"},
+		{name: "checkpoint", state: "checkpoint", wantEv: "agent.message_chunk"},
+		{name: "blocked", state: "blocked", wantEv: "agent.status", wantPhase: "waiting"},
+		{name: "child_question", state: "child_question", wantEv: "agent.status", wantPhase: "waiting"},
+		{name: "permission_requested", state: "permission_requested", wantEv: "permission.request"},
+		{name: "arbitrary state without payload phase", state: "started", wantEv: "agent.status", wantPhase: "working", wantLabel: "started"},
+		{name: "payload phase working passes", state: "working", payload: `{"phase":"working"}`, wantEv: "agent.status", wantPhase: "working"},
+		{name: "payload unknown phase maps to working with label", state: "working", payload: `{"phase":"warp"}`, wantEv: "agent.status", wantPhase: "working", wantLabel: "warp"},
+		{name: "payload unknown phase keeps existing label", state: "thinking", payload: `{"phase":"warp","label":"Channelling"}`, wantEv: "agent.status", wantPhase: "working", wantLabel: "Channelling"},
+		{name: "payload phase blocked maps to waiting with label", state: "working", payload: `{"phase":"blocked"}`, wantEv: "agent.status", wantPhase: "waiting", wantLabel: "blocked"},
+		{name: "payload phase 42", state: "working", payload: `{"phase":42}`, wantEv: "agent.status", wantPhase: "working"},
+		{name: "payload phase object", state: "working", payload: `{"phase":{}}`, wantEv: "agent.status", wantPhase: "working"},
+		{name: "payload phase null", state: "working", payload: `{"phase":null}`, wantEv: "agent.status", wantPhase: "working"},
+		{name: "checkpoint payload phase not normalized", state: "checkpoint", payload: `{"phase":"warp"}`, wantEv: "agent.message_chunk", wantPhase: "warp"},
 	}
 
 	for _, c := range cases {
-		payload := []byte(`{"summary":"ok"}`)
-		ev := brokerEvent("ses_1", c.state, payload)
-		if ev.Event != c.wantEv {
-			t.Errorf("brokerEvent(%q) event = %q, want %q", c.state, ev.Event, c.wantEv)
+		payload := json.RawMessage(c.payload)
+		if c.payload == "" {
+			payload = json.RawMessage(`{"summary":"ok"}`)
 		}
-		if c.wantPhase != "" && ev.Fields["phase"] != c.wantPhase {
-			t.Errorf("brokerEvent(%q) phase = %v, want %v", c.state, ev.Fields["phase"], c.wantPhase)
+		ev := BrokerEvent("ses_1", c.state, payload)
+		if ev.Event != c.wantEv {
+			t.Errorf("%s: event = %q, want %q", c.name, ev.Event, c.wantEv)
+		}
+		raw, ok := ev.Fields["phase"]
+		if c.wantPhase == nil {
+			if ok {
+				t.Errorf("%s: phase = %v, want the key absent", c.name, raw)
+			}
+		} else {
+			phase, isString := raw.(string)
+			if !isString {
+				t.Errorf("%s: phase %v does not satisfy a .(string) assertion", c.name, raw)
+			} else if phase != c.wantPhase {
+				t.Errorf("%s: phase = %q, want %q", c.name, phase, c.wantPhase)
+			}
+		}
+		label, ok := ev.Fields["label"]
+		if c.wantLabel == nil {
+			if ok {
+				t.Errorf("%s: label = %v, want the key absent", c.name, label)
+			}
+		} else {
+			got, isString := label.(string)
+			if !isString {
+				t.Errorf("%s: label %v does not satisfy a .(string) assertion", c.name, label)
+			} else if got != c.wantLabel {
+				t.Errorf("%s: label = %q, want %q", c.name, got, c.wantLabel)
+			}
 		}
 		if ev.SessionID != "ses_1" {
-			t.Errorf("brokerEvent(%q) sessionID = %q, want ses_1", c.state, ev.SessionID)
+			t.Errorf("%s: sessionID = %q, want ses_1", c.name, ev.SessionID)
 		}
 	}
 }
