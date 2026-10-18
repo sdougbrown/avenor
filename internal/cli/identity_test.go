@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,27 +12,34 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
-// provenanceRecorder captures the launch provenance each CLI attempt hands to
-// the provider layer.
+// launchRecord is the option record one CLI attempt hands to the provider
+// layer: its launch provenance, the session it resumes, and its agent.
+type launchRecord struct {
+	provenance runtime.LaunchProvenance
+	resumeID   string
+	agent      string
+}
+
+// provenanceRecorder captures the record of every CLI attempt.
 type provenanceRecorder struct {
 	mu       sync.Mutex
-	launches []runtime.LaunchProvenance
+	launches []launchRecord
 }
 
-func (r *provenanceRecorder) record(p *runtime.LaunchProvenance) {
+func (r *provenanceRecorder) record(cfg attemptConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if p == nil {
-		r.launches = append(r.launches, runtime.LaunchProvenance{})
-		return
+	record := launchRecord{resumeID: cfg.resumeID, agent: cfg.startOptions.Agent}
+	if cfg.startOptions.Provenance != nil {
+		record.provenance = *cfg.startOptions.Provenance
 	}
-	r.launches = append(r.launches, *p)
+	r.launches = append(r.launches, record)
 }
 
-func (r *provenanceRecorder) all() []runtime.LaunchProvenance {
+func (r *provenanceRecorder) all() []launchRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]runtime.LaunchProvenance(nil), r.launches...)
+	return append([]launchRecord(nil), r.launches...)
 }
 
 // recordProvenance installs a runAttempt stub that records each launch and
@@ -50,7 +56,7 @@ func recordProvenance(t *testing.T, respond func(launch int) attemptResult) *pro
 		return ch
 	}
 	runAttempt = func(_ context.Context, cfg attemptConfig, _ attemptDeps) attemptResult {
-		recorder.record(cfg.startOptions.Provenance)
+		recorder.record(cfg)
 		return respond(len(recorder.all()) - 1)
 	}
 	return recorder
@@ -110,7 +116,7 @@ func TestDirectRunLaunchProvenance(t *testing.T) {
 		t.Fatalf("launches = %d, want 1", len(launches))
 	}
 	runID := sentinelRunID(t, sentinel)
-	got := launches[0]
+	got := launches[0].provenance
 	if got.RuntimeID != runID || got.ExecutionID != runID {
 		t.Fatalf("identity = %q/%q, want the CLI run id %q", got.RuntimeID, got.ExecutionID, runID)
 	}
@@ -126,20 +132,25 @@ func TestDirectRunRetryAdvancesAttempt(t *testing.T) {
 		}
 		return attemptResult{exitCode: 0, sessionID: "ses_2", stopReason: "end_turn"}
 	})
-	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--prompt", "work", "--max-retries", "1", "--label", "retry-label")
+	sentinel := filepath.Join(t.TempDir(), "done")
+	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--prompt", "work", "--max-retries", "1", "--label", "retry-label", "--sentinel-file", sentinel)
 
 	launches := recorder.all()
 	if len(launches) != 2 {
 		t.Fatalf("launches = %d, want 2", len(launches))
 	}
+	runID := sentinelRunID(t, sentinel)
 	for i, want := range []int{1, 2} {
-		got := launches[i]
+		got := launches[i].provenance
 		if got.Attempt != want || got.Kind != "run" || got.Phase != "" || got.Iteration != nil || got.Label != "retry-label" {
 			t.Fatalf("launch %d provenance = %+v, want attempt %d of the same direct run", i, got, want)
 		}
+		if got.ExecutionID != runID {
+			t.Fatalf("launch %d execution id = %q, want the CLI run id %q", i, got.ExecutionID, runID)
+		}
 	}
-	if launches[0].ExecutionID == "" || launches[0].ExecutionID != launches[1].ExecutionID {
-		t.Fatalf("execution id changed across retries: %q vs %q", launches[0].ExecutionID, launches[1].ExecutionID)
+	if launches[0].provenance.ExecutionID != launches[1].provenance.ExecutionID {
+		t.Fatalf("execution id changed across retries: %q vs %q", launches[0].provenance.ExecutionID, launches[1].provenance.ExecutionID)
 	}
 }
 
@@ -148,22 +159,25 @@ func TestTeamMemberLaunchProvenance(t *testing.T) {
 		return attemptResult{exitCode: 0, sessionID: "ses_member", stopReason: "end_turn"}
 	})
 	config := writeCLIConfig(t, "team.json", `{"team":[{"name":"alpha","prompt":"a"},{"name":"beta","prompt":"b"}]}`)
-	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--team-file", config, "--label", "team-label")
+	sentinel := filepath.Join(t.TempDir(), "done")
+	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--team-file", config, "--label", "team-label", "--sentinel-file", sentinel)
 
 	launches := recorder.all()
 	if len(launches) != 2 {
 		t.Fatalf("launches = %d, want 2", len(launches))
 	}
+	runID := sentinelRunID(t, sentinel)
 	seen := map[string]bool{}
-	for _, got := range launches {
+	for _, launch := range launches {
+		got := launch.provenance
 		if got.Kind != "team" || got.Iteration != nil || got.Label != "team-label" || got.Attempt != 1 {
 			t.Fatalf("member provenance = %+v, want a first team launch", got)
 		}
 		if got.Phase != "alpha" && got.Phase != "beta" {
 			t.Fatalf("member phase = %q, want alpha or beta", got.Phase)
 		}
-		if got.RuntimeID == "" || got.RuntimeID != got.ExecutionID {
-			t.Fatalf("member identity = %q/%q, want one shared CLI execution id", got.RuntimeID, got.ExecutionID)
+		if got.ExecutionID != runID {
+			t.Fatalf("member execution id = %q, want the CLI run id %q", got.ExecutionID, runID)
 		}
 		seen[got.Phase] = true
 	}
@@ -177,7 +191,8 @@ func TestLoopPhaseLaunchProvenance(t *testing.T) {
 		return attemptResult{exitCode: 0, sessionID: "ses_phase", stopReason: "end_turn"}
 	})
 	config := writeCLIConfig(t, "loop.json", `{"max_iterations":2,"pre":[{"name":"setup","prompt":"pre"}],"loop":[{"name":"body","prompt":"body"}],"post":[{"name":"report","prompt":"post"}]}`)
-	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--loop-file", config, "--label", "loop-label")
+	sentinel := filepath.Join(t.TempDir(), "done")
+	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--loop-file", config, "--label", "loop-label", "--sentinel-file", sentinel)
 
 	launches := recorder.all()
 	type launchKey struct {
@@ -188,13 +203,17 @@ func TestLoopPhaseLaunchProvenance(t *testing.T) {
 	if len(launches) != len(want) {
 		t.Fatalf("launches = %d, want %d (%+v)", len(launches), len(want), launches)
 	}
+	runID := sentinelRunID(t, sentinel)
 	for i, expected := range want {
-		got := launches[i]
+		got := launches[i].provenance
 		if got.Kind != "loop" || got.Phase != expected.phase || got.Iteration == nil || *got.Iteration != expected.iteration {
 			t.Fatalf("launch %d provenance = %+v, want loop/%s/%d", i, got, expected.phase, expected.iteration)
 		}
 		if got.Label != "loop-label" || got.Attempt != 1 {
 			t.Fatalf("launch %d provenance = %+v, want the CLI label and first attempt", i, got)
+		}
+		if got.ExecutionID != runID {
+			t.Fatalf("launch %d execution id = %q, want the CLI run id %q", i, got.ExecutionID, runID)
 		}
 	}
 }
@@ -219,7 +238,7 @@ func TestNestedTeamInLoopSharesExecutionIDAndUsesInnerKind(t *testing.T) {
 	if len(launches) != 1 {
 		t.Fatalf("launches = %d, want 1", len(launches))
 	}
-	got := launches[0]
+	got := launches[0].provenance
 	if got.Kind != "team" || got.Phase != "inner-member" || got.Iteration != nil {
 		t.Fatalf("nested member provenance = %+v, want the inner team member", got)
 	}
@@ -247,7 +266,8 @@ func TestRetryThenNudgeLaunchProvenance(t *testing.T) {
 	if len(launches) != 3 {
 		t.Fatalf("launches = %d, want retry plus nudge (%+v)", len(launches), launches)
 	}
-	for i, got := range launches {
+	for i, launch := range launches {
+		got := launch.provenance
 		if got.Attempt != i+1 {
 			t.Fatalf("launch %d attempt = %d, want %d", i, got.Attempt, i+1)
 		}
@@ -257,11 +277,15 @@ func TestRetryThenNudgeLaunchProvenance(t *testing.T) {
 	}
 }
 
-// TestDirectRunResumeCarriesLaunchIdentity pins the resume-from-previous path:
-// the resumed attempt keeps the containing invocation's identity.
-func TestDirectRunResumeCarriesLaunchIdentity(t *testing.T) {
+// TestLoopPhaseResumeCarriesLaunchIdentity pins the resume-from-previous path:
+// a phase that resumes the previous phase's session keeps the containing
+// invocation's identity and receives that session ID.
+func TestLoopPhaseResumeCarriesLaunchIdentity(t *testing.T) {
 	recorder := recordProvenance(t, func(launch int) attemptResult {
-		return attemptResult{exitCode: 0, sessionID: "ses_phase", stopReason: "end_turn"}
+		if launch == 0 {
+			return attemptResult{exitCode: 0, sessionID: "ses_review", stopReason: "end_turn"}
+		}
+		return attemptResult{exitCode: 0, sessionID: "ses_verify", stopReason: "end_turn"}
 	})
 	config := writeCLIConfig(t, "loop.json", `{"max_iterations":1,"loop":[{"name":"review","prompt":"r"},{"name":"verify","prompt":"v","resume_from_previous":true}]}`)
 	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--loop-file", config, "--label", "resume-label")
@@ -270,31 +294,43 @@ func TestDirectRunResumeCarriesLaunchIdentity(t *testing.T) {
 	if len(launches) != 2 {
 		t.Fatalf("launches = %d, want 2", len(launches))
 	}
-	if launches[1].Phase != "verify" || launches[1].Kind != "loop" || launches[1].Attempt != 1 {
-		t.Fatalf("resumed phase provenance = %+v, want a first verify launch", launches[1])
+	if got := launches[0].resumeID; got != "" {
+		t.Fatalf("first phase resume id = %q, want none", got)
 	}
-	if launches[0].ExecutionID != launches[1].ExecutionID {
-		t.Fatalf("execution id changed across phases: %q vs %q", launches[0].ExecutionID, launches[1].ExecutionID)
+	resumed := launches[1]
+	if got := resumed.resumeID; got != "ses_review" {
+		t.Fatalf("resumed phase resume id = %q, want the previous session %q", got, "ses_review")
+	}
+	if resumed.provenance.Phase != "verify" || resumed.provenance.Kind != "loop" || resumed.provenance.Attempt != 1 {
+		t.Fatalf("resumed phase provenance = %+v, want a first verify launch", resumed.provenance)
+	}
+	if launches[0].provenance.ExecutionID != resumed.provenance.ExecutionID {
+		t.Fatalf("execution id changed across phases: %q vs %q", launches[0].provenance.ExecutionID, resumed.provenance.ExecutionID)
 	}
 }
 
-// TestTeamMemberConfigIsReadOnlyPerLaunch pins that members do not share a
-// mutable option record: each member's identity is its own snapshot.
+// TestTeamMemberIdentityIsNotShared pins that members do not share a mutable
+// option record: each member's phase pairs with its own agent.
 func TestTeamMemberIdentityIsNotShared(t *testing.T) {
 	recorder := recordProvenance(t, func(int) attemptResult {
 		return attemptResult{exitCode: 0, sessionID: "ses_member", stopReason: "end_turn"}
 	})
-	config := writeCLIConfig(t, "team.json", `{"team":[{"name":"alpha","prompt":"a"},{"name":"beta","prompt":"b"},{"name":"gamma","prompt":"c"}]}`)
+	config := writeCLIConfig(t, "team.json", `{"team":[`+
+		`{"name":"alpha","prompt":"a","agent":"agent-a","model":"model-a"},`+
+		`{"name":"beta","prompt":"b","agent":"agent-b","model":"model-b"},`+
+		`{"name":"gamma","prompt":"c","agent":"agent-c","model":"model-c"}]}`)
 	runCLI(t, "--backend", "pi", "--dir", t.TempDir(), "--team-file", config)
 
 	launches := recorder.all()
-	phases := map[string]int{}
-	for _, got := range launches {
-		phases[got.Phase]++
+	if len(launches) != 3 {
+		t.Fatalf("launches = %d, want one per member (%+v)", len(launches), launches)
 	}
-	if len(launches) != 3 || len(phases) != 3 {
-		raw, _ := json.Marshal(launches)
-		t.Fatalf("launches = %s, want one distinct identity per member", raw)
+	pairs := map[string]string{}
+	for _, launch := range launches {
+		pairs[launch.agent] = launch.provenance.Phase
+	}
+	if pairs["agent-a"] != "alpha" || pairs["agent-b"] != "beta" || pairs["agent-c"] != "gamma" {
+		t.Fatalf("agent/phase pairs = %v, want each member's own phase", pairs)
 	}
 }
 
@@ -321,7 +357,7 @@ func TestNestedLoopInTeamKeepsExecutionIDAndUsesInnerKind(t *testing.T) {
 	if len(launches) != 1 {
 		t.Fatalf("launches = %d, want 1", len(launches))
 	}
-	got := launches[0]
+	got := launches[0].provenance
 	if got.Kind != "loop" || got.Phase != "inner-pre" || got.Iteration == nil || *got.Iteration != 0 {
 		t.Fatalf("nested loop provenance = %+v, want the inner loop phase", got)
 	}

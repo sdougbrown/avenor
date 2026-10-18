@@ -14,14 +14,18 @@ import (
 )
 
 // writeStartRecorder installs a fake backend child on PATH. It appends its PID
-// to startPath on every launch, records the allowlisted identity, and answers
-// the backend's minimal protocol with respond.
-func writeStartRecorder(t *testing.T, bin, startPath, obsPath, respond string) {
+// to startPath on every launch, records the allowlisted identity, logs every
+// request line to requestPath, and answers the backend's minimal protocol with
+// respond.
+func writeStartRecorder(t *testing.T, bin, startPath, obsPath, requestPath, respond string) {
 	t.Helper()
 	binDir := t.TempDir()
 	body := "#!/bin/sh\n" +
+		"request_log=" + identitytest.ShellQuote(requestPath) + "\n" +
 		"printf '%s\\n' \"$$\" >> " + identitytest.ShellQuote(startPath) + "\n" +
-		identitytest.Body(obsPath) + respond
+		identitytest.Body(obsPath) +
+		"log_request() { printf '%s\\n' \"$1\" >> \"$request_log\"; }\n" +
+		respond
 	if err := os.WriteFile(filepath.Join(binDir, bin), []byte(body), 0o755); err != nil {
 		t.Fatalf("write %s child: %v", bin, err)
 	}
@@ -30,11 +34,16 @@ func writeStartRecorder(t *testing.T, bin, startPath, obsPath, respond string) {
 
 const codexResponder = `
 while IFS= read -r line; do
+  log_request "$line"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   [ -n "$id" ] || continue
   case "$line" in
     *'"method":"thread/start"'*|*'"method":"thread/resume"'*)
       printf '{"id":"%s","result":{"thread":{"id":"th_child"}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":"%s","result":{"turn":{"id":"turn_child"}}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"th_child","turn":{"id":"turn_child","status":"completed"}}}\n'
       ;;
     *)
       printf '{"id":"%s","result":{}}\n' "$id"
@@ -45,6 +54,7 @@ done
 
 const acpResponder = `
 while IFS= read -r line; do
+  log_request "$line"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   [ -n "$id" ] || continue
   printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"sessionId":"ses_identity"}}\n' "$id"
@@ -74,12 +84,14 @@ done
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// writeAgyRecorder installs a fake `agy` child that answers --version and then
-// emits the print-mode init/result pair for the conversation it was given.
-func writeAgyRecorder(t *testing.T, startPath, obsPath string) {
+// writeAgyRecorder installs a fake `agy` child that logs its argv, answers
+// --version and then emits the print-mode init/result pair for the conversation
+// it was given.
+func writeAgyRecorder(t *testing.T, startPath, obsPath, argsPath string) {
 	t.Helper()
 	binDir := t.TempDir()
 	body := "#!/bin/sh\n" + `
+printf '%s\n' "$*" >> ` + identitytest.ShellQuote(argsPath) + `
 if [ "$1" = "--version" ]; then printf '1.1.7\n'; exit 0; fi
 printf '%s\n' "$$" >> ` + identitytest.ShellQuote(startPath) + `
 ` + identitytest.Body(obsPath) + `
@@ -136,7 +148,8 @@ func TestStartSessionResumeCarriesFreshIdentityToChild(t *testing.T) {
 			identitytest.PoisonParent(t)
 			obsPath := filepath.Join(t.TempDir(), "observed.env")
 			startPath := filepath.Join(t.TempDir(), "starts")
-			writeStartRecorder(t, tc.bin, startPath, obsPath, tc.respond)
+			requestPath := filepath.Join(t.TempDir(), "requests")
+			writeStartRecorder(t, tc.bin, startPath, obsPath, requestPath, tc.respond)
 
 			previous := identitytest.Provenance("rt_previous")
 			first, err := factory.NewProvider(runtime.StartOptions{}, tc.backend)
@@ -181,7 +194,8 @@ func TestStartSessionResumeCarriesIdentityWithExplicitThinking(t *testing.T) {
 	identitytest.PoisonParent(t)
 	obsPath := filepath.Join(t.TempDir(), "observed.env")
 	startPath := filepath.Join(t.TempDir(), "starts")
-	writeStartRecorder(t, "codex", startPath, obsPath, codexResponder)
+	requestPath := filepath.Join(t.TempDir(), "requests")
+	writeStartRecorder(t, "codex", startPath, obsPath, requestPath, codexResponder)
 
 	previous := identitytest.Provenance("rt_previous")
 	first, err := factory.NewProvider(runtime.StartOptions{}, "codex-app-server")
@@ -233,7 +247,8 @@ func TestStartSessionResumeKeepsLiveLaunchIdentity(t *testing.T) {
 			identitytest.PoisonParent(t)
 			obsPath := filepath.Join(t.TempDir(), "observed.env")
 			startPath := filepath.Join(t.TempDir(), "starts")
-			writeStartRecorder(t, tc.bin, startPath, obsPath, tc.respond)
+			requestPath := filepath.Join(t.TempDir(), "requests")
+			writeStartRecorder(t, tc.bin, startPath, obsPath, requestPath, tc.respond)
 
 			launched := identitytest.Provenance("rt_live")
 			p, err := factory.NewProvider(runtime.StartOptions{}, tc.backend)
@@ -330,6 +345,127 @@ func TestStartSessionPiResumeAppliesOnlyPerCallThinking(t *testing.T) {
 	}
 }
 
+// TestStartSessionResumeIgnoresConstructorThinking pins that an identity-only
+// resume takes thinking from the per-call request alone: constructor thinking
+// reaches no thinking parameter when the caller sends an empty level.
+func TestStartSessionResumeIgnoresConstructorThinking(t *testing.T) {
+	fresh := &runtime.LaunchProvenance{
+		RuntimeID:   "rt_quiet",
+		ExecutionID: "rt_quiet",
+		Kind:        "loop",
+		Phase:       "body",
+		Iteration:   intPtr(1),
+		Label:       "quiet-label",
+		Attempt:     3,
+	}
+
+	t.Run("codex-app-server", func(t *testing.T) {
+		identitytest.PoisonParent(t)
+		obsPath := filepath.Join(t.TempDir(), "observed.env")
+		startPath := filepath.Join(t.TempDir(), "starts")
+		requestPath := filepath.Join(t.TempDir(), "requests")
+		writeStartRecorder(t, "codex", startPath, obsPath, requestPath, codexResponder)
+
+		p, err := factory.NewProvider(runtime.StartOptions{Thinking: "high"}, "codex-app-server")
+		if err != nil {
+			t.Fatalf("NewProvider: %v", err)
+		}
+		defer closeProvider(p)
+		session, err := cli.StartSession(context.Background(), p, "codex-app-server", runtime.StartOptions{
+			Dir:        t.TempDir(),
+			Provenance: fresh,
+		}, "th_previous")
+		if err != nil {
+			t.Fatalf("StartSession resume: %v", err)
+		}
+		// Turn effort is chosen at Prompt, so the identity-only resume must
+		// leave the first turn without one.
+		if err := p.Prompt(context.Background(), session.SessionID, "work"); err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+		identitytest.Assert(t, identitytest.Read(t, obsPath), fresh)
+		assertNoThinkingApplied(t, requestPath)
+		if starts := countStarts(t, startPath); starts != 1 {
+			t.Fatalf("launches = %d, want the resumed process", starts)
+		}
+	})
+
+	for _, tc := range []struct{ backend, bin string }{
+		{"opencode-acp", "opencode"},
+		{"gemini-acp", "gemini"},
+		{"cursor-acp", "agent"},
+	} {
+		t.Run(tc.backend, func(t *testing.T) {
+			identitytest.PoisonParent(t)
+			obsPath := filepath.Join(t.TempDir(), "observed.env")
+			startPath := filepath.Join(t.TempDir(), "starts")
+			requestPath := filepath.Join(t.TempDir(), "requests")
+			writeStartRecorder(t, tc.bin, startPath, obsPath, requestPath, acpResponder)
+
+			p, err := factory.NewProvider(runtime.StartOptions{Thinking: "high"}, tc.backend)
+			if err != nil {
+				t.Fatalf("NewProvider: %v", err)
+			}
+			defer closeProvider(p)
+			if _, err := cli.StartSession(context.Background(), p, tc.backend, runtime.StartOptions{
+				Dir:        t.TempDir(),
+				Provenance: fresh,
+			}, "ses_previous"); err != nil {
+				t.Fatalf("StartSession resume: %v", err)
+			}
+			identitytest.Assert(t, identitytest.Read(t, obsPath), fresh)
+			assertNoThinkingApplied(t, requestPath)
+			if starts := countStarts(t, startPath); starts != 1 {
+				t.Fatalf("launches = %d, want the resumed process", starts)
+			}
+		})
+	}
+
+	t.Run("agy", func(t *testing.T) {
+		identitytest.PoisonParent(t)
+		t.Setenv("AVENOR_AGY_TRANSPORT", "headless")
+		obsPath := filepath.Join(t.TempDir(), "observed.env")
+		startPath := filepath.Join(t.TempDir(), "starts")
+		argsPath := filepath.Join(t.TempDir(), "args")
+		writeAgyRecorder(t, startPath, obsPath, argsPath)
+
+		p, err := factory.NewProvider(runtime.StartOptions{Dir: t.TempDir(), Thinking: "high"}, "agy")
+		if err != nil {
+			t.Fatalf("NewProvider: %v", err)
+		}
+		defer closeProvider(p)
+		session, err := cli.StartSession(context.Background(), p, "agy", runtime.StartOptions{
+			Dir:        t.TempDir(),
+			Provenance: fresh,
+		}, "conv_previous")
+		if err != nil {
+			t.Fatalf("StartSession resume: %v", err)
+		}
+		if err := p.Prompt(context.Background(), session.SessionID, "work"); err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+		identitytest.Assert(t, identitytest.Read(t, obsPath), fresh)
+		assertNoThinkingApplied(t, argsPath)
+	})
+}
+
+// assertNoThinkingApplied requires the recorded child input to carry no
+// thinking or effort parameter. Markers are parameter-shaped so paths and
+// unrelated text cannot satisfy them.
+func assertNoThinkingApplied(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read child input log: %v", err)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, marker := range []string{`"thinking":`, `"effort":`, "--thinking", "thinking_level"} {
+		if strings.Contains(lower, marker) {
+			t.Fatalf("resume applied %s: %s", marker, raw)
+		}
+	}
+}
+
 // TestStartSessionAgyResumeSnapshotsCallerIdentity pins agy's deferred launch:
 // the first Prompt starts the process with the identity supplied to the resume,
 // not with a later caller mutation.
@@ -338,7 +474,8 @@ func TestStartSessionAgyResumeSnapshotsCallerIdentity(t *testing.T) {
 	t.Setenv("AVENOR_AGY_TRANSPORT", "headless")
 	obsPath := filepath.Join(t.TempDir(), "observed.env")
 	startPath := filepath.Join(t.TempDir(), "starts")
-	writeAgyRecorder(t, startPath, obsPath)
+	argsPath := filepath.Join(t.TempDir(), "args")
+	writeAgyRecorder(t, startPath, obsPath, argsPath)
 
 	want := &runtime.LaunchProvenance{
 		RuntimeID:   "rt_agy",
@@ -409,7 +546,8 @@ func TestStartSessionAgyAutoTransportKeepsCallerIdentity(t *testing.T) {
 	t.Setenv("AVENOR_AGY_TRANSPORT", "auto")
 	obsPath := filepath.Join(t.TempDir(), "observed.env")
 	startPath := filepath.Join(t.TempDir(), "starts")
-	writeAgyRecorder(t, startPath, obsPath)
+	argsPath := filepath.Join(t.TempDir(), "args")
+	writeAgyRecorder(t, startPath, obsPath, argsPath)
 
 	want := &runtime.LaunchProvenance{RuntimeID: "rt_auto", ExecutionID: "rt_auto", Kind: "run", Attempt: 2}
 	p, err := factory.NewProvider(runtime.StartOptions{Dir: t.TempDir()}, "agy")
