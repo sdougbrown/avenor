@@ -49,6 +49,13 @@ func IdentityEnvNames() []string {
 	return append([]string(nil), identityEnvNames...)
 }
 
+// Launch kinds reported in LaunchProvenance.Kind.
+const (
+	LaunchKindRun  = "run"
+	LaunchKindTeam = "team"
+	LaunchKindLoop = "loop"
+)
+
 // LaunchProvenance is the informational identity of one harness launch. It is
 // separate from the broker RuntimeID in StartOptions, which keeps its routing
 // meaning.
@@ -60,6 +67,33 @@ type LaunchProvenance struct {
 	Iteration   *int   // loop iteration, including zero for pre/post; nil when not a loop
 	Label       string
 	Attempt     int // 1-based launch-attempt ordinal; 0 means unset
+}
+
+// DirectLaunchProvenance reports the identity of a direct launch attempt. The
+// attempt is already counted; a direct launch has no phase or iteration.
+func DirectLaunchProvenance(runID, label string, attempt int) *LaunchProvenance {
+	return &LaunchProvenance{
+		RuntimeID:   runID,
+		ExecutionID: runID,
+		Kind:        LaunchKindRun,
+		Label:       label,
+		Attempt:     attempt,
+	}
+}
+
+// PhaseLaunchProvenance reports the identity of one phase launch. ordinal is
+// the zero-based launch ordinal a runner hands to its attempt callback, so the
+// reported attempt is always 1-based.
+func PhaseLaunchProvenance(runID, kind, phase, label string, iteration *int, ordinal int) *LaunchProvenance {
+	return &LaunchProvenance{
+		RuntimeID:   runID,
+		ExecutionID: runID,
+		Kind:        kind,
+		Phase:       phase,
+		Iteration:   iteration,
+		Label:       label,
+		Attempt:     ordinal + 1,
+	}
 }
 
 // IdentityEnv returns the KEY=VALUE entries for the present identity fields in

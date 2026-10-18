@@ -523,15 +523,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				resolvedSelections[phase.Name] = selection
 				selectionMu.Unlock()
 			}
-			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt, &runtime.LaunchProvenance{
-				RuntimeID:   runID,
-				ExecutionID: runID,
-				Kind:        "loop",
-				Phase:       phase.Name,
-				Iteration:   &iteration,
-				Label:       *label,
-				Attempt:     attemptNum + 1,
-			})
+			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
+				runID, runtime.LaunchKindLoop, phase.Name, *label, &iteration, attemptNum))
 			if r.err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, r.err
 			}
@@ -594,14 +587,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				resolvedSelections[phase.Name] = selection
 				selectionMu.Unlock()
 			}
-			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt, &runtime.LaunchProvenance{
-				RuntimeID:   runID,
-				ExecutionID: runID,
-				Kind:        "team",
-				Phase:       phase.Name,
-				Label:       *label,
-				Attempt:     attemptNum + 1,
-			})
+			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
+				runID, runtime.LaunchKindTeam, phase.Name, *label, nil, attemptNum))
 			if r.err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, r.err
 			}
@@ -880,7 +867,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				ServerURL:  startOptions.ServerURL,
 				Model:      startOptions.Model,
 				Thinking:   startOptions.Thinking,
-				Provenance: &runtime.LaunchProvenance{RuntimeID: runID, ExecutionID: runID, Kind: "run", Label: *label, Attempt: attempt},
+				Provenance: runtime.DirectLaunchProvenance(runID, *label, attempt),
 			},
 			backend:                *backend,
 			resumeID:               resumeID,

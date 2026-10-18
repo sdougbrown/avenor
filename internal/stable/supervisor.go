@@ -1747,13 +1747,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		RuntimeID:     rtID,
 		Broker:        s.broker,
 		BrokerToken:   child.brokerToken,
-		Provenance: &runtime.LaunchProvenance{
-			RuntimeID:   rtID,
-			ExecutionID: rtID,
-			Kind:        "run",
-			Label:       params.Label,
-			Attempt:     1,
-		},
+		Provenance:    runtime.DirectLaunchProvenance(rtID, params.Label, 1),
 	}
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
 	startOpts.ServerURL = discovery.URL
@@ -2717,15 +2711,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
 				LaunchWrapper: child.launchWrapper,
-				Provenance: &runtime.LaunchProvenance{
-					RuntimeID:   child.id,
-					ExecutionID: child.id,
-					Kind:        "loop",
-					Phase:       phase.Name,
-					Iteration:   &iteration,
-					Label:       child.label,
-					Attempt:     attemptNum + 1,
-				},
+				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindLoop, phase.Name, child.label, &iteration, attemptNum),
 			}
 
 			resumeID := prevSessionID
@@ -3010,14 +2996,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
 				LaunchWrapper: child.launchWrapper,
-				Provenance: &runtime.LaunchProvenance{
-					RuntimeID:   child.id,
-					ExecutionID: child.id,
-					Kind:        "team",
-					Phase:       phase.Name,
-					Label:       child.label,
-					Attempt:     attemptNum + 1,
-				},
+				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindTeam, phase.Name, child.label, nil, attemptNum),
 			}
 
 			resumeID := prevSessionID
@@ -3825,13 +3804,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		RuntimeID:    child.id,
 		Broker:       s.broker,
 		BrokerToken:  brokerToken,
-		Provenance: &runtime.LaunchProvenance{
-			RuntimeID:   child.id,
-			ExecutionID: child.id,
-			Kind:        "run",
-			Label:       label,
-			Attempt:     launchAttempt,
-		},
+		Provenance:   runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
 	}, resumeID)
 }
 
