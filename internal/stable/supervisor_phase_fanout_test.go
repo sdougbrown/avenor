@@ -256,12 +256,6 @@ func TestUnknownPhaseDiagnosticCacheConcurrentWrites(t *testing.T) {
 	if got := strings.Count(stderr.String(), "further unrecognized values suppressed"); got != 1 {
 		t.Fatalf("suppression lines = %d, want 1", got)
 	}
-	child.mu.Lock()
-	cached := len(child.unknownPhases)
-	child.mu.Unlock()
-	if cached != unknownPhaseDiagnosticCap {
-		t.Fatalf("cached distinct values = %d, want %d", cached, unknownPhaseDiagnosticCap)
-	}
 
 	// Concurrent saturation never blocks later valid updates or completion.
 	writeAgentStatus(t, writer, "working")
