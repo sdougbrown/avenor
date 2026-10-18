@@ -1919,7 +1919,9 @@ func assertShutdownWaitsForNestedChildCleanup(t *testing.T, kind string, run fun
 	// The nested child runs a loop or team run function, so the immutable
 	// attempt class is workflow.
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
+	sup.permissions.mu.Lock()
 	sup.permissions.permOptions[child.id+":req_cleanup"] = []any{"allow"}
+	sup.permissions.mu.Unlock()
 	sup.controlMu.Unlock()
 
 	locked := false
@@ -1990,7 +1992,9 @@ func assertShutdownWaitsForNestedChildCleanup(t *testing.T, kind string, run fun
 	}
 	sup.controlMu.Lock()
 	retained := sup.runtimes[child.id]
+	sup.permissions.mu.Lock()
 	_, optionsCached := sup.permissions.permOptions[child.id+":req_cleanup"]
+	sup.permissions.mu.Unlock()
 	sup.controlMu.Unlock()
 	if retained != child {
 		t.Fatal("completed nested child was not retained as a status tombstone")
@@ -2841,7 +2845,9 @@ func cachePermissionOptionsThroughFanout(t *testing.T, sup *Supervisor, runtimeI
 	if ev.Event == "permission.request" {
 		requestID, _ := ev.Fields["request_id"].(string)
 		sup.controlMu.Lock()
+		sup.permissions.mu.Lock()
 		_, ok := sup.permissions.permOptions[runtimeID+":"+requestID]
+		sup.permissions.mu.Unlock()
 		sup.controlMu.Unlock()
 		if !ok {
 			t.Fatalf("fanout writer did not cache permission options for %s:%s", runtimeID, requestID)
@@ -3829,7 +3835,10 @@ func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.
 	if provider.called {
 		t.Fatal("AnswerPermission was called for unknown option_id")
 	}
-	if _, ok := sup.permissions.permOptions["rt_unknown:req_unknown"]; !ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions["rt_unknown:req_unknown"]
+	sup.permissions.mu.Unlock()
+	if !cached {
 		t.Fatal("cache entry was consumed on invalid option_id")
 	}
 }
@@ -3853,7 +3862,10 @@ func TestAnswerPermissionRequiresWriteInBeforeConsumingClaim(t *testing.T) {
 	if provider.called {
 		t.Fatal("provider called for empty write-in")
 	}
-	if _, ok := sup.permissions.permOptions["rt_write:req_write"]; !ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions["rt_write:req_write"]
+	sup.permissions.mu.Unlock()
+	if !cached {
 		t.Fatal("empty write-in consumed cached request")
 	}
 	if err := sup.permissions.answerPermission("rt_write", "req_write", "other", "typed response"); err != nil {
@@ -3901,7 +3913,10 @@ func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
 	if provider.called {
 		t.Fatal("provider was called directly instead of through the active resolver claim")
 	}
-	if _, ok := sup.permissions.permOptions["rt_claim:req_claim"]; ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions["rt_claim:req_claim"]
+	sup.permissions.mu.Unlock()
+	if cached {
 		t.Fatal("cache entry was not consumed after delivering the claim answer")
 	}
 	select {
@@ -3968,7 +3983,10 @@ func TestAnswerPermissionScopesSameRequestIDByRuntime(t *testing.T) {
 	default:
 		t.Fatal("rt_2 claim did not receive its answer")
 	}
-	if _, ok := sup.permissions.permOptions["rt_1:0"]; !ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions["rt_1:0"]
+	sup.permissions.mu.Unlock()
+	if !cached {
 		t.Fatal("answering rt_2 consumed rt_1 options")
 	}
 }
@@ -4134,7 +4152,10 @@ func TestAnswerPermissionRejectsLateAnswerOwnedByFileResolver(t *testing.T) {
 	if provider.called {
 		t.Fatal("stable answer bypassed file resolver and called provider directly")
 	}
-	if _, ok := sup.permissions.permOptions["rt_file:0"]; !ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions["rt_file:0"]
+	sup.permissions.mu.Unlock()
+	if !cached {
 		t.Fatal("blocked late answer consumed cached permission options")
 	}
 }
@@ -4171,7 +4192,10 @@ func TestAnswerPermissionRejectsUnsupportedKindWithoutConsumingCache(t *testing.
 	if provider.called {
 		t.Fatal("AnswerPermission was called for unsupported kind")
 	}
-	if _, ok := sup.permissions.permOptions["rt_kind_bad:req_kind_bad"]; !ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions["rt_kind_bad:req_kind_bad"]
+	sup.permissions.mu.Unlock()
+	if !cached {
 		t.Fatal("cache entry was consumed on unsupported kind")
 	}
 }
@@ -4277,7 +4301,10 @@ func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
 	if err := sup.permissions.answerPermission("rt_clear", "req_clear", "ok", ""); err != nil {
 		t.Fatalf("answerPermission: %v", err)
 	}
-	if _, ok := sup.permissions.permOptions["rt_clear:req_clear"]; ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions["rt_clear:req_clear"]
+	sup.permissions.mu.Unlock()
+	if cached {
 		t.Fatal("cache entry was not cleared after use")
 	}
 }
@@ -4387,7 +4414,10 @@ func TestFailedDirectResponseWriteKeepsReusedIDTombstone(t *testing.T) {
 	if state := sup.control.PermissionResolverState(child.id, "reused"); state != control.PermissionResolverNoResolver {
 		t.Fatalf("claim state after failed publication = %v, want non-terminal no-resolver", state)
 	}
-	if _, ok := sup.permissions.permOptions[child.id+":reused"]; !ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions[child.id+":reused"]
+	sup.permissions.mu.Unlock()
+	if !cached {
 		t.Fatal("failed publication removed the old permission options")
 	}
 	if sup.control.PreparePermissionClaim(child.id, "reused", control.PermissionResolverNoResolver, options) {
@@ -4777,7 +4807,9 @@ func TestShutdownWaitsForDirectPermissionTeardown(t *testing.T) {
 	deadline := time.After(5 * time.Second)
 	for {
 		sup.controlMu.Lock()
+		sup.permissions.mu.Lock()
 		_, cached := sup.permissions.permOptions[spawn.RuntimeID+":req_shutdown_direct"]
+		sup.permissions.mu.Unlock()
 		sup.controlMu.Unlock()
 		if cached && sup.control.PermissionResolverState(spawn.RuntimeID, "req_shutdown_direct") == control.PermissionResolverNoResolver {
 			break
@@ -4853,7 +4885,9 @@ func TestShutdownWaitsForDirectPermissionTeardown(t *testing.T) {
 		t.Fatal("provider was not closed before shutdown returned")
 	}
 	sup.controlMu.Lock()
+	sup.permissions.mu.Lock()
 	_, cached := sup.permissions.permOptions[spawn.RuntimeID+":req_shutdown_direct"]
+	sup.permissions.mu.Unlock()
 	sup.controlMu.Unlock()
 	if cached {
 		t.Fatal("permission options were not cleared before shutdown returned")
@@ -4927,7 +4961,9 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		sup.controlMu.Lock()
+		sup.permissions.mu.Lock()
 		_, cached := sup.permissions.permOptions[child.id+":"+provider.requestID]
+		sup.permissions.mu.Unlock()
 		sup.controlMu.Unlock()
 		if cached && sup.control.PermissionResolverState(child.id, provider.requestID) == control.PermissionResolverNoResolver {
 			break
@@ -5221,7 +5257,10 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 	if state := sup.control.PermissionResolverState("rt_direct", "req_direct"); state != control.PermissionResolverResolved {
 		t.Fatalf("resolver state after success = %v, want resolved", state)
 	}
-	if _, ok := sup.permissions.permOptions["rt_direct:req_direct"]; ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions["rt_direct:req_direct"]
+	sup.permissions.mu.Unlock()
+	if cached {
 		t.Fatal("cache entry was not cleared after direct delivery")
 	}
 	if err := sup.permissions.answerPermission("rt_direct", "req_direct", "allow_it", ""); err != nil {
@@ -5303,7 +5342,10 @@ func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
 	if state := sup.control.PermissionResolverState("rt_retry", "req_retry"); state != control.PermissionResolverNoResolver {
 		t.Fatalf("resolver state after failure = %v, want no-resolver", state)
 	}
-	if _, ok := sup.permissions.permOptions["rt_retry:req_retry"]; !ok {
+	sup.permissions.mu.Lock()
+	_, cached := sup.permissions.permOptions["rt_retry:req_retry"]
+	sup.permissions.mu.Unlock()
+	if !cached {
 		t.Fatal("cache entry was removed after failed provider delivery")
 	}
 
@@ -5313,7 +5355,10 @@ func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
 	if state := sup.control.PermissionResolverState("rt_retry", "req_retry"); state != control.PermissionResolverResolved {
 		t.Fatalf("resolver state after retry = %v, want resolved", state)
 	}
-	if _, ok := sup.permissions.permOptions["rt_retry:req_retry"]; ok {
+	sup.permissions.mu.Lock()
+	_, cached = sup.permissions.permOptions["rt_retry:req_retry"]
+	sup.permissions.mu.Unlock()
+	if cached {
 		t.Fatal("cache entry was not removed after successful retry")
 	}
 }
@@ -5324,9 +5369,11 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 		MaxRuntimes:   1,
 	})
 	const key = "rt_reuse:req_reuse"
+	sup.permissions.mu.Lock()
 	sup.permissions.permOptions[key] = []any{
 		map[string]any{"optionId": "old", "kind": "allow"},
 	}
+	sup.permissions.mu.Unlock()
 	if !sup.control.PreparePermissionClaim("rt_reuse", "req_reuse", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -5385,10 +5432,155 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 		map[string]any{"optionId": "new", "kind": "reject"},
 	}
 	sup.permissions.cachePermissionOptions("rt_reuse", "req_reuse", replacement)
-	if got := sup.permissions.permOptions[key]; len(got) != 1 {
+	sup.permissions.mu.Lock()
+	got := sup.permissions.permOptions[key]
+	sup.permissions.mu.Unlock()
+	if len(got) != 1 {
 		t.Fatalf("replacement options = %+v, want one intact entry", got)
 	} else if option, _ := got[0].(map[string]any); option["optionId"] != "new" {
 		t.Fatalf("replacement options were overwritten: %+v", got)
+	}
+}
+
+func TestAnswerPermissionOptionReadWaitsForDirectCleanupEnvelope(t *testing.T) {
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:          "/tmp/test-answer-options-envelope.sock",
+		MaxRuntimes:            1,
+		PermissionClaimTimeout: 5 * time.Second,
+	})
+	provider := &permRecordingProvider{}
+	child := &childRuntime{
+		id:       "rt_envelope",
+		provider: provider,
+		session:  runtime.Session{SessionID: "ses_envelope"},
+		done:     make(chan struct{}),
+		promptCh: make(chan struct{}, 1),
+	}
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
+	finishUnrunChildAtCleanup(t, sup, child)
+	cachePermissionOptionsThroughFanout(t, sup, child.id, events.Event{
+		Event: "permission.request",
+		Fields: map[string]any{
+			"request_id": "req_envelope",
+			"options": []any{
+				map[string]any{"optionId": "allow_it", "kind": "allow"},
+			},
+		},
+	})
+	if !sup.control.PreparePermissionClaim(child.id, "req_envelope", control.PermissionResolverNoResolver, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if got := sup.control.DeliverPendingPermission(child.id, "req_envelope", "allow_it", ""); got != control.PermissionAnswerNoResolver {
+		t.Fatalf("direct delivery = %v, want no-resolver", got)
+	}
+
+	cleanupReached := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCleanup) }) }
+	t.Cleanup(release)
+	cleanupDone := make(chan struct{})
+	go func() {
+		sup.permissions.cleanupDirectPermission(child.id, "req_envelope", "allow_it", "", func() {
+			close(cleanupReached)
+			<-releaseCleanup
+		})
+		close(cleanupDone)
+	}()
+	select {
+	case <-cleanupReached:
+	case <-time.After(time.Second):
+		t.Fatal("production cleanup did not reach claim release")
+	}
+
+	// The option read shares the cleanup's control envelope, so it cannot see
+	// the removed options before the claim is marked resolved, and an identical
+	// repeat answer submitted in that window resolves against that claim
+	// instead of reporting a missing request.
+	optionsRead := make(chan []any, 1)
+	go func() { optionsRead <- sup.permissions.cachedOptions(child.id, "req_envelope") }()
+	repeatAnswer := make(chan error, 1)
+	go func() { repeatAnswer <- sup.permissions.answerPermission(child.id, "req_envelope", "allow_it", "") }()
+	select {
+	case <-optionsRead:
+		t.Fatal("option read completed while direct cleanup held its envelope")
+	case err := <-repeatAnswer:
+		t.Fatalf("repeat answer across direct cleanup = %v, want it blocked until cleanup completes", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("production cleanup did not complete")
+	}
+	select {
+	case options := <-optionsRead:
+		if options != nil {
+			t.Fatalf("option read after cleanup = %+v, want no cached options", options)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("option read did not complete after cleanup")
+	}
+	select {
+	case err := <-repeatAnswer:
+		if err != nil {
+			t.Fatalf("repeat answer across direct cleanup: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("repeat answer did not complete after cleanup")
+	}
+	if provider.called {
+		t.Fatal("repeat answer invoked the provider instead of the resolved claim")
+	}
+}
+
+func TestReleasePermissionDeciderReleasesEachLabelOnce(t *testing.T) {
+	sup := newTestSupervisor(t, Config{
+		ControlSocket: "/tmp/test-decider-release-once.sock",
+		MaxRuntimes:   1,
+	})
+	labels := make([]string, 0, maxConcurrentPermissionDeciders)
+	for i := 0; i < maxConcurrentPermissionDeciders; i++ {
+		label := permdecLabelPrefix + fmt.Sprintf("rt_cap:req_cap_%d", i)
+		if !sup.permissions.acquirePermissionDeciderSlot(label) {
+			t.Fatalf("decider slot %d refused below the cap of %d", i, maxConcurrentPermissionDeciders)
+		}
+		labels = append(labels, label)
+	}
+	if sup.permissions.acquirePermissionDeciderSlot(permdecLabelPrefix + "rt_cap:req_over_cap") {
+		t.Fatal("decider slot acquired above the cap")
+	}
+
+	sup.permissions.blockPermissionRequestForRetry("rt_cap", "req_blocked")
+	sup.permissions.releasePermissionDecider(labels[0])
+	sup.permissions.mu.Lock()
+	active := sup.permissions.permDeciderActive
+	_, stillBlocked := sup.permissions.permDeciderBlocked["rt_cap\x00req_blocked"]
+	sup.permissions.mu.Unlock()
+	if active != maxConcurrentPermissionDeciders-1 {
+		t.Fatalf("active deciders after one release = %d, want %d", active, maxConcurrentPermissionDeciders-1)
+	}
+	if stillBlocked {
+		t.Fatal("release did not re-route the request blocked at the cap")
+	}
+
+	sup.permissions.blockPermissionRequestForRetry("rt_cap", "req_blocked")
+	sup.permissions.releasePermissionDecider(labels[0])
+	sup.permissions.mu.Lock()
+	active = sup.permissions.permDeciderActive
+	_, reBlocked := sup.permissions.permDeciderBlocked["rt_cap\x00req_blocked"]
+	_, reHeld := sup.permissions.permDeciderSlots[labels[0]]
+	sup.permissions.mu.Unlock()
+	if active != maxConcurrentPermissionDeciders-1 {
+		t.Fatalf("active deciders after repeated release = %d, want %d", active, maxConcurrentPermissionDeciders-1)
+	}
+	if !reBlocked {
+		t.Fatal("repeated release re-routed a request blocked after the slot was freed")
+	}
+	if reHeld {
+		t.Fatal("repeated release handed the freed decider label back a slot")
 	}
 }
 
