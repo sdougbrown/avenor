@@ -279,6 +279,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	}()
 
 	var retryCount int
+	var launchCount int
 	var accDirective string
 	var accLabel string
 
@@ -286,7 +287,9 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 		if retryCount > 0 && retryCount <= opts.MaxRetries {
 			phaseconfig.EmitRetry(opts.EventSink, opts.RunID, retryCount, opts.MaxRetries)
 		}
-		r, err := opts.PhaseAttempt(ctx, renderedPhase, retryCount, iteration, prevSessionID)
+		launch := launchCount
+		launchCount++
+		r, err := opts.PhaseAttempt(ctx, renderedPhase, launch, iteration, prevSessionID)
 		retryCount++
 		if err != nil {
 			return r, err
@@ -307,7 +310,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	if rerr != nil {
 		return
 	}
-	result, rerr = completePhaseRequirements(ctx, opts, phase, iteration, result)
+	result, rerr = completePhaseRequirements(ctx, opts, phase, iteration, result, &launchCount)
 	return
 }
 
@@ -317,7 +320,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 // incomplete_output instead of successful completion. This mirrors the team
 // runner's requirement enforcement so a missing deliverable cannot count as
 // a successful loop iteration.
-func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, iteration int, result PhaseAttemptResult) (PhaseAttemptResult, error) {
+func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phaseconfig.Phase, iteration int, result PhaseAttemptResult, launchCount *int) (PhaseAttemptResult, error) {
 	missing := phaseconfig.MissingRequiredFiles(opts.WorkDir, phase.Requires)
 	if len(missing) == 0 || result.ExitCode != 0 || phaseStopReason(result) != "end_turn" {
 		return result, nil
@@ -348,7 +351,9 @@ func completePhaseRequirements(ctx context.Context, opts RunOptions, phase phase
 		}
 		nudgePhase := phase
 		nudgePhase.Prompt = phaseconfig.IncompleteNudgePrompt(customNudge, missing)
-		result, err := opts.PhaseAttempt(ctx, nudgePhase, i+1, iteration, sessionID)
+		launch := *launchCount
+		*launchCount = launch + 1
+		result, err := opts.PhaseAttempt(ctx, nudgePhase, launch, iteration, sessionID)
 		if err != nil {
 			return result, err
 		}
