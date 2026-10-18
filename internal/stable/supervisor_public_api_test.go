@@ -1668,9 +1668,9 @@ func TestSupervisorPublicAPIDeciderAllow(t *testing.T) {
 	if code, _ := raw["exit_code"].(int); code != 0 {
 		t.Fatalf("decider raw RuntimeStatus exit_code = %v, want 0", raw["exit_code"])
 	}
-	if got := h.deciderIdentityCount(); got != 1 {
-		t.Fatalf("decider identities = %d, want 1", got)
-	}
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "exactly one decider identity", func() bool {
+		return h.deciderIdentityCount() == 1
+	})
 }
 
 func TestSupervisorPublicAPIDeciderDeny(t *testing.T) {
@@ -1691,9 +1691,9 @@ func TestSupervisorPublicAPIDeciderDeny(t *testing.T) {
 	h.requireEncodedContinuation(rt, "req_deny", "reject_once", "reject")
 	deciderRT := h.deciderRuntimeID(rt, "req_deny")
 	h.awaitRawStatus(deciderRT, "ended")
-	if got := h.deciderIdentityCount(); got != 1 {
-		t.Fatalf("decider identities = %d, want 1", got)
-	}
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "exactly one decider identity", func() bool {
+		return h.deciderIdentityCount() == 1
+	})
 }
 
 func TestSupervisorPublicAPIDeciderSpawnFailureRetries(t *testing.T) {
@@ -1727,9 +1727,9 @@ func TestSupervisorPublicAPIDeciderSpawnFailureRetries(t *testing.T) {
 	}
 	deciderRT := h.deciderRuntimeID(rt, "req_retry")
 	h.awaitRawStatus(deciderRT, "ended")
-	if got := h.deciderIdentityCount(); got != 1 {
-		t.Fatalf("decider identities = %d, want 1 (the failed spawn never became a run)", got)
-	}
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "exactly one decider identity (the failed spawn never became a run)", func() bool {
+		return h.deciderIdentityCount() == 1
+	})
 }
 
 func TestSupervisorPublicAPIDeciderSpawnFailuresExhaustToHuman(t *testing.T) {
@@ -1869,7 +1869,7 @@ func TestSupervisorPublicAPIDeciderConcurrencyCapReleasesBlockedRequest(t *testi
 	h.requireEncodedContinuation(ids[blockedLabel], blockedReq, "allow_once", "allow")
 	h.awaitRawStatus(fourthDecider, "ended")
 	if got := h.deciderIdentityCount(); got != itestDeciderCap+1 {
-		t.Fatalf("decider identities = %d, want %d (three held, one replacement)", got, itestDeciderCap+1)
+		t.Fatalf("decider identities = %d, want %d (two held, one canceled, one replacement)", got, itestDeciderCap+1)
 	}
 	if got := h.log.count(itestEventIs("permission.request", ids[blockedLabel])); got != 1 {
 		t.Fatalf("permission.request events for the blocked worker = %d, want 1", got)
@@ -1958,12 +1958,13 @@ func TestSupervisorPublicAPIDeciderSlotFreedWhenDeciderCanceled(t *testing.T) {
 	if err := h.sup.RuntimeCancel(deciders["req_w1"]); err != nil {
 		t.Fatalf("cancel decider: %v", err)
 	}
+	h.awaitRawStatus(deciders["req_w1"], "ended")
 	fourthDecider := h.deciderRuntimeID(ids[blockedLabel], blockedReq)
 	h.requirePermissionResponse(ids[blockedLabel], blockedReq, "allow_once", "allow")
 	h.requireEncodedContinuation(ids[blockedLabel], blockedReq, "allow_once", "allow")
 	h.awaitRawStatus(fourthDecider, "ended")
 	if got := h.deciderIdentityCount(); got != itestDeciderCap+1 {
-		t.Fatalf("decider identities = %d, want %d (three held, one replacement)", got, itestDeciderCap+1)
+		t.Fatalf("decider identities = %d, want %d (two held, one canceled, one replacement)", got, itestDeciderCap+1)
 	}
 	if got := h.log.count(itestEventIs("permission.request", ids[blockedLabel])); got != 1 {
 		t.Fatalf("permission.request events for the blocked worker = %d, want 1", got)
@@ -2268,7 +2269,7 @@ func TestSupervisorPublicAPIDeciderDeferLeavesRequestForHuman(t *testing.T) {
 	}
 	h.requirePermissionResponse(rt, "req_defer", "allow_once", "allow")
 	h.requireEncodedContinuation(rt, "req_defer", "allow_once", "allow")
-	if got := h.deciderIdentityCount(); got != 1 {
-		t.Fatalf("decider identities = %d, want 1 (the human answer must not re-route the request)", got)
-	}
+	h.consistentlyFor(permission.DefaultPollInterval+500*time.Millisecond, "exactly one decider identity (the human answer must not re-route the request)", func() bool {
+		return h.deciderIdentityCount() == 1
+	})
 }
