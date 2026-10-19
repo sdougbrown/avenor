@@ -25,6 +25,7 @@ type scriptedTransport struct {
 	generation    string
 	lastSend      messaging.SendRequest
 	lastWait      messaging.WaitRequest
+	lastWithdraw  messaging.WithdrawRequest
 }
 
 func (s *scriptedTransport) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
@@ -63,6 +64,7 @@ func (s *scriptedTransport) Reply(ctx context.Context, req messaging.ReplyReques
 
 func (s *scriptedTransport) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	s.withdrawCalls++
+	s.lastWithdraw = req
 	return s.withdrawResult, s.withdrawErr
 }
 
@@ -224,6 +226,61 @@ func TestWithdraw(t *testing.T) {
 	if tr.withdrawCalls != 1 {
 		t.Fatalf("withdraw calls = %d", tr.withdrawCalls)
 	}
+
+	tr = &scriptedTransport{generation: "gen-live", withdrawResult: messaging.WithdrawResult{Outcome: messaging.OutcomeWithdrawn}}
+	if _, err := New(tr, Options{}).Withdraw(context.Background(), messaging.WithdrawRequest{Sender: alice, MessageID: "id-1"}); err != nil {
+		t.Fatalf("Withdraw without a pinned generation: %v", err)
+	}
+	if tr.lastWithdraw.Generation != "gen-live" {
+		t.Fatalf("withdraw generation = %q, want the preflighted generation", tr.lastWithdraw.Generation)
+	}
+}
+
+// TestExtractReplyMessageOutcomes pins the renderings the deleted broker helper
+// used to produce, and extends them to every non-replied outcome the ask client
+// now reports. Text is the reply rendering; Failure is what the tool surfaces
+// return for the remaining outcomes.
+func TestExtractReplyMessageOutcomes(t *testing.T) {
+	const msgID = "msg-1"
+
+	t.Run("replied", func(t *testing.T) {
+		cases := []struct{ payload, want string }{
+			{`{"message":"hello"}`, "hello"},
+			{`{"summary":"ok"}`, `{"summary":"ok"}`},
+			{"", "(empty reply)"},
+		}
+		for _, tc := range cases {
+			res := AskResult{MessageID: msgID, Outcome: messaging.OutcomeReplied, Reply: &messaging.InboundMessage{Payload: []byte(tc.payload)}}
+			got, err := res.Text()
+			if err != nil || got != tc.want {
+				t.Errorf("Text(%q) = (%q, %v), want %q", tc.payload, got, err, tc.want)
+			}
+		}
+	})
+
+	t.Run("not replied", func(t *testing.T) {
+		cases := []struct {
+			outcome messaging.Outcome
+			text    string
+			cause   error
+		}{
+			{messaging.OutcomeTimedOut, "(timeout: no reply received)", nil},
+			{messaging.OutcomeWithdrawn, "(cancelled)", nil},
+			{messaging.OutcomeEdgeAbsent, "(no pending ask)", nil},
+			{messaging.OutcomePossiblyPending, "(possibly pending: no terminal reply)", messaging.ErrUnsupportedProtocol},
+			{messaging.OutcomeLost, "(ask lost)", nil},
+		}
+		for _, tc := range cases {
+			res := AskResult{MessageID: msgID, Outcome: tc.outcome}
+			err := res.Failure(&Error{MessageID: msgID, Outcome: tc.outcome, Err: tc.cause})
+			if !strings.HasPrefix(err.Error(), tc.text) || !strings.Contains(err.Error(), msgID) {
+				t.Errorf("Failure(%q) = %v, want %q naming %q", tc.outcome, err, tc.text, msgID)
+			}
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Errorf("Failure(%q) lost its cause: %v", tc.outcome, err)
+			}
+		}
+	})
 }
 
 func TestRenderReply(t *testing.T) {

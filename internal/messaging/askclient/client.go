@@ -54,6 +54,24 @@ func (r AskResult) Text() (string, error) {
 	return RenderReply(messaging.WaitResult{Outcome: r.Outcome, Reply: r.Reply})
 }
 
+// Failure renders a non-replied ask for a tool surface: the outcome's text, the
+// message ID a cancel tool can act on, and the typed cause when the transport
+// reported one.
+func (r AskResult) Failure(err error) error {
+	if err == nil {
+		return nil
+	}
+	text, renderErr := r.Text()
+	if renderErr != nil {
+		return err
+	}
+	var askErr *Error
+	if errors.As(err, &askErr) && askErr.Err != nil {
+		return fmt.Errorf("%s (message_id: %s): %w", text, r.MessageID, askErr.Err)
+	}
+	return fmt.Errorf("%s (message_id: %s)", text, r.MessageID)
+}
+
 // Error is a failed ask. Pending reports whether the message ID may still be
 // outstanding; it is true exactly for OutcomePossiblyPending.
 type Error struct {
@@ -160,10 +178,18 @@ func bodyMessageID(body string) string {
 	return payload.ID
 }
 
-// Withdraw withdraws an ask and returns its terminal fence.
+// Withdraw withdraws an ask and returns its terminal fence. A request that pins
+// no generation takes the one Preflight reports.
 func (c *Client) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	if req.MessageID == "" {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, messaging.ErrInvalidRequest
+	}
+	if req.Generation == "" {
+		pre, err := c.transport.Preflight(ctx)
+		if err != nil {
+			return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
+		}
+		req.Generation = pre.Generation
 	}
 	return c.transport.Withdraw(ctx, req)
 }
