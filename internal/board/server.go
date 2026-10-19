@@ -324,38 +324,42 @@ func (s *Server) handleSockets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var results []socketEntry
-
-	if s.cfg.Socket != "" {
-		entry := dialOne(s.cfg.Socket)
-		if entry != nil {
+	for _, path := range s.socketPaths() {
+		if entry := dialOne(path); entry != nil {
 			results = append(results, *entry)
-		}
-	} else {
-		dirs := s.cfg.ScanDirs
-		if len(dirs) == 0 {
-			home, _ := os.UserHomeDir()
-			dirs = []string{filepath.Join(home, ".avenor", "sockets")}
-		}
-		for _, dir := range dirs {
-			dir = ResolveHome(dir)
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				continue
-			}
-			for _, e := range entries {
-				if !strings.HasSuffix(e.Name(), ".sock") {
-					continue
-				}
-				path := filepath.Join(dir, e.Name())
-				entry := dialOne(path)
-				if entry != nil {
-					results = append(results, *entry)
-				}
-			}
 		}
 	}
 
 	writeJSON(w, results)
+}
+
+// socketPaths enumerates the control sockets this board was pointed at: the
+// configured socket when set, otherwise every .sock in the scan directories.
+// Both the status listing and the mutation allowlist read this one walk.
+func (s *Server) socketPaths() []string {
+	if s.cfg.Socket != "" {
+		return []string{s.cfg.Socket}
+	}
+	dirs := s.cfg.ScanDirs
+	if len(dirs) == 0 {
+		home, _ := os.UserHomeDir()
+		dirs = []string{filepath.Join(home, ".avenor", "sockets")}
+	}
+	var paths []string
+	for _, dir := range dirs {
+		dir = ResolveHome(dir)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".sock") {
+				continue
+			}
+			paths = append(paths, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return paths
 }
 
 type socketEntry struct {
@@ -652,34 +656,13 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 // operator startup configuration did not select.
 var errSocketNotAllowed = errors.New("socket is not an allowlisted control socket")
 
-// allowedSockets recomputes the sockets the operator selected: the configured
-// socket when set, otherwise the scan directories. Request bodies never widen
-// it.
+// allowedSockets canonicalizes the sockets the operator selected. Request
+// bodies never widen it.
 func (s *Server) allowedSockets() []string {
-	if s.cfg.Socket != "" {
-		if path, err := canonicalSocketPath(s.cfg.Socket); err == nil {
-			return []string{path}
-		}
-		return nil
-	}
-	dirs := s.cfg.ScanDirs
-	if len(dirs) == 0 {
-		home, _ := os.UserHomeDir()
-		dirs = []string{filepath.Join(home, ".avenor", "sockets")}
-	}
 	var allowed []string
-	for _, dir := range dirs {
-		entries, err := os.ReadDir(ResolveHome(dir))
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if !strings.HasSuffix(entry.Name(), ".sock") {
-				continue
-			}
-			if path, err := canonicalSocketPath(filepath.Join(ResolveHome(dir), entry.Name())); err == nil {
-				allowed = append(allowed, path)
-			}
+	for _, path := range s.socketPaths() {
+		if canonical, err := canonicalSocketPath(path); err == nil {
+			allowed = append(allowed, canonical)
 		}
 	}
 	return allowed
