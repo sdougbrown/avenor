@@ -198,18 +198,18 @@ func (c *Controllers) skip(controllerID string, err error) bool {
 	return true
 }
 
-// List returns every controller record sorted by id. A controller whose event
-// log cannot be replayed is reported per item and skipped, so one unreplayable
-// history does not hide the rest. A missing controllers directory yields an
-// empty set and no error.
-func (s *ControllerStore) List() (Controllers, error) {
+// loadAll reads every controller in sorted id order, calling load once per
+// controller, collecting the records that loaded and reporting a replay hole
+// as a per-controller failure. A load error that is not a hole aborts the whole
+// read.
+func (s *ControllerStore) loadAll(load func(controllerID string) (ControllerRecord, bool, error)) (Controllers, error) {
 	ids, err := s.controllerIDs()
 	if err != nil {
 		return Controllers{}, err
 	}
 	out := Controllers{Records: make([]ControllerRecord, 0, len(ids))}
 	for _, id := range ids {
-		rec, ok, err := s.Get(id)
+		rec, ok, err := load(id)
 		if err != nil {
 			if out.skip(id, err) {
 				continue
@@ -221,6 +221,14 @@ func (s *ControllerStore) List() (Controllers, error) {
 		}
 	}
 	return out, nil
+}
+
+// List returns every controller record sorted by id. A controller whose event
+// log cannot be replayed is reported per item and skipped, so one unreplayable
+// history does not hide the rest. A missing controllers directory yields an
+// empty set and no error.
+func (s *ControllerStore) List() (Controllers, error) {
+	return s.loadAll(s.Get)
 }
 
 // controllerIDs lists the controller directory names in sorted order. A
@@ -437,24 +445,7 @@ func leaderReleasedEvent(seq int64, now time.Time, lease LeaderLease) Controller
 // creates the controllers directory; a missing directory yields an empty set
 // and no error.
 func (s *ControllerStore) Recover() (Controllers, error) {
-	ids, err := s.controllerIDs()
-	if err != nil {
-		return Controllers{}, err
-	}
-	out := Controllers{Records: make([]ControllerRecord, 0, len(ids))}
-	for _, id := range ids {
-		rec, ok, err := s.recoverController(id)
-		if err != nil {
-			if out.skip(id, err) {
-				continue
-			}
-			return Controllers{}, err
-		}
-		if ok {
-			out.Records = append(out.Records, rec)
-		}
-	}
-	return out, nil
+	return s.loadAll(s.recoverController)
 }
 
 // recoverController recovers one controller under its flock, reporting whether
