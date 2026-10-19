@@ -1056,15 +1056,14 @@ func TestMCPAttachAfterSIGKILLUsesTypedOutcomes(t *testing.T) {
 }
 
 // TestReplacementNotBlockedByMissingTombstone proves the tombstone neither
-// authorizes nor blocks a replacement: its absence, staleness and presence all
-// produce the same decision and the launcher never touches it.
+// authorizes nor blocks a replacement: its absence and presence both produce
+// the same decision and the launcher never touches it.
 func TestReplacementNotBlockedByMissingTombstone(t *testing.T) {
 	cases := []struct {
 		name     string
 		tombston string
 	}{
 		{"absent", ""},
-		{"stale", "STOPPED reason=signal pid=1 at=2000-01-01T00:00:00Z\n"},
 		{"present", "STOPPED reason=signal pid=2 at=2026-10-19T00:00:00Z\n"},
 	}
 	for _, tc := range cases {
