@@ -13,7 +13,12 @@ import (
 
 func ownerAuthParams(t *testing.T, cap OwnerCapability) json.RawMessage {
 	t.Helper()
-	params, err := json.Marshal(OwnerAuthRequest{Version: OwnerAuthVersion, CapabilityID: cap.ID, Secret: cap.Secret})
+	return authParams(t, OwnerAuthRequest{Version: OwnerAuthVersion, CapabilityID: cap.ID, Secret: cap.Secret})
+}
+
+func authParams(t *testing.T, req OwnerAuthRequest) json.RawMessage {
+	t.Helper()
+	params, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal authenticate_owner params: %v", err)
 	}
@@ -270,21 +275,18 @@ func TestOwnerAuthErrorCodes(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		params OwnerAuthRequest
+		params json.RawMessage
 		code   int
 		reason string
 	}{
-		{name: "wrong secret", params: OwnerAuthRequest{Version: OwnerAuthVersion, CapabilityID: cap.ID, Secret: "beef"}, code: CodeOwnerUnauthenticated, reason: "capability-mismatch"},
-		{name: "wrong id", params: OwnerAuthRequest{Version: OwnerAuthVersion, CapabilityID: "beef", Secret: cap.Secret}, code: CodeOwnerUnauthenticated, reason: "capability-mismatch"},
-		{name: "unsupported version", params: OwnerAuthRequest{Version: 2, CapabilityID: cap.ID, Secret: cap.Secret}, code: CodeUnsupportedOwnerAuth, reason: "version-2"},
+		{name: "wrong secret", params: authParams(t, OwnerAuthRequest{Version: OwnerAuthVersion, CapabilityID: cap.ID, Secret: "beef"}), code: CodeOwnerUnauthenticated, reason: "capability-mismatch"},
+		{name: "wrong id", params: authParams(t, OwnerAuthRequest{Version: OwnerAuthVersion, CapabilityID: "beef", Secret: cap.Secret}), code: CodeOwnerUnauthenticated, reason: "capability-mismatch"},
+		{name: "unsupported version", params: authParams(t, OwnerAuthRequest{Version: 2, CapabilityID: cap.ID, Secret: cap.Secret}), code: CodeUnsupportedOwnerAuth, reason: "version-2"},
+		{name: "missing params", code: CodeUnsupportedOwnerAuth, reason: "version-0"},
 	}
 	for _, tc := range cases {
 		conn := mustDial(t, s.path)
-		params, err := json.Marshal(tc.params)
-		if err != nil {
-			t.Fatalf("%s: marshal: %v", tc.name, err)
-		}
-		if err := writeReq(t, conn, Request{JSONRPC: "2.0", ID: 1, Method: "authenticate_owner", Params: params}); err != nil {
+		if err := writeReq(t, conn, Request{JSONRPC: "2.0", ID: 1, Method: "authenticate_owner", Params: tc.params}); err != nil {
 			t.Fatalf("%s: write: %v", tc.name, err)
 		}
 		resp := readResp(t, conn)
@@ -305,13 +307,20 @@ func TestOwnerAuthErrorCodes(t *testing.T) {
 		}
 	}
 
+	// Invalid Params cannot cross the framed wire, so the malformed-params
+	// branch is reached through dispatch with a raw body.
+	resp := s.dispatch(&connState{server: s}, Request{JSONRPC: "2.0", ID: 1, Method: "authenticate_owner", Params: json.RawMessage(`{"version":`)})
+	if resp.Error == nil || resp.Error.Code != CodeUnsupportedOwnerAuth {
+		t.Fatalf("malformed params = %+v, want -32012", resp.Error)
+	}
+
 	// Success reports the construction capability and never the secret.
 	conn := mustDial(t, s.path)
 	defer conn.Close()
 	if err := writeReq(t, conn, Request{JSONRPC: "2.0", ID: 1, Method: "authenticate_owner", Params: ownerAuthParams(t, cap)}); err != nil {
 		t.Fatalf("write success: %v", err)
 	}
-	resp := readResp(t, conn)
+	resp = readResp(t, conn)
 	if resp.Error != nil {
 		t.Fatalf("authenticate_owner: %+v", resp.Error)
 	}

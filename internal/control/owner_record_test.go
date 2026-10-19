@@ -444,6 +444,32 @@ func TestOwnerRecordPublishesThroughSymlinkedAncestor(t *testing.T) {
 	}
 }
 
+// TestOwnerRecordCorruptRejected proves a record that breaks the file contract
+// or its decoder is reported as stale instead of decoded.
+func TestOwnerRecordCorruptRejected(t *testing.T) {
+	path := testSocketPath(t)
+	_, _ = publishTestServer(t, path)
+	recordPath := ownerRecordPath(path)
+	body, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	cases := map[string]string{
+		"wrong version":     strings.Replace(string(body), `"version":1`, `"version":2`, 1),
+		"unknown field":     `{"unexpected":true,` + string(body[1:]),
+		"trailing data":     string(body) + `{}`,
+		"over the size cap": strings.Repeat(" ", ownerRecordMaxBytes+1),
+	}
+	for name, body := range cases {
+		if err := os.WriteFile(recordPath, []byte(body), 0o600); err != nil {
+			t.Fatalf("%s: write: %v", name, err)
+		}
+		if _, err := LoadOwnerRecord(path); !errors.Is(err, ErrStaleOwnerRecord) {
+			t.Fatalf("%s: load = %v, want stale-owner-record", name, err)
+		}
+	}
+}
+
 // TestOwnerRecordModeRejected proves a record with the wrong mode, owner or
 // file type is rejected and never replaced.
 func TestOwnerRecordModeRejected(t *testing.T) {
