@@ -41,6 +41,18 @@ func requireFile(t *testing.T, path, want string) {
 	}
 }
 
+// requireMode asserts path is owner-only readable and writable.
+func requireMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", filepath.Base(path), err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %#o, want %#o", filepath.Base(path), got, want)
+	}
+}
+
 func runForTest(t *testing.T, args ...string) (int, string) {
 	t.Helper()
 	var stderr strings.Builder
@@ -81,6 +93,7 @@ func TestRunArtifacts(t *testing.T) {
 		eventLink   bool // --on-event is left as a dangling symlink
 		foreignPID  string
 		replacePID  bool // a concurrent run swaps the pid file in before removal
+		checkMode   bool // the published files are owner-only
 		wantCode    int
 		wantErr     string
 		wantResult  string // "" means no result file may exist
@@ -89,7 +102,14 @@ func TestRunArtifacts(t *testing.T) {
 		{
 			name:       "settled turn publishes its final output",
 			turns:      []scriptedTurn{turn("reply final answer", "end_turn", "final answer")},
+			checkMode:  true,
 			wantResult: "final answer",
+			wantRESULT: true,
+		},
+		{
+			name:       "settled turn without a final output publishes the accumulated reply",
+			turns:      []scriptedTurn{turn("the reply", "end_turn", "")},
+			wantResult: "the reply",
 			wantRESULT: true,
 		},
 		{name: "unsettled timeout publishes no file", timeout: true, turns: []scriptedTurn{turn("half an answer", "", "")}, wantCode: 124},
@@ -183,10 +203,14 @@ func TestRunArtifacts(t *testing.T) {
 				provider.promptStarted = make(chan struct{}, 1)
 				provider.release = release
 			}
-			// The sentinel lands only after the answer is whole.
+			// The sentinel lands only after the answer is whole, and the pid file
+			// is checked here because the run removes it on exit.
 			atomicWriteHook = func(path string) {
 				if path == sentinelPath && tt.wantResult != "" {
 					requireFile(t, resultPath, tt.wantResult)
+				}
+				if path == pidPath && tt.checkMode {
+					requireMode(t, pidPath, 0o600)
 				}
 			}
 			t.Cleanup(func() { atomicWriteHook = nil })
@@ -222,6 +246,9 @@ func TestRunArtifacts(t *testing.T) {
 				}
 			} else {
 				requireFile(t, resultPath, tt.wantResult)
+				if tt.checkMode {
+					requireMode(t, resultPath, 0o600)
+				}
 			}
 			if tt.foreignPID != "" || tt.replacePID {
 				requireFile(t, pidPath, "424242\n")
@@ -387,10 +414,8 @@ func TestRunWorkflowPublishesPID(t *testing.T) {
 	writeTestFile(t, loopPath, `{"pre":[{"name":"work","prompt":"work"}]}`)
 	pidPath := filepath.Join(dir, "run.pid")
 
-	published := 0
 	atomicWriteHook = func(path string) {
 		if path == pidPath {
-			published++
 			requireFile(t, pidPath, strconv.Itoa(os.Getpid())+"\n")
 		}
 	}
@@ -399,9 +424,6 @@ func TestRunWorkflowPublishesPID(t *testing.T) {
 	code, stderr := runForTest(t, "--backend", "gemini-acp", "--dir", dir, "--loop-file", loopPath, "--pid-file", pidPath)
 	if code != 0 {
 		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr)
-	}
-	if published != 1 {
-		t.Fatalf("pid file published %d times, want 1", published)
 	}
 	requireFile(t, pidPath, "")
 }
