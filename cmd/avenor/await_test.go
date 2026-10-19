@@ -937,3 +937,19 @@ func TestAwaitDiscoveryLabelCollisionChoosesNewestStartedAt(t *testing.T) {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), wantStderr)
 	}
 }
+
+// TestAwaitStaysCredentialFree proves await resolves and reports over the
+// credential-free dial: an owner record it could never load has no effect.
+func TestAwaitStaysCredentialFree(t *testing.T) {
+	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	record := server.socket() + ".owner.json"
+	if err := os.WriteFile(record, []byte("{not a record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(record) })
+
+	var stdout, stderr bytes.Buffer
+	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+}
