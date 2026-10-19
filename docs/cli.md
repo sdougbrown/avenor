@@ -79,39 +79,46 @@ same text the terminal `session.end` carries as `final_output` (the backend's
 own final output when it supplies one, otherwise the text of the run's last
 turn). The file is written atomically before the sentinel, so a reader that
 waits for the sentinel never sees a partial answer, and the sentinel then ends
-with `RESULT=<path>`. A failed run still writes the final text it settled
-with; a run that ends with no final message writes no file and no `RESULT=`
-line. An answer left by an earlier run at the same path is removed once every
-setup step that can fail has passed, before the first prompt.
+with `RESULT=<path>`. A run that ends with no final message writes no file and
+no `RESULT=` line.
 
-A cancelled run writes no result file and no `RESULT=` line: the reply collected
-so far is a prefix of an answer, not the run's final message, and advertising it
-would hand a reader a truncated run's text. SIGINT and SIGTERM both end the run
-at exit code 130 with a `KILLED` sentinel carrying `STOP_REASON=cancelled`.
+The file is written only when the run's last turn settled on the backend's
+terminal event. A turn that settled with a failure still has a final message, so
+a failed run writes the text it settled with; a cancelled run, a timed-out run,
+and a run whose attempt or resume failed before the backend settled write no
+file and no `RESULT=` line, because the reply collected so far is a prefix of an
+answer, not the run's final message. SIGINT and SIGTERM both end the run at exit
+code 130 with a `KILLED` sentinel carrying `STOP_REASON=cancelled`. An answer
+left by an earlier run at the same path is removed just before the first prompt,
+once the provider and session are up, so a run that fails before then leaves
+that answer alone.
 
-`--pid-file <path>` writes the run's own pid once the flags are accepted and
-removes the file when the run exits, including on SIGINT and SIGTERM. The signal
-trap is installed before the pid file is published, so a signal landing during
-setup still has a cleanup path and cannot leave the pid file behind. The trap
-serves the first signal; once that signal has cancelled the run the handler
-restores the default disposition, so a second signal still ends a teardown that
-will not finish. A SIGKILL or a crash skips cleanup and leaves a stale pid file
-behind, and the kernel recycles pids, so `kill -0 $(cat run.pid)` alone can
-report an unrelated process as live. Check the process identity before
-signalling — `ps -o command= -p <pid>` works on both Linux and macOS — or wait
-for the sentinel instead. Launch wrappers cannot supply a trustworthy pid:
-`setsid` forks when the caller leads a process group, so a recorded `$!` can
-name a shell that already exited while the run continues. Letting the run
-publish its pid avoids that. The pid file is only removed by the run that wrote
-it.
+`--pid-file <path>` writes the run's own pid once every setup step that can fail
+has passed, and removes the file when the run exits, including on SIGINT and
+SIGTERM. A run rejected before that point, such as one whose prompt file is
+unreadable, never publishes a pid and leaves another run's pid file untouched.
+The signal trap is installed before the pid file is published, so a first signal
+landing during setup still has a cleanup path and does not leave the pid file
+behind; a second signal restores the default disposition and can end the process
+before that cleanup runs, leaving the file behind. A SIGKILL or a crash skips
+cleanup and leaves a stale pid file behind, and the kernel recycles pids, so
+`kill -0 $(cat run.pid)` alone can report an unrelated process as live. Check
+the process identity before signalling — `ps -o command= -p <pid>` works on both
+Linux and macOS — or wait for the sentinel instead. Launch wrappers cannot
+supply a trustworthy pid: `setsid` forks when the caller leads a process group,
+so a recorded `$!` can name a shell that already exited while the run continues.
+Letting the run publish its pid avoids that. The pid file is only removed by the
+run that wrote it.
 
 `--result-file`, `--pid-file`, `--sentinel-file` and `--on-event` must name
-distinct paths — compared as absolute paths, and by file identity when the paths
-already exist — and the result and pid paths must be single-line. An invocation
-rejected by flag validation writes no result or pid file and leaves an earlier
-answer untouched. It still writes its sentinel when `--sentinel-file` is set,
-because every exit path records an outcome; treat the sentinel path as the
-run's own output rather than a place to keep an answer, since a rejection
+distinct paths — compared as absolute paths with existing parent directories
+resolved, and by file identity when the paths already exist — and the result and
+pid paths must be single-line. An invocation rejected by flag validation writes
+no result or pid file and leaves an earlier answer untouched. A rejection after
+the flags are parsed still writes its sentinel when `--sentinel-file` is set, so
+a supervisor can wait on it; a command line that does not parse exits 1 before
+the sentinel path is known, so nothing is written. Treat the sentinel path as
+the run's own output rather than a place to keep an answer, since a rejection
 rewrites it like any other exit.
 
 ```sh
@@ -809,7 +816,7 @@ avenor watch --follow --format plain --since-cursor /tmp/cursor /tmp/events.json
 - `6` — Provider quota exhausted (`quota_exhausted`); fall back to another model or retry later
 - `7` — Provider rate limit (`rate_limited`); retried when `--max-retries` > 0
 - `124` — Overall session timeout (`--timeout` reached)
-- `130` — Cancelled (SIGINT, context done)
+- `130` — Cancelled (`SIGINT`, `SIGTERM`, or context cancellation)
 
 A provider limit failure is reported as exit code 6 or 7 instead of 1, so an
 orchestrator can distinguish "out of quota, switch or retry later" from "the

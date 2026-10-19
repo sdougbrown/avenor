@@ -60,25 +60,30 @@ longer one):
   --timeout 90s --label verify-term &
 RUN=$!
 for i in $(seq 1 100); do [ -s "$SCRATCH/term.pid" ] && break; sleep 0.1; done
-kill -TERM "$(cat "$SCRATCH/term.pid")" || echo "run finished before SIGTERM"
+PIDPID=$(cat "$SCRATCH/term.pid" 2>/dev/null || true)
+# Prove the pid names this run before signalling it: a bare `kill -0` also
+# succeeds for a recycled pid, and a finished run leaves no pid file to read.
+if [ -n "$PIDPID" ] && ps -o command= -p "$PIDPID" | grep -q avenor; then
+  kill -TERM "$PIDPID"
+else
+  echo "pid file does not name a live avenor run; repeat with a longer prompt"
+fi
 wait $RUN; echo "exit=$?"
 cat "$SCRATCH/term.done"
 for i in $(seq 1 50); do [ -e "$SCRATCH/term.pid" ] || break; sleep 0.1; done
-[ -e "$SCRATCH/term.pid" ] && echo "pid file outlived the run"
-[ -e "$SCRATCH/term-result.txt" ] && echo "cancelled run wrote a result file"
+if [ -e "$SCRATCH/term.pid" ]; then echo "pid file outlived the run"; fi
+if [ -e "$SCRATCH/term-result.txt" ]; then echo "cancelled run wrote a result file"; fi
 ```
 
 **Killed run (the proof):** `exit=130`; the sentinel starts with `KILLED` and
 carries `STOP_REASON=cancelled` and `EXIT_CODE=130`, with no `RESULT=` line;
 there is no result file; the pid file is gone within the polling window.
 
-To prove the pid file tracks the live process rather than a launcher, start
-the run under `set -m` (which makes the background job a process-group leader,
-so `setsid` forks and `$!` names a shell that exits immediately), read the pid
-from the file while the run is alive, and compare `ps -o command= -p <pid>`
-with the launched command — a bare `kill -0` also succeeds for a recycled pid.
-The `$!` pid is gone while the pid-file pid is alive; both are gone after the
-sentinel appears.
+To prove the pid file tracks the live process rather than a launcher, the block
+above reads the pid from the file and checks what `ps -o command= -p <pid>`
+names before signalling — a bare `kill -0` also succeeds for a recycled pid, and
+a `$!` captured from a `setsid` launcher can name a shell that already exited.
+The pid file is gone after the sentinel appears.
 
 ## Gotchas
 
@@ -96,7 +101,8 @@ sentinel appears.
 - The permission handler defaults to `file:<sentinel-base>` when
   `--sentinel-file` is set; if you see the run stall, check for a permission
   request file next to the sentinel (see [permissions.md](permissions.md)).
-- A cancelled run deliberately writes no result file and no `RESULT=` line, so
-  do not read the result path unconditionally after `exit=130`.
+- A cancelled or timed-out run deliberately writes no result file and no
+  `RESULT=` line, so do not read the result path unconditionally after
+  `exit=130` or `exit=124`.
 - The pid file is removed on exit, including on a trapped signal, but a
   `SIGKILL` leaves it behind — check `ps -o command= -p <pid>`, not `kill -0`.
