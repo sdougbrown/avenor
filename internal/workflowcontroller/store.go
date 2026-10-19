@@ -27,9 +27,6 @@ type ControllerStore struct {
 	// already applied to the snapshot, so once the log grows past this it is
 	// rotated after the snapshot superseding it is durable.
 	compactBytes int64
-	// rotate renames the active event log to its previous generation; a nil
-	// rotate renames with os.Rename.
-	rotate func(oldpath, newpath string) error
 
 	// subMu guards subscribers, a coalescing fan-out of buffered(1) wake
 	// channels notified after every committed controller record change.
@@ -581,8 +578,9 @@ func (s *ControllerStore) loadForCommand(controllerID string) (ControllerRecord,
 
 // loadLocked reads the snapshot under a held flock and replays any events
 // beyond its revision, previous log generation first, truncating a malformed
-// trailing event line. It reports whether the snapshot exists and how many
-// events were replayed.
+// trailing event line. A snapshot older than the oldest retained generation is
+// an error rather than a repair. It reports whether the snapshot exists and
+// how many events were replayed.
 func (s *ControllerStore) loadLocked(controllerID string) (ControllerRecord, int, error) {
 	data, err := os.ReadFile(s.snapshotPath(controllerID))
 	if err != nil {
@@ -607,8 +605,11 @@ func (s *ControllerStore) loadLocked(controllerID string) (ControllerRecord, int
 }
 
 // replayEvents applies logged events with a seq beyond the record's revision,
-// tolerating a truncated final line (an incomplete append) by cutting the log
-// back to the last good line. Corruption on any earlier line is an error.
+// requiring every applied event to follow the record's revision contiguously:
+// a skipped seq means the generation holding it is gone, so replay reports the
+// missing range instead of jumping the record forward over discarded events.
+// A truncated final line (an incomplete append) is tolerated by cutting the
+// log back to the last good line; corruption on any earlier line is an error.
 func (s *ControllerStore) replayEvents(controllerID string, rec ControllerRecord, path string) (ControllerRecord, int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -636,6 +637,10 @@ func (s *ControllerStore) replayEvents(controllerID string, rec ControllerRecord
 			return rec, replayed, fmt.Errorf("controller %s event log corrupted at line %d: %w", controllerID, i+1, err)
 		}
 		if e.Seq > rec.Revision {
+			if e.Seq != rec.Revision+1 {
+				return rec, replayed, fmt.Errorf("controller %s event log: missing events %d-%d before seq %d",
+					controllerID, rec.Revision+1, e.Seq-1, e.Seq)
+			}
 			if err := applyEvent(&rec, e); err != nil {
 				return rec, replayed, fmt.Errorf("controller %s event %d: %w", controllerID, e.Seq, err)
 			}
@@ -796,10 +801,10 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 // compactLog rotates the event log once it outgrows compactBytes, keeping the
 // generation it replaces as events.ndjson.prev. It runs only after the
 // snapshot superseding the log is durable: replay skips events at or below the
-// snapshot's revision, so a rotation that is lost to a crash leaves skipped
-// events behind, while rotating before the snapshot lands would lose events
-// replay still needs. A crash between the rename and the next append leaves
-// the previous generation alone, which replay still reads.
+// snapshot's revision, so a rotation lost to a crash leaves skipped events
+// behind, while rotating before the snapshot lands would lose events replay
+// still needs. Failures are reported to the caller, which only logs them: a
+// failed rotation lets the log grow.
 func (s *ControllerStore) compactLog(controllerID string) error {
 	path := s.eventsPath(controllerID)
 	fi, err := os.Stat(path)
@@ -812,11 +817,17 @@ func (s *ControllerStore) compactLog(controllerID string) error {
 	if fi.Size() <= s.compactThreshold() {
 		return nil
 	}
-	rotate := s.rotate
-	if rotate == nil {
-		rotate = os.Rename
+	if err := os.Rename(path, s.prevEventsPath(controllerID)); err != nil {
+		return err
 	}
-	if err := rotate(path, s.prevEventsPath(controllerID)); err != nil {
+	// The fresh generation is created here so its directory entry lands in the
+	// same fsync as the rotation: losing it to a crash would drop the active
+	// half of the repair path.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return durablefile.FsyncDir(s.controllerDir(controllerID))

@@ -167,15 +167,19 @@ expired attempt lease re-arms for a replacement claim — with no coordinator
 memory involved. The leadership lease is durable per renewal: each renewal is
 appended to the controller's event log before the snapshot is replaced, so
 replay repairs a snapshot that is older than the log instead of accepting an
-expiry the log cannot reproduce. The log is bounded to two generations: once it
-outgrows its size limit, the snapshot superseding it is written first and the
-log is then rotated to `events.ndjson.prev`, and replay reads the previous
-generation before the active log. Replay therefore repairs any snapshot back to
-the start of the previous generation, which includes the newest renewal; event
-history older than that is discarded, so a snapshot restored from further back
-replays only what the two files still hold. `disable` is the deliberate stop:
-it halts future dispatch, cancels poll contexts, freezes cursors, and releases
-the lease, leaving running attempts alone.
+expiry the log cannot reproduce. Compaction is best-effort and keeps two
+generations: once the log outgrows its size limit, the snapshot superseding it
+is written first and the log is then rotated to `events.ndjson.prev`, and
+replay reads the previous generation before the active log. A snapshot whose
+revision is at or above the previous generation's first event minus one
+replays contiguously through both generations to the newest renewal. An older
+snapshot cannot be repaired — the events before the previous generation are
+gone — so replay reports the missing sequence range and the load fails rather
+than fabricating a record from a holed history. A failed rotation leaves both
+files untouched, so an unwritable controller directory only lets the log grow.
+`disable` is the deliberate stop: it halts future dispatch, cancels poll
+contexts, freezes cursors, and releases the lease, leaving running attempts
+alone.
 
 ## Boundaries
 
