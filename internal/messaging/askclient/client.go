@@ -211,7 +211,7 @@ func RenderReply(res messaging.WaitResult) (string, error) {
 		if json.Unmarshal(res.Reply.Payload, &payload) == nil && payload.Message != "" {
 			return payload.Message, nil
 		}
-		return string(res.Reply.Payload), nil
+		return renderFullReply(res.Reply), nil
 	case messaging.OutcomeTimedOut:
 		return "(timeout: no reply received)", nil
 	case messaging.OutcomeWithdrawn:
@@ -224,6 +224,21 @@ func RenderReply(res messaging.WaitResult) (string, error) {
 		return "(ask lost)", nil
 	}
 	return "", fmt.Errorf("askclient: cannot render outcome %q", res.Outcome)
+}
+
+// renderFullReply renders a reply whose payload carries no message text: the
+// correlation id and the replier name the answer, and the payload is passed
+// through untouched. A payload that is not JSON is rendered as it arrived.
+func renderFullReply(reply *messaging.InboundMessage) string {
+	rendered, err := json.Marshal(map[string]any{
+		"message_id":  reply.MessageID,
+		"from_run_id": reply.FromRunID,
+		"payload":     reply.Payload,
+	})
+	if err != nil {
+		return string(reply.Payload)
+	}
+	return string(rendered)
 }
 
 // classifySendError maps a pre-response send failure to an outcome. A typed

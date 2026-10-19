@@ -260,11 +260,14 @@ func TestExtractReplyMessageOutcomes(t *testing.T) {
 	t.Run("replied", func(t *testing.T) {
 		cases := []struct{ payload, want string }{
 			{`{"message":"hello"}`, "hello"},
-			{`{"summary":"ok"}`, `{"summary":"ok"}`},
+			// A reply without message text keeps the broker's wait-result
+			// rendering: the ids and the untouched payload.
+			{`{"summary":"ok"}`, `{"from_run_id":"bob","message_id":"msg-1","payload":{"summary":"ok"}}`},
+			{`raw`, "raw"},
 			{"", "(empty reply)"},
 		}
 		for _, tc := range cases {
-			res := AskResult{MessageID: msgID, Outcome: messaging.OutcomeReplied, Reply: &messaging.InboundMessage{Payload: []byte(tc.payload)}}
+			res := AskResult{MessageID: msgID, Outcome: messaging.OutcomeReplied, Reply: &messaging.InboundMessage{MessageID: msgID, FromRunID: "bob", Payload: []byte(tc.payload)}}
 			got, err := res.Text()
 			if err != nil || got != tc.want {
 				t.Errorf("Text(%q) = (%q, %v), want %q", tc.payload, got, err, tc.want)
@@ -305,6 +308,7 @@ func TestRenderReply(t *testing.T) {
 		wantErr bool
 	}{
 		{messaging.OutcomeReplied, &messaging.InboundMessage{Payload: []byte(`{"message":"hello"}`)}, "hello", false},
+		{messaging.OutcomeReplied, &messaging.InboundMessage{MessageID: "msg-1", FromRunID: "bob", Payload: []byte(`{"summary":"ok"}`)}, `{"from_run_id":"bob","message_id":"msg-1","payload":{"summary":"ok"}}`, false},
 		{messaging.OutcomeReplied, &messaging.InboundMessage{Payload: []byte(`raw`)}, "raw", false},
 		{messaging.OutcomeReplied, nil, "", true},
 		{messaging.OutcomeTimedOut, nil, "(timeout: no reply received)", false},
