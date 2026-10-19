@@ -92,6 +92,14 @@ func TestSentinelContent(t *testing.T) {
 			want:       "DONE\nSESSION=ses_abc123\nSTOP_REASON=end_turn\nRUN=a1b2c3d4e5f60718\n",
 		},
 		{
+			name:       "exit 0 with result path",
+			exitCode:   0,
+			sessionID:  "ses_abc123",
+			stopReason: "end_turn",
+			resultPath: "/tmp/run/result.txt",
+			want:       "DONE\nSESSION=ses_abc123\nSTOP_REASON=end_turn\nRESULT=/tmp/run/result.txt\n",
+		},
+		{
 			name:       "run id newlines cannot inject sentinel lines",
 			exitCode:   0,
 			sessionID:  "ses_abc123",
