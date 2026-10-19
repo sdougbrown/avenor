@@ -443,7 +443,7 @@ func TestValidateArtifactPaths(t *testing.T) {
 		t.Fatalf("symlink artifact dir: %v", err)
 	}
 	same := filepath.Join(dir, "same.txt")
-	samePathErr := "--result-file and --pid-file name the same path"
+	samePath := "name the same path"
 
 	for _, tt := range []struct {
 		name                  string
@@ -452,13 +452,13 @@ func TestValidateArtifactPaths(t *testing.T) {
 		autoApprove           bool
 		want                  string
 	}{
-		{"abs against rel", same, "same.txt", "", "", "", false, samePathErr},
-		{"pid links to result", same, link, "", "", "", false, samePathErr},
-		{"pid through a symlinked directory", filepath.Join(dir, "absent.txt"), filepath.Join(linkDir, "absent.txt"), "", "", "", false, samePathErr},
-		{"on-event", same, "", "same.txt", "", "", false, "--result-file and --on-event name the same path"},
-		{"derived permission request", filepath.Join(dir, "run.perm.req"), "", "", filepath.Join(dir, "run.done"), "", false, "--result-file and the permission request file name the same path"},
+		{"abs against rel", same, "same.txt", "", "", "", false, samePath},
+		{"pid links to result", same, link, "", "", "", false, samePath},
+		{"pid through a symlinked directory", filepath.Join(dir, "absent.txt"), filepath.Join(linkDir, "absent.txt"), "", "", "", false, samePath},
+		{"on-event", same, "", "same.txt", "", "", false, samePath},
+		{"derived permission request", filepath.Join(dir, "run.perm.req"), "", "", filepath.Join(dir, "run.done"), "", false, samePath},
 		{"derived permission request with auto-approve", filepath.Join(dir, "run.perm.req"), "", "", filepath.Join(dir, "run.done"), "", true, ""},
-		{"newline", "line\nbreak.txt", "", "", "", "", false, "--result-file must be a single-line path"},
+		{"newline", "line\nbreak.txt", "", "", "", "", false, "single-line path"},
 	} {
 		err := validateArtifactPaths(tt.result, tt.pid, tt.sentinel, tt.event, tt.permHandler, tt.autoApprove)
 		if tt.want == "" {
@@ -473,5 +473,18 @@ func TestValidateArtifactPaths(t *testing.T) {
 	}
 	if err := validateArtifactPaths(same, filepath.Join(dir, "other.txt"), "", "", "", false); err != nil {
 		t.Fatalf("distinct paths rejected: %v", err)
+	}
+}
+
+// TestRunRejectsCollidingArtifactPaths pins the exit code a caller sees when two
+// flags name one artifact path; TestValidateArtifactPaths covers the spellings.
+func TestRunRejectsCollidingArtifactPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.txt")
+	code, stderr := runForTest(t, "--prompt", "hi", "--backend", "pi", "--result-file", path, "--pid-file", path)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "name the same path") {
+		t.Fatalf("stderr = %q, want a same-path rejection", stderr)
 	}
 }
