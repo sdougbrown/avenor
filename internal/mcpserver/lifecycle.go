@@ -197,16 +197,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 		case <-exited:
 			// A competing starter may have won the bind. Re-check before
 			// declaring failure, and never unlink or shut down its socket.
-			if cl, state, err := attachSupervisor(socketPath); state == supervisorLive {
-				return &supervisorLifecycle{
-					socketPath: socketPath,
-					client:     cl,
-					shared:     true,
-				}, nil
-			} else if state != supervisorDead {
-				return nil, fmt.Errorf("attach competing supervisor %s: %w", socketPath, err)
-			}
-			return nil, fmt.Errorf("supervisor exited during startup")
+			return attachWinner(socketPath)
 		case <-deadline:
 			_ = cmd.Process.Kill()
 			<-exited
@@ -230,12 +221,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 							select {
 							case <-exited:
 								_ = cl.Close()
-								if winner, state, err := attachSupervisor(socketPath); state == supervisorLive {
-									return &supervisorLifecycle{socketPath: socketPath, client: winner, shared: true}, nil
-								} else if state != supervisorDead {
-									return nil, fmt.Errorf("attach competing supervisor %s: %w", socketPath, err)
-								}
-								return nil, fmt.Errorf("supervisor exited during startup")
+								return attachWinner(socketPath)
 							default:
 								return &supervisorLifecycle{
 									socketPath: socketPath,
@@ -266,12 +252,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 							<-exited
 						}
 						_ = cl.Close()
-						if winner, state, err := attachSupervisor(socketPath); state == supervisorLive {
-							return &supervisorLifecycle{socketPath: socketPath, client: winner, shared: true}, nil
-						} else if state != supervisorDead {
-							return nil, fmt.Errorf("attach competing supervisor %s: %w", socketPath, err)
-						}
-						return nil, fmt.Errorf("supervisor exited during startup")
+						return attachWinner(socketPath)
 					}
 				}
 				_ = cl.Close()
@@ -327,6 +308,19 @@ func attachSupervisor(socketPath string) (*client.Client, supervisorState, error
 		return nil, classifyAttachError(err), err
 	}
 	return cl, supervisorLive, nil
+}
+
+// attachWinner returns the shared lifecycle of the supervisor that holds
+// socketPath after this attempt's own child lost it.
+func attachWinner(socketPath string) (*supervisorLifecycle, error) {
+	cl, state, err := attachSupervisor(socketPath)
+	if state == supervisorLive {
+		return &supervisorLifecycle{socketPath: socketPath, client: cl, shared: true}, nil
+	}
+	if state != supervisorDead {
+		return nil, fmt.Errorf("attach competing supervisor %s: %w", socketPath, err)
+	}
+	return nil, fmt.Errorf("supervisor exited during startup")
 }
 
 // classifyProbeError decides the replacement decision from a credential-free
