@@ -218,6 +218,7 @@ const server = net.createServer((socket) => {
 })
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  if (signal === 'SIGTERM' && process.env.AVENOR_TEST_IGNORE_SIGTERM === '1') continue
   process.on(signal, () => {
     removeArtifacts()
     server.close()

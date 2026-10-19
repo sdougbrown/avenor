@@ -445,6 +445,19 @@ describe('Supervisor singleton and run accessors', () => {
     expect(Supervisor.isCurrentInstance('/tmp/other.sock')).toBe(false)
   })
 
+  it('lets the server finish its own cleanup before signalling the child', async () => {
+    process.env.AVENOR_TEST_IGNORE_SIGTERM = '1'
+    try {
+      const sup = await Supervisor.get()
+      const socketPath = sup.supervisorId
+      await sup.close()
+      expect(fs.existsSync(socketPath)).toBe(false)
+      expect(fs.existsSync(`${socketPath}.owner.json`)).toBe(false)
+    } finally {
+      delete process.env.AVENOR_TEST_IGNORE_SIGTERM
+    }
+  })
+
   it('forEachRun iterates stored runs without exposing the map', async () => {
     const sup = await Supervisor.get()
     const first: RunInfo = {

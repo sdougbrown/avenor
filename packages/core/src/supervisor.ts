@@ -74,6 +74,22 @@ async function waitForSocketRemoval(socketPath: string, timeoutMs = CHILD_REAP_G
   }
 }
 
+/** Wait for the child to exit on its own, bounded by the timeout. */
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true
+  return new Promise<boolean>((resolve) => {
+    const onExit = () => {
+      clearTimeout(timer)
+      resolve(true)
+    }
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit)
+      resolve(false)
+    }, timeoutMs)
+    child.once('exit', onExit)
+  })
+}
+
 /** Terminate the captured child and wait for it to exit. */
 async function reapChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return
@@ -683,9 +699,14 @@ export class Supervisor {
     if (this.childProcess) {
       const child = this.childProcess
       this.childProcess = null
+      // The Go server traps only interrupts, so signalling it before it has
+      // finished shutting down skips the cleanup that removes its socket and
+      // owner record. Give it the grace period to exit on its own first.
+      if (!shutdownSent || !(await waitForChildExit(child, CHILD_REAP_GRACE_MS))) {
+        await reapChild(child)
+      }
       // The Go server removes its own socket and owner record while it shuts
       // down; the launcher never unlinks either path.
-      await reapChild(child)
       await waitForSocketRemoval(this.socketPath)
     } else if (shutdownSent) {
       // An attached supervisor is not this launcher's child, so the only
