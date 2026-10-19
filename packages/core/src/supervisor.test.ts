@@ -508,6 +508,29 @@ describe.skipIf(process.env.AVENOR_REAL_INTEGRATION === '1')('Owned start agains
     }
   })
 
+  it('fails at once and reaps the child when its own capability is rejected', async () => {
+    const spawnLog = path.join(os.tmpdir(), `avenor-fake-spawns-rejected-${process.pid}.log`)
+    fs.rmSync(spawnLog, { force: true })
+    process.env.AVENOR_TEST_SPAWN_LOG = spawnLog
+    process.env.AVENOR_TEST_OWNER_SECRET_MISMATCH = '1'
+    try {
+      const startedAt = Date.now()
+      const failure = await Supervisor.get().catch((err: unknown) => err)
+      // The attempt token proved the child and the record named its socket, so a
+      // rejected capability is terminal rather than something to retry.
+      expect(failure).toBeInstanceOf(OwnerAuthError)
+      expect((failure as OwnerAuthError).kind).toBe('unauthenticated')
+      expect(Date.now() - startedAt).toBeLessThan(5_000)
+      const pid = Number(fs.readFileSync(spawnLog, 'utf8').trim())
+      expect(pid).toBeGreaterThan(0)
+      expect(() => process.kill(pid, 0)).toThrow()
+    } finally {
+      delete process.env.AVENOR_TEST_SPAWN_LOG
+      delete process.env.AVENOR_TEST_OWNER_SECRET_MISMATCH
+      fs.rmSync(spawnLog, { force: true })
+    }
+  })
+
   it('retries a predecessor record until the child publishes its own', async () => {
     const socketPath = path.join(socketsRoot(), `avenor-mcp-${process.pid}.sock`)
     fs.mkdirSync(socketsRoot(), { recursive: true, mode: 0o700 })

@@ -43,7 +43,13 @@ if (!socketPath) {
 const attemptToken = process.env.AVENOR_CONTROL_IDENTITY_TOKEN ?? ''
 delete process.env.AVENOR_CONTROL_IDENTITY_TOKEN
 
-const gate = createOwnerGate({ socketPath, attemptToken })
+// A record whose secret the server does not accept: the launcher's token proves
+// the child, the record names its socket, and authentication still fails.
+const recordSecret = process.env.AVENOR_TEST_OWNER_SECRET_MISMATCH === '1'
+  ? '0'.repeat(64)
+  : undefined
+
+const gate = createOwnerGate({ socketPath, attemptToken, recordSecret })
 
 try {
   fs.unlinkSync(socketPath)
