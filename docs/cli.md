@@ -46,7 +46,7 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--http-debug` | (none) | HTTP debug adapter bind address (e.g., `127.0.0.1:8080`); enables `/debug/status` and `/debug/events` endpoints |
 | `--timeout` | `0` (disabled) | Overall session timeout (Go duration: `30s`, `5m`, etc.); fires after duration regardless of progress |
 | `--progress-timeout` | `0` (disabled) | Session progress timeout; fires if no event received for this duration |
-| `--max-retries` | `0` | Maximum retry attempts on transient failure (exit code 1); emits `avenor.retry` and `avenor.error` events (see [events.md](events.md)) |
+| `--max-retries` | `0` | Maximum retry attempts on transient failure (exit code 1, or a rate-limited turn); emits `avenor.retry` and `avenor.error` events (see [events.md](events.md)) |
 | `--run-id` | (generated) | Correlation ID for this run; auto-generated if not set |
 | `--permission-claim-timeout` | `0` (disabled) | Optional deadline for a connected control client to answer a permission request. With 0, fallback occurs only after all control clients disconnect |
 
@@ -749,8 +749,32 @@ avenor watch --follow --format plain --since-cursor /tmp/cursor /tmp/events.json
 - `0` — Success (session ended with stop_reason "success" or no explicit reason)
 - `1` — General error or session ended with stop_reason "error"; may trigger retry if `--max-retries` > 0
 - `2` — Usage/validation error (avenor control subcommands only)
+- `5` — Blocked (a phase aborted with an abort marker)
+- `6` — Provider quota exhausted (`quota_exhausted`); fall back to another model or retry later
+- `7` — Provider rate limit (`rate_limited`); retried when `--max-retries` > 0
 - `124` — Overall session timeout (`--timeout` reached)
 - `130` — Cancelled (SIGINT, context done)
+
+A provider limit failure is reported as exit code 6 or 7 instead of 1, so an
+orchestrator can distinguish "out of quota, switch or retry later" from "the
+agent failed" without reading the event log.
+
+### Completion sentinel
+
+With `--sentinel-file`, the file contains the status, session ID, and stop
+reason, plus any applicable extra lines:
+
+```
+FAILED
+SESSION=ses_abc123
+STOP_REASON=rate_limited
+EXIT_CODE=7
+RETRY_AFTER=20
+RUN=a3f9...
+```
+
+`RETRY_AFTER` (whole seconds) appears only when the provider stated how long to
+wait. Without a hint, the line is omitted; it is never emitted empty.
 
 See [loop.md](loop.md) for how exit codes interact with multi-phase loops.
 

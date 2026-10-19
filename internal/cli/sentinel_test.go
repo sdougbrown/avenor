@@ -71,6 +71,7 @@ func TestSentinelContent(t *testing.T) {
 		sessionID  string
 		stopReason string
 		runID      string
+		retryAfter int64
 		reason     string
 		want       string
 	}{
@@ -178,6 +179,23 @@ func TestSentinelContent(t *testing.T) {
 			want:       "FAILED\nSESSION=ses_r\nSTOP_REASON=refusal\nEXIT_CODE=2\n",
 		},
 		{
+			name:       "exit 6 quota exhausted with retry hint",
+			exitCode:   6,
+			sessionID:  "ses_q",
+			stopReason: "quota_exhausted",
+			retryAfter: 3600,
+			runID:      "deadbeefcafe0006",
+			want:       "FAILED\nSESSION=ses_q\nSTOP_REASON=quota_exhausted\nEXIT_CODE=6\nRETRY_AFTER=3600\nRUN=deadbeefcafe0006\n",
+		},
+		{
+			name:       "exit 7 rate limited with retry hint",
+			exitCode:   7,
+			sessionID:  "ses_rl",
+			stopReason: "rate_limited",
+			retryAfter: 20,
+			want:       "FAILED\nSESSION=ses_rl\nSTOP_REASON=rate_limited\nEXIT_CODE=7\nRETRY_AFTER=20\n",
+		},
+		{
 			name:       "empty session id",
 			exitCode:   0,
 			sessionID:  "",
@@ -228,10 +246,10 @@ func TestSentinelContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sentinelContent(tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.reason)
+			got := sentinelContent(tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.retryAfter, tt.reason)
 			if got != tt.want {
-				t.Errorf("sentinelContent(%d, %q, %q, %q, %q):\n got: %q\nwant: %q",
-					tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.reason, got, tt.want)
+				t.Errorf("sentinelContent(%d, %q, %q, %q, %d, %q):\n got: %q\nwant: %q",
+					tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.retryAfter, tt.reason, got, tt.want)
 			}
 		})
 	}

@@ -245,6 +245,12 @@ The `stop_reason` indicates *why* the session ended:
 - `"tool_use"` — Session ended while waiting for tool results (unexpected in normal flows).
 - `"timeout"` — Avenor's client-side timeout fired. Usage is best-effort from the buffer at timeout.
 - `"cancelled"` — Avenor or the operator cancelled the session. Usage may be incomplete.
+- `"quota_exhausted"` — The provider refused the turn because the account's
+  usage quota is exhausted. Exit code `6`. The provider's message stays in
+  `error_message`.
+- `"rate_limited"` — The provider refused the turn because of a rate limit.
+  Exit code `7`, and retryable by `--max-retries`. When the provider states
+  how long to wait, `session.end` also carries `retry_after` (whole seconds).
 - `"degenerate_reasoning_stream"` — The reasoning/thought stream became
   clearly non-productive (provider leakage of internal control tokens, or
   a long run of single-character hex deltas). Avenor aborted the session
@@ -270,6 +276,32 @@ Example (cancelled):
 ```json
 {"event":"session.end","session_id":"ses_123","stop_reason":"cancelled"}
 ```
+
+Example (provider rate limit with a retry hint):
+
+```json
+{"event":"session.end","session_id":"ses_123","stop_reason":"rate_limited","error_message":"429: rate limit reached; try again in 20s","retry_after":20}
+```
+
+#### Provider limit failures
+
+Avenor classifies a provider's usage-limit or rate-limit failure into
+`quota_exhausted` or `rate_limited` from the terminal failure text, so the run
+is not reported as a generic `error`. An explicit stop reason from the backend
+always wins; only failures that would otherwise map to exit code 1 are
+reclassified. The classifier covers the shapes each backend forwards:
+
+| Backend | Failure text source |
+|---|---|
+| `pi` | The provider message in the settled `agent_end` (`error_message`), or the captured child stderr when the event carries none |
+| `codex-app-server` | The `turn/completed` failure message |
+| ACP backends | The prompt error text |
+| `opencode-http` | The provider error name, reported as the stop reason |
+| `claude-channel` | The failure summary on the terminal finish record |
+
+The provider's retry-after hint is parsed from the same text (`try again in
+20s`, `retry-after: 30`, `resets in 2 minutes`) and reported as `retry_after`
+in whole seconds. A value beyond a day is treated as absent.
 
 ## Launch identity
 

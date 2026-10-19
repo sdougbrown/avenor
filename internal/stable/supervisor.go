@@ -2316,16 +2316,17 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		// the lock and selects the continuation this switch executes.
 		child.mu.Lock()
 		cont, eff, err := s.applyLifecycle(child, lifecycleSignal{
-			kind:              signalAttemptOutcome,
-			class:             child.lc.class,
-			runKind:           runKind,
-			exitCode:          result.exitCode,
-			stopReason:        result.stopReason,
-			sentinelReason:    stopReason,
-			resultSessionID:   result.sessionID,
-			sessionIDConflict: conflict,
-			retryable:         retryable,
-			retriesRemaining:  retriesRemaining,
+			kind:               signalAttemptOutcome,
+			class:              child.lc.class,
+			runKind:            runKind,
+			exitCode:           result.exitCode,
+			stopReason:         result.stopReason,
+			sentinelReason:     stopReason,
+			sentinelRetryAfter: result.retryAfter,
+			resultSessionID:    result.sessionID,
+			sessionIDConflict:  conflict,
+			retryable:          retryable,
+			retriesRemaining:   retriesRemaining,
 		})
 		child.mu.Unlock()
 		if err != nil {
@@ -2458,6 +2459,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				promptConsumed:     probeResumed,
 				exitCode:           result.exitCode,
 				sentinelReason:     stopReason,
+				sentinelRetryAfter: result.retryAfter,
 				resultSessionID:    result.sessionID,
 			})
 			child.mu.Unlock()
@@ -2868,9 +2870,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {
-			cli.WriteSentinelWithReason(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.Reason, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, result.Reason, s.stderrWriter())
 		} else {
-			cli.WriteSentinel(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, "", s.stderrWriter())
 		}
 	}
 }
@@ -3155,9 +3157,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {
-			cli.WriteSentinelWithReason(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.Reason, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, result.Reason, s.stderrWriter())
 		} else {
-			cli.WriteSentinel(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, "", s.stderrWriter())
 		}
 	}
 }
@@ -3166,6 +3168,7 @@ type childAttemptResult struct {
 	exitCode   int
 	sessionID  string
 	stopReason string
+	retryAfter int64
 }
 
 func (c *childRuntime) dequeuePrompt() (string, bool) {
@@ -3752,7 +3755,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		ProviderTurn: providerTurn,
 	})
 	exitCode := result.ExitCode
-	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason}
+	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason, retryAfter: result.RetryAfter}
 }
 
 func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, resumeID string, launchAttempt int) (runtime.Session, error) {

@@ -28,47 +28,52 @@ func DerivePermBase(sentinelPath string) string {
 //
 // Exit code semantics:
 //
-//	0   → DONE\nSESSION=...\nSTOP_REASON=...\n[RUN=...\n]
-//	5   → BLOCKED\nSESSION=...\nSTOP_REASON=blocked\n[REASON=...\n][RUN=...\n]
-//	124 → TIMEOUT\nSESSION=...\nSTOP_REASON=...\n[RUN=...\n]
-//	130 → KILLED\nSESSION=...\nSTOP_REASON=...\nEXIT_CODE=130\n[RUN=...\n]
-//	N   → FAILED\nSESSION=...\nSTOP_REASON=...\nEXIT_CODE=N\n[RUN=...\n]
+//	0   → DONE\nSESSION=...\nSTOP_REASON=...\n[RETRY_AFTER=...\n][RUN=...\n]
+//	5   → BLOCKED\nSESSION=...\nSTOP_REASON=blocked\n[REASON=...\n][RETRY_AFTER=...\n][RUN=...\n]
+//	124 → TIMEOUT\nSESSION=...\nSTOP_REASON=...\n[RETRY_AFTER=...\n][RUN=...\n]
+//	130 → KILLED\nSESSION=...\nSTOP_REASON=...\nEXIT_CODE=130\n[RETRY_AFTER=...\n][RUN=...\n]
+//	N   → FAILED\nSESSION=...\nSTOP_REASON=...\nEXIT_CODE=N\n[RETRY_AFTER=...\n][RUN=...\n]
 //
 // The RUN= line is omitted when runID is empty.
 // The REASON= line is only emitted for exit code 5 and only when reason is non-empty.
-func sentinelContent(exitCode int, sessionID, stopReason, runID, reason string) string {
+// The RETRY_AFTER= line is emitted only when the provider supplied a hint.
+func sentinelContent(exitCode int, sessionID, stopReason, runID string, retryAfter int64, reason string) string {
 	run := ""
 	if runID != "" {
 		run = "RUN=" + sentinelLineValue(runID) + "\n"
+	}
+	retry := ""
+	if retryAfter > 0 {
+		retry = fmt.Sprintf("RETRY_AFTER=%d\n", retryAfter)
 	}
 	switch exitCode {
 	case 0:
 		if stopReason == "" {
 			stopReason = "end_turn"
 		}
-		return fmt.Sprintf("DONE\nSESSION=%s\nSTOP_REASON=%s\n%s", sessionID, stopReason, run)
+		return fmt.Sprintf("DONE\nSESSION=%s\nSTOP_REASON=%s\n%s%s", sessionID, stopReason, retry, run)
 	case 5:
 		blockedStop := "blocked"
 		reasonLine := ""
 		if reason != "" {
 			reasonLine = "REASON=" + sentinelLineValue(reason) + "\n"
 		}
-		return fmt.Sprintf("BLOCKED\nSESSION=%s\nSTOP_REASON=%s\n%s%s", sessionID, blockedStop, reasonLine, run)
+		return fmt.Sprintf("BLOCKED\nSESSION=%s\nSTOP_REASON=%s\n%s%s%s", sessionID, blockedStop, reasonLine, retry, run)
 	case 124:
 		if stopReason == "" {
 			stopReason = "timeout"
 		}
-		return fmt.Sprintf("TIMEOUT\nSESSION=%s\nSTOP_REASON=%s\n%s", sessionID, stopReason, run)
+		return fmt.Sprintf("TIMEOUT\nSESSION=%s\nSTOP_REASON=%s\n%s%s", sessionID, stopReason, retry, run)
 	case 130:
 		if stopReason == "" {
 			stopReason = "cancelled"
 		}
-		return fmt.Sprintf("KILLED\nSESSION=%s\nSTOP_REASON=%s\nEXIT_CODE=130\n%s", sessionID, stopReason, run)
+		return fmt.Sprintf("KILLED\nSESSION=%s\nSTOP_REASON=%s\nEXIT_CODE=130\n%s%s", sessionID, stopReason, retry, run)
 	default:
 		if stopReason == "" {
 			stopReason = fmt.Sprintf("exit_%d", exitCode)
 		}
-		return fmt.Sprintf("FAILED\nSESSION=%s\nSTOP_REASON=%s\nEXIT_CODE=%d\n%s", sessionID, stopReason, exitCode, run)
+		return fmt.Sprintf("FAILED\nSESSION=%s\nSTOP_REASON=%s\nEXIT_CODE=%d\n%s%s", sessionID, stopReason, exitCode, retry, run)
 	}
 }
 
@@ -121,12 +126,12 @@ func sessionEndFields(eventLogPath string) (sessionID, stopReason string) {
 	return sessionID, stopReason
 }
 
-// WriteSentinelWithReason writes the completion sentinel file at path using an
-// atomic tmp+rename strategy, with an optional reason line (used for exit code 5
-// "blocked" sentinels). Errors are logged to stderr but never affect the
-// caller's exit code.
-func WriteSentinelWithReason(path string, exitCode int, sessionID, stopReason, runID, reason string, stderr io.Writer) {
-	content := sentinelContent(exitCode, sessionID, stopReason, runID, reason)
+// WriteSentinelResult writes the completion sentinel file at path using an
+// atomic tmp+rename strategy, with an optional reason line (used for exit code
+// 5 "blocked" sentinels) and an optional provider retry-after hint in seconds.
+// Errors are logged to stderr but never affect the caller's exit code.
+func WriteSentinelResult(path string, exitCode int, sessionID, stopReason, runID string, retryAfter int64, reason string, stderr io.Writer) {
+	content := sentinelContent(exitCode, sessionID, stopReason, runID, retryAfter, reason)
 
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".sentinel-*.tmp")
@@ -154,11 +159,17 @@ func WriteSentinelWithReason(path string, exitCode int, sessionID, stopReason, r
 	}
 }
 
+// WriteSentinelWithReason writes a completion sentinel without a provider
+// retry-after hint.
+func WriteSentinelWithReason(path string, exitCode int, sessionID, stopReason, runID, reason string, stderr io.Writer) {
+	WriteSentinelResult(path, exitCode, sessionID, stopReason, runID, 0, reason, stderr)
+}
+
 // WriteSentinel writes the completion sentinel file at path using an
 // atomic tmp+rename strategy. Errors are logged to stderr but never affect
 // the caller's exit code.
 func WriteSentinel(path string, exitCode int, sessionID, stopReason, runID string, stderr io.Writer) {
-	WriteSentinelWithReason(path, exitCode, sessionID, stopReason, runID, "", stderr)
+	WriteSentinelResult(path, exitCode, sessionID, stopReason, runID, 0, "", stderr)
 }
 
 // cleanupSentinelFiles removes pre-existing sentinel and permission request

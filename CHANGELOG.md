@@ -10,6 +10,7 @@
 - `Supervisor` (packages/core) exposes `getInstance(supervisorId)` — the single source of truth for singleton ownership, with `isCurrentInstance` now derived from it — and `forEachRun(cb)` for iterating stored runs without reaching into the private map. The last `(sup as any).runs` casts (in `avenor_shutdown`) are gone.
 - Per-phase roster entries in loop and team configs now apply their `thinking` level: the entry's default merges with the run-level value (an explicit `--thinking`/spawn level wins) and is validated against the phase's resolved backend before the phase starts. `ResolvedSelection` now carries the entry's level for phase consumers; the spawn selector deliberately still excludes `thinking`, which remains a default rather than a selection field.
 - `avenor await`: new wait-only subcommand from this feature work. Waits on a run until attention or done, with plain transition lines or JSON output.
+- Provider quota and rate-limit failures now get their own stop reasons and exit codes: `quota_exhausted` (exit `6`) and `rate_limited` (exit `7`), classified from the terminal failure text each backend forwards (`pi` provider message or stderr, codex `turn/completed` error, ACP prompt error, `opencode-http` error name, claude-channel failure summary). `session.end` and the completion sentinel carry the provider's retry-after hint as `retry_after` seconds / `RETRY_AFTER=`, and a rate-limited turn stays eligible for `--max-retries`. Documented in [docs/events.md](docs/events.md).
 
 ### Fixed
 

@@ -43,6 +43,11 @@ all carrying the `verify-smoke` label.
 - A bare `avenor run` (no `--backend`) defaults to `opencode-acp`, which needs
   `opencode` on PATH — absent here. Always pass `--backend pi`.
 - `--timeout` matters: without it a wedged backend hangs the drive forever.
+- A provider limit failure ends the run with exit code `6` (`quota_exhausted`)
+  or `7` (`rate_limited`) instead of `1`, and the sentinel carries
+  `RETRY_AFTER=` when the provider stated a wait. `session.end` carries the
+  same `stop_reason`, so check the terminal event before treating a FAILED
+  sentinel as an agent failure.
 - The permission handler defaults to `file:<sentinel-base>` when
   `--sentinel-file` is set; if you see the run stall, check for a permission
   request file next to the sentinel (see [permissions.md](permissions.md)).

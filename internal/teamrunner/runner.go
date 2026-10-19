@@ -22,6 +22,7 @@ type RunResult struct {
 	StopReason string
 	SessionID  string
 	Reason     string
+	RetryAfter int64
 	// MarkerDirective/MarkerLabel carry the terminal marker the team exited
 	// on (the exit directive and its label) so the workflow termination path
 	// can select a declared outcome from it.
@@ -34,6 +35,7 @@ type NestedResult struct {
 	StopReason string
 	SessionID  string
 	Reason     string
+	RetryAfter int64
 }
 
 type RunOptions struct {
@@ -54,6 +56,7 @@ type PhaseAttemptResult struct {
 	ExitCode      int
 	SessionID     string
 	StopReason    string
+	RetryAfter    int64
 	LoopDirective string
 	LoopLabel     string
 	Output        string
@@ -223,7 +226,7 @@ func runPrePhases(ctx context.Context, opts RunOptions, prevCommit *string) (str
 			} else {
 				_ = emitTeamEnd(opts.EventSink, opts.RunID, "pre_failure", "", 0, 0)
 			}
-			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID}
+			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID, RetryAfter: result.RetryAfter}
 			return output.String(), &r, nil
 		}
 	}
@@ -305,6 +308,7 @@ func runTeamMembers(ctx context.Context, opts RunOptions, members []phaseconfig.
 						ExitCode:   r.ExitCode,
 						StopReason: stopReason,
 						SessionID:  r.SessionID,
+						RetryAfter: r.RetryAfter,
 					}
 				}
 			}
@@ -400,7 +404,7 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 			} else {
 				_ = emitTeamEnd(opts.EventSink, opts.RunID, "post_failure", "", 0, 0)
 			}
-			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID}
+			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID, RetryAfter: result.RetryAfter}
 			return nil, &r, nil
 		}
 	}
@@ -433,6 +437,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 			ExitCode:      nestedResult.ExitCode,
 			SessionID:     nestedResult.SessionID,
 			StopReason:    nestedResult.StopReason,
+			RetryAfter:    nestedResult.RetryAfter,
 			LoopDirective: nestedLoopDirective(nestedResult),
 			LoopLabel:     nestedResult.Reason,
 		}, nil

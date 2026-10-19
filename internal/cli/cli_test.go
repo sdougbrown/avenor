@@ -2008,6 +2008,100 @@ func (s *waitExitMatrixSink) terminalStopReasons() []string {
 	return stopReasons
 }
 
+// TestWaitForSessionClassifiesProviderLimits pins the classification a
+// wrapper sees: a provider limit failure becomes its own stop reason and exit
+// code instead of a generic exit-1 error, with the retry hint on session.end.
+func TestWaitForSessionClassifiesProviderLimits(t *testing.T) {
+	tests := []struct {
+		name           string
+		fields         map[string]any
+		promptErr      error
+		wantStopReason string
+		wantExitCode   int
+		wantRetryAfter int64
+	}{
+		{
+			name:           "quota from event text",
+			fields:         map[string]any{"stop_reason": "error", "error_message": "Codex error: The usage limit has been reached"},
+			wantStopReason: runtime.QuotaExhaustedStopReason,
+			wantExitCode:   6,
+		},
+		{
+			name:           "rate limit from event text with hint",
+			fields:         map[string]any{"stop_reason": "error", "error_message": "429: rate limit reached; try again in 20s"},
+			wantStopReason: runtime.RateLimitedStopReason,
+			wantExitCode:   7,
+			wantRetryAfter: 20,
+		},
+		{
+			name:           "opencode error name as stop reason",
+			fields:         map[string]any{"stop_reason": "RateLimitError"},
+			wantStopReason: runtime.RateLimitedStopReason,
+			wantExitCode:   7,
+		},
+		{
+			name:           "rate limit from prompt error only",
+			promptErr:      errors.New("prompt: turn failed for session ses_limit: 429 Too Many Requests, retry after 30"),
+			wantStopReason: runtime.RateLimitedStopReason,
+			wantExitCode:   7,
+			wantRetryAfter: 30,
+		},
+		{
+			name:           "unrelated failure stays generic",
+			fields:         map[string]any{"stop_reason": "error", "error_message": "400: invalid model name"},
+			wantStopReason: "error",
+			wantExitCode:   1,
+		},
+		{
+			name:           "explicit stop reason wins",
+			fields:         map[string]any{"stop_reason": "max_tokens", "error_message": "rate limit reached"},
+			wantStopReason: "max_tokens",
+			wantExitCode:   3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &waitExitMatrixSink{}
+			cfg := SessionWaitConfig{SessionID: "ses_limit", RunID: "run_limit"}
+			if tt.promptErr != nil {
+				promptDone := make(chan error, 1)
+				promptDone <- tt.promptErr
+				cfg.PromptDone = promptDone
+			} else {
+				eventCh := make(chan events.Event, 1)
+				eventCh <- events.Event{Event: "session.end", SessionID: "ses_limit", Fields: tt.fields}
+				promptDone := make(chan error, 1)
+				promptDone <- nil
+				cfg.EventCh = eventCh
+				cfg.PromptDone = promptDone
+			}
+			result := WaitForSession(context.Background(), &cliFakeProvider{}, cfg, SessionWaitDeps{Writer: sink, Stderr: io.Discard})
+			if result.ExitCode != tt.wantExitCode || result.StopReason != tt.wantStopReason {
+				t.Fatalf("result = (exit %d, %q), want (exit %d, %q)", result.ExitCode, result.StopReason, tt.wantExitCode, tt.wantStopReason)
+			}
+			if result.RetryAfter != tt.wantRetryAfter {
+				t.Fatalf("RetryAfter = %d, want %d", result.RetryAfter, tt.wantRetryAfter)
+			}
+			reasons := sink.terminalStopReasons()
+			if len(reasons) != 1 || reasons[0] != tt.wantStopReason {
+				t.Fatalf("session.end stop reasons = %v, want [%q]", reasons, tt.wantStopReason)
+			}
+			var retryAfter any
+			for _, event := range sink.events {
+				if event.Event == "session.end" {
+					retryAfter = event.Fields["retry_after"]
+				}
+			}
+			if tt.wantRetryAfter > 0 && retryAfter != tt.wantRetryAfter {
+				t.Fatalf("session.end retry_after = %v, want %d", retryAfter, tt.wantRetryAfter)
+			}
+			if tt.wantRetryAfter == 0 && retryAfter != nil {
+				t.Fatalf("session.end retry_after = %v, want absent", retryAfter)
+			}
+		})
+	}
+}
+
 type sequentialPermissionProvider struct {
 	cliFakeProvider
 	mu             sync.Mutex

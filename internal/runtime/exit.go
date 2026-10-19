@@ -12,8 +12,14 @@ const ToolDeniedStopReason = "tool_denied"
 // IsRetryableFailure reports whether a failed attempt may be retried. Session
 // identity conflicts are fatal: retrying could resume a provisional ID or let
 // an attempt finish without adopting the provider's authoritative session ID.
+// A rate-limited turn is transient, so it stays eligible for the configured
+// retries; an exhausted quota needs a fallback model or a later attempt, not
+// another call in the same run.
 func IsRetryableFailure(exitCode int, stopReason string) bool {
-	return exitCode == 1 && stopReason != SessionIDConflictStopReason
+	if stopReason == SessionIDConflictStopReason {
+		return false
+	}
+	return exitCode == 1 || stopReason == RateLimitedStopReason
 }
 
 // ExitCodeForStopReason returns Avenor's locked process exit code for a
@@ -32,6 +38,10 @@ func ExitCodeForStopReason(stopReason string) int {
 		return 4
 	case "blocked":
 		return 5
+	case QuotaExhaustedStopReason:
+		return 6
+	case RateLimitedStopReason:
+		return 7
 	case "cancelled":
 		return 130
 	case "progress_timeout":
@@ -58,6 +68,10 @@ func StopReasonForExitCode(exitCode int) string {
 		return "max_turn_requests"
 	case 5:
 		return "blocked"
+	case 6:
+		return QuotaExhaustedStopReason
+	case 7:
+		return RateLimitedStopReason
 	case 124:
 		return "timeout"
 	case 130:

@@ -21,6 +21,7 @@ type attemptResult struct {
 	exitCode      int
 	sessionID     string
 	stopReason    string
+	retryAfter    int64
 	loopDirective string
 	loopLabel     string
 	output        string
@@ -205,7 +206,7 @@ func runSingleAttempt(
 			}
 		}
 
-		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
+		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, retryAfter: result.RetryAfter, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
 	}
 }
 

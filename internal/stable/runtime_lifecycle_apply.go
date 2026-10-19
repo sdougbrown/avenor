@@ -378,6 +378,7 @@ func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifec
 	if !fault.sentinelWritten {
 		eff = append(eff, lifecycleEffect{
 			kind: effectWriteSentinel, exitCode: fault.exitCode, reason: fault.reason, sessionID: fault.sessionID,
+			retryAfter: fault.retryAfter,
 		})
 	}
 	if fault.idleEnd {
@@ -402,6 +403,7 @@ type lifecycleFault struct {
 	exitCode        int
 	reason          string
 	sessionID       string
+	retryAfter      int64
 	recordExit      bool
 	sentinelWritten bool
 	parkPath        bool
@@ -422,7 +424,7 @@ func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []
 		switch e.kind {
 		case effectWriteSentinel:
 			if child.sentinelFile != "" {
-				cli.WriteSentinel(child.sentinelFile, e.exitCode, e.sessionID, e.reason, s.runID, s.stderrWriter())
+				cli.WriteSentinelResult(child.sentinelFile, e.exitCode, e.sessionID, e.reason, s.runID, e.retryAfter, "", s.stderrWriter())
 			}
 		case effectSignalCapacity:
 			s.signalCapacityChange()
