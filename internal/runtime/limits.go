@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"math"
 	"regexp"
 	"strconv"
@@ -16,13 +17,20 @@ const (
 	RateLimitedStopReason    = "rate_limited"
 )
 
+// retryWaitCeiling bounds a provider's retry hint: a longer wait is not a retry
+// this run can usefully make. It follows workflowcontroller.ClampRetryDelay.
+const retryWaitCeiling = 5 * time.Minute
+
 // quotaSignals and rateLimitSignals are matched against the lowercased stop
-// reason and terminal failure text.
+// reason and terminal failure text. They are the only copy of the vocabulary.
 var quotaSignals = []string{
 	"quota",
 	"usage limit",
 	"usage_limit",
 	"credit balance",
+	"insufficient balance",
+	"insufficient credits",
+	"payment required",
 	"billing hard limit",
 	"spend limit",
 	"hit your limit",
@@ -43,15 +51,13 @@ var rateLimitSignals = []string{
 // for example "try again in 20s", "retry after 30" or "resets in 2 hours".
 var retryAfterHint = regexp.MustCompile(`(?i)(?:retry[- ]?after|try again in|retry in|resets? in)\D{0,16}?(\d+(?:\.\d+)?)\s*(milliseconds?|ms|hours?|hrs?|h|minutes?|mins?|m|secs?|seconds?|s|days?|d)?\b`)
 
-// status429 matches an HTTP status token. The left boundary excludes ':' so a
-// source location such as "foo.go:429:" is not read as an HTTP status.
-var status429 = regexp.MustCompile(`(^|\s)429($|[\s:),.])`)
-
-// providerSummarySignal matches a provider limit only in the shape a provider
-// reports it: the message opens with the status code or the limit wording.
-// A model-authored summary that merely mentions a 429 does not describe the
-// provider's own refusal.
-var providerSummarySignal = regexp.MustCompile(`(?i)^\s*(?:(?:error|failed|failure)[:=]?\s*)?(?:(?:http\s*)?[45]\d\d\b|quota|usage[ _]limit|rate[ _-]?limit|too many requests|resource[ _]exhausted|overloaded|credit balance|spend limit|billing hard limit|hit your limit)`)
+// status429 and status402 match an HTTP status a provider reports. The left
+// boundary accepts a space, '(' or '=' so "API error (429)" and "status=429"
+// read as statuses, while a source location such as "foo.go:429:" does not.
+var (
+	status429 = regexp.MustCompile(`(?:^|[\s(=])429(?:$|[\s:),.])`)
+	status402 = regexp.MustCompile(`(?:^|[\s(=])402(?:$|[\s:),.])`)
+)
 
 // ClassifyProviderLimit maps a provider's usage-limit or rate-limit failure
 // onto a stop reason, and returns the provider's retry-after hint in whole
@@ -70,60 +76,45 @@ func ClassifyProviderLimit(stopReason, message string) (string, int64) {
 		return "", 0
 	}
 	text := strings.ToLower(stopReason + " " + message)
-	retryAfter := retryAfterSeconds(message)
-	quota := containsSignal(text, quotaSignals)
-	// A retry hint or a 429 alongside usage-limit wording describes throttling,
-	// not an exhausted account: prefer the retryable class so --max-retries is
-	// not silently disabled for a transient condition.
-	if containsSignal(text, rateLimitSignals) || status429.MatchString(text) || (quota && retryAfter > 0) {
-		return RateLimitedStopReason, retryAfter
+	// Only an explicit throttle signal makes a limit retryable. Quota wording
+	// with a reset hint describes a hard-capped account: retrying spends the
+	// budget on the same refusal, while quota_exhausted tells the caller to
+	// switch models.
+	if containsSignal(text, rateLimitSignals) || status429.MatchString(text) {
+		return RateLimitedStopReason, retryAfterSeconds(message)
 	}
-	if quota {
-		return QuotaExhaustedStopReason, retryAfter
+	if containsSignal(text, quotaSignals) || status402.MatchString(text) {
+		return QuotaExhaustedStopReason, retryAfterSeconds(message)
 	}
 	return "", 0
 }
 
-// HasProviderLimitSignal reports whether text opens with a provider limit
-// signal. A model-authored summary is accepted as provider text only when it
-// reports the refusal rather than mentioning one.
-func HasProviderLimitSignal(text string) bool {
-	return providerSummarySignal.MatchString(text)
-}
-
-// RetryDelay returns the sleep before the next attempt: the caller's backoff,
-// extended to honor the provider's retry-after hint. A wait that does not fit
-// before the run deadline is clamped to the time remaining and fits is false:
-// waiting it out ends with the deadline, so the caller's deadline path owns
-// the classification instead of scheduling an attempt that cannot start.
-func RetryDelay(backoff time.Duration, retryAfter int64, deadline time.Time) (delay time.Duration, fits bool) {
-	delay = backoff
-	if hint := time.Duration(retryAfter) * time.Second; hint > delay {
-		delay = hint
-	}
-	if deadline.IsZero() {
-		return delay, true
-	}
-	remaining := time.Until(deadline)
-	if remaining < delay {
-		if remaining < 0 {
-			remaining = 0
+// RetryWait returns the timer to wait on before the next attempt, and whether
+// the provider's hint leaves an attempt worth making.
+//
+// The wait is the caller's backoff, extended to the provider's retry-after
+// hint. A hint above retryWaitCeiling, or a wait that cannot fit before the run
+// deadline, yields no timer and false: the run cannot honor what the provider
+// asked for, so the caller stops retrying and reports the provider's own class
+// instead of parking the run. With no hint, a backoff that does not fit before
+// the deadline also yields no timer, but true: the caller's context case
+// classifies the run.
+func RetryWait(ctx context.Context, after func(time.Duration) <-chan time.Time, backoff time.Duration, retryAfter int64) (<-chan time.Time, bool) {
+	delay := backoff
+	hinted := retryAfter > 0
+	if hinted {
+		// Compare in seconds so an absurd hint cannot wrap the conversion.
+		if retryAfter > int64(retryWaitCeiling/time.Second) {
+			return nil, false
 		}
-		return remaining, false
+		if hint := time.Duration(retryAfter) * time.Second; hint > delay {
+			delay = hint
+		}
 	}
-	return delay, true
-}
-
-// RetryWait returns the channel to wait on before the next attempt, or nil
-// when the wait does not fit before the run deadline. A nil channel leaves
-// only the caller's context able to wake the select, so its deadline path
-// classifies the run instead of an attempt starting after the deadline.
-func RetryWait(after func(time.Duration) <-chan time.Time, backoff time.Duration, retryAfter int64, deadline time.Time) <-chan time.Time {
-	delay, fits := RetryDelay(backoff, retryAfter, deadline)
-	if !fits {
-		return nil
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < delay {
+		return nil, !hinted
 	}
-	return after(delay)
+	return after(delay), true
 }
 
 func containsSignal(text string, signals []string) bool {

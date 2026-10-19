@@ -340,6 +340,17 @@ func (s *Supervisor) reportLifecycleError(child *childRuntime, err error) {
 	fmt.Fprintf(s.stderrWriter(), "avenor stable: lifecycle error (runtime %s): %v\n", id, err)
 }
 
+// resultFault is the fail-safe payload for a finished attempt: the fail-safe
+// records the exit, writes the sentinel with the provider's hint and ends the
+// run. Every fail-safe site builds its payload here, so no site can drop a
+// field the sentinel contract carries.
+func resultFault(result childAttemptResult, stopReason string) lifecycleFault {
+	return lifecycleFault{
+		exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
+		retryAfter: result.retryAfter, recordExit: true,
+	}
+}
+
 // failSafeRunChildTransition is the fixed fail-safe for an illegal transition
 // in runChild's owned paths and the idle-context end. The failed prediction
 // leaves external waiters: a sentinel consumer, a held tree token, a spawned

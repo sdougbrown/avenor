@@ -38,6 +38,10 @@ func DerivePermBase(sentinelPath string) string {
 // The REASON= line is only emitted for exit code 5 and only when reason is non-empty.
 // The RETRY_AFTER= line is emitted only when the provider supplied a hint.
 func sentinelContent(exitCode int, sessionID, stopReason, runID string, retryAfter int64, reason string) string {
+	// The format is line-oriented, so no provider- or agent-supplied value may
+	// carry its own newline.
+	sessionID = sentinelLineValue(sessionID)
+	stopReason = sentinelLineValue(stopReason)
 	run := ""
 	if runID != "" {
 		run = "RUN=" + sentinelLineValue(runID) + "\n"
@@ -77,6 +81,7 @@ func sentinelContent(exitCode int, sessionID, stopReason, runID string, retryAft
 	}
 }
 
+// sentinelLineValue keeps a value on its own single line of the sentinel file.
 func sentinelLineValue(value string) string {
 	value = strings.ReplaceAll(value, "\r", " ")
 	value = strings.ReplaceAll(value, "\n", " ")

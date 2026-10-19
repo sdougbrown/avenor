@@ -863,7 +863,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 
 	resumeID := *resume
-	runDeadline, _ := runCtx.Deadline()
 	var result attemptResult
 	for attempt := 1; ; attempt++ {
 		if controlServer != nil {
@@ -900,6 +899,12 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			resumeID = result.sessionID
 		}
 
+		// A hinted wait this run cannot honor leaves no attempt worth making, so
+		// the provider's own class and RETRY_AFTER stand.
+		wait, retry := runtime.RetryWait(runCtx, retryAfter, backoffDelay(attempt), result.retryAfter)
+		if !retry {
+			break
+		}
 		if err := writeRetryEvent(writer, result.sessionID, runID, attempt+1, *maxRetries, *label); err != nil {
 			fmt.Fprintf(stderr, "avenor: write retry event: %v\n", err)
 			result.exitCode = 1
@@ -910,7 +915,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 
 		select {
-		case <-runtime.RetryWait(retryAfter, backoffDelay(attempt), result.retryAfter, runDeadline):
+		case <-wait:
 		case <-runCtx.Done():
 			if runCtx.Err() == context.DeadlineExceeded {
 				return exitWithSentinel(124)
@@ -1600,17 +1605,13 @@ func cancelProvider(turn *ProviderTurn, writer EventSink, sessionID, runID, runL
 }
 
 // failureText returns the terminal failure text a backend owns on session.end.
-// summary is model-authored prose on the claude-channel finish record, so it
-// only counts when it reports the provider limit itself rather than mentioning
-// one in passing.
+// Only provider-owned fields count: model-authored prose such as a
+// claude-channel finish summary never classifies a run.
 func failureText(fields map[string]any) string {
 	for _, key := range []string{"error_message", "error", "message"} {
 		if text, _ := fields[key].(string); text != "" {
 			return text
 		}
-	}
-	if summary, _ := fields["summary"].(string); runtime.HasProviderLimitSignal(summary) {
-		return summary
 	}
 	return ""
 }

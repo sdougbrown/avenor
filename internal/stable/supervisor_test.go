@@ -1674,6 +1674,94 @@ func TestWorkflowChildSentinelCarriesRetryAfter(t *testing.T) {
 	}
 }
 
+// The stable supervisor's retry backoff must honor the provider's hint, like
+// the direct run path and the phase loops.
+func TestRunChildRetryWaitHonorsProviderHint(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{
+			{
+				sessionID: "ses_hint_1",
+				events: []stableScriptedEvent{{event: events.Event{
+					Event:     "session.end",
+					SessionID: "ses_hint_1",
+					Fields:    map[string]any{"stop_reason": "error", "error_message": "429: rate limit reached; try again in 20s"},
+				}}},
+			},
+			{
+				sessionID: "ses_hint_2",
+				events: []stableScriptedEvent{{event: events.Event{
+					Event:     "session.end",
+					SessionID: "ses_hint_2",
+					Fields:    map[string]any{"stop_reason": "end_turn"},
+				}}},
+			},
+		},
+	}
+	oldRetryWaitTimer := retryWaitTimer
+	waited := make(chan time.Duration, 2)
+	retryWaitTimer = func(delay time.Duration) <-chan time.Time {
+		waited <- delay
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+	t.Cleanup(func() { retryWaitTimer = oldRetryWaitTimer })
+
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-retry-hint.sock", MaxRuntimes: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	child := &childRuntime{
+		id:          "rt_retry_hint",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_hint_1"},
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		eventWriter: stableTestSink{},
+		cancelFn:    cancel,
+	}
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
+	go sup.runChild(ctx, child, "first", 0, 1)
+
+	select {
+	case delay := <-waited:
+		if delay != 20*time.Second {
+			t.Fatalf("retry wait = %v, want the provider's 20s hint", delay)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry backoff never reached the wait")
+	}
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && !completed && phase == "done"
+	})
+	cancel()
+	waitForStableDone(t, child)
+}
+
+// The fail-safe writes the sentinel it owns with the provider's hint: it is the
+// last thing an illegal transition leaves a sentinel consumer.
+func TestFailSafeSentinelCarriesRetryAfter(t *testing.T) {
+	sup := newLifecycleTestOwner()
+	sup.errWriter = io.Discard
+	child := &childRuntime{
+		id:           "rt_failsafe_hint",
+		done:         make(chan struct{}),
+		eventWriter:  stableTestSink{},
+		sentinelFile: filepath.Join(t.TempDir(), "run.done"),
+	}
+	child.lc = lifecycleState{exec: execStarting, class: directAttemptClass}
+
+	sup.failSafeRunChildTransition(child, resultFault(childAttemptResult{
+		exitCode: 7, sessionID: "ses_failsafe_hint", stopReason: runtime.RateLimitedStopReason, retryAfter: 20,
+	}, runtime.RateLimitedStopReason))
+
+	content := readSentinel(t, child.sentinelFile)
+	for _, want := range []string{"STOP_REASON=rate_limited\n", "EXIT_CODE=7\n", "RETRY_AFTER=20\n"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("sentinel = %q, want %q", content, want)
+		}
+	}
+}
+
 func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	provider := &stableScriptedProvider{
 		attempt: -1,

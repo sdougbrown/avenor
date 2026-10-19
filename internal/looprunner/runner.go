@@ -390,7 +390,12 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 			return result, nil
 		}
 
-		deadline, _ := ctx.Deadline()
+		// A hinted wait this run cannot honor leaves no attempt worth making, so
+		// the provider's class and its hint stand as the result.
+		wait, retry := runtime.RetryWait(ctx, phaseRetryAfter, phaseconfig.BackoffDuration(retry-1), result.RetryAfter)
+		if !retry {
+			return result, nil
+		}
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
@@ -400,7 +405,7 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 				result.StopReason = "timeout"
 			}
 			return result, nil
-		case <-runtime.RetryWait(phaseRetryAfter, phaseconfig.BackoffDuration(retry-1), result.RetryAfter, deadline):
+		case <-wait:
 		}
 
 		result, err = attemptFn(ctx)

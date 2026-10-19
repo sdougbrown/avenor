@@ -574,6 +574,38 @@ func TestRunEventPayloads(t *testing.T) {
 	}
 }
 
+// The phase retry loop must forward the parsed provider hint to its wait: a
+// regression to the plain backoff leaves every other test green.
+func TestRunPhaseWithRetryHonorsProviderHint(t *testing.T) {
+	oldRetryAfter := phaseRetryAfter
+	var waited []time.Duration
+	phaseRetryAfter = func(delay time.Duration) <-chan time.Time {
+		waited = append(waited, delay)
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+	t.Cleanup(func() { phaseRetryAfter = oldRetryAfter })
+
+	attempts := 0
+	result, err := runPhaseWithRetry(context.Background(), func(context.Context) (PhaseAttemptResult, error) {
+		attempts++
+		if attempts == 1 {
+			return PhaseAttemptResult{ExitCode: 7, SessionID: "ses_hint", StopReason: runtime.RateLimitedStopReason, RetryAfter: 25}, nil
+		}
+		return PhaseAttemptResult{ExitCode: 0, SessionID: "ses_hint_done"}, nil
+	}, 1)
+	if err != nil {
+		t.Fatalf("runPhaseWithRetry() error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if len(waited) != 1 || waited[0] != 25*time.Second {
+		t.Fatalf("retry waits = %v, want one wait of the provider's 25s hint", waited)
+	}
+}
+
 func TestRunRetryOnTransientFailure(t *testing.T) {
 	oldRetryAfter := phaseRetryAfter
 	phaseRetryAfter = func(d time.Duration) <-chan time.Time {

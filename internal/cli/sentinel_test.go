@@ -196,6 +196,15 @@ func TestSentinelContent(t *testing.T) {
 			want:       "FAILED\nSESSION=ses_rl\nSTOP_REASON=rate_limited\nEXIT_CODE=7\nRETRY_AFTER=20\n",
 		},
 		{
+			// Neither a provider-supplied stop reason nor a session id may forge a
+			// line for consumers that split the sentinel on newlines.
+			name:       "newlines cannot forge a sentinel line",
+			exitCode:   7,
+			sessionID:  "ses_rl\nRUN=forged",
+			stopReason: "rate_limited\nEXIT_CODE=0",
+			want:       "FAILED\nSESSION=ses_rl RUN=forged\nSTOP_REASON=rate_limited EXIT_CODE=0\nEXIT_CODE=7\n",
+		},
+		{
 			name:       "empty session id",
 			exitCode:   0,
 			sessionID:  "",

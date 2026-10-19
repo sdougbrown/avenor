@@ -906,6 +906,45 @@ func TestRunCleansSentinelFilesBetweenRetries(t *testing.T) {
 	}
 }
 
+// TestRunRetryWaitHonorsProviderHint pins the direct run path's call site: the
+// parsed provider hint reaches the retry wait instead of the plain backoff.
+func TestRunRetryWaitHonorsProviderHint(t *testing.T) {
+	oldRunAttempt, oldRetryAfter := runAttempt, retryAfter
+	t.Cleanup(func() {
+		runAttempt, retryAfter = oldRunAttempt, oldRetryAfter
+	})
+
+	dir := t.TempDir()
+	promptPath := filepath.Join(dir, "prompt.txt")
+	if err := os.WriteFile(promptPath, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	var attempts int
+	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
+		attempts++
+		if attempts == 1 {
+			return attemptResult{exitCode: 7, sessionID: "ses_hint", stopReason: runtime.RateLimitedStopReason, retryAfter: 25}
+		}
+		return attemptResult{exitCode: 0, sessionID: "ses_hint_done", stopReason: "end_turn"}
+	}
+	var waited []time.Duration
+	retryAfter = func(delay time.Duration) <-chan time.Time {
+		waited = append(waited, delay)
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+
+	var stderr strings.Builder
+	if code := run([]string{"--prompt-file", promptPath, "--max-retries", "1"}, func(string) string { return "" }, &stderr); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if len(waited) != 1 || waited[0] != 25*time.Second {
+		t.Fatalf("retry waits = %v, want one wait of the provider's 25s hint", waited)
+	}
+}
+
 // TestRunRetryBackoffStopsAtRunDeadline proves the direct run path cannot
 // escape the shared --timeout deadline: when the deadline expires during a
 // retry backoff, the run is classified as a timeout (exit 124) with a TIMEOUT
@@ -2029,6 +2068,14 @@ func TestWaitForSessionClassifiesProviderLimits(t *testing.T) {
 			wantRetryAfter: 20,
 		},
 		{
+			// The incident text reaches the CLI as the prompt error when the child
+			// exits before settling: it must still classify, and not retry.
+			name:           "billing block from the prompt error",
+			promptErr:      errors.New(`turn failed for session 01a151cb: 402: {"message":"Insufficient Balance (request_id: 4e2d2a94-3469-4e99-9750-2ce9e58722b1)","type":"unknown_error","param":null,"code":"invalid_request_error"}`),
+			wantStopReason: runtime.QuotaExhaustedStopReason,
+			wantExitCode:   6,
+		},
+		{
 			name:           "opencode error name as stop reason",
 			fields:         map[string]any{"stop_reason": "RateLimitError"},
 			wantStopReason: runtime.RateLimitedStopReason,
@@ -2147,8 +2194,7 @@ func TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder(t *testing.T) {
 }
 
 // TestFailureText pins which terminal fields count as provider-owned failure
-// text. A claude-channel summary is model-authored prose, so it only counts
-// when it opens with a provider limit.
+// text. A claude-channel summary is model-authored prose, so it never does.
 func TestFailureText(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -2158,8 +2204,7 @@ func TestFailureText(t *testing.T) {
 		{name: "error_message", fields: map[string]any{"error_message": "429"}, want: "429"},
 		{name: "error", fields: map[string]any{"error": "boom"}, want: "boom"},
 		{name: "message", fields: map[string]any{"message": "rate limit"}, want: "rate limit"},
-		{name: "provider-shaped summary", fields: map[string]any{"summary": "429 Too Many Requests"}, want: "429 Too Many Requests"},
-		{name: "prose summary", fields: map[string]any{"summary": "returned 429 Too Many Requests"}, want: ""},
+		{name: "model summary is not provider text", fields: map[string]any{"summary": "429 rate limit; retry after 3600"}, want: ""},
 		{name: "no text", fields: map[string]any{}},
 	}
 	for _, tt := range tests {
