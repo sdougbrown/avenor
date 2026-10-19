@@ -339,6 +339,26 @@ func TestRunWorkflowPublishesPID(t *testing.T) {
 	requireFile(t, pidPath, "")
 }
 
+// TestRunWorkflowRejectedConfigKeepsPIDFile pins the setup-failure rule for a
+// workflow run: a loop config rejected before the workflow starts leaves a pid
+// file another run owns untouched, because this run never publishes one.
+func TestRunWorkflowRejectedConfigKeepsPIDFile(t *testing.T) {
+	dir := t.TempDir()
+	loopPath := filepath.Join(dir, "loop.json")
+	writeTestFile(t, loopPath, `{"pre":[]}`)
+	pidPath := filepath.Join(dir, "run.pid")
+	writeTestFile(t, pidPath, "424242\n")
+
+	code, stderr := runForTest(t, "--backend", "gemini-acp", "--dir", dir, "--loop-file", loopPath, "--pid-file", pidPath)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1; stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "load loop config") {
+		t.Fatalf("stderr = %q, want a load loop config error", stderr)
+	}
+	requireFile(t, pidPath, "424242\n")
+}
+
 // TestValidateArtifactPaths covers spellings the CLI cannot compare as strings:
 // a relative path against an absolute one, links to one file, and --on-event
 // sharing a path with another artifact.

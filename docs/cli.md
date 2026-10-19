@@ -93,12 +93,13 @@ left by an earlier run at the same path is removed just before the first prompt,
 once the provider and session are up, so a run that fails before then leaves
 that answer alone.
 
-`--pid-file <path>` writes the run's own pid once the shared setup that can fail
+`--pid-file <path>` writes the run's own pid once the setup that mode can fail
 has passed, and removes the file when the run exits, including on SIGINT and
-SIGTERM. A direct run and a `--loop-file`/`--team-file` run both publish it; a
-workflow run publishes the pid before loading its config, so a config rejected
-afterwards still leaves no pid file behind. A run rejected before the pid is
-written, such as one whose prompt file is unreadable, never publishes a pid and
+SIGTERM. Every run mode publishes it: a direct run publishes before its first
+attempt, and a `--loop-file`/`--team-file` run publishes after its workflow
+config loads and validates, so a rejected config still leaves no pid file
+behind. A run rejected before the pid is written, such as one whose prompt file
+is unreadable or whose workflow config is invalid, never publishes a pid and
 leaves another run's pid file untouched.
 The signal trap is installed before the pid file is published, so a first signal
 landing during setup still has a cleanup path and does not leave the pid file

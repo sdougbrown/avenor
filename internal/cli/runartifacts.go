@@ -90,6 +90,21 @@ func writePIDFile(path string) error {
 	return writeFileAtomic(path, ".pid-*.tmp", strconv.Itoa(os.Getpid())+"\n")
 }
 
+// publishPIDFile writes this run's pid to path and returns the cleanup that
+// removes it on exit. Each run mode publishes only after its own setup that can
+// fail has passed, so a run rejected during setup never writes or removes a pid
+// file another run owns.
+func publishPIDFile(path string, stderr io.Writer) (func(), bool) {
+	if path == "" {
+		return func() {}, true
+	}
+	if err := writePIDFile(path); err != nil {
+		fmt.Fprintf(stderr, "avenor: pid-file: %v\n", err)
+		return nil, false
+	}
+	return func() { removePIDFile(path, os.Getpid()) }, true
+}
+
 // removePIDFile removes path only while it still holds pid, so a later run
 // that reused the path keeps its own file. Content and inode are verified
 // through the open handle and re-checked against the path after the read; a
