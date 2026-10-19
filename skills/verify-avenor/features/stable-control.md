@@ -7,6 +7,7 @@
 - Interacting with a running child (`prompt <text> [rt_id]` — text first, runtime id optional; omitting the id queues a root prompt instead of addressing the child)
 - Cancelling (`cancel <rt_id>`)
 - Graceful shutdown of the supervisor (`shutdown graceful`)
+- Owner reconnect: every mutating verb loads the published owner record and authenticates on its own connection
 
 ## How to get to it (user POV)
 
@@ -46,10 +47,47 @@ kill "$STABLE_PID" 2>/dev/null
 `pending_permission: false`; the child's sentinel file (its path is in the
 spawn response `sentinel_file` field) contains `DONE`.
 
+### Published record and owner reconnect
+
+While the supervisor runs, three artifacts sit beside the socket: the socket
+(`0600`), the owner record `<socket>.owner.json` (`0600`, euid-owned; fields
+`version`, `socket`, `socket_identity`, `capability_id`, `secret`, `owner_pid`),
+and the persistent lock `<socket>.control.lock` (`0600`). Confirm them without
+printing the secret:
+
+```sh
+ls -l "$SCRATCH"
+stat -c '%n mode=%a uid=%u type=%F' "$SOCK" "$SOCK.owner.json" "$SOCK.control.lock"
+sed 's/"secret":"[0-9a-f]*"/"secret":"<redacted>"/' "$SOCK.owner.json"
+```
+
+Every mutating `avenor control` invocation is a separate process, so the recipe
+above is already a reconnect test: `spawn`, `prompt`, `cancel` and `shutdown`
+each load the record, bind their connection, authenticate, and drop the grant
+when the process exits. Run two mutating verbs back to back and both must
+succeed. Read-only verbs (`status`, `list`, `tail`) dial without a credential
+and work with no record at all.
+
+After `shutdown graceful` the socket and the record are gone, the lock file and
+the tombstone remain, and the supervisor has exited:
+
+```sh
+test -e "$SOCK" || echo "socket removed"
+test -e "$SOCK.owner.json" || echo "record removed"
+test -e "$SOCK.control.lock" && echo "lock retained"
+cat "$SOCK.dead"    # STOPPED reason=shutdown pid=<pid> at=<timestamp>
+```
+
 ## Gotchas
 
 - Save `$STABLE_PID` immediately; cleanup must kill the recorded PID, never
   `pkill avenor`.
+- A mutating verb that reports `permission_denied` (`-32010`) did not load or
+  present the record. Check that `<socket>.owner.json` exists, is `0600` and is
+  owned by your euid. `stale-owner-record` means the record no longer describes
+  the live socket, so another process owns that path now.
+- Never delete `<socket>.control.lock` or `<socket>.dead` between runs: the lock
+  is what serializes a replacement against the live listener.
 - `spawn` returns JSON including `runtime_id`, `on_event`, and
   `sentinel_file` — use those paths for evidence rather than guessing.
 - The child runs against a real backend; same cheap-prompt rule as single runs.

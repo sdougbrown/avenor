@@ -44,12 +44,15 @@ wait
 **Observable end state (the proof):** the run completes (sentinel `DONE`) only
 after the answer was written; the response file exists with the chosen option;
 the agent's side effect (`proof.txt`) exists in the scratch dir; events show
-the permission exchange. The two denial paths end differently: a deny option
-(`kind: reject`, outcome `selected`) relays the rejection and the session
-still ends normally — sentinel `DONE` with `STOP_REASON=end_turn`, rejection
-visible in events — while `--outcome cancelled` terminates the run with
-sentinel `KILLED`, `STOP_REASON=cancelled`, `EXIT_CODE=130`. Capture both
-branches when the feature under test is the answerer itself.
+the permission exchange (`permission.request`, then `permission.response` with
+`kind: allow`). The two refusal paths end differently. A deny option
+(`kind: reject`, outcome `selected`) relays the rejection and the pi backend
+ends the run as a tool denial: sentinel `FAILED`, `STOP_REASON=tool_denied`,
+`EXIT_CODE=2`, no side effect, and the rejection visible in events. An
+`--outcome cancelled` answer terminates the run with sentinel `KILLED`,
+`STOP_REASON=cancelled`, `EXIT_CODE=130`. Capture both branches when the feature
+under test is the answerer itself, and answer every request the run makes — a
+backend that retries the tool after a denial asks again.
 
 ## Gotchas
 
@@ -58,7 +61,11 @@ branches when the feature under test is the answerer itself.
   `internal/permission/file.go`) expires and the run terminates with a
   permission error — always answer promptly and bound the run with `--timeout`.
 - The request file may be rewritten between polls; read it once, answer once.
-- `--option` is required; `--outcome` defaults to `selected`.
-- If no request file ever appears, the pi backend may not be surfacing the
-  approval for this action — try a different tool trigger before concluding
+- `--option` is required, including with `--outcome cancelled`; `--outcome`
+  defaults to `selected`.
+- The pi backend does not ask before writing inside the run's directory or
+  running a command. A drive must load an extension that calls
+  `ctx.ui.confirm` (for example a `tool_call` gate) before a request file
+  appears at all.
+- If no request file ever appears, check the extension gate before concluding
   the answer path is broken.
