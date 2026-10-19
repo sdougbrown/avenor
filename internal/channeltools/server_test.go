@@ -1,7 +1,6 @@
 package channeltools
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/tooltest"
 )
 
 func decodeRPCResponses(t *testing.T, data []byte) []map[string]any {
@@ -252,7 +252,7 @@ func TestChanneltoolsStandaloneLocalAsk(t *testing.T) {
 		t.Fatalf("write ask: %v", err)
 	}
 
-	ask := waitForAgentMessage(t, b, "parent_run")
+	ask := tooltest.WaitForAgentMessage(t, b, "parent_run")
 	if _, err := messaging.ParseMsgID(ask.ID, time.Now()); err != nil {
 		t.Fatalf("ask message id %q is not a versioned id: %v", ask.ID, err)
 	}
@@ -282,7 +282,7 @@ func TestChanneltoolsStandaloneLocalAsk(t *testing.T) {
 		t.Fatalf("reply status = %d, want 200", resp.StatusCode)
 	}
 
-	responses := decodeRPCResponses(t, readRPCResponse(t, stdoutR))
+	responses := decodeRPCResponses(t, tooltest.ReadResponse(t, stdoutR))
 	text := responses[0]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if text != "Reply from parent_run:\nhere is the status" {
 		t.Fatalf("avenor_ask result text = %q", text)
@@ -297,47 +297,5 @@ func TestChanneltoolsStandaloneLocalAsk(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after stdin closed")
-	}
-}
-
-// waitForAgentMessage waits for an agent message queued for runID.
-func waitForAgentMessage(t *testing.T, b *broker.Broker, runID string) broker.ControlMessage {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if st := b.GetRun(runID); st != nil {
-			st.Mu.Lock()
-			for _, msg := range st.ControlQueue {
-				if msg.Type == "agent_message" {
-					queued := *msg
-					st.Mu.Unlock()
-					return queued
-				}
-			}
-			st.Mu.Unlock()
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("no agent message reached %s", runID)
-	return broker.ControlMessage{}
-}
-
-// readRPCResponse reads one JSON-RPC response line from a running server.
-func readRPCResponse(t *testing.T, stdout io.Reader) []byte {
-	t.Helper()
-	lines := make(chan []byte, 1)
-	go func() {
-		line, err := bufio.NewReader(stdout).ReadBytes('\n')
-		if err == nil {
-			lines <- line
-		}
-		close(lines)
-	}()
-	select {
-	case line := <-lines:
-		return line
-	case <-time.After(5 * time.Second):
-		t.Fatal("no JSON-RPC response")
-		return nil
 	}
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
+	"github.com/sdougbrown/avenor/internal/tooltest"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
@@ -7570,7 +7571,7 @@ func TestChildAskCleanupParity(t *testing.T) {
 		asked <- askResult{res: res, err: err}
 	}()
 
-	msgID := waitForQueuedAsk(t, b, "child")
+	msgID := tooltest.WaitForAgentMessage(t, b, "child").ID
 	if err := sup.BrokerCancel(msgID); err != nil {
 		t.Fatalf("BrokerCancel: %v", err)
 	}
@@ -7601,29 +7602,6 @@ func TestChildAskCleanupParity(t *testing.T) {
 	if b.Store().Pending("supervisor", msgID) {
 		t.Fatal("withdrawn ask left a live edge")
 	}
-}
-
-// waitForQueuedAsk waits for the first agent message queued for runID and
-// returns its message ID.
-func waitForQueuedAsk(t *testing.T, b *broker.Broker, runID string) string {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if st := b.GetRun(runID); st != nil {
-			st.Mu.Lock()
-			for _, msg := range st.ControlQueue {
-				if msg.Type == "agent_message" && msg.ID != "" {
-					id := msg.ID
-					st.Mu.Unlock()
-					return id
-				}
-			}
-			st.Mu.Unlock()
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("no ask reached %s", runID)
-	return ""
 }
 
 // TestLocalExecutionWithoutMessagingRegistration pins the degraded path: a

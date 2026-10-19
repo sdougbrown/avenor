@@ -12,6 +12,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/tooltest"
 )
 
 // TestSupervisorBrokerReplyAnswersVersionedAsk pins the supervisor's reply
@@ -104,7 +105,7 @@ func TestNewSupervisorAsksOverItsConstructedTransport(t *testing.T) {
 		res, err := sup.BrokerAsk(context.Background(), "target", "status?", "agent")
 		asked <- askOutcome{res: res, err: err}
 	}()
-	msgID := waitForQueuedAsk(t, sup.broker, "target")
+	msgID := tooltest.WaitForAgentMessage(t, sup.broker, "target").ID
 
 	reply := fmt.Sprintf(`{"run_id":"target","token":%q,"from_run_id":"target","to_run_id":"supervisor","type":"agent_message","payload":{"id":"reply-1","from":"target","from_run_id":"target","to_run_id":"supervisor","message":"all good","reply_to":%q}}`, targetToken, msgID)
 	if status, body := brokerPost(t, sup.broker.Addr(), "send", reply); status != http.StatusOK {
