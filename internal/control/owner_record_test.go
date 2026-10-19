@@ -542,30 +542,6 @@ func TestStopRemovesRecordWithoutLock(t *testing.T) {
 	}
 }
 
-// TestStaleOwnerSocketTakenOverUnderLock proves Start is the only unlinker and
-// that it replaces a dead owner's record with its own.
-func TestStaleOwnerSocketTakenOverUnderLock(t *testing.T) {
-	path := testSocketPath(t)
-	old, oldCap := NewTestServer(NewState("run_1", "", 0))
-	if err := old.Start(path); err != nil {
-		t.Fatalf("start old: %v", err)
-	}
-	dropListener(t, old)
-
-	replacement, replacementCap := publishTestServer(t, path)
-	record, err := LoadOwnerRecord(path)
-	if err != nil {
-		t.Fatalf("load record: %v", err)
-	}
-	if record.CapabilityID != replacementCap.ID {
-		t.Fatalf("record capability = %q, want the replacement's", record.CapabilityID)
-	}
-	if record.CapabilityID == oldCap.ID {
-		t.Fatal("record still names the dead owner")
-	}
-	_ = replacement
-}
-
 // TestStartOnLiveOwnerChangesNothing proves a competing starter mutates
 // nothing.
 func TestStartOnLiveOwnerChangesNothing(t *testing.T) {

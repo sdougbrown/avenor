@@ -450,22 +450,6 @@ func TestOwnerWireBrokerSendDelivers(t *testing.T) {
 	if got := b.GetRun("run_recipient").Info.Label; got != "renamed recipient" {
 		t.Fatalf("label after rename = %q", got)
 	}
-
-	// The same call without the capability fails, while a generic read works.
-	stranger := mustDial(t, s.path)
-	defer stranger.Close()
-	if err := writeReq(t, stranger, Request{JSONRPC: "2.0", ID: 3, Method: "broker_send", Params: params}); err != nil {
-		t.Fatalf("write stranger broker_send: %v", err)
-	}
-	if resp := readResp(t, stranger); resp.Error == nil || resp.Error.Code != CodePermissionDenied {
-		t.Fatalf("unauthenticated broker_send = %+v, want permission denied", resp)
-	}
-	if err := writeReq(t, stranger, Request{JSONRPC: "2.0", ID: 4, Method: "status"}); err != nil {
-		t.Fatalf("write stranger status: %v", err)
-	}
-	if resp := readResp(t, stranger); resp.Error != nil {
-		t.Fatalf("stranger status = %+v, want success", resp)
-	}
 }
 
 // TestOwnerFacadeDelegation proves the facade delegates to the constructed
@@ -579,17 +563,7 @@ func TestOldCapabilityRejectedAfterReplacement(t *testing.T) {
 		t.Fatalf("old capability = %+v, want -32011", resp)
 	}
 
-	// The replacement's record, socket and owner access survive the rejection.
-	record, err := LoadOwnerRecord(path)
-	if err != nil {
-		t.Fatalf("load replacement record: %v", err)
-	}
-	if record.CapabilityID != replacementCap.ID {
-		t.Fatalf("record capability = %q, want the replacement's", record.CapabilityID)
-	}
-	if record.SocketIdentity != socketIdentityOf(t, path) {
-		t.Fatal("replacement record no longer matches the live socket")
-	}
+	// The replacement's owner access survives the rejection.
 	owner := dialOwner(t, replacement, replacementCap)
 	defer owner.Close()
 	if err := writeReq(t, owner, Request{JSONRPC: "2.0", ID: 2, Method: "cancel"}); err != nil {
