@@ -591,9 +591,15 @@ describe.skipIf(process.env.AVENOR_REAL_INTEGRATION !== '1')('Owner attach again
     let sup: Supervisor | undefined
     try {
       sup = await Supervisor.get()
+      const socketPath = sup.supervisorId
       // cancel is owner-gated and needs no spawned runtime.
       await sup.getClient().cancel()
       expect(await sup.getClient().status()).toBeObject()
+      // The server removes its own artifacts once it shuts down cleanly, which
+      // only happens if the launcher waits instead of signalling it early.
+      await sup.close()
+      expect(fs.existsSync(socketPath)).toBe(false)
+      expect(fs.existsSync(`${socketPath}.owner.json`)).toBe(false)
     } finally {
       await sup?.close().catch(() => {})
       await Supervisor.currentInstance()?.close().catch(() => {})
@@ -626,6 +632,7 @@ describe.skipIf(process.env.AVENOR_REAL_INTEGRATION !== '1')('Owner attach again
       expect(await shutdownTool({ supervisorId: socketPath })).toMatchObject({ ok: true })
       await exited
       expect(() => fs.lstatSync(socketPath)).toThrow()
+      expect(() => fs.lstatSync(`${socketPath}.owner.json`)).toThrow()
     } finally {
       child.kill('SIGKILL')
       await exited
