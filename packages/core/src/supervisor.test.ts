@@ -1,8 +1,10 @@
 import { describe, it, expect, afterEach, afterAll, mock } from 'bun:test'
 import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
+import * as net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { createOwnerGate } from '../test/fixtures/owner-gate.js'
 import {
   findAvenorBinary,
   installerBinaryPath,
@@ -504,6 +506,37 @@ describe.skipIf(process.env.AVENOR_REAL_INTEGRATION === '1')('Owned start agains
     } finally {
       delete process.env.AVENOR_TEST_SPAWN_LOG
       await sup?.close().catch(() => {})
+      fs.rmSync(spawnLog, { force: true })
+    }
+  })
+
+  it('treats a socket that vanishes after a live probe as uncertain, not dead', async () => {
+    const spawnLog = path.join(os.tmpdir(), `avenor-fake-spawns-vanished-${process.pid}.log`)
+    fs.rmSync(spawnLog, { force: true })
+    process.env.AVENOR_TEST_SPAWN_LOG = spawnLog
+    const socketPath = path.join(socketsRoot(), `avenor-mcp-${process.pid}.sock`)
+    fs.mkdirSync(socketsRoot(), { recursive: true, mode: 0o700 })
+    const gate = createOwnerGate({ socketPath })
+    const connections = new Set<net.Socket>()
+    // A listener that answers the probe and then takes the path away.
+    const holder = net.createServer((socket) => {
+      connections.add(socket)
+      fs.unlinkSync(socketPath)
+    })
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject)
+      holder.listen(socketPath, resolve)
+    })
+    gate.publish()
+    try {
+      const failure = await Supervisor.get().catch((err: unknown) => err)
+      expect((failure as NodeJS.ErrnoException).code).toBe('ENOENT')
+      expect(fs.existsSync(spawnLog)).toBe(false)
+    } finally {
+      delete process.env.AVENOR_TEST_SPAWN_LOG
+      holder.close()
+      for (const socket of connections) socket.destroy()
+      gate.remove()
       fs.rmSync(spawnLog, { force: true })
     }
   })

@@ -32,8 +32,8 @@ export class OwnerRecordMissingError extends Error {
 }
 
 /**
- * The control socket path has no directory entry, so no listener holds it and
- * a replacement is authorized.
+ * The control socket path has no directory entry, so no listener holds that
+ * path.
  */
 export class OwnerSocketAbsentError extends Error {
   readonly code = 'ENOENT'

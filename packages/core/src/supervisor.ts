@@ -32,14 +32,8 @@ interface ExistingSupervisor {
   error?: Error
 }
 
-function isAbsentSocketError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException | undefined)?.code
-  return code === 'ECONNREFUSED' || code === 'ENOENT'
-}
-
 // Only a peer that refused, did not support or timed out the capability, or a
-// path this euid cannot bind, is an authentication outcome. Everything else is
-// transport uncertainty and authorizes no replacement.
+// path this euid cannot bind, is an authentication outcome.
 function isOwnerRejection(err: unknown): boolean {
   return err instanceof OwnerAuthError ||
     err instanceof ForeignPeerError ||
@@ -47,10 +41,13 @@ function isOwnerRejection(err: unknown): boolean {
     err instanceof StaleOwnerRecordError
 }
 
+// Classification of an attach that followed a live probe. An authentication
+// outcome is terminal. Everything else, including a socket that is absent or
+// refusing by now, is uncertainty and authorizes no replacement: a socket can
+// vanish while its owner is still shutting down, so only a fresh probe that
+// finds no listener is proof of a dead leftover.
 function classifyAttachError(err: unknown): ExistingSupervisorState {
-  if (isAbsentSocketError(err)) return 'dead'
-  if (isOwnerRejection(err)) return 'auth-rejected'
-  return 'uncertain'
+  return isOwnerRejection(err) ? 'auth-rejected' : 'uncertain'
 }
 
 function errorMessage(err: unknown): string {
