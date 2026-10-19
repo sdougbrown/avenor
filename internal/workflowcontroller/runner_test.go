@@ -417,6 +417,46 @@ func TestRunnerFailedRenewalStopsDispatchAndReacquires(t *testing.T) {
 	waitUntil(t, "runner leading again", func() bool { return storeLeaderEpoch(t, store) >= 2 })
 }
 
+// TestRunnerStopsOnLogHole proves a controller whose history cannot be
+// replayed stops its leader loop with a terminal status instead of retrying
+// forever, whether the hole surfaces on the first acquisition or on a
+// renewal.
+func TestRunnerStopsOnLogHole(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// holeBeforeStart holed the log before the runner starts, so its
+		// first acquisition is the call that finds the hole.
+		holeBeforeStart bool
+	}{
+		{name: "acquire", holeBeforeStart: true},
+		{name: "renew"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, _ := newRunnerStore(t, 1)
+			deps := newFakeDeps(store, "c1")
+			deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+			deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+			if test.holeBeforeStart {
+				holeControllerLog(t, store, "c1")
+			}
+			r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+			if !test.holeBeforeStart {
+				waitUntil(t, "runner leading", func() bool { return r.Status().Leading })
+				holeControllerLog(t, store, "c1")
+			}
+
+			select {
+			case <-r.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatalf("runner did not stop on a %s-side log hole", test.name)
+			}
+			if got := r.Status().LastOutcome; got != outcomeLogHole {
+				t.Fatalf("runner outcome after a %s-side log hole: got %q, want %q", test.name, got, outcomeLogHole)
+			}
+		})
+	}
+}
+
 func storeLeaderEpoch(t *testing.T, store *ControllerStore) int64 {
 	t.Helper()
 	rec, ok, err := store.Get("c1")

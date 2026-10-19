@@ -164,9 +164,31 @@ recover controller records and poll cursors, then restart a leader loop for
 every controller whose desired state is enabled. Dispatched work continues
 from the durable snapshot — a parked review re-parks on its exact subject, an
 expired attempt lease re-arms for a replacement claim — with no coordinator
-memory involved. `disable` is the deliberate stop: it halts future dispatch,
-cancels poll contexts, freezes cursors, and releases the lease, leaving
-running attempts alone.
+memory involved. The leadership lease is durable per renewal: each renewal is
+appended to the controller's event log before the snapshot is replaced, so
+replay repairs a snapshot that is older than the log instead of accepting an
+expiry the log cannot reproduce. Compaction is best-effort and keeps two
+generations: once the log outgrows its size limit, the snapshot superseding it
+is written first and the log is then rotated to `events.ndjson.prev`, and
+replay reads the previous generation before the active log. A snapshot whose
+revision is at or above the previous generation's first event minus one
+replays contiguously through both generations to the newest renewal. An older
+snapshot cannot be repaired — the events before the previous generation are
+gone — so replay fails with `ErrLogHole`, naming the controller and the
+missing sequence range, rather than fabricating a record from a holed history.
+Only the affected controller stops: its leader loop reports `log_hole` and
+exits, `controller list` reports it under `load_failures`, and every other
+controller keeps recovering and running. To reset it, stop the supervisor and
+remove that controller's state directory,
+`<workflow-root>/controllers/<controller-id>`; the next `controller create`
+starts it again from an empty record. A rotation is a single rename, and a
+missing active log replays as empty while the next append creates it, so a
+failed rotation never loses events: before the rename both files are
+untouched, after it the next append starts a fresh active log. An unwritable
+controller directory only lets the log grow.
+`disable` is the deliberate stop: it halts future dispatch, cancels poll
+contexts, freezes cursors, and releases the lease, leaving running attempts
+alone.
 
 ## Boundaries
 

@@ -28,19 +28,33 @@ func newTestStore(t *testing.T) (*ControllerStore, *fakeClock) {
 	return NewStoreWithClock(t.TempDir(), clock.Now), clock
 }
 
-// eventKinds reads a controller's event log and returns the kinds in order.
-func eventKinds(t *testing.T, s *ControllerStore, controllerID string) []string {
+// readEvents returns the events stored in an NDJSON event log, failing the
+// test on an unreadable or malformed line.
+func readEvents(t *testing.T, path string) []ControllerEvent {
 	t.Helper()
-	data, err := os.ReadFile(s.eventsPath(controllerID))
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read events: %v", err)
 	}
-	var kinds []string
+	var events []ControllerEvent
 	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 		var e ControllerEvent
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			t.Fatalf("unmarshal event line %q: %v", line, err)
 		}
+		events = append(events, e)
+	}
+	return events
+}
+
+// eventKinds reads a controller's event log and returns the kinds in order.
+func eventKinds(t *testing.T, s *ControllerStore, controllerID string) []string {
+	t.Helper()
+	var kinds []string
+	for _, e := range readEvents(t, s.eventsPath(controllerID)) {
 		kinds = append(kinds, e.Kind)
 	}
 	return kinds
@@ -48,16 +62,8 @@ func eventKinds(t *testing.T, s *ControllerStore, controllerID string) []string 
 
 func eventReasons(t *testing.T, s *ControllerStore, controllerID, kind string) []string {
 	t.Helper()
-	data, err := os.ReadFile(s.eventsPath(controllerID))
-	if err != nil {
-		t.Fatalf("read events: %v", err)
-	}
 	var reasons []string
-	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
-		var e ControllerEvent
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			t.Fatalf("unmarshal event line %q: %v", line, err)
-		}
+	for _, e := range readEvents(t, s.eventsPath(controllerID)) {
 		if e.Kind == kind {
 			reasons = append(reasons, e.Reason)
 		}
@@ -437,11 +443,11 @@ func TestRecoverExpiresLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if len(recovered) != 1 || recovered[0].ControllerID != "alpha" {
+	if len(recovered.Records) != 1 || recovered.Records[0].ControllerID != "alpha" {
 		t.Fatalf("recovered records: %+v", recovered)
 	}
-	if recovered[0].Leader != nil {
-		t.Fatalf("recovery left an expired lease: %+v", recovered[0].Leader)
+	if recovered.Records[0].Leader != nil {
+		t.Fatalf("recovery left an expired lease: %+v", recovered.Records[0].Leader)
 	}
 	if reasons := eventReasons(t, s, "alpha", EventLeaderExpired); len(reasons) != 1 || reasons[0] != "recovery" {
 		t.Fatalf("leader_expired reasons: %v", reasons)
@@ -556,76 +562,269 @@ func TestProjectionFailureIsolation(t *testing.T) {
 	}
 }
 
-func TestRenewalEventSuppression(t *testing.T) {
+// TestRenewLeaseLogsEveryRenewal proves a renewal inside the old one-minute
+// event window still logs its event and bumps the revision.
+func TestRenewLeaseLogsEveryRenewal(t *testing.T) {
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
-	rec := mustAcquire(t, s, "alpha", "owner-1")
-	acquiredAt := clock.cur
-	if rec.Revision != 3 {
-		t.Fatalf("revision after acquire: got %d, want 3", rec.Revision)
-	}
+	acquired := mustAcquire(t, s, "alpha", "owner-1")
 
-	clock.Advance(10 * time.Second)
+	rec := acquired
+	for i := 0; i < 2; i++ {
+		clock.Advance(RenewInterval)
+		var err error
+		if rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err != nil {
+			t.Fatalf("renew %d: %v", i, err)
+		}
+	}
+	if got := len(eventReasons(t, s, "alpha", EventLeaderRenewed)); got != 2 {
+		t.Fatalf("leader_renewed events after two renewals: got %d, want 2", got)
+	}
+	if rec.Revision != acquired.Revision+2 {
+		t.Fatalf("revision after two renewals: got %d, want %d", rec.Revision, acquired.Revision+2)
+	}
+	// The lease must expire one TTL after the last renewal's own time, not
+	// after the acquisition's.
+	if want := clock.Now().Add(LeaseTTL); !rec.Leader.ExpiresAt.Equal(want) {
+		t.Fatalf("expiry after the last renewal: got %s, want %s", rec.Leader.ExpiresAt, want)
+	}
+}
+
+// renewUntilRotation renews until the previous generation starts beyond after,
+// returning the record and that first seq.
+func renewUntilRotation(t *testing.T, s *ControllerStore, clock *fakeClock, controllerID string, rec ControllerRecord, after int64) (ControllerRecord, int64) {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		clock.Advance(RenewInterval)
+		next, err := s.RenewLease(controllerID, rec.Leader.LeaseID, rec.OwnerEpoch)
+		if err != nil {
+			t.Fatalf("renew %d: %v", i, err)
+		}
+		rec = next
+		prev := s.prevEventsPath(controllerID)
+		if _, err := os.Stat(prev); err == nil {
+			if events := readEvents(t, prev); len(events) > 0 && events[0].Seq > after {
+				return rec, events[0].Seq
+			}
+		}
+	}
+	t.Fatalf("event log never rotated past %d bytes", s.compactThreshold())
+	return ControllerRecord{}, 0
+}
+
+// rewindSnapshot sets a snapshot's revision back to revision, as a stale or
+// restored copy would.
+func rewindSnapshot(t *testing.T, s *ControllerStore, controllerID string, revision int64) {
+	t.Helper()
+	path := s.snapshotPath(controllerID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	var snap ControllerRecord
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	snap.Revision = revision
+	if data, err = json.Marshal(snap); err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("rewind snapshot: %v", err)
+	}
+}
+
+// holeControllerLog keeps only a controller's final event and rewinds its
+// snapshot below it, so replay cannot account for the events in between.
+func holeControllerLog(t *testing.T, s *ControllerStore, controllerID string) {
+	t.Helper()
+	unlock, err := s.lockController(controllerID)
+	if err != nil {
+		t.Fatalf("lock %s: %v", controllerID, err)
+	}
+	defer unlock()
+	path := s.eventsPath(controllerID)
+	events := readEvents(t, path)
+	last, err := json.Marshal(events[len(events)-1])
+	if err != nil {
+		t.Fatalf("marshal last event: %v", err)
+	}
+	if err := os.WriteFile(path, append(last, '\n'), 0o644); err != nil {
+		t.Fatalf("write holed log: %v", err)
+	}
+	rewindSnapshot(t, s, controllerID, 0)
+}
+
+// TestRotationDropsActiveLog proves a rotation leaves no active log and the
+// next renewal recreates it: replay treats the missing file as empty, so the
+// rotation needs no post-rename create.
+func TestRotationDropsActiveLog(t *testing.T) {
+	s, clock := newTestStore(t)
+	s.compactBytes = 1 << 10
+	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
+	rec, _ := renewUntilRotation(t, s, clock, "alpha", mustAcquire(t, s, "alpha", "owner-1"), 0)
+
+	if _, err := os.Stat(s.eventsPath("alpha")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("active log survived the rotation: err=%v", err)
+	}
+	clock.Advance(RenewInterval)
+	if _, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err != nil {
+		t.Fatalf("renew with no active log: %v", err)
+	}
+	if _, err := os.Stat(s.eventsPath("alpha")); err != nil {
+		t.Fatalf("renew did not recreate the active log: %v", err)
+	}
+}
+
+// TestReplayRejectsHistoryHole proves replay never fabricates state across a
+// discarded generation: a snapshot older than the previous generation's first
+// event fails to load with ErrLogHole naming the missing events, while a
+// snapshot one event older replays both generations to the live record.
+func TestReplayRejectsHistoryHole(t *testing.T) {
+	s, clock := newTestStore(t)
+	s.compactBytes = 1 << 10
+	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
+	acquired := mustAcquire(t, s, "alpha", "owner-1")
+
+	// Two rotations: the previous generation then holds events the snapshot no
+	// longer covers, and the renewal after them fills the active log.
+	rec, first := renewUntilRotation(t, s, clock, "alpha", acquired, 0)
+	rec, second := renewUntilRotation(t, s, clock, "alpha", rec, first)
+	clock.Advance(RenewInterval)
 	rec, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
 	if err != nil {
-		t.Fatalf("first renew: %v", err)
-	}
-	if rec.Revision != 4 {
-		t.Fatalf("revision after event-bearing renew: got %d, want 4", rec.Revision)
-	}
-	if got := len(eventReasons(t, s, "alpha", EventLeaderRenewed)); got != 1 {
-		t.Fatalf("leader_renewed events after first renew: got %d, want 1", got)
+		t.Fatalf("renew after rotation: %v", err)
 	}
 
-	// A second renewal inside the one-minute window suppresses the event but
-	// still extends the lease.
-	clock.Advance(10 * time.Second)
-	rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
-	if err != nil {
-		t.Fatalf("second renew: %v", err)
-	}
-	if rec.Revision != 4 {
-		t.Fatalf("revision after suppressed renew: got %d, want 4", rec.Revision)
-	}
-	if got := len(eventReasons(t, s, "alpha", EventLeaderRenewed)); got != 1 {
-		t.Fatalf("leader_renewed events after suppressed renew: got %d, want 1", got)
-	}
-	wantExpiry := acquiredAt.Add(20 * time.Second).Add(LeaseTTL)
-	if !rec.Leader.ExpiresAt.Equal(wantExpiry) {
-		t.Fatalf("expiry after two renewals: got %s, want %s", rec.Leader.ExpiresAt, wantExpiry)
+	// The legal boundary: one revision before the previous generation's first
+	// event still replays through both generations.
+	rewindSnapshot(t, s, "alpha", second-1)
+	boundary, ok, err := s.Get("alpha")
+	if err != nil || !ok || boundary.Revision != rec.Revision || boundary.Leader == nil ||
+		!boundary.Leader.ExpiresAt.Equal(rec.Leader.ExpiresAt) {
+		t.Fatalf("boundary replay: got %+v ok=%v err=%v, want revision %d expiry %s",
+			boundary, ok, err, rec.Revision, rec.Leader.ExpiresAt)
 	}
 
-	// The snapshot on disk reflects the suppressed renewal.
-	fresh, _, err := s.Get("alpha")
-	if err != nil {
-		t.Fatalf("get after suppressed renew: %v", err)
+	// One missing event is a hole, and the error names it.
+	rewindSnapshot(t, s, "alpha", second-2)
+	want := fmt.Sprintf("missing events %d-%d", second-1, second-1)
+	if _, _, err := s.Get("alpha"); !errors.Is(err, ErrLogHole) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("load with one missing event: got err=%v, want ErrLogHole naming %q", err, want)
 	}
-	if !fresh.Leader.ExpiresAt.Equal(wantExpiry) || fresh.Revision != 4 {
-		t.Fatalf("persisted snapshot stale after suppressed renew: %+v", fresh)
+}
+
+// TestCompactLogThreshold pins the rotation boundary and the default a store
+// built without a threshold falls back to.
+func TestCompactLogThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		compactBytes, size int64
+		wantRotated        bool
+	}{
+		{"at threshold", 64, 64, false},
+		{"over threshold", 64, 65, true},
+		{"default at threshold", 0, defaultCompactLogBytes, false},
+		{"default over threshold", 0, defaultCompactLogBytes + 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newTestStore(t)
+			mustCreate(t, s, "alpha", 1)
+			s.compactBytes = tc.compactBytes
+			if err := os.Truncate(s.eventsPath("alpha"), tc.size); err != nil {
+				t.Fatalf("size log: %v", err)
+			}
+			if err := s.compactLog("alpha"); err != nil {
+				t.Fatalf("compact: %v", err)
+			}
+			_, err := os.Stat(s.prevEventsPath("alpha"))
+			if rotated := err == nil; rotated != tc.wantRotated {
+				t.Fatalf("%d-byte log rotated=%v, want %v", tc.size, rotated, tc.wantRotated)
+			}
+		})
+	}
+}
+
+// TestCompactionFailureIsNonFatal proves compaction is best-effort: a commit
+// that cannot rotate its log still lands and stays loadable, and a later
+// commit compacts once the rename can succeed again.
+func TestCompactionFailureIsNonFatal(t *testing.T) {
+	s, _ := newTestStore(t)
+	// Every commit attempts a rotation; a non-empty directory at the previous
+	// generation's path blocks that rename.
+	s.compactBytes = 1
+	if err := os.MkdirAll(filepath.Join(s.prevEventsPath("alpha"), "held"), 0o755); err != nil {
+		t.Fatalf("block previous generation: %v", err)
+	}
+	if _, err := s.Create("alpha", 1); err != nil {
+		t.Fatalf("create with failing compaction: %v", err)
+	}
+	// The snapshot writer only logs a failed rotation; compactLog reports it.
+	if err := s.compactLog("alpha"); err == nil {
+		t.Fatal("compact with a blocked previous generation: got nil error")
+	}
+	if err := os.RemoveAll(s.prevEventsPath("alpha")); err != nil {
+		t.Fatalf("clear blocking directory: %v", err)
+	}
+	if rec, ok, err := s.Get("alpha"); err != nil || !ok || rec.Revision != 1 {
+		t.Fatalf("load after a failed rotation: rec=%+v ok=%v err=%v", rec, ok, err)
+	}
+	if _, err := s.SetDesiredState("alpha", DesiredEnabled, ""); err != nil {
+		t.Fatalf("enable after compaction recovered: %v", err)
+	}
+	if _, err := os.Stat(s.prevEventsPath("alpha")); err != nil {
+		t.Fatalf("no generation after compaction recovered: %v", err)
+	}
+}
+
+// TestLogHoleIsolatesOneController proves one unreplayable controller does not
+// hide the rest: List and Recover report it by id and keep serving the healthy
+// controller.
+func TestLogHoleIsolatesOneController(t *testing.T) {
+	s, _ := newTestStore(t)
+	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
+	mustEnable(t, s, mustCreate(t, s, "beta", 1).ControllerID)
+	mustAcquire(t, s, "beta", "owner-1")
+	holeControllerLog(t, s, "beta")
+
+	for name, read := range map[string]func() (Controllers, error){
+		"list":    s.List,
+		"recover": s.Recover,
+	} {
+		got, err := read()
+		if err != nil {
+			t.Fatalf("%s with one holed controller: %v", name, err)
+		}
+		if len(got.Records) != 1 || got.Records[0].ControllerID != "alpha" {
+			t.Fatalf("%s records: %+v, want only alpha", name, got.Records)
+		}
+		if len(got.Failures) != 1 || got.Failures[0].ControllerID != "beta" || !errors.Is(got.Failures[0], ErrLogHole) {
+			t.Fatalf("%s failures: %+v, want beta with ErrLogHole", name, got.Failures)
+		}
 	}
 }
 
 func TestListSortedAndMissingDir(t *testing.T) {
 	s, _ := newTestStore(t)
 
-	records, err := s.List()
+	listed, err := s.List()
 	if err != nil {
 		t.Fatalf("list with missing controllers dir: %v", err)
 	}
-	if len(records) != 0 {
-		t.Fatalf("list with missing controllers dir: got %+v, want empty", records)
+	if len(listed.Records) != 0 {
+		t.Fatalf("list with missing controllers dir: got %+v, want empty", listed)
 	}
 
 	mustCreate(t, s, "beta", 1)
 	mustCreate(t, s, "alpha", 2)
 	mustCreate(t, s, "gamma", 3)
 
-	records, err = s.List()
+	listed, err = s.List()
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	var ids []string
-	for _, rec := range records {
+	for _, rec := range listed.Records {
 		ids = append(ids, rec.ControllerID)
 	}
 	if strings.Join(ids, ",") != "alpha,beta,gamma" {

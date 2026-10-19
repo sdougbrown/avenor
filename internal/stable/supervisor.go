@@ -5583,11 +5583,14 @@ func (s *Supervisor) runWorkflowStartupBarrier() {
 		m.MarkCandidateIndexEmpty(s.supervisorIdentity())
 	}
 	if barrierErr == nil {
-		records, err := s.workflowControllers.Recover()
+		recovered, err := s.workflowControllers.Recover()
 		if err != nil {
 			barrierErr = fmt.Errorf("workflow controller recovery: %w", err)
 		} else {
-			for _, rec := range records {
+			for _, failure := range recovered.Failures {
+				log.Printf("workflow: controller recovery skipped: %v", failure)
+			}
+			for _, rec := range recovered.Records {
 				if rec.DesiredState == workflowcontroller.DesiredEnabled {
 					s.startControllerLoop(s.workflowControllers, rec.ControllerID)
 				}
@@ -5885,19 +5888,27 @@ func (s *Supervisor) WorkflowControllerList() (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	records, err := store.List()
+	listed, err := store.List()
 	if err != nil {
 		return nil, err
 	}
-	controllers := make([]map[string]any, 0, len(records))
-	for _, rec := range records {
+	controllers := make([]map[string]any, 0, len(listed.Records))
+	for _, rec := range listed.Records {
 		controllers = append(controllers, map[string]any{
 			"controller_id": rec.ControllerID,
 			"desired_state": string(rec.DesiredState),
 			"leader":        controllerLeaderMap(rec, s.supervisorIdentity()),
 		})
 	}
-	return map[string]any{"controllers": controllers}, nil
+	result := map[string]any{"controllers": controllers}
+	if len(listed.Failures) > 0 {
+		failures := make([]string, 0, len(listed.Failures))
+		for _, failure := range listed.Failures {
+			failures = append(failures, failure.Error())
+		}
+		result["load_failures"] = failures
+	}
+	return result, nil
 }
 
 func (s *Supervisor) WorkflowReady(id string, limit int) (any, error) {

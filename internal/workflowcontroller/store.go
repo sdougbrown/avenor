@@ -23,6 +23,10 @@ import (
 type ControllerStore struct {
 	root string
 	now  func() time.Time
+	// compactBytes bounds the controller event log: every event in the log is
+	// already applied to the snapshot, so once the log grows past this it is
+	// rotated after the snapshot superseding it is durable.
+	compactBytes int64
 
 	// subMu guards subscribers, a coalescing fan-out of buffered(1) wake
 	// channels notified after every committed controller record change.
@@ -30,15 +34,19 @@ type ControllerStore struct {
 	subscribers []chan struct{}
 }
 
+// defaultCompactLogBytes is the event-log size past which a controller log is
+// rotated.
+const defaultCompactLogBytes int64 = 64 << 10
+
 // NewStore returns a store rooted at workflowRoot, using the wall clock.
 func NewStore(workflowRoot string) *ControllerStore {
-	return &ControllerStore{root: workflowRoot, now: time.Now}
+	return &ControllerStore{root: workflowRoot, now: time.Now, compactBytes: defaultCompactLogBytes}
 }
 
 // NewStoreWithClock returns a store rooted at workflowRoot that reads the
 // supplied clock for every time-dependent decision.
 func NewStoreWithClock(workflowRoot string, now func() time.Time) *ControllerStore {
-	return &ControllerStore{root: workflowRoot, now: now}
+	return &ControllerStore{root: workflowRoot, now: now, compactBytes: defaultCompactLogBytes}
 }
 
 // Root returns the workflow root the store was constructed with.
@@ -60,6 +68,12 @@ func (s *ControllerStore) snapshotPath(controllerID string) string {
 
 func (s *ControllerStore) eventsPath(controllerID string) string {
 	return filepath.Join(s.controllerDir(controllerID), "events.ndjson")
+}
+
+// prevEventsPath is the previous log generation, kept so a snapshot restored
+// one generation back still replays to the newest lease expiry.
+func (s *ControllerStore) prevEventsPath(controllerID string) string {
+	return filepath.Join(s.controllerDir(controllerID), "events.ndjson.prev")
 }
 
 func (s *ControllerStore) lockPath(controllerID string) string {
@@ -149,24 +163,72 @@ func (s *ControllerStore) Get(controllerID string) (ControllerRecord, bool, erro
 	return rec, true, err
 }
 
-// List returns every controller record sorted by id. A missing controllers
-// directory yields an empty slice and no error.
-func (s *ControllerStore) List() ([]ControllerRecord, error) {
+// Controllers is the outcome of a fleet-wide read: the records that loaded and
+// one failure per controller that was skipped because its state cannot be
+// replayed. A skipped controller never hides the records of the others.
+type Controllers struct {
+	Records  []ControllerRecord
+	Failures []ControllerLoadFailure
+}
+
+// ControllerLoadFailure names one controller whose persisted state could not
+// be loaded.
+type ControllerLoadFailure struct {
+	ControllerID string
+	Err          error
+}
+
+// Error returns the wrapped load error's message, which already names the
+// controller it belongs to.
+func (f ControllerLoadFailure) Error() string {
+	return f.Err.Error()
+}
+
+// Unwrap exposes the underlying load error to errors.Is.
+func (f ControllerLoadFailure) Unwrap() error { return f.Err }
+
+// skip records a per-item load failure and reports whether err is isolated to
+// that controller. Only a replay hole is isolated; every other load error stays
+// fatal for the whole read.
+func (c *Controllers) skip(controllerID string, err error) bool {
+	if !errors.Is(err, ErrLogHole) {
+		return false
+	}
+	c.Failures = append(c.Failures, ControllerLoadFailure{ControllerID: controllerID, Err: err})
+	return true
+}
+
+// loadAll reads every controller in sorted id order, calling load once per
+// controller, collecting the records that loaded and reporting a replay hole
+// as a per-controller failure. A load error that is not a hole aborts the whole
+// read.
+func (s *ControllerStore) loadAll(load func(controllerID string) (ControllerRecord, bool, error)) (Controllers, error) {
 	ids, err := s.controllerIDs()
 	if err != nil {
-		return nil, err
+		return Controllers{}, err
 	}
-	records := make([]ControllerRecord, 0, len(ids))
+	out := Controllers{Records: make([]ControllerRecord, 0, len(ids))}
 	for _, id := range ids {
-		rec, ok, err := s.Get(id)
+		rec, ok, err := load(id)
 		if err != nil {
-			return nil, err
+			if out.skip(id, err) {
+				continue
+			}
+			return Controllers{}, err
 		}
 		if ok {
-			records = append(records, rec)
+			out.Records = append(out.Records, rec)
 		}
 	}
-	return records, nil
+	return out, nil
+}
+
+// List returns every controller record sorted by id. A controller whose event
+// log cannot be replayed is reported per item and skipped, so one unreplayable
+// history does not hide the rest. A missing controllers directory yields an
+// empty set and no error.
+func (s *ControllerStore) List() (Controllers, error) {
+	return s.loadAll(s.Get)
 }
 
 // controllerIDs lists the controller directory names in sorted order. A
@@ -298,9 +360,9 @@ func (s *ControllerStore) AcquireLease(controllerID, ownerID string) (Controller
 }
 
 // RenewLease extends the caller's lease by LeaseTTL via a compare-and-swap on
-// lease id and owner epoch. The leader_renewed event is appended at most once
-// per minute per lease; a renewal inside that window still extends the lease
-// but only rewrites the snapshot, leaving Revision untouched.
+// lease id and owner epoch. Every renewal is logged, so a snapshot recovered
+// from a stale or lost copy never carries an expiry the event log cannot
+// reproduce.
 func (s *ControllerStore) RenewLease(controllerID, leaseID string, ownerEpoch int64) (ControllerRecord, error) {
 	if err := validateControllerID(controllerID); err != nil {
 		return ControllerRecord{}, err
@@ -319,32 +381,17 @@ func (s *ControllerStore) RenewLease(controllerID, leaseID string, ownerEpoch in
 		return ControllerRecord{}, fmt.Errorf("controller %s renew lease: %w", controllerID, err)
 	}
 	now := s.now().UTC()
-	rec.Leader.RenewedAt = now
-	rec.Leader.ExpiresAt = now.Add(LeaseTTL)
-	rec.UpdatedAt = now
-	if rec.LastRenewalEventAt.IsZero() || now.Sub(rec.LastRenewalEventAt) >= time.Minute {
-		event := ControllerEvent{
-			Kind:       EventLeaderRenewed,
-			Seq:        rec.Revision + 1,
-			Time:       now,
-			LeaseID:    leaseID,
-			OwnerEpoch: ownerEpoch,
-			ExpiresAt:  rec.Leader.ExpiresAt,
-		}
-		if err := s.commitLocked(controllerID, &rec, []ControllerEvent{event}); err != nil {
-			return ControllerRecord{}, err
-		}
-		return rec, nil
+	event := ControllerEvent{
+		Kind:       EventLeaderRenewed,
+		Seq:        rec.Revision + 1,
+		Time:       now,
+		LeaseID:    leaseID,
+		OwnerEpoch: ownerEpoch,
+		ExpiresAt:  now.Add(LeaseTTL),
 	}
-	// Event suppressed: the renewed snapshot is written in place without
-	// bumping Revision, since no event was appended. The snapshot-only renewal
-	// intentionally diverges from the event log's ExpiresAt until the next
-	// renewal event is appended; a snapshot lost after this point replays the
-	// older expiry.
-	if err := s.writeSnapshot(controllerID, rec); err != nil {
+	if err := s.commitLocked(controllerID, &rec, []ControllerEvent{event}); err != nil {
 		return ControllerRecord{}, err
 	}
-	s.regenerateProjection(controllerID, rec)
 	return rec, nil
 }
 
@@ -393,24 +440,12 @@ func leaderReleasedEvent(seq int64, now time.Time, lease LeaderLease) Controller
 
 // Recover replays every controller's event log, expires lapsed leases with
 // reason "recovery", regenerates each projection, and persists changed
-// snapshots. It never creates the controllers directory; a missing directory
-// yields an empty slice and no error.
-func (s *ControllerStore) Recover() ([]ControllerRecord, error) {
-	ids, err := s.controllerIDs()
-	if err != nil {
-		return nil, err
-	}
-	records := make([]ControllerRecord, 0, len(ids))
-	for _, id := range ids {
-		rec, ok, err := s.recoverController(id)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			records = append(records, rec)
-		}
-	}
-	return records, nil
+// snapshots. A controller whose history cannot be replayed is reported per
+// item and skipped, so one holed log does not disable the others. It never
+// creates the controllers directory; a missing directory yields an empty set
+// and no error.
+func (s *ControllerStore) Recover() (Controllers, error) {
+	return s.loadAll(s.recoverController)
 }
 
 // recoverController recovers one controller under its flock, reporting whether
@@ -578,8 +613,10 @@ func (s *ControllerStore) loadForCommand(controllerID string) (ControllerRecord,
 }
 
 // loadLocked reads the snapshot under a held flock and replays any events
-// beyond its revision, truncating a malformed trailing event line. It reports
-// whether the snapshot exists and how many events were replayed.
+// beyond its revision, previous log generation first, truncating a malformed
+// trailing event line. A snapshot older than the oldest retained generation is
+// an error rather than a repair. It reports whether the snapshot exists and
+// how many events were replayed.
 func (s *ControllerStore) loadLocked(controllerID string) (ControllerRecord, int, error) {
 	data, err := os.ReadFile(s.snapshotPath(controllerID))
 	if err != nil {
@@ -592,13 +629,23 @@ func (s *ControllerStore) loadLocked(controllerID string) (ControllerRecord, int
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return ControllerRecord{}, 0, fmt.Errorf("controller %s snapshot: %w", controllerID, err)
 	}
-	rec, replayed, err := s.replayEvents(controllerID, rec, s.eventsPath(controllerID))
-	return rec, replayed, err
+	rec, replayed, err := s.replayEvents(controllerID, rec, s.prevEventsPath(controllerID))
+	if err != nil {
+		return rec, replayed, err
+	}
+	rec, current, err := s.replayEvents(controllerID, rec, s.eventsPath(controllerID))
+	if err != nil {
+		return rec, replayed, err
+	}
+	return rec, replayed + current, nil
 }
 
 // replayEvents applies logged events with a seq beyond the record's revision,
-// tolerating a truncated final line (an incomplete append) by cutting the log
-// back to the last good line. Corruption on any earlier line is an error.
+// requiring every applied event to follow the record's revision contiguously:
+// a skipped seq means the generation holding it is gone, so replay reports the
+// missing range instead of jumping the record forward over discarded events.
+// A truncated final line (an incomplete append) is tolerated by cutting the
+// log back to the last good line; corruption on any earlier line is an error.
 func (s *ControllerStore) replayEvents(controllerID string, rec ControllerRecord, path string) (ControllerRecord, int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -626,6 +673,10 @@ func (s *ControllerStore) replayEvents(controllerID string, rec ControllerRecord
 			return rec, replayed, fmt.Errorf("controller %s event log corrupted at line %d: %w", controllerID, i+1, err)
 		}
 		if e.Seq > rec.Revision {
+			if e.Seq != rec.Revision+1 {
+				return rec, replayed, fmt.Errorf("controller %s event log: missing events %d-%d before seq %d: %w",
+					controllerID, rec.Revision+1, e.Seq-1, e.Seq, ErrLogHole)
+			}
 			if err := applyEvent(&rec, e); err != nil {
 				return rec, replayed, fmt.Errorf("controller %s event %d: %w", controllerID, e.Seq, err)
 			}
@@ -696,13 +747,21 @@ func (s *ControllerStore) notifySubscribers() {
 	}
 }
 
-// appendEvents durably appends complete JSON events to the NDJSON log.
+// appendEvents durably appends complete JSON events to the NDJSON log. A
+// failed append is rolled back to the pre-append offset: replay hard-fails on
+// a torn line anywhere before the final one, so a partial write must not reach
+// the log.
 func (s *ControllerStore) appendEvents(controllerID string, events []ControllerEvent) error {
 	f, err := os.OpenFile(s.eventsPath(controllerID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	start := fi.Size()
 	var firstErr error
 	for _, e := range events {
 		data, err := json.Marshal(e)
@@ -719,10 +778,21 @@ func (s *ControllerStore) appendEvents(controllerID string, events []ControllerE
 	if err := f.Sync(); err != nil && firstErr == nil {
 		firstErr = err
 	}
+	if firstErr == nil {
+		return nil
+	}
+	if err := f.Truncate(start); err != nil {
+		log.Printf("controller %s: truncate failed append: %v", controllerID, err)
+		return firstErr
+	}
+	if err := f.Sync(); err != nil {
+		log.Printf("controller %s: sync after truncate: %v", controllerID, err)
+	}
 	return firstErr
 }
 
-// writeSnapshot atomically replaces the snapshot file and fsyncs the directory.
+// writeSnapshot atomically replaces the snapshot file, fsyncs the directory,
+// and then compacts the event log the snapshot supersedes.
 func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecord) error {
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -753,7 +823,51 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 	if err := os.Rename(tmpName, s.snapshotPath(controllerID)); err != nil {
 		return err
 	}
-	return durablefile.FsyncDir(dir)
+	if err := durablefile.FsyncDir(dir); err != nil {
+		return err
+	}
+	// Compaction is best-effort: the commit is already durable, so a failed
+	// rotation must not report the commit as failed.
+	if err := s.compactLog(controllerID); err != nil {
+		log.Printf("controller %s: compact log: %v", controllerID, err)
+	}
+	return nil
+}
+
+// compactLog rotates the event log once it outgrows compactBytes, keeping the
+// generation it replaces as events.ndjson.prev. It runs only after the
+// snapshot superseding the log is durable: replay skips events at or below the
+// snapshot's revision, so a rotation lost to a crash leaves skipped events
+// behind, while rotating before the snapshot lands would lose events replay
+// still needs. The rotation is one rename, and a missing active log replays as
+// empty while the next append creates it, so there is no post-rename window to
+// repair. Failures are reported to the caller, which only logs them: a failed
+// rotation lets the log grow.
+func (s *ControllerStore) compactLog(controllerID string) error {
+	path := s.eventsPath(controllerID)
+	fi, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if fi.Size() <= s.compactThreshold() {
+		return nil
+	}
+	if err := os.Rename(path, s.prevEventsPath(controllerID)); err != nil {
+		return err
+	}
+	return durablefile.FsyncDir(s.controllerDir(controllerID))
+}
+
+// compactThreshold bounds the active log, defaulting for a store built without
+// a threshold so a zero value cannot rotate on every write.
+func (s *ControllerStore) compactThreshold() int64 {
+	if s.compactBytes <= 0 {
+		return defaultCompactLogBytes
+	}
+	return s.compactBytes
 }
 
 // regenerateProjection rewrites the controller's Markdown projection. The
