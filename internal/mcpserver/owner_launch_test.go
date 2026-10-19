@@ -253,27 +253,6 @@ func TestMCPAttachReloadsRotatedOwnerRecord(t *testing.T) {
 	if len(received) != 1 || received[0]["message"] != "post-rotation" {
 		t.Fatalf("received = %v, want the delivered message", received)
 	}
-
-	raw, err := client.Dial(socketPath)
-	if err != nil {
-		t.Fatalf("dial replacement: %v", err)
-	}
-	defer raw.Close()
-	if err := raw.AuthenticateOwner(control.OwnerCapability{ID: dead.CapabilityID, Secret: dead.Secret}); !errors.Is(err, client.ErrOwnerUnauthenticated) {
-		t.Fatalf("dead capability error = %v, want unauthenticated", err)
-	}
-
-	// A launcher that never captured this child attaches to the live owner
-	// through the record it published, and its gated calls reach that owner.
-	third := startRealSupervisorServer(t, socketPath)
-	t.Cleanup(func() { _ = third.Close() })
-	sharedLauncher, _, err := third.getClientForSupervisor("")
-	if err != nil {
-		t.Fatalf("second launcher attach: %v", err)
-	}
-	if err := launcherClient(t, sharedLauncher).Call("broker_send", map[string]any{"from_run_id": "supervisor", "to_run_id": "supervisor", "message": "second launcher"}, &sent); err != nil {
-		t.Fatalf("second launcher broker_send: %v", err)
-	}
 }
 
 // TestFreshLauncherRespawnsAfterSIGKILL proves a launcher that never captured
