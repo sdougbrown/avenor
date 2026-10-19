@@ -36,7 +36,7 @@ The recorded PID for a wrapped backend is the wrapper's PID: the wrapper is the 
 
 Ownership is recorded per session: resuming with a different wrapper is rejected exactly like a backend, agent, or model mismatch. An omitted wrapper on resume inherits the session's authoritative wrapper.
 
-The launch wrapper does not change the control socket's trust boundary: anything able to talk to the socket could already choose backend commands. The wrapper is an additional capability for trusted callers, not a security feature.
+The launch wrapper does not change the control socket's trust boundary: a caller that can present the owner capability could already choose backend commands. The wrapper is an additional capability for trusted callers, not a security feature.
 
 ### MCP surfaces: operator allowlist
 
