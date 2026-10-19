@@ -1,0 +1,99 @@
+{
+  "comment": "v1 host wire contract spoken by internal/messaging/hosthttp and served by internal/messaging/hostfixture. Placeholders in angle brackets are values supplied at request time.",
+  "protocol": 1,
+  "endpoints": [
+    {
+      "path": "/v1/preflight",
+      "request": {},
+      "response": {"protocol": 1, "epoch": "<generation>"}
+    },
+    {
+      "path": "/v1/send",
+      "request": {
+        "epoch": "<generation>",
+        "message_id": "<msg-id>",
+        "from_run_id": "run-a",
+        "from_sender": "alice",
+        "to_run_id": "run-b",
+        "body": "{\"message\":\"ping\"}"
+      },
+      "response": {"outcome": "sent", "message_id": "<msg-id>", "epoch": "<generation>"}
+    },
+    {
+      "path": "/v1/wait",
+      "request": {
+        "epoch": "<generation>",
+        "sender_run_id": "run-a",
+        "sender": "alice",
+        "message_id": "<msg-id>",
+        "timeout_ms": 1000
+      },
+      "response": {
+        "outcome": "replied",
+        "reply": {
+          "message_id": "<msg-id>",
+          "from_run_id": "run-b",
+          "sender": "bob",
+          "kind": "agent_message",
+          "payload": {"message": "pong"}
+        }
+      }
+    },
+    {
+      "path": "/v1/reply",
+      "request": {
+        "from_run_id": "run-b",
+        "to_run_id": "run-a",
+        "message_id": "<msg-id>",
+        "correlation_id": "",
+        "body": "{\"message\":\"pong\"}"
+      },
+      "response": {"outcome": "replied", "message_id": "<msg-id>"}
+    },
+    {
+      "path": "/v1/withdraw",
+      "request": {"epoch": "<generation>", "sender_run_id": "run-a", "message_id": "<msg-id>"},
+      "response": {
+        "outcome": "withdrawn",
+        "fence": {
+          "sender": "run-a",
+          "message_id": "<msg-id>",
+          "generation": "<generation>",
+          "deadline": "<rfc3339>",
+          "terminal": true
+        }
+      }
+    },
+    {
+      "path": "/v1/receive",
+      "request": {"epoch": "<generation>", "sender_run_id": "run-b", "limit": 8},
+      "response": {
+        "epoch": "<generation>",
+        "messages": [
+          {
+            "message_id": "<msg-id>",
+            "from_run_id": "run-a",
+            "sender": "alice",
+            "kind": "agent_message",
+            "payload": {"message": "ping"}
+          }
+        ]
+      }
+    },
+    {
+      "path": "/v1/peers",
+      "request": {"epoch": "<generation>", "sender_run_id": "run-a"},
+      "response": {"epoch": "<generation>", "peers": [{"run_id": "run-b", "session": null}]}
+    }
+  ],
+  "errors": [
+    {"status": 401, "error": "auth-rejected", "outcome": "auth-rejected"},
+    {"status": 403, "error": "not-ask-target", "outcome": "edge-absent"},
+    {"status": 400, "error": "not-ask-sender", "outcome": "edge-absent"},
+    {"status": 409, "error": "generation-mismatch", "outcome": "not-sent"},
+    {"status": 409, "error": "duplicate-message-id", "outcome": "not-sent"},
+    {"status": 400, "error": "invalid-request", "outcome": "not-sent"},
+    {"status": 400, "error": "mutual-ask", "outcome": "not-sent"},
+    {"status": 503, "error": "fence-capacity", "outcome": "not-sent"}
+  ]
+}
