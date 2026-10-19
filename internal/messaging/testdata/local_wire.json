@@ -1,0 +1,45 @@
+{
+  "protocol": 1,
+  "marker_field": "messaging_protocol",
+  "paths": {
+    "sessions": "/sessions",
+    "send": "/send",
+    "wait": "/wait_reply",
+    "withdraw": "/cancel_message",
+    "receive": "/poll-control"
+  },
+  "request_fields": {
+    "send": ["run_id", "token", "from_run_id", "to_run_id", "type", "generation", "message_id", "expects_reply", "sender", "payload"],
+    "reply": ["run_id", "token", "from_run_id", "to_run_id", "type", "reply_to", "sender", "payload"],
+    "wait": ["run_id", "token", "waiting_for", "generation", "timeout_ms"],
+    "withdraw": ["run_id", "token", "cancel_message_id", "generation"],
+    "receive": ["run_id", "token", "agent_only"]
+  },
+  "response_fields": {
+    "sessions": ["sessions", "generation", "messaging_protocol"],
+    "send": ["queued", "message_id", "expects_reply", "outcome"],
+    "reply": ["queued", "reply_to", "message_id", "outcome"],
+    "wait_replied": ["message_id", "from_run_id", "sender", "kind", "payload", "outcome"],
+    "wait_timeout": ["timeout", "message_id", "outcome"],
+    "wait_withdrawn": ["cancelled", "message_id", "outcome"],
+    "wait_lost": ["lost", "message_id", "outcome"],
+    "wait_absent": ["error", "outcome"],
+    "withdraw": ["cancelled", "message_id", "outcome", "fence"],
+    "withdraw_absent": ["error", "outcome", "fence"],
+    "error": ["error", "code", "outcome"]
+  },
+  "fence_fields": ["sender", "message_id", "generation", "deadline", "terminal"],
+  "codes": [
+    "auth-rejected",
+    "invalid-request",
+    "generation-mismatch",
+    "malformed-message-id",
+    "message-id-expired",
+    "message-id-horizon",
+    "duplicate-message-id",
+    "mutual-ask",
+    "fence-capacity",
+    "not-ask-target",
+    "target-unavailable"
+  ]
+}
