@@ -15,7 +15,8 @@
         "from_run_id": "run-a",
         "from_sender": "alice",
         "to_run_id": "run-b",
-        "body": "{\"message\":\"ping\"}"
+        "body": "{\"message\":\"ping\"}",
+        "no_reply": false
       },
       "response": {"outcome": "sent", "message_id": "<msg-id>", "epoch": "<generation>"}
     },

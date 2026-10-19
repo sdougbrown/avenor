@@ -13,13 +13,17 @@ type Identity struct {
 	Sender string
 }
 
-// SendRequest admits one ask for delivery to Target.
+// SendRequest admits one message for delivery to Target.
 type SendRequest struct {
 	From       Identity
 	To         Identity
 	MessageID  string
 	Generation string
 	Body       string
+	// NoReply asks the receiver to deliver the message without creating a reply
+	// edge. The zero value is an ask: it admits the message and allocates the
+	// edge a Wait can observe.
+	NoReply bool
 }
 
 // SendResult reports the admission verdict for an ask.

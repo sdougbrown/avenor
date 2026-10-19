@@ -91,6 +91,7 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		"from_sender": req.From.Sender,
 		"to_run_id":   req.To.RunID,
 		"body":        req.Body,
+		"no_reply":    req.NoReply,
 	})
 	if err != nil {
 		// A connection refused before any byte was written never carried the ask.

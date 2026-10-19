@@ -42,6 +42,7 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		MessageID:  req.MessageID,
 		Generation: req.Generation,
 		Body:       req.Body,
+		NoReply:    req.NoReply,
 	})
 	out := messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}
 	if err != nil && !messaging.IsSendOutcome(out.Outcome) {

@@ -143,6 +143,7 @@ func (f *Fixture) send(w http.ResponseWriter, r *http.Request) {
 		FromSender string `json:"from_sender"`
 		ToRunID    string `json:"to_run_id"`
 		Body       string `json:"body"`
+		NoReply    bool   `json:"no_reply"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -160,6 +161,7 @@ func (f *Fixture) send(w http.ResponseWriter, r *http.Request) {
 		MessageID:  req.MessageID,
 		Generation: req.Epoch,
 		Body:       req.Body,
+		NoReply:    req.NoReply,
 	})
 	if err != nil {
 		code := messaging.WireCodeFor(err)

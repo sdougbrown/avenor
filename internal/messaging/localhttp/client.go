@@ -107,7 +107,7 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		"type":          "agent_message",
 		"generation":    req.Generation,
 		"message_id":    req.MessageID,
-		"expects_reply": true,
+		"expects_reply": !req.NoReply,
 		"sender":        req.From.Sender,
 		"payload":       payload,
 	})

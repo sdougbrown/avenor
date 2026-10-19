@@ -334,3 +334,61 @@ func TestStorePruneFencesUnconsumedReply(t *testing.T) {
 		t.Fatalf("re-admit error = %v, want duplicate refusal", err)
 	}
 }
+
+// recordingBackend records what the store publishes.
+type recordingBackend struct {
+	mu        sync.Mutex
+	published []messaging.InboundMessage
+}
+
+func (r *recordingBackend) Publish(target string, msg messaging.InboundMessage) (func(), error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.published = append(r.published, msg)
+	return func() {}, nil
+}
+
+func (r *recordingBackend) Receive(sender string, limit int) ([]messaging.InboundMessage, error) {
+	return nil, nil
+}
+
+func (r *recordingBackend) Peers() ([]messaging.Peer, error) { return nil, nil }
+
+func TestStoreNoReplyCreatesNoEdge(t *testing.T) {
+	store := New(Options{})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	sender := messaging.Identity{RunID: "alice", Sender: "alice"}
+	now := time.Now()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	key := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID, Generation: store.Generation()}
+
+	res, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
+		Body: `{"message":"notice"}`, NoReply: true,
+	})
+	if err != nil || res.Outcome != messaging.OutcomeSent {
+		t.Fatalf("Admit = (%+v, %v), want sent", res, err)
+	}
+	if len(backend.published) != 1 || backend.published[0].MessageID != msgID {
+		t.Fatalf("published = %+v, want the notice", backend.published)
+	}
+	if store.Pending(sender.RunID, msgID) {
+		t.Fatal("no-reply admit left a live edge")
+	}
+	if _, ok := store.Fence(key); ok {
+		t.Fatal("no-reply admit left a terminal fence")
+	}
+	waited, err := store.Wait(t.Context(), key, 20*time.Millisecond)
+	if err != nil || waited.Outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Wait = (%+v, %v), want edge-absent", waited, err)
+	}
+	withdrawn, err := store.Withdraw(key)
+	if err != nil || withdrawn.Outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Withdraw = (%+v, %v), want edge-absent", withdrawn, err)
+	}
+}

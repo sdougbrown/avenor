@@ -113,6 +113,9 @@ type AdmitRequest struct {
 	// Legacy admits IDs without an encoded deadline, which is the local HTTP
 	// router's compatibility path. The shared client always leaves it false.
 	Legacy bool
+	// NoReply publishes the message without recording an edge or a fence, so no
+	// wait can observe it. The zero value admits an ask.
+	NoReply bool
 }
 
 // AdmitResult reports the admission verdict and the acceptance deadline.
@@ -199,6 +202,24 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 
 	s.reclaimLocked(now)
 
+	msg := messaging.InboundMessage{
+		MessageID: req.MessageID,
+		FromRunID: req.Sender.RunID,
+		Sender:    req.Sender.Sender,
+		Kind:      "agent_message",
+		Payload:   json.RawMessage(req.Body),
+	}
+	if req.NoReply {
+		if s.backend != nil {
+			if _, err := s.backend.Publish(req.Target, msg); err != nil {
+				result.Outcome = messaging.OutcomeNotSent
+				return result, err
+			}
+		}
+		result.Outcome = messaging.OutcomeSent
+		return result, nil
+	}
+
 	if f, ok := s.terminal[key]; ok {
 		ack := messaging.FenceAck{
 			Sender: key.Sender, MessageID: key.MessageID, Generation: key.Generation,
@@ -227,13 +248,6 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 		return result, messaging.ErrFenceCapacity
 	}
 
-	msg := messaging.InboundMessage{
-		MessageID: req.MessageID,
-		FromRunID: req.Sender.RunID,
-		Sender:    req.Sender.Sender,
-		Kind:      "agent_message",
-		Payload:   json.RawMessage(req.Body),
-	}
 	e := &edge{
 		key:      key,
 		target:   req.Target,

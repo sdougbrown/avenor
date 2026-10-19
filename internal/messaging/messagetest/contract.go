@@ -97,6 +97,41 @@ func RunTransportSuite(t *testing.T, newTransport TransportFactory) {
 		}
 	})
 
+	t.Run("no-reply send creates no waitable edge", func(t *testing.T) {
+		msgID := mint(t, time.Minute)
+		sent, err := at.Send(t.Context(), messaging.SendRequest{
+			From: alice, To: bob, MessageID: msgID, Generation: pre.Generation,
+			Body: `{"message":"notice"}`, NoReply: true,
+		})
+		if err != nil || sent.Outcome != messaging.OutcomeSent {
+			t.Fatalf("Send = (%+v, %v)", sent, err)
+		}
+		received, err := bt.Receive(t.Context(), messaging.ReceiveRequest{
+			Sender: bob, Generation: bpre.Generation, Limit: 8,
+		})
+		if err != nil {
+			t.Fatalf("Receive: %v", err)
+		}
+		if len(received.Messages) != 1 || received.Messages[0].Sender != alice.Sender {
+			t.Fatalf("Receive = %+v, want the delivered notice", received.Messages)
+		}
+		if string(received.Messages[0].Payload) != `{"message":"notice"}` {
+			t.Fatalf("received payload = %s, want the notice body", received.Messages[0].Payload)
+		}
+		waited, err := at.Wait(t.Context(), messaging.WaitRequest{
+			Sender: alice, MessageID: msgID, Generation: pre.Generation, Timeout: 20 * time.Millisecond,
+		})
+		if err != nil || waited.Outcome != messaging.OutcomeEdgeAbsent {
+			t.Fatalf("Wait = (%+v, %v), want edge-absent", waited, err)
+		}
+		withdrawn, err := at.Withdraw(t.Context(), messaging.WithdrawRequest{
+			Sender: alice, MessageID: msgID, Generation: pre.Generation,
+		})
+		if err != nil || withdrawn.Outcome != messaging.OutcomeEdgeAbsent {
+			t.Fatalf("Withdraw = (%+v, %v), want edge-absent", withdrawn, err)
+		}
+	})
+
 	t.Run("receive honors the limit", func(t *testing.T) {
 		ids := make([]string, 3)
 		for i := range ids {
