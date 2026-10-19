@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/control"
@@ -157,18 +158,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			WriteSentinelResult(*sentinelFile, code, finalSessionID, sr, runID, finalRetryAfter, "", resultPath, stderr)
 		}
 		return code
-	}
-
-	if *pidFile != "" {
-		if err := writePIDFile(*pidFile); err != nil {
-			fmt.Fprintf(stderr, "avenor: pid-file: %v\n", err)
-			return exitWithSentinel(1)
-		}
-		defer removePIDFile(*pidFile, os.Getpid())
-	}
-	if *resultFile != "" {
-		// An answer from an earlier run must not outlive this one.
-		removeOrLog(*resultFile, stderr)
 	}
 
 	if workflowMode {
@@ -343,6 +332,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "avenor: --result-file is not supported with --loop-file or --team-file")
 		return exitWithSentinel(1)
 	}
+	if err := validateArtifactPaths(*resultFile, *pidFile, *sentinelFile); err != nil {
+		fmt.Fprintf(stderr, "avenor: %v\n", err)
+		return exitWithSentinel(1)
+	}
 	if *loopFile != "" && *resume != "" {
 		fmt.Fprintln(stderr, "avenor: --loop-file and --resume are mutually exclusive")
 		return exitWithSentinel(1)
@@ -358,6 +351,21 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 	effectivePermHandler := effectivePermissionHandler(*sentinelFile, *permissionHandler, *autoApprove)
 	cleanupPermBase := permissionCleanupBase(*sentinelFile, *permissionHandler)
+
+	// Artifact files are written only after every flag has been accepted, so a
+	// rejected invocation neither creates a pid file nor deletes a caller's
+	// earlier answer.
+	if *pidFile != "" {
+		if err := writePIDFile(*pidFile); err != nil {
+			fmt.Fprintf(stderr, "avenor: pid-file: %v\n", err)
+			return exitWithSentinel(1)
+		}
+		defer removePIDFile(*pidFile, os.Getpid())
+	}
+	if *resultFile != "" {
+		// An answer from an earlier run must not outlive this one.
+		removeOrLog(*resultFile, stderr)
+	}
 
 	// Pre-run cleanup: truncate event log and remove stale sentinel/perm files.
 	// Only when --sentinel-file is active to avoid changing behavior for callers
@@ -391,7 +399,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	var controlServer *control.ControlServer
 	var httpServer *control.HTTPDebugServer
 	if *controlSocket != "" {
-		controlServer = control.NewServer(state)
+		controlServer = newControlServer(state)
 		if err := controlServer.Start(*controlSocket); err != nil {
 			fmt.Fprintf(stderr, "avenor: start control server: %v\n", err)
 			return exitWithSentinel(1)
@@ -400,7 +408,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 	if *httpDebug != "" {
 		if controlServer == nil {
-			controlServer = control.NewServer(state)
+			controlServer = newControlServer(state)
 		}
 		httpServer, err = control.NewHTTPDebugServer(*httpDebug, controlServer)
 		if err != nil {
@@ -447,7 +455,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		Thinking:  *thinking,
 	}
 
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	if controlServer != nil {
 		controlServer.SetCancelFunc(stopSignals)
@@ -994,6 +1002,7 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 
 var runAttempt = runSingleAttempt
 var retryAfter = time.After
+var newControlServer = control.NewServer
 
 // deadlineFromContext returns the context's deadline, or the zero time when
 // the context carries none.

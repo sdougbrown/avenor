@@ -81,15 +81,24 @@ turn). The file is written atomically before the sentinel, so a reader that
 waits for the sentinel never sees a partial answer, and the sentinel then ends
 with `RESULT=<path>`. A failed run still writes the final text it settled
 with; a run that ends with no final message writes no file and no `RESULT=`
-line. An answer left by an earlier run
-at the same path is removed when the run starts.
+line. An answer left by an earlier run at the same path is removed when the
+run starts.
 
-`--pid-file <path>` writes the run's own pid at startup and removes the file
-when the run exits. Launch wrappers cannot supply a trustworthy pid: `setsid`
+`--pid-file <path>` writes the run's own pid once the flags are accepted and
+removes the file when the run exits, including on SIGINT and SIGTERM: the run
+traps both, writes its result and sentinel, and only then removes the pid file.
+A SIGKILL or a crash skips that cleanup and leaves a stale pid file behind, and
+the kernel recycles pids, so `kill -0 $(cat run.pid)` alone can report an
+unrelated process as live. Check the process identity before signalling —
+compare `/proc/<pid>/cmdline` against the launched command, or wait for the
+sentinel instead. Launch wrappers cannot supply a trustworthy pid: `setsid`
 forks when the caller leads a process group, so a recorded `$!` can name a
 shell that already exited while the run continues. Letting the run publish its
-pid avoids that; a waiter polls `kill -0 $(cat run.pid)`. The pid file is only
-removed by the run that wrote it.
+pid avoids that. The pid file is only removed by the run that wrote it.
+
+`--result-file`, `--pid-file` and `--sentinel-file` must name distinct paths,
+and the result and pid paths must be single-line. An invocation rejected by
+flag validation creates none of them and leaves an earlier answer untouched.
 
 ```sh
 avenor run --prompt-file my-prompt.txt --label "data-prep" \

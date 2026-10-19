@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -135,37 +134,15 @@ func sessionEndFields(eventLogPath string) (sessionID, stopReason string) {
 	return sessionID, stopReason
 }
 
-// WriteSentinelResult writes the completion sentinel file at path using an
-// atomic tmp+rename strategy, with an optional reason line (used for exit code
-// 5 "blocked" sentinels), an optional provider retry-after hint in seconds, and
+// WriteSentinelResult writes the completion sentinel file at path through the
+// shared atomic write, with an optional reason line (used for exit code 5
+// "blocked" sentinels), an optional provider retry-after hint in seconds, and
 // an optional result file to expose as RESULT=. Errors are logged to stderr but
 // never affect the caller's exit code.
 func WriteSentinelResult(path string, exitCode int, sessionID, stopReason, runID string, retryAfter int64, reason, resultPath string, stderr io.Writer) {
 	content := sentinelContent(exitCode, sessionID, stopReason, runID, retryAfter, reason, resultPath)
-
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".sentinel-*.tmp")
-	if err != nil {
-		fmt.Fprintf(stderr, "avenor: sentinel: create tmp: %v\n", err)
-		return
-	}
-	tmpPath := tmp.Name()
-
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		fmt.Fprintf(stderr, "avenor: sentinel: write tmp: %v\n", err)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		fmt.Fprintf(stderr, "avenor: sentinel: close tmp: %v\n", err)
-		return
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		fmt.Fprintf(stderr, "avenor: sentinel: rename: %v\n", err)
-		return
+	if err := writeFileAtomic(path, ".sentinel-*.tmp", content); err != nil {
+		fmt.Fprintf(stderr, "avenor: sentinel: %v\n", err)
 	}
 }
 
