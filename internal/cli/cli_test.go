@@ -243,10 +243,34 @@ type scriptedSession struct {
 	events chan events.Event
 }
 
+// scriptedTurn is one Prompt turn and the event it ends with. finalOutput rides
+// session.end as final_output, the run's final text even when the reply chunks
+// say otherwise.
+type scriptedTurn struct {
+	chunk       string
+	stopReason  string
+	finalOutput string
+}
+
+func scriptedChunk(sessionID, text string) events.Event {
+	return events.Event{Event: "agent.message_chunk", SessionID: sessionID, Fields: map[string]any{"content": map[string]any{"text": text}}}
+}
+
 type scriptedProvider struct {
 	mu       sync.Mutex
 	nextID   int
 	sessions map[string]*scriptedSession
+	// turns, when set, serves one scripted turn per Prompt, in order.
+	turns []scriptedTurn
+	next  int
+	// promptStarted receives after a turn's chunks are queued; release holds the
+	// turn open until it is closed.
+	promptStarted chan<- struct{}
+	release       <-chan struct{}
+	// startStarted receives once Start is entered; blockStart keeps Start waiting
+	// on its context, so a test can signal while the first session starts.
+	startStarted chan<- struct{}
+	blockStart   bool
 }
 
 func newScriptedProvider() *scriptedProvider {
@@ -254,6 +278,16 @@ func newScriptedProvider() *scriptedProvider {
 }
 
 func (p *scriptedProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	p.mu.Lock()
+	started, block := p.startStarted, p.blockStart
+	p.mu.Unlock()
+	if started != nil {
+		started <- struct{}{}
+	}
+	if block {
+		<-ctx.Done()
+		return runtime.Session{}, ctx.Err()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.nextID++
@@ -268,20 +302,49 @@ func (p *scriptedProvider) Start(ctx context.Context, opts runtime.StartOptions)
 func (p *scriptedProvider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.sessions[sessionID]; !ok {
+	session, ok := p.sessions[sessionID]
+	if !ok {
 		return runtime.Session{}, fmt.Errorf("unknown session %q", sessionID)
 	}
+	// Each resume opens a fresh subscription for the turn it serves.
+	session.events = make(chan events.Event, 8)
 	return runtime.Session{SessionID: sessionID}, nil
 }
 
 func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt string) error {
 	p.mu.Lock()
 	session, ok := p.sessions[sessionID]
+	var turn scriptedTurn
+	scripted := p.next < len(p.turns)
+	if scripted {
+		turn = p.turns[p.next]
+		p.next++
+	}
+	started, release := p.promptStarted, p.release
 	p.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown session %q", sessionID)
 	}
 	session.prompt = prompt
+
+	if scripted {
+		if turn.chunk != "" {
+			session.events <- scriptedChunk(sessionID, turn.chunk)
+		}
+		if started != nil {
+			started <- struct{}{}
+		}
+		if release != nil {
+			<-release
+		}
+		fields := map[string]any{"stop_reason": turn.stopReason}
+		if turn.finalOutput != "" {
+			fields["final_output"] = turn.finalOutput
+		}
+		session.events <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
+		close(session.events)
+		return nil
+	}
 
 	var reply string
 	switch {
@@ -295,13 +358,7 @@ func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt 
 		reply = "ok"
 	}
 
-	session.events <- events.Event{
-		Event:     "agent.message_chunk",
-		SessionID: sessionID,
-		Fields: map[string]any{
-			"content": map[string]any{"text": reply},
-		},
-	}
+	session.events <- scriptedChunk(sessionID, reply)
 	session.events <- events.Event{
 		Event:     "session.end",
 		SessionID: sessionID,
@@ -342,6 +399,34 @@ func (p *scriptedProvider) snapshotSessions() []scriptedSession {
 		})
 	}
 	return out
+}
+
+// runOutcome is a finished run's exit code and stderr.
+type runOutcome struct {
+	code   int
+	stderr string
+}
+
+// runAsync starts a run in a goroutine so a test can drive its artifacts while
+// it is live.
+func runAsync(args ...string) <-chan runOutcome {
+	done := make(chan runOutcome, 1)
+	go func() {
+		var stderr strings.Builder
+		done <- runOutcome{run(args, func(string) string { return "" }, &stderr), stderr.String()}
+	}()
+	return done
+}
+
+func awaitRun(t *testing.T, done <-chan runOutcome, what string) runOutcome {
+	t.Helper()
+	select {
+	case got := <-done:
+		return got
+	case <-time.After(10 * time.Second):
+		t.Fatalf("run did not finish after %s", what)
+		return runOutcome{}
+	}
 }
 
 func waitForSessionForTest(
@@ -389,6 +474,45 @@ func shortControlSocketPath(t *testing.T) string {
 	return filepath.Join(dir, "control.sock")
 }
 
+// promptOverControl queues a prompt through a run's control socket and waits
+// for the reply.
+func promptOverControl(t *testing.T, path, text string) {
+	t.Helper()
+	params, _ := json.Marshal(map[string]string{"text": text})
+	body, _ := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "prompt", Params: params})
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(append(body, '\n')); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	var resp control.Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil || resp.Error != nil {
+		t.Fatalf("prompt response = %+v, %v", resp, err)
+	}
+}
+
+// cancelOverControl cancels a run through its control socket and waits for the
+// reply. The first client to connect owns the socket, so this client owns it.
+func cancelOverControl(t *testing.T, path string) {
+	t.Helper()
+	body, _ := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "cancel"})
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(append(body, '\n')); err != nil {
+		t.Fatalf("write cancel: %v", err)
+	}
+	var resp control.Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil || resp.Error != nil {
+		t.Fatalf("cancel response = %+v, %v", resp, err)
+	}
+}
+
 func waitForPendingPermissionForTest(t *testing.T, cs *control.ControlServer) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -414,6 +538,28 @@ func waitForControlClientForTest(t *testing.T, cs *control.ControlServer) {
 			t.Fatal("timed out waiting for control client")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestNewEventWriterTightensEventLog pins the event log's owner-only mode: the
+// stream carries prompt and turn content, and a leftover file keeps its wider
+// mode through O_TRUNC unless the opened file is tightened.
+func TestNewEventWriterTightensEventLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("seed event log: %v", err)
+	}
+	writer, err := NewEventWriter(path)
+	if err != nil {
+		t.Fatalf("NewEventWriter: %v", err)
+	}
+	defer writer.Close()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat event log: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("event log mode = %o, want 0600", got)
 	}
 }
 
@@ -1130,6 +1276,25 @@ func TestRunRejectsTeamFileAndResume(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--team-file and --resume are mutually exclusive") {
 		t.Fatalf("stderr = %q, want mutual exclusion error", stderr.String())
+	}
+}
+
+func TestRunRejectsResultFileInWorkflowMode(t *testing.T) {
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.txt")
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--loop-file", filepath.Join(dir, "loop.json"),
+		"--result-file", resultPath,
+	}, func(string) string { return "" }, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("run() = %d, want 1; stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--result-file is not supported") {
+		t.Fatalf("stderr = %q, want result-file rejection", stderr.String())
+	}
+	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
+		t.Fatalf("result file exists after a rejected run: %v", err)
 	}
 }
 
@@ -3557,6 +3722,45 @@ func TestAutoAnswerWorkingStatusEmittedOnPermissionResume(t *testing.T) {
 	}
 	if !workingAfterRequest {
 		t.Fatalf("agent.status working not emitted after permission resolved; events: %+v", got)
+	}
+}
+
+// TestRunResultFileControlPromptTurn queues a prompt through the run's own
+// control socket while a first turn is open: the result file must hold the last
+// turn's final output, not the first turn's text or the accumulated reply.
+func TestRunResultFileControlPromptTurn(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	releaseTurn := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseTurn)
+	provider := newScriptedProvider()
+	provider.turns = []scriptedTurn{
+		{chunk: "first draft", stopReason: "end_turn"},
+		{chunk: "second draft", stopReason: "end_turn", finalOutput: "authoritative answer"},
+	}
+	provider.promptStarted, provider.release = started, release
+	stubProvider(t, provider)
+
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.txt")
+	sentinelPath := filepath.Join(dir, "run.done")
+	socketPath := shortControlSocketPath(t)
+	done := runAsync("--prompt", "hi", "--backend", "pi", "--control-socket", socketPath,
+		"--result-file", resultPath, "--sentinel-file", sentinelPath)
+
+	waitForTest(t, "the first turn", started)
+	// The prompt is queued before the first turn ends, so the run's own turn
+	// loop is what selects the second answer.
+	promptOverControl(t, socketPath, "second question")
+	releaseTurn()
+
+	if got := awaitRun(t, done, "the queued prompt"); got.code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", got.code, got.stderr)
+	}
+	requireFile(t, resultPath, "authoritative answer")
+	sentinel, err := os.ReadFile(sentinelPath)
+	if err != nil || !strings.Contains(string(sentinel), "RESULT="+resultPath+"\n") {
+		t.Fatalf("sentinel = %q, %v; want RESULT=%s", sentinel, err, resultPath)
 	}
 }
 

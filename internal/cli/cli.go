@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/control"
@@ -97,6 +98,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	onEvent := fs.String("on-event", "", "path to write NDJSON events (optional; events are discarded if unset)")
 	permissionHandler := fs.String("permission-handler", "", "permission handler, supports file:<path>")
 	sentinelFile := fs.String("sentinel-file", "", "path to write a completion sentinel (also derives permission base unless --permission-handler is set)")
+	resultFile := fs.String("result-file", "", "path to write the run's final assistant message as plain text (direct runs only; written before the sentinel)")
+	pidFile := fs.String("pid-file", "", "path to write this process's pid at startup (removed on exit)")
 	timeout := fs.Duration("timeout", 0, "overall session timeout")
 	progressTimeout := fs.Duration("progress-timeout", 0, "session progress timeout (fires if no event for duration)")
 	model := fs.String("model", "", "backend-specific model id")
@@ -136,14 +139,23 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	var finalSessionID string
 	var finalStopReason string
 	var finalRetryAfter int64
+	var finalResult string
 
 	exitWithSentinel := func(code int) int {
+		resultPath := ""
+		if *resultFile != "" && finalResult != "" {
+			if err := writeResultFile(*resultFile, finalResult); err != nil {
+				fmt.Fprintf(stderr, "avenor: result-file: %v\n", err)
+			} else {
+				resultPath = *resultFile
+			}
+		}
 		if *sentinelFile != "" {
 			sr := finalStopReason
 			if sr == "" {
 				sr = runtime.StopReasonForExitCode(code)
 			}
-			WriteSentinelResult(*sentinelFile, code, finalSessionID, sr, runID, finalRetryAfter, "", stderr)
+			WriteSentinelResult(*sentinelFile, code, finalSessionID, sr, runID, finalRetryAfter, "", resultPath, stderr)
 		}
 		return code
 	}
@@ -316,6 +328,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "avenor: --loop-file and --team-file are mutually exclusive")
 		return exitWithSentinel(1)
 	}
+	if *resultFile != "" && workflowMode {
+		fmt.Fprintln(stderr, "avenor: --result-file is not supported with --loop-file or --team-file")
+		return exitWithSentinel(1)
+	}
+	if err := validateArtifactPaths(*resultFile, *pidFile, *sentinelFile, *onEvent, *permissionHandler, *autoApprove); err != nil {
+		fmt.Fprintf(stderr, "avenor: %v\n", err)
+		return exitWithSentinel(1)
+	}
 	if *loopFile != "" && *resume != "" {
 		fmt.Fprintln(stderr, "avenor: --loop-file and --resume are mutually exclusive")
 		return exitWithSentinel(1)
@@ -331,6 +351,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 	effectivePermHandler := effectivePermissionHandler(*sentinelFile, *permissionHandler, *autoApprove)
 	cleanupPermBase := permissionCleanupBase(*sentinelFile, *permissionHandler)
+
+	// The signal trap is installed before the pid file is published, so a
+	// first signal landing during setup still has a cleanup path. Once the
+	// signal has cancelled the trap context, stopSignals restores the default
+	// disposition so a second signal still ends a teardown that will not finish.
+	// The run context is derived from the trap context so a control-plane cancel
+	// stops the run without unregistering the trap: a signal arriving during that
+	// teardown is still handled, and only a signal restores the default.
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	stopAfterCancel := context.AfterFunc(signalCtx, stopSignals)
+	defer stopAfterCancel()
+	ctx, cancelRun := context.WithCancel(signalCtx)
+	defer cancelRun()
 
 	// Pre-run cleanup: truncate event log and remove stale sentinel/perm files.
 	// Only when --sentinel-file is active to avoid changing behavior for callers
@@ -420,10 +454,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		Thinking:  *thinking,
 	}
 
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stopSignals()
 	if controlServer != nil {
-		controlServer.SetCancelFunc(stopSignals)
+		controlServer.SetCancelFunc(cancelRun)
 	}
 
 	// The run deadline (not a one-shot timer) bounds every attempt, retry,
@@ -432,9 +464,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	// only tick and no later attempt can outlive the limit.
 	runCtx := ctx
 	if *timeout > 0 {
-		var cancelRun context.CancelFunc
-		runCtx, cancelRun = context.WithDeadline(ctx, time.Now().Add(*timeout))
-		defer cancelRun()
+		var cancelDeadline context.CancelFunc
+		runCtx, cancelDeadline = context.WithDeadline(ctx, time.Now().Add(*timeout))
+		defer cancelDeadline()
 	}
 
 	// Stable supervisor metadata is unavailable in this execution path. Keep
@@ -715,6 +747,12 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			NestedRun:    nestedRun,
 		}
 
+		stopPID, ok := publishPIDFile(*pidFile, stderr)
+		if !ok {
+			return exitWithSentinel(1)
+		}
+		defer stopPID()
+
 		lrCtx, lrCancel := context.WithCancel(runCtx)
 		defer lrCancel()
 
@@ -839,6 +877,12 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			NestedRun:    nestedRun,
 		}
 
+		stopPID, ok := publishPIDFile(*pidFile, stderr)
+		if !ok {
+			return exitWithSentinel(1)
+		}
+		defer stopPID()
+
 		trCtx, trCancel := context.WithCancel(runCtx)
 		defer trCancel()
 
@@ -853,18 +897,38 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 		if *sentinelFile != "" {
 			if result.Reason != "" {
-				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, stderr)
+				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, "", stderr)
 			} else {
-				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", stderr)
+				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", "", stderr)
 			}
 		}
 
 		return result.ExitCode
 	}
 
+	// The pid file is published once every setup step that can fail has passed,
+	// so a rejected invocation never touches a pid file another run owns.
+	stopPID, ok := publishPIDFile(*pidFile, stderr)
+	if !ok {
+		return exitWithSentinel(1)
+	}
+	defer stopPID()
+
 	resumeID := *resume
+	// A cancelled or timed-out run stopped mid-answer, so the reply collected so
+	// far is not the run's final message and must not be published.
+	exitForRunContext := func(code int, stopReason string) int {
+		finalStopReason = stopReason
+		finalResult = ""
+		return exitWithSentinel(code)
+	}
 	var result attemptResult
 	for attempt := 1; ; attempt++ {
+		// A signal can land between the trap and the first session, so the run
+		// context decides the outcome before an attempt starts.
+		if code, stopReason, done := runContextOutcome(runCtx); done {
+			return exitForRunContext(code, stopReason)
+		}
 		if controlServer != nil {
 			state.Update(func(s *control.Snapshot) { s.RetryAttempt = attempt })
 		}
@@ -876,6 +940,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			resumeID:               resumeID,
 			sessionBackends:        sessionBackends,
 			initialPrompt:          string(promptText),
+			resultFile:             *resultFile,
 			runID:                  runID,
 			runLabel:               *label,
 			autoApprove:            *autoApprove,
@@ -890,6 +955,15 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		finalSessionID = result.sessionID
 		finalStopReason = result.stopReason
 		finalRetryAfter = result.retryAfter
+		finalResult = settledResultText(result)
+
+		// An attempt that failed while the run context was already finished
+		// reports the cancel or the deadline, not a failed attempt.
+		if result.exitCode != 0 {
+			if code, stopReason, done := runContextOutcome(runCtx); done {
+				return exitForRunContext(code, stopReason)
+			}
+		}
 
 		if result.err != nil || !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > *maxRetries {
 			break
@@ -917,10 +991,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		select {
 		case <-wait:
 		case <-runCtx.Done():
-			if runCtx.Err() == context.DeadlineExceeded {
-				return exitWithSentinel(124)
-			}
-			return exitWithSentinel(130)
+			// The loop's context check reports the stop; do not start another
+			// attempt after the run context finished.
+			continue
 		}
 	}
 
@@ -974,6 +1047,19 @@ func deadlineFromContext(ctx context.Context) time.Time {
 	return deadline
 }
 
+// runContextOutcome maps a finished run context to the run's outcome: a
+// cancelled signal ends the run at 130, an expired --timeout at 124. It reports
+// false while the context is still live.
+func runContextOutcome(ctx context.Context) (int, string, bool) {
+	switch ctx.Err() {
+	case context.Canceled:
+		return 130, runtime.StopReasonForExitCode(130), true
+	case context.DeadlineExceeded:
+		return 124, runtime.StopReasonForExitCode(124), true
+	}
+	return 0, "", false
+}
+
 func effectivePermissionHandler(sentinelPath, permissionHandler string, autoApprove bool) string {
 	if permissionHandler != "" {
 		return permissionHandler
@@ -1000,9 +1086,9 @@ func writeSentinelForResult(result looprunner.RunResult, sentinelFile, runID str
 		return
 	}
 	if result.Reason != "" {
-		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, stderr)
+		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, "", stderr)
 	} else {
-		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", stderr)
+		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", "", stderr)
 	}
 }
 
@@ -1026,8 +1112,12 @@ type sessionResult struct {
 	LoopDirective string
 	LoopLabel     string
 	Output        string
-	FinalReply    string
-	Usage         map[string]any
+	// FinalOutput is the run's final assistant message: the provider's
+	// session.end final_output when it supplied one, otherwise the text
+	// accumulated from the terminal turn.
+	FinalOutput string
+	FinalReply  string
+	Usage       map[string]any
 }
 
 type SessionWaitConfig struct {
@@ -1101,6 +1191,8 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var output strings.Builder
 	var finalReply strings.Builder
 	var fullReply strings.Builder
+	var sessionEndFinalOutput string
+	var sessionEndFinalOutputSet bool
 	eventChClosed := false
 	// interruptedToolFailure records a tool call the backend aborted
 	// (tool.call_update status=failed with rawOutput.metadata.interrupted).
@@ -1187,7 +1279,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		// Surface the authoritative stop reason: callers derive the sentinel's
 		// classification from it, and an empty value degrades to exit_1 even
 		// when session.end named the real reason.
-		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, RetryAfter: finalRetryAfter, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
+		finalOutput := fullReply.String()
+		if sessionEndFinalOutputSet {
+			finalOutput = sessionEndFinalOutput
+		}
+		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, RetryAfter: finalRetryAfter, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalOutput: finalOutput, FinalReply: finalReply.String(), Usage: bufferedUsage}
 	}
 	// flushTerminal settles the turn and writes its authoritative session.end.
 	// The held terminal record's provider text and the prompt error describe the
@@ -1233,6 +1329,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		}
 		if _, ok := event.Fields["final_output"]; !ok && fullReply.Len() > 0 {
 			event.Fields["final_output"] = fullReply.String()
+		}
+		// The held terminal record is the run's last word, so its final_output
+		// is the message --result-file may publish.
+		if text, ok := event.Fields["final_output"].(string); ok {
+			sessionEndFinalOutput, sessionEndFinalOutputSet = text, true
 		}
 		if err := deps.Writer.Write(event); err != nil {
 			fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
@@ -1646,7 +1747,7 @@ func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string,
 		fmt.Fprintf(stderr, "avenor: write terminal event: %v\n", err)
 		return sessionResult{ExitCode: 1}
 	}
-	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, RetryAfter: retryAfter, Output: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
+	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, RetryAfter: retryAfter, Output: fullFinalOutput, FinalOutput: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
 }
 
 type eventWriter struct {
@@ -2034,8 +2135,20 @@ func NewEventWriter(path string) (*eventWriter, error) {
 	if path == "" {
 		return &eventWriter{encoder: json.NewEncoder(io.Discard)}, nil
 	}
-	file, err := os.Create(path)
+	// O_NOFOLLOW refuses a final symlink, so a link left at --on-event cannot
+	// redirect this run's event log into another artifact's file. The log
+	// carries prompt and turn content, so it is owner-only like every other run
+	// artifact; O_TRUNC keeps a leftover file's mode, so the opened file is
+	// tightened as well.
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("event log path %s is a symlink; symlinks are refused", path)
+		}
+		return nil, err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
 		return nil, err
 	}
 	return &eventWriter{

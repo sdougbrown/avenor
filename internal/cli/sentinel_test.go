@@ -73,6 +73,7 @@ func TestSentinelContent(t *testing.T) {
 		runID      string
 		retryAfter int64
 		reason     string
+		resultPath string
 		want       string
 	}{
 		{
@@ -89,6 +90,14 @@ func TestSentinelContent(t *testing.T) {
 			stopReason: "end_turn",
 			runID:      "a1b2c3d4e5f60718",
 			want:       "DONE\nSESSION=ses_abc123\nSTOP_REASON=end_turn\nRUN=a1b2c3d4e5f60718\n",
+		},
+		{
+			name:       "exit 0 with result path",
+			exitCode:   0,
+			sessionID:  "ses_abc123",
+			stopReason: "end_turn",
+			resultPath: "/tmp/run/result.txt",
+			want:       "DONE\nSESSION=ses_abc123\nSTOP_REASON=end_turn\nRESULT=/tmp/run/result.txt\n",
 		},
 		{
 			name:       "run id newlines cannot inject sentinel lines",
@@ -247,10 +256,10 @@ func TestSentinelContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sentinelContent(tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.retryAfter, tt.reason)
+			got := sentinelContent(tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.retryAfter, tt.reason, tt.resultPath)
 			if got != tt.want {
-				t.Errorf("sentinelContent(%d, %q, %q, %q, %d, %q):\n got: %q\nwant: %q",
-					tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.retryAfter, tt.reason, got, tt.want)
+				t.Errorf("sentinelContent(%d, %q, %q, %q, %d, %q, %q):\n got: %q\nwant: %q",
+					tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.retryAfter, tt.reason, tt.resultPath, got, tt.want)
 			}
 		})
 	}
@@ -421,7 +430,7 @@ func TestWriteSentinelResult(t *testing.T) {
 		sentPath := filepath.Join(dir, "run.done")
 
 		var stderr strings.Builder
-		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "", 0, "", &stderr)
+		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "", 0, "", "", &stderr)
 
 		if stderr.Len() > 0 {
 			t.Errorf("unexpected stderr: %s", stderr.String())
@@ -443,7 +452,7 @@ func TestWriteSentinelResult(t *testing.T) {
 
 		var stderr strings.Builder
 		reason := "architectural issue: layering violation in pkg/db"
-		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "", 0, reason, &stderr)
+		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "", 0, reason, "", &stderr)
 
 		if stderr.Len() > 0 {
 			t.Errorf("unexpected stderr: %s", stderr.String())
@@ -464,7 +473,7 @@ func TestWriteSentinelResult(t *testing.T) {
 		sentPath := filepath.Join(dir, "run.done")
 
 		var stderr strings.Builder
-		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "deadbeefcafe0004", 0, "loop limit exceeded", &stderr)
+		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "deadbeefcafe0004", 0, "loop limit exceeded", "", &stderr)
 
 		if stderr.Len() > 0 {
 			t.Errorf("unexpected stderr: %s", stderr.String())

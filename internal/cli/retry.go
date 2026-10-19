@@ -25,6 +25,7 @@ type attemptResult struct {
 	loopDirective string
 	loopLabel     string
 	output        string
+	finalOutput   string
 	finalReply    string
 	usage         map[string]any
 	err           error
@@ -36,6 +37,7 @@ type attemptConfig struct {
 	resumeID               string
 	sessionBackends        *sessionBackendMap
 	initialPrompt          string
+	resultFile             string
 	runID                  string
 	runLabel               string
 	autoApprove            bool
@@ -54,6 +56,21 @@ type attemptDeps struct {
 // prompt can be sent without respawning the provider.
 func resumeSession(ctx context.Context, provider runtime.Provider, backend string, opts runtime.StartOptions, sessionID string) (runtime.Session, error) {
 	return StartSession(ctx, provider, backend, opts, sessionID)
+}
+
+// settledResultText is the text --result-file may publish: the final message of
+// a run whose last turn settled on the backend's terminal event. A cancelled or
+// timed-out run stopped mid-answer, and an attempt or resume that failed never
+// reached that event, so none of them has a final message for a reader.
+func settledResultText(outcome attemptResult) string {
+	if outcome.err != nil {
+		return ""
+	}
+	switch outcome.stopReason {
+	case "", "cancelled", "timeout", "progress_timeout":
+		return ""
+	}
+	return outcome.finalOutput
 }
 
 // runSingleAttempt creates a fresh provider, starts or resumes a session,
@@ -111,6 +128,13 @@ func runSingleAttempt(
 				return attemptResult{exitCode: 1, sessionID: session.SessionID}
 			}
 		}
+	}
+
+	// The attempt is about to send its first prompt, so an answer from an
+	// earlier run at the same path must not outlive this one. A run whose
+	// provider or session never started leaves that answer alone.
+	if cfg.resultFile != "" {
+		removeOrLog(cfg.resultFile, deps.stderr)
 	}
 
 	var accDirective string
@@ -180,7 +204,7 @@ func runSingleAttempt(
 		// An authoritative ID conflict invalidates this attempt. Do not service
 		// queued control prompts by resuming its provisional session ID.
 		if result.StopReason == runtime.SessionIDConflictStopReason {
-			return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
+			return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalOutput: result.FinalOutput, finalReply: result.FinalReply, usage: result.Usage}
 		}
 
 		if deps.controlServer != nil {
@@ -189,6 +213,8 @@ func runSingleAttempt(
 			if interruptText := deps.controlServer.ConsumeInterrupt(); interruptText != "" {
 				if _, err := resumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
 					fmt.Fprintf(deps.stderr, "avenor: resume after cancel: %v\n", err)
+					// A failed resume leaves the interrupted reply a prefix, not a
+					// final message.
 					return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
 				}
 				prompt = interruptText
@@ -206,7 +232,7 @@ func runSingleAttempt(
 			}
 		}
 
-		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, retryAfter: result.RetryAfter, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
+		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, retryAfter: result.RetryAfter, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalOutput: result.FinalOutput, finalReply: result.FinalReply, usage: result.Usage}
 	}
 }
 

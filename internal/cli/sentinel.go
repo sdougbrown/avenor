@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -28,23 +27,27 @@ func DerivePermBase(sentinelPath string) string {
 //
 // Exit code semantics:
 //
-//	0   → DONE\nSESSION=...\nSTOP_REASON=...\n[RETRY_AFTER=...\n][RUN=...\n]
-//	5   → BLOCKED\nSESSION=...\nSTOP_REASON=blocked\n[REASON=...\n][RETRY_AFTER=...\n][RUN=...\n]
-//	124 → TIMEOUT\nSESSION=...\nSTOP_REASON=...\n[RETRY_AFTER=...\n][RUN=...\n]
-//	130 → KILLED\nSESSION=...\nSTOP_REASON=...\nEXIT_CODE=130\n[RETRY_AFTER=...\n][RUN=...\n]
-//	N   → FAILED\nSESSION=...\nSTOP_REASON=...\nEXIT_CODE=N\n[RETRY_AFTER=...\n][RUN=...\n]
+//	0   → DONE\nSESSION=...\nSTOP_REASON=...\n[RETRY_AFTER=...\n][RUN=...\n][RESULT=...\n]
+//	5   → BLOCKED\nSESSION=...\nSTOP_REASON=blocked\n[REASON=...\n][RETRY_AFTER=...\n][RUN=...\n][RESULT=...\n]
+//	124 → TIMEOUT\nSESSION=...\nSTOP_REASON=...\n[RETRY_AFTER=...\n][RUN=...\n][RESULT=...\n]
+//	130 → KILLED\nSESSION=...\nSTOP_REASON=...\nEXIT_CODE=130\n[RETRY_AFTER=...\n][RUN=...\n][RESULT=...\n]
+//	N   → FAILED\nSESSION=...\nSTOP_REASON=...\nEXIT_CODE=N\n[RETRY_AFTER=...\n][RUN=...\n][RESULT=...\n]
 //
 // The RUN= line is omitted when runID is empty.
 // The REASON= line is only emitted for exit code 5 and only when reason is non-empty.
 // The RETRY_AFTER= line is emitted only when the provider supplied a hint.
-func sentinelContent(exitCode int, sessionID, stopReason, runID string, retryAfter int64, reason string) string {
+// The RESULT= line is omitted unless resultPath names a result file that was written.
+func sentinelContent(exitCode int, sessionID, stopReason, runID string, retryAfter int64, reason, resultPath string) string {
 	// The format is line-oriented, so no provider- or agent-supplied value may
 	// carry its own newline.
 	sessionID = sentinelLineValue(sessionID)
 	stopReason = sentinelLineValue(stopReason)
-	run := ""
+	trailer := ""
 	if runID != "" {
-		run = "RUN=" + sentinelLineValue(runID) + "\n"
+		trailer = "RUN=" + sentinelLineValue(runID) + "\n"
+	}
+	if resultPath != "" {
+		trailer += "RESULT=" + sentinelLineValue(resultPath) + "\n"
 	}
 	retry := ""
 	if retryAfter > 0 {
@@ -55,29 +58,29 @@ func sentinelContent(exitCode int, sessionID, stopReason, runID string, retryAft
 		if stopReason == "" {
 			stopReason = "end_turn"
 		}
-		return fmt.Sprintf("DONE\nSESSION=%s\nSTOP_REASON=%s\n%s%s", sessionID, stopReason, retry, run)
+		return fmt.Sprintf("DONE\nSESSION=%s\nSTOP_REASON=%s\n%s%s", sessionID, stopReason, retry, trailer)
 	case 5:
 		blockedStop := "blocked"
 		reasonLine := ""
 		if reason != "" {
 			reasonLine = "REASON=" + sentinelLineValue(reason) + "\n"
 		}
-		return fmt.Sprintf("BLOCKED\nSESSION=%s\nSTOP_REASON=%s\n%s%s%s", sessionID, blockedStop, reasonLine, retry, run)
+		return fmt.Sprintf("BLOCKED\nSESSION=%s\nSTOP_REASON=%s\n%s%s%s", sessionID, blockedStop, reasonLine, retry, trailer)
 	case 124:
 		if stopReason == "" {
 			stopReason = "timeout"
 		}
-		return fmt.Sprintf("TIMEOUT\nSESSION=%s\nSTOP_REASON=%s\n%s%s", sessionID, stopReason, retry, run)
+		return fmt.Sprintf("TIMEOUT\nSESSION=%s\nSTOP_REASON=%s\n%s%s", sessionID, stopReason, retry, trailer)
 	case 130:
 		if stopReason == "" {
 			stopReason = "cancelled"
 		}
-		return fmt.Sprintf("KILLED\nSESSION=%s\nSTOP_REASON=%s\nEXIT_CODE=130\n%s%s", sessionID, stopReason, retry, run)
+		return fmt.Sprintf("KILLED\nSESSION=%s\nSTOP_REASON=%s\nEXIT_CODE=130\n%s%s", sessionID, stopReason, retry, trailer)
 	default:
 		if stopReason == "" {
 			stopReason = fmt.Sprintf("exit_%d", exitCode)
 		}
-		return fmt.Sprintf("FAILED\nSESSION=%s\nSTOP_REASON=%s\nEXIT_CODE=%d\n%s%s", sessionID, stopReason, exitCode, retry, run)
+		return fmt.Sprintf("FAILED\nSESSION=%s\nSTOP_REASON=%s\nEXIT_CODE=%d\n%s%s", sessionID, stopReason, exitCode, retry, trailer)
 	}
 }
 
@@ -131,36 +134,15 @@ func sessionEndFields(eventLogPath string) (sessionID, stopReason string) {
 	return sessionID, stopReason
 }
 
-// WriteSentinelResult writes the completion sentinel file at path using an
-// atomic tmp+rename strategy, with an optional reason line (used for exit code
-// 5 "blocked" sentinels) and an optional provider retry-after hint in seconds.
-// Errors are logged to stderr but never affect the caller's exit code.
-func WriteSentinelResult(path string, exitCode int, sessionID, stopReason, runID string, retryAfter int64, reason string, stderr io.Writer) {
-	content := sentinelContent(exitCode, sessionID, stopReason, runID, retryAfter, reason)
-
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".sentinel-*.tmp")
-	if err != nil {
-		fmt.Fprintf(stderr, "avenor: sentinel: create tmp: %v\n", err)
-		return
-	}
-	tmpPath := tmp.Name()
-
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		fmt.Fprintf(stderr, "avenor: sentinel: write tmp: %v\n", err)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		fmt.Fprintf(stderr, "avenor: sentinel: close tmp: %v\n", err)
-		return
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		fmt.Fprintf(stderr, "avenor: sentinel: rename: %v\n", err)
-		return
+// WriteSentinelResult writes the completion sentinel file at path through the
+// shared atomic write, with an optional reason line (used for exit code 5
+// "blocked" sentinels), an optional provider retry-after hint in seconds, and
+// an optional result file to expose as RESULT=. Errors are logged to stderr but
+// never affect the caller's exit code.
+func WriteSentinelResult(path string, exitCode int, sessionID, stopReason, runID string, retryAfter int64, reason, resultPath string, stderr io.Writer) {
+	content := sentinelContent(exitCode, sessionID, stopReason, runID, retryAfter, reason, resultPath)
+	if err := writeFileAtomic(path, ".sentinel-*.tmp", content); err != nil {
+		fmt.Fprintf(stderr, "avenor: sentinel: %v\n", err)
 	}
 }
 
@@ -168,7 +150,7 @@ func WriteSentinelResult(path string, exitCode int, sessionID, stopReason, runID
 // atomic tmp+rename strategy. Errors are logged to stderr but never affect
 // the caller's exit code.
 func WriteSentinel(path string, exitCode int, sessionID, stopReason, runID string, stderr io.Writer) {
-	WriteSentinelResult(path, exitCode, sessionID, stopReason, runID, 0, "", stderr)
+	WriteSentinelResult(path, exitCode, sessionID, stopReason, runID, 0, "", "", stderr)
 }
 
 // cleanupSentinelFiles removes pre-existing sentinel and permission request

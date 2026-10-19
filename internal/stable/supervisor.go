@@ -2866,9 +2866,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {
-			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, result.Reason, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, result.Reason, "", s.stderrWriter())
 		} else {
-			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, "", s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, "", "", s.stderrWriter())
 		}
 	}
 }
@@ -3154,9 +3154,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {
-			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, result.Reason, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, result.Reason, "", s.stderrWriter())
 		} else {
-			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, "", s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, "", "", s.stderrWriter())
 		}
 	}
 }

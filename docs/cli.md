@@ -38,8 +38,10 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `claude-channel` |
 | `--model` | (none) | Backend-specific model ID; if not set, resolved from opencode config via `--agent` |
 | `--thinking` | (none) | Backend-native reasoning level; validated against the effective backend |
-| `--on-event` | (none) | Path to write NDJSON event stream; events are discarded if unset |
+| `--on-event` | (none) | Path to write NDJSON event stream; events are discarded if unset. A final symlink is refused, so the event log cannot be redirected into another artifact's file |
 | `--sentinel-file` | (none) | Path to write a completion sentinel (exit code, session ID, stop reason); also derives permission handler unless `--permission-handler` is set |
+| `--result-file` | (none) | Path to write the run's final assistant message as plain text. Direct runs only (not with `--loop-file`/`--team-file`). Written atomically before the sentinel; the sentinel then carries a `RESULT=<path>` line |
+| `--pid-file` | (none) | Path to write the run's own pid at startup, removed when it exits. Track a backgrounded run by this pid instead of a launcher's `$!` |
 | `--permission-handler` | (derived) | Permission resolver: `file:<path>` for file-based answers, or omitted for socket/auto-approve only. If `--sentinel-file` is set and `--permission-handler` is not, defaults to `file:<sentinel-base>` |
 | `--auto-approve` | `false` | Automatically approve ordinary permission requests. Questions that require user input still wait for an answer |
 | `--control-socket` | (none) | Unix socket path for control plane; enables remote commands while session is running |
@@ -65,6 +67,72 @@ Run with auto-retry on transient failure (up to 3 attempts):
 avenor run --prompt "find bugs" --max-retries 3 \
   --backend opencode-http --server-url http://localhost:8080 \
   --on-event /tmp/events.jsonl
+```
+
+### Result and pid files
+
+A caller that runs `avenor run` unattended usually needs two things the event
+log makes awkward: the run's final answer and its pid.
+
+`--result-file <path>` writes the final assistant message as plain text — the
+same text the terminal `session.end` carries as `final_output` (the backend's
+own final output when it supplies one, otherwise the text of the run's last
+turn). The file is written atomically before the sentinel, so a reader that
+waits for the sentinel never sees a partial answer, and the sentinel then ends
+with `RESULT=<path>`. A run that ends with no final message writes no file and
+no `RESULT=` line.
+
+The file is written only when the run's last turn settled on the backend's
+terminal event. A turn that settled with a failure still has a final message, so
+a failed run writes the text it settled with; a cancelled run, a timed-out run,
+and a run whose attempt or resume failed before the backend settled write no
+file and no `RESULT=` line, because the reply collected so far is a prefix of an
+answer, not the run's final message. SIGINT and SIGTERM both end the run at exit
+code 130 with a `KILLED` sentinel carrying `STOP_REASON=cancelled`. An answer
+left by an earlier run at the same path is removed just before the first prompt,
+once the provider and session are up, so a run that fails before then leaves
+that answer alone.
+
+`--pid-file <path>` writes the run's own pid once the setup that mode can fail
+has passed, and removes the file when the run exits, including on SIGINT and
+SIGTERM. Every run mode publishes it: a direct run publishes before its first
+attempt, and a `--loop-file`/`--team-file` run publishes after its workflow
+config loads and validates, so a rejected config still leaves no pid file
+behind. A run rejected before the pid is written, such as one whose prompt file
+is unreadable or whose workflow config is invalid, never publishes a pid and
+leaves another run's pid file untouched.
+The signal trap is installed before the pid file is published, so a first signal
+landing during setup still has a cleanup path and does not leave the pid file
+behind; a second signal restores the default disposition and can end the process
+before that cleanup runs, leaving the file behind. A SIGKILL or a crash skips
+cleanup and leaves a stale pid file behind, and the kernel recycles pids, so
+`kill -0 $(cat run.pid)` alone can report an unrelated process as live. Check
+the process identity before signalling — `ps -o command= -p <pid>` works on both
+Linux and macOS — or wait for the sentinel instead. Launch wrappers cannot
+supply a trustworthy pid: `setsid` forks when the caller leads a process group,
+so a recorded `$!` can name a shell that already exited while the run continues.
+Letting the run publish its pid avoids that. The pid file is only removed by the
+run that wrote it.
+
+`--result-file`, `--pid-file`, `--sentinel-file` and `--on-event` must name
+distinct paths — compared as absolute paths with existing parent directories
+resolved, and by file identity when the paths already exist — and none may claim
+the permission request or response file derived from the sentinel while the file
+handler is active, and the result and pid paths must be single-line. An invocation rejected by flag validation writes
+no result or pid file and leaves an earlier answer untouched. A rejection after
+the flags are parsed still writes its sentinel when `--sentinel-file` is set, so
+a supervisor can wait on it; a command line that does not parse exits 1 before
+the sentinel path is known, so nothing is written. Treat the sentinel path as
+the run's own output rather than a place to keep an answer, since a rejection
+rewrites it like any other exit.
+
+```sh
+avenor run --prompt-file my-prompt.txt --label "data-prep" \
+  --on-event /tmp/events.jsonl --sentinel-file /tmp/run.sentinel \
+  --result-file /tmp/result.txt --pid-file /tmp/run.pid &
+
+until [ -f /tmp/run.sentinel ]; do sleep 1; done
+cat /tmp/result.txt
 ```
 
 See [loop.md](loop.md) for multi-phase loop config.
@@ -753,7 +821,7 @@ avenor watch --follow --format plain --since-cursor /tmp/cursor /tmp/events.json
 - `6` — Provider quota exhausted (`quota_exhausted`); fall back to another model or retry later
 - `7` — Provider rate limit (`rate_limited`); retried when `--max-retries` > 0
 - `124` — Overall session timeout (`--timeout` reached)
-- `130` — Cancelled (SIGINT, context done)
+- `130` — Cancelled (`SIGINT`, `SIGTERM`, or context cancellation)
 
 A provider limit failure is reported as exit code 6 or 7 instead of 1, so an
 orchestrator can distinguish "out of quota, switch or retry later" from "the
