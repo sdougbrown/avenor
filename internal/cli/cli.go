@@ -354,12 +354,17 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 	// The signal trap is installed before the pid file is published, so a
 	// first signal landing during setup still has a cleanup path. Once the
-	// first signal has cancelled the run, stopSignals restores the default
+	// signal has cancelled the trap context, stopSignals restores the default
 	// disposition so a second signal still ends a teardown that will not finish.
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// The run context is derived from the trap context so a control-plane cancel
+	// stops the run without unregistering the trap: a signal arriving during that
+	// teardown is still handled, and only a signal restores the default.
+	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	stopAfterCancel := context.AfterFunc(ctx, stopSignals)
+	stopAfterCancel := context.AfterFunc(signalCtx, stopSignals)
 	defer stopAfterCancel()
+	ctx, cancelRun := context.WithCancel(signalCtx)
+	defer cancelRun()
 
 	// Pre-run cleanup: truncate event log and remove stale sentinel/perm files.
 	// Only when --sentinel-file is active to avoid changing behavior for callers
@@ -450,7 +455,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 
 	if controlServer != nil {
-		controlServer.SetCancelFunc(stopSignals)
+		controlServer.SetCancelFunc(cancelRun)
 	}
 
 	// The run deadline (not a one-shot timer) bounds every attempt, retry,
@@ -459,9 +464,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	// only tick and no later attempt can outlive the limit.
 	runCtx := ctx
 	if *timeout > 0 {
-		var cancelRun context.CancelFunc
-		runCtx, cancelRun = context.WithDeadline(ctx, time.Now().Add(*timeout))
-		defer cancelRun()
+		var cancelDeadline context.CancelFunc
+		runCtx, cancelDeadline = context.WithDeadline(ctx, time.Now().Add(*timeout))
+		defer cancelDeadline()
 	}
 
 	// Stable supervisor metadata is unavailable in this execution path. Keep

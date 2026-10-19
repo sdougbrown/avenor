@@ -494,6 +494,25 @@ func promptOverControl(t *testing.T, path, text string) {
 	}
 }
 
+// cancelOverControl cancels a run through its control socket and waits for the
+// reply. The first client to connect owns the socket, so this client owns it.
+func cancelOverControl(t *testing.T, path string) {
+	t.Helper()
+	body, _ := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "cancel"})
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(append(body, '\n')); err != nil {
+		t.Fatalf("write cancel: %v", err)
+	}
+	var resp control.Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil || resp.Error != nil {
+		t.Fatalf("cancel response = %+v, %v", resp, err)
+	}
+}
+
 func waitForPendingPermissionForTest(t *testing.T, cs *control.ControlServer) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
