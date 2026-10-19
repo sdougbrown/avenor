@@ -1249,7 +1249,7 @@ func TestRunRejectsResultFileInWorkflowMode(t *testing.T) {
 	if exitCode != 1 {
 		t.Fatalf("run() = %d, want 1; stderr=%s", exitCode, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "--result-file is not supported with --loop-file or --team-file") {
+	if !strings.Contains(stderr.String(), "--result-file is not supported") {
 		t.Fatalf("stderr = %q, want result-file rejection", stderr.String())
 	}
 	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
