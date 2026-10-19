@@ -618,13 +618,13 @@ func TestGetClientForSupervisorDialsValidInRootID(t *testing.T) {
 	defer s.Close()
 
 	socketPath := filepath.Join(root, "avenor-mcp-missing.sock")
-	origDial := dialSupervisorClient
+	origDial := attachSupervisorClient
 	var dialed string
-	dialSupervisorClient = func(p string) (*client.Client, error) {
+	attachSupervisorClient = func(p string) (*client.Client, error) {
 		dialed = p
 		return origDial(p)
 	}
-	t.Cleanup(func() { dialSupervisorClient = origDial })
+	t.Cleanup(func() { attachSupervisorClient = origDial })
 
 	if _, _, err := s.getClientForSupervisor(socketPath); err == nil || !strings.Contains(err.Error(), "dial supervisor socket") {
 		t.Fatalf("expected dial failure on missing in-root socket, got: %v", err)
@@ -1591,6 +1591,43 @@ func startFakeSupervisorNamed(t *testing.T, name string) (string, func()) {
 	}()
 
 	return path, func() { ln.Close() }
+}
+
+// TestReadOnlyToolNeedsNoOwnerRecord proves a read-only tool acquires its
+// supervisor client without owner credentials: a live supervisor that never
+// published a record still serves avenor_status, whether the caller names it
+// with supervisor_id or the deployment configures its socket.
+func TestReadOnlyToolNeedsNoOwnerRecord(t *testing.T) {
+	path, cleanup := startFakeSupervisorNamed(t, "avenor-mcp-readonly.sock")
+	defer cleanup()
+	if err := os.Remove(control.OwnerRecordPath(path)); err != nil {
+		t.Fatalf("remove owner record: %v", err)
+	}
+	stubSocketsRoot(t, filepath.Dir(path))
+
+	for _, tc := range []struct {
+		name string
+		opts Options
+		id   string
+	}{
+		{"supervisor_id", Options{Transport: "stdio"}, path},
+		{"configured socket", Options{Transport: "stdio", SupervisorSocket: path, NoAutostart: true}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := NewServer(tc.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{SupervisorID: tc.id})
+			if err != nil {
+				t.Fatalf("read-only status without an owner record: %v", err)
+			}
+			if runs := statusOutputRuns(t, result); len(runs) != 1 || runs[0]["runtime_id"] != "rt_1" {
+				t.Fatalf("runs = %v, want the stub's runtime", runs)
+			}
+		})
+	}
 }
 
 func TestServerWithRealSocketStatus(t *testing.T) {
@@ -4736,7 +4773,7 @@ func serveOwnerAuthOnly(conn net.Conn, cap control.OwnerCapability) {
 	}
 }
 
-// withCountedDials swaps dialSupervisorClient for a counting wrapper that
+// withCountedDials swaps attachSupervisorClient for a counting wrapper that
 // delegates to the original dial, restoring the seam when the test ends.
 // Tests that must block inside the dial keep their own wrapper instead.
 // stubSocketsRoot points validateSupervisorSocketPath at dir for the test's
@@ -4758,12 +4795,12 @@ func stubSocketsRoot(t *testing.T, dir string) string {
 func withCountedDials(t *testing.T) *atomic.Int32 {
 	t.Helper()
 	var dials atomic.Int32
-	origDial := dialSupervisorClient
-	dialSupervisorClient = func(p string) (*client.Client, error) {
+	origDial := attachSupervisorClient
+	attachSupervisorClient = func(p string) (*client.Client, error) {
 		dials.Add(1)
 		return origDial(p)
 	}
-	t.Cleanup(func() { dialSupervisorClient = origDial })
+	t.Cleanup(func() { attachSupervisorClient = origDial })
 	return &dials
 }
 
@@ -4894,14 +4931,14 @@ func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
 	var dials atomic.Int32
 	dialEntered := make(chan struct{})
 	releaseDial := make(chan struct{})
-	origDial := dialSupervisorClient
-	dialSupervisorClient = func(p string) (*client.Client, error) {
+	origDial := attachSupervisorClient
+	attachSupervisorClient = func(p string) (*client.Client, error) {
 		dials.Add(1)
 		dialEntered <- struct{}{}
 		<-releaseDial
 		return origDial(p)
 	}
-	defer func() { dialSupervisorClient = origDial }()
+	defer func() { attachSupervisorClient = origDial }()
 
 	atLockBoundary := make(chan struct{}, n)
 	releaseLockBoundary := make(chan struct{})

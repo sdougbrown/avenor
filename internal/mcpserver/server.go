@@ -472,7 +472,7 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		deadline = s.clock().Add(effective)
 	}
 
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
 	if err != nil {
 		return nil, statusToolOutput{}, err
 	}
@@ -955,7 +955,7 @@ func (s *Server) handleAvenorResult(ctx context.Context, req *mcp.CallToolReques
 	}
 
 	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
-	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
+	cl, cleanup, err := s.getReadClientForSupervisor(supervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1464,7 +1464,7 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 		// Acquire the client before resolving the supervisor path: the
 		// acquisition may autostart the default supervisor, and a rehydrated
 		// entry must be scoped to the path it was found on.
-		cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+		cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1711,7 +1711,7 @@ func (s *Server) handleAvenorWorkflowStatus(ctx context.Context, req *mcp.CallTo
 	if args.WorkflowID == "" {
 		return nil, nil, fmt.Errorf("workflow_id is required")
 	}
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1738,7 +1738,7 @@ func (s *Server) handleAvenorWorkflowWait(ctx context.Context, req *mcp.CallTool
 		requested = time.Duration(seconds) * time.Second
 	}
 	effective, clamped := s.clampWait(requested)
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1762,7 +1762,7 @@ func (s *Server) handleAvenorWorkflowInspect(ctx context.Context, req *mcp.CallT
 	if args.WorkflowID == "" {
 		return nil, nil, fmt.Errorf("workflow_id is required")
 	}
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1780,7 +1780,7 @@ func (s *Server) handleAvenorWorkflowEvents(ctx context.Context, req *mcp.CallTo
 	if args.WorkflowID == "" {
 		return nil, nil, fmt.Errorf("workflow_id is required")
 	}
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1953,7 +1953,7 @@ func (s *Server) handleAvenorWorkflowCancel(ctx context.Context, req *mcp.CallTo
 // lists all controllers. The controller ID is passed through unchanged; no
 // identifier is remapped.
 func (s *Server) handleAvenorWorkflowControllerStatus(ctx context.Context, req *mcp.CallToolRequest, args workflowControllerStatusArgs) (*mcp.CallToolResult, any, error) {
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
+	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1974,10 +1974,25 @@ func (s *Server) handleAvenorWorkflowControllerStatus(ctx context.Context, req *
 
 var startSupervisorFunc = startSupervisor
 
-// dialSupervisorClient is the seam for acquiring a supervisor control client.
-// It attaches as the socket's published owner because the tools below reach
-// owner-gated verbs; tests replace it to count or substitute acquisitions.
-var dialSupervisorClient = client.AttachOwner
+// dialSupervisorClient and attachSupervisorClient are the two seams for
+// acquiring a supervisor control client. Read-only handlers dial anonymously
+// so they never read or transmit the owner record; owner-gated handlers attach
+// as the socket's published owner. Tests replace them to count or substitute
+// acquisitions.
+var (
+	dialSupervisorClient   = client.Dial
+	attachSupervisorClient = client.AttachOwner
+)
+
+// supervisorAccess selects what a supervisor client presents.
+type supervisorAccess int
+
+const (
+	// readAccess acquires a credential-free connection.
+	readAccess supervisorAccess = iota
+	// ownerAccess authenticates as the socket's published owner.
+	ownerAccess
+)
 
 // beforeSupervisorLock is a no-op production hook used to coordinate callers
 // at the lazy-supervisor lock boundary in concurrency tests.
@@ -1993,11 +2008,26 @@ func (s *Server) persistentControlClientForTest() ControlClient {
 }
 
 func (s *Server) getClientForSupervisor(supervisorID string) (ControlClient, func(), error) {
-	cl, cleanup, _, err := s.getClientForSupervisorWithPath(supervisorID)
+	cl, cleanup, _, err := s.acquireSupervisor(supervisorID, ownerAccess)
+	return cl, cleanup, err
+}
+
+// getReadClientForSupervisor acquires the credential-free client the read-only
+// tools use.
+func (s *Server) getReadClientForSupervisor(supervisorID string) (ControlClient, func(), error) {
+	cl, cleanup, _, err := s.acquireSupervisor(supervisorID, readAccess)
 	return cl, cleanup, err
 }
 
 func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlClient, func(), string, error) {
+	return s.acquireSupervisor(supervisorID, ownerAccess)
+}
+
+func (s *Server) acquireSupervisor(supervisorID string, access supervisorAccess) (ControlClient, func(), string, error) {
+	dial := dialSupervisorClient
+	if access == ownerAccess {
+		dial = attachSupervisorClient
+	}
 	// An explicit supervisor_id that resolves to the autostarted/default
 	// supervisor must reuse the persistent owner connection: ownership is
 	// granted per connection by authenticate_owner, and spawn authenticated on
@@ -2024,7 +2054,7 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 		if err := validateSupervisorSocketPath(supervisorID); err != nil {
 			return nil, nil, "", err
 		}
-		cl, err := dialSupervisorClient(supervisorID)
+		cl, err := dial(supervisorID)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("dial supervisor socket %s: %w", supervisorID, err)
 		}
@@ -2037,10 +2067,15 @@ func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlCli
 		// connection, and never fall through to autostart. Holding the lock
 		// during the dial makes concurrent acquisitions share one attempt.
 		if s.controlClient == nil || s.controlClient.Closed() {
-			cl, err := dialSupervisorClient(s.opts.SupervisorSocket)
+			cl, err := dial(s.opts.SupervisorSocket)
 			if err != nil {
 				s.controlClient = nil
 				return nil, nil, "", fmt.Errorf("supervisor unavailable at %s: %w", s.opts.SupervisorSocket, err)
+			}
+			if access == readAccess {
+				// The persistent client is the owner connection, so a read-only
+				// call closes its own connection instead of caching it.
+				return cl, func() { cl.Close() }, s.defaultSupervisorPath, nil
 			}
 			s.controlClient = cl
 		}
