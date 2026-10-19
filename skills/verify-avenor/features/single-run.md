@@ -4,7 +4,9 @@
 
 - Inline prompt vs `--prompt-file`
 - Event stream emission (`--on-event`, NDJSON)
-- Completion sentinel (`--sentinel-file`: `DONE`, `SESSION=`, `STOP_REASON=`, `RUN=`)
+- Completion sentinel (`--sentinel-file`: `DONE`, `SESSION=`, `STOP_REASON=`, `RUN=`, `RESULT=` when a result file was written)
+- Result file (`--result-file`: the run's final answer as plain text, written before the sentinel)
+- Pid file (`--pid-file`: the run's own pid while it is alive, removed on exit)
 - Timeout guards (`--timeout`, `--progress-timeout`)
 - Label correlation (`--label` appears in events)
 
@@ -23,17 +25,28 @@ SCRATCH=$(mktemp -d /tmp/avenor-verify.XXXXXX)
   --dir "$SCRATCH" \
   --on-event "$SCRATCH/events.ndjson" \
   --sentinel-file "$SCRATCH/done.env" \
+  --result-file "$SCRATCH/result.txt" \
+  --pid-file "$SCRATCH/run.pid" \
   --timeout 90s --label verify-smoke
-echo "exit=$?"
 
 cat "$SCRATCH/done.env"
+cat "$SCRATCH/result.txt"
 grep -c '"event"' "$SCRATCH/events.ndjson"
+test -e "$SCRATCH/run.pid" && echo "pid file outlived the run"
 ```
 
 **Observable end state (the proof):** exit code 0; sentinel contains `DONE`,
-a `SESSION=` id, and `STOP_REASON=end_turn`; `events.ndjson` contains a
-`session.start` and a terminal `session.end` with `stop_reason: end_turn`,
-all carrying the `verify-smoke` label.
+a `SESSION=` id, `STOP_REASON=end_turn`, and `RESULT=` pointing at the result
+file; the result file holds the same text as the terminal `session.end`
+`final_output`; the pid file is gone because the run exited; `events.ndjson`
+contains a `session.start` and a terminal `session.end` with
+`stop_reason: end_turn`, all carrying the `verify-smoke` label.
+
+To prove the pid file tracks the live process rather than a launcher, start
+the run under `set -m` (which makes the background job a process-group leader,
+so `setsid` forks and `$!` names a shell that exits immediately), read the pid
+from the file while the run is alive, and check `kill -0`. The `$!` pid is gone
+while the pid-file pid is alive; both are gone after the sentinel appears.
 
 ## Gotchas
 

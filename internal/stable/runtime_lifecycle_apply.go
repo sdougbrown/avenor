@@ -435,7 +435,7 @@ func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []
 		switch e.kind {
 		case effectWriteSentinel:
 			if child.sentinelFile != "" {
-				cli.WriteSentinelResult(child.sentinelFile, e.exitCode, e.sessionID, e.reason, s.runID, e.retryAfter, "", s.stderrWriter())
+				cli.WriteSentinelResult(child.sentinelFile, e.exitCode, e.sessionID, e.reason, s.runID, e.retryAfter, "", "", s.stderrWriter())
 			}
 		case effectSignalCapacity:
 			s.signalCapacityChange()

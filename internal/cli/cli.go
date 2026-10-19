@@ -97,6 +97,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	onEvent := fs.String("on-event", "", "path to write NDJSON events (optional; events are discarded if unset)")
 	permissionHandler := fs.String("permission-handler", "", "permission handler, supports file:<path>")
 	sentinelFile := fs.String("sentinel-file", "", "path to write a completion sentinel (also derives permission base unless --permission-handler is set)")
+	resultFile := fs.String("result-file", "", "path to write the run's final assistant message as plain text (direct runs only; written before the sentinel)")
+	pidFile := fs.String("pid-file", "", "path to write this process's pid at startup (removed on exit)")
 	timeout := fs.Duration("timeout", 0, "overall session timeout")
 	progressTimeout := fs.Duration("progress-timeout", 0, "session progress timeout (fires if no event for duration)")
 	model := fs.String("model", "", "backend-specific model id")
@@ -136,16 +138,37 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	var finalSessionID string
 	var finalStopReason string
 	var finalRetryAfter int64
+	var finalResult string
 
 	exitWithSentinel := func(code int) int {
+		resultPath := ""
+		if *resultFile != "" && finalResult != "" {
+			if err := writeResultFile(*resultFile, finalResult); err != nil {
+				fmt.Fprintf(stderr, "avenor: result-file: %v\n", err)
+			} else {
+				resultPath = *resultFile
+			}
+		}
 		if *sentinelFile != "" {
 			sr := finalStopReason
 			if sr == "" {
 				sr = runtime.StopReasonForExitCode(code)
 			}
-			WriteSentinelResult(*sentinelFile, code, finalSessionID, sr, runID, finalRetryAfter, "", stderr)
+			WriteSentinelResult(*sentinelFile, code, finalSessionID, sr, runID, finalRetryAfter, "", resultPath, stderr)
 		}
 		return code
+	}
+
+	if *pidFile != "" {
+		if err := writePIDFile(*pidFile); err != nil {
+			fmt.Fprintf(stderr, "avenor: pid-file: %v\n", err)
+			return exitWithSentinel(1)
+		}
+		defer removePIDFile(*pidFile, os.Getpid())
+	}
+	if *resultFile != "" {
+		// An answer from an earlier run must not outlive this one.
+		removeOrLog(*resultFile, stderr)
 	}
 
 	if workflowMode {
@@ -314,6 +337,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 	if *loopFile != "" && *teamFile != "" {
 		fmt.Fprintln(stderr, "avenor: --loop-file and --team-file are mutually exclusive")
+		return exitWithSentinel(1)
+	}
+	if *resultFile != "" && workflowMode {
+		fmt.Fprintln(stderr, "avenor: --result-file is not supported with --loop-file or --team-file")
 		return exitWithSentinel(1)
 	}
 	if *loopFile != "" && *resume != "" {
@@ -853,9 +880,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 		if *sentinelFile != "" {
 			if result.Reason != "" {
-				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, stderr)
+				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, "", stderr)
 			} else {
-				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", stderr)
+				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", "", stderr)
 			}
 		}
 
@@ -890,6 +917,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		finalSessionID = result.sessionID
 		finalStopReason = result.stopReason
 		finalRetryAfter = result.retryAfter
+		finalResult = result.finalOutput
 
 		if result.err != nil || !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > *maxRetries {
 			break
@@ -1000,9 +1028,9 @@ func writeSentinelForResult(result looprunner.RunResult, sentinelFile, runID str
 		return
 	}
 	if result.Reason != "" {
-		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, stderr)
+		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, "", stderr)
 	} else {
-		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", stderr)
+		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", "", stderr)
 	}
 }
 
@@ -1026,8 +1054,12 @@ type sessionResult struct {
 	LoopDirective string
 	LoopLabel     string
 	Output        string
-	FinalReply    string
-	Usage         map[string]any
+	// FinalOutput is the run's final assistant message: the provider's
+	// session.end final_output when it supplied one, otherwise the text
+	// accumulated from the terminal turn.
+	FinalOutput string
+	FinalReply  string
+	Usage       map[string]any
 }
 
 type SessionWaitConfig struct {
@@ -1101,6 +1133,8 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var output strings.Builder
 	var finalReply strings.Builder
 	var fullReply strings.Builder
+	var sessionEndFinalOutput string
+	var sessionEndFinalOutputSet bool
 	eventChClosed := false
 	// interruptedToolFailure records a tool call the backend aborted
 	// (tool.call_update status=failed with rawOutput.metadata.interrupted).
@@ -1187,7 +1221,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		// Surface the authoritative stop reason: callers derive the sentinel's
 		// classification from it, and an empty value degrades to exit_1 even
 		// when session.end named the real reason.
-		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, RetryAfter: finalRetryAfter, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
+		finalOutput := fullReply.String()
+		if sessionEndFinalOutputSet {
+			finalOutput = sessionEndFinalOutput
+		}
+		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, RetryAfter: finalRetryAfter, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalOutput: finalOutput, FinalReply: finalReply.String(), Usage: bufferedUsage}
 	}
 	// flushTerminal settles the turn and writes its authoritative session.end.
 	// The held terminal record's provider text and the prompt error describe the
@@ -1233,6 +1271,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		}
 		if _, ok := event.Fields["final_output"]; !ok && fullReply.Len() > 0 {
 			event.Fields["final_output"] = fullReply.String()
+		}
+		// The held terminal record is the run's last word, so its final_output
+		// is the message --result-file may publish.
+		if text, ok := event.Fields["final_output"].(string); ok {
+			sessionEndFinalOutput, sessionEndFinalOutputSet = text, true
 		}
 		if err := deps.Writer.Write(event); err != nil {
 			fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
@@ -1646,7 +1689,7 @@ func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string,
 		fmt.Fprintf(stderr, "avenor: write terminal event: %v\n", err)
 		return sessionResult{ExitCode: 1}
 	}
-	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, RetryAfter: retryAfter, Output: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
+	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, RetryAfter: retryAfter, Output: fullFinalOutput, FinalOutput: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
 }
 
 type eventWriter struct {

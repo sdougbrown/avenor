@@ -6256,6 +6256,9 @@ func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
 			if result.FinalReply != tt.wantFinalReply {
 				t.Fatalf("FinalReply = %q, want %q", result.FinalReply, tt.wantFinalReply)
 			}
+			if result.FinalOutput != tt.wantFinalOutput {
+				t.Fatalf("FinalOutput = %q, want %q", result.FinalOutput, tt.wantFinalOutput)
+			}
 
 			last := logged[len(logged)-1]
 			got, ok := last.Fields["final_output"].(string)
@@ -6321,6 +6324,9 @@ func TestWaitForSessionSessionEndPreservesBackendFinalOutput(t *testing.T) {
 			}
 			if result.FinalReply != tt.wantFinalReply {
 				t.Fatalf("FinalReply = %q, want %q", result.FinalReply, tt.wantFinalReply)
+			}
+			if want, _ := tt.value.(string); result.FinalOutput != want {
+				t.Fatalf("FinalOutput = %q, want %q", result.FinalOutput, want)
 			}
 
 			last := logged[len(logged)-1]

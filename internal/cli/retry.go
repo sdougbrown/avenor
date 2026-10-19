@@ -25,6 +25,7 @@ type attemptResult struct {
 	loopDirective string
 	loopLabel     string
 	output        string
+	finalOutput   string
 	finalReply    string
 	usage         map[string]any
 	err           error
@@ -180,7 +181,7 @@ func runSingleAttempt(
 		// An authoritative ID conflict invalidates this attempt. Do not service
 		// queued control prompts by resuming its provisional session ID.
 		if result.StopReason == runtime.SessionIDConflictStopReason {
-			return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
+			return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalOutput: result.FinalOutput, finalReply: result.FinalReply, usage: result.Usage}
 		}
 
 		if deps.controlServer != nil {
@@ -189,7 +190,7 @@ func runSingleAttempt(
 			if interruptText := deps.controlServer.ConsumeInterrupt(); interruptText != "" {
 				if _, err := resumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
 					fmt.Fprintf(deps.stderr, "avenor: resume after cancel: %v\n", err)
-					return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
+					return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalOutput: result.FinalOutput, finalReply: result.FinalReply, usage: result.Usage}
 				}
 				prompt = interruptText
 				continue
@@ -198,7 +199,7 @@ func runSingleAttempt(
 				if nextPrompt := deps.controlServer.DequeuePrompt(); nextPrompt != "" {
 					if _, err := resumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
 						fmt.Fprintf(deps.stderr, "avenor: resume after end_turn: %v\n", err)
-						return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
+						return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalOutput: result.FinalOutput, finalReply: result.FinalReply, usage: result.Usage}
 					}
 					prompt = nextPrompt
 					continue
@@ -206,7 +207,7 @@ func runSingleAttempt(
 			}
 		}
 
-		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, retryAfter: result.RetryAfter, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
+		return attemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: stopReason, retryAfter: result.RetryAfter, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalOutput: result.FinalOutput, finalReply: result.FinalReply, usage: result.Usage}
 	}
 }
 

@@ -40,6 +40,8 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--thinking` | (none) | Backend-native reasoning level; validated against the effective backend |
 | `--on-event` | (none) | Path to write NDJSON event stream; events are discarded if unset |
 | `--sentinel-file` | (none) | Path to write a completion sentinel (exit code, session ID, stop reason); also derives permission handler unless `--permission-handler` is set |
+| `--result-file` | (none) | Path to write the run's final assistant message as plain text. Direct runs only (not with `--loop-file`/`--team-file`). Written atomically before the sentinel; the sentinel then carries a `RESULT=<path>` line |
+| `--pid-file` | (none) | Path to write the run's own pid at startup, removed when it exits. Track a backgrounded run by this pid instead of a launcher's `$!` |
 | `--permission-handler` | (derived) | Permission resolver: `file:<path>` for file-based answers, or omitted for socket/auto-approve only. If `--sentinel-file` is set and `--permission-handler` is not, defaults to `file:<sentinel-base>` |
 | `--auto-approve` | `false` | Automatically approve ordinary permission requests. Questions that require user input still wait for an answer |
 | `--control-socket` | (none) | Unix socket path for control plane; enables remote commands while session is running |
@@ -65,6 +67,37 @@ Run with auto-retry on transient failure (up to 3 attempts):
 avenor run --prompt "find bugs" --max-retries 3 \
   --backend opencode-http --server-url http://localhost:8080 \
   --on-event /tmp/events.jsonl
+```
+
+### Result and pid files
+
+A caller that runs `avenor run` unattended usually needs two things the event
+log makes awkward: the run's final answer and its pid.
+
+`--result-file <path>` writes the final assistant message as plain text — the
+same text the terminal `session.end` carries as `final_output` (the backend's
+own final output when it supplies one, otherwise the text of the run's last
+turn). The file is written atomically before the sentinel, so a reader that
+waits for the sentinel never sees a partial answer, and the sentinel then ends
+with `RESULT=<path>`. A failed run still writes the final text it settled
+with; a run that ends with no final message writes no file and no `RESULT=`
+line. An answer left by an earlier run
+at the same path is removed when the run starts.
+
+`--pid-file <path>` writes the run's own pid at startup and removes the file
+when the run exits. Launch wrappers cannot supply a trustworthy pid: `setsid`
+forks when the caller leads a process group, so a recorded `$!` can name a
+shell that already exited while the run continues. Letting the run publish its
+pid avoids that; a waiter polls `kill -0 $(cat run.pid)`. The pid file is only
+removed by the run that wrote it.
+
+```sh
+avenor run --prompt-file my-prompt.txt --label "data-prep" \
+  --on-event /tmp/events.jsonl --sentinel-file /tmp/run.sentinel \
+  --result-file /tmp/result.txt --pid-file /tmp/run.pid &
+
+until [ -f /tmp/run.sentinel ]; do sleep 1; done
+cat /tmp/result.txt
 ```
 
 See [loop.md](loop.md) for multi-phase loop config.
