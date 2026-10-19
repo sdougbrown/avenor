@@ -9,6 +9,7 @@ import {
   ForeignPeerError,
   OwnerSocketAbsentError,
   ownerRecordPath,
+  setOwnerAttachDialHook,
   StaleOwnerRecordError,
 } from './owner-attach.js'
 
@@ -21,6 +22,7 @@ interface ListeningSocket {
 const cleanups: Array<() => void> = []
 
 afterEach(() => {
+  setOwnerAttachDialHook(() => {})
   while (cleanups.length > 0) cleanups.pop()?.()
 })
 
@@ -110,11 +112,8 @@ describe('owner socket binding', () => {
     const replacement = await listenSocket(replacementPath)
     publishRecord(socketPath)
 
-    await expect(
-      attachOwner(socketPath, {
-        beforeDial: () => fs.renameSync(replacementPath, socketPath),
-      }),
-    ).rejects.toBeInstanceOf(StaleOwnerRecordError)
+    setOwnerAttachDialHook(() => fs.renameSync(replacementPath, socketPath))
+    await expect(attachOwner(socketPath)).rejects.toBeInstanceOf(StaleOwnerRecordError)
 
     expect(replacement.connections).toBe(1)
     expect(replacement.bytes).toBe(0)

@@ -84,8 +84,15 @@ export interface OwnerAttachOptions {
   timeoutMs?: number
   /** Binding identity; production uses the process euid. */
   euid?: number
-  /** Runs after the record validation and before the dial. */
-  beforeDial?: () => void
+}
+
+// Package hook, mirroring the Go client's beforeOwnerAttachDial. A test may
+// substitute the step between validation and the dial; production leaves it a
+// no-op.
+let beforeOwnerAttachDial: () => void = () => {}
+
+export function setOwnerAttachDialHook(hook: () => void): void {
+  beforeOwnerAttachDial = hook
 }
 
 export function ownerRecordPath(socketPath: string): string {
@@ -335,18 +342,15 @@ export async function attachOwner(
   const deadline = Date.now() + (options.timeoutMs ?? OWNER_ATTACH_TIMEOUT_MS)
   const euid = options.euid ?? processEUID()
   const record = loadOwnerRecord(socketPath)
-  const bound = bindOwnerSocket(socketPath, euid)
-  if (bound.dev !== record.socket_identity.dev || bound.ino !== record.socket_identity.ino) {
-    throw stale(socketPath, `${socketPath} does not match the published record`)
-  }
-  options.beforeDial?.()
+  bindOwnerSocket(socketPath, euid)
+  validateOwnerRecordSocket(socketPath, record)
+  beforeOwnerAttachDial()
   const socket = await connectOwnerSocket(socketPath, remainingMs(deadline))
   let client: Client
   try {
-    const live = socketFileIdentity(socketPath)
-    if (String(live.dev) !== bound.dev || String(live.ino) !== bound.ino) {
-      throw stale(socketPath, `${socketPath} changed after the dial`)
-    }
+    // The path can be rebound between the checks and the dial, so the socket
+    // this dial reached must still be the record's before any credential byte.
+    validateOwnerRecordSocket(socketPath, record)
     client = new Client(socket)
   } catch (err) {
     socket.destroy()
