@@ -1238,6 +1238,25 @@ func TestRunRejectsTeamFileAndResume(t *testing.T) {
 	}
 }
 
+func TestRunRejectsResultFileInWorkflowMode(t *testing.T) {
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.txt")
+	var stderr strings.Builder
+	exitCode := run([]string{
+		"--loop-file", filepath.Join(dir, "loop.json"),
+		"--result-file", resultPath,
+	}, func(string) string { return "" }, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("run() = %d, want 1; stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--result-file is not supported with --loop-file or --team-file") {
+		t.Fatalf("stderr = %q, want result-file rejection", stderr.String())
+	}
+	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
+		t.Fatalf("result file exists after a rejected run: %v", err)
+	}
+}
+
 func TestRunTeamFileConfigErrorWritesErrorSentinel(t *testing.T) {
 	dir := t.TempDir()
 	teamPath := filepath.Join(dir, "team.json")
