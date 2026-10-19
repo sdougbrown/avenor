@@ -128,14 +128,12 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		return fail(messaging.OutcomePossiblyPending, fmt.Errorf("%w: send response carries no outcome", ErrMalformedResponse))
 	}
 	if body.Error != "" {
-		outcome := body.Outcome
-		if !messaging.IsSendOutcome(outcome) {
-			if messaging.WireErrorFor(body.Error) == nil {
-				return fail(messaging.OutcomePossiblyPending, fmt.Errorf("%w: send response carries unknown error %q", ErrMalformedResponse, body.Error))
-			}
-			outcome = messaging.SendOutcomeFor(body.Error)
+		if messaging.WireErrorFor(body.Error) == nil {
+			return fail(messaging.OutcomePossiblyPending, fmt.Errorf("%w: send response carries unknown error %q", ErrMalformedResponse, body.Error))
 		}
-		return fail(outcome, body.err())
+		// The wire contract assigns exactly one outcome to a code, so a
+		// peer-supplied outcome never overrides it.
+		return fail(messaging.SendOutcomeFor(body.Error), body.err())
 	}
 	// A send that loses the admission race to a withdrawal reports the
 	// fence's outcome instead of admitting the ask.

@@ -1763,6 +1763,45 @@ func TestBrokerReplyAnswersVersionedAsk(t *testing.T) {
 	}
 }
 
+// TestBrokerReplyAfterRotationFallsBackToDelivery pins the broker's
+// fire-and-forget fallback: a rotation retires the edge, and the reply still
+// reaches the asker as a plain delivery.
+func TestBrokerReplyAfterRotationFallsBackToDelivery(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("rotated_asker")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	targetToken, err := b.CreateRun("rotated_replier")
+	if err != nil {
+		t.Fatalf("create replier: %v", err)
+	}
+	addr := b.Addr()
+	msgID := mintMsgID(t, time.Minute)
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "rotated_asker", "rotated_replier", msgID, b.Store().Generation())); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+
+	b.Store().Reset()
+
+	reply := sendReply(t, addr, targetToken, "rotated_replier", "rotated_asker", msgID, "after the rotation")
+	if reply["status"] != http.StatusOK || reply["note"] == nil {
+		t.Fatalf("reply = %+v, want the fire-and-forget fallback", reply)
+	}
+	sender := b.GetRun("rotated_asker")
+	sender.Mu.Lock()
+	queued := len(sender.ControlQueue)
+	sender.Mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("asker queue = %d, want the reply delivered", queued)
+	}
+}
+
 // TestBrokerVersionedIDRequiresGeneration pins that a versioned ID without a
 // generation field is refused on every ask endpoint.
 func TestBrokerVersionedIDRequiresGeneration(t *testing.T) {

@@ -313,12 +313,17 @@ func (s *Store) waitOnEdge(ctx context.Context, e *edge, timeout time.Duration) 
 }
 
 // Reply routes a reply to the waiting sender and reports whether a live edge
-// accepted it. The key must name the generation the ask was admitted under; a
-// generation-less key only matches a legacy edge.
+// accepted it. The key names the generation a versioned ask was admitted
+// under; an unversioned ask is admitted without a generation, so a miss falls
+// back to the generation-less key before the edge is reported absent.
 func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.RawMessage) (messaging.Outcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.findActiveLocked(key)
+	if e == nil && key.Generation != "" {
+		key.Generation = ""
+		e = s.findActiveLocked(key)
+	}
 	if e == nil {
 		return messaging.OutcomeEdgeAbsent, nil
 	}
@@ -581,8 +586,7 @@ func (s *Store) consumeLocked(e *edge) {
 	}
 }
 
-// findActiveLocked returns the live edge registered for the exact key, so a
-// reply can only answer the generation it was asked in.
+// findActiveLocked returns the live edge registered for the exact key.
 func (s *Store) findActiveLocked(key messaging.FenceKey) *edge {
 	return s.active[key]
 }

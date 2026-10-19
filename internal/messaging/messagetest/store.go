@@ -351,7 +351,9 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		msgID := "legacy-replied-id"
 		legacyKey := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID}
 		admitLegacy(t, store, msgID, "bob")
-		if outcome, err := store.Reply(legacyKey, "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		// The reply names the current generation; the lookup falls back to the
+		// generation-less key the legacy ask was registered under.
+		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("Reply = (%q, %v)", outcome, err)
 		}
 		res, err := store.Wait(t.Context(), legacyKey, time.Second)

@@ -5,7 +5,6 @@ package inprocess
 
 import (
 	"context"
-	"errors"
 	"sync"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -45,7 +44,8 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		Body:       req.Body,
 	})
 	out := messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}
-	if err != nil && errors.Is(err, context.Canceled) {
+	if err != nil && !messaging.IsSendOutcome(out.Outcome) {
+		// A terminal fence reports its own outcome, which a send cannot carry.
 		out.Outcome = messaging.OutcomeNotSent
 	}
 	return out, err

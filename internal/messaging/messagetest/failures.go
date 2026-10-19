@@ -140,6 +140,14 @@ func RunFailureMatrix(t *testing.T, newTransport TransportFactory) {
 		}); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
+		// Expire the wait first: the duplicate then meets a terminal fence, whose
+		// own outcome is outside the vocabulary a send may report.
+		waited, err := base.Wait(t.Context(), messaging.WaitRequest{
+			Sender: alice, MessageID: msgID, Generation: pre.Generation, Timeout: 20 * time.Millisecond,
+		})
+		if err != nil || waited.Outcome != messaging.OutcomeTimedOut {
+			t.Fatalf("Wait = (%+v, %v)", waited, err)
+		}
 		res, err := base.Send(t.Context(), messaging.SendRequest{
 			From: alice, To: bob, MessageID: msgID, Generation: pre.Generation, Body: `{"message":"again"}`,
 		})

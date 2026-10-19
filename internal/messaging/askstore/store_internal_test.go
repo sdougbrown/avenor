@@ -2,6 +2,7 @@ package askstore
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -217,6 +218,32 @@ func TestStoreWithdrawAbsentIDPolicy(t *testing.T) {
 		})
 		if err != nil || res.Outcome != messaging.OutcomeSent {
 			t.Fatalf("bob Admit = (%+v, %v)", res, err)
+		}
+	})
+
+	t.Run("absent fences are bounded globally", func(t *testing.T) {
+		clk := &clock{now: base}
+		store := New(Options{Clock: clk.Now})
+		gen := store.Generation()
+		withdraw := func(senderRunID string) (messaging.WithdrawResult, error) {
+			return store.Withdraw(messaging.FenceKey{
+				Sender: senderRunID, MessageID: mint(t, base, base.Add(time.Minute)), Generation: gen,
+			})
+		}
+		senders := absentFenceCapacity / absentFenceQuota
+		for i := 0; i < senders; i++ {
+			sender := fmt.Sprintf("sender-%d", i)
+			for j := 0; j < absentFenceQuota; j++ {
+				if res, err := withdraw(sender); err != nil || !res.Fence.Terminal {
+					t.Fatalf("absent withdrawal %d/%d = (%+v, %v)", i, j, res, err)
+				}
+			}
+		}
+		// The next sender is under its own quota, so only the global ceiling
+		// can refuse it.
+		over, err := withdraw("one-more-sender")
+		if !errors.Is(err, messaging.ErrFenceCapacity) || over.Fence.Terminal {
+			t.Fatalf("over-capacity withdrawal = (%+v, %v)", over, err)
 		}
 	})
 

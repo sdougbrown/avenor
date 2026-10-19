@@ -30,6 +30,22 @@ func TestAskFailureMatrix(t *testing.T) {
 	messagetest.RunFailureMatrix(t, suiteFactory(t))
 }
 
+func TestInProcessReplyRouting(t *testing.T) {
+	store, _ := messagetest.NewMemoryStore(t)
+	messagetest.RunReplyRoutingSuite(t, func(t *testing.T, id messaging.Identity) messaging.Transport {
+		return New(store)
+	}, messagetest.ReplyRoutingHooks{
+		AdmitLegacy: func(t *testing.T, sender messaging.Identity, messageID, target string) {
+			if _, err := store.Admit(t.Context(), askstore.AdmitRequest{
+				Sender: sender, Target: target, MessageID: messageID, Legacy: true,
+			}); err != nil {
+				t.Fatalf("legacy Admit: %v", err)
+			}
+		},
+		Rotate: func(t *testing.T) { store.Reset() },
+	})
+}
+
 func mintID(t *testing.T, ttl time.Duration) string {
 	t.Helper()
 	now := time.Now().UTC()

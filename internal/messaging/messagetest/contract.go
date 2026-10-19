@@ -156,6 +156,67 @@ func RunTransportSuite(t *testing.T, newTransport TransportFactory) {
 	})
 }
 
+// ReplyRoutingHooks expose the store operations a transport cannot perform, so
+// the reply-routing suite can set up the edges it checks.
+type ReplyRoutingHooks struct {
+	// AdmitLegacy admits an unversioned ask, which the store keys without a
+	// generation.
+	AdmitLegacy func(t *testing.T, sender messaging.Identity, messageID, target string)
+	// Rotate retires the generation that holds live ask state.
+	Rotate func(t *testing.T)
+}
+
+// RunReplyRoutingSuite pins reply routing for the keys a transport cannot
+// create itself: a reply answers an edge admitted on the legacy path, and a
+// reply whose generation a rotation retired finds no edge.
+func RunReplyRoutingSuite(t *testing.T, newTransport TransportFactory, hooks ReplyRoutingHooks) {
+	t.Helper()
+
+	alice := messaging.Identity{RunID: "reply-alice", Sender: "alice"}
+	bob := messaging.Identity{RunID: "reply-bob", Sender: "bob"}
+	at := newTransport(t, alice)
+	bt := newTransport(t, bob)
+	t.Cleanup(func() {
+		_ = at.Close()
+		_ = bt.Close()
+	})
+
+	t.Run("reply answers a legacy edge", func(t *testing.T) {
+		msgID := "legacy-edge-id"
+		hooks.AdmitLegacy(t, alice, msgID, bob.RunID)
+		replied, err := bt.Reply(t.Context(), messaging.ReplyRequest{
+			From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+		})
+		if err != nil || replied.Outcome != messaging.OutcomeReplied {
+			t.Fatalf("Reply = (%+v, %v), want the legacy edge answered", replied, err)
+		}
+	})
+
+	t.Run("reply after a rotation finds no edge", func(t *testing.T) {
+		pre, err := at.Preflight(t.Context())
+		if err != nil {
+			t.Fatalf("Preflight: %v", err)
+		}
+		now := time.Now().UTC()
+		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("NewMsgID: %v", err)
+		}
+		if _, err := at.Send(t.Context(), messaging.SendRequest{
+			From: alice, To: bob, MessageID: msgID, Generation: pre.Generation, Body: `{"message":"ping"}`,
+		}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		hooks.Rotate(t)
+		replied, err := bt.Reply(t.Context(), messaging.ReplyRequest{
+			From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+		})
+		if err != nil || replied.Outcome != messaging.OutcomeEdgeAbsent {
+			t.Fatalf("Reply after rotation = (%+v, %v), want edge-absent", replied, err)
+		}
+	})
+}
+
 // NewMemoryStore builds an askstore backed by a fresh MemoryBackend.
 func NewMemoryStore(t *testing.T) (*askstore.Store, *MemoryBackend) {
 	t.Helper()

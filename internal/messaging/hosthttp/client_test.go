@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/messaging/hosthttp"
 	"github.com/sdougbrown/avenor/internal/messaging/internal/hostfixture"
 	"github.com/sdougbrown/avenor/internal/messaging/messagetest"
@@ -55,6 +56,20 @@ func TestHostClientContract(t *testing.T) {
 
 func TestHostClientFailureMatrix(t *testing.T) {
 	messagetest.RunFailureMatrix(t, fixtureFactory(hostfixture.New(t)))
+}
+
+func TestHostReplyRouting(t *testing.T) {
+	fx := hostfixture.New(t)
+	messagetest.RunReplyRoutingSuite(t, fixtureFactory(fx), messagetest.ReplyRoutingHooks{
+		AdmitLegacy: func(t *testing.T, sender messaging.Identity, messageID, target string) {
+			if _, err := fx.Store().Admit(t.Context(), askstore.AdmitRequest{
+				Sender: sender, Target: target, MessageID: messageID, Legacy: true,
+			}); err != nil {
+				t.Fatalf("legacy Admit: %v", err)
+			}
+		},
+		Rotate: func(t *testing.T) { fx.Store().Reset() },
+	})
 }
 
 // TestHostFixturePausesSendAdmission pauses the fixture's send admission for
@@ -221,6 +236,27 @@ func TestHostClientAdmissionRejections(t *testing.T) {
 			t.Fatalf("Withdraw = %+v", withdrawn)
 		}
 	})
+}
+
+// TestHostSendDerivesOutcomeFromCode pins that a peer-supplied outcome never
+// overrides the outcome the wire contract assigns to the error code.
+func TestHostSendDerivesOutcomeFromCode(t *testing.T) {
+	srv := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"duplicate-message-id","outcome":"sent"}`))
+	})
+	tr, err := hosthttp.New(plainDescriptor(srv.URL))
+	if err != nil {
+		t.Fatalf("hosthttp.New: %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+
+	res, err := tr.Send(t.Context(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: "gen", Body: `{}`,
+	})
+	if !errors.Is(err, messaging.ErrDuplicateMessageID) || res.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("Send = (%+v, %v), want not-sent", res, err)
+	}
 }
 
 func stubServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
@@ -406,20 +442,39 @@ func TestHostClientRefusesRedirects(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tr.Close() })
 
-	res, err := tr.Send(t.Context(), messaging.SendRequest{
-		From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: "gen", Body: `{}`,
-	})
-	if !errors.Is(err, hosthttp.ErrRedirect) {
-		t.Fatalf("Send error = %v, want ErrRedirect", err)
+	msgID := mintID(t, time.Minute)
+	calls := map[string]func() error{
+		"send": func() error {
+			_, err := tr.Send(t.Context(), messaging.SendRequest{
+				From: alice, To: bob, MessageID: msgID, Generation: "gen", Body: `{}`,
+			})
+			return err
+		},
+		"wait": func() error {
+			_, err := tr.Wait(t.Context(), messaging.WaitRequest{
+				Sender: alice, MessageID: msgID, Generation: "gen", Timeout: 50 * time.Millisecond,
+			})
+			return err
+		},
+		"reply": func() error {
+			_, err := tr.Reply(t.Context(), messaging.ReplyRequest{
+				From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{}`,
+			})
+			return err
+		},
 	}
-	if res.Outcome != messaging.OutcomePossiblyPending {
-		t.Fatalf("Send outcome = %q, want possibly-pending", res.Outcome)
-	}
-	mu.Lock()
-	served := reached
-	mu.Unlock()
-	if served != 0 {
-		t.Fatalf("redirect target served %d request(s)", served)
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			if err := call(); !errors.Is(err, hosthttp.ErrRedirect) {
+				t.Fatalf("%s error = %v, want ErrRedirect", name, err)
+			}
+			mu.Lock()
+			served := reached
+			mu.Unlock()
+			if served != 0 {
+				t.Fatalf("redirect target served %d request(s)", served)
+			}
+		})
 	}
 }
 

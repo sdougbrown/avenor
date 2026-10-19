@@ -802,18 +802,12 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	if replyTo != "" {
 		// The asker is the reply's destination. A live edge is completed with
-		// the reply; an absent or terminal edge falls back to fire-and-forget.
-		// The reply carries no generation, so the edge is looked up in the
-		// store's current generation, which is where an ask admitted since the
-		// last rotation lives.
+		// the reply; an absent edge falls back to fire-and-forget, which only
+		// this layer can do because it owns the queues. The reply carries no
+		// generation, so the edge is looked up in the store's current
+		// generation; the store itself retries the generation-less legacy key.
 		key := messaging.FenceKey{Sender: fullBody.ToRunID, MessageID: replyTo, Generation: b.store.Generation()}
 		outcome, err := b.store.Reply(key, fullBody.FromRunID, fullBody.Payload)
-		if err == nil && outcome != messaging.OutcomeReplied {
-			// An unversioned ask is admitted without a generation, so only the
-			// generation-less key reaches its edge.
-			key.Generation = ""
-			outcome, err = b.store.Reply(key, fullBody.FromRunID, fullBody.Payload)
-		}
 		if errors.Is(err, messaging.ErrNotAskTarget) {
 			writeJSONError(w, http.StatusForbidden, "not the target of this ask")
 			return
@@ -822,7 +816,9 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if outcome != messaging.OutcomeReplied {
+		if outcome == messaging.OutcomeEdgeAbsent {
+			// No live edge owns this ID, so the reply degrades to a delivery
+			// rather than completing an edge the store already retired.
 			err = b.SendTo(fullBody.FromRunID, fullBody.ToRunID, fullBody.Type, fullBody.Payload, "")
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusNotFound)
