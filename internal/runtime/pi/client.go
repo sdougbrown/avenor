@@ -218,6 +218,10 @@ func (c *client) Close() error {
 
 func (c *client) Stderr() string { return c.stderr.String() }
 
+// resetStderr discards the output of earlier turns so a stale failure cannot
+// describe the current one.
+func (c *client) resetStderr() { c.stderr.Reset() }
+
 func (c *client) writeStdin(data []byte) error {
 	c.stdinMu.Lock()
 	defer c.stdinMu.Unlock()
@@ -265,6 +269,14 @@ func (c *client) sendCommand(ctx context.Context, cmd map[string]any) (json.RawM
 		c.mu.Unlock()
 		return nil, ctx.Err()
 	case <-c.done:
+		// readLoop closes done after it dispatches the final line, so a
+		// response that arrived just before the EOF is already queued: prefer
+		// it before reporting the child as gone.
+		select {
+		case result := <-ch:
+			return result, nil
+		default:
+		}
 		c.mu.Lock()
 		if c.pending != nil {
 			delete(c.pending, id)
@@ -619,6 +631,12 @@ func (b *rollingBuffer) Append(line string) {
 	if len(b.lines) > b.cap {
 		b.lines = b.lines[len(b.lines)-b.cap:]
 	}
+	b.mu.Unlock()
+}
+
+func (b *rollingBuffer) Reset() {
+	b.mu.Lock()
+	b.lines = nil
 	b.mu.Unlock()
 }
 

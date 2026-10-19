@@ -153,6 +153,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	turnCh := make(chan events.Event, 1)
 
+	// Only this turn's output may describe this turn's failure: the rolling
+	// buffer is process-lifetime, so an earlier turn's 429 would otherwise
+	// reclassify a later, unrelated error.
+	c.resetStderr()
 	subCh := make(chan events.Event, 128)
 	c.subscribe(sessionID, subCh)
 
@@ -169,6 +173,11 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			}
 		}
 	}()
+	settle := func() {
+		c.unsubscribe(sessionID, subCh)
+		close(subCh)
+		<-done
+	}
 
 	cmd := map[string]any{
 		"type":    "prompt",
@@ -177,39 +186,29 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	}
 	_, err = c.sendCommand(ctx, cmd)
 	if err != nil {
-		c.unsubscribe(sessionID, subCh)
-		close(subCh)
-		<-done
+		settle()
 		return fmt.Errorf("send prompt: %w", err)
 	}
 
 	select {
 	case ev := <-turnCh:
-		c.unsubscribe(sessionID, subCh)
-		close(subCh)
-		<-done
+		settle()
 		return piTurnResult(sessionID, ev, c.Stderr())
 	case <-c.done:
-		// The child exited before settling the turn. Read any terminal event
-		// that was queued just before the EOF, then report what it printed:
-		// waiting on the caller's deadline would misreport the failure as a
-		// timeout.
+		// The child exited before settling the turn. readLoop closes c.done
+		// right after it fans the terminal event out, and the forwarder may not
+		// have moved it to turnCh yet: close and drain the subscription first,
+		// then read the queued turn before reporting the exit. Waiting on the
+		// caller's deadline would misreport the failure as a timeout.
+		settle()
 		select {
 		case ev := <-turnCh:
-			c.unsubscribe(sessionID, subCh)
-			close(subCh)
-			<-done
 			return piTurnResult(sessionID, ev, c.Stderr())
 		default:
 		}
-		c.unsubscribe(sessionID, subCh)
-		close(subCh)
-		<-done
 		return fmt.Errorf("turn failed for session %s: %s", sessionID, piExitCause(c.Stderr()))
 	case <-ctx.Done():
-		c.unsubscribe(sessionID, subCh)
-		close(subCh)
-		<-done
+		settle()
 		return ctx.Err()
 	}
 }

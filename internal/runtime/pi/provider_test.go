@@ -653,7 +653,6 @@ func TestPromptTurnErrorSurfacesStderrDetail(t *testing.T) {
 	c.setSessionID("ses-pi-err")
 	p.client = c
 	p.sessions = map[string]struct{}{"ses-pi-err": {}}
-	c.stderr.Append("model 429: rate limited")
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- p.Prompt(context.Background(), "ses-pi-err", "hi") }()
@@ -663,6 +662,7 @@ func TestPromptTurnErrorSurfacesStderrDetail(t *testing.T) {
 		if err != nil {
 			return
 		}
+		c.stderr.Append("model 429: rate limited")
 		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
 		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "error"})
 	}()
@@ -693,7 +693,6 @@ func TestPromptFailsWhenClientExitsBeforeSettlement(t *testing.T) {
 	c.setSessionID("ses-pi-gone")
 	p.client = c
 	p.sessions = map[string]struct{}{"ses-pi-gone": {}}
-	c.stderr.Append("pi: authentication failed")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -705,6 +704,7 @@ func TestPromptFailsWhenClientExitsBeforeSettlement(t *testing.T) {
 		if err != nil {
 			return
 		}
+		c.stderr.Append("pi: authentication failed")
 		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
 		_ = wOut.Close()
 	}()
@@ -720,6 +720,78 @@ func TestPromptFailsWhenClientExitsBeforeSettlement(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "authentication failed") {
 		t.Fatalf("error = %v; want the captured stderr", err)
+	}
+}
+
+// A child that settles the turn and then exits must still report the settled
+// turn: readLoop closes the client's done channel right after it fans the
+// terminal event out, so the exit path has to drain the subscription before it
+// declares a failure.
+func TestPromptSettlesTurnBeforeClientExit(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-pi-settled")
+	p.client = c
+	p.sessions = map[string]struct{}{"ses-pi-settled": {}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(ctx, "ses-pi-settled", "hi") }()
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
+		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "stop"})
+		_ = wOut.Close()
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Prompt = %v, want the settled turn", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Prompt did not return after the child exited")
+	}
+}
+
+// The rolling stderr buffer is process-lifetime: a stale limit line from an
+// earlier turn must not describe a later, unrelated failure.
+func TestPromptStderrIsPerTurn(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-pi-turns")
+	p.client = c
+	p.sessions = map[string]struct{}{"ses-pi-turns": {}}
+
+	go func() {
+		first, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		c.stderr.Append("model 429: rate limited")
+		writeLine(wOut, map[string]any{"type": "response", "id": first["id"], "success": true})
+		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "error", "errorMessage": "429: rate limited"})
+
+		second, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": second["id"], "success": true})
+		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "error", "errorMessage": "400: invalid model name"})
+	}()
+
+	if err := p.Prompt(context.Background(), "ses-pi-turns", "first"); err == nil || !strings.Contains(err.Error(), "429") {
+		t.Fatalf("first Prompt = %v, want the rate limit", err)
+	}
+	if err := p.Prompt(context.Background(), "ses-pi-turns", "second"); err == nil || strings.Contains(err.Error(), "429") {
+		t.Fatalf("second Prompt = %v, want only the current turn's cause", err)
 	}
 }
 
