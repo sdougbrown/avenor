@@ -118,9 +118,9 @@ func TestBoardMutationAllowlist(t *testing.T) {
 	}
 }
 
-// TestBoardMutationAllowlistScanDirs proves an enumerated socket is also
-// allowlisted, and that a requested path outside the allowlist is refused
-// before any credential is loaded.
+// TestBoardUnlistedTargetRejected proves a socket enumerated from the scan
+// directories is allowlisted, while a live socket the operator's configuration
+// did not select is refused with 403 and never reached.
 func TestBoardUnlistedTargetRejected(t *testing.T) {
 	dir := shortTempDir(t)
 	socket, stub := startControlSocket(t, dir, "listed.sock")
