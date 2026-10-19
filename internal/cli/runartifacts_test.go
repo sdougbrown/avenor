@@ -419,8 +419,9 @@ func TestRunWorkflowRejectedConfigKeepsPIDFile(t *testing.T) {
 }
 
 // TestValidateArtifactPaths covers spellings the CLI cannot compare as strings:
-// a relative path against an absolute one, links to one file, and --on-event
-// sharing a path with another artifact.
+// a relative path against an absolute one, links to one file, --on-event
+// sharing a path with another artifact, and a flag claiming a permission file
+// the file handler derives from the sentinel.
 func TestValidateArtifactPaths(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -437,22 +438,32 @@ func TestValidateArtifactPaths(t *testing.T) {
 	samePathErr := "--result-file and --pid-file name the same path"
 
 	for _, tt := range []struct {
-		name               string
-		result, pid, event string
-		want               string
+		name                  string
+		result, pid, event    string
+		sentinel, permHandler string
+		autoApprove           bool
+		want                  string
 	}{
-		{"abs against rel", same, "same.txt", "", samePathErr},
-		{"pid links to result", same, link, "", samePathErr},
-		{"pid through a symlinked directory", filepath.Join(dir, "absent.txt"), filepath.Join(linkDir, "absent.txt"), "", samePathErr},
-		{"on-event", same, "", "same.txt", "--result-file and --on-event name the same path"},
-		{"newline", "line\nbreak.txt", "", "", "--result-file must be a single-line path"},
+		{"abs against rel", same, "same.txt", "", "", "", false, samePathErr},
+		{"pid links to result", same, link, "", "", "", false, samePathErr},
+		{"pid through a symlinked directory", filepath.Join(dir, "absent.txt"), filepath.Join(linkDir, "absent.txt"), "", "", "", false, samePathErr},
+		{"on-event", same, "", "same.txt", "", "", false, "--result-file and --on-event name the same path"},
+		{"derived permission request", filepath.Join(dir, "run.perm.req"), "", "", filepath.Join(dir, "run.done"), "", false, "--result-file and the permission request file name the same path"},
+		{"derived permission request with auto-approve", filepath.Join(dir, "run.perm.req"), "", "", filepath.Join(dir, "run.done"), "", true, ""},
+		{"newline", "line\nbreak.txt", "", "", "", "", false, "--result-file must be a single-line path"},
 	} {
-		err := validateArtifactPaths(tt.result, tt.pid, "", tt.event)
+		err := validateArtifactPaths(tt.result, tt.pid, tt.sentinel, tt.event, tt.permHandler, tt.autoApprove)
+		if tt.want == "" {
+			if err != nil {
+				t.Fatalf("%s: validateArtifactPaths() = %v, want nil", tt.name, err)
+			}
+			continue
+		}
 		if err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Fatalf("%s: validateArtifactPaths() = %v, want %q", tt.name, err, tt.want)
 		}
 	}
-	if err := validateArtifactPaths(same, filepath.Join(dir, "other.txt"), "", ""); err != nil {
+	if err := validateArtifactPaths(same, filepath.Join(dir, "other.txt"), "", "", "", false); err != nil {
 		t.Fatalf("distinct paths rejected: %v", err)
 	}
 }

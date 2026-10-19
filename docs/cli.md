@@ -116,8 +116,9 @@ run that wrote it.
 
 `--result-file`, `--pid-file`, `--sentinel-file` and `--on-event` must name
 distinct paths — compared as absolute paths with existing parent directories
-resolved, and by file identity when the paths already exist — and the result and
-pid paths must be single-line. An invocation rejected by flag validation writes
+resolved, and by file identity when the paths already exist — and none may claim
+the permission request or response file derived from the sentinel while the file
+handler is active, and the result and pid paths must be single-line. An invocation rejected by flag validation writes
 no result or pid file and leaves an earlier answer untouched. A rejection after
 the flags are parsed still writes its sentinel when `--sentinel-file` is set, so
 a supervisor can wait on it; a command line that does not parse exits 1 before

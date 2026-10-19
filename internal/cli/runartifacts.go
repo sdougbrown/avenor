@@ -26,24 +26,35 @@ var pidFileRemoveCheck func()
 // contract. Paths are compared as absolutes with any existing parent directory
 // resolved, so neither a relative spelling nor a symlinked directory can slip
 // past another flag's path, and existing files are also compared by identity.
-func validateArtifactPaths(resultFile, pidFile, sentinelFile, onEvent string) error {
-	flags := []struct {
+// While the file permission handler is active, the request and response files it
+// derives from the sentinel join the set: the handler writes them over whatever
+// a flag left at those paths.
+func validateArtifactPaths(resultFile, pidFile, sentinelFile, onEvent, permissionHandler string, autoApprove bool) error {
+	type artifact struct {
 		name       string
 		path       string
 		singleLine bool
-	}{
+	}
+	artifacts := []artifact{
 		{"--result-file", resultFile, true},
 		{"--pid-file", pidFile, true},
 		{"--sentinel-file", sentinelFile, false},
 		{"--on-event", onEvent, false},
+	}
+	if sentinelFile != "" && permissionHandler == "" && !autoApprove {
+		base := DerivePermBase(sentinelFile)
+		artifacts = append(artifacts,
+			artifact{"the permission request file", base + ".req", false},
+			artifact{"the permission response file", base + ".req.response", false},
+		)
 	}
 	type seenPath struct {
 		name string
 		abs  string
 		info os.FileInfo
 	}
-	seen := make([]seenPath, 0, len(flags))
-	for _, f := range flags {
+	seen := make([]seenPath, 0, len(artifacts))
+	for _, f := range artifacts {
 		if f.path == "" {
 			continue
 		}

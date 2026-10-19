@@ -332,7 +332,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "avenor: --result-file is not supported with --loop-file or --team-file")
 		return exitWithSentinel(1)
 	}
-	if err := validateArtifactPaths(*resultFile, *pidFile, *sentinelFile, *onEvent); err != nil {
+	if err := validateArtifactPaths(*resultFile, *pidFile, *sentinelFile, *onEvent, *permissionHandler, *autoApprove); err != nil {
 		fmt.Fprintf(stderr, "avenor: %v\n", err)
 		return exitWithSentinel(1)
 	}
