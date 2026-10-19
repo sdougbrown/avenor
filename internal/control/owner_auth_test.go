@@ -313,6 +313,17 @@ func TestOwnerAuthErrorCodes(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != CodeUnsupportedOwnerAuth {
 		t.Fatalf("malformed params = %+v, want -32012", resp.Error)
 	}
+	payload, err := json.Marshal(resp.Error.Data)
+	if err != nil {
+		t.Fatalf("malformed params: marshal error data: %v", err)
+	}
+	var malformedData OwnerAuthErrorData
+	if err := json.Unmarshal(payload, &malformedData); err != nil {
+		t.Fatalf("malformed params: decode error data: %v", err)
+	}
+	if malformedData.Reason != "malformed-params" {
+		t.Fatalf("malformed params error data = %+v, want reason malformed-params", malformedData)
+	}
 
 	// Success reports the construction capability and never the secret.
 	conn := mustDial(t, s.path)
