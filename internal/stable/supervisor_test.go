@@ -2738,10 +2738,15 @@ func TestStableResultOverControlSocketUsesRuntimeIDAndPreservesLargeOutput(t *te
 	}
 }
 
-// attachOwnerForTest authenticates c as sup's construction owner.
-func attachOwnerForTest(t *testing.T, c *client.Client, sup *Supervisor) {
+// attachOwnerForTest authenticates c as the owner published at socketPath.
+func attachOwnerForTest(t *testing.T, c *client.Client, socketPath string) {
 	t.Helper()
-	if err := c.AuthenticateOwner(sup.ownerCapability); err != nil {
+	record, err := control.LoadOwnerRecord(socketPath)
+	if err != nil {
+		t.Fatalf("load owner record: %v", err)
+	}
+	owner := control.OwnerCapability{ID: record.CapabilityID, Secret: record.Secret}
+	if err := c.AuthenticateOwner(owner); err != nil {
 		t.Fatalf("authenticate owner: %v", err)
 	}
 }
@@ -6074,7 +6079,7 @@ func TestSpawnAndSendToParent(t *testing.T) {
 		t.Fatalf("dial control socket: %v", err)
 	}
 	defer c.Close()
-	attachOwnerForTest(t, c, sup)
+	attachOwnerForTest(t, c, socketPath)
 
 	// Subscribe to events so the server pushes them to this client.
 	if err := c.Call("subscribe", nil, nil); err != nil {
@@ -8047,7 +8052,7 @@ func runControlTurnsTest(t *testing.T, turns int, betweenTurn func(turn int, sup
 		t.Fatalf("dial control socket: %v", err)
 	}
 	defer c.Close()
-	attachOwnerForTest(t, c, sup)
+	attachOwnerForTest(t, c, socketPath)
 
 	// Subscribe before spawning so no turn's events are missed.
 	if err := c.Call("subscribe", nil, nil); err != nil {
@@ -8152,7 +8157,7 @@ func TestSubscribeRuntimeOnlyReceivesSessionEnd(t *testing.T) {
 		t.Fatalf("dial control socket: %v", err)
 	}
 	defer c.Close()
-	attachOwnerForTest(t, c, sup)
+	attachOwnerForTest(t, c, socketPath)
 
 	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "pony"})
 	if err != nil {

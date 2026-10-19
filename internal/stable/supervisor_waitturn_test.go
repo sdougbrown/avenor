@@ -107,7 +107,7 @@ func startWaitTurnSupervisor(t *testing.T, provider *waitTurnTestProvider) (*cli
 		t.Fatalf("dial control socket: %v", err)
 	}
 	t.Cleanup(func() { c.Close() })
-	attachOwnerForTest(t, c, sup)
+	attachOwnerForTest(t, c, socketPath)
 	return c, sup
 }
 

@@ -598,12 +598,9 @@ type Supervisor struct {
 	// goroutines can use it without synchronization.
 	errWriter io.Writer
 	state     *control.ControlState
-	// ownerCapability is the immutable control principal this supervisor
-	// publishes and authenticates against; it never changes for the process.
-	ownerCapability control.OwnerCapability
-	controlMu       sync.Mutex
-	runtimes        map[string]*childRuntime
-	nextID          int
+	controlMu sync.Mutex
+	runtimes  map[string]*childRuntime
+	nextID    int
 	// outstandingReservations counts admission reservations that hold a local
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
@@ -686,7 +683,6 @@ func NewSupervisor(cfg Config) *Supervisor {
 		config:                  cfg,
 		runID:                   runID,
 		state:                   state,
-		ownerCapability:         owner,
 		control:                 control.NewServer(state, owner),
 		idempotency:             newIdempotencyStore(cfg.IdempotencyCapacity),
 		runtimes:                map[string]*childRuntime{},
