@@ -193,6 +193,19 @@ export class RpcError extends Error {
   }
 }
 
+/**
+ * A call that produced no response inside the client timeout. It is a transport
+ * outcome, not a peer's structured rejection.
+ */
+export class CallTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT'
+
+  constructor() {
+    super('read response: timeout')
+    this.name = 'CallTimeoutError'
+  }
+}
+
 const OWNER_AUTH_VERSION = 1
 export const OWNER_UNAUTHENTICATED_CODE = -32011
 export const UNSUPPORTED_OWNER_AUTH_CODE = -32012
@@ -230,9 +243,6 @@ function classifyOwnerAuthError(err: unknown): unknown {
       default:
         return new OwnerAuthError('unsupported', { code: err.code, reason })
     }
-  }
-  if (err instanceof Error && err.message === 'read response: timeout') {
-    return new OwnerAuthError('timeout')
   }
   return err
 }
@@ -423,7 +433,7 @@ export class Client {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error('read response: timeout'))
+        reject(new CallTimeoutError())
       }, timeout)
 
       this.pending.set(id, { resolve, reject, timer })
