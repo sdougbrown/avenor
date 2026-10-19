@@ -97,6 +97,36 @@ func RunTransportSuite(t *testing.T, newTransport TransportFactory) {
 		}
 	})
 
+	t.Run("receive honors the limit", func(t *testing.T) {
+		ids := make([]string, 3)
+		for i := range ids {
+			ids[i] = mint(t, time.Minute)
+			if _, err := at.Send(t.Context(), messaging.SendRequest{
+				From: alice, To: bob, MessageID: ids[i], Generation: pre.Generation, Body: `{"message":"ping"}`,
+			}); err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+		}
+		first, err := bt.Receive(t.Context(), messaging.ReceiveRequest{
+			Sender: bob, Generation: bpre.Generation, Limit: 2,
+		})
+		if err != nil {
+			t.Fatalf("Receive: %v", err)
+		}
+		if len(first.Messages) != 2 || first.Messages[0].MessageID != ids[0] || first.Messages[1].MessageID != ids[1] {
+			t.Fatalf("first Receive = %+v, want the first two in order", first.Messages)
+		}
+		second, err := bt.Receive(t.Context(), messaging.ReceiveRequest{
+			Sender: bob, Generation: bpre.Generation, Limit: 2,
+		})
+		if err != nil {
+			t.Fatalf("second Receive: %v", err)
+		}
+		if len(second.Messages) != 1 || second.Messages[0].MessageID != ids[2] {
+			t.Fatalf("second Receive = %+v, want the message the limit left queued", second.Messages)
+		}
+	})
+
 	t.Run("withdraw fences the ask", func(t *testing.T) {
 		msgID := mint(t, time.Minute)
 		if _, err := at.Send(t.Context(), messaging.SendRequest{
@@ -122,17 +152,19 @@ func RunTransportSuite(t *testing.T, newTransport TransportFactory) {
 	})
 
 	t.Run("wait timeout", func(t *testing.T) {
-		msgID := mint(t, time.Minute)
-		if _, err := at.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: pre.Generation, Body: `{"message":"ping"}`,
-		}); err != nil {
-			t.Fatalf("Send: %v", err)
-		}
-		waited, err := at.Wait(t.Context(), messaging.WaitRequest{
-			Sender: alice, MessageID: msgID, Generation: pre.Generation, Timeout: 25 * time.Millisecond,
-		})
-		if err != nil || waited.Outcome != messaging.OutcomeTimedOut {
-			t.Fatalf("Wait = (%+v, %v)", waited, err)
+		for _, timeout := range []time.Duration{25 * time.Millisecond, 500 * time.Microsecond} {
+			msgID := mint(t, time.Minute)
+			if _, err := at.Send(t.Context(), messaging.SendRequest{
+				From: alice, To: bob, MessageID: msgID, Generation: pre.Generation, Body: `{"message":"ping"}`,
+			}); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			waited, err := at.Wait(t.Context(), messaging.WaitRequest{
+				Sender: alice, MessageID: msgID, Generation: pre.Generation, Timeout: timeout,
+			})
+			if err != nil || waited.Outcome != messaging.OutcomeTimedOut {
+				t.Fatalf("wait with %v timeout = (%+v, %v)", timeout, waited, err)
+			}
 		}
 	})
 

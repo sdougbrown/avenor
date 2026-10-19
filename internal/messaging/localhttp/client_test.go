@@ -93,6 +93,10 @@ func TestLocalAdapterFailureMatrix(t *testing.T) {
 	messagetest.RunFailureMatrix(t, brokerFactory(t, b))
 }
 
+func TestLocalAdapterPeerFaultRacingClose(t *testing.T) {
+	messagetest.RunPeerFaultCloseSuite(t, brokerFactory(t, newBroker(t)))
+}
+
 func TestLocalReplyRouting(t *testing.T) {
 	b := newBroker(t)
 	messagetest.RunReplyRoutingSuite(t, brokerFactory(t, b), messagetest.ReplyRoutingHooks{
@@ -467,8 +471,9 @@ func rawPost(t *testing.T, addr, path string, payload map[string]any) (int, map[
 }
 
 // TestLocalWireFixture pins the recorded local wire contract against the live
-// router: every declared path serves, every declared response field is present,
-// and every declared code is part of the shared error table.
+// router: every declared path serves, every declared request field is accepted,
+// every declared response field is present, and every declared code is part of
+// the shared error table.
 func TestLocalWireFixture(t *testing.T) {
 	doc := loadWireDoc(t)
 	if doc.Protocol != messaging.ProtocolVersion {
@@ -483,80 +488,96 @@ func TestLocalWireFixture(t *testing.T) {
 			t.Fatalf("documented code %q is not in the shared error table", code)
 		}
 	}
-	for op, fields := range doc.RequestFields {
-		if len(fields) == 0 {
-			t.Fatalf("request %q declares no fields", op)
-		}
-	}
 
 	b := newBroker(t)
 	credsA := credentials(t, b, alice)
 	credsB := credentials(t, b, bob)
 	addr := b.Addr()
 
+	// build renders one request from the fields the document declares for op,
+	// so a declared field the router stops accepting fails here.
+	values := map[string]any{
+		"run_id": credsA.RunID, "token": credsA.Token,
+		"from_run_id": alice.RunID, "to_run_id": bob.RunID, "type": "agent_message",
+		"sender": alice.Sender, "payload": map[string]any{"message": "ping"},
+		"timeout_ms": 2000, "agent_only": true, "limit": 0,
+	}
+	build := func(op string, overrides map[string]any) map[string]any {
+		t.Helper()
+		if len(doc.RequestFields[op]) == 0 {
+			t.Fatalf("%s request declares no fields", op)
+		}
+		request := make(map[string]any, len(doc.RequestFields[op]))
+		for _, field := range doc.RequestFields[op] {
+			value, ok := overrides[field]
+			if !ok {
+				value, ok = values[field]
+			}
+			if !ok {
+				t.Fatalf("%s request declares %q, which the fixture has no value for", op, field)
+			}
+			request[field] = value
+		}
+		return request
+	}
+
 	status, sessions := rawGet(t, addr, doc.Paths["sessions"], credsA)
 	if status != http.StatusOK {
 		t.Fatalf("sessions status = %d", status)
 	}
 	assertFields(t, "sessions", doc.ResponseFields["sessions"], sessions)
-	if int(sessions[doc.MarkerField].(float64)) != doc.Protocol {
-		t.Fatalf("marker %q = %v", doc.MarkerField, sessions[doc.MarkerField])
+	marker, ok := sessions[doc.MarkerField].(float64)
+	if !ok {
+		t.Fatalf("marker %q = %v, want a number", doc.MarkerField, sessions[doc.MarkerField])
+	}
+	if int(marker) != doc.Protocol {
+		t.Fatalf("marker %q = %v, want %d", doc.MarkerField, marker, doc.Protocol)
 	}
 	generation, _ := sessions["generation"].(string)
+	values["generation"] = generation
 
 	msgID := mintID(t, time.Minute)
-	status, sent := rawPost(t, addr, doc.Paths["send"], map[string]any{
-		"run_id": credsA.RunID, "token": credsA.Token,
-		"from_run_id": alice.RunID, "to_run_id": bob.RunID, "type": "agent_message",
-		"generation": generation, "message_id": msgID, "expects_reply": true,
-		"sender": alice.Sender, "payload": map[string]any{"message": "ping"},
-	})
+	values["message_id"], values["expects_reply"], values["waiting_for"] = msgID, true, msgID
+	status, sent := rawPost(t, addr, doc.Paths["send"], build("send", nil))
 	if status != http.StatusOK || sent["outcome"] != string(messaging.OutcomeSent) {
 		t.Fatalf("send = (%d, %v)", status, sent)
 	}
 	assertFields(t, "send", doc.ResponseFields["send"], sent)
 
-	status, replied := rawPost(t, addr, doc.Paths["send"], map[string]any{
+	status, replied := rawPost(t, addr, doc.Paths["send"], build("reply", map[string]any{
 		"run_id": credsB.RunID, "token": credsB.Token,
-		"from_run_id": bob.RunID, "to_run_id": alice.RunID, "type": "agent_message",
-		"reply_to": msgID, "sender": bob.Sender, "payload": map[string]any{"message": "pong"},
-	})
+		"from_run_id": bob.RunID, "to_run_id": alice.RunID,
+		"sender": bob.Sender, "reply_to": msgID,
+		"payload": map[string]any{"message": "pong"},
+	}))
 	if status != http.StatusOK || replied["outcome"] != string(messaging.OutcomeReplied) {
 		t.Fatalf("reply = (%d, %v)", status, replied)
 	}
 	assertFields(t, "reply", doc.ResponseFields["reply"], replied)
 
-	status, waited := rawPost(t, addr, doc.Paths["wait"], map[string]any{
-		"run_id": credsA.RunID, "token": credsA.Token,
-		"waiting_for": msgID, "generation": generation, "timeout_ms": 2000,
-	})
+	status, waited := rawPost(t, addr, doc.Paths["wait"], build("wait", nil))
 	if status != http.StatusOK || waited["outcome"] != string(messaging.OutcomeReplied) {
 		t.Fatalf("wait = (%d, %v)", status, waited)
 	}
 	assertFields(t, "wait_replied", doc.ResponseFields["wait_replied"], waited)
 
 	timeoutID := mintID(t, time.Minute)
-	if status, body := rawPost(t, addr, doc.Paths["send"], map[string]any{
-		"run_id": credsA.RunID, "token": credsA.Token,
-		"from_run_id": alice.RunID, "to_run_id": bob.RunID, "type": "agent_message",
-		"generation": generation, "message_id": timeoutID, "expects_reply": true,
-		"payload": map[string]any{"message": "silence"},
-	}); status != http.StatusOK {
+	if status, body := rawPost(t, addr, doc.Paths["send"], build("send", map[string]any{
+		"message_id": timeoutID, "payload": map[string]any{"message": "silence"},
+	})); status != http.StatusOK {
 		t.Fatalf("send = (%d, %v)", status, body)
 	}
-	status, timedOut := rawPost(t, addr, doc.Paths["wait"], map[string]any{
-		"run_id": credsA.RunID, "token": credsA.Token,
-		"waiting_for": timeoutID, "generation": generation, "timeout_ms": 20,
-	})
+	status, timedOut := rawPost(t, addr, doc.Paths["wait"], build("wait", map[string]any{
+		"waiting_for": timeoutID, "timeout_ms": 20,
+	}))
 	if status != http.StatusGatewayTimeout || timedOut["outcome"] != string(messaging.OutcomeTimedOut) {
 		t.Fatalf("timed-out wait = (%d, %v)", status, timedOut)
 	}
 	assertFields(t, "wait_timeout", doc.ResponseFields["wait_timeout"], timedOut)
 
-	status, withdrawn := rawPost(t, addr, doc.Paths["withdraw"], map[string]any{
-		"run_id": credsA.RunID, "token": credsA.Token,
-		"cancel_message_id": timeoutID, "generation": generation,
-	})
+	status, withdrawn := rawPost(t, addr, doc.Paths["withdraw"], build("withdraw", map[string]any{
+		"cancel_message_id": timeoutID,
+	}))
 	if status != http.StatusOK {
 		t.Fatalf("withdraw = (%d, %v)", status, withdrawn)
 	}
@@ -567,21 +588,17 @@ func TestLocalWireFixture(t *testing.T) {
 	}
 	assertFields(t, "fence", doc.FenceFields, fence)
 
-	status, absent := rawPost(t, addr, doc.Paths["withdraw"], map[string]any{
-		"run_id": credsA.RunID, "token": credsA.Token,
-		"cancel_message_id": mintID(t, time.Minute), "generation": generation,
-	})
+	status, absent := rawPost(t, addr, doc.Paths["withdraw"], build("withdraw", map[string]any{
+		"cancel_message_id": mintID(t, time.Minute),
+	}))
 	if status != http.StatusNotFound {
 		t.Fatalf("absent withdraw = (%d, %v)", status, absent)
 	}
 	assertFields(t, "withdraw_absent", doc.ResponseFields["withdraw_absent"], absent)
 
-	status, duplicate := rawPost(t, addr, doc.Paths["send"], map[string]any{
-		"run_id": credsA.RunID, "token": credsA.Token,
-		"from_run_id": alice.RunID, "to_run_id": bob.RunID, "type": "agent_message",
-		"generation": generation, "message_id": timeoutID, "expects_reply": true,
-		"payload": map[string]any{"message": "again"},
-	})
+	status, duplicate := rawPost(t, addr, doc.Paths["send"], build("send", map[string]any{
+		"message_id": timeoutID, "payload": map[string]any{"message": "again"},
+	}))
 	if status != http.StatusConflict {
 		t.Fatalf("duplicate send = (%d, %v)", status, duplicate)
 	}
@@ -590,9 +607,9 @@ func TestLocalWireFixture(t *testing.T) {
 		t.Fatalf("duplicate send code = %v", duplicate["code"])
 	}
 
-	status, polled := rawPostList(t, addr, doc.Paths["receive"], map[string]any{
-		"run_id": credsB.RunID, "token": credsB.Token, "agent_only": true,
-	})
+	status, polled := rawPostList(t, addr, doc.Paths["receive"], build("receive", map[string]any{
+		"run_id": credsB.RunID, "token": credsB.Token,
+	}))
 	if status != http.StatusOK {
 		t.Fatalf("poll-control = (%d, %v)", status, polled)
 	}
@@ -627,5 +644,64 @@ func TestLocalAdapterRejectsBadCredentials(t *testing.T) {
 	target.Mu.Unlock()
 	if delivered != 0 {
 		t.Fatalf("rejected credential delivered %d message(s)", delivered)
+	}
+}
+
+// TestLocalAdapterLegacyForbidden pins the code-less 403 an older router sends
+// for a reply from outside the ask: it is the not-ask-target refusal, not a
+// rejected credential.
+func TestLocalAdapterLegacyForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sessions":
+			_, _ = io.WriteString(w, `{"sessions":[],"generation":"gen-1","messaging_protocol":1}`)
+		case "/send":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":"not the target of this ask"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	tr := newStubAdapter(t, srv.URL)
+	res, err := tr.Reply(t.Context(), messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: mintID(t, time.Minute), Body: `{"message":"pong"}`,
+	})
+	if !errors.Is(err, messaging.ErrNotAskTarget) {
+		t.Fatalf("Reply error = %v, want not-ask-target", err)
+	}
+	if res.Outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Reply outcome = %q, want edge-absent", res.Outcome)
+	}
+}
+
+// TestLocalAdapterSenderMismatch pins the broker's sender binding through the
+// adapter: a run that has claimed a display name cannot claim another, and the
+// refusal is a credential fact rather than transport uncertainty.
+func TestLocalAdapterSenderMismatch(t *testing.T) {
+	b := newBroker(t)
+	tr := newAdapter(t, b, alice)
+	newAdapter(t, b, bob)
+
+	pre, err := tr.Preflight(t.Context())
+	if err != nil {
+		t.Fatalf("Preflight: %v", err)
+	}
+	if _, err := tr.Send(t.Context(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: pre.Generation, Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("first Send: %v", err)
+	}
+
+	res, err := tr.Send(t.Context(), messaging.SendRequest{
+		From: messaging.Identity{RunID: alice.RunID, Sender: "mallory"}, To: bob,
+		MessageID: mintID(t, time.Minute), Generation: pre.Generation, Body: `{"message":"ping"}`,
+	})
+	if !errors.Is(err, messaging.ErrSenderMismatch) {
+		t.Fatalf("mismatched Send error = %v, want sender-mismatch", err)
+	}
+	if res.Outcome != messaging.OutcomeAuthRejected {
+		t.Fatalf("mismatched Send outcome = %q, want auth-rejected", res.Outcome)
 	}
 }

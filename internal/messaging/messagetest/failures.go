@@ -56,6 +56,21 @@ func RunFailureMatrix(t *testing.T, newTransport TransportFactory) {
 		}
 	})
 
+	t.Run("refused dial is never sent", func(t *testing.T) {
+		tr := newTransport(t, alice)
+		setter, ok := tr.(roundTripperSetter)
+		if !ok {
+			t.Skip("transport has no pluggable round tripper")
+		}
+		setter.SetTransport(refusedDial{})
+		res, err := tr.Send(t.Context(), messaging.SendRequest{
+			From: alice, To: bob, MessageID: mint(t), Generation: pre.Generation, Body: `{"message":"ping"}`,
+		})
+		if err == nil || res.Outcome != messaging.OutcomeNotSent {
+			t.Fatalf("Send = (%+v, %v), want not-sent for a refused dial", res, err)
+		}
+	})
+
 	t.Run("admission rejected", func(t *testing.T) {
 		tr := newFault(t, faultNotSent)
 		res, err := tr.Send(t.Context(), messaging.SendRequest{From: alice, To: bob, MessageID: mint(t), Generation: pre.Generation})
