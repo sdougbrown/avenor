@@ -183,10 +183,12 @@ func TestCloseNotStarted(t *testing.T) {
 
 // TestCloseKeepsInheritedMessaging pins transport ownership: the supervisor
 // creates the shared transport and is its only closer, so a provider stopping
-// must leave it usable for its siblings.
+// must leave it usable for its siblings. The provider carries a live client so
+// Close runs its full teardown rather than returning early.
 func TestCloseKeepsInheritedMessaging(t *testing.T) {
 	transport := inprocess.New(askstore.New(askstore.Options{}))
 	p := NewWithOptions(runtime.StartOptions{Messaging: transport})
+	p.client, _, _ = fakeClient()
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
