@@ -46,7 +46,7 @@ async function executeKillTool(
   // runtime_id targets the supervisor's own root run.
   validateRunId(args.runId)
 
-  const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
+  const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId, { owner: true })
   try {
     const runInfo: RunInfo | undefined = isSingleton && sup
       ? findLocalRunByReference(sup, args.runId)

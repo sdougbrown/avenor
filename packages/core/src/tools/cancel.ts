@@ -13,7 +13,7 @@ async function executeCancelTool(
   args: CancelToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<CancelResult> {
-  const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
+  const { client, isSingleton } = await getSupervisorClient(args.supervisorId, { owner: true })
   try {
     await client.brokerCancel(args.messageId)
     return { cancelled: true }

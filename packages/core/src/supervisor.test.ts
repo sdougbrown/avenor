@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, afterAll, mock } from 'bun:test'
+import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -8,7 +9,11 @@ import {
   Supervisor,
   type RunInfo,
 } from './supervisor.js'
+import { RpcError } from './client.js'
 import { followUpTool } from './tools/follow-up.js'
+import { getSupervisorClient } from './tools/get-supervisor-client.js'
+import { shutdownTool } from './tools/shutdown.js'
+import { socketsRoot } from './paths.js'
 
 function useFakeAvenorUnlessRealIntegration(): void {
   if (process.env.AVENOR_REAL_INTEGRATION === '1') return
@@ -458,4 +463,81 @@ describe('Supervisor singleton and run accessors', () => {
     sup.forEachRun(info => seen.push(info.runId))
     expect(seen).toEqual(['run-iter-1', 'run-iter-2'])
   })
+})
+
+
+describe.skipIf(process.env.AVENOR_REAL_INTEGRATION !== '1')('Owner attach against a real supervisor', () => {
+  function useIsolatedHome(): { restore: () => void } {
+    const previous = process.env.AVENOR_HOME
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-owner-real-'))
+    process.env.AVENOR_HOME = home
+    fs.mkdirSync(socketsRoot(), { recursive: true, mode: 0o700 })
+    return {
+      restore: () => {
+        fs.rmSync(home, { recursive: true, force: true })
+        if (previous === undefined) delete process.env.AVENOR_HOME
+        else process.env.AVENOR_HOME = previous
+      },
+    }
+  }
+
+  async function waitForRecord(socketPath: string): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      try {
+        fs.lstatSync(socketPath)
+        fs.lstatSync(`${socketPath}.owner.json`)
+        return
+      } catch {
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+    }
+    throw new Error(`supervisor did not publish ${socketPath}`)
+  }
+
+  it('an owned start attaches and reaches a gated method', async () => {
+    const home = useIsolatedHome()
+    let sup: Supervisor | undefined
+    try {
+      sup = await Supervisor.get()
+      // cancel is owner-gated and needs no spawned runtime.
+      await sup.getClient().cancel()
+      expect(await sup.getClient().status()).toBeObject()
+    } finally {
+      await sup?.close().catch(() => {})
+      await Supervisor.currentInstance()?.close().catch(() => {})
+      home.restore()
+    }
+  }, 30_000)
+
+  it('attaches a gated call to a supervisor this process did not start', async () => {
+    const home = useIsolatedHome()
+    const socketPath = path.join(socketsRoot(), `avenor-mcp-external-${process.pid}.sock`)
+    const child = spawn(findAvenorBinary(), ['stable', '--control-socket', socketPath, '--idle-timeout', '2m'], {
+      stdio: 'ignore',
+    })
+    const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
+    try {
+      await waitForRecord(socketPath)
+
+      // Read-only access stays credential-free and keeps working.
+      const readOnly = await getSupervisorClient(socketPath)
+      expect(await readOnly.client.status()).toBeObject()
+      await expect(readOnly.client.cancel()).rejects.toMatchObject({ code: -32010 })
+      readOnly.client.close()
+
+      // The gated path attaches with the published capability.
+      const owner = await getSupervisorClient(socketPath, { owner: true })
+      await owner.client.cancel()
+      owner.client.close()
+
+      // A gated tool also reaches a supervisor started by someone else.
+      expect(await shutdownTool({ supervisorId: socketPath })).toMatchObject({ ok: true })
+      await exited
+      expect(() => fs.lstatSync(socketPath)).toThrow()
+    } finally {
+      child.kill('SIGKILL')
+      await exited
+      home.restore()
+    }
+  }, 30_000)
 })

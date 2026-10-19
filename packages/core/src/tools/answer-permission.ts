@@ -26,7 +26,7 @@ export async function answerPermissionTool(args: {
   let isSingleton = false
 
   if (args.supervisorId) {
-    ({ client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId))
+    ({ client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId, { owner: true }))
   } else {
     sup = await Supervisor.get()
     client = sup.getClient()

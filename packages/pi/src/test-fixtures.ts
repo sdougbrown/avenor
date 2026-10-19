@@ -59,6 +59,7 @@ export async function startExtensionHarness(options: {
     workflowReadyTool: mock(async () => ({})),
     observeRun: mock(() => null),
     dial: mock(async () => ({ close() {} })),
+    attachOwner: mock(async () => ({ close() {} })),
     Supervisor: class {} as any,
   }
   await createExtension({ ...baseDeps, ...options.deps }, { pollIntervalMs: 5, subAgentEnv: null, ...options.extOptions })(mockPi as any)

@@ -1,8 +1,17 @@
 import { Supervisor } from '../supervisor.js'
 import { dial, type Client } from '../client.js'
+import { attachOwner } from '../owner-attach.js'
 import { validateSupervisorSocketPath } from './validate.js'
 
-export async function getSupervisorClient(supervisorId: string | undefined): Promise<{
+export interface SupervisorClientOptions {
+  /** Attach with the socket's published owner capability instead of a bare dial. */
+  owner?: boolean
+}
+
+export async function getSupervisorClient(
+  supervisorId: string | undefined,
+  options: SupervisorClientOptions = {},
+): Promise<{
   client: Client
   isSingleton: boolean
   sup: Supervisor | null
@@ -20,5 +29,10 @@ export async function getSupervisorClient(supervisorId: string | undefined): Pro
   if (isSingleton) {
     return { client: current.getClient(), isSingleton: true, sup: current, supervisorId: id }
   }
-  return { client: await dial(id), isSingleton: false, sup: null, supervisorId: id }
+  return {
+    client: options.owner ? await attachOwner(id) : await dial(id),
+    isSingleton: false,
+    sup: null,
+    supervisorId: id,
+  }
 }

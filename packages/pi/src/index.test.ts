@@ -528,6 +528,7 @@ describe('Avenor Pi extension', () => {
       shutdownTool: mock(async () => ({ ok: true })),
       observeRun: mock(() => null),
       dial: mock(async () => externalClient),
+      attachOwner: mock(async () => externalClient),
       Supervisor: class {
         static isCurrentInstance(supervisorId: string) {
           return supervisorId === '/tmp/sock'
@@ -814,6 +815,7 @@ describe('Avenor Pi extension', () => {
       }),
       observeRun: mock(() => null),
       dial: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })),
+      attachOwner: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })),
       Supervisor: class {} as any,
     }, { subAgentEnv: null })(mockPi as any)
 
@@ -883,6 +885,7 @@ describe('Avenor Pi extension', () => {
         shutdownTool: mock(async () => ({ ok: true })),
         observeRun: mock(() => null),
         dial: mock(async () => ({ close() {}, cancel: async () => {}, prompt: async () => {}, events() { throw new Error('unused') } })),
+        attachOwner: mock(async () => ({ close() {}, cancel: async () => {}, prompt: async () => {}, events() { throw new Error('unused') } })),
         Supervisor: class {
           static async get() {
             return { supervisorId: '/tmp/sock' }

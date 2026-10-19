@@ -81,17 +81,58 @@ async function startSpawnServer(): Promise<{
     socketsRoot(),
     `avenor-mcp-spawn-test-${process.pid}-${Math.random().toString(36).slice(2)}.sock`,
   )
+  const capabilityId = 'c'.repeat(32)
+  const capabilitySecret = 'd'.repeat(64)
   const received: SpawnParams[] = []
   const server = net.createServer((socket) => {
     let buffer = ''
+    let authenticated = false
     socket.on('data', (chunk) => {
       buffer += chunk.toString()
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
       for (const line of lines) {
         if (!line.trim()) continue
-        const request = JSON.parse(line) as { id: number; params: SpawnParams }
-        received.push(request.params)
+        const request = JSON.parse(line) as {
+          id: number
+          method: string
+          params?: Record<string, unknown> & SpawnParams
+        }
+        if (request.method === 'identity') {
+          socket.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { token: '' } }) + '\n')
+          continue
+        }
+        if (request.method === 'authenticate_owner') {
+          const params = request.params ?? {}
+          if (
+            params.version === 1 &&
+            params.capability_id === capabilityId &&
+            params.secret === capabilitySecret
+          ) {
+            authenticated = true
+            socket.write(JSON.stringify({
+              jsonrpc: '2.0',
+              id: request.id,
+              result: { version: 1, authenticated: true, capability_id: capabilityId },
+            }) + '\n')
+          } else {
+            socket.write(JSON.stringify({
+              jsonrpc: '2.0',
+              id: request.id,
+              error: { code: -32011, message: 'unauthenticated', data: { version: 1, reason: 'capability-rejected' } },
+            }) + '\n')
+          }
+          continue
+        }
+        if (!authenticated) {
+          socket.write(JSON.stringify({
+            jsonrpc: '2.0',
+            id: request.id,
+            error: { code: -32010, message: 'permission_denied' },
+          }) + '\n')
+          continue
+        }
+        received.push(request.params ?? {})
         socket.write(JSON.stringify({
           jsonrpc: '2.0',
           id: request.id,
@@ -104,15 +145,31 @@ async function startSpawnServer(): Promise<{
     server.once('error', reject)
     server.listen(socketPath, resolve)
   })
+  const info = fs.lstatSync(socketPath, { bigint: true })
+  fs.writeFileSync(
+    `${socketPath}.owner.json`,
+    JSON.stringify({
+      version: 1,
+      socket: socketPath,
+      socket_identity: { dev: String(info.dev), ino: String(info.ino) },
+      capability_id: capabilityId,
+      secret: capabilitySecret,
+      owner_pid: process.pid,
+    }),
+    { mode: 0o600 },
+  )
+  fs.chmodSync(`${socketPath}.owner.json`, 0o600)
   return { server, socketPath, received }
 }
 
 async function stopSpawnServer(server: net.Server, socketPath: string): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()))
-  try {
-    await os.promises.unlink(socketPath)
-  } catch {
-    // The server may have removed the socket during close.
+  for (const file of [socketPath, `${socketPath}.owner.json`]) {
+    try {
+      await os.promises.unlink(file)
+    } catch {
+      // The server may have removed the socket during close.
+    }
   }
 }
 
