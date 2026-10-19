@@ -28,6 +28,10 @@ const (
 	// absentFenceQuota bounds the edge-absent withdrawal fences one sender may
 	// hold, so unknown message IDs cannot consume the shared capacity.
 	absentFenceQuota = 64
+
+	// absentFenceCapacity is the ceiling on edge-absent withdrawal fences across
+	// all senders: 64 senders' worth of the per-sender quota.
+	absentFenceCapacity = 64 * absentFenceQuota
 )
 
 // Options configures a Store. Every field has a usable default.
@@ -63,6 +67,11 @@ type Store struct {
 	terminal map[messaging.FenceKey]*fence
 	paused   map[messaging.FenceKey]*gate
 	reached  map[messaging.FenceKey]bool
+
+	// absentBySender counts each sender's edge-absent withdrawal fences and
+	// absentFences their total, so neither check scans s.terminal.
+	absentBySender map[string]int
+	absentFences   int
 }
 
 // edge is the store's own ask record. It is deliberately not a copy of the
@@ -126,6 +135,8 @@ func New(opts Options) *Store {
 		terminal:      make(map[messaging.FenceKey]*fence),
 		paused:        make(map[messaging.FenceKey]*gate),
 		reached:       make(map[messaging.FenceKey]bool),
+
+		absentBySender: make(map[string]int),
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -370,10 +381,10 @@ func (s *Store) fenceAbsentLocked(key messaging.FenceKey, now time.Time) (messag
 	if err != nil || key.Sender == "" {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
 	}
-	if s.absentFenceCountLocked(key.Sender) >= absentFenceQuota {
+	if s.absentBySender[key.Sender] >= absentFenceQuota || s.absentFences >= absentFenceCapacity {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent}, messaging.ErrFenceCapacity
 	}
-	s.terminal[key] = &fence{deadline: deadline, outcome: messaging.OutcomeWithdrawn, absent: true}
+	s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeWithdrawn, absent: true})
 	return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent, Fence: s.ackLocked(key, deadline)}, nil
 }
 
@@ -400,6 +411,8 @@ func (s *Store) Reset() {
 	s.terminal = make(map[messaging.FenceKey]*fence)
 	s.paused = make(map[messaging.FenceKey]*gate)
 	s.reached = make(map[messaging.FenceKey]bool)
+	s.absentBySender = make(map[string]int)
+	s.absentFences = 0
 	s.generation = messaging.NewGeneration()
 }
 
@@ -551,7 +564,7 @@ func (s *Store) completeLocked(e *edge, outcome messaging.Outcome) {
 	}
 	delete(s.active, e.key)
 	if versionedID(e.key.MessageID, s.now()) {
-		s.terminal[e.key] = &fence{deadline: e.deadline, outcome: outcome}
+		s.setFenceLocked(e.key, &fence{deadline: e.deadline, outcome: outcome})
 	}
 	if outcome == messaging.OutcomeWithdrawn && e.remove != nil {
 		e.remove()
@@ -559,10 +572,13 @@ func (s *Store) completeLocked(e *edge, outcome messaging.Outcome) {
 	}
 }
 
-// consumeLocked removes a replied edge and records its terminal fence.
+// consumeLocked removes a replied edge and records its terminal fence, under
+// the same versioned-ID rule completeLocked applies.
 func (s *Store) consumeLocked(e *edge) {
 	delete(s.active, e.key)
-	s.terminal[e.key] = &fence{deadline: e.deadline, outcome: messaging.OutcomeReplied}
+	if versionedID(e.key.MessageID, s.now()) {
+		s.setFenceLocked(e.key, &fence{deadline: e.deadline, outcome: messaging.OutcomeReplied})
+	}
 }
 
 // findActiveLocked returns the live edge registered for the exact key, so a
@@ -583,15 +599,33 @@ func (s *Store) fenceCountLocked() int {
 	return n
 }
 
-// absentFenceCountLocked counts the edge-absent withdrawal fences sender holds.
-func (s *Store) absentFenceCountLocked(sender string) int {
-	n := 0
-	for key, f := range s.terminal {
-		if f.absent && key.Sender == sender {
-			n++
-		}
+// setFenceLocked records a terminal fence and keeps the absent-fence counters
+// in step with the record it replaces.
+func (s *Store) setFenceLocked(key messaging.FenceKey, f *fence) {
+	s.dropFenceLocked(key)
+	s.terminal[key] = f
+	if f.absent {
+		s.absentBySender[key.Sender]++
+		s.absentFences++
 	}
-	return n
+}
+
+// dropFenceLocked releases the counts a replacement or reclaim supersedes.
+func (s *Store) dropFenceLocked(key messaging.FenceKey) {
+	prev, ok := s.terminal[key]
+	if !ok {
+		return
+	}
+	delete(s.terminal, key)
+	if !prev.absent {
+		return
+	}
+	s.absentFences--
+	if n := s.absentBySender[key.Sender] - 1; n > 0 {
+		s.absentBySender[key.Sender] = n
+	} else {
+		delete(s.absentBySender, key.Sender)
+	}
 }
 
 // generationErrorLocked reports the generation fault for a key. A versioned
@@ -620,7 +654,7 @@ func versionedID(messageID string, now time.Time) bool {
 func (s *Store) reclaimLocked(now time.Time) {
 	for key, f := range s.terminal {
 		if !now.Before(f.deadline) {
-			delete(s.terminal, key)
+			s.dropFenceLocked(key)
 		}
 	}
 }
