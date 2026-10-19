@@ -380,8 +380,18 @@ func TestStoreNoReplyCreatesNoEdge(t *testing.T) {
 	if store.Pending(sender.RunID, msgID) {
 		t.Fatal("no-reply admit left a live edge")
 	}
-	if _, ok := store.Fence(key); ok {
-		t.Fatal("no-reply admit left a terminal fence")
+	if ack, ok := store.Fence(key); !ok || !ack.Terminal {
+		t.Fatalf("no-reply admit left no dedup fence (%+v, %v)", ack, ok)
+	}
+	duplicate, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
+		Body: `{"message":"notice"}`, NoReply: true,
+	})
+	if !errors.Is(err, messaging.ErrDuplicateMessageID) || duplicate.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("duplicate no-reply Admit = (%+v, %v), want a duplicate refusal", duplicate, err)
+	}
+	if len(backend.published) != 1 {
+		t.Fatalf("the same message id was delivered %d time(s), want 1", len(backend.published))
 	}
 	waited, err := store.Wait(t.Context(), key, 20*time.Millisecond)
 	if err != nil || waited.Outcome != messaging.OutcomeEdgeAbsent {
@@ -390,5 +400,35 @@ func TestStoreNoReplyCreatesNoEdge(t *testing.T) {
 	withdrawn, err := store.Withdraw(key)
 	if err != nil || withdrawn.Outcome != messaging.OutcomeEdgeAbsent {
 		t.Fatalf("Withdraw = (%+v, %v), want edge-absent", withdrawn, err)
+	}
+}
+
+// TestNoReplyCannotBypassWithdrawnFence pins the no-reply path against the
+// terminal fence: an ID withdrawn before the message arrives is not delivered.
+func TestNoReplyCannotBypassWithdrawnFence(t *testing.T) {
+	store := New(Options{})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	sender := messaging.Identity{RunID: "alice", Sender: "alice"}
+	now := time.Now()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	key := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID, Generation: store.Generation()}
+	if withdrawn, err := store.Withdraw(key); err != nil || withdrawn.Outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Withdraw = (%+v, %v), want edge-absent", withdrawn, err)
+	}
+
+	res, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
+		Body: `{"message":"notice"}`, NoReply: true,
+	})
+	if err != nil || res.Outcome != messaging.OutcomeWithdrawn || res.Fence == nil {
+		t.Fatalf("Admit past a withdrawal = (%+v, %v), want the terminal fence", res, err)
+	}
+	if len(backend.published) != 0 {
+		t.Fatalf("withdrawn no-reply message was delivered %d time(s)", len(backend.published))
 	}
 }

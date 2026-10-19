@@ -94,6 +94,12 @@ type fence struct {
 	// absent marks a fence installed by a withdrawal that found no edge. These
 	// are bounded per sender instead of against the shared capacity.
 	absent bool
+	// delivered marks the dedup record for a delivered no-reply message: the ID
+	// is spent, but there is no ask edge and no terminal ask state.
+	delivered bool
+	// remove retracts a queued delivery whose waiter gave up. It is set only
+	// for an abandoned ask, so a later withdrawal can still unqueue it.
+	remove func()
 }
 
 // gate pauses admission for one key until it is resumed.
@@ -113,8 +119,9 @@ type AdmitRequest struct {
 	// Legacy admits IDs without an encoded deadline, which is the local HTTP
 	// router's compatibility path. The shared client always leaves it false.
 	Legacy bool
-	// NoReply publishes the message without recording an edge or a fence, so no
-	// wait can observe it. The zero value admits an ask.
+	// NoReply publishes the message without allocating a reply edge, so no wait
+	// can observe it. A delivered versioned ID is still fenced, so resending it
+	// cannot deliver the same message twice. The zero value admits an ask.
 	NoReply bool
 }
 
@@ -209,23 +216,18 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 		Kind:      "agent_message",
 		Payload:   json.RawMessage(req.Body),
 	}
-	if req.NoReply {
-		if s.backend != nil {
-			if _, err := s.backend.Publish(req.Target, msg); err != nil {
-				result.Outcome = messaging.OutcomeNotSent
-				return result, err
-			}
-		}
-		result.Outcome = messaging.OutcomeSent
-		return result, nil
-	}
-
 	if f, ok := s.terminal[key]; ok {
 		ack := messaging.FenceAck{
 			Sender: key.Sender, MessageID: key.MessageID, Generation: key.Generation,
 			Deadline: f.deadline, Terminal: true,
 		}
 		result.Fence = &ack
+		if f.delivered {
+			// The ID already carried a delivered no-reply message, so this send
+			// is a duplicate rather than a fresh delivery.
+			result.Outcome = messaging.OutcomeNotSent
+			return result, messaging.ErrDuplicateMessageID
+		}
 		if f.outcome == messaging.OutcomeWithdrawn {
 			result.Outcome = messaging.OutcomeWithdrawn
 			return result, nil
@@ -237,15 +239,31 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 		result.Outcome = messaging.OutcomeNotSent
 		return result, messaging.ErrDuplicateMessageID
 	}
-	for _, e := range s.active {
-		if e.key.Sender == req.Target && e.target == req.Sender.RunID {
-			result.Outcome = messaging.OutcomeNotSent
-			return result, messaging.ErrMutualAsk
+	if !req.NoReply {
+		for _, e := range s.active {
+			if e.key.Sender == req.Target && e.target == req.Sender.RunID {
+				result.Outcome = messaging.OutcomeNotSent
+				return result, messaging.ErrMutualAsk
+			}
 		}
 	}
 	if s.fenceCountLocked() >= s.fenceCapacity {
 		result.Outcome = messaging.OutcomeNotSent
 		return result, messaging.ErrFenceCapacity
+	}
+
+	if req.NoReply {
+		if s.backend != nil {
+			if _, err := s.backend.Publish(req.Target, msg); err != nil {
+				result.Outcome = messaging.OutcomeNotSent
+				return result, err
+			}
+		}
+		if versionedID(req.MessageID, now) {
+			s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeSent, delivered: true})
+		}
+		result.Outcome = messaging.OutcomeSent
+		return result, nil
 	}
 
 	e := &edge{
@@ -290,12 +308,14 @@ func (s *Store) Wait(ctx context.Context, key messaging.FenceKey, timeout time.D
 		return s.waitOnEdge(ctx, e, timeout)
 	}
 	if f, ok := s.terminal[key]; ok {
+		outcome, delivered := f.outcome, f.delivered
 		s.mu.Unlock()
-		if f.outcome == messaging.OutcomeReplied {
-			// The reply was already consumed; its payload is not retained.
+		if outcome == messaging.OutcomeReplied || delivered {
+			// The reply was already consumed, and a delivered no-reply message
+			// never had an ask edge to wait on; neither payload is retained.
 			return messaging.WaitResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
 		}
-		return messaging.WaitResult{Outcome: f.outcome}, nil
+		return messaging.WaitResult{Outcome: outcome}, nil
 	}
 	s.mu.Unlock()
 	return messaging.WaitResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
@@ -384,6 +404,17 @@ func (s *Store) Withdraw(key messaging.FenceKey) (messaging.WithdrawResult, erro
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeWithdrawn, Fence: s.ackLocked(key, e.deadline)}, nil
 	}
 	if f, ok := s.terminal[key]; ok {
+		if f.delivered {
+			return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent, Fence: s.ackLocked(key, f.deadline)}, nil
+		}
+		if f.remove != nil {
+			// The waiter gave up before its ask was answered; retracting the
+			// delivery now is what keeps the withdrawal from leaving a stale ask
+			// in the target's queue.
+			f.remove()
+			f.remove = nil
+			f.outcome = messaging.OutcomeWithdrawn
+		}
 		return messaging.WithdrawResult{Outcome: f.outcome, Fence: s.ackLocked(key, f.deadline)}, nil
 	}
 	return s.fenceAbsentLocked(key, now)
@@ -582,12 +613,18 @@ func (s *Store) completeLocked(e *edge, outcome messaging.Outcome) {
 		return
 	}
 	delete(s.active, e.key)
-	if versionedID(e.key.MessageID, s.now()) {
-		s.setFenceLocked(e.key, &fence{deadline: e.deadline, outcome: outcome})
-	}
 	if outcome == messaging.OutcomeWithdrawn && e.remove != nil {
 		e.remove()
 		e.remove = nil
+	}
+	if versionedID(e.key.MessageID, s.now()) {
+		f := &fence{deadline: e.deadline, outcome: outcome}
+		if outcome == messaging.OutcomePossiblyPending {
+			// The waiter abandoned the ask but its delivery may still be queued.
+			f.remove = e.remove
+			e.remove = nil
+		}
+		s.setFenceLocked(e.key, f)
 	}
 }
 
@@ -628,13 +665,17 @@ func (s *Store) setFenceLocked(key messaging.FenceKey, f *fence) {
 	}
 }
 
-// dropFenceLocked releases the counts a replacement or reclaim supersedes.
+// dropFenceLocked releases the counts a replacement or reclaim supersedes, and
+// retracts a queued delivery the fence was holding a retraction for.
 func (s *Store) dropFenceLocked(key messaging.FenceKey) {
 	prev, ok := s.terminal[key]
 	if !ok {
 		return
 	}
 	delete(s.terminal, key)
+	if prev.remove != nil {
+		prev.remove()
+	}
 	if !prev.absent {
 		return
 	}
