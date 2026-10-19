@@ -27,7 +27,7 @@ func TestSupervisorBrokerReplyAnswersVersionedAsk(t *testing.T) {
 		t.Fatal("supervisor run was not registered with the broker")
 	}
 
-	askerToken, err := sup.broker.CreateRun("asker")
+	askerToken, err := sup.broker.CreateRun("asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}

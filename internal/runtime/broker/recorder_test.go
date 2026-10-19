@@ -14,7 +14,7 @@ func TestRecorderSessionEnd(t *testing.T) {
 	}
 	defer b.Stop()
 
-	if _, err := b.CreateRun("run_rec"); err != nil {
+	if _, err := b.CreateRun("run_rec", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -47,7 +47,7 @@ func TestRecorderSessionEndDefaultDone(t *testing.T) {
 	}
 	defer b.Stop()
 
-	if _, err := b.CreateRun("run_rec2"); err != nil {
+	if _, err := b.CreateRun("run_rec2", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -74,7 +74,7 @@ func TestRecorderAgentStatus(t *testing.T) {
 	}
 	defer b.Stop()
 
-	if _, err := b.CreateRun("run_rec3"); err != nil {
+	if _, err := b.CreateRun("run_rec3", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -112,7 +112,7 @@ func TestRecorderPermissionRequest(t *testing.T) {
 	}
 	defer b.Stop()
 
-	if _, err := b.CreateRun("run_rec4"); err != nil {
+	if _, err := b.CreateRun("run_rec4", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -141,7 +141,7 @@ func TestRecorderUnknownEventIgnored(t *testing.T) {
 	}
 	defer b.Stop()
 
-	if _, err := b.CreateRun("run_rec5"); err != nil {
+	if _, err := b.CreateRun("run_rec5", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -164,7 +164,7 @@ func TestRecorderMessageChunk(t *testing.T) {
 	}
 	defer b.Stop()
 
-	if _, err := b.CreateRun("run_msg"); err != nil {
+	if _, err := b.CreateRun("run_msg", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -200,7 +200,7 @@ func TestRecorderChildQuestion(t *testing.T) {
 	}
 	defer b.Stop()
 
-	if _, err := b.CreateRun("run_cq"); err != nil {
+	if _, err := b.CreateRun("run_cq", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 

@@ -162,30 +162,37 @@ type RunState struct {
 	Mu                  sync.Mutex
 	Notify              chan struct{}
 
-	// Session metadata for peer discovery
+	// Session metadata for peer discovery. It is also the display name's
+	// single source: Info.Label is the name the run was launched with or
+	// last renamed to.
 	Info *SessionInfo
-
-	// SenderName is the display name the run claimed on its first
-	// authenticated send; empty until a send carries one.
-	SenderName string
 }
 
 func (st *RunState) Lock()   { st.Mu.Lock() }
 func (st *RunState) Unlock() { st.Mu.Unlock() }
 
-// bindSender records the display name a run first claims and reports whether
-// name is the run's registered one. A request that names nothing takes the
-// registered name; a request that names someone else is refused.
-func (st *RunState) bindSender(name string) (string, bool) {
+// displayName reports the name peers see for this run. A run registered
+// without a label carries its run ID.
+func (st *RunState) displayName() string {
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
-	if st.SenderName == "" {
-		st.SenderName = name
+	if st.Info != nil && st.Info.Label != "" {
+		return st.Info.Label
 	}
-	if name == "" {
-		return st.SenderName, true
+	return st.RunID
+}
+
+// displayName reports the registered name of runID, or the run ID when no run
+// is registered under it.
+func (b *Broker) displayName(runID string) string {
+	if runID == "" {
+		return ""
 	}
-	return st.SenderName, name == st.SenderName
+	st := b.GetRun(runID)
+	if st == nil {
+		return runID
+	}
+	return st.displayName()
 }
 
 // PushControl queues a control message for the given run.
@@ -239,6 +246,7 @@ func (b *Broker) SendTo(fromRunID, toRunID, kind string, payload json.RawMessage
 		Type:      kind,
 		RunID:     toRunID,
 		FromRunID: fromRunID,
+		Sender:    b.displayName(fromRunID),
 		Payload:   payload,
 	}
 	return b.PushControl(toRunID, msg)
@@ -790,15 +798,13 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The display name is bound to the token that authenticated the run, so no
-	// caller can announce itself as a different participant.
-	senderName, ok := fromSt.bindSender(fullBody.Sender)
-	if !ok {
+	// The registered name is bound to the token that authenticated the run, so
+	// no caller can announce itself as a different participant. A request that
+	// names nobody takes the registered name.
+	senderName := fromSt.displayName()
+	if fullBody.Sender != "" && fullBody.Sender != senderName {
 		writeCodedError(w, http.StatusForbidden, "sender does not match this run", "sender-mismatch")
 		return
-	}
-	if senderName == "" {
-		senderName = fullBody.FromRunID
 	}
 
 	// The payload carries the routing a legacy sender writes; the envelope
@@ -1245,44 +1251,66 @@ func (b *Broker) GetRun(runID string) *RunState {
 	return b.runs[runID]
 }
 
-// CreateRun registers a new run and returns its token.
-func (b *Broker) CreateRun(runID string) (string, error) {
+// CreateRun registers a new run under name, the display label its peers see.
+// An empty name registers the run under its run ID. It returns the run token.
+func (b *Broker) CreateRun(runID, name string) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, exists := b.runs[runID]; exists {
 		return "", fmt.Errorf("run already registered")
 	}
-	st := &RunState{
-		RunID:               runID,
-		Token:               MakeToken(),
-		LastSeen:            time.Now(),
-		Notify:              make(chan struct{}, 1),
-		PermissionRequests:  make(map[string]*PermissionState),
-		PermissionDecisions: make(map[string]string),
-	}
+	st := newRunState(runID, name)
 	b.runs[runID] = st
 	return st.Token, nil
 }
 
-// EnsureRun registers a new run if one does not already exist for the
-// given runID. Returns the run's token (existing or newly created) and
-// whether the run was newly created.
-func (b *Broker) EnsureRun(runID string) (string, bool) {
+// EnsureRun registers a new run under name if one does not already exist for
+// the given runID. An empty name registers the run under its run ID, and an
+// existing run keeps the name it already has. Returns the run's token (existing
+// or newly created) and whether the run was newly created.
+func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if st, exists := b.runs[runID]; exists {
 		return st.Token, false
 	}
-	st := &RunState{
+	st := newRunState(runID, name)
+	b.runs[runID] = st
+	return st.Token, true
+}
+
+func newRunState(runID, name string) *RunState {
+	if name == "" {
+		name = runID
+	}
+	return &RunState{
 		RunID:               runID,
 		Token:               MakeToken(),
 		LastSeen:            time.Now(),
 		Notify:              make(chan struct{}, 1),
 		PermissionRequests:  make(map[string]*PermissionState),
 		PermissionDecisions: make(map[string]string),
+		Info:                &SessionInfo{RunID: runID, Label: name},
 	}
-	b.runs[runID] = st
-	return st.Token, true
+}
+
+// RenameRun changes the display name peers see for runID. An empty name resets
+// the run to its run ID.
+func (b *Broker) RenameRun(runID, name string) error {
+	st := b.GetRun(runID)
+	if st == nil {
+		return fmt.Errorf("run not found: %s", runID)
+	}
+	if name == "" {
+		name = runID
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	if st.Info == nil {
+		st.Info = &SessionInfo{RunID: runID}
+	}
+	st.Info.Label = name
+	return nil
 }
 
 // DeleteRun removes a run from the broker. Safe to call even if the run
@@ -1383,10 +1411,14 @@ func (x brokerBackend) Receive(sender string, limit int) ([]messaging.InboundMes
 	for _, msg := range msgs {
 		var am AgentMessage
 		_ = json.Unmarshal(msg.Payload, &am)
+		sender := msg.Sender
+		if sender == "" {
+			sender = am.From
+		}
 		out = append(out, messaging.InboundMessage{
 			MessageID: am.ID,
 			FromRunID: msg.FromRunID,
-			Sender:    am.From,
+			Sender:    sender,
 			Kind:      msg.Type,
 			Payload:   msg.Payload,
 		})

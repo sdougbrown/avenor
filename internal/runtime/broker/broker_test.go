@@ -79,7 +79,7 @@ func TestBrokerRegisterExistingRunWithMatchingToken(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_existing")
+	token, err := b.CreateRun("run_existing", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestPollAgentMessagesStopsOnCancel(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
-	if _, err := b.CreateRun("poll_cancel"); err != nil {
+	if _, err := b.CreateRun("poll_cancel", ""); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 
@@ -402,7 +402,7 @@ func TestBrokerPollDrainsStaleNotifyAfterQueuedMessage(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_poll")
+	token, err := b.CreateRun("run_poll", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -625,7 +625,7 @@ func TestBrokerDeleteRun(t *testing.T) {
 	}
 	defer b.Stop()
 
-	if _, err := b.CreateRun("run_to_delete"); err != nil {
+	if _, err := b.CreateRun("run_to_delete", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	if st := b.GetRun("run_to_delete"); st == nil {
@@ -709,7 +709,7 @@ func TestBrokerSend(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_send")
+	token, err := b.CreateRun("run_send", "")
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -764,7 +764,7 @@ func TestBrokerIngestReport(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_ingest_report")
+	token, err := b.CreateRun("run_ingest_report", "")
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -794,7 +794,7 @@ func TestBrokerIngestFinish(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_ingest_finish")
+	token, err := b.CreateRun("run_ingest_finish", "")
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -838,11 +838,11 @@ func TestBrokerSendTo(t *testing.T) {
 	defer b.Stop()
 
 	// Create two runs
-	senderToken, err := b.CreateRun("sender")
+	senderToken, err := b.CreateRun("sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("target")
+	targetToken, err := b.CreateRun("target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -885,6 +885,9 @@ func TestBrokerSendTo(t *testing.T) {
 	if msgs[0].FromRunID != "sender" {
 		t.Errorf("FromRunID = %q, want sender", msgs[0].FromRunID)
 	}
+	if msgs[0].Sender != "sender" {
+		t.Errorf("Sender = %q, want the registered name", msgs[0].Sender)
+	}
 	if msgs[0].Type != "agent_message" {
 		t.Errorf("Type = %q, want agent_message", msgs[0].Type)
 	}
@@ -897,7 +900,7 @@ func TestBrokerSendToUnknownTarget(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("sender")
+	token, err := b.CreateRun("sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
@@ -927,11 +930,11 @@ func TestBrokerSendAuthFailure(t *testing.T) {
 	}
 	defer b.Stop()
 
-	_, err := b.CreateRun("sender")
+	_, err := b.CreateRun("sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	_, err = b.CreateRun("target")
+	_, err = b.CreateRun("target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -962,12 +965,12 @@ func TestBrokerSendAutoCorrelationID(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("sender_auto")
+	senderToken, err := b.CreateRun("sender_auto", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
 	b.DeleteRun("target_auto")
-	targetToken, err := b.CreateRun("target_auto")
+	targetToken, err := b.CreateRun("target_auto", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -1156,11 +1159,11 @@ func TestBrokerAskReplyHappyPath(t *testing.T) {
 	defer b.Stop()
 
 	// Register two runs
-	senderToken, err := b.CreateRun("asker")
+	senderToken, err := b.CreateRun("asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	replierToken, err := b.CreateRun("replier")
+	replierToken, err := b.CreateRun("replier", "")
 	if err != nil {
 		t.Fatalf("create replier: %v", err)
 	}
@@ -1236,11 +1239,11 @@ func TestBrokerAskReplyFireAndForgetRemainsUnchanged(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("ff_sender")
+	senderToken, err := b.CreateRun("ff_sender", "")
 	if err != nil {
 		t.Fatalf("create ff_sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("ff_target")
+	targetToken, err := b.CreateRun("ff_target", "")
 	if err != nil {
 		t.Fatalf("create ff_target: %v", err)
 	}
@@ -1279,11 +1282,11 @@ func TestBrokerAskRequiresMessageID(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("asker_no_id")
+	senderToken, err := b.CreateRun("asker_no_id", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	_, err = b.CreateRun("target_no_id")
+	_, err = b.CreateRun("target_no_id", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -1315,11 +1318,11 @@ func TestBrokerMutualAskGuard(t *testing.T) {
 	}
 	defer b.Stop()
 
-	aToken, err := b.CreateRun("agent_a")
+	aToken, err := b.CreateRun("agent_a", "")
 	if err != nil {
 		t.Fatalf("create agent_a: %v", err)
 	}
-	bToken, err := b.CreateRun("agent_b")
+	bToken, err := b.CreateRun("agent_b", "")
 	if err != nil {
 		t.Fatalf("create agent_b: %v", err)
 	}
@@ -1349,11 +1352,11 @@ func TestBrokerMutualAskGuardConcurrent(t *testing.T) {
 	}
 	defer b.Stop()
 
-	aToken, err := b.CreateRun("ca")
+	aToken, err := b.CreateRun("ca", "")
 	if err != nil {
 		t.Fatalf("create ca: %v", err)
 	}
-	bToken, err := b.CreateRun("cb")
+	bToken, err := b.CreateRun("cb", "")
 	if err != nil {
 		t.Fatalf("create cb: %v", err)
 	}
@@ -1409,11 +1412,11 @@ func TestBrokerAskReusesMessageIDConflict(t *testing.T) {
 	}
 	defer b.Stop()
 
-	at, err := b.CreateRun("dup_a")
+	at, err := b.CreateRun("dup_a", "")
 	if err != nil {
 		t.Fatalf("create dup_a: %v", err)
 	}
-	if _, err := b.CreateRun("dup_b"); err != nil {
+	if _, err := b.CreateRun("dup_b", ""); err != nil {
 		t.Fatalf("create dup_b: %v", err)
 	}
 	addr := b.Addr()
@@ -1437,11 +1440,11 @@ func TestBrokerDeleteRunCleansAskEdges(t *testing.T) {
 	}
 	defer b.Stop()
 
-	aToken, err := b.CreateRun("del_a")
+	aToken, err := b.CreateRun("del_a", "")
 	if err != nil {
 		t.Fatalf("create del_a: %v", err)
 	}
-	if _, err := b.CreateRun("del_b"); err != nil {
+	if _, err := b.CreateRun("del_b", ""); err != nil {
 		t.Fatalf("create del_b: %v", err)
 	}
 	addr := b.Addr()
@@ -1470,11 +1473,11 @@ func TestBrokerResetCleansAskEdges(t *testing.T) {
 	}
 	defer b.Stop()
 
-	aToken, err := b.CreateRun("res_a")
+	aToken, err := b.CreateRun("res_a", "")
 	if err != nil {
 		t.Fatalf("create res_a: %v", err)
 	}
-	if _, err := b.CreateRun("res_b"); err != nil {
+	if _, err := b.CreateRun("res_b", ""); err != nil {
 		t.Fatalf("create res_b: %v", err)
 	}
 	addr := b.Addr()
@@ -1500,11 +1503,11 @@ func TestBrokerCancelMessage(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("canceller")
+	senderToken, err := b.CreateRun("canceller", "")
 	if err != nil {
 		t.Fatalf("create canceller: %v", err)
 	}
-	targetToken, err := b.CreateRun("cancel_target")
+	targetToken, err := b.CreateRun("cancel_target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -1604,11 +1607,11 @@ func TestBrokerRemovalTerminatesWaiters(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("removal_sender")
+	senderToken, err := b.CreateRun("removal_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	if _, err := b.CreateRun("removal_target"); err != nil {
+	if _, err := b.CreateRun("removal_target", ""); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	msgID := "removal-ask"
@@ -1642,7 +1645,7 @@ func TestBrokerSessionsAdvertisesGeneration(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
-	token, err := b.CreateRun("gen_reader")
+	token, err := b.CreateRun("gen_reader", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -1734,11 +1737,11 @@ func TestBrokerReplyAnswersVersionedAsk(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("versioned_asker")
+	senderToken, err := b.CreateRun("versioned_asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	targetToken, err := b.CreateRun("versioned_replier")
+	targetToken, err := b.CreateRun("versioned_replier", "")
 	if err != nil {
 		t.Fatalf("create replier: %v", err)
 	}
@@ -1773,11 +1776,11 @@ func TestBrokerReplyAfterRotationFallsBackToDelivery(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("rotated_asker")
+	senderToken, err := b.CreateRun("rotated_asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	targetToken, err := b.CreateRun("rotated_replier")
+	targetToken, err := b.CreateRun("rotated_replier", "")
 	if err != nil {
 		t.Fatalf("create replier: %v", err)
 	}
@@ -1811,11 +1814,11 @@ func TestBrokerVersionedIDRequiresGeneration(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("nogen_sender")
+	senderToken, err := b.CreateRun("nogen_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	if _, err := b.CreateRun("nogen_target"); err != nil {
+	if _, err := b.CreateRun("nogen_target", ""); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	addr := b.Addr()
@@ -1846,11 +1849,11 @@ func TestBrokerStaleGenerationRejected(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("stale_gen_sender")
+	senderToken, err := b.CreateRun("stale_gen_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	if _, err := b.CreateRun("stale_gen_target"); err != nil {
+	if _, err := b.CreateRun("stale_gen_target", ""); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	addr := b.Addr()
@@ -1882,11 +1885,11 @@ func TestBrokerWithdrawnVersionedIDRejectedOnResend(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("fenced_sender")
+	senderToken, err := b.CreateRun("fenced_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	if _, err := b.CreateRun("fenced_target"); err != nil {
+	if _, err := b.CreateRun("fenced_target", ""); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	addr := b.Addr()
@@ -1919,7 +1922,7 @@ func TestBrokerWaitReplyForNonexistentAsk(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("nobody")
+	token, err := b.CreateRun("nobody", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -1943,11 +1946,11 @@ func TestBrokerReplyAfterEdgeExpired(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("sender_expired")
+	senderToken, err := b.CreateRun("sender_expired", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("target_expired")
+	targetToken, err := b.CreateRun("target_expired", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -1999,7 +2002,7 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 	defer b.Stop()
 
 	// Register a run so we have auth credentials.
-	token, err := b.CreateRun("sessions_user")
+	token, err := b.CreateRun("sessions_user", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -2027,7 +2030,7 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 	}
 
 	// Register a run and check again
-	_, err = b.CreateRun("runner_1")
+	_, err = b.CreateRun("runner_1", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -2097,7 +2100,7 @@ func TestBrokerUpdateSessionInfo(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("update_me")
+	token, err := b.CreateRun("update_me", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -2140,11 +2143,11 @@ func TestBrokerPruneExpiredAskEdges(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("pruner")
+	token, err := b.CreateRun("pruner", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	if _, err := b.CreateRun("pruner_target"); err != nil {
+	if _, err := b.CreateRun("pruner_target", ""); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	if r := sendAsk(t, b.Addr(), token, "pruner", "pruner_target", "stale-edge", "hi"); r["status"] != http.StatusOK {
@@ -2173,11 +2176,11 @@ func TestBrokerAskReplyWaitTimeout(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("timeout_asker")
+	senderToken, err := b.CreateRun("timeout_asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	if _, err := b.CreateRun("timeout_target"); err != nil {
+	if _, err := b.CreateRun("timeout_target", ""); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 
@@ -2244,11 +2247,11 @@ func TestBrokerSendAuthStillRequiredForAskReply(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("auth_test_1")
+	token, err := b.CreateRun("auth_test_1", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	_, err = b.CreateRun("auth_test_2")
+	_, err = b.CreateRun("auth_test_2", "")
 	if err != nil {
 		t.Fatalf("create run 2: %v", err)
 	}
@@ -2302,15 +2305,15 @@ func TestBrokerReplyByNonTargetReturns403(t *testing.T) {
 	}
 	defer b.Stop()
 
-	askerToken, err := b.CreateRun("asker")
+	askerToken, err := b.CreateRun("asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	targetToken, err := b.CreateRun("target")
+	targetToken, err := b.CreateRun("target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
-	thirdToken, err := b.CreateRun("third")
+	thirdToken, err := b.CreateRun("third", "")
 	if err != nil {
 		t.Fatalf("create third: %v", err)
 	}
@@ -2337,19 +2340,19 @@ func TestBrokerReplyByNonTargetReturns403(t *testing.T) {
 	}
 }
 
-func TestBrokerSessionsNilInfo(t *testing.T) {
+func TestBrokerSessionsLaunchName(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("no_info_run")
+	token, err := b.CreateRun("no_info_run", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 
-	// Query sessions without calling UpdateSessionInfo — st.Info should be nil.
+	// A run registered without a label reports its run ID as its display name.
 	resp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=no_info_run&token=%s", b.Addr(), token))
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
@@ -2370,9 +2373,8 @@ func TestBrokerSessionsNilInfo(t *testing.T) {
 	if s0["run_id"] != "no_info_run" {
 		t.Errorf("run_id = %q, want no_info_run", s0["run_id"])
 	}
-	// Without UpdateSessionInfo, label/status should be empty
-	if label, ok := s0["label"]; ok && label != "" {
-		t.Errorf("expected empty label, got %q", label)
+	if s0["label"] != "no_info_run" {
+		t.Errorf("label = %v, want the run ID", s0["label"])
 	}
 	if status, ok := s0["status"]; ok && status != "" {
 		t.Errorf("expected empty status, got %q", status)
@@ -2392,11 +2394,11 @@ func TestBrokerCancelSignalViaWaitReply(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("canceller_wait")
+	senderToken, err := b.CreateRun("canceller_wait", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	_, err = b.CreateRun("victim")
+	_, err = b.CreateRun("victim", "")
 	if err != nil {
 		t.Fatalf("create victim: %v", err)
 	}
@@ -2481,11 +2483,11 @@ func TestBrokerReplyDropOnFullChannel(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("drop_sender")
+	senderToken, err := b.CreateRun("drop_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("drop_target")
+	targetToken, err := b.CreateRun("drop_target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -2526,11 +2528,11 @@ func TestBrokerCancelDropOnFullChannel(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("cdrop_sender")
+	senderToken, err := b.CreateRun("cdrop_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("cdrop_target")
+	targetToken, err := b.CreateRun("cdrop_target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -2581,11 +2583,11 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("disco_sender")
+	senderToken, err := b.CreateRun("disco_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("disco_target")
+	targetToken, err := b.CreateRun("disco_target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -2662,11 +2664,11 @@ func TestBrokerVersionedWaitDisconnectCleanup(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("vdisco_sender")
+	senderToken, err := b.CreateRun("vdisco_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	if _, err := b.CreateRun("vdisco_target"); err != nil {
+	if _, err := b.CreateRun("vdisco_target", ""); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	addr := b.Addr()
@@ -2719,12 +2721,12 @@ func TestBrokerDrainAgentMessages(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("receiver")
+	token, err := b.CreateRun("receiver", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 	_ = token
-	senderToken, err := b.CreateRun("sender")
+	senderToken, err := b.CreateRun("sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
@@ -2785,11 +2787,11 @@ func TestBrokerWaitReplyDeliversReplyAfterWriteTimeout(t *testing.T) {
 	// Fresh connections per request so each wait_reply gets its own deadline.
 	noKeepAlive := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 
-	senderToken, err := b.CreateRun("asker")
+	senderToken, err := b.CreateRun("asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	replierToken, err := b.CreateRun("replier")
+	replierToken, err := b.CreateRun("replier", "")
 	if err != nil {
 		t.Fatalf("create replier: %v", err)
 	}
@@ -2886,11 +2888,11 @@ func TestLocalRouterOutcomeFieldsAdditive(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("additive_sender")
+	senderToken, err := b.CreateRun("additive_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	if _, err := b.CreateRun("additive_target"); err != nil {
+	if _, err := b.CreateRun("additive_target", ""); err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	addr := b.Addr()
@@ -2981,11 +2983,11 @@ func TestLocalRouterEnvelopeRouting(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("envelope_sender")
+	senderToken, err := b.CreateRun("envelope_sender", "display-name")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("envelope_target")
+	targetToken, err := b.CreateRun("envelope_target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -3011,7 +3013,7 @@ func TestLocalRouterEnvelopeRouting(t *testing.T) {
 		t.Fatalf("polled envelope = %v", entry)
 	}
 	if entry["sender"] != "display-name" {
-		t.Fatalf("polled sender = %v, want the supplied display name", entry["sender"])
+		t.Fatalf("polled sender = %v, want the registered display name", entry["sender"])
 	}
 	raw, err := json.Marshal(entry["payload"])
 	if err != nil {
@@ -3058,7 +3060,7 @@ func TestLocalRouterEnvelopeRouting(t *testing.T) {
 	}
 
 	// The display name is bound to the token that authenticated the run: naming
-	// someone else is refused, and naming nobody takes the bound name.
+	// someone else is refused, and naming nobody takes the registered name.
 	mismatch := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
 		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
 		"expects_reply":true,"sender":"other-name","payload":{"message":"impersonation"}}`,
@@ -3076,7 +3078,47 @@ func TestLocalRouterEnvelopeRouting(t *testing.T) {
 		t.Fatalf("unnamed send = (%d, %v)", status, body)
 	}
 	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["sender"] != "display-name" {
-		t.Fatalf("unnamed send poll = %v, want the bound display name", polled)
+		t.Fatalf("unnamed send poll = %v, want the registered display name", polled)
+	}
+
+	// Fire-and-forget delivery reports the registered name too, not the raw
+	// payload `from`.
+	if status := fireAndForgetSend(t, addr, senderToken, "envelope_sender", "envelope_target", "note"); status != http.StatusOK {
+		t.Fatalf("fire-and-forget status = %d", status)
+	}
+	if polled := pollAllMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["sender"] != "display-name" {
+		t.Fatalf("fire-and-forget poll = %v, want the registered display name", polled)
+	}
+
+	// An unlabeled run reports its run ID as the display name.
+	unlabeledToken, err := b.CreateRun("unlabeled_sender", "")
+	if err != nil {
+		t.Fatalf("create unlabeled sender: %v", err)
+	}
+	unlabeled := fmt.Sprintf(`{"run_id":"unlabeled_sender","token":%q,"from_run_id":"unlabeled_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"message":"unlabeled"}}`,
+		unlabeledToken, gen, mintMsgID(t, time.Minute))
+	if status, body := postBroker(t, addr, "send", unlabeled); status != http.StatusOK {
+		t.Fatalf("unlabeled send = (%d, %v)", status, body)
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["sender"] != "unlabeled_sender" {
+		t.Fatalf("unlabeled send poll = %v, want the run ID as the display name", polled)
+	}
+
+	// Renaming changes the name the recipient sees on the next delivery.
+	if err := b.RenameRun("envelope_sender", "renamed-sender"); err != nil {
+		t.Fatalf("RenameRun: %v", err)
+	}
+	renamed := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"message":"renamed"}}`,
+		senderToken, gen, mintMsgID(t, time.Minute))
+	if status, body := postBroker(t, addr, "send", renamed); status != http.StatusOK {
+		t.Fatalf("renamed send = (%d, %v)", status, body)
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["sender"] != "renamed-sender" {
+		t.Fatalf("renamed send poll = %v, want the new name", polled)
 	}
 }
 
@@ -3089,11 +3131,11 @@ func TestLocalPollControlAgentOnlyKeepsControlMessages(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("drain_sender")
+	senderToken, err := b.CreateRun("drain_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("drain_target")
+	targetToken, err := b.CreateRun("drain_target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}

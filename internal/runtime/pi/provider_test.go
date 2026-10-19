@@ -451,7 +451,7 @@ func TestProviderStartBuildsBrokerURLForChild(t *testing.T) {
 		t.Fatalf("broker.Start: %v", err)
 	}
 	defer b.Stop()
-	token, _ := b.EnsureRun("rt_1")
+	token, _ := b.EnsureRun("rt_1", "")
 
 	captured := withFakePiCommand(t)
 	p := NewWithOptions(runtime.StartOptions{Broker: b, RuntimeID: "rt_1", BrokerToken: token})

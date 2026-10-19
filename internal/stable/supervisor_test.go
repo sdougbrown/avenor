@@ -2179,7 +2179,7 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 
 	// Pre-register the child's broker run so the EnsureRun inside runTeamChild
 	// settles on this exact token.
-	wantToken, _ := b.EnsureRun(child.id)
+	wantToken, _ := b.EnsureRun(child.id, "")
 
 	cfg := &teamrunner.TeamConfig{
 		Team: []phaseconfig.Phase{{Name: "review", Prompt: "review"}},
@@ -2216,7 +2216,7 @@ func TestRuntimeFanoutWriterFeedsRecorder(t *testing.T) {
 		t.Fatalf("broker.Start: %v", err)
 	}
 	defer b.Stop()
-	if _, err := b.CreateRun("writer-run"); err != nil {
+	if _, err := b.CreateRun("writer-run", ""); err != nil {
 		t.Fatalf("broker.CreateRun: %v", err)
 	}
 
@@ -7455,7 +7455,7 @@ func TestBrokerAskContextCancellation(t *testing.T) {
 	defer b.Stop()
 
 	sup := &Supervisor{broker: b}
-	if _, err := b.CreateRun("target"); err != nil {
+	if _, err := b.CreateRun("target", ""); err != nil {
 		t.Fatalf("create target run: %v", err)
 	}
 
@@ -7543,7 +7543,7 @@ func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
 		t.Fatalf("start broker: %v", err)
 	}
 	sup := &Supervisor{broker: b}
-	if _, err := b.CreateRun("target"); err != nil {
+	if _, err := b.CreateRun("target", ""); err != nil {
 		t.Fatalf("create target run: %v", err)
 	}
 	if err := b.Stop(); err != nil {
@@ -7575,7 +7575,7 @@ func startBrokerPrimeAndStop(t *testing.T, prime func(sup *Supervisor, b *broker
 	}
 	sup := &Supervisor{broker: b}
 	prime(sup, b)
-	if _, err := b.CreateRun("target"); err != nil {
+	if _, err := b.CreateRun("target", ""); err != nil {
 		t.Fatalf("create target run: %v", err)
 	}
 	if err := b.Stop(); err != nil {

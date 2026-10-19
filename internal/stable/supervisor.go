@@ -1558,7 +1558,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// the parent run ID to the child's prompt so it knows where to reply.
 	var parentToken string
 	if params.ParentRunID != "" && s.broker != nil {
-		parentToken, _ = s.broker.EnsureRun(params.ParentRunID)
+		parentToken, _ = s.broker.EnsureRun(params.ParentRunID, "")
 		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Use avenor_send with this run ID to send status updates, findings, or questions back to your parent.\n\n", params.ParentRunID)
 		promptText = parentNote + promptText
 	}
@@ -1872,7 +1872,7 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 	// EnsureRun is idempotent, so concurrent first-use calls settle on the
 	// same run and token instead of racing CreateRun and failing "already
 	// registered" on the second call.
-	token, _ := s.broker.EnsureRun("supervisor")
+	token, _ := s.broker.EnsureRun("supervisor", "supervisor")
 	if token == "" {
 		return "", ""
 	}
@@ -1889,7 +1889,7 @@ func (s *Supervisor) ensureChildBrokerRun(child *childRuntime) string {
 	if s.broker == nil {
 		return ""
 	}
-	token, _ := s.broker.EnsureRun(child.id)
+	token, _ := s.broker.EnsureRun(child.id, child.label)
 	child.mu.Lock()
 	child.brokerToken = token
 	child.mu.Unlock()
@@ -2717,7 +2717,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			attemptWriter := taggedWriter
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
-				s.broker.CreateRun(brokerRunID)
+				s.broker.CreateRun(brokerRunID, "")
 				brokerAttemptIDsMu.Lock()
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
 				brokerAttemptIDsMu.Unlock()
@@ -3003,7 +3003,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			attemptWriter := taggedWriter
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
-				s.broker.CreateRun(brokerRunID)
+				s.broker.CreateRun(brokerRunID, "")
 				brokerAttemptIDsMu.Lock()
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
 				brokerAttemptIDsMu.Unlock()

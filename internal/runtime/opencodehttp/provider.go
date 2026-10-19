@@ -93,7 +93,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	var runID string
 	if broker != nil {
 		runID = uuid.New().String()
-		if _, err := broker.CreateRun(runID); err != nil {
+		if _, err := broker.CreateRun(runID, merged.Label); err != nil {
 			runID = ""
 		}
 	}

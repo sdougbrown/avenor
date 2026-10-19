@@ -326,7 +326,7 @@ func TestCancelNotFound(t *testing.T) {
 func TestPromptQueuesChannelEvent(t *testing.T) {
 	runID := "run-prompt"
 	b := broker.New("")
-	if _, err := b.CreateRun(runID); err != nil {
+	if _, err := b.CreateRun(runID, ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	p := &Provider{broker: b, sessions: make(map[string]*session)}
@@ -369,7 +369,7 @@ func TestPromptQueuesChannelEvent(t *testing.T) {
 func TestPollBrokerEventsSkipsChannelReadyBeforeSidecarRegister(t *testing.T) {
 	runID := "run-not-ready"
 	b := broker.New("")
-	if _, err := b.CreateRun(runID); err != nil {
+	if _, err := b.CreateRun(runID, ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	p := &Provider{broker: b}
@@ -397,7 +397,7 @@ func TestPollBrokerEventsSkipsChannelReadyBeforeSidecarRegister(t *testing.T) {
 func TestPollBrokerEventsEmitsChannelLifecycle(t *testing.T) {
 	runID := "run-lifecycle"
 	b := broker.New("")
-	if _, err := b.CreateRun(runID); err != nil {
+	if _, err := b.CreateRun(runID, ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	st := b.GetRun(runID)
@@ -454,7 +454,7 @@ func TestPollBrokerEventsEmitsChannelLifecycle(t *testing.T) {
 func TestPollBrokerEventsMarksFinishedBeforeSendingEnd(t *testing.T) {
 	runID := "run-1"
 	b := broker.New("")
-	if _, err := b.CreateRun(runID); err != nil {
+	if _, err := b.CreateRun(runID, ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	st := b.GetRun(runID)
@@ -978,7 +978,7 @@ func TestAnswerPermissionTerminalRoute(t *testing.T) {
 
 func TestAnswerPermissionFallthroughToBroker(t *testing.T) {
 	b := broker.New("")
-	if _, err := b.CreateRun("run-broker"); err != nil {
+	if _, err := b.CreateRun("run-broker", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -1223,7 +1223,7 @@ func TestPromptWaitsForStartupClearBeforePaste(t *testing.T) {
 func TestPromptQueuesBrokerControlEvenWhenTerminalInjectionAsync(t *testing.T) {
 	runID := "run-queue"
 	b := broker.New("")
-	if _, err := b.CreateRun(runID); err != nil {
+	if _, err := b.CreateRun(runID, ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	p := &Provider{
@@ -1277,7 +1277,7 @@ func TestDevelopmentChannelPromptsSendRightKeys(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runID := "run-" + tc.name
 			b := broker.New("")
-			if _, err := b.CreateRun(runID); err != nil {
+			if _, err := b.CreateRun(runID, ""); err != nil {
 				t.Fatalf("CreateRun: %v", err)
 			}
 			p := &Provider{
@@ -1328,7 +1328,7 @@ func TestDevelopmentChannelPromptsSendRightKeys(t *testing.T) {
 func TestPermissionAllowedSendsDigitAndEnter(t *testing.T) {
 	runID := "run-allow"
 	b := broker.New("")
-	if _, err := b.CreateRun(runID); err != nil {
+	if _, err := b.CreateRun(runID, ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	p := &Provider{
@@ -1374,7 +1374,7 @@ func TestPermissionAllowedSendsDigitAndEnter(t *testing.T) {
 func TestPermissionDeniedSendsEscAndEnter(t *testing.T) {
 	runID := "run-deny"
 	b := broker.New("")
-	if _, err := b.CreateRun(runID); err != nil {
+	if _, err := b.CreateRun(runID, ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	p := &Provider{
@@ -1420,7 +1420,7 @@ func TestPermissionDeniedSendsEscAndEnter(t *testing.T) {
 func TestSessionGoneEmitsFallbackEnd(t *testing.T) {
 	runID := "run-gone"
 	b := broker.New("")
-	if _, err := b.CreateRun(runID); err != nil {
+	if _, err := b.CreateRun(runID, ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	p := &Provider{

@@ -35,7 +35,7 @@ func newBroker(t *testing.T) *broker.Broker {
 
 func credentials(t *testing.T, b *broker.Broker, id messaging.Identity) messaging.LocalCredentials {
 	t.Helper()
-	token, _ := b.EnsureRun(id.RunID)
+	token, _ := b.EnsureRun(id.RunID, id.Sender)
 	return messaging.LocalCredentials{RunID: id.RunID, Token: token}
 }
 
@@ -67,7 +67,7 @@ func registerPeers(t *testing.T, b *broker.Broker, id messaging.Identity) {
 		return
 	}
 	for _, peer := range []string{"alice", "bob", "eve"} {
-		b.EnsureRun(prefix + "-" + peer)
+		b.EnsureRun(prefix+"-"+peer, peer)
 	}
 }
 
