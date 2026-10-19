@@ -275,13 +275,3 @@ func (f ownerFacade) Cancel() {
 func (f ownerFacade) AnswerPermission(scope, requestID, optionID, message string) PermissionAnswerDelivery {
 	return f.server.DeliverPendingPermission(scope, requestID, optionID, message)
 }
-
-// NewTestServer mints a random owner capability and returns it so a test can
-// authenticate explicitly.
-func NewTestServer(state *ControlState) (*ControlServer, OwnerCapability) {
-	owner, err := GenerateOwnerCapability()
-	if err != nil {
-		panic("avenor: failed to generate test owner capability: " + err.Error())
-	}
-	return NewServer(state, owner), owner
-}

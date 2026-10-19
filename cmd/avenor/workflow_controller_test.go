@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/control/controltest"
 )
 
 // fakeControllerHandler is a recording stub implementing
@@ -77,7 +78,7 @@ func (f *fakeControllerHandler) WorkflowReady(id string, limit int) (any, error)
 // CLI runner plus the handler.
 func cliControllerEnv(t *testing.T) (func(args ...string) (string, int), *fakeControllerHandler) {
 	t.Helper()
-	srv, _ := control.NewTestServer(control.NewState("run_cli", "", 0))
+	srv, _ := controltest.NewServer(control.NewState("run_cli", "", 0))
 	fake := &fakeControllerHandler{}
 	srv.SetWorkflowControllerHandler(fake)
 	sock := filepath.Join(t.TempDir(), "control.sock")

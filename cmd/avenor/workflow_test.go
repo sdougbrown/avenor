@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/control/controltest"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
@@ -30,7 +31,7 @@ func TestWorkflowCLIEndToEnd(t *testing.T) {
 	store := workflow.New(root)
 	mgr := workflow.NewManager(store)
 
-	srv, _ := control.NewTestServer(control.NewState("run_cli", "", 0))
+	srv, _ := controltest.NewServer(control.NewState("run_cli", "", 0))
 	srv.SetWorkflowHandler(mgr)
 	sock := filepath.Join(t.TempDir(), "control.sock")
 	if err := srv.Start(sock); err != nil {
@@ -137,7 +138,7 @@ func cliWorkflowEnv(t *testing.T) (func(args ...string) (string, int), *workflow
 	store := workflow.New(root)
 	mgr := workflow.NewManager(store)
 
-	srv, _ := control.NewTestServer(control.NewState("run_cli", "", 0))
+	srv, _ := controltest.NewServer(control.NewState("run_cli", "", 0))
 	srv.SetWorkflowHandler(mgr)
 	sock := filepath.Join(t.TempDir(), "control.sock")
 	if err := srv.Start(sock); err != nil {
@@ -471,7 +472,7 @@ func TestWorkflowCLIInstantiateParamsRoundTrip(t *testing.T) {
 	store := workflow.New(root)
 	mgr := workflow.NewManager(store)
 
-	srv, _ := control.NewTestServer(control.NewState("run_cli_params", "", 0))
+	srv, _ := controltest.NewServer(control.NewState("run_cli_params", "", 0))
 	srv.SetWorkflowHandler(mgr)
 	sock := filepath.Join(t.TempDir(), "control.sock")
 	if err := srv.Start(sock); err != nil {

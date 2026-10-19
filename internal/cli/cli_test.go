@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/control/controltest"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -688,7 +689,7 @@ func TestPermissionRequestEmitsEffectiveResolverAndClaimState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cs, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+			cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 			var conn net.Conn
 			if tt.connectControl {
 				socketPath := shortControlSocketPath(t)
@@ -1625,7 +1626,7 @@ func TestFanoutWriterWithControlAndNoMetadataPreservesOutputAndBoundsStatus(t *t
 		t.Fatalf("NewEventWriter: %v", err)
 	}
 	state := control.NewState("run_control", "review", 0)
-	server, _ := control.NewTestServer(state)
+	server, _ := controltest.NewServer(state)
 	writer := newFanoutWriter(baseWriter, server, nil)
 	finalOutput := strings.Repeat("é", events.MaxFinalOutputRunes+10)
 
@@ -3810,7 +3811,7 @@ func authenticateOwnerForTest(t *testing.T, conn net.Conn, cap control.OwnerCapa
 
 func TestControlPermissionResolution(t *testing.T) {
 	state := control.NewState("run_1", "mylabel", 0)
-	cs, cap := control.NewTestServer(state)
+	cs, cap := controltest.NewServer(state)
 	socketPath := filepath.Join(t.TempDir(), "cs.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control: %v", err)
@@ -3965,7 +3966,7 @@ func TestControlPermissionNonLiteralOptionIDMapsByKind(t *testing.T) {
 		t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 		state := control.NewState("run_map", "label", 0)
-		cs, cap := control.NewTestServer(state)
+		cs, cap := controltest.NewServer(state)
 		socketPath := filepath.Join(sockDir, "m.sock")
 		if err := cs.Start(socketPath); err != nil {
 			t.Fatalf("start control: %v", err)
@@ -4088,7 +4089,7 @@ func TestControlPermissionRejectsUnknownOptionID(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_bad", "label", 0)
-	cs, cap := control.NewTestServer(state)
+	cs, cap := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "cs.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control: %v", err)
@@ -4172,7 +4173,7 @@ func TestControlPermissionRejectsUnsupportedKind(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_bad_kind", "label", 0)
-	cs, cap := control.NewTestServer(state)
+	cs, cap := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "cs.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control: %v", err)
@@ -4382,7 +4383,7 @@ func TestPermissionRequestConsumesCompletedResolverBeforeReusedID(t *testing.T) 
 			}
 		},
 	}
-	controlServer, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	controlServer, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	eventCh := make(chan events.Event, 4)
 	eventCh <- events.Event{
 		Event:     "permission.request",
@@ -4512,7 +4513,7 @@ func TestPermissionRequestRejectsExistingDirectDeliveryBeforePublishing(t *testi
 		t.Fatalf("newEventWriter: %v", err)
 	}
 
-	cs, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -4601,7 +4602,7 @@ func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T
 	if err != nil {
 		t.Fatalf("newEventWriter: %v", err)
 	}
-	cs, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -4650,7 +4651,7 @@ func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T
 // auto-approve producer records the chosen option, a matching manual repeat
 // succeeds, and a conflicting one is rejected.
 func TestAutoApprovedResolutionAcceptsMatchingManualAnswer(t *testing.T) {
-	cs, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -4711,7 +4712,7 @@ func TestAutoApprovedResolutionAcceptsMatchingManualAnswer(t *testing.T) {
 // rejecting it: a replay of the universally guessable ("", "") must not be
 // accepted as a matching repeat.
 func TestAutoApprovedResolutionWithoutAllowOptionRecordsEmptyAndRejectsReplay(t *testing.T) {
-	cs, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -4793,7 +4794,7 @@ func TestControlPermissionClaimDisconnectFallsThrough(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_timeout", "label", 0)
-	cs, _ := control.NewTestServer(state)
+	cs, _ := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "t.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -4861,7 +4862,7 @@ func TestControlPermissionClaimDisconnectFallsThrough(t *testing.T) {
 }
 
 func TestScopedControlPermissionClaimCompletesAndReleasesForNextRequest(t *testing.T) {
-	cs, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -4952,7 +4953,7 @@ func TestScopedControlPermissionClaimCompletesAndReleasesForNextRequest(t *testi
 }
 
 func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
-	cs, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -5028,7 +5029,7 @@ func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
 }
 
 func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
-	cs, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -5093,7 +5094,7 @@ func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
 }
 
 func TestFailedAutomaticPermissionRemovesClaim(t *testing.T) {
-	cs, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	cs.PreparePermissionClaim("rt_auto", "0", control.PermissionResolverAutomatic, nil)
 	provider := &errorFakeProvider{answerErr: errors.New("answer failed")}
 	event := events.Event{
@@ -5127,7 +5128,7 @@ func TestControlPermissionClaimDisconnectFallsToFileHandler(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_fh", "label", 0)
-	cs, _ := control.NewTestServer(state)
+	cs, _ := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "f.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -5290,7 +5291,7 @@ func TestFilePermissionRepeatComparisonRecordsMessage(t *testing.T) {
 	// No control client is connected, so the resolver state is File. Prepare
 	// the claim so the file producer's MarkPermissionClaimResolved records the
 	// resolution.
-	cs, _ := control.NewTestServer(control.NewState("run_file", "label", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_file", "label", 0))
 	if !cs.PreparePermissionClaim("", "req_file_rep", control.PermissionResolverFile, []any{
 		map[string]any{"optionId": "deny", "kind": "reject"},
 		map[string]any{"optionId": "allow_f", "kind": "allow", "requiresMessage": true},
@@ -5498,7 +5499,7 @@ func TestControlPermissionClaimContextCancelReleasesClaim(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_cancel", "label", 0)
-	cs, _ := control.NewTestServer(state)
+	cs, _ := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "x.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -5580,7 +5581,7 @@ func TestControlPermissionClaimExplicitTimeoutFallsThrough(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_et", "label", 0)
-	cs, _ := control.NewTestServer(state)
+	cs, _ := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "et.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)

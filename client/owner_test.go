@@ -12,11 +12,12 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/control/controltest"
 )
 
 func testOwnerSocket(t *testing.T) (string, *control.ControlServer) {
 	t.Helper()
-	srv, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	srv, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	path := filepath.Join(t.TempDir(), "control.sock")
 	if err := srv.Start(path); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -255,7 +256,7 @@ func TestOwnerRecordPublishesUnderWorldWritableDir(t *testing.T) {
 		t.Skipf("temp dir %s is not world-writable on this host", dir)
 	}
 
-	s, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	s, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	path := filepath.Join(os.TempDir(), "avc-ww-"+time.Now().Format("150405.000000000")+".sock")
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)

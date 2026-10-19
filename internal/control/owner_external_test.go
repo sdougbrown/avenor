@@ -9,6 +9,7 @@ import (
 
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/control/controltest"
 	"github.com/sdougbrown/avenor/internal/events"
 )
 
@@ -23,7 +24,7 @@ func TestSocketStartIdentityTokenIsOneShot(t *testing.T) {
 	path := externalSocketPath(t)
 	t.Setenv(controlIdentityTokenEnv, "child-token")
 
-	s, _ := control.NewTestServer(control.NewState("run_1", "", 0))
+	s, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -44,7 +45,7 @@ func TestSocketStartIdentityTokenIsOneShot(t *testing.T) {
 
 func TestResultOverControlSocketReadsReplyBeyondScannerLimit(t *testing.T) {
 	state := control.NewState("run_1", "demo", 0)
-	s, _ := control.NewTestServer(state)
+	s, _ := controltest.NewServer(state)
 	path := externalSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
