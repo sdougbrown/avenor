@@ -19,6 +19,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/control"
 )
 
 // statusOutputMap flattens a typed avenor_status tool output into the map
@@ -1550,6 +1551,7 @@ func startFakeSupervisorNamed(t *testing.T, name string) (string, func()) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	cap := publishOwnerRecordForStub(t, path)
 
 	go func() {
 		for {
@@ -1567,6 +1569,8 @@ func startFakeSupervisorNamed(t *testing.T, name string) (string, func()) {
 					}
 					var resp client.Response
 					switch req.Method {
+					case "authenticate_owner":
+						resp = ownerAuthResponse(req, cap)
 					case "status":
 						resp = client.Response{JSONRPC: "2.0", ID: req.ID}
 						snap := map[string]any{"session_id": "ses_test", "phase": "working"}
@@ -4667,15 +4671,16 @@ func TestServerAuthenticatedHTTPHandlerHostChecks(t *testing.T) {
 	})
 }
 
-// startStubSupervisorListener runs a listener that accepts supervisor
-// connections and parks them without speaking the control protocol; tests
-// use it as a dial target and close accepted conns to simulate a restart.
+// startStubSupervisorListener runs a listener that publishes an owner record,
+// answers authenticate_owner and otherwise parks connections; tests use it as
+// an attach target and close accepted conns to simulate a restart.
 func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount func() int, closeAccepted func(), cleanup func()) {
 	t.Helper()
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen %s: %v", socketPath, err)
 	}
+	cap := publishOwnerRecordForStub(t, socketPath)
 	var mu sync.Mutex
 	var conns []net.Conn
 	go func() {
@@ -4687,6 +4692,7 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 			mu.Lock()
 			conns = append(conns, conn)
 			mu.Unlock()
+			go serveOwnerAuthOnly(conn, cap)
 		}
 	}()
 	acceptedCount = func() int {
@@ -4706,8 +4712,28 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 		ln.Close()
 		closeAccepted()
 		os.Remove(socketPath)
+		os.Remove(control.OwnerRecordPath(socketPath))
 	}
 	return acceptedCount, closeAccepted, cleanup
+}
+
+// serveOwnerAuthOnly answers authenticate_owner and ignores every other
+// request, which is all an attach target has to speak.
+func serveOwnerAuthOnly(conn net.Conn, cap control.OwnerCapability) {
+	defer conn.Close()
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		var req client.Request
+		if json.Unmarshal(scanner.Bytes(), &req) != nil {
+			continue
+		}
+		if req.Method != "authenticate_owner" {
+			continue
+		}
+		resp := ownerAuthResponse(req, cap)
+		data, _ := json.Marshal(resp)
+		_, _ = conn.Write(append(data, '\n'))
+	}
 }
 
 // withCountedDials swaps dialSupervisorClient for a counting wrapper that

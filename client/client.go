@@ -962,3 +962,9 @@ func (c *Client) SendToParent(runtimeID, message string) error {
 	}
 	return c.Call("send_to_parent", params, nil)
 }
+
+// ValidateOwnerRecord requires socketPath to be the socket record names, so an
+// attach can bind a connection to the record it loaded.
+func ValidateOwnerRecord(socketPath string, record control.OwnerRecord) error {
+	return requireRecordSocket(socketPath, record)
+}

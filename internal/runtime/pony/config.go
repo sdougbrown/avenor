@@ -108,10 +108,12 @@ func (c *PonyConfig) ResolveProfile(name string) (*Profile, error) {
 
 // NewControlSocketExecutor creates an OrchestratorExecutor backed by a
 // control socket client. This is used by the CLI to wire orchestration tools.
+// The socket is operator-selected, so the executor attaches as its published
+// owner; the orchestration verbs it uses are owner-gated.
 func NewControlSocketExecutor(socketPath string) (OrchestratorExecutor, error) {
-	c, err := client.Dial(socketPath)
+	c, err := client.AttachOwner(socketPath)
 	if err != nil {
-		return nil, fmt.Errorf("dial control socket: %w", err)
+		return nil, fmt.Errorf("attach control socket: %w", err)
 	}
 	return &controlSocketExecutor{client: c}, nil
 }

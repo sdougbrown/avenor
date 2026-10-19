@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -585,9 +586,9 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := client.Dial(body.Socket)
+	c, err := s.attachMutationClient(body.Socket)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeMutationError(w, err)
 		return
 	}
 	defer c.Close()
@@ -631,9 +632,9 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := client.Dial(body.Socket)
+	c, err := s.attachMutationClient(body.Socket)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeMutationError(w, err)
 		return
 	}
 	defer c.Close()
@@ -643,6 +644,92 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// ── Owner attach for mutations ──────────────────────────────────────────────
+
+// errSocketNotAllowed reports a mutation aimed at a socket that trusted
+// operator startup configuration did not select.
+var errSocketNotAllowed = errors.New("socket is not an allowlisted control socket")
+
+// allowedSockets recomputes the sockets the operator selected: the configured
+// socket when set, otherwise the scan directories. Request bodies never widen
+// it.
+func (s *Server) allowedSockets() []string {
+	if s.cfg.Socket != "" {
+		if path, err := canonicalSocketPath(s.cfg.Socket); err == nil {
+			return []string{path}
+		}
+		return nil
+	}
+	dirs := s.cfg.ScanDirs
+	if len(dirs) == 0 {
+		home, _ := os.UserHomeDir()
+		dirs = []string{filepath.Join(home, ".avenor", "sockets")}
+	}
+	var allowed []string
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(ResolveHome(dir))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".sock") {
+				continue
+			}
+			if path, err := canonicalSocketPath(filepath.Join(ResolveHome(dir), entry.Name())); err == nil {
+				allowed = append(allowed, path)
+			}
+		}
+	}
+	return allowed
+}
+
+// canonicalSocketPath makes path absolute, resolves its directory and refuses
+// a symlinked socket file. Ancestor symlinks resolve, which keeps a socket
+// directory reached through a temp-dir alias usable.
+func canonicalSocketPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return "", fmt.Errorf("%w: %s is not a socket", errSocketNotAllowed, abs)
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, filepath.Base(abs)), nil
+}
+
+// allowOwnerAttach reports whether requested names an allowlisted control
+// socket and returns its canonical path.
+func (s *Server) allowOwnerAttach(requested string) (string, error) {
+	canonical, err := canonicalSocketPath(requested)
+	if err != nil {
+		return "", err
+	}
+	for _, allowed := range s.allowedSockets() {
+		if allowed == canonical {
+			return canonical, nil
+		}
+	}
+	return "", fmt.Errorf("%w: %s", errSocketNotAllowed, canonical)
+}
+
+// attachMutationClient validates the requested socket against the allowlist
+// before any owner record is loaded, then attaches as that socket's owner.
+func (s *Server) attachMutationClient(requested string) (*client.Client, error) {
+	canonical, err := s.allowOwnerAttach(requested)
+	if err != nil {
+		return nil, err
+	}
+	return client.AttachOwner(canonical)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -659,6 +746,16 @@ func writeError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+// writeMutationError reports an unallowlisted target as forbidden and any
+// other attach failure as a gateway error.
+func writeMutationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errSocketNotAllowed) {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	writeError(w, http.StatusBadGateway, err)
 }
 
 // ResolveHome expands a leading "~/" to the user's home directory.

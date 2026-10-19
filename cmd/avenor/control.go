@@ -29,7 +29,9 @@ func runControl(args []string) int {
 		return 1
 	}
 
-	c, err := client.Dial(*socketFile)
+	// Operator-selected socket: attach as its published owner so the gated
+	// verbs below keep working.
+	c, err := client.AttachOwner(*socketFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "avenor control: %v\n", err)
 		return 1

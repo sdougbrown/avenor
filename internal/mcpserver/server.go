@@ -1974,9 +1974,10 @@ func (s *Server) handleAvenorWorkflowControllerStatus(ctx context.Context, req *
 
 var startSupervisorFunc = startSupervisor
 
-// dialSupervisorClient is the seam for dialing a supervisor control socket;
-// tests replace it to count or substitute dials.
-var dialSupervisorClient = client.Dial
+// dialSupervisorClient is the seam for acquiring a supervisor control client.
+// It attaches as the socket's published owner because the tools below reach
+// owner-gated verbs; tests replace it to count or substitute acquisitions.
+var dialSupervisorClient = client.AttachOwner
 
 // beforeSupervisorLock is a no-op production hook used to coordinate callers
 // at the lazy-supervisor lock boundary in concurrency tests.
@@ -1998,8 +1999,8 @@ func (s *Server) getClientForSupervisor(supervisorID string) (ControlClient, fun
 
 func (s *Server) getClientForSupervisorWithPath(supervisorID string) (ControlClient, func(), string, error) {
 	// An explicit supervisor_id that resolves to the autostarted/default
-	// supervisor must reuse the persistent owner connection. Ownership is
-	// per-connection (first mutator wins), and spawn claimed it on
+	// supervisor must reuse the persistent owner connection: ownership is
+	// granted per connection by authenticate_owner, and spawn authenticated on
 	// s.controlClient — dialing a fresh connection here would fail ensureOwner
 	// on mutating calls (answer_permission, prompt, cancel, follow_up), since
 	// those resolve supervisor_id from the registry and would otherwise arrive
