@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,6 +27,9 @@ import (
 	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askclient"
+	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
@@ -622,15 +624,19 @@ type Supervisor struct {
 	httpServer                    *control.HTTPDebugServer
 	// permissions owns supervisor-level permission routing state, decider
 	// accounting and the provider bindings direct answers target.
-	permissions                  *permissionRouter
-	httpServers                  map[string]*managedHTTPServer // dir → ready server
-	httpStarting                 map[string]struct{}           // dirs with a start in flight
-	httpShutdownStarted          bool
-	httpServerMu                 sync.Mutex
-	httpServerCond               *sync.Cond
-	fileSnapshots                map[string][]string // runtimeID → pre-run file list for output detection
-	fileSnapMu                   sync.Mutex
-	broker                       *broker.Broker
+	permissions         *permissionRouter
+	httpServers         map[string]*managedHTTPServer // dir → ready server
+	httpStarting        map[string]struct{}           // dirs with a start in flight
+	httpShutdownStarted bool
+	httpServerMu        sync.Mutex
+	httpServerCond      *sync.Cond
+	fileSnapshots       map[string][]string // runtimeID → pre-run file list for output detection
+	fileSnapMu          sync.Mutex
+	broker              *broker.Broker
+	// messaging is the supervisor's own transport over the broker's ask store.
+	// It is the only transport the supervisor closes, and it never outlives
+	// the broker.
+	messaging                    messaging.Transport
 	brokerRunID                  string
 	brokerToken                  string
 	brokerRunMu                  sync.Mutex
@@ -699,6 +705,10 @@ func NewSupervisor(cfg Config) *Supervisor {
 		// asks before the host performs any outbound broker call. Without this,
 		// a child asking its parent first would fail "to run not found".
 		sup.registerBrokerRun()
+		// Both the in-process transport and the HTTP router read this store,
+		// so an ask the supervisor makes is the same ask a child can answer
+		// over HTTP.
+		sup.messaging = inprocess.New(sup.broker.Store())
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	sup.capacityCh = make(chan struct{})
@@ -1747,6 +1757,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		RuntimeID:     rtID,
 		Broker:        s.broker,
 		BrokerToken:   child.brokerToken,
+		Messaging:     s.messaging,
 		Provenance:    runtime.DirectLaunchProvenance(rtID, params.Label, 1),
 	}
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
@@ -1906,8 +1917,7 @@ func (s *Supervisor) brokerPost(path string, body map[string]any) ([]byte, error
 // connections by host:port across every supervisor in the process, so a
 // connection left behind by one broker can be reused against another (or
 // against a recycled loopback port) and surface as EOF or connection-reset
-// instead of connection refused — which flips the ask pending classification
-// in BrokerAsk and withdrawAsk.
+// instead of connection refused.
 func (s *Supervisor) brokerHTTPClientDo(req *http.Request) (*http.Response, error) {
 	s.brokerHTTPClientOnce.Do(func() {
 		s.brokerHTTPClient = &http.Client{
@@ -1995,9 +2005,23 @@ func (s *Supervisor) BrokerSend(fromRunID, toRunID, message, role string) error 
 	return err
 }
 
+// BrokerAsk asks another run a question and waits for its reply. The ask is
+// sent over the supervisor's messaging transport under the supervisor's own
+// registered identity.
 func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error) {
-	msgID := broker.MakeToken()[:16]
-	payload := map[string]any{
+	if s.messaging == nil {
+		return nil, &control.AskError{
+			Outcome: messaging.OutcomeNotSent,
+			Err:     fmt.Errorf("broker not available"),
+		}
+	}
+	runID, _ := s.registerBrokerRun()
+	sender := messaging.Identity{RunID: runID, Sender: "supervisor"}
+	msgID, err := messaging.NewMsgID(time.Now(), time.Time{})
+	if err != nil {
+		return nil, &control.AskError{Outcome: messaging.OutcomeNotSent, Err: err}
+	}
+	payload, err := json.Marshal(map[string]any{
 		"id":            msgID,
 		"from":          "supervisor",
 		"from_run_id":   "supervisor",
@@ -2005,116 +2029,32 @@ func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role strin
 		"message":       message,
 		"role":          role,
 		"expects_reply": true,
+	})
+	if err != nil {
+		return nil, &control.AskError{MessageID: msgID, Outcome: messaging.OutcomeNotSent, Err: err}
 	}
-	// Send with expects_reply
-	sendBody := map[string]any{
-		"from_run_id": "supervisor",
-		"to_run_id":   toRunID,
-		"type":        "agent_message",
-		"payload":     payload,
-	}
-	if _, err := s.brokerPostContext(ctx, "/send", sendBody); err != nil {
-		err = fmt.Errorf("send ask: %w", err)
-		pending := true
-		switch {
-		case sendNeverReachedBroker(err):
-			// The connection never carried the request to the broker, so no
-			// edge can have been registered.
-			pending = false
-		case isTransportFailure(err) && !s.brokerReachable():
-			// The send drew no HTTP response and the broker is now
-			// unreachable: its in-memory edge registry cannot hold this ask.
-			// A just-stopped broker can also reset the connection instead of
-			// refusing it, so refusal alone is not the only never-delivered
-			// signal.
-			pending = false
-		default:
-			// A transport failure after the broker processed the send can
-			// leave the ask edge registered; attempt cleanup instead of
-			// assuming.
-			pending = s.withdrawAsk(msgID)
+	result, err := askclient.New(s.messaging, askclient.Options{}).Ask(ctx,
+		messaging.SendRequest{
+			From:      sender,
+			To:        messaging.Identity{RunID: toRunID, Sender: toRunID},
+			MessageID: msgID,
+			Body:      string(payload),
+		},
+		messaging.WaitRequest{Sender: sender},
+	)
+	if err != nil {
+		return nil, &control.AskError{
+			MessageID: result.MessageID,
+			Outcome:   result.Outcome,
+			Pending:   result.Outcome == messaging.OutcomePossiblyPending,
+			Err:       err,
 		}
-		return nil, &control.AskError{MessageID: msgID, Pending: pending, Err: err}
 	}
-	// Wait for reply. A failed wait (caller cancellation, broker error, or
-	// dropped connection) leaves or already cleaned the ask edge; withdraw
-	// and classify so the caller knows whether cancel can still act.
-	replyBody, err := s.brokerPostContext(ctx, "/wait_reply", map[string]any{
-		"waiting_for": msgID,
-	})
-	if err != nil {
-		return nil, &control.AskError{MessageID: msgID, Pending: s.withdrawAsk(msgID), Err: fmt.Errorf("wait for reply: %w", err)}
-	}
-	// Parse the reply
-	var result map[string]any
-	if err := json.Unmarshal(replyBody, &result); err != nil {
-		return nil, &control.AskError{MessageID: msgID, Pending: false, Err: fmt.Errorf("parse reply: %w", err)}
-	}
-	return result, nil
-}
-
-// sendNeverReachedBroker reports whether a failed ask send provably never
-// reached the broker: the dial itself failed (the connection was never
-// established), or there was no broker to talk to at all.
-func sendNeverReachedBroker(err error) bool {
-	var opErr *net.OpError
-	if errors.As(err, &opErr) && opErr.Op == "dial" {
-		return true
-	}
-	return strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "broker not available")
-}
-
-// isTransportFailure reports whether a request failed at the connection level
-// without ever drawing an HTTP response.
-func isTransportFailure(err error) bool {
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return true
-	}
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-}
-
-// brokerReachable reports whether the broker's HTTP endpoint currently
-// accepts TCP connections.
-func (s *Supervisor) brokerReachable() bool {
-	if s.broker == nil {
-		return false
-	}
-	conn, err := net.DialTimeout("tcp", s.broker.Addr(), 250*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
-
-// withdrawAsk attempts to withdraw a pending ask and classifies whether the
-// edge may still exist on the broker. It returns true only when the cleanup
-// attempt failed for a reason other than the edge already being gone.
-func (s *Supervisor) withdrawAsk(msgID string) bool {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := s.brokerPostContext(cleanupCtx, "/cancel_message", map[string]any{
-		"cancel_message_id": msgID,
-	})
-	if err == nil {
-		return false
-	}
-	// A transport-level failure drew no HTTP response, so it cannot be the
-	// broker's 404 response; report the edge as possibly surviving. This check
-	// must come first: the substring match below would otherwise also match
-	// the digits "404" inside the request URL (e.g. a broker port like 44045).
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		return true
-	}
-	// The broker clears the edge itself when a cancelled wait_reply request
-	// disconnects; either a successful cancel or a 404 "no pending ask"
-	// response means the edge is already gone.
-	if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "no pending ask for this message id") {
-		return false
-	}
-	return true
+	return map[string]any{
+		"message_id":  result.MessageID,
+		"from_run_id": result.Reply.FromRunID,
+		"payload":     result.Reply.Payload,
+	}, nil
 }
 
 func (s *Supervisor) BrokerPeers() (any, error) {
@@ -2129,11 +2069,24 @@ func (s *Supervisor) BrokerPeers() (any, error) {
 	return result, nil
 }
 
+// BrokerCancel withdraws an outstanding ask and reports whether a terminal
+// fence now covers it.
 func (s *Supervisor) BrokerCancel(messageID string) error {
-	_, err := s.brokerPost("/cancel_message", map[string]any{
-		"cancel_message_id": messageID,
+	if s.messaging == nil {
+		return fmt.Errorf("broker not available")
+	}
+	runID, _ := s.registerBrokerRun()
+	withdrawn, err := askclient.New(s.messaging, askclient.Options{}).Withdraw(context.Background(), messaging.WithdrawRequest{
+		Sender:    messaging.Identity{RunID: runID, Sender: "supervisor"},
+		MessageID: messageID,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if withdrawn.Outcome == messaging.OutcomeEdgeAbsent {
+		return fmt.Errorf("no pending ask for %s", messageID)
+	}
+	return nil
 }
 
 // BrokerReceive drains inbound agent_message control messages (asks from
@@ -2707,6 +2660,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				RuntimeID:     child.id,
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
+				Messaging:     s.messaging,
 				LaunchWrapper: child.launchWrapper,
 				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindLoop, phase.Name, child.label, &iteration, attemptNum),
 			}
@@ -2993,6 +2947,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				RuntimeID:     child.id,
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
+				Messaging:     s.messaging,
 				LaunchWrapper: child.launchWrapper,
 				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindTeam, phase.Name, child.label, nil, attemptNum),
 			}
@@ -3804,6 +3759,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		RuntimeID:    child.id,
 		Broker:       s.broker,
 		BrokerToken:  brokerToken,
+		Messaging:    s.messaging,
 		Provenance:   runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
 	}, resumeID)
 }
@@ -3967,6 +3923,9 @@ func (s *Supervisor) shutdown(mode string) int {
 	defer func() {
 		if s.broker != nil {
 			_ = s.broker.Stop()
+		}
+		if s.messaging != nil {
+			_ = s.messaging.Close()
 		}
 		s.closeTreeBudget()
 	}()
