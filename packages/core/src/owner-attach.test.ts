@@ -120,3 +120,57 @@ describe('owner socket binding', () => {
     expect(original.connections).toBe(0)
   })
 })
+
+describe('owner record validation', () => {
+  function rewriteRecord(
+    recordPath: string,
+    change: (record: Record<string, unknown>) => Record<string, unknown>,
+  ): void {
+    const record = JSON.parse(fs.readFileSync(recordPath, 'utf8')) as Record<string, unknown>
+    fs.writeFileSync(recordPath, JSON.stringify(change(record)))
+    fs.chmodSync(recordPath, 0o600)
+  }
+
+  const cases: Array<{
+    name: string
+    corrupt: (recordPath: string, socketPath: string) => void
+  }> = [
+    {
+      name: 'a record another uid can read',
+      corrupt: (recordPath) => fs.chmodSync(recordPath, 0o644),
+    },
+    {
+      name: 'a symlinked record',
+      corrupt: (recordPath) => {
+        fs.renameSync(recordPath, `${recordPath}.target`)
+        fs.symlinkSync(`${recordPath}.target`, recordPath)
+      },
+    },
+    {
+      name: 'an unknown field',
+      corrupt: (recordPath) => rewriteRecord(recordPath, record => ({ ...record, extra: true })),
+    },
+    {
+      name: 'a record version the client does not speak',
+      corrupt: (recordPath) => rewriteRecord(recordPath, record => ({ ...record, version: 2 })),
+    },
+    {
+      name: 'a record naming another socket',
+      corrupt: (recordPath, socketPath) =>
+        rewriteRecord(recordPath, record => ({ ...record, socket: `${socketPath}.other` })),
+    },
+  ]
+
+  for (const testCase of cases) {
+    it(`rejects ${testCase.name} without sending credentials`, async () => {
+      const dir = temporaryDir()
+      const socketPath = path.join(dir, 'record.sock')
+      const listening = await listenSocket(socketPath)
+      publishRecord(socketPath)
+      testCase.corrupt(ownerRecordPath(socketPath), socketPath)
+
+      await expect(attachOwner(socketPath)).rejects.toBeInstanceOf(StaleOwnerRecordError)
+      expect(listening.connections).toBe(0)
+    })
+  }
+})
