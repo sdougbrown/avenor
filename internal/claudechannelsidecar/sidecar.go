@@ -274,15 +274,7 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if err != nil {
 			return nil, err
 		}
-		body, err := json.Marshal(map[string]any{
-			"id":            msgID,
-			"from":          s.opts.RunID,
-			"from_run_id":   s.opts.RunID,
-			"to_run_id":     p.ToRunID,
-			"message":       p.Message,
-			"role":          role,
-			"expects_reply": true,
-		})
+		body, err := messaging.AskBody(msgID, s.opts.RunID, p.ToRunID, p.Message, role)
 		if err != nil {
 			return nil, err
 		}

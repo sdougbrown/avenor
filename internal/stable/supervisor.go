@@ -2021,15 +2021,7 @@ func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role strin
 	if err != nil {
 		return nil, &control.AskError{Outcome: messaging.OutcomeNotSent, Err: err}
 	}
-	payload, err := json.Marshal(map[string]any{
-		"id":            msgID,
-		"from":          "supervisor",
-		"from_run_id":   "supervisor",
-		"to_run_id":     toRunID,
-		"message":       message,
-		"role":          role,
-		"expects_reply": true,
-	})
+	payload, err := messaging.AskBody(msgID, "supervisor", toRunID, message, role)
 	if err != nil {
 		return nil, &control.AskError{MessageID: msgID, Outcome: messaging.OutcomeNotSent, Err: err}
 	}
