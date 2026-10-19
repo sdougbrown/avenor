@@ -285,7 +285,9 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 			Body:      string(body),
 		}, messaging.WaitRequest{Sender: sender})
 		if err != nil {
-			return nil, result.Failure(err)
+			// This call has returned, so the stdio loop is free again and the
+			// agent can retract an ask the failure left outstanding.
+			return nil, fmt.Errorf("%w; an ask still outstanding can be retracted with avenor_cancel", result.Failure(err))
 		}
 		replyText, err := result.Text()
 		if err != nil {
