@@ -25,6 +25,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -7455,8 +7456,8 @@ func newBrokerSupervisor(t *testing.T, b *broker.Broker) *Supervisor {
 }
 
 // TestBrokerAskContextCancellation verifies that a cancelled ask wait returns
-// an AskError naming the message ID, reporting the ask as possibly pending, and
-// leaving no live edge a later wait could treat as outstanding.
+// an AskError naming the message ID, retracts the ask it abandoned, and leaves
+// nothing behind that blocks the target's own ask.
 func TestBrokerAskContextCancellation(t *testing.T) {
 	b := broker.New("")
 	if err := b.Start(); err != nil {
@@ -7486,11 +7487,34 @@ func TestBrokerAskContextCancellation(t *testing.T) {
 	if askErr.MessageID == "" {
 		t.Fatal("AskError.MessageID is empty")
 	}
-	if askErr.Outcome != messaging.OutcomePossiblyPending || !askErr.Pending {
-		t.Fatalf("ask outcome = %q (pending %v), want possibly-pending", askErr.Outcome, askErr.Pending)
+	if askErr.Outcome != messaging.OutcomePossiblyPending || askErr.Pending {
+		t.Fatalf("ask outcome = %q (pending %v), want a retracted possibly-pending ask", askErr.Outcome, askErr.Pending)
 	}
 	if b.Store().Pending("supervisor", askErr.MessageID) {
 		t.Fatal("cancelled wait left a live edge behind")
+	}
+	queued, err := b.DrainAgentMessages("target", 0)
+	if err != nil {
+		t.Fatalf("DrainAgentMessages: %v", err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("cancelled ask left %d queued message(s)", len(queued))
+	}
+
+	now := time.Now().UTC()
+	reverseID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	reverse, err := b.Store().Admit(context.Background(), askstore.AdmitRequest{
+		Sender:     messaging.Identity{RunID: "target", Sender: "target"},
+		Target:     "supervisor",
+		MessageID:  reverseID,
+		Generation: b.Store().Generation(),
+		Body:       `{"message":"reverse"}`,
+	})
+	if err != nil || reverse.Outcome != messaging.OutcomeSent {
+		t.Fatalf("reverse ask = (%+v, %v), want sent", reverse, err)
 	}
 }
 
