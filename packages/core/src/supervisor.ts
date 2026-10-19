@@ -688,9 +688,11 @@ export class Supervisor {
   async close(options: { skipShutdown?: boolean } = {}): Promise<void> {
     let shutdownSent = false
     if (this.client && !options.skipShutdown) {
+      // Track the request rather than its answer: a shutdown that errors or
+      // times out still gets the grace period below.
+      shutdownSent = true
       try {
         await this.client.shutdown('graceful')
-        shutdownSent = true
       } catch {
         // ignore shutdown errors
       }
