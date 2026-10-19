@@ -8,8 +8,9 @@ import (
 
 // WriteFileAtomic replaces path with data through a uniquely named temp file in
 // path's directory, so a reader never observes a partial file and concurrent
-// writers cannot collide on one temp path. The temp file is created with perm
-// and removed on every failure path.
+// writers cannot collide on one temp path. The temp file is created with perm,
+// synced before the rename, and removed on every failure path; the caller owns
+// fsyncing the directory when the rename itself must be durable.
 func WriteFileAtomic(path, pattern string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), pattern)
 	if err != nil {
@@ -25,6 +26,11 @@ func WriteFileAtomic(path, pattern string, data []byte, perm os.FileMode) error 
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("sync temp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
