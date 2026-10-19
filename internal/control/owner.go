@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
-	"time"
 )
 
 // OwnerCapability is the bearer credential of the process that owns a control
@@ -48,7 +47,6 @@ type OwnerRecord struct {
 	SocketIdentity SocketIdentity `json:"socket_identity"`
 	CapabilityID   string         `json:"capability_id"`
 	Secret         string         `json:"secret"`
-	PublishedAt    string         `json:"published_at"`
 	OwnerPID       int            `json:"owner_pid"`
 }
 
@@ -106,7 +104,6 @@ func (s *ControlServer) publishOwnerRecord(socketPath string, identity SocketIde
 		SocketIdentity: identity,
 		CapabilityID:   s.owner.ID,
 		Secret:         s.owner.Secret,
-		PublishedAt:    time.Now().UTC().Format(time.RFC3339Nano),
 		OwnerPID:       os.Getpid(),
 	})
 	if err != nil {
@@ -225,6 +222,9 @@ func LoadOwnerRecord(socketPath string) (OwnerRecord, error) {
 	}
 	if record.Version != ownerRecordVersion {
 		return OwnerRecord{}, fmt.Errorf("%w: %s has version %d", ErrStaleOwnerRecord, path, record.Version)
+	}
+	if record.Socket != socketPath {
+		return OwnerRecord{}, fmt.Errorf("%w: %s names socket %s", ErrStaleOwnerRecord, path, record.Socket)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return OwnerRecord{}, fmt.Errorf("%w: %s has trailing data", ErrStaleOwnerRecord, path)
