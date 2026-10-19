@@ -23,6 +23,10 @@ import (
 type ControllerStore struct {
 	root string
 	now  func() time.Time
+	// compactBytes bounds the controller event log: every event in the log is
+	// already applied to the snapshot, so once the log grows past this it is
+	// truncated after the snapshot superseding it is durable.
+	compactBytes int64
 
 	// subMu guards subscribers, a coalescing fan-out of buffered(1) wake
 	// channels notified after every committed controller record change.
@@ -30,15 +34,19 @@ type ControllerStore struct {
 	subscribers []chan struct{}
 }
 
+// defaultCompactLogBytes is the event-log size at which a controller log is
+// truncated.
+const defaultCompactLogBytes int64 = 64 << 10
+
 // NewStore returns a store rooted at workflowRoot, using the wall clock.
 func NewStore(workflowRoot string) *ControllerStore {
-	return &ControllerStore{root: workflowRoot, now: time.Now}
+	return &ControllerStore{root: workflowRoot, now: time.Now, compactBytes: defaultCompactLogBytes}
 }
 
 // NewStoreWithClock returns a store rooted at workflowRoot that reads the
 // supplied clock for every time-dependent decision.
 func NewStoreWithClock(workflowRoot string, now func() time.Time) *ControllerStore {
-	return &ControllerStore{root: workflowRoot, now: now}
+	return &ControllerStore{root: workflowRoot, now: now, compactBytes: defaultCompactLogBytes}
 }
 
 // Root returns the workflow root the store was constructed with.
@@ -298,9 +306,9 @@ func (s *ControllerStore) AcquireLease(controllerID, ownerID string) (Controller
 }
 
 // RenewLease extends the caller's lease by LeaseTTL via a compare-and-swap on
-// lease id and owner epoch. The leader_renewed event is appended at most once
-// per minute per lease; a renewal inside that window still extends the lease
-// but only rewrites the snapshot, leaving Revision untouched.
+// lease id and owner epoch. Every renewal is logged, so a snapshot recovered
+// from a stale or lost copy never carries an expiry the event log cannot
+// reproduce.
 func (s *ControllerStore) RenewLease(controllerID, leaseID string, ownerEpoch int64) (ControllerRecord, error) {
 	if err := validateControllerID(controllerID); err != nil {
 		return ControllerRecord{}, err
@@ -319,32 +327,17 @@ func (s *ControllerStore) RenewLease(controllerID, leaseID string, ownerEpoch in
 		return ControllerRecord{}, fmt.Errorf("controller %s renew lease: %w", controllerID, err)
 	}
 	now := s.now().UTC()
-	rec.Leader.RenewedAt = now
-	rec.Leader.ExpiresAt = now.Add(LeaseTTL)
-	rec.UpdatedAt = now
-	if rec.LastRenewalEventAt.IsZero() || now.Sub(rec.LastRenewalEventAt) >= time.Minute {
-		event := ControllerEvent{
-			Kind:       EventLeaderRenewed,
-			Seq:        rec.Revision + 1,
-			Time:       now,
-			LeaseID:    leaseID,
-			OwnerEpoch: ownerEpoch,
-			ExpiresAt:  rec.Leader.ExpiresAt,
-		}
-		if err := s.commitLocked(controllerID, &rec, []ControllerEvent{event}); err != nil {
-			return ControllerRecord{}, err
-		}
-		return rec, nil
+	event := ControllerEvent{
+		Kind:       EventLeaderRenewed,
+		Seq:        rec.Revision + 1,
+		Time:       now,
+		LeaseID:    leaseID,
+		OwnerEpoch: ownerEpoch,
+		ExpiresAt:  now.Add(LeaseTTL),
 	}
-	// Event suppressed: the renewed snapshot is written in place without
-	// bumping Revision, since no event was appended. The snapshot-only renewal
-	// intentionally diverges from the event log's ExpiresAt until the next
-	// renewal event is appended; a snapshot lost after this point replays the
-	// older expiry.
-	if err := s.writeSnapshot(controllerID, rec); err != nil {
+	if err := s.commitLocked(controllerID, &rec, []ControllerEvent{event}); err != nil {
 		return ControllerRecord{}, err
 	}
-	s.regenerateProjection(controllerID, rec)
 	return rec, nil
 }
 
@@ -722,7 +715,8 @@ func (s *ControllerStore) appendEvents(controllerID string, events []ControllerE
 	return firstErr
 }
 
-// writeSnapshot atomically replaces the snapshot file and fsyncs the directory.
+// writeSnapshot atomically replaces the snapshot file, fsyncs the directory,
+// and then compacts the event log the snapshot supersedes.
 func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecord) error {
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -753,7 +747,38 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 	if err := os.Rename(tmpName, s.snapshotPath(controllerID)); err != nil {
 		return err
 	}
-	return durablefile.FsyncDir(dir)
+	if err := durablefile.FsyncDir(dir); err != nil {
+		return err
+	}
+	return s.compactLog(controllerID)
+}
+
+// compactLog truncates the event log once it outgrows compactBytes. It runs
+// only after the snapshot superseding the log is durable: replay skips events
+// at or below the snapshot's revision, so a truncate that is lost to a crash
+// leaves skipped events behind, while truncating before the snapshot lands
+// would lose events replay still needed.
+func (s *ControllerStore) compactLog(controllerID string) error {
+	path := s.eventsPath(controllerID)
+	fi, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if fi.Size() <= s.compactBytes {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // regenerateProjection rewrites the controller's Markdown projection. The

@@ -91,11 +91,6 @@ type ControllerRecord struct {
 	UpdatedAt       time.Time
 	DisabledReason  string
 	CapacityBlocked string
-
-	// LastRenewalEventAt is the wall-clock time of the last leader_renewed
-	// event appended for the current lease; it throttles renewal events to at
-	// most one per minute while renewals themselves still extend the lease.
-	LastRenewalEventAt time.Time `json:"last_renewal_event_at"`
 }
 
 // ControllerEvent is one line of a controller's events.ndjson log.
@@ -120,23 +115,22 @@ type ControllerEvent struct {
 	DiagDetail string `json:"diag_detail,omitempty"`
 }
 
-// LastRenewalEventAt is exported on ControllerRecord; the custom
-// MarshalJSON/UnmarshalJSON below omit the zero value and round-trip it.
+// controllerRecordJSON is the on-disk shape: it omits the zero value of every
+// optional collection and round-trips a non-nil empty PollCursors as {}.
 type controllerRecordJSON struct {
-	SchemaVersion      int                     `json:"schema_version"`
-	ControllerID       string                  `json:"controller_id"`
-	DesiredState       DesiredState            `json:"desired_state"`
-	MaxInflight        int                     `json:"max_inflight"`
-	Revision           int64                   `json:"revision"`
-	OwnerEpoch         int64                   `json:"owner_epoch"`
-	Leader             *LeaderLease            `json:"leader,omitempty"`
-	PollCursors        *map[string]*PollCursor `json:"poll_cursors,omitempty"`
-	Diagnostics        *map[string]string      `json:"diagnostics,omitempty"`
-	CreatedAt          time.Time               `json:"created_at"`
-	UpdatedAt          time.Time               `json:"updated_at"`
-	DisabledReason     string                  `json:"disabled_reason,omitempty"`
-	CapacityBlocked    string                  `json:"capacity_blocked,omitempty"`
-	LastRenewalEventAt *time.Time              `json:"last_renewal_event_at,omitempty"`
+	SchemaVersion   int                     `json:"schema_version"`
+	ControllerID    string                  `json:"controller_id"`
+	DesiredState    DesiredState            `json:"desired_state"`
+	MaxInflight     int                     `json:"max_inflight"`
+	Revision        int64                   `json:"revision"`
+	OwnerEpoch      int64                   `json:"owner_epoch"`
+	Leader          *LeaderLease            `json:"leader,omitempty"`
+	PollCursors     *map[string]*PollCursor `json:"poll_cursors,omitempty"`
+	Diagnostics     *map[string]string      `json:"diagnostics,omitempty"`
+	CreatedAt       time.Time               `json:"created_at"`
+	UpdatedAt       time.Time               `json:"updated_at"`
+	DisabledReason  string                  `json:"disabled_reason,omitempty"`
+	CapacityBlocked string                  `json:"capacity_blocked,omitempty"`
 }
 
 // MarshalJSON writes the record with an empty-but-present poll_cursors object
@@ -160,10 +154,6 @@ func (r ControllerRecord) MarshalJSON() ([]byte, error) {
 	}
 	if r.Diagnostics != nil {
 		a.Diagnostics = &r.Diagnostics
-	}
-	if !r.LastRenewalEventAt.IsZero() {
-		t := r.LastRenewalEventAt
-		a.LastRenewalEventAt = &t
 	}
 	return json.Marshal(a)
 }
@@ -192,9 +182,6 @@ func (r *ControllerRecord) UnmarshalJSON(data []byte) error {
 	}
 	if a.Diagnostics != nil {
 		r.Diagnostics = *a.Diagnostics
-	}
-	if a.LastRenewalEventAt != nil {
-		r.LastRenewalEventAt = *a.LastRenewalEventAt
 	}
 	return nil
 }
@@ -231,7 +218,6 @@ func applyEvent(rec *ControllerRecord, e ControllerEvent) error {
 		rec.CapacityBlocked = ""
 		rec.Leader = nil
 		rec.OwnerEpoch = 0
-		rec.LastRenewalEventAt = time.Time{}
 	case EventEnabled:
 		rec.DesiredState = DesiredEnabled
 		rec.DisabledReason = ""
@@ -242,7 +228,6 @@ func applyEvent(rec *ControllerRecord, e ControllerEvent) error {
 		rec.CapacityBlocked = ""
 	case EventLeaderAcquired:
 		rec.OwnerEpoch = e.OwnerEpoch
-		rec.LastRenewalEventAt = time.Time{}
 		rec.Leader = &LeaderLease{
 			LeaseID:    e.LeaseID,
 			OwnerID:    e.OwnerID,
@@ -256,7 +241,6 @@ func applyEvent(rec *ControllerRecord, e ControllerEvent) error {
 			rec.Leader.RenewedAt = e.Time
 			rec.Leader.ExpiresAt = e.ExpiresAt
 		}
-		rec.LastRenewalEventAt = e.Time
 	case EventLeaderReleased, EventLeaderExpired:
 		rec.Leader = nil
 	case EventCapacityBlocked:

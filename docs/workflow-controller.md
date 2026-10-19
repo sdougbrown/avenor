@@ -164,9 +164,14 @@ recover controller records and poll cursors, then restart a leader loop for
 every controller whose desired state is enabled. Dispatched work continues
 from the durable snapshot — a parked review re-parks on its exact subject, an
 expired attempt lease re-arms for a replacement claim — with no coordinator
-memory involved. `disable` is the deliberate stop: it halts future dispatch,
-cancels poll contexts, freezes cursors, and releases the lease, leaving
-running attempts alone.
+memory involved. The leadership lease is durable per renewal: each renewal is
+written to the controller's event log before the snapshot is replaced, so a
+record recovered from a stale snapshot still carries the leader's latest
+expiry and nobody else can hold the lease over it. The controller event log is
+truncated once the snapshot superseding it is durable, so renewal lines do not
+accumulate without bound. `disable` is the deliberate stop: it halts future
+dispatch, cancels poll contexts, freezes cursors, and releases the lease,
+leaving running attempts alone.
 
 ## Boundaries
 

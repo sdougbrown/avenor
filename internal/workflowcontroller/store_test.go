@@ -556,52 +556,94 @@ func TestProjectionFailureIsolation(t *testing.T) {
 	}
 }
 
-func TestRenewalEventSuppression(t *testing.T) {
+// TestRenewLeaseLogsEveryRenewal proves every renewal is in the event log, so
+// a snapshot that is lost or restored stale replays to the leader's live
+// expiry instead of a lease that lapsed a renewal ago.
+func TestRenewLeaseLogsEveryRenewal(t *testing.T) {
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	rec := mustAcquire(t, s, "alpha", "owner-1")
 	acquiredAt := clock.cur
-	if rec.Revision != 3 {
-		t.Fatalf("revision after acquire: got %d, want 3", rec.Revision)
-	}
 
 	clock.Advance(10 * time.Second)
 	rec, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
 	if err != nil {
 		t.Fatalf("first renew: %v", err)
 	}
-	if rec.Revision != 4 {
-		t.Fatalf("revision after event-bearing renew: got %d, want 4", rec.Revision)
-	}
-	if got := len(eventReasons(t, s, "alpha", EventLeaderRenewed)); got != 1 {
-		t.Fatalf("leader_renewed events after first renew: got %d, want 1", got)
+	// The snapshot as written by the first renewal, i.e. the bytes a lost
+	// snapshot would revert to.
+	stale, err := os.ReadFile(s.snapshotPath("alpha"))
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
 	}
 
-	// A second renewal inside the one-minute window suppresses the event but
-	// still extends the lease.
 	clock.Advance(10 * time.Second)
 	rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
 	if err != nil {
 		t.Fatalf("second renew: %v", err)
 	}
-	if rec.Revision != 4 {
-		t.Fatalf("revision after suppressed renew: got %d, want 4", rec.Revision)
-	}
-	if got := len(eventReasons(t, s, "alpha", EventLeaderRenewed)); got != 1 {
-		t.Fatalf("leader_renewed events after suppressed renew: got %d, want 1", got)
-	}
 	wantExpiry := acquiredAt.Add(20 * time.Second).Add(LeaseTTL)
 	if !rec.Leader.ExpiresAt.Equal(wantExpiry) {
 		t.Fatalf("expiry after two renewals: got %s, want %s", rec.Leader.ExpiresAt, wantExpiry)
 	}
-
-	// The snapshot on disk reflects the suppressed renewal.
-	fresh, _, err := s.Get("alpha")
-	if err != nil {
-		t.Fatalf("get after suppressed renew: %v", err)
+	if got := len(eventReasons(t, s, "alpha", EventLeaderRenewed)); got != 2 {
+		t.Fatalf("leader_renewed events after two renewals: got %d, want 2", got)
 	}
-	if !fresh.Leader.ExpiresAt.Equal(wantExpiry) || fresh.Revision != 4 {
-		t.Fatalf("persisted snapshot stale after suppressed renew: %+v", fresh)
+
+	// Rewind the snapshot to the first renewal: the log alone must replay to
+	// the live expiry, and the lease must stay unreachable meanwhile.
+	if err := os.WriteFile(s.snapshotPath("alpha"), stale, 0o644); err != nil {
+		t.Fatalf("rewind snapshot: %v", err)
+	}
+	recovered, ok, err := s.Get("alpha")
+	if err != nil || !ok {
+		t.Fatalf("get after snapshot rewind: ok=%v err=%v", ok, err)
+	}
+	if !recovered.Leader.ExpiresAt.Equal(wantExpiry) || recovered.Revision != rec.Revision {
+		t.Fatalf("replayed lease expiry: got %s rev %d, want %s rev %d",
+			recovered.Leader.ExpiresAt, recovered.Revision, wantExpiry, rec.Revision)
+	}
+	if _, acquired, err := s.AcquireLease("alpha", "owner-2"); err != nil || acquired {
+		t.Fatalf("acquire while the replayed lease is live: acquired=%v err=%v", acquired, err)
+	}
+}
+
+// TestRenewalLogCompaction proves the event log stays bounded under the
+// renewal cadence: once it exceeds the store's compaction threshold it is
+// truncated after the snapshot that supersedes it is durable, and the record
+// still replays.
+func TestRenewalLogCompaction(t *testing.T) {
+	s, clock := newTestStore(t)
+	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
+	rec := mustAcquire(t, s, "alpha", "owner-1")
+
+	prev := s.compactBytes
+	s.compactBytes = 1 << 10
+	defer func() { s.compactBytes = prev }()
+
+	for i := 0; i < 12; i++ {
+		clock.Advance(RenewInterval)
+		next, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
+		if err != nil {
+			t.Fatalf("renew %d: %v", i, err)
+		}
+		rec = next
+		size, err := os.Stat(s.eventsPath("alpha"))
+		if err != nil {
+			t.Fatalf("stat events after renew %d: %v", i, err)
+		}
+		if size.Size() > s.compactBytes {
+			t.Fatalf("event log after renew %d: %d bytes, want <= %d", i, size.Size(), s.compactBytes)
+		}
+	}
+
+	replayed, ok, err := s.Get("alpha")
+	if err != nil || !ok {
+		t.Fatalf("get after compaction: ok=%v err=%v", ok, err)
+	}
+	if replayed.Revision != rec.Revision || !replayed.Leader.ExpiresAt.Equal(rec.Leader.ExpiresAt) {
+		t.Fatalf("record after compaction: rev %d expiry %s, want rev %d expiry %s",
+			replayed.Revision, replayed.Leader.ExpiresAt, rec.Revision, rec.Leader.ExpiresAt)
 	}
 }
 
