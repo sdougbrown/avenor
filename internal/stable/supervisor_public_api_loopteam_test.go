@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
@@ -1276,5 +1277,165 @@ func TestSupervisorPublicAPILoopAndTeamListRows(t *testing.T) {
 		if got := row["exit_code"]; got != 0 {
 			t.Fatalf("List exit_code after completion = %v, want 0", got)
 		}
+	}
+}
+
+// TestSupervisorPublicAPITeamStatusRunningBeforeFirstMemberAttempt pins the
+// window between team publication and the first member attempt: both members
+// block in Start, so no attempt has incremented yet, and every status read
+// must report running. It also asserts both members still start exactly once
+// and the team ends cleanly, so status connections cannot disturb member
+// startup.
+func TestSupervisorPublicAPITeamStatusRunningBeforeFirstMemberAttempt(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	alphaStarted := make(chan struct{}, 1)
+	betaStarted := make(chan struct{}, 1)
+	alpha := newItestProvider(itestAttempt("ses_start_alpha", itestSessionEnd("ses_start_alpha", "end_turn", "alpha done")))
+	beta := newItestProvider(itestAttempt("ses_start_beta", itestSessionEnd("ses_start_beta", "end_turn", "beta done")))
+	alpha.onStart = func(ctx context.Context) {
+		alphaStarted <- struct{}{}
+		select {
+		case <-gate.ch:
+		case <-ctx.Done():
+		}
+	}
+	beta.onStart = func(ctx context.Context) {
+		betaStarted <- struct{}{}
+		select {
+		case <-gate.ch:
+		case <-ctx.Done():
+		}
+	}
+	h := newItestHarness(t, Config{}, itestTeamProviders(map[string]*itestProvider{
+		"alpha-agent": alpha,
+		"beta-agent":  beta,
+	}))
+
+	file := itestWorkflowConfig(t, "team", map[string]any{
+		"team": []map[string]any{
+			{"name": "alpha", "prompt": "alpha work", "agent": "alpha-agent"},
+			{"name": "beta", "prompt": "beta work", "agent": "beta-agent"},
+		},
+	})
+
+	// Spawn over the control socket and close the spawn connection right away,
+	// the way a one-shot caller does.
+	spawner := h.connectClient()
+	var spawned map[string]any
+	if err := spawner.Call("spawn", map[string]any{
+		"team_file": file,
+		"dir":       t.TempDir(),
+		"label":     "team-start",
+		"backend":   "pony",
+		"timeout":   30,
+	}, &spawned); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	rt, _ := spawned["runtime_id"].(string)
+	if rt == "" {
+		t.Fatalf("spawn result = %#v, want a runtime id", spawned)
+	}
+	_ = spawner.Close()
+
+	for _, started := range []chan struct{}{alphaStarted, betaStarted} {
+		itestRecv(t, started, "member Start")
+	}
+
+	// Poll status over fresh connections while both members are blocked in
+	// Start, recording the raw status each caller sees.
+	var observed []any
+	for i := 0; i < 5; i++ {
+		c, err := client.Dial(h.socket)
+		if err != nil {
+			t.Fatalf("status dial: %v", err)
+		}
+		status, err := c.Status(rt)
+		if err != nil {
+			_ = c.Close()
+			t.Fatalf("status: %v", err)
+		}
+		observed = append(observed, status["status"])
+		_ = c.Close()
+	}
+
+	gate.open()
+	for _, sessionID := range []string{"ses_start_alpha", "ses_start_beta"} {
+		h.log.waitFor(t, sessionID+" session.end", itestMemberEndIs(sessionID, "end_turn"))
+	}
+	h.log.waitFor(t, "avenor.team.end", itestEventIs("avenor.team.end", rt))
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+
+	for i, got := range observed {
+		if got != "running" {
+			t.Errorf("status poll %d while members started = %v, want running", i+1, got)
+		}
+	}
+	if starts, _ := alpha.counts(); starts != 1 {
+		t.Errorf("alpha starts = %d, want 1", starts)
+	}
+	if starts, _ := beta.counts(); starts != 1 {
+		t.Errorf("beta starts = %d, want 1", starts)
+	}
+}
+
+// TestSupervisorPublicAPILoopStatusRunningBetweenAttempts pins the gap between
+// two loop attempts: the first attempt has settled, so no attempt is live, and
+// the second Start is blocked. The child must still report running, because the
+// loop runner owns the whole run and has not finished it.
+func TestSupervisorPublicAPILoopStatusRunningBetweenAttempts(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	var startCount atomic.Int32
+	secondStart := make(chan struct{}, 1)
+	provider := newItestProvider(
+		itestAttempt("ses_gap_one", itestSessionEnd("ses_gap_one", "end_turn", "iteration one")),
+		itestAttempt("ses_gap_two", itestSessionEnd("ses_gap_two", "end_turn", "iteration two")),
+	)
+	provider.onStart = func(ctx context.Context) {
+		if startCount.Add(1) != 2 {
+			return
+		}
+		secondStart <- struct{}{}
+		select {
+		case <-gate.ch:
+		case <-ctx.Done():
+		}
+	}
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 2,
+		"loop":           []map[string]any{{"name": "work", "prompt": "loop work"}},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-gap"})
+
+	h.log.waitFor(t, "first attempt session.end", itestMemberEndIs("ses_gap_one", "end_turn"))
+	itestRecv(t, secondStart, "second attempt Start")
+
+	// The second Start is blocked, so each of these reads lands in the gap.
+	var observed []any
+	for i := 0; i < 5; i++ {
+		out, err := h.sup.RuntimeStatus(rt)
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		raw, _ := out.(map[string]any)
+		observed = append(observed, raw["status"])
+	}
+
+	gate.open()
+	h.log.waitFor(t, "second attempt session.end", itestMemberEndIs("ses_gap_two", "end_turn"))
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+
+	for i, got := range observed {
+		if got != "running" {
+			t.Errorf("status read %d between attempts = %v, want running", i+1, got)
+		}
+	}
+	if starts, _ := provider.counts(); starts != 2 {
+		t.Errorf("provider starts = %d, want 2", starts)
 	}
 }

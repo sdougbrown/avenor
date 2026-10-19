@@ -455,6 +455,7 @@ type itestProvider struct {
 	resumeCalls []string
 	promptTexts []string
 	onPrompt    func(ctx context.Context)
+	onStart     func(ctx context.Context)
 	onAnswer    func(requestID string, resp runtime.PermissionResponse)
 }
 
@@ -465,7 +466,11 @@ func newItestProvider(attempts ...stableScriptedAttempt) *itestProvider {
 func (p *itestProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	p.mu.Lock()
 	p.starts++
+	onStart := p.onStart
 	p.mu.Unlock()
+	if onStart != nil {
+		onStart(ctx)
+	}
 	return p.stableScriptedProvider.Start(ctx, opts)
 }
 

@@ -79,6 +79,8 @@ func Translate(status RuntimeStatus, phase Phase) Translation {
 			translatedPhase = PhaseNone
 		}
 	case StatusIdle:
+		// Only a child with no live attempt reports idle; see
+		// lifecycleState.runtimeStatus in internal/stable.
 		if IsTerminalPhase(phase) {
 			translatedStatus = RuntimeStatus(phase)
 		} else {
