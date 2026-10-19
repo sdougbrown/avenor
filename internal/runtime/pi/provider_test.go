@@ -679,6 +679,48 @@ func TestPromptTurnErrorSurfacesStderrDetail(t *testing.T) {
 	if !strings.Contains(err.Error(), "model 429: rate limited") {
 		t.Fatalf("error = %v; want the stderr detail in the message", err)
 	}
+	if strings.Contains(err.Error(), "unknown error") {
+		t.Fatalf("error = %v; want the captured stderr as the cause, not unknown error", err)
+	}
+}
+
+// A pi child that exits before settling the turn must fail the prompt with
+// what it printed, not leave the caller waiting on its own deadline.
+func TestPromptFailsWhenClientExitsBeforeSettlement(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-pi-gone")
+	p.client = c
+	p.sessions = map[string]struct{}{"ses-pi-gone": {}}
+	c.stderr.Append("pi: authentication failed")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(ctx, "ses-pi-gone", "hi") }()
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
+		_ = wOut.Close()
+	}()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Prompt did not return after the pi child exited")
+	}
+	if err == nil {
+		t.Fatal("expected a turn error")
+	}
+	if !strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("error = %v; want the captured stderr", err)
+	}
 }
 
 func TestPromptTurnErrorOmitsEmptyStderr(t *testing.T) {

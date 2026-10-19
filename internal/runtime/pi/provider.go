@@ -188,39 +188,79 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		c.unsubscribe(sessionID, subCh)
 		close(subCh)
 		<-done
-
-		reason, _ := ev.Fields["stop_reason"]
-		switch reason {
-		case "end_turn", "end_of_turn":
-			return nil
-		case "cancelled":
-			return fmt.Errorf("turn cancelled for session %s", sessionID)
-		case "error":
-			msg, _ := ev.Fields["error_message"].(string)
-			if msg == "" {
-				msg = "unknown error"
-			}
-			// The child pi process prints model/API failures to stderr; the
-			// session.end event does not always carry them. Surface only the
-			// tail of the captured stderr: the rolling buffer also accumulates
-			// client-side diagnostics and stale lines from earlier turns.
-			if stderr := strings.TrimSpace(c.Stderr()); stderr != "" {
-				lines := strings.Split(stderr, "\n")
-				if len(lines) > 3 {
-					lines = lines[len(lines)-3:]
-				}
-				msg = fmt.Sprintf("%s (stderr: %s)", msg, strings.Join(lines, " | "))
-			}
-			return fmt.Errorf("turn failed for session %s: %s", sessionID, msg)
+		return piTurnResult(sessionID, ev, c.Stderr())
+	case <-c.done:
+		// The child exited before settling the turn. Read any terminal event
+		// that was queued just before the EOF, then report what it printed:
+		// waiting on the caller's deadline would misreport the failure as a
+		// timeout.
+		select {
+		case ev := <-turnCh:
+			c.unsubscribe(sessionID, subCh)
+			close(subCh)
+			<-done
+			return piTurnResult(sessionID, ev, c.Stderr())
 		default:
-			return nil
 		}
+		c.unsubscribe(sessionID, subCh)
+		close(subCh)
+		<-done
+		return fmt.Errorf("turn failed for session %s: %s", sessionID, piExitCause(c.Stderr()))
 	case <-ctx.Done():
 		c.unsubscribe(sessionID, subCh)
 		close(subCh)
 		<-done
 		return ctx.Err()
 	}
+}
+
+// piTurnResult maps a settled agent_end onto Prompt's result. The captured
+// stderr carries failures that the event itself does not name, so it is the
+// cause when error_message is absent.
+func piTurnResult(sessionID string, ev events.Event, stderr string) error {
+	reason, _ := ev.Fields["stop_reason"]
+	switch reason {
+	case "end_turn", "end_of_turn":
+		return nil
+	case "cancelled":
+		return fmt.Errorf("turn cancelled for session %s", sessionID)
+	case "error":
+		msg, _ := ev.Fields["error_message"].(string)
+		detail := piStderrTail(stderr)
+		switch {
+		case msg == "":
+			msg = detail
+		case detail != "":
+			msg = fmt.Sprintf("%s (stderr: %s)", msg, detail)
+		}
+		if msg == "" {
+			msg = "unknown error"
+		}
+		return fmt.Errorf("turn failed for session %s: %s", sessionID, msg)
+	default:
+		return nil
+	}
+}
+
+func piExitCause(stderr string) string {
+	if tail := piStderrTail(stderr); tail != "" {
+		return tail
+	}
+	return "pi exited before the turn settled"
+}
+
+// piStderrTail keeps only the last few captured stderr lines: the rolling
+// buffer also accumulates client-side diagnostics and stale earlier turns.
+func piStderrTail(stderr string) string {
+	stderr = strings.TrimSpace(stderr)
+	if stderr == "" {
+		return ""
+	}
+	lines := strings.Split(stderr, "\n")
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+	}
+	return strings.Join(lines, " | ")
 }
 
 func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
