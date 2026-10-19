@@ -610,12 +610,16 @@ type Supervisor struct {
 	shutdownChOnce          sync.Once
 	// heartbeatMu guards heartbeats, the registry of live executor lease
 	// heartbeat goroutines stopped on supervisor shutdown.
-	heartbeatMu      sync.Mutex
-	heartbeats       map[*leaseHeartbeat]struct{}
-	runtimeActivity  chan struct{}
-	childQuestionSeq int
-	pendingQuestions map[string]pendingChildQuestion // child runtime ID -> pending question
-	handledQuestions map[string]handledChildQuestion // child runtime ID -> latest handled request
+	heartbeatMu     sync.Mutex
+	heartbeats      map[*leaseHeartbeat]struct{}
+	runtimeActivity chan struct{}
+	// runtimeActivityAt is the last spawn or completion, in Unix nanoseconds.
+	// The idle timer measures its window from it rather than from the moment
+	// the loop happens to observe the last runtime end.
+	runtimeActivityAt atomic.Int64
+	childQuestionSeq  int
+	pendingQuestions  map[string]pendingChildQuestion // child runtime ID -> pending question
+	handledQuestions  map[string]handledChildQuestion // child runtime ID -> latest handled request
 	// childQuestionTimeout is the deadline for a parent to answer a child's
 	// question before the child is prompted to continue on its own.
 	childQuestionTimeout          time.Duration
@@ -689,7 +693,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		controllerRenewInterval: workflowcontroller.RenewInterval,
 		candidateRefreshWindow:  workflowcontroller.DefaultAntiEntropy,
 		shutdownCh:              make(chan struct{}),
-		runtimeActivity:         make(chan struct{}),
+		runtimeActivity:         make(chan struct{}, 1),
 		pendingQuestions:        map[string]pendingChildQuestion{},
 		handledQuestions:        map[string]handledChildQuestion{},
 		childQuestionTimeout:    cfg.ChildQuestionTimeout,
@@ -800,10 +804,8 @@ func (s *Supervisor) Run() (exitCode int) {
 		}()
 	}
 
-	var idleDeadline time.Time
-	if s.config.IdleTimeout > 0 {
-		idleDeadline = time.Now().Add(s.config.IdleTimeout)
-	}
+	// lastActivity anchors the idle window before the first runtime acts.
+	lastActivity := time.Now()
 
 	s.startReaper()
 	defer s.stopReaper()
@@ -817,7 +819,10 @@ func (s *Supervisor) Run() (exitCode int) {
 	}
 
 	for {
-		idleCh := idleCheck(s.config.IdleTimeout, s.activeRuntimeCount(), &idleDeadline)
+		if at := s.lastRuntimeActivity(); at.After(lastActivity) {
+			lastActivity = at
+		}
+		idleCh := idleCheck(s.config.IdleTimeout, s.liveRuntimeCount(), lastActivity)
 		select {
 		case <-ctx.Done():
 			reason = "signal"
@@ -826,6 +831,12 @@ func (s *Supervisor) Run() (exitCode int) {
 			reason = "shutdown"
 			return s.shutdown("graceful")
 		case <-idleCh:
+			// The timer may have fired in the same iteration that a spawn or a
+			// completion made pending: only a supervisor that is still idle
+			// expires.
+			if s.liveRuntimeCount() > 0 || s.lastRuntimeActivity().After(lastActivity) {
+				continue
+			}
 			reason = "idle"
 			return s.shutdown("graceful")
 		case <-s.runtimeActivity:
@@ -1213,15 +1224,36 @@ func (s *Supervisor) writeTombstone(reason string) {
 	}
 }
 
-func idleCheck(idleTimeout time.Duration, active int, deadline *time.Time) <-chan time.Time {
-	if idleTimeout <= 0 {
+// signalRuntimeActivity records runtime activity and wakes Run's activity
+// select without blocking. The supervisor may be outside its select when
+// activity happens, so the wake channel is buffered and an unread wake is
+// enough for the next evaluation.
+func (s *Supervisor) signalRuntimeActivity() {
+	s.runtimeActivityAt.Store(time.Now().UnixNano())
+	select {
+	case s.runtimeActivity <- struct{}{}:
+	default:
+	}
+}
+
+// lastRuntimeActivity returns the most recent spawn or completion.
+func (s *Supervisor) lastRuntimeActivity() time.Time {
+	nanos := s.runtimeActivityAt.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
+// idleCheck returns the idle timer for the current live runtime count. A
+// nonempty live count disarms the timer; once no runtime is live, the window
+// is lastActivity plus the timeout, so a supervisor never expires before a
+// full idle window has passed since its last runtime acted.
+func idleCheck(idleTimeout time.Duration, live int, lastActivity time.Time) <-chan time.Time {
+	if idleTimeout <= 0 || live > 0 {
 		return nil
 	}
-	if active > 0 {
-		*deadline = time.Now().Add(idleTimeout)
-		return nil
-	}
-	return time.After(time.Until(*deadline))
+	return time.After(time.Until(lastActivity.Add(idleTimeout)))
 }
 
 // acquireLocalRuntimeSlot re-gates a parked runtime on the local
@@ -1682,10 +1714,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		child.sentinelFile = sentinelFile
 		// provider and session remain zero-valued for loop children
 
-		select {
-		case s.runtimeActivity <- struct{}{}:
-		default:
-		}
+		s.signalRuntimeActivity()
 
 		releaseReservation = nil
 		go s.runLoopChild(childCtx, child, cfg, params.Timeout, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.Thinking, params.ServerURL, backend)
@@ -1740,10 +1769,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		child.onEvent = onEvent
 		child.sentinelFile = sentinelFile
 
-		select {
-		case s.runtimeActivity <- struct{}{}:
-		default:
-		}
+		s.signalRuntimeActivity()
 
 		releaseReservation = nil
 		go s.runTeamChild(childCtx, child, cfg, params.Timeout, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.Thinking, params.ServerURL, backend)
@@ -1848,10 +1874,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	releaseReservation = nil
 	go s.runChild(childCtx, child, promptText, params.Timeout, params.MaxRetries)
 
-	select {
-	case s.runtimeActivity <- struct{}{}:
-	default:
-	}
+	s.signalRuntimeActivity()
 
 	brokerURL := s.brokerURL()
 	return SpawnResult{
@@ -4007,6 +4030,23 @@ func (s *Supervisor) activeRuntimeCount() int {
 	return s.activeRuntimeCountLocked()
 }
 
+// liveRuntimeCount counts registered runtimes that have not completed,
+// including parked runtimes: a parked runtime still owns a live backend
+// process awaiting a follow-up prompt.
+func (s *Supervisor) liveRuntimeCount() int {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	n := 0
+	for _, rt := range s.runtimes {
+		rt.mu.Lock()
+		if !rt.lc.isCompleted() {
+			n++
+		}
+		rt.mu.Unlock()
+	}
+	return n
+}
+
 func (s *Supervisor) listRuntimes() []map[string]any {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
@@ -4171,6 +4211,8 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 			// closeDone runs inside doneOnce, after the publication transaction.
 			s.executeDeferredLifecycleEffects(child, pubEff)
 		}
+		// The runtime no longer counts as live; re-evaluate the idle timer.
+		s.signalRuntimeActivity()
 	})
 }
 

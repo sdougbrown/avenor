@@ -28,7 +28,7 @@ Flags:
 | `--control-socket` `<path>` | (required) | Unix socket path for the control plane. Avenor writes a tombstone file at `<path>.dead` to signal abnormal shutdown, an owner record at `<path>.owner.json`, and a persistent lock at `<path>.control.lock` |
 | `--max-runtimes` | 16 | Maximum concurrent child runtimes for this supervisor. Spawn requests are rejected once this limit is hit. Runtimes parked after a successful turn do not count against this limit |
 | `--max-tree-budget` | 64 | Maximum concurrent executing runtimes across the whole supervisor tree including nested supervisors. Bounds recursive fan-out |
-| `--idle-timeout` | 0 | Exit cleanly after this duration with no child runtimes running and no control connections active. 0 disables (supervisor runs until signaled) |
+| `--idle-timeout` | 0 | Exit cleanly after this duration with no live child runtimes (parked runtimes count as live). 0 disables (supervisor runs until signaled) |
 | `--parked-timeout` | 30m | How long a finished runtime stays parked awaiting a follow-up prompt before it is reaped. Parked runtimes hold a live backend process but do not count against `--max-runtimes`. 0 parks until supervisor shutdown or cancellation |
 | `--lease-sweep-interval` | 10s | How often the supervisor expires workflow leases whose heartbeat stopped (the live stall detector). An expired lease re-arms its node for a replacement claim without a restart. 0 disables the sweep: leases then expire only on supervisor restart |
 | `--shutdown-timeout` | 10s | How long to wait for child runtimes to finish gracefully before killing them |
@@ -366,16 +366,18 @@ A root without an active budget reports degraded mode and its cause:
 
 If you set `--idle-timeout` (e.g. `--idle-timeout 5m`), the supervisor exits cleanly when:
 
-1. No child runtimes are running (all have finished or been cancelled), AND
-2. The supervisor has been idle for the full duration, AND
-3. No control connections are active
+1. No child runtimes are live (none running, parked awaiting a follow-up, or waiting on a slot), AND
+2. A full idle window has passed since the last runtime activity — the last spawn, or the last runtime finishing a session or being reaped
+
+Control connections do not hold the supervisor open: an idle supervisor exits even while a client is connected.
 
 This is useful for dynamic environments where you spawn supervisors on-demand and want them to clean up when they're no longer needed. Without an idle timeout, the supervisor runs indefinitely until signaled.
 
+A parked runtime — a finished turn waiting for a follow-up prompt — still owns a backend process, so it counts as live and keeps the supervisor up until it is prompted or reaped.
+
 The idle timeout resets whenever:
 - A new runtime finishes spawning
-- A running runtime finishes a session
-- A control connection arrives
+- A running runtime finishes a session or is reaped
 
 ## HTTP Debug Adapter
 
