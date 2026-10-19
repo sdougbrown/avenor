@@ -67,6 +67,13 @@ func RunTransportSuite(t *testing.T, newTransport TransportFactory) {
 		if len(received.Messages) != 1 || received.Messages[0].MessageID != msgID {
 			t.Fatalf("Receive = %+v", received.Messages)
 		}
+		msg := received.Messages[0]
+		if msg.FromRunID != alice.RunID || msg.Sender != alice.Sender {
+			t.Fatalf("received sender = %q/%q, want %q/%q", msg.FromRunID, msg.Sender, alice.RunID, alice.Sender)
+		}
+		if msg.Kind != "agent_message" || string(msg.Payload) != `{"message":"ping"}` {
+			t.Fatalf("received message = %+v", msg)
+		}
 		replied, err := bt.Reply(t.Context(), messaging.ReplyRequest{
 			From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
 		})
@@ -82,8 +89,11 @@ func RunTransportSuite(t *testing.T, newTransport TransportFactory) {
 		if waited.Outcome != messaging.OutcomeReplied || waited.Reply == nil {
 			t.Fatalf("Wait = %+v", waited)
 		}
-		if string(waited.Reply.Payload) != `{"message":"pong"}` {
-			t.Fatalf("reply payload = %s", waited.Reply.Payload)
+		if waited.Reply.MessageID != msgID || waited.Reply.FromRunID != bob.RunID {
+			t.Fatalf("reply identity = %+v", waited.Reply)
+		}
+		if waited.Reply.Kind != "agent_message" || string(waited.Reply.Payload) != `{"message":"pong"}` {
+			t.Fatalf("reply = %+v", waited.Reply)
 		}
 	})
 

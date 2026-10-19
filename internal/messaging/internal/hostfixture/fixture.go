@@ -1,14 +1,15 @@
 // Package hostfixture is a test-only v1 host messaging server. It speaks the
 // wire contract internal/messaging/hosthttp implements and is backed by a real
 // askstore, so an ask admitted through it has the same edge, waiter and
-// terminal-fence lifecycle as any other transport. Nothing outside tests may
-// import it.
+// terminal-fence lifecycle as any other transport.
+//
+// Its location under internal/messaging/internal makes an import from a
+// production package outside internal/messaging a compile error.
 package hostfixture
 
 import (
 	"crypto/subtle"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,20 +20,15 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askstore"
+	"github.com/sdougbrown/avenor/internal/messaging/messagetest"
 )
 
-const (
-	// HeaderCapability and HeaderSecret name the capability the caller presents.
-	HeaderCapability = "X-Avenor-Capability"
-	HeaderSecret     = "X-Avenor-Secret"
-
-	maxBodyBytes = 1 << 20
-)
+const maxBodyBytes = 1 << 20
 
 // Fixture is a v1 host endpoint bound to a fresh httptest server.
 type Fixture struct {
 	store   *askstore.Store
-	backend *queues
+	backend *messagetest.MemoryBackend
 	server  *httptest.Server
 	paths   []string
 
@@ -48,7 +44,7 @@ type credential struct {
 // New starts a fixture and registers its cleanup.
 func New(t *testing.T) *Fixture {
 	t.Helper()
-	backend := newQueues()
+	backend := messagetest.NewMemoryBackend()
 	store := askstore.New(askstore.Options{})
 	store.SetBackend(backend)
 	f := &Fixture{store: store, backend: backend, creds: make(map[string]credential)}
@@ -163,9 +159,15 @@ func (f *Fixture) send(w http.ResponseWriter, r *http.Request) {
 		Target:     req.ToRunID,
 		MessageID:  req.MessageID,
 		Generation: req.Epoch,
+		Body:       req.Body,
 	})
 	if err != nil {
-		writeError(w, wireCode(err), res.Outcome, err.Error())
+		code := messaging.WireCodeFor(err)
+		outcome := res.Outcome
+		if !messaging.IsSendOutcome(outcome) {
+			outcome = messaging.SendOutcomeFor(code)
+		}
+		writeError(w, code, outcome, err.Error())
 		return
 	}
 	writeEnvelope(w, http.StatusOK, envelope{Outcome: res.Outcome, MessageID: res.MessageID, Epoch: res.Generation})
@@ -194,7 +196,7 @@ func (f *Fixture) wait(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := f.store.Wait(r.Context(), fenceKey(messaging.Identity{RunID: req.SenderRunID}, req.MessageID, req.Epoch), time.Duration(req.TimeoutMilli)*time.Millisecond)
 	if err != nil {
-		writeError(w, wireCode(err), res.Outcome, err.Error())
+		writeError(w, messaging.WireCodeFor(err), res.Outcome, err.Error())
 		return
 	}
 	env := envelope{Outcome: res.Outcome}
@@ -211,7 +213,8 @@ func (f *Fixture) wait(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *Fixture) reply(w http.ResponseWriter, r *http.Request) {
-	if _, ok := f.authenticate(w, r); !ok {
+	cred, ok := f.authenticate(w, r)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -224,13 +227,17 @@ func (f *Fixture) reply(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
+	if req.FromRunID != cred.runID {
+		writeError(w, "auth-rejected", messaging.OutcomeAuthRejected, "capability does not name the sender")
+		return
+	}
 	outcome, err := f.store.Reply(
 		fenceKey(messaging.Identity{RunID: req.ToRunID}, req.MessageID, f.store.Generation()),
 		req.FromRunID,
 		json.RawMessage(req.Body),
 	)
 	if err != nil {
-		writeError(w, wireCode(err), outcome, err.Error())
+		writeError(w, messaging.WireCodeFor(err), outcome, err.Error())
 		return
 	}
 	writeEnvelope(w, http.StatusOK, envelope{Outcome: outcome, MessageID: req.MessageID})
@@ -258,7 +265,7 @@ func (f *Fixture) withdraw(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := f.store.Withdraw(fenceKey(messaging.Identity{RunID: req.SenderRunID}, req.MessageID, req.Epoch))
 	if err != nil {
-		writeError(w, wireCode(err), res.Outcome, err.Error())
+		writeError(w, messaging.WireCodeFor(err), res.Outcome, err.Error())
 		return
 	}
 	env := envelope{Outcome: res.Outcome}
@@ -299,7 +306,7 @@ func (f *Fixture) receive(w http.ResponseWriter, r *http.Request) {
 	}
 	msgs, err := f.store.Receive(req.SenderRunID, req.Limit)
 	if err != nil {
-		writeError(w, wireCode(err), "", err.Error())
+		writeError(w, messaging.WireCodeFor(err), "", err.Error())
 		return
 	}
 	env := envelope{Epoch: f.store.Generation()}
@@ -336,7 +343,7 @@ func (f *Fixture) peers(w http.ResponseWriter, r *http.Request) {
 	}
 	all, err := f.store.Peers()
 	if err != nil {
-		writeError(w, wireCode(err), "", err.Error())
+		writeError(w, messaging.WireCodeFor(err), "", err.Error())
 		return
 	}
 	env := envelope{Epoch: f.store.Generation()}
@@ -347,8 +354,8 @@ func (f *Fixture) peers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *Fixture) authenticate(w http.ResponseWriter, r *http.Request) (credential, bool) {
-	id := r.Header.Get(HeaderCapability)
-	secret := r.Header.Get(HeaderSecret)
+	id := r.Header.Get(messaging.HeaderCapability)
+	secret := r.Header.Get(messaging.HeaderSecret)
 	f.mu.Lock()
 	cred, ok := f.creds[id]
 	f.mu.Unlock()
@@ -375,57 +382,8 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-// wireCode is the wire spelling of a typed messaging error.
-func wireCode(err error) string {
-	switch {
-	case errors.Is(err, messaging.ErrAuthRejected):
-		return "auth-rejected"
-	case errors.Is(err, messaging.ErrGenerationMismatch):
-		return "generation-mismatch"
-	case errors.Is(err, messaging.ErrUnsupportedProtocol):
-		return "unsupported-protocol"
-	case errors.Is(err, messaging.ErrMalformedMessageID):
-		return "malformed-message-id"
-	case errors.Is(err, messaging.ErrMessageIDExpired):
-		return "message-id-expired"
-	case errors.Is(err, messaging.ErrMessageIDHorizon):
-		return "message-id-horizon"
-	case errors.Is(err, messaging.ErrDuplicateMessageID):
-		return "duplicate-message-id"
-	case errors.Is(err, messaging.ErrMutualAsk):
-		return "mutual-ask"
-	case errors.Is(err, messaging.ErrFenceCapacity):
-		return "fence-capacity"
-	case errors.Is(err, messaging.ErrNotAskSender):
-		return "not-ask-sender"
-	case errors.Is(err, messaging.ErrNotAskTarget):
-		return "not-ask-target"
-	case errors.Is(err, messaging.ErrTargetUnavailable):
-		return "target-unavailable"
-	case errors.Is(err, messaging.ErrTransportClosed):
-		return "transport-closed"
-	case errors.Is(err, messaging.ErrUnsupportedOperation):
-		return "unsupported-operation"
-	}
-	return "invalid-request"
-}
-
-func statusFor(code string) int {
-	switch code {
-	case "auth-rejected":
-		return http.StatusUnauthorized
-	case "not-ask-target", "not-ask-sender":
-		return http.StatusForbidden
-	case "generation-mismatch", "duplicate-message-id":
-		return http.StatusConflict
-	case "fence-capacity", "target-unavailable":
-		return http.StatusServiceUnavailable
-	}
-	return http.StatusBadRequest
-}
-
 func writeError(w http.ResponseWriter, code string, outcome messaging.Outcome, detail string) {
-	writeEnvelope(w, statusFor(code), envelope{Outcome: outcome, Error: code, Message: detail})
+	writeEnvelope(w, messaging.WireStatusFor(code), envelope{Outcome: outcome, Error: code, Message: detail})
 }
 
 func writeEnvelope(w http.ResponseWriter, status int, env envelope) {
@@ -468,75 +426,4 @@ type message struct {
 type peer struct {
 	RunID   string          `json:"run_id"`
 	Session json.RawMessage `json:"session"`
-}
-
-// queues is the fixture's in-memory message and peer store.
-type queues struct {
-	mu     sync.Mutex
-	queues map[string][]messaging.InboundMessage
-	peers  []messaging.Peer
-}
-
-func newQueues() *queues {
-	return &queues{queues: make(map[string][]messaging.InboundMessage)}
-}
-
-func (q *queues) Publish(target string, msg messaging.InboundMessage) (func(), error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.queues[target] = append(q.queues[target], msg)
-	removed := false
-	return func() {
-		q.mu.Lock()
-		defer q.mu.Unlock()
-		if removed {
-			return
-		}
-		removed = true
-		queue := q.queues[target]
-		for i, queued := range queue {
-			if queued.MessageID == msg.MessageID {
-				q.queues[target] = append(queue[:i], queue[i+1:]...)
-				return
-			}
-		}
-	}, nil
-}
-
-func (q *queues) Receive(sender string, limit int) ([]messaging.InboundMessage, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	queue := q.queues[sender]
-	if len(queue) == 0 {
-		return nil, nil
-	}
-	if limit > 0 && len(queue) > limit {
-		queue = queue[:limit]
-	}
-	out := append([]messaging.InboundMessage(nil), queue...)
-	q.queues[sender] = q.queues[sender][len(queue):]
-	return out, nil
-}
-
-func (q *queues) Peers() ([]messaging.Peer, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return append([]messaging.Peer(nil), q.peers...), nil
-}
-
-func (q *queues) AddPeer(runID string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for _, peer := range q.peers {
-		if peer.RunID == runID {
-			return
-		}
-	}
-	q.peers = append(q.peers, messaging.Peer{RunID: runID})
-}
-
-func (q *queues) Queued(target string) int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return len(q.queues[target])
 }

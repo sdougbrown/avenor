@@ -1,5 +1,5 @@
 {
-  "comment": "v1 host wire contract spoken by internal/messaging/hosthttp and served by internal/messaging/hostfixture. Placeholders in angle brackets are values supplied at request time.",
+  "comment": "v1 host wire contract spoken by internal/messaging/hosthttp and served by internal/messaging/internal/hostfixture. Placeholders in angle brackets are values supplied at request time. The error table mirrors messaging.WireErrors, which owns the codes, typed errors, statuses and outcomes.",
   "protocol": 1,
   "endpoints": [
     {
@@ -24,7 +24,6 @@
       "request": {
         "epoch": "<generation>",
         "sender_run_id": "run-a",
-        "sender": "alice",
         "message_id": "<msg-id>",
         "timeout_ms": 1000
       },
@@ -88,12 +87,19 @@
   ],
   "errors": [
     {"status": 401, "error": "auth-rejected", "outcome": "auth-rejected"},
-    {"status": 403, "error": "not-ask-target", "outcome": "edge-absent"},
-    {"status": 400, "error": "not-ask-sender", "outcome": "edge-absent"},
-    {"status": 409, "error": "generation-mismatch", "outcome": "not-sent"},
-    {"status": 409, "error": "duplicate-message-id", "outcome": "not-sent"},
     {"status": 400, "error": "invalid-request", "outcome": "not-sent"},
+    {"status": 409, "error": "generation-mismatch", "outcome": "not-sent"},
+    {"status": 400, "error": "unsupported-protocol", "outcome": "not-sent"},
+    {"status": 400, "error": "malformed-message-id", "outcome": "not-sent"},
+    {"status": 400, "error": "message-id-expired", "outcome": "not-sent"},
+    {"status": 400, "error": "message-id-horizon", "outcome": "not-sent"},
+    {"status": 409, "error": "duplicate-message-id", "outcome": "not-sent"},
     {"status": 400, "error": "mutual-ask", "outcome": "not-sent"},
-    {"status": 503, "error": "fence-capacity", "outcome": "not-sent"}
+    {"status": 503, "error": "fence-capacity", "outcome": "not-sent"},
+    {"status": 403, "error": "not-ask-sender", "outcome": "edge-absent"},
+    {"status": 403, "error": "not-ask-target", "outcome": "edge-absent"},
+    {"status": 503, "error": "target-unavailable", "outcome": "not-sent"},
+    {"status": 400, "error": "transport-closed", "outcome": "not-sent"},
+    {"status": 400, "error": "unsupported-operation", "outcome": "not-sent"}
   ]
 }

@@ -16,21 +16,31 @@ import (
 // MemoryBackend is an in-memory queue used by transport and store tests.
 type MemoryBackend struct {
 	mu      sync.Mutex
-	queues  map[string][]messaging.InboundMessage
+	queues  map[string][]queuedEntry
 	peers   []messaging.Peer
+	next    uint64
 	removed int
+}
+
+// queuedEntry carries the identity of one published message, so its removal
+// closure deletes that entry and not an earlier one that shares its ID.
+type queuedEntry struct {
+	seq uint64
+	msg messaging.InboundMessage
 }
 
 // NewMemoryBackend builds an empty backend.
 func NewMemoryBackend() *MemoryBackend {
-	return &MemoryBackend{queues: make(map[string][]messaging.InboundMessage)}
+	return &MemoryBackend{queues: make(map[string][]queuedEntry)}
 }
 
 // Publish appends msg to target's queue.
 func (m *MemoryBackend) Publish(target string, msg messaging.InboundMessage) (func(), error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.queues[target] = append(m.queues[target], msg)
+	m.next++
+	seq := m.next
+	m.queues[target] = append(m.queues[target], queuedEntry{seq: seq, msg: msg})
 	removed := false
 	return func() {
 		m.mu.Lock()
@@ -41,11 +51,12 @@ func (m *MemoryBackend) Publish(target string, msg messaging.InboundMessage) (fu
 		removed = true
 		queue := m.queues[target]
 		for i, queued := range queue {
-			if queued.MessageID == msg.MessageID {
-				m.queues[target] = append(queue[:i], queue[i+1:]...)
-				m.removed++
-				return
+			if queued.seq != seq {
+				continue
 			}
+			m.queues[target] = append(queue[:i], queue[i+1:]...)
+			m.removed++
+			return
 		}
 	}, nil
 }
@@ -61,7 +72,10 @@ func (m *MemoryBackend) Receive(sender string, limit int) ([]messaging.InboundMe
 	if limit > 0 && len(queue) > limit {
 		queue = queue[:limit]
 	}
-	out := append([]messaging.InboundMessage(nil), queue...)
+	out := make([]messaging.InboundMessage, 0, len(queue))
+	for _, queued := range queue {
+		out = append(out, queued.msg)
+	}
 	m.queues[sender] = m.queues[sender][len(queue):]
 	return out, nil
 }

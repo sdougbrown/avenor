@@ -17,11 +17,10 @@ func RunFailureMatrix(t *testing.T, newTransport TransportFactory) {
 
 	alice := messaging.Identity{RunID: "matrix-alice", Sender: "alice"}
 	bob := messaging.Identity{RunID: "matrix-bob", Sender: "bob"}
+	eve := messaging.Identity{RunID: "matrix-eve", Sender: "eve"}
 	base := newTransport(t, alice)
-	target := newTransport(t, bob)
 	t.Cleanup(func() {
 		_ = base.Close()
-		_ = target.Close()
 	})
 
 	pre, err := base.Preflight(t.Context())
@@ -161,8 +160,8 @@ func RunFailureMatrix(t *testing.T, newTransport TransportFactory) {
 		}); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
-		_, err := target.Reply(t.Context(), messaging.ReplyRequest{
-			From: messaging.Identity{RunID: "matrix-eve"}, ToRunID: alice.RunID, MessageID: msgID, Body: `{}`,
+		_, err := newTransport(t, eve).Reply(t.Context(), messaging.ReplyRequest{
+			From: eve, ToRunID: alice.RunID, MessageID: msgID, Body: `{}`,
 		})
 		if !errors.Is(err, messaging.ErrNotAskTarget) {
 			t.Fatalf("non-target reply error = %v", err)

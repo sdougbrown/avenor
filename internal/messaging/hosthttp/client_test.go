@@ -1,6 +1,7 @@
 package hosthttp_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,12 +9,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
-	"github.com/sdougbrown/avenor/internal/messaging/hostfixture"
 	"github.com/sdougbrown/avenor/internal/messaging/hosthttp"
+	"github.com/sdougbrown/avenor/internal/messaging/internal/hostfixture"
 	"github.com/sdougbrown/avenor/internal/messaging/messagetest"
 )
 
@@ -179,6 +182,32 @@ func TestHostClientAdmissionRejections(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate after a terminal fence", func(t *testing.T) {
+		fx := hostfixture.New(t)
+		tr := newTransport(t, fx, alice)
+		gen := fx.Store().Generation()
+		msgID := mintID(t, time.Minute)
+		if _, err := tr.Send(t.Context(), messaging.SendRequest{
+			From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{}`,
+		}); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if waited, err := tr.Wait(t.Context(), messaging.WaitRequest{
+			Sender: alice, MessageID: msgID, Generation: gen, Timeout: 20 * time.Millisecond,
+		}); err != nil || waited.Outcome != messaging.OutcomeTimedOut {
+			t.Fatalf("Wait = (%+v, %v), want a timeout", waited, err)
+		}
+
+		// The fence now records timed-out, which is not a send outcome; the
+		// refusal reports the documented duplicate-message-id outcome.
+		res, err := tr.Send(t.Context(), messaging.SendRequest{
+			From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{}`,
+		})
+		if !errors.Is(err, messaging.ErrDuplicateMessageID) || res.Outcome != messaging.OutcomeNotSent {
+			t.Fatalf("duplicate Send = (%+v, %v)", res, err)
+		}
+	})
+
 	t.Run("withdrawal without an edge", func(t *testing.T) {
 		fx := hostfixture.New(t)
 		tr := newTransport(t, fx, alice)
@@ -260,6 +289,26 @@ func TestHostClientMalformedResponses(t *testing.T) {
 		})
 	}
 
+	t.Run("oversized body", func(t *testing.T) {
+		srv := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+			// A valid envelope inside the read limit followed by padding: a
+			// silent truncation would report this send as admitted.
+			_, _ = w.Write([]byte(`{"outcome":"sent"}`))
+			_, _ = w.Write(bytes.Repeat([]byte(" "), 2<<20))
+		})
+		tr, err := hosthttp.New(plainDescriptor(srv.URL))
+		if err != nil {
+			t.Fatalf("hosthttp.New: %v", err)
+		}
+		t.Cleanup(func() { _ = tr.Close() })
+		res, err := tr.Send(t.Context(), messaging.SendRequest{
+			From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: "gen",
+		})
+		if !errors.Is(err, hosthttp.ErrMalformedResponse) || res.Outcome != messaging.OutcomePossiblyPending {
+			t.Fatalf("Send = (%+v, %v), want possibly-pending and ErrMalformedResponse", res, err)
+		}
+	})
+
 	t.Run("unparseable body reports the malformed class", func(t *testing.T) {
 		srv := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte("not-json"))
@@ -269,10 +318,11 @@ func TestHostClientMalformedResponses(t *testing.T) {
 			t.Fatalf("hosthttp.New: %v", err)
 		}
 		t.Cleanup(func() { _ = tr.Close() })
-		if _, err := tr.Send(t.Context(), messaging.SendRequest{
+		res, err := tr.Send(t.Context(), messaging.SendRequest{
 			From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: "gen",
-		}); !errors.Is(err, hosthttp.ErrMalformedResponse) {
-			t.Fatalf("Send error = %v, want ErrMalformedResponse", err)
+		})
+		if !errors.Is(err, hosthttp.ErrMalformedResponse) || res.Outcome != messaging.OutcomePossiblyPending {
+			t.Fatalf("Send = (%+v, %v), want possibly-pending and ErrMalformedResponse", res, err)
 		}
 	})
 }
@@ -336,6 +386,168 @@ func TestHostClientRejectsUnboundEndpoints(t *testing.T) {
 	}
 }
 
+// TestHostClientRefusesRedirects pins that a redirect is never followed, so the
+// capability headers cannot be replayed to another host.
+func TestHostClientRefusesRedirects(t *testing.T) {
+	var mu sync.Mutex
+	var reached int
+	target := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reached++
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"outcome":"sent"}`))
+	})
+	srv := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusFound)
+	})
+	tr, err := hosthttp.New(plainDescriptor(srv.URL))
+	if err != nil {
+		t.Fatalf("hosthttp.New: %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+
+	res, err := tr.Send(t.Context(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: "gen", Body: `{}`,
+	})
+	if !errors.Is(err, hosthttp.ErrRedirect) {
+		t.Fatalf("Send error = %v, want ErrRedirect", err)
+	}
+	if res.Outcome != messaging.OutcomePossiblyPending {
+		t.Fatalf("Send outcome = %q, want possibly-pending", res.Outcome)
+	}
+	mu.Lock()
+	served := reached
+	mu.Unlock()
+	if served != 0 {
+		t.Fatalf("redirect target served %d request(s)", served)
+	}
+}
+
+// TestHostFixtureRejectsForgedReply pins that a reply is only accepted from the
+// capability that names its sender.
+func TestHostFixtureRejectsForgedReply(t *testing.T) {
+	fx := hostfixture.New(t)
+	sender := newTransport(t, fx, alice)
+	target := newTransport(t, fx, bob)
+	eve := messaging.Identity{RunID: "host-eve", Sender: "eve"}
+	intruder := newTransport(t, fx, eve)
+	gen := fx.Store().Generation()
+	msgID := mintID(t, time.Minute)
+	if _, err := sender.Send(t.Context(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	forged, err := intruder.Reply(t.Context(), messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"forged"}`,
+	})
+	if !errors.Is(err, messaging.ErrAuthRejected) || forged.Outcome != messaging.OutcomeAuthRejected {
+		t.Fatalf("forged Reply = (%+v, %v)", forged, err)
+	}
+	if !fx.Store().Pending(alice.RunID, msgID) {
+		t.Fatal("forged reply completed the ask")
+	}
+
+	replied, err := target.Reply(t.Context(), messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("target Reply = (%+v, %v)", replied, err)
+	}
+}
+
+// TestHostFixtureWithdrawalRetractsQueuedDelivery pins that a withdrawal
+// removes the delivery an already-admitted ask queued for its target.
+func TestHostFixtureWithdrawalRetractsQueuedDelivery(t *testing.T) {
+	fx := hostfixture.New(t)
+	sender := newTransport(t, fx, alice)
+	target := newTransport(t, fx, bob)
+	gen := fx.Store().Generation()
+	msgID := mintID(t, time.Minute)
+	if _, err := sender.Send(t.Context(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if queued := fx.Queued(bob.RunID); queued != 1 {
+		t.Fatalf("queued = %d, want 1", queued)
+	}
+
+	withdrawn, err := sender.Withdraw(t.Context(), messaging.WithdrawRequest{
+		Sender: alice, MessageID: msgID, Generation: gen,
+	})
+	if err != nil || withdrawn.Outcome != messaging.OutcomeWithdrawn {
+		t.Fatalf("Withdraw = (%+v, %v)", withdrawn, err)
+	}
+	if queued := fx.Queued(bob.RunID); queued != 0 {
+		t.Fatalf("withdrawal left %d queued delivery(ies)", queued)
+	}
+	received, err := target.Receive(t.Context(), messaging.ReceiveRequest{
+		Sender: bob, Generation: gen, Limit: 8,
+	})
+	if err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	if len(received.Messages) != 0 {
+		t.Fatalf("withdrawn ask was delivered: %+v", received.Messages)
+	}
+}
+
+// TestHostClientPreflightGenerationMismatch pins the expected-epoch check.
+func TestHostClientPreflightGenerationMismatch(t *testing.T) {
+	fx := hostfixture.New(t)
+	desc := fx.Descriptor(alice)
+	desc.ExpectedEpoch = "stale-generation"
+	tr, err := hosthttp.New(desc)
+	if err != nil {
+		t.Fatalf("hosthttp.New: %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+
+	pre, err := tr.Preflight(t.Context())
+	if !errors.Is(err, messaging.ErrGenerationMismatch) {
+		t.Fatalf("Preflight error = %v, want ErrGenerationMismatch", err)
+	}
+	if pre.Generation != fx.Store().Generation() {
+		t.Fatalf("Preflight generation = %q, want the served one", pre.Generation)
+	}
+}
+
+// TestHostClientClosedOperations pins that a call made after Close is provably
+// never dispatched and is reported as not-sent, not as pending.
+func TestHostClientClosedOperations(t *testing.T) {
+	fx := hostfixture.New(t)
+	tr := newTransport(t, fx, alice)
+	gen := fx.Store().Generation()
+	msgID := mintID(t, time.Minute)
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	res, err := tr.Send(t.Context(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{}`,
+	})
+	if !errors.Is(err, messaging.ErrTransportClosed) || res.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("Send = (%+v, %v)", res, err)
+	}
+	waited, err := tr.Wait(t.Context(), messaging.WaitRequest{
+		Sender: alice, MessageID: msgID, Generation: gen, Timeout: time.Second,
+	})
+	if !errors.Is(err, messaging.ErrTransportClosed) || waited.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("Wait = (%+v, %v)", waited, err)
+	}
+	replied, err := tr.Reply(t.Context(), messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{}`,
+	})
+	if !errors.Is(err, messaging.ErrTransportClosed) || replied.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("Reply = (%+v, %v)", replied, err)
+	}
+	if active := fx.Store().ActiveCount(); active != 0 {
+		t.Fatalf("a closed transport admitted %d ask(s)", active)
+	}
+}
+
 func TestHostClientCloseUnblocksWait(t *testing.T) {
 	fx := hostfixture.New(t)
 	tr := newTransport(t, fx, alice)
@@ -392,29 +604,39 @@ func TestHostClientCloseUnblocksWait(t *testing.T) {
 	}
 }
 
-// TestHostWireFixture pins the declared v1 wire document against the endpoints
-// the fixture actually serves and the shared outcome vocabulary.
-func TestHostWireFixture(t *testing.T) {
+// wireDoc is the declared v1 wire document.
+type wireDoc struct {
+	Protocol  int `json:"protocol"`
+	Endpoints []struct {
+		Path     string         `json:"path"`
+		Request  map[string]any `json:"request"`
+		Response map[string]any `json:"response"`
+	} `json:"endpoints"`
+	Errors []struct {
+		Status  int               `json:"status"`
+		Error   string            `json:"error"`
+		Outcome messaging.Outcome `json:"outcome"`
+	} `json:"errors"`
+}
+
+func readWireDoc(t *testing.T) wireDoc {
+	t.Helper()
 	raw, err := os.ReadFile("../testdata/host_wire.json")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	var doc struct {
-		Protocol  int `json:"protocol"`
-		Endpoints []struct {
-			Path     string         `json:"path"`
-			Request  map[string]any `json:"request"`
-			Response map[string]any `json:"response"`
-		} `json:"endpoints"`
-		Errors []struct {
-			Status  int               `json:"status"`
-			Error   string            `json:"error"`
-			Outcome messaging.Outcome `json:"outcome"`
-		} `json:"errors"`
-	}
+	var doc wireDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
+	return doc
+}
+
+// TestHostWireFixture pins the declared v1 wire document against the endpoints
+// the fixture serves, the shared outcome vocabulary, and the error table
+// internal/messaging owns.
+func TestHostWireFixture(t *testing.T) {
+	doc := readWireDoc(t)
 	if doc.Protocol != messaging.ProtocolVersion {
 		t.Fatalf("fixture protocol = %d, want %d", doc.Protocol, messaging.ProtocolVersion)
 	}
@@ -438,11 +660,181 @@ func TestHostWireFixture(t *testing.T) {
 		t.Fatalf("declared endpoints %v, served %v", declared, served)
 	}
 
-	for _, entry := range doc.Errors {
-		if entry.Error == "" || !validOutcome(t, string(entry.Outcome)) {
-			t.Fatalf("error entry = %+v", entry)
+	classes := messaging.WireErrors()
+	if len(doc.Errors) != len(classes) {
+		t.Fatalf("wire document declares %d error row(s), the contract has %d", len(doc.Errors), len(classes))
+	}
+	for i, class := range classes {
+		entry := doc.Errors[i]
+		if entry.Error != class.Code || entry.Status != class.Status || entry.Outcome != class.Outcome {
+			t.Fatalf("error row %d = %+v, want %s/%d/%s", i, entry, class.Code, class.Status, class.Outcome)
 		}
 	}
+}
+
+// TestHostWireErrorReplay drives the whole error table. A code the fixture
+// produces is replayed through it, and the served status and outcome must match
+// the contract; a code it cannot produce is replayed through the client against
+// a server that reports that row.
+func TestHostWireErrorReplay(t *testing.T) {
+	aliceDesc := func(fx *hostfixture.Fixture) messaging.EndpointDescriptor { return fx.Descriptor(alice) }
+	triggers := map[string]func(t *testing.T, fx *hostfixture.Fixture) (int, messaging.Outcome){
+		"auth-rejected": func(t *testing.T, fx *hostfixture.Fixture) (int, messaging.Outcome) {
+			t.Helper()
+			desc := aliceDesc(fx)
+			desc.CapabilitySecret = "wrong-secret"
+			return fixturePost(t, fx, "/v1/send", desc, sendBody(t, fx.Store().Generation(), mintID(t, time.Minute), alice, bob.RunID))
+		},
+		"invalid-request": func(t *testing.T, fx *hostfixture.Fixture) (int, messaging.Outcome) {
+			t.Helper()
+			return fixturePost(t, fx, "/v1/send", aliceDesc(fx), "not-json")
+		},
+		"generation-mismatch": func(t *testing.T, fx *hostfixture.Fixture) (int, messaging.Outcome) {
+			t.Helper()
+			return fixturePost(t, fx, "/v1/send", aliceDesc(fx), sendBody(t, "stale-generation", mintID(t, time.Minute), alice, bob.RunID))
+		},
+		"malformed-message-id": func(t *testing.T, fx *hostfixture.Fixture) (int, messaging.Outcome) {
+			t.Helper()
+			return fixturePost(t, fx, "/v1/send", aliceDesc(fx), sendBody(t, fx.Store().Generation(), "not-a-versioned-id", alice, bob.RunID))
+		},
+		"duplicate-message-id": func(t *testing.T, fx *hostfixture.Fixture) (int, messaging.Outcome) {
+			t.Helper()
+			desc := aliceDesc(fx)
+			gen := fx.Store().Generation()
+			msgID := mintID(t, time.Minute)
+			body := sendBody(t, gen, msgID, alice, bob.RunID)
+			if status, _ := fixturePost(t, fx, "/v1/send", desc, body); status != http.StatusOK {
+				t.Fatalf("first send status = %d, want %d", status, http.StatusOK)
+			}
+			// Let the wait expire, so the duplicate meets a terminal fence whose
+			// own outcome is not a send outcome.
+			if status, outcome := fixturePost(t, fx, "/v1/wait", desc, waitBody(t, gen, msgID, alice)); status != http.StatusOK || outcome != messaging.OutcomeTimedOut {
+				t.Fatalf("wait = (%d, %q), want (%d, %q)", status, outcome, http.StatusOK, messaging.OutcomeTimedOut)
+			}
+			return fixturePost(t, fx, "/v1/send", desc, body)
+		},
+		"mutual-ask": func(t *testing.T, fx *hostfixture.Fixture) (int, messaging.Outcome) {
+			t.Helper()
+			gen := fx.Store().Generation()
+			if status, _ := fixturePost(t, fx, "/v1/send", aliceDesc(fx), sendBody(t, gen, mintID(t, time.Minute), alice, bob.RunID)); status != http.StatusOK {
+				t.Fatalf("first send status = %d, want %d", status, http.StatusOK)
+			}
+			return fixturePost(t, fx, "/v1/send", fx.Descriptor(bob), sendBody(t, gen, mintID(t, time.Minute), bob, alice.RunID))
+		},
+		"not-ask-target": func(t *testing.T, fx *hostfixture.Fixture) (int, messaging.Outcome) {
+			t.Helper()
+			eve := messaging.Identity{RunID: "wire-eve", Sender: "eve"}
+			msgID := mintID(t, time.Minute)
+			if status, _ := fixturePost(t, fx, "/v1/send", aliceDesc(fx), sendBody(t, fx.Store().Generation(), msgID, alice, bob.RunID)); status != http.StatusOK {
+				t.Fatalf("send status = %d, want %d", status, http.StatusOK)
+			}
+			return fixturePost(t, fx, "/v1/reply", fx.Descriptor(eve), replyBody(t, msgID, eve, alice.RunID))
+		},
+	}
+
+	for _, class := range messaging.WireErrors() {
+		t.Run(class.Code, func(t *testing.T) {
+			if trigger, ok := triggers[class.Code]; ok {
+				status, outcome := trigger(t, hostfixture.New(t))
+				if status != class.Status {
+					t.Fatalf("served status = %d, want %d", status, class.Status)
+				}
+				if outcome != class.Outcome {
+					t.Fatalf("served outcome = %q, want %q", outcome, class.Outcome)
+				}
+				return
+			}
+
+			srv := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(class.Status)
+				_, _ = w.Write([]byte(`{"error":"` + class.Code + `","outcome":"` + string(class.Outcome) + `"}`))
+			})
+			tr, err := hosthttp.New(plainDescriptor(srv.URL))
+			if err != nil {
+				t.Fatalf("hosthttp.New: %v", err)
+			}
+			t.Cleanup(func() { _ = tr.Close() })
+			res, err := tr.Send(t.Context(), messaging.SendRequest{
+				From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: "gen", Body: `{}`,
+			})
+			if !errors.Is(err, class.Err) {
+				t.Fatalf("Send error = %v, want %v", err, class.Err)
+			}
+			if !messaging.IsSendOutcome(res.Outcome) {
+				t.Fatalf("Send outcome = %q, outside the send vocabulary", res.Outcome)
+			}
+			if messaging.IsSendOutcome(class.Outcome) && res.Outcome != class.Outcome {
+				t.Fatalf("Send outcome = %q, want %q", res.Outcome, class.Outcome)
+			}
+		})
+	}
+}
+
+func sendBody(t *testing.T, epoch, msgID string, from messaging.Identity, toRunID string) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"epoch":       epoch,
+		"message_id":  msgID,
+		"from_run_id": from.RunID,
+		"from_sender": from.Sender,
+		"to_run_id":   toRunID,
+		"body":        `{"message":"ping"}`,
+	})
+	if err != nil {
+		t.Fatalf("marshal send body: %v", err)
+	}
+	return string(raw)
+}
+
+func waitBody(t *testing.T, epoch, msgID string, sender messaging.Identity) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"epoch":         epoch,
+		"sender_run_id": sender.RunID,
+		"message_id":    msgID,
+		"timeout_ms":    20,
+	})
+	if err != nil {
+		t.Fatalf("marshal wait body: %v", err)
+	}
+	return string(raw)
+}
+
+func replyBody(t *testing.T, msgID string, from messaging.Identity, toRunID string) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"from_run_id": from.RunID,
+		"to_run_id":   toRunID,
+		"message_id":  msgID,
+		"body":        `{"message":"pong"}`,
+	})
+	if err != nil {
+		t.Fatalf("marshal reply body: %v", err)
+	}
+	return string(raw)
+}
+
+func fixturePost(t *testing.T, fx *hostfixture.Fixture, path string, desc messaging.EndpointDescriptor, body string) (int, messaging.Outcome) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, fx.URL()+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(messaging.HeaderCapability, desc.CapabilityID)
+	req.Header.Set(messaging.HeaderSecret, desc.CapabilitySecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	var env struct {
+		Outcome messaging.Outcome `json:"outcome"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("decode %s response: %v", path, err)
+	}
+	return resp.StatusCode, env.Outcome
 }
 
 func validOutcome(t *testing.T, raw any) bool {

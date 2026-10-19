@@ -22,9 +22,6 @@ import (
 )
 
 const (
-	headerCapability = "X-Avenor-Capability"
-	headerSecret     = "X-Avenor-Secret"
-
 	// defaultRequestTimeout bounds one request when the descriptor sets none.
 	defaultRequestTimeout = 30 * time.Second
 
@@ -47,6 +44,10 @@ const (
 // An ask that may already have been transmitted is classified
 // possibly-pending, never not-sent.
 var ErrMalformedResponse = errors.New("hosthttp: malformed response")
+
+// ErrRedirect reports a response that would redirect the request. The client
+// never follows one, so the capability headers cannot reach another host.
+var ErrRedirect = errors.New("hosthttp: redirect refused")
 
 // Transport is the v1 host messaging transport.
 type Transport struct {
@@ -83,10 +84,17 @@ func New(desc messaging.EndpointDescriptor) (messaging.Transport, error) {
 	return &Transport{
 		desc:    desc,
 		baseURL: strings.TrimSuffix(desc.BaseURL, "/"),
-		client:  &http.Client{Transport: &http.Transport{}},
-		ctx:     ctx,
-		cancel:  cancel,
+		client: &http.Client{
+			Transport:     &http.Transport{},
+			CheckRedirect: refuseRedirect,
+		},
+		ctx:    ctx,
+		cancel: cancel,
 	}, nil
+}
+
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("%w: %s", ErrRedirect, req.URL.Redacted())
 }
 
 func loopback(host string) bool {
@@ -119,10 +127,20 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 	if body.Outcome == "" {
 		return fail(messaging.OutcomePossiblyPending, fmt.Errorf("%w: send response carries no outcome", ErrMalformedResponse))
 	}
+	if body.Error != "" {
+		outcome := body.Outcome
+		if !messaging.IsSendOutcome(outcome) {
+			if messaging.WireErrorFor(body.Error) == nil {
+				return fail(messaging.OutcomePossiblyPending, fmt.Errorf("%w: send response carries unknown error %q", ErrMalformedResponse, body.Error))
+			}
+			outcome = messaging.SendOutcomeFor(body.Error)
+		}
+		return fail(outcome, body.err())
+	}
 	// A send that loses the admission race to a withdrawal reports the
 	// fence's outcome instead of admitting the ask.
 	if body.Outcome != messaging.OutcomeSent && body.Outcome != messaging.OutcomeWithdrawn {
-		return fail(body.Outcome, body.err())
+		return fail(messaging.OutcomePossiblyPending, fmt.Errorf("%w: send response carries outcome %q", ErrMalformedResponse, body.Outcome))
 	}
 	messageID := body.MessageID
 	if messageID == "" {
@@ -142,12 +160,11 @@ func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messag
 	body, err := t.call(ctx, pathWait, timeout+messaging.CleanupDeadline, map[string]any{
 		"epoch":         req.Generation,
 		"sender_run_id": req.Sender.RunID,
-		"sender":        req.Sender.Sender,
 		"message_id":    req.MessageID,
 		"timeout_ms":    timeout.Milliseconds(),
 	})
 	if err != nil {
-		if t.isClosed() {
+		if t.isClosed() && transportCancelled(err) {
 			return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
 		}
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, err
@@ -338,17 +355,20 @@ func (t *Transport) call(ctx context.Context, path string, timeout time.Duration
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set(headerCapability, t.desc.CapabilityID)
-	req.Header.Set(headerSecret, t.desc.CapabilitySecret)
+	req.Header.Set(messaging.HeaderCapability, t.desc.CapabilityID)
+	req.Header.Set(messaging.HeaderSecret, t.desc.CapabilitySecret)
 
 	resp, err := t.client.Do(req)
 	if err != nil {
 		return body, err
 	}
 	defer resp.Body.Close()
-	raw, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	raw, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return body, err
+	}
+	if len(raw) > maxResponseBytes {
+		return body, fmt.Errorf("%w: response body exceeds %d bytes", ErrMalformedResponse, maxResponseBytes)
 	}
 	if len(raw) == 0 {
 		return body, fmt.Errorf("%w: empty response body", ErrMalformedResponse)
@@ -357,6 +377,12 @@ func (t *Transport) call(ctx context.Context, path string, timeout time.Duration
 		return body, fmt.Errorf("%w: %v", ErrMalformedResponse, err)
 	}
 	return body, nil
+}
+
+// transportCancelled reports whether err is the cancellation Close applies to
+// in-flight requests rather than a fault the caller or the peer produced.
+func transportCancelled(err error) bool {
+	return errors.Is(err, messaging.ErrTransportClosed) || errors.Is(err, context.Canceled)
 }
 
 // child returns a request context cancelled by ctx, the request timeout or
@@ -445,28 +471,10 @@ func (e envelope) err() error {
 	if e.Error == "" {
 		return nil
 	}
-	if typed, ok := wireErrors[e.Error]; ok {
+	if typed := messaging.WireErrorFor(e.Error); typed != nil {
 		return typed
 	}
 	return fmt.Errorf("hosthttp: peer reported %q: %s", e.Error, e.Message)
-}
-
-var wireErrors = map[string]error{
-	"auth-rejected":         messaging.ErrAuthRejected,
-	"invalid-request":       messaging.ErrInvalidRequest,
-	"generation-mismatch":   messaging.ErrGenerationMismatch,
-	"unsupported-protocol":  messaging.ErrUnsupportedProtocol,
-	"malformed-message-id":  messaging.ErrMalformedMessageID,
-	"message-id-expired":    messaging.ErrMessageIDExpired,
-	"message-id-horizon":    messaging.ErrMessageIDHorizon,
-	"duplicate-message-id":  messaging.ErrDuplicateMessageID,
-	"mutual-ask":            messaging.ErrMutualAsk,
-	"fence-capacity":        messaging.ErrFenceCapacity,
-	"not-ask-sender":        messaging.ErrNotAskSender,
-	"not-ask-target":        messaging.ErrNotAskTarget,
-	"target-unavailable":    messaging.ErrTargetUnavailable,
-	"transport-closed":      messaging.ErrTransportClosed,
-	"unsupported-operation": messaging.ErrUnsupportedOperation,
 }
 
 var _ messaging.Transport = (*Transport)(nil)
