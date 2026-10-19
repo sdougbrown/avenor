@@ -123,6 +123,41 @@ func TestOwnerAttachRequiresRecord(t *testing.T) {
 	}
 }
 
+// TestOwnerAttachRevalidatesAfterDial proves a socket rebuilt inside the dial
+// window is refused before the predecessor's secret is presented.
+func TestOwnerAttachRevalidatesAfterDial(t *testing.T) {
+	path, _ := testOwnerSocket(t)
+	origHook := beforeOwnerAttachDial
+	t.Cleanup(func() { beforeOwnerAttachDial = origHook })
+
+	var rebuilt net.Listener
+	beforeOwnerAttachDial = func() {
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("unlink owner socket: %v", err)
+		}
+		ln, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatalf("rebind socket: %v", err)
+		}
+		rebuilt = ln
+	}
+
+	if _, err := AttachOwner(path); !errors.Is(err, control.ErrStaleOwnerRecord) {
+		t.Fatalf("attach after a mid-dial socket rebuild = %v, want stale-owner-record", err)
+	}
+	_ = rebuilt.(*net.UnixListener).SetDeadline(time.Now().Add(2 * time.Second))
+	conn, err := rebuilt.Accept()
+	if err != nil {
+		t.Fatalf("rebuilt socket accept: %v", err)
+	}
+	defer conn.Close()
+	buf := make([]byte, 128)
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if n, _ := conn.Read(buf); n != 0 {
+		t.Fatalf("attach sent %d credential bytes after the socket was rebuilt: %q", n, buf[:n])
+	}
+}
+
 // TestAuthenticateOwnerBindsThePeer proves the bare handshake refuses a foreign
 // peer too, so no exported path can write credentials to one.
 func TestAuthenticateOwnerBindsThePeer(t *testing.T) {

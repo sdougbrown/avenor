@@ -232,6 +232,13 @@ func AttachOwner(socketPath string) (*Client, error) {
 		_ = conn.Close()
 		return nil, &ForeignPeerError{SocketPath: socketPath, PeerUID: uid, EUID: euid}
 	}
+	// The path can be rebound between the pre-dial check and the dial, so the
+	// connected socket must still be the record's before any credential is
+	// presented.
+	if err := requireRecordSocket(socketPath, record); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	c := newClient(conn)
 	if err := c.authenticateOwnerUntil(control.OwnerCapability{ID: record.CapabilityID, Secret: record.Secret}, deadline); err != nil {
 		_ = c.Close()
