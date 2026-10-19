@@ -520,6 +520,28 @@ func TestOwnerRecordSwapUnderReaderRejected(t *testing.T) {
 	_ = published
 }
 
+// TestStopRemovesRecordWithoutLock proves the identity-guarded record is still
+// removed when the control lock cannot be taken.
+func TestStopRemovesRecordWithoutLock(t *testing.T) {
+	path := testSocketPath(t)
+	s, _ := publishTestServer(t, path)
+	lockPath := path + ".control.lock"
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatalf("remove lock: %v", err)
+	}
+	if err := os.Symlink("/nonexistent-lock-target", lockPath); err != nil {
+		t.Fatalf("symlink lock: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(lockPath) })
+
+	if err := s.Stop(); err == nil {
+		t.Fatal("Stop reported no lock failure")
+	}
+	if _, err := os.Lstat(ownerRecordPath(path)); err == nil {
+		t.Fatal("owner record survived Stop after a lock failure")
+	}
+}
+
 // TestStaleOwnerSocketTakenOverUnderLock proves Start is the only unlinker and
 // that it replaces a dead owner's record with its own.
 func TestStaleOwnerSocketTakenOverUnderLock(t *testing.T) {
