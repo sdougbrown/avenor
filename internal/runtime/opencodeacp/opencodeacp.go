@@ -54,7 +54,7 @@ func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerAddr st
 				"avenor-channel-tools": map[string]any{
 					"type":    "local",
 					"enabled": true,
-					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", fmt.Sprintf("http://%s", brokerAddr)},
+					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--sender", opts.Label, "--token", brokerToken, "--broker-url", fmt.Sprintf("http://%s", brokerAddr)},
 				},
 			},
 			"tools": map[string]any{

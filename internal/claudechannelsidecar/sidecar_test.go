@@ -1,15 +1,20 @@
 package claudechannelsidecar
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 func TestRunHandlesInitializeToolsAndReport(t *testing.T) {
@@ -586,5 +591,131 @@ func TestAvenorSendMissingArgs(t *testing.T) {
 	}
 	if responses[1]["error"] == nil {
 		t.Fatalf("expected JSON-RPC error for missing args, got %#v", responses[1])
+	}
+}
+
+// TestSidecarStandaloneLocalAsk drives avenor_ask end to end against a real
+// local broker: the sidecar sends a versioned ask under its own sender name,
+// the target answers over the broker, and the sidecar renders the reply.
+func TestSidecarStandaloneLocalAsk(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	defer func() { _ = b.Stop() }()
+
+	childToken, err := b.CreateRun("child_run", "claude-child")
+	if err != nil {
+		t.Fatalf("CreateRun child: %v", err)
+	}
+	parentToken, err := b.CreateRun("parent_run", "parent")
+	if err != nil {
+		t.Fatalf("CreateRun parent: %v", err)
+	}
+
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(context.Background(), Options{
+			RunID:     "child_run",
+			Sender:    "claude-child",
+			Token:     childToken,
+			BrokerURL: "http://" + b.Addr(),
+			Stdin:     stdinR,
+			Stdout:    stdoutW,
+			Stderr:    io.Discard,
+		})
+	}()
+
+	if _, err := fmt.Fprintln(stdinW, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"avenor_ask","arguments":{"to_run_id":"parent_run","message":"status?"}}}`); err != nil {
+		t.Fatalf("write ask: %v", err)
+	}
+
+	ask := waitForSidecarAsk(t, b, "parent_run")
+	if _, err := messaging.ParseMsgID(ask.ID, time.Now()); err != nil {
+		t.Fatalf("ask message id %q is not a versioned id: %v", ask.ID, err)
+	}
+	if ask.FromRunID != "child_run" || ask.Sender != "claude-child" {
+		t.Fatalf("ask identity = %q/%q, want child_run/claude-child", ask.FromRunID, ask.Sender)
+	}
+
+	replyBody, err := json.Marshal(map[string]any{
+		"run_id":      "parent_run",
+		"token":       parentToken,
+		"from_run_id": "parent_run",
+		"to_run_id":   "child_run",
+		"type":        "agent_message",
+		"reply_to":    ask.ID,
+		"payload":     map[string]any{"message": "all good"},
+	})
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
+	}
+	resp, err := http.Post("http://"+b.Addr()+"/send", "application/json", bytes.NewReader(replyBody))
+	if err != nil {
+		t.Fatalf("post reply: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("reply status = %d, want 200", resp.StatusCode)
+	}
+
+	responses := decodeRPCResponses(t, readSidecarResponse(t, stdoutR))
+	text := responses[0]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if text != "Reply from parent_run:\nall good" {
+		t.Fatalf("avenor_ask result text = %q", text)
+	}
+
+	_ = stdinW.Close()
+	_ = stdoutW.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after stdin closed")
+	}
+}
+
+func waitForSidecarAsk(t *testing.T, b *broker.Broker, runID string) broker.ControlMessage {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if st := b.GetRun(runID); st != nil {
+			st.Mu.Lock()
+			for _, msg := range st.ControlQueue {
+				if msg.Type == "agent_message" {
+					queued := *msg
+					st.Mu.Unlock()
+					return queued
+				}
+			}
+			st.Mu.Unlock()
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("no agent message reached %s", runID)
+	return broker.ControlMessage{}
+}
+
+func readSidecarResponse(t *testing.T, stdout io.Reader) []byte {
+	t.Helper()
+	lines := make(chan []byte, 1)
+	go func() {
+		line, err := bufio.NewReader(stdout).ReadBytes('\n')
+		if err == nil {
+			lines <- line
+		}
+		close(lines)
+	}()
+	select {
+	case line := <-lines:
+		return line
+	case <-time.After(5 * time.Second):
+		t.Fatal("no JSON-RPC response")
+		return nil
 	}
 }

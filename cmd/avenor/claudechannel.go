@@ -12,6 +12,7 @@ import (
 func runClaudeChannel(args []string) int {
 	fs := flag.NewFlagSet("claude-channel", flag.ContinueOnError)
 	runID := fs.String("run-id", "", "Avenor run ID")
+	sender := fs.String("sender", "", "registered display name for the run (defaults to the run ID)")
 	token := fs.String("token", "", "sidecar bearer token")
 	brokerURL := fs.String("broker-url", "", "broker HTTP base URL")
 
@@ -25,6 +26,7 @@ func runClaudeChannel(args []string) int {
 
 	if err := claudechannelsidecar.Run(context.Background(), claudechannelsidecar.Options{
 		RunID:     *runID,
+		Sender:    *sender,
 		Token:     *token,
 		BrokerURL: *brokerURL,
 	}); err != nil {

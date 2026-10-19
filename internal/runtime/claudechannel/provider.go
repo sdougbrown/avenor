@@ -150,6 +150,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 				"args": []string{
 					"claude-channel",
 					"--run-id", runID,
+					"--sender", merged.Label,
 					"--token", sidecarTok,
 					"--broker-url", brokerURL,
 				},
