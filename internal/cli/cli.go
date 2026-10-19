@@ -635,6 +635,19 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 	}
 
+	// The pid file is published for every run mode once the shared setup that
+	// can fail has passed and the signal trap is installed, so a rejected
+	// invocation never touches a pid file another run owns. A workflow run
+	// publishes its pid before loading its config and removes it on exit, so a
+	// rejected config also leaves no pid file behind.
+	if *pidFile != "" {
+		if err := writePIDFile(*pidFile); err != nil {
+			fmt.Fprintf(stderr, "avenor: pid-file: %v\n", err)
+			return exitWithSentinel(1)
+		}
+		defer removePIDFile(*pidFile, os.Getpid())
+	}
+
 	if *loopFile != "" {
 		fallbackRosterPath := *rosterFile
 		if fallbackRosterPath != "" && !filepath.IsAbs(fallbackRosterPath) {
@@ -887,16 +900,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 
 		return result.ExitCode
-	}
-
-	// The pid file is published once every setup step that can fail has passed,
-	// so a rejected invocation never touches a pid file another run owns.
-	if *pidFile != "" {
-		if err := writePIDFile(*pidFile); err != nil {
-			fmt.Fprintf(stderr, "avenor: pid-file: %v\n", err)
-			return exitWithSentinel(1)
-		}
-		defer removePIDFile(*pidFile, os.Getpid())
 	}
 
 	resumeID := *resume

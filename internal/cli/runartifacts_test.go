@@ -309,6 +309,36 @@ func TestRunCancelledBySignal(t *testing.T) {
 	}
 }
 
+// TestRunWorkflowPublishesPID pins --pid-file for a workflow run: the file
+// holds this run's pid while the workflow is live and is gone after it exits.
+func TestRunWorkflowPublishesPID(t *testing.T) {
+	provider := newScriptedProvider()
+	stubProvider(t, provider)
+
+	dir := t.TempDir()
+	loopPath := filepath.Join(dir, "loop.json")
+	writeTestFile(t, loopPath, `{"pre":[{"name":"work","prompt":"work"}]}`)
+	pidPath := filepath.Join(dir, "run.pid")
+
+	published := 0
+	atomicWriteHook = func(path string) {
+		if path == pidPath {
+			published++
+			requireFile(t, pidPath, strconv.Itoa(os.Getpid())+"\n")
+		}
+	}
+	t.Cleanup(func() { atomicWriteHook = nil })
+
+	code, stderr := runForTest(t, "--backend", "gemini-acp", "--dir", dir, "--loop-file", loopPath, "--pid-file", pidPath)
+	if code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr)
+	}
+	if published != 1 {
+		t.Fatalf("pid file published %d times, want 1", published)
+	}
+	requireFile(t, pidPath, "")
+}
+
 // TestValidateArtifactPaths covers spellings the CLI cannot compare as strings:
 // a relative path against an absolute one, links to one file, and --on-event
 // sharing a path with another artifact.
