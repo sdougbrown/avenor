@@ -2,9 +2,7 @@ package workflowcontroller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -430,48 +428,13 @@ func TestRunnerStopsOnLogHole(t *testing.T) {
 	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
 	waitUntil(t, "runner leading", func() bool { return r.Status().Leading })
 
-	// Hole the log under the runner's lease: keep the final event and rewind
-	// the snapshot below it, so replay cannot account for the events between.
-	func() {
-		unlock, err := store.lockController("c1")
-		if err != nil {
-			t.Fatalf("lock c1: %v", err)
-		}
-		defer unlock()
-		events := readEvents(t, store.eventsPath("c1"))
-		last, err := json.Marshal(events[len(events)-1])
-		if err != nil {
-			t.Fatalf("marshal last event: %v", err)
-		}
-		if err := os.WriteFile(store.eventsPath("c1"), append(last, '\n'), 0o644); err != nil {
-			t.Fatalf("write holed log: %v", err)
-		}
-		data, err := os.ReadFile(store.snapshotPath("c1"))
-		if err != nil {
-			t.Fatalf("read snapshot: %v", err)
-		}
-		var snap ControllerRecord
-		if err := json.Unmarshal(data, &snap); err != nil {
-			t.Fatalf("unmarshal snapshot: %v", err)
-		}
-		snap.Revision = 0
-		out, err := json.Marshal(snap)
-		if err != nil {
-			t.Fatalf("marshal rewound snapshot: %v", err)
-		}
-		if err := os.WriteFile(store.snapshotPath("c1"), out, 0o644); err != nil {
-			t.Fatalf("write rewound snapshot: %v", err)
-		}
-	}()
+	holeControllerLog(t, store, "c1")
 
-	waitUntil(t, "runner stopped on the hole", func() bool {
-		select {
-		case <-r.Done():
-			return true
-		default:
-			return false
-		}
-	})
+	select {
+	case <-r.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not stop on a log hole")
+	}
 	if got := r.Status().LastOutcome; got != outcomeLogHole {
 		t.Fatalf("runner outcome after a log hole: got %q, want %q", got, outcomeLogHole)
 	}

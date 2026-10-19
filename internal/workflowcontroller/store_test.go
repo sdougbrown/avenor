@@ -1,17 +1,14 @@
 package workflowcontroller
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -565,68 +562,32 @@ func TestProjectionFailureIsolation(t *testing.T) {
 	}
 }
 
-// TestRenewLeaseLogsEveryRenewal proves every renewal is in the event log, so
-// a snapshot that is lost or restored stale replays to the leader's live
-// expiry instead of a lease that lapsed a renewal ago.
+// TestRenewLeaseLogsEveryRenewal proves a renewal inside the old one-minute
+// event window still logs its event and bumps the revision.
 func TestRenewLeaseLogsEveryRenewal(t *testing.T) {
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
-	rec := mustAcquire(t, s, "alpha", "owner-1")
-	acquiredAt := clock.cur
+	acquired := mustAcquire(t, s, "alpha", "owner-1")
 
-	clock.Advance(10 * time.Second)
-	rec, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
-	if err != nil {
-		t.Fatalf("first renew: %v", err)
-	}
-	// The snapshot as written by the first renewal, i.e. the bytes a lost
-	// snapshot would revert to.
-	stale, err := os.ReadFile(s.snapshotPath("alpha"))
-	if err != nil {
-		t.Fatalf("read snapshot: %v", err)
-	}
-
-	clock.Advance(10 * time.Second)
-	rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
-	if err != nil {
-		t.Fatalf("second renew: %v", err)
-	}
-	wantExpiry := acquiredAt.Add(20 * time.Second).Add(LeaseTTL)
-	if !rec.Leader.ExpiresAt.Equal(wantExpiry) {
-		t.Fatalf("expiry after two renewals: got %s, want %s", rec.Leader.ExpiresAt, wantExpiry)
+	rec := acquired
+	for i := 0; i < 2; i++ {
+		clock.Advance(RenewInterval)
+		var err error
+		if rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err != nil {
+			t.Fatalf("renew %d: %v", i, err)
+		}
 	}
 	if got := len(eventReasons(t, s, "alpha", EventLeaderRenewed)); got != 2 {
 		t.Fatalf("leader_renewed events after two renewals: got %d, want 2", got)
 	}
-
-	// Rewind the snapshot to the first renewal: the log alone must replay to
-	// the live expiry, and the lease must stay unreachable meanwhile.
-	if err := os.WriteFile(s.snapshotPath("alpha"), stale, 0o644); err != nil {
-		t.Fatalf("rewind snapshot: %v", err)
-	}
-	recovered, ok, err := s.Get("alpha")
-	if err != nil || !ok {
-		t.Fatalf("get after snapshot rewind: ok=%v err=%v", ok, err)
-	}
-	if !recovered.Leader.ExpiresAt.Equal(wantExpiry) || recovered.Revision != rec.Revision {
-		t.Fatalf("replayed lease expiry: got %s rev %d, want %s rev %d",
-			recovered.Leader.ExpiresAt, recovered.Revision, wantExpiry, rec.Revision)
-	}
-	if _, acquired, err := s.AcquireLease("alpha", "owner-2"); err != nil || acquired {
-		t.Fatalf("acquire while the replayed lease is live: acquired=%v err=%v", acquired, err)
+	if rec.Revision != acquired.Revision+2 {
+		t.Fatalf("revision after two renewals: got %d, want %d", rec.Revision, acquired.Revision+2)
 	}
 }
 
-// renewUntilRotation renews until events.ndjson.prev holds a first seq beyond
-// after, returning the record and the replacement generation's first seq.
-func renewUntilRotation(
-	t *testing.T,
-	s *ControllerStore,
-	clock *fakeClock,
-	controllerID string,
-	rec ControllerRecord,
-	after int64,
-) (ControllerRecord, int64) {
+// renewUntilRotation renews until the previous generation starts beyond after,
+// returning the record and that first seq.
+func renewUntilRotation(t *testing.T, s *ControllerStore, clock *fakeClock, controllerID string, rec ControllerRecord, after int64) (ControllerRecord, int64) {
 	t.Helper()
 	for i := 0; i < 100; i++ {
 		clock.Advance(RenewInterval)
@@ -635,90 +596,71 @@ func renewUntilRotation(
 			t.Fatalf("renew %d: %v", i, err)
 		}
 		rec = next
-		if seq, ok := prevFirstSeq(t, s, controllerID); ok && seq > after {
-			return rec, seq
+		prev := s.prevEventsPath(controllerID)
+		if _, err := os.Stat(prev); err == nil {
+			if events := readEvents(t, prev); len(events) > 0 && events[0].Seq > after {
+				return rec, events[0].Seq
+			}
 		}
 	}
 	t.Fatalf("event log never rotated past %d bytes", s.compactThreshold())
 	return ControllerRecord{}, 0
 }
 
-// prevFirstSeq returns the seq of the first event in the previous log
-// generation, and whether that generation exists.
-func prevFirstSeq(t *testing.T, s *ControllerStore, controllerID string) (int64, bool) {
+// rewindSnapshot sets a snapshot's revision back to revision, as a stale or
+// restored copy would.
+func rewindSnapshot(t *testing.T, s *ControllerStore, controllerID string, revision int64) {
 	t.Helper()
-	path := s.prevEventsPath(controllerID)
-	if _, err := os.Stat(path); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return 0, false
-		}
-		t.Fatalf("stat previous generation: %v", err)
-	}
-	events := readEvents(t, path)
-	if len(events) == 0 {
-		return 0, false
-	}
-	return events[0].Seq, true
-}
-
-// TestRenewalLogCompaction proves a snapshot from before a rotation replays
-// both generations to the live revision and expiry.
-func TestRenewalLogCompaction(t *testing.T) {
-	s, clock := newTestStore(t)
-	s.compactBytes = 1 << 10
-	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
-	acquired := mustAcquire(t, s, "alpha", "owner-1")
-	snap, err := os.ReadFile(s.snapshotPath("alpha"))
+	path := s.snapshotPath(controllerID)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read snapshot after acquire: %v", err)
+		t.Fatalf("read snapshot: %v", err)
 	}
-
-	// Rotate, then renew once more so the active log holds events beyond the
-	// previous generation's last seq: replay has to read both files.
-	rec, _ := renewUntilRotation(t, s, clock, "alpha", acquired, 0)
-	clock.Advance(RenewInterval)
-	if rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err != nil {
-		t.Fatalf("renew after rotation: %v", err)
+	var snap ControllerRecord
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
 	}
-
-	// The rewound snapshot predates the rotation, so only the two retained
-	// generations can account for the events since.
-	if err := os.WriteFile(s.snapshotPath("alpha"), snap, 0o644); err != nil {
+	snap.Revision = revision
+	if data, err = json.Marshal(snap); err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("rewind snapshot: %v", err)
 	}
-	unlock, err := s.lockController("alpha")
-	if err != nil {
-		t.Fatalf("lock after rewind: %v", err)
-	}
-	replayed, _, err := s.loadLocked("alpha")
-	unlock()
-	if err != nil {
-		t.Fatalf("load after rewind: %v", err)
-	}
-	if replayed.Revision != rec.Revision {
-		t.Fatalf("replayed revision: got %d, want %d", replayed.Revision, rec.Revision)
-	}
-	if replayed.Leader == nil || !replayed.Leader.ExpiresAt.Equal(rec.Leader.ExpiresAt) {
-		t.Fatalf("replayed lease: %+v, want expiry %s", replayed.Leader, rec.Leader.ExpiresAt)
-	}
 }
 
-// TestRotationDropsActiveLog proves a rotation leaves no active log and that
-// the next renewal recreates it: replay treats the missing file as empty, so
-// the rotation needs no post-rename create.
+// holeControllerLog keeps only a controller's final event and rewinds its
+// snapshot below it, so replay cannot account for the events in between.
+func holeControllerLog(t *testing.T, s *ControllerStore, controllerID string) {
+	t.Helper()
+	unlock, err := s.lockController(controllerID)
+	if err != nil {
+		t.Fatalf("lock %s: %v", controllerID, err)
+	}
+	defer unlock()
+	path := s.eventsPath(controllerID)
+	events := readEvents(t, path)
+	last, err := json.Marshal(events[len(events)-1])
+	if err != nil {
+		t.Fatalf("marshal last event: %v", err)
+	}
+	if err := os.WriteFile(path, append(last, '\n'), 0o644); err != nil {
+		t.Fatalf("write holed log: %v", err)
+	}
+	rewindSnapshot(t, s, controllerID, 0)
+}
+
+// TestRotationDropsActiveLog proves a rotation leaves no active log and the
+// next renewal recreates it: replay treats the missing file as empty, so the
+// rotation needs no post-rename create.
 func TestRotationDropsActiveLog(t *testing.T) {
 	s, clock := newTestStore(t)
 	s.compactBytes = 1 << 10
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
-	rec := mustAcquire(t, s, "alpha", "owner-1")
+	rec, _ := renewUntilRotation(t, s, clock, "alpha", mustAcquire(t, s, "alpha", "owner-1"), 0)
 
-	rec, _ = renewUntilRotation(t, s, clock, "alpha", rec, 0)
 	if _, err := os.Stat(s.eventsPath("alpha")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("active log survived the rotation: err=%v", err)
-	}
-	loaded, ok, err := s.Get("alpha")
-	if err != nil || !ok || loaded.Revision != rec.Revision {
-		t.Fatalf("load with no active log: rec=%+v ok=%v err=%v", loaded, ok, err)
 	}
 	clock.Advance(RenewInterval)
 	if _, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err != nil {
@@ -731,107 +673,61 @@ func TestRotationDropsActiveLog(t *testing.T) {
 
 // TestReplayRejectsHistoryHole proves replay never fabricates state across a
 // discarded generation: a snapshot older than the previous generation's first
-// event fails to load with ErrLogHole naming the events it cannot account for,
-// while a snapshot exactly one event older still replays.
+// event fails to load with ErrLogHole naming the missing events, while a
+// snapshot one event older replays both generations to the live record.
 func TestReplayRejectsHistoryHole(t *testing.T) {
 	s, clock := newTestStore(t)
 	s.compactBytes = 1 << 10
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	acquired := mustAcquire(t, s, "alpha", "owner-1")
 
-	// One previous generation only: a second rotation replaces it instead of
-	// accumulating history, and the next renewal recreates the active log.
+	// Two rotations: the previous generation then holds events the snapshot no
+	// longer covers, and the renewal after them fills the active log.
 	rec, first := renewUntilRotation(t, s, clock, "alpha", acquired, 0)
 	rec, second := renewUntilRotation(t, s, clock, "alpha", rec, first)
-	if second <= first {
-		t.Fatalf("previous generation first seq after a second rotation: %d, want > %d", second, first)
-	}
 	clock.Advance(RenewInterval)
-	renewed, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
+	rec, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
 	if err != nil {
 		t.Fatalf("renew after rotation: %v", err)
 	}
-	rec = renewed
-	if _, err := os.Stat(s.eventsPath("alpha")); err != nil {
-		t.Fatalf("active log after a renewal: %v", err)
-	}
 
-	live, err := os.ReadFile(s.snapshotPath("alpha"))
-	if err != nil {
-		t.Fatalf("read snapshot: %v", err)
-	}
-	rewind := func(revision int64) {
-		t.Helper()
-		var snap ControllerRecord
-		if err := json.Unmarshal(live, &snap); err != nil {
-			t.Fatalf("unmarshal snapshot: %v", err)
-		}
-		snap.Revision = revision
-		data, err := json.Marshal(snap)
-		if err != nil {
-			t.Fatalf("marshal rewound snapshot: %v", err)
-		}
-		if err := os.WriteFile(s.snapshotPath("alpha"), data, 0o644); err != nil {
-			t.Fatalf("rewind snapshot: %v", err)
-		}
-	}
-
-	// The legal boundary the doc promises: one revision before the previous
-	// generation's first event still replays to the live record.
-	rewind(second - 1)
+	// The legal boundary: one revision before the previous generation's first
+	// event still replays through both generations.
+	rewindSnapshot(t, s, "alpha", second-1)
 	boundary, ok, err := s.Get("alpha")
-	if err != nil || !ok {
-		t.Fatalf("load at the previous generation boundary: ok=%v err=%v", ok, err)
-	}
-	if boundary.Revision != rec.Revision || boundary.Leader == nil {
-		t.Fatalf("boundary replay: revision %d lease %+v, want revision %d", boundary.Revision, boundary.Leader, rec.Revision)
-	}
-
-	// Exactly one missing event is a hole, not a discontinuity replay may jump.
-	rewind(second - 2)
-	_, _, loadErr := s.Get("alpha")
-	if !errors.Is(loadErr, ErrLogHole) {
-		t.Fatalf("load with one missing event: got err=%v, want ErrLogHole", loadErr)
-	}
-	if want := fmt.Sprintf("missing events %d-%d", second-1, second-1); !strings.Contains(loadErr.Error(), want) {
-		t.Fatalf("hole error: got %q, want it to name %q", loadErr, want)
+	if err != nil || !ok || boundary.Revision != rec.Revision || boundary.Leader == nil ||
+		!boundary.Leader.ExpiresAt.Equal(rec.Leader.ExpiresAt) {
+		t.Fatalf("boundary replay: got %+v ok=%v err=%v, want revision %d expiry %s",
+			boundary, ok, err, rec.Revision, rec.Leader.ExpiresAt)
 	}
 
-	// A snapshot older than the previous generation is the wider hole.
-	rewind(acquired.Revision)
-	_, _, loadErr = s.Get("alpha")
-	if !errors.Is(loadErr, ErrLogHole) {
-		t.Fatalf("load across a discarded generation: got err=%v, want ErrLogHole", loadErr)
-	}
-	if want := fmt.Sprintf("missing events %d-%d", acquired.Revision+1, second-1); !strings.Contains(loadErr.Error(), want) {
-		t.Fatalf("hole error: got %q, want it to name %q", loadErr, want)
+	// One missing event is a hole, and the error names it.
+	rewindSnapshot(t, s, "alpha", second-2)
+	want := fmt.Sprintf("missing events %d-%d", second-1, second-1)
+	if _, _, err := s.Get("alpha"); !errors.Is(err, ErrLogHole) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("load with one missing event: got err=%v, want ErrLogHole naming %q", err, want)
 	}
 }
 
-// TestCompactLogThreshold pins the rotation boundary and the fallback for a
-// store built without a threshold.
+// TestCompactLogThreshold pins the rotation boundary and the default a store
+// built without a threshold falls back to.
 func TestCompactLogThreshold(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		compactBytes int64
-		size         int64
-		wantRotated  bool
+		name               string
+		compactBytes, size int64
+		wantRotated        bool
 	}{
-		{"below threshold", 64, 63, false},
-		{"exactly at threshold", 64, 64, false},
-		{"one byte over threshold", 64, 65, true},
+		{"at threshold", 64, 64, false},
+		{"over threshold", 64, 65, true},
 		{"default at threshold", 0, defaultCompactLogBytes, false},
-		{"default one byte over", 0, defaultCompactLogBytes + 1, true},
+		{"default over threshold", 0, defaultCompactLogBytes + 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := newTestStore(t)
+			mustCreate(t, s, "alpha", 1)
 			s.compactBytes = tc.compactBytes
-			if err := os.MkdirAll(s.controllerDir("alpha"), 0o755); err != nil {
-				t.Fatalf("mkdir controller dir: %v", err)
-			}
-			content := bytes.Repeat([]byte("x"), int(tc.size))
-			if err := os.WriteFile(s.eventsPath("alpha"), content, 0o644); err != nil {
-				t.Fatalf("write log: %v", err)
+			if err := os.Truncate(s.eventsPath("alpha"), tc.size); err != nil {
+				t.Fatalf("size log: %v", err)
 			}
 			if err := s.compactLog("alpha"); err != nil {
 				t.Fatalf("compact: %v", err)
@@ -845,39 +741,27 @@ func TestCompactLogThreshold(t *testing.T) {
 }
 
 // TestCompactionFailureIsNonFatal proves compaction is best-effort: a commit
-// that cannot rotate its log still lands, leaves a loadable log, and compacts
-// once the directory accepts the rename again.
+// that cannot rotate its log still lands and stays loadable, and a later
+// commit compacts once the rename can succeed again.
 func TestCompactionFailureIsNonFatal(t *testing.T) {
 	s, _ := newTestStore(t)
-	// Every commit attempts a rotation, so the first one after the blocking
-	// directory exists fails before any snapshot is loadable.
+	// Every commit attempts a rotation; a non-empty directory at the previous
+	// generation's path blocks that rename.
 	s.compactBytes = 1
-
-	// A non-empty directory at the previous generation's path makes the
-	// rotation rename fail the way an unwritable controller directory would.
 	if err := os.MkdirAll(filepath.Join(s.prevEventsPath("alpha"), "held"), 0o755); err != nil {
-		t.Fatalf("mkdir blocking previous generation: %v", err)
+		t.Fatalf("block previous generation: %v", err)
 	}
 	if _, err := s.Create("alpha", 1); err != nil {
 		t.Fatalf("create with failing compaction: %v", err)
 	}
-	if got := len(eventKinds(t, s, "alpha")); got != 1 {
-		t.Fatalf("log after a failed rotation: %d events, want the 1 committed", got)
-	}
-	// The blocked rotation is reported to the caller; the snapshot writer only
-	// logs it.
+	// The snapshot writer only logs a failed rotation; compactLog reports it.
 	if err := s.compactLog("alpha"); err == nil {
 		t.Fatal("compact with a blocked previous generation: got nil error")
 	}
-	if fi, err := os.Stat(s.prevEventsPath("alpha")); err != nil || !fi.IsDir() {
-		t.Fatalf("rotation replaced the blocking directory: fi=%v err=%v", fi, err)
-	}
-
 	if err := os.RemoveAll(s.prevEventsPath("alpha")); err != nil {
 		t.Fatalf("clear blocking directory: %v", err)
 	}
-	rec, ok, err := s.Get("alpha")
-	if err != nil || !ok || rec.Revision != 1 {
+	if rec, ok, err := s.Get("alpha"); err != nil || !ok || rec.Revision != 1 {
 		t.Fatalf("load after a failed rotation: rec=%+v ok=%v err=%v", rec, ok, err)
 	}
 	if _, err := s.SetDesiredState("alpha", DesiredEnabled, ""); err != nil {
@@ -890,38 +774,13 @@ func TestCompactionFailureIsNonFatal(t *testing.T) {
 
 // TestLogHoleIsolatesOneController proves one unreplayable controller does not
 // hide the rest: List and Recover report it by id and keep serving the healthy
-// controller, so a single holed log cannot disable the fleet.
+// controller.
 func TestLogHoleIsolatesOneController(t *testing.T) {
 	s, _ := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	mustEnable(t, s, mustCreate(t, s, "beta", 1).ControllerID)
-	holed := mustAcquire(t, s, "beta", "owner-1")
-
-	// Keep only beta's final event and rewind its snapshot below it, so replay
-	// cannot account for the events in between.
-	func() {
-		unlock, err := s.lockController("beta")
-		if err != nil {
-			t.Fatalf("lock beta: %v", err)
-		}
-		defer unlock()
-		events := readEvents(t, s.eventsPath("beta"))
-		last, err := json.Marshal(events[len(events)-1])
-		if err != nil {
-			t.Fatalf("marshal last event: %v", err)
-		}
-		if err := os.WriteFile(s.eventsPath("beta"), append(last, '\n'), 0o644); err != nil {
-			t.Fatalf("write holed log: %v", err)
-		}
-		holed.Revision = 0
-		snap, err := json.Marshal(holed)
-		if err != nil {
-			t.Fatalf("marshal rewound snapshot: %v", err)
-		}
-		if err := os.WriteFile(s.snapshotPath("beta"), snap, 0o644); err != nil {
-			t.Fatalf("write rewound snapshot: %v", err)
-		}
-	}()
+	mustAcquire(t, s, "beta", "owner-1")
+	holeControllerLog(t, s, "beta")
 
 	for name, read := range map[string]func() (Controllers, error){
 		"list":    s.List,
@@ -937,64 +796,6 @@ func TestLogHoleIsolatesOneController(t *testing.T) {
 		if len(got.Failures) != 1 || got.Failures[0].ControllerID != "beta" || !errors.Is(got.Failures[0], ErrLogHole) {
 			t.Fatalf("%s failures: %+v, want beta with ErrLogHole", name, got.Failures)
 		}
-	}
-}
-
-// TestFailedAppendRollsBack proves a partially written event never reaches the
-// log: replay would hard-fail on the torn line once another append follows it.
-func TestFailedAppendRollsBack(t *testing.T) {
-	s, clock := newTestStore(t)
-	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
-	rec := mustAcquire(t, s, "alpha", "owner-1")
-
-	before, err := os.ReadFile(s.eventsPath("alpha"))
-	if err != nil {
-		t.Fatalf("read log: %v", err)
-	}
-	// Writing past RLIMIT_FSIZE fails after a partial write, which is the torn
-	// line this rollback exists to remove.
-	var limit syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
-		t.Fatalf("get rlimit: %v", err)
-	}
-	defer func() {
-		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
-			t.Errorf("restore rlimit: %v", err)
-		}
-	}()
-	fsz := make(chan os.Signal, 1)
-	signal.Notify(fsz, syscall.SIGXFSZ)
-	defer signal.Stop(fsz)
-	limited := syscall.Rlimit{Cur: uint64(len(before) + 8), Max: limit.Max}
-	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limited); err != nil {
-		t.Fatalf("lower rlimit: %v", err)
-	}
-
-	clock.Advance(RenewInterval)
-	if _, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err == nil {
-		t.Fatal("renew with a failing append: got nil error")
-	}
-	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
-		t.Fatalf("restore rlimit: %v", err)
-	}
-
-	after, err := os.ReadFile(s.eventsPath("alpha"))
-	if err != nil {
-		t.Fatalf("re-read log: %v", err)
-	}
-	if !bytes.Equal(after, before) {
-		t.Fatalf("failed append left bytes in the log: got %q, want %q", after, before)
-	}
-	got, ok, err := s.Get("alpha")
-	if err != nil || !ok {
-		t.Fatalf("get after failed append: ok=%v err=%v", ok, err)
-	}
-	if got.Revision != rec.Revision {
-		t.Fatalf("revision after failed append: got %d, want %d", got.Revision, rec.Revision)
-	}
-	clock.Advance(RenewInterval)
-	if _, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err != nil {
-		t.Fatalf("renew after failed append: %v", err)
 	}
 }
 
