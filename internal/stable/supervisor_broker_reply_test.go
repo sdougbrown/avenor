@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,4 +78,55 @@ func brokerPost(t *testing.T, addr, path, body string) (int, map[string]any) {
 		t.Fatalf("decode /%s: %v", path, err)
 	}
 	return resp.StatusCode, result
+}
+
+// TestNewSupervisorAsksOverItsConstructedTransport pins the wiring the
+// constructor owns: the supervisor asks in process, a child answers over the
+// broker's HTTP router, and the reply resolves the edge the in-process
+// transport admitted.
+func TestNewSupervisorAsksOverItsConstructedTransport(t *testing.T) {
+	sup := NewSupervisor(Config{MaxRuntimes: 1})
+	t.Cleanup(func() { _ = sup.broker.Stop() })
+	if sup.messaging == nil {
+		t.Fatal("NewSupervisor wired no messaging transport")
+	}
+	targetToken, err := sup.broker.CreateRun("target", "target")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	type askOutcome struct {
+		res any
+		err error
+	}
+	asked := make(chan askOutcome, 1)
+	go func() {
+		res, err := sup.BrokerAsk(context.Background(), "target", "status?", "agent")
+		asked <- askOutcome{res: res, err: err}
+	}()
+	msgID := waitForQueuedAsk(t, sup.broker, "target")
+
+	reply := fmt.Sprintf(`{"run_id":"target","token":%q,"from_run_id":"target","to_run_id":"supervisor","type":"agent_message","payload":{"id":"reply-1","from":"target","from_run_id":"target","to_run_id":"supervisor","message":"all good","reply_to":%q}}`, targetToken, msgID)
+	if status, body := brokerPost(t, sup.broker.Addr(), "send", reply); status != http.StatusOK {
+		t.Fatalf("reply send = (%d, %v)", status, body)
+	}
+
+	select {
+	case out := <-asked:
+		if out.err != nil {
+			t.Fatalf("BrokerAsk: %v", out.err)
+		}
+		result, ok := out.res.(map[string]any)
+		if !ok {
+			t.Fatalf("BrokerAsk result has type %T, want map[string]any", out.res)
+		}
+		if result["message_id"] != msgID || result["from_run_id"] != "target" {
+			t.Fatalf("BrokerAsk result = %v, want the target's answer to %s", result, msgID)
+		}
+		if payload, _ := result["payload"].(json.RawMessage); !strings.Contains(string(payload), "all good") {
+			t.Fatalf("BrokerAsk payload = %s, want the reply text", payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the supervisor's in-process ask never saw its reply")
+	}
 }
