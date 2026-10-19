@@ -300,6 +300,9 @@ func TestRunCancelledBySignal(t *testing.T) {
 					t.Fatalf("sentinel = %q, want %q", sentinel, want)
 				}
 			}
+			if strings.Contains(string(sentinel), "RESULT=") {
+				t.Fatalf("sentinel = %q, want no RESULT line", sentinel)
+			}
 			requireFile(t, resultPath, "")
 			requireFile(t, pidPath, "")
 		})
