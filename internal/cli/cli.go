@@ -2124,6 +2124,9 @@ func NewEventWriter(path string) (*eventWriter, error) {
 	// redirect this run's event log into another artifact's file.
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o666)
 	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("event log path %s is a symlink; symlinks are refused", path)
+		}
 		return nil, err
 	}
 	return &eventWriter{

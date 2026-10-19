@@ -38,7 +38,7 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `claude-channel` |
 | `--model` | (none) | Backend-specific model ID; if not set, resolved from opencode config via `--agent` |
 | `--thinking` | (none) | Backend-native reasoning level; validated against the effective backend |
-| `--on-event` | (none) | Path to write NDJSON event stream; events are discarded if unset |
+| `--on-event` | (none) | Path to write NDJSON event stream; events are discarded if unset. A final symlink is refused, so the event log cannot be redirected into another artifact's file |
 | `--sentinel-file` | (none) | Path to write a completion sentinel (exit code, session ID, stop reason); also derives permission handler unless `--permission-handler` is set |
 | `--result-file` | (none) | Path to write the run's final assistant message as plain text. Direct runs only (not with `--loop-file`/`--team-file`). Written atomically before the sentinel; the sentinel then carries a `RESULT=<path>` line |
 | `--pid-file` | (none) | Path to write the run's own pid at startup, removed when it exits. Track a backgrounded run by this pid instead of a launcher's `$!` |

@@ -140,7 +140,7 @@ func TestRunArtifacts(t *testing.T) {
 			eventLink:  true,
 			foreignPID: "424242\n",
 			wantCode:   1,
-			wantErr:    "open event stream",
+			wantErr:    "symlinks are refused",
 			wantResult: "earlier answer",
 		},
 	} {
