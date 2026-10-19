@@ -123,19 +123,6 @@ func Dial(socketPath string) (*Client, error) {
 // its wait budget.
 var ErrResponseTimeout = errors.New("read response: timeout")
 
-// OwnerAuthParams and OwnerAuthResult are the authenticate_owner wire shapes.
-type OwnerAuthParams struct {
-	Version      int    `json:"version"`
-	CapabilityID string `json:"capability_id"`
-	Secret       string `json:"secret"`
-}
-
-type OwnerAuthResult struct {
-	Version       int    `json:"version"`
-	Authenticated bool   `json:"authenticated"`
-	CapabilityID  string `json:"capability_id"`
-}
-
 // Owner-authentication rejections, classified from the wire codes so every
 // client reports the same four classes.
 var (
@@ -203,8 +190,8 @@ func (c *Client) AuthenticateOwner(cap control.OwnerCapability) error {
 }
 
 func (c *Client) authenticateOwnerUntil(cap control.OwnerCapability, deadline time.Time) error {
-	var res OwnerAuthResult
-	params := OwnerAuthParams{Version: control.OwnerAuthVersion, CapabilityID: cap.ID, Secret: cap.Secret}
+	var res control.OwnerAuthResult
+	params := control.OwnerAuthRequest{Version: control.OwnerAuthVersion, CapabilityID: cap.ID, Secret: cap.Secret}
 	if err := c.call("authenticate_owner", params, &res, remainingUntil(deadline)); err != nil {
 		return classifyOwnerAuthError(err)
 	}
