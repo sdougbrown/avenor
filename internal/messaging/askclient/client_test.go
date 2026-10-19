@@ -20,13 +20,15 @@ type scriptedTransport struct {
 	withdrawErr    error
 	preflightErr   error
 
-	sendCalls     int
-	waitCalls     int
-	withdrawCalls int
-	generation    string
-	lastSend      messaging.SendRequest
-	lastWait      messaging.WaitRequest
-	lastWithdraw  messaging.WithdrawRequest
+	sendCalls           int
+	waitCalls           int
+	withdrawCalls       int
+	generation          string
+	lastSend            messaging.SendRequest
+	lastWait            messaging.WaitRequest
+	lastWithdraw        messaging.WithdrawRequest
+	withdrawCtxErr      error
+	withdrawHasDeadline bool
 }
 
 func (s *scriptedTransport) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
@@ -66,6 +68,8 @@ func (s *scriptedTransport) Reply(ctx context.Context, req messaging.ReplyReques
 func (s *scriptedTransport) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	s.withdrawCalls++
 	s.lastWithdraw = req
+	s.withdrawCtxErr = ctx.Err()
+	_, s.withdrawHasDeadline = ctx.Deadline()
 	return s.withdrawResult, s.withdrawErr
 }
 
@@ -173,30 +177,32 @@ func TestAskAdoptsThePayloadID(t *testing.T) {
 
 func TestAskClassifications(t *testing.T) {
 	cases := []struct {
-		name    string
-		send    messaging.SendResult
-		sendErr error
-		wait    messaging.WaitResult
-		waitErr error
-		outcome messaging.Outcome
-		pending bool
+		name     string
+		send     messaging.SendResult
+		sendErr  error
+		wait     messaging.WaitResult
+		waitErr  error
+		withdraw messaging.WithdrawResult
+		outcome  messaging.Outcome
+		pending  bool
 	}{
 		{name: "auth rejected", send: messaging.SendResult{Outcome: messaging.OutcomeAuthRejected}, sendErr: messaging.ErrAuthRejected, outcome: messaging.OutcomeAuthRejected},
 		{name: "generation mismatch", send: messaging.SendResult{Outcome: messaging.OutcomeNotSent}, sendErr: messaging.ErrGenerationMismatch, outcome: messaging.OutcomeNotSent},
 		{name: "invalid request", send: messaging.SendResult{Outcome: messaging.OutcomeNotSent}, sendErr: messaging.ErrInvalidRequest, outcome: messaging.OutcomeNotSent},
 		{name: "untyped send failure is uncertain", send: messaging.SendResult{}, sendErr: errors.New("connection reset"), outcome: messaging.OutcomePossiblyPending, pending: true},
-		{name: "uncertain wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, outcome: messaging.OutcomePossiblyPending, pending: true},
+		{name: "uncertain wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, withdraw: messaging.WithdrawResult{Outcome: messaging.OutcomePossiblyPending}, outcome: messaging.OutcomePossiblyPending, pending: true},
 		{name: "withdrawn wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomeWithdrawn}, outcome: messaging.OutcomeWithdrawn},
 		{name: "lost wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomeLost}, outcome: messaging.OutcomeLost},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := &scriptedTransport{
-				generation:  "gen-1",
-				sendResults: []messaging.SendResult{tc.send},
-				sendErrs:    []error{tc.sendErr},
-				waitResults: []messaging.WaitResult{tc.wait},
-				waitErrs:    []error{tc.waitErr},
+				generation:     "gen-1",
+				sendResults:    []messaging.SendResult{tc.send},
+				sendErrs:       []error{tc.sendErr},
+				waitResults:    []messaging.WaitResult{tc.wait},
+				waitErrs:       []error{tc.waitErr},
+				withdrawResult: tc.withdraw,
 			}
 			client := New(tr, Options{})
 			res, err := client.Ask(context.Background(), sendRequest("id-1"), waitRequest("id-1"))
@@ -215,6 +221,68 @@ func TestAskClassifications(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAskFailedWaitWithdraws(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("failed wait is retracted under the cleanup context", func(t *testing.T) {
+		tr := &scriptedTransport{
+			generation:     "gen-1",
+			sendResults:    []messaging.SendResult{{Outcome: messaging.OutcomeSent}},
+			waitResults:    []messaging.WaitResult{{Outcome: messaging.OutcomePossiblyPending}},
+			withdrawResult: messaging.WithdrawResult{Outcome: messaging.OutcomeWithdrawn},
+		}
+		_, err := New(tr, Options{}).Ask(ctx, sendRequest("id-1"), waitRequest("id-1"))
+		var askErr *Error
+		if !errors.As(err, &askErr) {
+			t.Fatalf("Ask error = %v, want *Error", err)
+		}
+		if tr.withdrawCalls != 1 {
+			t.Fatalf("withdraw calls = %d, want 1", tr.withdrawCalls)
+		}
+		if tr.lastWithdraw.MessageID != "id-1" || tr.lastWithdraw.Sender != alice || tr.lastWithdraw.Generation != "gen-1" {
+			t.Fatalf("withdraw request = %+v, want the ask's identity and id", tr.lastWithdraw)
+		}
+		if tr.withdrawCtxErr != nil || !tr.withdrawHasDeadline {
+			t.Fatalf("cleanup context = (err %v, deadline %v), want a bounded live context", tr.withdrawCtxErr, tr.withdrawHasDeadline)
+		}
+		if askErr.Pending() {
+			t.Fatal("retracted ask is still reported pending")
+		}
+	})
+
+	t.Run("unconfirmed retraction stays pending", func(t *testing.T) {
+		tr := &scriptedTransport{
+			generation:  "gen-1",
+			sendResults: []messaging.SendResult{{Outcome: messaging.OutcomeSent}},
+			waitResults: []messaging.WaitResult{{Outcome: messaging.OutcomePossiblyPending}},
+			withdrawErr: errors.New("cleanup unavailable"),
+		}
+		_, err := New(tr, Options{}).Ask(ctx, sendRequest("id-1"), waitRequest("id-1"))
+		var askErr *Error
+		if !errors.As(err, &askErr) {
+			t.Fatalf("Ask error = %v, want *Error", err)
+		}
+		if tr.withdrawCalls != 1 || !askErr.Pending() {
+			t.Fatalf("withdraw calls = %d (pending %v), want 1 and pending", tr.withdrawCalls, askErr.Pending())
+		}
+	})
+
+	t.Run("send failure is not withdrawn", func(t *testing.T) {
+		tr := &scriptedTransport{
+			generation:  "gen-1",
+			sendResults: []messaging.SendResult{{Outcome: messaging.OutcomeNotSent}},
+			sendErrs:    []error{messaging.ErrTargetUnavailable},
+		}
+		if _, err := New(tr, Options{}).Ask(ctx, sendRequest("id-1"), waitRequest("id-1")); err == nil {
+			t.Fatal("Ask returned no error for a refused send")
+		}
+		if tr.withdrawCalls != 0 {
+			t.Fatalf("withdraw calls = %d, want none for a refused send", tr.withdrawCalls)
+		}
+	})
 }
 
 func TestWithdraw(t *testing.T) {

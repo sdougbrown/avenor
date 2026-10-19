@@ -2035,10 +2035,15 @@ func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role strin
 		messaging.WaitRequest{Sender: sender},
 	)
 	if err != nil {
+		pending := false
+		var askErr *askclient.Error
+		if errors.As(err, &askErr) {
+			pending = askErr.Pending()
+		}
 		return nil, &control.AskError{
 			MessageID: result.MessageID,
 			Outcome:   result.Outcome,
-			Pending:   s.withdrawAsk(result.MessageID),
+			Pending:   pending,
 			Err:       err,
 		}
 	}
@@ -2059,29 +2064,6 @@ func (s *Supervisor) BrokerPeers() (any, error) {
 		return nil, fmt.Errorf("parse sessions: %w", err)
 	}
 	return result, nil
-}
-
-// withdrawAsk retracts an ask whose wait ended without a reply and reports
-// whether it may still be pending. The wait's own context is already
-// cancelled, so the cleanup runs under its own bounded context. A cancellation
-// or timeout otherwise leaves the queued delivery in place, so the target
-// would keep seeing an ask that can no longer be answered.
-func (s *Supervisor) withdrawAsk(messageID string) bool {
-	if s.messaging == nil || messageID == "" {
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), messaging.CleanupDeadline)
-	defer cancel()
-	runID, _ := s.registerBrokerRun()
-	withdrawn, err := askclient.New(s.messaging, askclient.Options{}).Withdraw(ctx, messaging.WithdrawRequest{
-		Sender:    messaging.Identity{RunID: runID, Sender: "supervisor"},
-		MessageID: messageID,
-	})
-	if err != nil {
-		// The retraction never ran, so the ask is still outstanding.
-		return true
-	}
-	return withdrawn.Outcome == messaging.OutcomePossiblyPending
 }
 
 // BrokerCancel withdraws an outstanding ask and reports whether a terminal

@@ -73,11 +73,15 @@ func (r AskResult) Failure(err error) error {
 }
 
 // Error is a failed ask. Pending reports whether the message ID may still be
-// outstanding; it is true exactly for OutcomePossiblyPending.
+// outstanding: a possibly-pending wait whose cleanup withdrawal confirmed a
+// terminal fence is no longer pending.
 type Error struct {
 	MessageID string
 	Outcome   messaging.Outcome
 	Err       error
+	// retracted records a failed wait whose cleanup withdrawal installed a
+	// terminal fence for the ask.
+	retracted bool
 }
 
 func (e *Error) Error() string {
@@ -90,7 +94,9 @@ func (e *Error) Error() string {
 func (e *Error) Unwrap() error { return e.Err }
 
 // Pending reports whether the ask may still be outstanding.
-func (e *Error) Pending() bool { return e.Outcome == messaging.OutcomePossiblyPending }
+func (e *Error) Pending() bool {
+	return e.Outcome == messaging.OutcomePossiblyPending && !e.retracted
+}
 
 // Ask sends one ask and waits for its terminal state. A caller-supplied
 // MessageID must be versioned; an empty one is minted with the wait cap as its
@@ -161,9 +167,36 @@ func (c *Client) Ask(ctx context.Context, send messaging.SendRequest, wait messa
 	result.Outcome = waited.Outcome
 	result.Reply = waited.Reply
 	if err != nil || waited.Outcome != messaging.OutcomeReplied {
-		return result, &Error{MessageID: result.MessageID, Outcome: result.Outcome, Err: err}
+		return result, &Error{
+			MessageID: result.MessageID,
+			Outcome:   result.Outcome,
+			Err:       err,
+			retracted: c.withdrawFailedWait(send, result),
+		}
 	}
 	return result, nil
+}
+
+// withdrawFailedWait retracts an ask whose wait ended without a reply and
+// reports whether a terminal fence now covers it. The wait may have ended
+// because its context was cancelled, so the withdrawal gets its own cleanup
+// budget; without it an undelivered ask would stay queued for a target that
+// can no longer answer it.
+func (c *Client) withdrawFailedWait(send messaging.SendRequest, result AskResult) bool {
+	if result.MessageID == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cleanup)
+	defer cancel()
+	withdrawn, err := c.Withdraw(ctx, messaging.WithdrawRequest{
+		Sender:     send.From,
+		MessageID:  result.MessageID,
+		Generation: send.Generation,
+	})
+	if err != nil {
+		return false
+	}
+	return withdrawn.Outcome != messaging.OutcomePossiblyPending
 }
 
 // bodyMessageID reports the id an ask body carries, so a minted envelope id

@@ -124,9 +124,9 @@ type StableHandler interface {
 }
 
 // AskError carries the broker message ID of a failed ask plus whether the
-// ask edge may still be pending. Pending is true exactly when Outcome is
-// messaging.OutcomePossiblyPending; callers can then withdraw the ask with
-// broker_cancel instead of retrying blind.
+// ask edge may still be pending. A failed wait is retracted by the ask client,
+// so Pending is false once that cleanup confirmed a terminal fence; callers can
+// withdraw a still-pending ask with broker_cancel instead of retrying blind.
 type AskError struct {
 	MessageID string
 	Pending   bool
