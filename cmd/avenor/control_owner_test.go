@@ -20,6 +20,10 @@ type gatedHandler struct {
 
 func (h *gatedHandler) record(method string) { h.calls = append(h.calls, method) }
 
+func (h *gatedHandler) List() any {
+	return []map[string]any{{"runtime_id": "rt_1"}}
+}
+
 func (h *gatedHandler) Spawn(json.RawMessage) (any, error) {
 	h.record("spawn")
 	return map[string]any{"run_id": "run_spawned"}, nil
@@ -67,6 +71,21 @@ func startOwnerControlServer(t *testing.T, handler control.StableHandler) string
 	}
 	t.Cleanup(func() { _ = srv.Stop() })
 	return socket
+}
+
+// TestControlReadVerbsNeedNoOwnerRecord proves the read-only verbs reach a
+// live socket that never published an owner record: they dial without
+// credentials, so no record is loaded or transmitted.
+func TestControlReadVerbsNeedNoOwnerRecord(t *testing.T) {
+	socket := startOwnerControlServer(t, &gatedHandler{})
+	if err := os.Remove(control.OwnerRecordPath(socket)); err != nil {
+		t.Fatalf("remove owner record: %v", err)
+	}
+	for _, verb := range []string{"status", "list"} {
+		if code := runControl([]string{"--socket", socket, verb}); code != 0 {
+			t.Fatalf("runControl(%s) = %d, want 0 without an owner record", verb, code)
+		}
+	}
 }
 
 // TestControlCommandsAttachAsOwner proves every gated verb the control command
