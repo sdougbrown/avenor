@@ -194,14 +194,14 @@ export class RpcError extends Error {
 }
 
 /**
- * A call that produced no response inside the client timeout. It is a transport
- * outcome, not a peer's structured rejection.
+ * A call or connect that produced no result inside the caller's timeout. It is
+ * a transport outcome, not a peer's structured rejection.
  */
 export class CallTimeoutError extends Error {
   readonly code = 'ETIMEDOUT'
 
-  constructor() {
-    super('read response: timeout')
+  constructor(message = 'read response: timeout') {
+    super(message)
     this.name = 'CallTimeoutError'
   }
 }
@@ -742,18 +742,34 @@ export class Client {
 
 export function dial(
   socketPath: string,
-  opts?: { callTimeoutMs?: number },
+  opts?: { callTimeoutMs?: number, connectTimeoutMs?: number },
 ): Promise<Client> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ path: socketPath })
+    let timer: ReturnType<typeof setTimeout> | undefined
 
-    const onConnect = () => {
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer)
+      socket.removeListener('connect', onConnect)
       socket.removeListener('error', onError)
+    }
+    const onConnect = () => {
+      cleanup()
       resolve(new Client(socket, opts))
     }
     const onError = (err: Error) => {
-      socket.removeListener('connect', onConnect)
+      cleanup()
       reject(new Error(`dial control socket: ${err.message}`))
+    }
+
+    if (opts?.connectTimeoutMs !== undefined) {
+      // A connect that never completes would otherwise outlive any caller
+      // deadline, because an unconnected socket emits neither event.
+      timer = setTimeout(() => {
+        cleanup()
+        socket.destroy()
+        reject(new CallTimeoutError(`dial control socket: timed out after ${opts.connectTimeoutMs}ms`))
+      }, opts.connectTimeoutMs)
     }
 
     socket.on('connect', onConnect)

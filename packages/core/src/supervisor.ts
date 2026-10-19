@@ -409,7 +409,12 @@ export class Supervisor {
 
           let client: Client
           try {
-            client = await dial(this.socketPath, { callTimeoutMs: this.callTimeoutMs })
+            // The connect is bounded by what is left of the attempt, so a hung
+            // dial cannot outlive the startup deadline.
+            client = await dial(this.socketPath, {
+              callTimeoutMs: this.callTimeoutMs,
+              connectTimeoutMs: Math.max(1, deadline - Date.now()),
+            })
           } catch {
             await sleep(100)
             continue
