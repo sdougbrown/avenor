@@ -3,6 +3,7 @@ import * as fs from 'node:fs'
 import * as net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { createOwnerGate } from '../../test/fixtures/owner-gate.js'
 import type { SpawnParams } from '../client.js'
 import { socketsRoot } from '../paths.js'
 
@@ -81,12 +82,11 @@ async function startSpawnServer(): Promise<{
     socketsRoot(),
     `avenor-mcp-spawn-test-${process.pid}-${Math.random().toString(36).slice(2)}.sock`,
   )
-  const capabilityId = 'c'.repeat(32)
-  const capabilitySecret = 'd'.repeat(64)
+  const gate = createOwnerGate({ socketPath })
   const received: SpawnParams[] = []
   const server = net.createServer((socket) => {
     let buffer = ''
-    let authenticated = false
+    const session = gate.session(line => socket.write(line))
     socket.on('data', (chunk) => {
       buffer += chunk.toString()
       const lines = buffer.split('\n')
@@ -98,38 +98,9 @@ async function startSpawnServer(): Promise<{
           method: string
           params?: Record<string, unknown> & SpawnParams
         }
-        if (request.method === 'identity') {
-          socket.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { token: '' } }) + '\n')
-          continue
-        }
-        if (request.method === 'authenticate_owner') {
-          const params = request.params ?? {}
-          if (
-            params.version === 1 &&
-            params.capability_id === capabilityId &&
-            params.secret === capabilitySecret
-          ) {
-            authenticated = true
-            socket.write(JSON.stringify({
-              jsonrpc: '2.0',
-              id: request.id,
-              result: { version: 1, authenticated: true, capability_id: capabilityId },
-            }) + '\n')
-          } else {
-            socket.write(JSON.stringify({
-              jsonrpc: '2.0',
-              id: request.id,
-              error: { code: -32011, message: 'unauthenticated', data: { version: 1, reason: 'capability-rejected' } },
-            }) + '\n')
-          }
-          continue
-        }
-        if (!authenticated) {
-          socket.write(JSON.stringify({
-            jsonrpc: '2.0',
-            id: request.id,
-            error: { code: -32010, message: 'permission_denied' },
-          }) + '\n')
+        if (session.handle(request)) continue
+        if (!session.authenticated) {
+          socket.write(gate.deny(request.id))
           continue
         }
         received.push(request.params ?? {})
@@ -145,20 +116,7 @@ async function startSpawnServer(): Promise<{
     server.once('error', reject)
     server.listen(socketPath, resolve)
   })
-  const info = fs.lstatSync(socketPath, { bigint: true })
-  fs.writeFileSync(
-    `${socketPath}.owner.json`,
-    JSON.stringify({
-      version: 1,
-      socket: socketPath,
-      socket_identity: { dev: String(info.dev), ino: String(info.ino) },
-      capability_id: capabilityId,
-      secret: capabilitySecret,
-      owner_pid: process.pid,
-    }),
-    { mode: 0o600 },
-  )
-  fs.chmodSync(`${socketPath}.owner.json`, 0o600)
+  gate.publish()
   return { server, socketPath, received }
 }
 

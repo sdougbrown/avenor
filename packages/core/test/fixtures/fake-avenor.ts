@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
-import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as net from 'node:net'
+
+import { createOwnerGate, fail, respond } from './owner-gate.js'
 
 type Request = {
   jsonrpc: '2.0'
@@ -26,14 +27,6 @@ function argValue(name: string): string | undefined {
   return process.argv[index + 1]
 }
 
-function respond(id: number | undefined, result: unknown) {
-  return JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n'
-}
-
-function fail(id: number | undefined, code: number, message: string, data?: unknown) {
-  return JSON.stringify({ jsonrpc: '2.0', id, error: { code, message, ...(data ? { data } : {}) } }) + '\n'
-}
-
 if (process.argv[2] !== 'stable') {
   console.error('fake avenor only supports stable')
   process.exit(1)
@@ -50,57 +43,18 @@ if (!socketPath) {
 const attemptToken = process.env.AVENOR_CONTROL_IDENTITY_TOKEN ?? ''
 delete process.env.AVENOR_CONTROL_IDENTITY_TOKEN
 
-const capabilityID = crypto.randomBytes(16).toString('hex')
-const capabilitySecret = crypto.randomBytes(32).toString('hex')
-const recordPath = `${socketPath}.owner.json`
-const gatedMethods = new Set([
-  'spawn',
-  'spawn_mcp',
-  'cancel',
-  'prompt',
-  'interrupt_and_prompt',
-  'answer_permission',
-  'shutdown',
-  'broker_send',
-  'broker_ask',
-  'broker_cancel',
-  'broker_reply',
-])
+const gate = createOwnerGate({ socketPath, attemptToken })
 
 try {
   fs.unlinkSync(socketPath)
 } catch {}
 
-function publishOwnerRecord(): void {
-  const info = fs.statSync(socketPath, { bigint: true })
-  const body = {
-    version: 1,
-    socket: socketPath,
-    socket_identity: { dev: String(info.dev), ino: String(info.ino) },
-    capability_id: capabilityID,
-    secret: capabilitySecret,
-    owner_pid: process.pid,
-  }
-  const temp = `${recordPath}.${crypto.randomBytes(8).toString('hex')}`
-  fs.writeFileSync(temp, JSON.stringify(body), { mode: 0o600 })
-  fs.chmodSync(temp, 0o600)
-  fs.renameSync(temp, recordPath)
-}
-
 let nextRuntime = 0
 const runtimes = new Map<string, Runtime>()
 
-function removeArtifacts(): void {
-  for (const file of [socketPath, recordPath]) {
-    try {
-      fs.unlinkSync(file)
-    } catch {}
-  }
-}
-
 const server = net.createServer((socket) => {
   let buffer = ''
-  let authenticated = false
+  const session = gate.session(line => socket.write(line))
 
   socket.on('data', (chunk) => {
     buffer += chunk.toString()
@@ -118,28 +72,10 @@ const server = net.createServer((socket) => {
         continue
       }
 
-      if (req.method === 'identity') {
-        socket.write(respond(req.id, { token: attemptToken }))
-        continue
-      }
+      if (session.handle(req)) continue
 
-      if (req.method === 'authenticate_owner') {
-        const params = req.params ?? {}
-        if (params.version !== 1) {
-          socket.write(fail(req.id, -32012, 'unsupported owner authentication', { version: 1, reason: 'unsupported-version' }))
-          continue
-        }
-        if (params.capability_id !== capabilityID || params.secret !== capabilitySecret) {
-          socket.write(fail(req.id, -32011, 'unauthenticated', { version: 1, reason: 'capability-rejected' }))
-          continue
-        }
-        authenticated = true
-        socket.write(respond(req.id, { version: 1, authenticated: true, capability_id: capabilityID }))
-        continue
-      }
-
-      if (gatedMethods.has(req.method) && !authenticated) {
-        socket.write(fail(req.id, -32010, 'permission_denied'))
+      if (gate.isGated(req.method) && !session.authenticated) {
+        socket.write(gate.deny(req.id))
         continue
       }
 
@@ -204,7 +140,7 @@ const server = net.createServer((socket) => {
         case 'shutdown':
           socket.write(respond(req.id, { ok: true }))
           setTimeout(() => {
-            removeArtifacts()
+            gate.remove()
             server.close()
             process.exit(0)
           }, 0)
@@ -220,12 +156,12 @@ const server = net.createServer((socket) => {
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   if (signal === 'SIGTERM' && process.env.AVENOR_TEST_IGNORE_SIGTERM === '1') continue
   process.on(signal, () => {
-    removeArtifacts()
+    gate.remove()
     server.close()
     process.exit(0)
   })
 }
 
 server.listen(socketPath, () => {
-  publishOwnerRecord()
+  gate.publish()
 })
