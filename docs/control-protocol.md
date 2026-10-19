@@ -421,13 +421,15 @@ The `workflow.controller.create`, `workflow.controller.enable`, `workflow.contro
 
 ## Owner Semantics
 
-The first client connection to issue a mutating method (`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `shutdown`) becomes the owner. Non-owner calls fail with error code `-32010` (`permission_denied`).
+The control server is constructed with an immutable owner capability that the owning process generates before construction. Ownership is granted per connection: a connection must present that capability in an `authenticate_owner` request before any mutating method (`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `spawn_mcp`, `shutdown`, `broker_send`, `broker_ask`, `broker_cancel`, `broker_reply`) is accepted. Calls from a connection without a grant fail with error code `-32010` (`permission_denied`); a failed re-authentication clears only that connection's grant.
 
-Ownership is per socket, not per user. The socket file is created with mode `0600`, so filesystem permissions enforce process-level isolation. There is no additional token authentication on the Unix socket: any process running as the same account that can open it can observe runs and compete to become the mutating owner. Ownership is released when the owner connection closes, and the next client to call a mutating method becomes the new owner.
+The capability is published beside the socket in `<socket>.owner.json` (mode `0600`, owned by the server's euid). A client loads that record, verifies the live socket's device and inode still match it, dials, and checks that the connected peer has the same uid before writing the capability. Ownership ends when the authenticated connection closes; reconnecting requires presenting the capability again. The handshake is a bearer exchange with no replay protection, so any process that can read the record can authenticate.
 
-Multiple read-only connections may observe state simultaneously (`subscribe`, `history`, `status`, `list`). Event subscriptions and history can contain transcript text, tool inputs or outputs, and permission details, so treat read access as sensitive. Non-owner subscribers continue to receive notifications.
+Ownership is per socket, not per user. The socket file is created with mode `0600`, so filesystem permissions enforce process-level isolation, and same-uid processes are trusted. There is no separate token beyond the owner capability.
 
-The footgun: if you lose the owner connection, no one else can mutate state. Either be the only client, or have a heartbeat mechanism to hand off ownership gracefully before closing.
+Multiple read-only connections may observe state simultaneously (`subscribe`, `history`, `status`, `list`). Event subscriptions and history can contain transcript text, tool inputs or outputs, and permission details, so treat read access as sensitive. Connections without a grant continue to receive notifications.
+
+The footgun: a client that loses its owner connection must load the record and authenticate again before it can mutate state.
 
 ## Permission Resolution Precedence
 
