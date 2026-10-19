@@ -18,6 +18,7 @@ type scriptedTransport struct {
 	waitErrs       []error
 	withdrawResult messaging.WithdrawResult
 	withdrawErr    error
+	preflightErr   error
 
 	sendCalls     int
 	waitCalls     int
@@ -77,6 +78,9 @@ func (s *scriptedTransport) Peers(ctx context.Context, req messaging.PeersReques
 }
 
 func (s *scriptedTransport) Preflight(ctx context.Context) (messaging.PreflightResult, error) {
+	if s.preflightErr != nil {
+		return messaging.PreflightResult{}, s.preflightErr
+	}
 	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: s.generation}, nil
 }
 
@@ -233,6 +237,16 @@ func TestWithdraw(t *testing.T) {
 	}
 	if tr.lastWithdraw.Generation != "gen-live" {
 		t.Fatalf("withdraw generation = %q, want the preflighted generation", tr.lastWithdraw.Generation)
+	}
+
+	tr = &scriptedTransport{withdrawResult: messaging.WithdrawResult{Outcome: messaging.OutcomeWithdrawn}}
+	tr.preflightErr = messaging.ErrTransportClosed
+	res, err = New(tr, Options{}).Withdraw(context.Background(), messaging.WithdrawRequest{Sender: alice, MessageID: "id-1"})
+	if err == nil || res.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("Withdraw with a failed preflight = (%+v, %v), want not-sent", res, err)
+	}
+	if tr.withdrawCalls != 0 {
+		t.Fatalf("withdraw calls = %d, want none without a generation", tr.withdrawCalls)
 	}
 }
 
