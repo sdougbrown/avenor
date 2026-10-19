@@ -21,8 +21,9 @@ var pidFileRemoveCheck func()
 // validateArtifactPaths rejects artifact paths a line-oriented consumer cannot
 // name: a newline in the result or pid path would split the value, and two
 // flags naming one path would let the last write clobber the answer or the pid
-// contract. Paths are compared as absolutes so a relative spelling cannot slip
-// past an absolute one, and existing files are also compared by identity.
+// contract. Paths are compared as absolutes with any existing parent directory
+// resolved, so neither a relative spelling nor a symlinked directory can slip
+// past another flag's path, and existing files are also compared by identity.
 func validateArtifactPaths(resultFile, pidFile, sentinelFile, onEvent string) error {
 	flags := []struct {
 		name       string
@@ -50,6 +51,12 @@ func validateArtifactPaths(resultFile, pidFile, sentinelFile, onEvent string) er
 		abs, err := filepath.Abs(f.path)
 		if err != nil {
 			return fmt.Errorf("%s: %w", f.name, err)
+		}
+		// A symlinked directory can hide that two spellings reach one file, so
+		// compare through the resolved parent when it exists. The file itself is
+		// opened without following a final symlink; see NewEventWriter.
+		if parent, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+			abs = filepath.Join(parent, filepath.Base(abs))
 		}
 		info, err := os.Stat(abs)
 		if err != nil {

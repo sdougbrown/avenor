@@ -268,6 +268,11 @@ type scriptedProvider struct {
 	// queued. release, when non-nil, holds the turn open until it is closed.
 	promptStarted chan<- struct{}
 	release       <-chan struct{}
+	// startStarted, when non-nil, receives once Start is entered. blockStart
+	// keeps Start waiting on its context, so a test can signal while the first
+	// session is still starting.
+	startStarted chan<- struct{}
+	blockStart   bool
 }
 
 func newScriptedProvider() *scriptedProvider {
@@ -275,6 +280,16 @@ func newScriptedProvider() *scriptedProvider {
 }
 
 func (p *scriptedProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	p.mu.Lock()
+	started, block := p.startStarted, p.blockStart
+	p.mu.Unlock()
+	if started != nil {
+		started <- struct{}{}
+	}
+	if block {
+		<-ctx.Done()
+		return runtime.Session{}, ctx.Err()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.nextID++
@@ -308,11 +323,15 @@ func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt 
 		p.next++
 	}
 	started, release := p.promptStarted, p.release
+	var eventsCh chan events.Event
+	if ok {
+		session.prompt = prompt
+		eventsCh = session.events
+	}
 	p.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown session %q", sessionID)
 	}
-	session.prompt = prompt
 
 	if !scripted {
 		var reply string
@@ -327,32 +346,31 @@ func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt 
 			reply = "ok"
 		}
 
-		session.events <- scriptedChunk(sessionID, reply)
-		session.events <- events.Event{
+		eventsCh <- scriptedChunk(sessionID, reply)
+		eventsCh <- events.Event{
 			Event:     "session.end",
 			SessionID: sessionID,
 			Fields:    map[string]any{"stop_reason": "end_turn"},
 		}
-		close(session.events)
+		close(eventsCh)
 		return nil
 	}
 
 	if turn.chunk != "" {
-		session.events <- scriptedChunk(sessionID, turn.chunk)
+		eventsCh <- scriptedChunk(sessionID, turn.chunk)
 	}
 	if started != nil {
 		started <- struct{}{}
 	}
 	if release != nil {
 		<-release
-		return nil
 	}
 	fields := map[string]any{"stop_reason": turn.stopReason}
 	if turn.finalOutput != "" {
 		fields["final_output"] = turn.finalOutput
 	}
-	session.events <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
-	close(session.events)
+	eventsCh <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
+	close(eventsCh)
 	return nil
 }
 
@@ -3608,6 +3626,115 @@ func TestAutoAnswerWorkingStatusEmittedOnPermissionResume(t *testing.T) {
 	}
 	if !workingAfterRequest {
 		t.Fatalf("agent.status working not emitted after permission resolved; events: %+v", got)
+	}
+}
+
+// TestRunResultFileControlPromptTurn queues a prompt through the run's own
+// control socket while a first turn is open: the result file must hold the last
+// turn's final output, not the first turn's text and not the accumulated reply.
+func TestRunResultFileControlPromptTurn(t *testing.T) {
+	oldNewProvider := newProvider
+	t.Cleanup(func() { newProvider = oldNewProvider })
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	releaseTurn := sync.OnceFunc(func() { close(release) })
+	defer releaseTurn()
+	provider := newScriptedProvider()
+	provider.turns = []scriptedTurn{
+		{chunk: "first draft", stopReason: "end_turn"},
+		{chunk: "second draft", stopReason: "end_turn", finalOutput: "authoritative answer"},
+	}
+	provider.promptStarted = started
+	provider.release = release
+	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.txt")
+	sentinelPath := filepath.Join(dir, "run.done")
+	socketPath := shortControlSocketPath(t)
+
+	type outcome struct {
+		code   int
+		stderr string
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		var stderr strings.Builder
+		code := run([]string{
+			"--prompt", "hi",
+			"--backend", "pi",
+			"--control-socket", socketPath,
+			"--result-file", resultPath,
+			"--sentinel-file", sentinelPath,
+		}, func(string) string { return "" }, &stderr)
+		done <- outcome{code: code, stderr: stderr.String()}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run never started its first turn")
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var ctrlConn net.Conn
+	var err error
+	for {
+		ctrlConn, err = net.DialTimeout("unix", socketPath, 2*time.Second)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dial control socket: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	defer ctrlConn.Close()
+
+	params, err := json.Marshal(map[string]string{"text": "second question"})
+	if err != nil {
+		t.Fatalf("marshal prompt params: %v", err)
+	}
+	body, err := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "prompt", Params: params})
+	if err != nil {
+		t.Fatalf("marshal prompt request: %v", err)
+	}
+	if _, err := ctrlConn.Write(append(body, '\n')); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	_ = ctrlConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	scanner := bufio.NewScanner(ctrlConn)
+	if !scanner.Scan() {
+		t.Fatal("no response to prompt")
+	}
+	var resp control.Response
+	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil || resp.Error != nil {
+		t.Fatalf("prompt response = %s, %v", scanner.Bytes(), err)
+	}
+	// The prompt is queued before the first turn ends, so the run's own turn
+	// loop is what selects the second answer.
+	releaseTurn()
+
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not finish after the queued prompt")
+	}
+	if got.code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", got.code, got.stderr)
+	}
+	if turns := provider.turnsRun(); turns != 2 {
+		t.Fatalf("turns = %d, want 2", turns)
+	}
+	raw, err := os.ReadFile(resultPath)
+	if err != nil || string(raw) != "authoritative answer" {
+		t.Fatalf("result file = %q, %v; want the control turn's final output", raw, err)
+	}
+	sentinel, err := os.ReadFile(sentinelPath)
+	if err != nil || !strings.Contains(string(sentinel), "RESULT="+resultPath+"\n") {
+		t.Fatalf("sentinel = %q, %v; want RESULT=%s", sentinel, err, resultPath)
 	}
 }
 

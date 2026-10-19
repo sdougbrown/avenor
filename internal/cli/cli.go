@@ -143,9 +143,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 	exitWithSentinel := func(code int) int {
 		resultPath := ""
-		// A cancelled run has no final answer: the reply so far is a prefix, not
-		// a result, so advertising it would hand a reader a truncated run's text.
-		if *resultFile != "" && finalResult != "" && code != 130 {
+		if *resultFile != "" && finalResult != "" {
 			if err := writeResultFile(*resultFile, finalResult); err != nil {
 				fmt.Fprintf(stderr, "avenor: result-file: %v\n", err)
 			} else {
@@ -355,31 +353,13 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	cleanupPermBase := permissionCleanupBase(*sentinelFile, *permissionHandler)
 
 	// The signal trap is installed before the pid file is published, so a
-	// SIGTERM can never leave a pid file behind. Once the first signal has
-	// cancelled the run, stopSignals restores the default disposition so a
-	// second signal still ends a teardown that will not finish.
+	// first signal landing during setup still has a cleanup path. Once the
+	// first signal has cancelled the run, stopSignals restores the default
+	// disposition so a second signal still ends a teardown that will not finish.
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	signalTrapDone := make(chan struct{})
-	defer close(signalTrapDone)
-	go func() {
-		select {
-		case <-ctx.Done():
-			stopSignals()
-		case <-signalTrapDone:
-		}
-	}()
-
-	// Artifact files are written only after every flag has been accepted, so a
-	// rejected invocation neither creates a pid file nor deletes a caller's
-	// earlier answer.
-	if *pidFile != "" {
-		if err := writePIDFile(*pidFile); err != nil {
-			fmt.Fprintf(stderr, "avenor: pid-file: %v\n", err)
-			return exitWithSentinel(1)
-		}
-		defer removePIDFile(*pidFile, os.Getpid())
-	}
+	stopAfterCancel := context.AfterFunc(ctx, stopSignals)
+	defer stopAfterCancel()
 
 	// Pre-run cleanup: truncate event log and remove stale sentinel/perm files.
 	// Only when --sentinel-file is active to avoid changing behavior for callers
@@ -909,16 +889,31 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		return result.ExitCode
 	}
 
-	// An answer from an earlier run must not outlive this one. This sits below
-	// every setup step that can fail, so a run that never starts leaves the
-	// caller's earlier answer alone.
-	if *resultFile != "" {
-		removeOrLog(*resultFile, stderr)
+	// The pid file is published once every setup step that can fail has passed,
+	// so a rejected invocation never touches a pid file another run owns.
+	if *pidFile != "" {
+		if err := writePIDFile(*pidFile); err != nil {
+			fmt.Fprintf(stderr, "avenor: pid-file: %v\n", err)
+			return exitWithSentinel(1)
+		}
+		defer removePIDFile(*pidFile, os.Getpid())
 	}
 
 	resumeID := *resume
+	// A cancelled or timed-out run stopped mid-answer, so the reply collected so
+	// far is not the run's final message and must not be published.
+	exitForRunContext := func(code int, stopReason string) int {
+		finalStopReason = stopReason
+		finalResult = ""
+		return exitWithSentinel(code)
+	}
 	var result attemptResult
 	for attempt := 1; ; attempt++ {
+		// A signal can land between the trap and the first session, so the run
+		// context decides the outcome before an attempt starts.
+		if code, stopReason, done := runContextOutcome(runCtx); done {
+			return exitForRunContext(code, stopReason)
+		}
 		if controlServer != nil {
 			state.Update(func(s *control.Snapshot) { s.RetryAttempt = attempt })
 		}
@@ -930,6 +925,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			resumeID:               resumeID,
 			sessionBackends:        sessionBackends,
 			initialPrompt:          string(promptText),
+			resultFile:             *resultFile,
 			runID:                  runID,
 			runLabel:               *label,
 			autoApprove:            *autoApprove,
@@ -944,7 +940,15 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		finalSessionID = result.sessionID
 		finalStopReason = result.stopReason
 		finalRetryAfter = result.retryAfter
-		finalResult = result.finalOutput
+		finalResult = settledResultText(result)
+
+		// An attempt that failed while the run context was already finished
+		// reports the cancel or the deadline, not a failed attempt.
+		if result.exitCode != 0 {
+			if code, stopReason, done := runContextOutcome(runCtx); done {
+				return exitForRunContext(code, stopReason)
+			}
+		}
 
 		if result.err != nil || !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > *maxRetries {
 			break
@@ -972,11 +976,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		select {
 		case <-wait:
 		case <-runCtx.Done():
-			if runCtx.Err() == context.DeadlineExceeded {
-				return exitWithSentinel(124)
-			}
-			finalStopReason = runtime.StopReasonForExitCode(130)
-			return exitWithSentinel(130)
+			// The loop's context check reports the stop; do not start another
+			// attempt after the run context finished.
+			continue
 		}
 	}
 
@@ -1028,6 +1030,19 @@ var retryAfter = time.After
 func deadlineFromContext(ctx context.Context) time.Time {
 	deadline, _ := ctx.Deadline()
 	return deadline
+}
+
+// runContextOutcome maps a finished run context to the run's outcome: a
+// cancelled signal ends the run at 130, an expired --timeout at 124. It reports
+// false while the context is still live.
+func runContextOutcome(ctx context.Context) (int, string, bool) {
+	switch ctx.Err() {
+	case context.Canceled:
+		return 130, runtime.StopReasonForExitCode(130), true
+	case context.DeadlineExceeded:
+		return 124, runtime.StopReasonForExitCode(124), true
+	}
+	return 0, "", false
 }
 
 func effectivePermissionHandler(sentinelPath, permissionHandler string, autoApprove bool) string {
@@ -2105,7 +2120,9 @@ func NewEventWriter(path string) (*eventWriter, error) {
 	if path == "" {
 		return &eventWriter{encoder: json.NewEncoder(io.Discard)}, nil
 	}
-	file, err := os.Create(path)
+	// O_NOFOLLOW refuses a final symlink, so a link left at --on-event cannot
+	// redirect this run's event log into another artifact's file.
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o666)
 	if err != nil {
 		return nil, err
 	}
