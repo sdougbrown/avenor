@@ -165,13 +165,17 @@ every controller whose desired state is enabled. Dispatched work continues
 from the durable snapshot — a parked review re-parks on its exact subject, an
 expired attempt lease re-arms for a replacement claim — with no coordinator
 memory involved. The leadership lease is durable per renewal: each renewal is
-written to the controller's event log before the snapshot is replaced, so a
-record recovered from a stale snapshot still carries the leader's latest
-expiry and nobody else can hold the lease over it. The controller event log is
-truncated once the snapshot superseding it is durable, so renewal lines do not
-accumulate without bound. `disable` is the deliberate stop: it halts future
-dispatch, cancels poll contexts, freezes cursors, and releases the lease,
-leaving running attempts alone.
+appended to the controller's event log before the snapshot is replaced, so
+replay repairs a snapshot that is older than the log instead of accepting an
+expiry the log cannot reproduce. The log is bounded to two generations: once it
+outgrows its size limit, the snapshot superseding it is written first and the
+log is then rotated to `events.ndjson.prev`, and replay reads the previous
+generation before the active log. Replay therefore repairs any snapshot back to
+the start of the previous generation, which includes the newest renewal; event
+history older than that is discarded, so a snapshot restored from further back
+replays only what the two files still hold. `disable` is the deliberate stop:
+it halts future dispatch, cancels poll contexts, freezes cursors, and releases
+the lease, leaving running attempts alone.
 
 ## Boundaries
 

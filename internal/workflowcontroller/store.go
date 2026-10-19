@@ -25,8 +25,11 @@ type ControllerStore struct {
 	now  func() time.Time
 	// compactBytes bounds the controller event log: every event in the log is
 	// already applied to the snapshot, so once the log grows past this it is
-	// truncated after the snapshot superseding it is durable.
+	// rotated after the snapshot superseding it is durable.
 	compactBytes int64
+	// rotate renames the active event log to its previous generation; a nil
+	// rotate renames with os.Rename.
+	rotate func(oldpath, newpath string) error
 
 	// subMu guards subscribers, a coalescing fan-out of buffered(1) wake
 	// channels notified after every committed controller record change.
@@ -34,8 +37,8 @@ type ControllerStore struct {
 	subscribers []chan struct{}
 }
 
-// defaultCompactLogBytes is the event-log size at which a controller log is
-// truncated.
+// defaultCompactLogBytes is the event-log size past which a controller log is
+// rotated.
 const defaultCompactLogBytes int64 = 64 << 10
 
 // NewStore returns a store rooted at workflowRoot, using the wall clock.
@@ -68,6 +71,12 @@ func (s *ControllerStore) snapshotPath(controllerID string) string {
 
 func (s *ControllerStore) eventsPath(controllerID string) string {
 	return filepath.Join(s.controllerDir(controllerID), "events.ndjson")
+}
+
+// prevEventsPath is the previous log generation, kept so a snapshot restored
+// one generation back still replays to the newest lease expiry.
+func (s *ControllerStore) prevEventsPath(controllerID string) string {
+	return filepath.Join(s.controllerDir(controllerID), "events.ndjson.prev")
 }
 
 func (s *ControllerStore) lockPath(controllerID string) string {
@@ -571,8 +580,9 @@ func (s *ControllerStore) loadForCommand(controllerID string) (ControllerRecord,
 }
 
 // loadLocked reads the snapshot under a held flock and replays any events
-// beyond its revision, truncating a malformed trailing event line. It reports
-// whether the snapshot exists and how many events were replayed.
+// beyond its revision, previous log generation first, truncating a malformed
+// trailing event line. It reports whether the snapshot exists and how many
+// events were replayed.
 func (s *ControllerStore) loadLocked(controllerID string) (ControllerRecord, int, error) {
 	data, err := os.ReadFile(s.snapshotPath(controllerID))
 	if err != nil {
@@ -585,8 +595,15 @@ func (s *ControllerStore) loadLocked(controllerID string) (ControllerRecord, int
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return ControllerRecord{}, 0, fmt.Errorf("controller %s snapshot: %w", controllerID, err)
 	}
-	rec, replayed, err := s.replayEvents(controllerID, rec, s.eventsPath(controllerID))
-	return rec, replayed, err
+	rec, replayed, err := s.replayEvents(controllerID, rec, s.prevEventsPath(controllerID))
+	if err != nil {
+		return rec, replayed, err
+	}
+	rec, current, err := s.replayEvents(controllerID, rec, s.eventsPath(controllerID))
+	if err != nil {
+		return rec, replayed, err
+	}
+	return rec, replayed + current, nil
 }
 
 // replayEvents applies logged events with a seq beyond the record's revision,
@@ -689,13 +706,21 @@ func (s *ControllerStore) notifySubscribers() {
 	}
 }
 
-// appendEvents durably appends complete JSON events to the NDJSON log.
+// appendEvents durably appends complete JSON events to the NDJSON log. A
+// failed append is rolled back to the pre-append offset: replay hard-fails on
+// a torn line anywhere before the final one, so a partial write must not reach
+// the log.
 func (s *ControllerStore) appendEvents(controllerID string, events []ControllerEvent) error {
 	f, err := os.OpenFile(s.eventsPath(controllerID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	start := fi.Size()
 	var firstErr error
 	for _, e := range events {
 		data, err := json.Marshal(e)
@@ -711,6 +736,16 @@ func (s *ControllerStore) appendEvents(controllerID string, events []ControllerE
 	}
 	if err := f.Sync(); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if firstErr == nil {
+		return nil
+	}
+	if err := f.Truncate(start); err != nil {
+		log.Printf("controller %s: truncate failed append: %v", controllerID, err)
+		return firstErr
+	}
+	if err := f.Sync(); err != nil {
+		log.Printf("controller %s: sync after truncate: %v", controllerID, err)
 	}
 	return firstErr
 }
@@ -750,14 +785,21 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 	if err := durablefile.FsyncDir(dir); err != nil {
 		return err
 	}
-	return s.compactLog(controllerID)
+	// Compaction is best-effort: the commit is already durable, so a failed
+	// rotation must not report the commit as failed.
+	if err := s.compactLog(controllerID); err != nil {
+		log.Printf("controller %s: compact log: %v", controllerID, err)
+	}
+	return nil
 }
 
-// compactLog truncates the event log once it outgrows compactBytes. It runs
-// only after the snapshot superseding the log is durable: replay skips events
-// at or below the snapshot's revision, so a truncate that is lost to a crash
-// leaves skipped events behind, while truncating before the snapshot lands
-// would lose events replay still needed.
+// compactLog rotates the event log once it outgrows compactBytes, keeping the
+// generation it replaces as events.ndjson.prev. It runs only after the
+// snapshot superseding the log is durable: replay skips events at or below the
+// snapshot's revision, so a rotation that is lost to a crash leaves skipped
+// events behind, while rotating before the snapshot lands would lose events
+// replay still needs. A crash between the rename and the next append leaves
+// the previous generation alone, which replay still reads.
 func (s *ControllerStore) compactLog(controllerID string) error {
 	path := s.eventsPath(controllerID)
 	fi, err := os.Stat(path)
@@ -767,18 +809,26 @@ func (s *ControllerStore) compactLog(controllerID string) error {
 		}
 		return err
 	}
-	if fi.Size() <= s.compactBytes {
+	if fi.Size() <= s.compactThreshold() {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
+	rotate := s.rotate
+	if rotate == nil {
+		rotate = os.Rename
+	}
+	if err := rotate(path, s.prevEventsPath(controllerID)); err != nil {
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
+	return durablefile.FsyncDir(s.controllerDir(controllerID))
+}
+
+// compactThreshold bounds the active log, defaulting for a store built without
+// a threshold so a zero value cannot rotate on every write.
+func (s *ControllerStore) compactThreshold() int64 {
+	if s.compactBytes <= 0 {
+		return defaultCompactLogBytes
 	}
-	return f.Close()
+	return s.compactBytes
 }
 
 // regenerateProjection rewrites the controller's Markdown projection. The

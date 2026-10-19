@@ -1,14 +1,17 @@
 package workflowcontroller
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -608,42 +611,250 @@ func TestRenewLeaseLogsEveryRenewal(t *testing.T) {
 	}
 }
 
-// TestRenewalLogCompaction proves the event log stays bounded under the
-// renewal cadence: once it exceeds the store's compaction threshold it is
-// truncated after the snapshot that supersedes it is durable, and the record
-// still replays.
+// TestRenewalLogCompaction proves the log stays bounded and keeps one older
+// generation: after a rotation, a snapshot from before the rotation still
+// replays to the newest revision and expiry.
 func TestRenewalLogCompaction(t *testing.T) {
+	s, clock := newTestStore(t)
+	s.compactBytes = 1 << 10
+	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
+	rec := mustAcquire(t, s, "alpha", "owner-1")
+
+	// Renew until the log rotates, keeping the snapshot written just before the
+	// rotation: that is the generation replay has to be able to restore.
+	var stale []byte
+	for i := 0; i < 20 && stale == nil; i++ {
+		before, err := os.ReadFile(s.snapshotPath("alpha"))
+		if err != nil {
+			t.Fatalf("read snapshot before renew %d: %v", i, err)
+		}
+		clock.Advance(RenewInterval)
+		rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
+		if err != nil {
+			t.Fatalf("renew %d: %v", i, err)
+		}
+		if _, err := os.Stat(s.prevEventsPath("alpha")); err == nil {
+			stale = before
+		}
+	}
+	if stale == nil {
+		t.Fatalf("event log never rotated past %d bytes", s.compactBytes)
+	}
+
+	// The rotation renewal's event survives only in the previous generation, so
+	// the rewound snapshot needs that file to reach the live expiry.
+	if err := os.WriteFile(s.snapshotPath("alpha"), stale, 0o644); err != nil {
+		t.Fatalf("rewind snapshot: %v", err)
+	}
+	unlock, err := s.lockController("alpha")
+	if err != nil {
+		t.Fatalf("lock after rewind: %v", err)
+	}
+	replayed, count, err := s.loadLocked("alpha")
+	unlock()
+	if err != nil {
+		t.Fatalf("load after rewind: %v", err)
+	}
+	if count == 0 {
+		t.Fatal("snapshot rewound one generation replayed no events")
+	}
+	if replayed.Revision != rec.Revision || !replayed.Leader.ExpiresAt.Equal(rec.Leader.ExpiresAt) {
+		t.Fatalf("replayed record: rev %d expiry %s, want rev %d expiry %s",
+			replayed.Revision, replayed.Leader.ExpiresAt, rec.Revision, rec.Leader.ExpiresAt)
+	}
+
+	// The repaired record keeps renewing, and the fresh generation stays bounded.
+	for i := 0; i < 2; i++ {
+		clock.Advance(RenewInterval)
+		rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
+		if err != nil {
+			t.Fatalf("renew after rewind %d: %v", i, err)
+		}
+	}
+	size, err := os.Stat(s.eventsPath("alpha"))
+	if err != nil {
+		t.Fatalf("stat active log: %v", err)
+	}
+	if size.Size() > s.compactBytes {
+		t.Fatalf("active log after rotation: %d bytes, want <= %d", size.Size(), s.compactBytes)
+	}
+}
+
+// TestCompactLogThreshold pins the rotation boundary and the fallback for a
+// store built without a threshold.
+func TestCompactLogThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		compactBytes int64
+		size         int64
+		wantRotated  bool
+	}{
+		{"below threshold", 64, 63, false},
+		{"exactly at threshold", 64, 64, false},
+		{"one byte over threshold", 64, 65, true},
+		{"default at threshold", 0, defaultCompactLogBytes, false},
+		{"default one byte over", 0, defaultCompactLogBytes + 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newTestStore(t)
+			s.compactBytes = tc.compactBytes
+			if err := os.MkdirAll(s.controllerDir("alpha"), 0o755); err != nil {
+				t.Fatalf("mkdir controller dir: %v", err)
+			}
+			content := bytes.Repeat([]byte("x"), int(tc.size))
+			if err := os.WriteFile(s.eventsPath("alpha"), content, 0o644); err != nil {
+				t.Fatalf("write log: %v", err)
+			}
+			if err := s.compactLog("alpha"); err != nil {
+				t.Fatalf("compact: %v", err)
+			}
+			_, err := os.Stat(s.prevEventsPath("alpha"))
+			if rotated := err == nil; rotated != tc.wantRotated {
+				t.Fatalf("%d-byte log rotated=%v, want %v", tc.size, rotated, tc.wantRotated)
+			}
+		})
+	}
+}
+
+// TestCompactionFailureIsNonFatal proves compaction is best-effort: the
+// renewal that triggers a failing rotation still commits, and the next renewal
+// compacts normally.
+func TestCompactionFailureIsNonFatal(t *testing.T) {
+	s, clock := newTestStore(t)
+	s.compactBytes = 1 << 10
+	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
+	rec := mustAcquire(t, s, "alpha", "owner-1")
+
+	s.rotate = func(string, string) error { return fs.ErrPermission }
+	for i := 0; i < 12; i++ {
+		clock.Advance(RenewInterval)
+		var err error
+		rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
+		if err != nil {
+			t.Fatalf("renew %d with failing compaction: %v", i, err)
+		}
+	}
+	size, err := os.Stat(s.eventsPath("alpha"))
+	if err != nil {
+		t.Fatalf("stat log: %v", err)
+	}
+	if size.Size() <= s.compactBytes {
+		t.Fatalf("log never outgrew %d bytes, so compaction was not attempted", s.compactBytes)
+	}
+	if _, err := os.Stat(s.prevEventsPath("alpha")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("rotation created a generation despite the failure: %v", err)
+	}
+
+	s.rotate = nil
+	clock.Advance(RenewInterval)
+	if rec, err = s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err != nil {
+		t.Fatalf("renew after compaction recovered: %v", err)
+	}
+	if _, err := os.Stat(s.prevEventsPath("alpha")); err != nil {
+		t.Fatalf("no generation after compaction recovered: %v", err)
+	}
+}
+
+// TestFailedAppendRollsBack proves a partially written event never reaches the
+// log: replay would hard-fail on the torn line once another append follows it.
+func TestFailedAppendRollsBack(t *testing.T) {
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	rec := mustAcquire(t, s, "alpha", "owner-1")
 
-	prev := s.compactBytes
-	s.compactBytes = 1 << 10
-	defer func() { s.compactBytes = prev }()
-
-	for i := 0; i < 12; i++ {
-		clock.Advance(RenewInterval)
-		next, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
-		if err != nil {
-			t.Fatalf("renew %d: %v", i, err)
+	before, err := os.ReadFile(s.eventsPath("alpha"))
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	// Writing past RLIMIT_FSIZE fails after a partial write, which is the torn
+	// line this rollback exists to remove.
+	var limit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+		t.Fatalf("get rlimit: %v", err)
+	}
+	defer func() {
+		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+			t.Errorf("restore rlimit: %v", err)
 		}
-		rec = next
-		size, err := os.Stat(s.eventsPath("alpha"))
-		if err != nil {
-			t.Fatalf("stat events after renew %d: %v", i, err)
-		}
-		if size.Size() > s.compactBytes {
-			t.Fatalf("event log after renew %d: %d bytes, want <= %d", i, size.Size(), s.compactBytes)
-		}
+	}()
+	fsz := make(chan os.Signal, 1)
+	signal.Notify(fsz, syscall.SIGXFSZ)
+	defer signal.Stop(fsz)
+	limited := syscall.Rlimit{Cur: uint64(len(before) + 8), Max: limit.Max}
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limited); err != nil {
+		t.Fatalf("lower rlimit: %v", err)
 	}
 
-	replayed, ok, err := s.Get("alpha")
+	clock.Advance(RenewInterval)
+	if _, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err == nil {
+		t.Fatal("renew with a failing append: got nil error")
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+		t.Fatalf("restore rlimit: %v", err)
+	}
+
+	after, err := os.ReadFile(s.eventsPath("alpha"))
+	if err != nil {
+		t.Fatalf("re-read log: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("failed append left bytes in the log: got %q, want %q", after, before)
+	}
+	got, ok, err := s.Get("alpha")
 	if err != nil || !ok {
-		t.Fatalf("get after compaction: ok=%v err=%v", ok, err)
+		t.Fatalf("get after failed append: ok=%v err=%v", ok, err)
 	}
-	if replayed.Revision != rec.Revision || !replayed.Leader.ExpiresAt.Equal(rec.Leader.ExpiresAt) {
-		t.Fatalf("record after compaction: rev %d expiry %s, want rev %d expiry %s",
-			replayed.Revision, replayed.Leader.ExpiresAt, rec.Revision, rec.Leader.ExpiresAt)
+	if got.Revision != rec.Revision {
+		t.Fatalf("revision after failed append: got %d, want %d", got.Revision, rec.Revision)
+	}
+	clock.Advance(RenewInterval)
+	if _, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err != nil {
+		t.Fatalf("renew after failed append: %v", err)
+	}
+}
+
+// controllerSnapshotWithThrottle records the on-disk shape written before the
+// renewal throttle was removed.
+const controllerSnapshotWithThrottle = `{
+  "schema_version": 1,
+  "controller_id": "alpha",
+  "desired_state": "enabled",
+  "max_inflight": 2,
+  "revision": 3,
+  "owner_epoch": 1,
+  "leader": {
+    "lease_id": "lease-legacy",
+    "owner_id": "owner-1",
+    "owner_epoch": 1,
+    "acquired_at": "2025-03-04T05:06:07Z",
+    "renewed_at": "2025-03-04T05:06:17Z",
+    "expires_at": "2025-03-04T05:06:37Z"
+  },
+  "created_at": "2025-03-04T05:06:00Z",
+  "updated_at": "2025-03-04T05:06:17Z",
+  "last_renewal_event_at": "2025-03-04T05:06:17Z"
+}`
+
+// TestLegacySnapshotWithThrottleField pins compatibility with snapshots that
+// still carry the removed renewal-throttle key.
+func TestLegacySnapshotWithThrottleField(t *testing.T) {
+	s, _ := newTestStore(t)
+	if err := os.MkdirAll(s.controllerDir("alpha"), 0o755); err != nil {
+		t.Fatalf("mkdir controller dir: %v", err)
+	}
+	if err := os.WriteFile(s.snapshotPath("alpha"), []byte(controllerSnapshotWithThrottle), 0o644); err != nil {
+		t.Fatalf("write legacy snapshot: %v", err)
+	}
+	rec, ok, err := s.Get("alpha")
+	if err != nil || !ok {
+		t.Fatalf("get legacy snapshot: ok=%v err=%v", ok, err)
+	}
+	if rec.Revision != 3 || rec.DesiredState != DesiredEnabled || rec.MaxInflight != 2 {
+		t.Fatalf("legacy snapshot: rev %d state %q max_inflight %d, want rev 3 enabled 2",
+			rec.Revision, rec.DesiredState, rec.MaxInflight)
+	}
+	if rec.Leader == nil || rec.Leader.LeaseID != "lease-legacy" {
+		t.Fatalf("legacy snapshot leader: %+v, want lease-legacy", rec.Leader)
 	}
 }
 
