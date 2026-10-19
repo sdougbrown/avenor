@@ -1607,6 +1607,73 @@ func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 	}
 }
 
+// A loop or team child under the supervisor writes the same sentinel contract
+// as the identical CLI run: the classified stop reason plus the provider's
+// retry-after hint, not a hint-less rate_limited line.
+func TestWorkflowChildSentinelCarriesRetryAfter(t *testing.T) {
+	tests := []struct {
+		kind string
+		run  func(*Supervisor, *childRuntime)
+	}{
+		{
+			kind: "loop",
+			run: func(sup *Supervisor, child *childRuntime) {
+				sup.runLoopChild(context.Background(), child, &looprunner.LoopConfig{
+					MaxIterations: 1,
+					Pre:           []phaseconfig.Phase{{Name: "work", Prompt: "work"}},
+				}, 0, 0, "", "", "", "", "", "test")
+			},
+		},
+		{
+			kind: "team",
+			run: func(sup *Supervisor, child *childRuntime) {
+				sup.runTeamChild(context.Background(), child, &teamrunner.TeamConfig{
+					Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}},
+				}, 0, 0, "", "", "", "", "", "test")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.kind, func(t *testing.T) {
+			sessionID := "ses_" + tt.kind + "_limit"
+			provider := &stableScriptedProvider{
+				attempt: -1,
+				scripts: []stableScriptedAttempt{{
+					sessionID: sessionID,
+					events: []stableScriptedEvent{{event: events.Event{
+						Event:     "session.end",
+						SessionID: sessionID,
+						Fields: map[string]any{
+							"stop_reason":   "error",
+							"error_message": "429: rate limit reached; try again in 20s",
+						},
+					}}},
+				}},
+			}
+			sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-" + tt.kind + "-sentinel-retry.sock", MaxRuntimes: 1})
+			sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+			child := &childRuntime{
+				id:           "rt_" + tt.kind + "_sentinel",
+				done:         make(chan struct{}),
+				promptCh:     make(chan struct{}, 1),
+				eventWriter:  stableTestSink{},
+				sentinelFile: filepath.Join(t.TempDir(), "run.done"),
+				cancelFn:     func() {},
+			}
+			registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
+
+			tt.run(sup, child)
+
+			content := readSentinel(t, child.sentinelFile)
+			for _, want := range []string{"STOP_REASON=rate_limited\n", "RETRY_AFTER=20\n"} {
+				if !strings.Contains(content, want) {
+					t.Fatalf("sentinel = %q, want %q", content, want)
+				}
+			}
+		})
+	}
+}
+
 func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 	provider := &stableScriptedProvider{
 		attempt: -1,

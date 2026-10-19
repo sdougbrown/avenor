@@ -411,16 +411,16 @@ func TestWriteSentinel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// WriteSentinelWithReason
+// WriteSentinelResult
 // ---------------------------------------------------------------------------
 
-func TestWriteSentinelWithReason(t *testing.T) {
+func TestWriteSentinelResult(t *testing.T) {
 	t.Run("exit 5 blocked without reason writes BLOCKED sentinel", func(t *testing.T) {
 		dir := t.TempDir()
 		sentPath := filepath.Join(dir, "run.done")
 
 		var stderr strings.Builder
-		WriteSentinelWithReason(sentPath, 5, "ses_b", "blocked", "", "", &stderr)
+		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "", 0, "", &stderr)
 
 		if stderr.Len() > 0 {
 			t.Errorf("unexpected stderr: %s", stderr.String())
@@ -442,7 +442,7 @@ func TestWriteSentinelWithReason(t *testing.T) {
 
 		var stderr strings.Builder
 		reason := "architectural issue: layering violation in pkg/db"
-		WriteSentinelWithReason(sentPath, 5, "ses_b", "blocked", "", reason, &stderr)
+		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "", 0, reason, &stderr)
 
 		if stderr.Len() > 0 {
 			t.Errorf("unexpected stderr: %s", stderr.String())
@@ -463,7 +463,7 @@ func TestWriteSentinelWithReason(t *testing.T) {
 		sentPath := filepath.Join(dir, "run.done")
 
 		var stderr strings.Builder
-		WriteSentinelWithReason(sentPath, 5, "ses_b", "blocked", "deadbeefcafe0004", "loop limit exceeded", &stderr)
+		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "deadbeefcafe0004", 0, "loop limit exceeded", &stderr)
 
 		if stderr.Len() > 0 {
 			t.Errorf("unexpected stderr: %s", stderr.String())

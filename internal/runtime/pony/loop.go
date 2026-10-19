@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/tools"
 )
@@ -410,15 +411,15 @@ turnLoop:
 					emit(eventCh, "avenor.error", map[string]any{
 						"source":      "loop",
 						"kind":        "degenerate_reasoning_stream",
-						"stop_reason": degenerateReasoningStopReason,
+						"stop_reason": runtime.DegenerateReasoningStreamStopReason,
 						"model":       modelName,
 						"message":     reason,
 						"diagnostics": guard.Diagnostics(),
 					})
 					emit(eventCh, "session.end", map[string]any{
-						"stop_reason": degenerateReasoningStopReason,
+						"stop_reason": runtime.DegenerateReasoningStreamStopReason,
 					})
-					return history, degenerateReasoningStopReason, nil
+					return history, runtime.DegenerateReasoningStreamStopReason, nil
 				}
 				emit(eventCh, "agent.thought_chunk", map[string]any{"delta": chunk.ReasoningContent})
 

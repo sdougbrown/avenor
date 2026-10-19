@@ -9,6 +9,11 @@ const SessionIDConflictStopReason = "session_id_conflict"
 // tool calls stay recoverable.
 const ToolDeniedStopReason = "tool_denied"
 
+// DegenerateReasoningStreamStopReason is the stop reason for a turn Avenor
+// aborted because the reasoning stream became non-productive. It shares the
+// generic exit-1 code, so it must stay distinct from a provider failure.
+const DegenerateReasoningStreamStopReason = "degenerate_reasoning_stream"
+
 // IsRetryableFailure reports whether a failed attempt may be retried. Session
 // identity conflicts are fatal: retrying could resume a provisional ID or let
 // an attempt finish without adopting the provider's authoritative session ID.

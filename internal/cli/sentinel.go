@@ -159,12 +159,6 @@ func WriteSentinelResult(path string, exitCode int, sessionID, stopReason, runID
 	}
 }
 
-// WriteSentinelWithReason writes a completion sentinel without a provider
-// retry-after hint.
-func WriteSentinelWithReason(path string, exitCode int, sessionID, stopReason, runID, reason string, stderr io.Writer) {
-	WriteSentinelResult(path, exitCode, sessionID, stopReason, runID, 0, reason, stderr)
-}
-
 // WriteSentinel writes the completion sentinel file at path using an
 // atomic tmp+rename strategy. Errors are logged to stderr but never affect
 // the caller's exit code.

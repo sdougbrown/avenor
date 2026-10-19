@@ -1963,19 +1963,14 @@ func (p *waitExitMatrixProvider) cancelSnapshot() (int, []string) {
 }
 
 type waitExitMatrixSink struct {
-	mu           sync.Mutex
-	events       []events.Event
-	onSessionEnd func()
+	mu     sync.Mutex
+	events []events.Event
 }
 
 func (s *waitExitMatrixSink) Write(event events.Event) error {
 	s.mu.Lock()
 	s.events = append(s.events, event)
-	onSessionEnd := s.onSessionEnd
 	s.mu.Unlock()
-	if event.Event == "session.end" && onSessionEnd != nil {
-		onSessionEnd()
-	}
 	return nil
 }
 
@@ -2062,18 +2057,16 @@ func TestWaitForSessionClassifiesProviderLimits(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sink := &waitExitMatrixSink{}
-			cfg := SessionWaitConfig{SessionID: "ses_limit", RunID: "run_limit"}
+			// Production always subscribes, so the prompt-error case drains an
+			// empty channel and classifies after the settlement grace expires.
+			eventCh := make(chan events.Event, 1)
+			promptDone := make(chan error, 1)
+			cfg := SessionWaitConfig{SessionID: "ses_limit", RunID: "run_limit", EventCh: eventCh, PromptDone: promptDone}
 			if tt.promptErr != nil {
-				promptDone := make(chan error, 1)
 				promptDone <- tt.promptErr
-				cfg.PromptDone = promptDone
 			} else {
-				eventCh := make(chan events.Event, 1)
 				eventCh <- events.Event{Event: "session.end", SessionID: "ses_limit", Fields: tt.fields}
-				promptDone := make(chan error, 1)
 				promptDone <- nil
-				cfg.EventCh = eventCh
-				cfg.PromptDone = promptDone
 			}
 			result := WaitForSession(context.Background(), &cliFakeProvider{}, cfg, SessionWaitDeps{Writer: sink, Stderr: io.Discard})
 			if result.ExitCode != tt.wantExitCode || result.StopReason != tt.wantStopReason {
@@ -2097,6 +2090,82 @@ func TestWaitForSessionClassifiesProviderLimits(t *testing.T) {
 			}
 			if tt.wantRetryAfter == 0 && retryAfter != nil {
 				t.Fatalf("session.end retry_after = %v, want absent", retryAfter)
+			}
+		})
+	}
+}
+
+// TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder pins the case
+// where the terminal event carries no provider message and only the prompt
+// error names the cause. Whichever arrives first, the classification sees
+// both and reports the same stop reason and exit code.
+func TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder(t *testing.T) {
+	for _, promptFirst := range []bool{false, true} {
+		name := "session.end first"
+		if promptFirst {
+			name = "prompt error first"
+		}
+		t.Run(name, func(t *testing.T) {
+			sink := &waitExitMatrixSink{}
+			eventCh := make(chan events.Event)
+			promptDone := make(chan error)
+			turnEnd := events.Event{Event: "session.end", SessionID: "ses_order", Fields: map[string]any{"stop_reason": "error"}}
+			promptErr := errors.New("prompt: turn failed for session ses_order: 429 Too Many Requests, retry after 30")
+			go func() {
+				if promptFirst {
+					promptDone <- promptErr
+					time.Sleep(20 * time.Millisecond)
+					eventCh <- turnEnd
+					return
+				}
+				eventCh <- turnEnd
+				time.Sleep(20 * time.Millisecond)
+				promptDone <- promptErr
+			}()
+			result := WaitForSession(context.Background(), &cliFakeProvider{}, SessionWaitConfig{
+				SessionID: "ses_order", RunID: "run_order", EventCh: eventCh, PromptDone: promptDone,
+			}, SessionWaitDeps{Writer: sink, Stderr: io.Discard})
+			if result.ExitCode != 7 || result.StopReason != runtime.RateLimitedStopReason || result.RetryAfter != 30 {
+				t.Fatalf("result = (exit %d, %q, %ds), want (exit 7, rate_limited, 30s)",
+					result.ExitCode, result.StopReason, result.RetryAfter)
+			}
+			reasons := sink.terminalStopReasons()
+			if len(reasons) != 1 || reasons[0] != runtime.RateLimitedStopReason {
+				t.Fatalf("session.end stop reasons = %v, want [rate_limited]", reasons)
+			}
+			var classifiedFrom any
+			for _, event := range sink.events {
+				if event.Event == "session.end" {
+					classifiedFrom = event.Fields["classified_from"]
+				}
+			}
+			if classifiedFrom != "error" {
+				t.Fatalf("session.end classified_from = %v, want error", classifiedFrom)
+			}
+		})
+	}
+}
+
+// TestFailureText pins which terminal fields count as provider-owned failure
+// text. A claude-channel summary is model-authored prose, so it only counts
+// when it opens with a provider limit.
+func TestFailureText(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields map[string]any
+		want   string
+	}{
+		{name: "error_message", fields: map[string]any{"error_message": "429"}, want: "429"},
+		{name: "error", fields: map[string]any{"error": "boom"}, want: "boom"},
+		{name: "message", fields: map[string]any{"message": "rate limit"}, want: "rate limit"},
+		{name: "provider-shaped summary", fields: map[string]any{"summary": "429 Too Many Requests"}, want: "429 Too Many Requests"},
+		{name: "prose summary", fields: map[string]any{"summary": "returned 429 Too Many Requests"}, want: ""},
+		{name: "no text", fields: map[string]any{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := failureText(tt.fields); got != tt.want {
+				t.Fatalf("failureText(%v) = %q, want %q", tt.fields, got, tt.want)
 			}
 		})
 	}
@@ -2202,8 +2271,8 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 		},
 		{
 			// A provider turn error arrives after the session.end event has been
-			// forwarded (the real ordering for pi backend failures): the
-			// authoritative result still wins, but the error event must be
+			// consumed (the real ordering for pi backend failures): its text
+			// still joins the classification, and the error event must be
 			// written so the failure leaves a diagnostic in the event log.
 			name: "prompt failure after authoritative session end",
 			setup: func(cfg *SessionWaitConfig) {
@@ -2217,8 +2286,8 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 				cfg.EventCh = eventCh
 				cfg.PromptDone = promptDone
 			},
-			wantExitCode:    1,
-			wantStopReason:  "error",
+			wantExitCode:    7,
+			wantStopReason:  runtime.RateLimitedStopReason,
 			wantCancels:     1,
 			wantErrors:      1,
 			wantSessionEnds: 1,
@@ -2391,33 +2460,7 @@ func TestWaitForSessionExitMatrixPreservesForwardedAuthoritativeEndDuringTeardow
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			provider := &waitExitMatrixProvider{}
-			eventCh := make(chan events.Event, 3)
-			eventCh <- events.Event{
-				Event:     "agent.message_chunk",
-				SessionID: "ses_authoritative_teardown",
-				Fields:    map[string]any{"content": map[string]any{"text": "authoritative reply"}},
-			}
-			if tt.permissionFailure {
-				eventCh <- events.Event{
-					Event:     "permission.request",
-					SessionID: "ses_authoritative_teardown",
-					Fields: map[string]any{
-						"request_id": "req_authoritative_teardown",
-						"options": []any{
-							map[string]any{"optionId": "allow", "kind": "allow"},
-						},
-					},
-				}
-			}
-			eventCh <- events.Event{
-				Event:     "session.end",
-				SessionID: "ses_authoritative_teardown",
-				Fields: map[string]any{
-					"stop_reason": "refusal",
-					"usage":       map[string]any{"input_tokens": 7},
-				},
-			}
-
+			eventCh := make(chan events.Event)
 			cfg := SessionWaitConfig{
 				EventCh:    eventCh,
 				PromptDone: make(chan error),
@@ -2430,9 +2473,38 @@ func TestWaitForSessionExitMatrixPreservesForwardedAuthoritativeEndDuringTeardow
 			}
 			trigger := tt.trigger(cancel, &cfg, &deps, provider)
 			sink := &waitExitMatrixSink{}
-			var triggerOnce sync.Once
-			sink.onSessionEnd = func() { triggerOnce.Do(trigger) }
 			deps.Writer = sink
+			// Unbuffered sends return only once the event was consumed, so the
+			// teardown trigger fires after the terminal event is in hand and
+			// before the prompt settles.
+			go func() {
+				eventCh <- events.Event{
+					Event:     "agent.message_chunk",
+					SessionID: "ses_authoritative_teardown",
+					Fields:    map[string]any{"content": map[string]any{"text": "authoritative reply"}},
+				}
+				if tt.permissionFailure {
+					eventCh <- events.Event{
+						Event:     "permission.request",
+						SessionID: "ses_authoritative_teardown",
+						Fields: map[string]any{
+							"request_id": "req_authoritative_teardown",
+							"options": []any{
+								map[string]any{"optionId": "allow", "kind": "allow"},
+							},
+						},
+					}
+				}
+				eventCh <- events.Event{
+					Event:     "session.end",
+					SessionID: "ses_authoritative_teardown",
+					Fields: map[string]any{
+						"stop_reason": "refusal",
+						"usage":       map[string]any{"input_tokens": 7},
+					},
+				}
+				trigger()
+			}()
 
 			result := WaitForSession(ctx, provider, cfg, deps)
 			if result.ExitCode != 2 || result.StopReason != "refusal" {
@@ -3093,37 +3165,46 @@ func TestAutoAnswerGoroutineDoesNotBlockEventLoop(t *testing.T) {
 		t.Fatal("AnswerPermission was not called within 5 seconds")
 	}
 
-	// Now push session.end — this must drain even while AnswerPermission is blocked.
+	// Now push session.end followed by a chunk — both must drain even while
+	// AnswerPermission is blocked. The terminal event itself waits for the
+	// permission result, which can still reclassify it, so the chunk is the
+	// observable proof that the loop kept reading.
 	eventCh <- events.Event{
 		Event:     "session.end",
 		SessionID: "ses_1",
 		Fields:    map[string]any{"stop_reason": "end_turn"},
 	}
+	eventCh <- events.Event{
+		Event:     "agent.message_chunk",
+		SessionID: "ses_1",
+		Fields:    map[string]any{"content": map[string]any{"text": "post-end-drain-probe"}},
+	}
 	promptDone <- nil
 	close(eventCh)
 
-	// Confirm the loop is not wedged by verifying it reads the session.end.
+	// Confirm the loop is not wedged by verifying it reads the chunk.
 	// The goroutine cannot unblock (close(provider.unblockAnswer) below) until
-	// AFTER sessionEndSeen fires, so there is no race: the goroutine is held
-	// blocked in AnswerPermission for the entire duration of the poll.
-	sessionEndSeen := make(chan struct{})
+	// AFTER drained fires, so there is no race: the goroutine is held blocked
+	// in AnswerPermission for the entire duration of the poll.
+	drained := make(chan struct{})
 	go func() {
 		// Poll the event log briefly. Each iteration is 50ms; 50 iterations = 2.5s.
 		for i := 0; i < 50; i++ {
 			time.Sleep(50 * time.Millisecond)
 			data, _ := os.ReadFile(eventsPath)
-			if strings.Contains(string(data), "session.end") {
-				close(sessionEndSeen)
+			if strings.Contains(string(data), "post-end-drain-probe") {
+				close(drained)
 				return
 			}
 		}
 	}()
 
 	select {
-	case <-sessionEndSeen:
-		// Good — session.end was written while AnswerPermission was still blocked.
+	case <-drained:
+		// Good — events after session.end were written while AnswerPermission
+		// was still blocked.
 	case <-time.After(5 * time.Second):
-		t.Fatal("session.end was not written within 5 seconds; event loop appears blocked")
+		t.Fatal("events after session.end were not written within 5 seconds; event loop appears blocked")
 	}
 
 	// Unblock the goroutine and wait for the loop to finish.

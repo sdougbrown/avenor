@@ -582,6 +582,7 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 			return result, nil
 		}
 
+		deadline, _ := ctx.Deadline()
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
@@ -591,7 +592,7 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 				result.StopReason = "timeout"
 			}
 			return result, nil
-		case <-phaseRetryAfter(phaseconfig.BackoffDuration(retry - 1)):
+		case <-runtime.RetryWait(phaseRetryAfter, phaseconfig.BackoffDuration(retry-1), result.RetryAfter, deadline):
 		}
 
 		result, err = attemptFn(ctx)

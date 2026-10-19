@@ -2305,7 +2305,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			s.reportLifecycleError(child, retErr)
 			s.failSafeRunChildTransition(child, lifecycleFault{
 				exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
-				recordExit: true,
+				retryAfter: result.retryAfter, recordExit: true,
 			})
 			return
 		}
@@ -2335,7 +2335,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			s.reportLifecycleError(child, err)
 			s.failSafeRunChildTransition(child, lifecycleFault{
 				exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
-				recordExit: true,
+				retryAfter: result.retryAfter, recordExit: true,
 			})
 			return
 		}
@@ -2522,9 +2522,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			if probeCont.kind == contRetry {
 				continue
 			}
-			// contBackoff runs the backoff timer.
+			// contBackoff runs the backoff timer. A wait clamped to the run
+			// deadline yields no timer, leaving the context case to end the run.
 			select {
-			case <-time.After(backoffDelay(attempt)):
+			case <-runtime.RetryWait(time.After, backoffDelay(attempt), result.retryAfter, deadlineFromContext(ctx)):
 			case <-ctx.Done():
 				s.writeIdleContextEnd(child, ctx.Err())
 				return
@@ -2825,6 +2826,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				ExitCode:      result.ExitCode,
 				SessionID:     session.SessionID,
 				StopReason:    result.StopReason,
+				RetryAfter:    result.RetryAfter,
 				LoopDirective: result.LoopDirective,
 				LoopLabel:     result.LoopLabel,
 				BrokerRunID:   brokerRunID,
@@ -3110,6 +3112,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				ExitCode:      result.ExitCode,
 				SessionID:     session.SessionID,
 				StopReason:    result.StopReason,
+				RetryAfter:    result.RetryAfter,
 				LoopDirective: result.LoopDirective,
 				LoopLabel:     result.LoopLabel,
 				Output:        result.Output,

@@ -233,7 +233,7 @@ Example:
 {"event":"agent.status","session_id":"ses_xyz","phase":"working","label":"reading files","source":"avenor","ts":1234567890}
 ```
 
-**`session.end`** — Terminal record for the session. Always the last event in any run. Fields: `stop_reason`, optional `usage` (object with `input_tokens`, `output_tokens`, `total_tokens`, `cached_read_tokens` in snake_case), and optional complete `final_output` provided by the backend or synthesized by Avenor from the complete `agent.message_chunk` stream. Durable NDJSON retains that complete value. Status, inspection, control history, and subscriptions show bounded previews and set `final_output_truncated: true` when they omit text; `avenor_result` retrieves the complete reply.
+**`session.end`** — Terminal record for the session. Always the last event in any run. Fields: `stop_reason`, optional `usage` (object with `input_tokens`, `output_tokens`, `total_tokens`, `cached_read_tokens` in snake_case), optional `retry_after` (whole seconds, provider limit failures only), optional `classified_from` (the backend's own stop reason when Avenor reclassified a provider limit failure), and optional complete `final_output` provided by the backend or synthesized by Avenor from the complete `agent.message_chunk` stream. Durable NDJSON retains that complete value. Status, inspection, control history, and subscriptions show bounded previews and set `final_output_truncated: true` when they omit text; `avenor_result` retrieves the complete reply.
 
 Classifies as MILESTONE.
 
@@ -246,8 +246,9 @@ The `stop_reason` indicates *why* the session ended:
 - `"timeout"` — Avenor's client-side timeout fired. Usage is best-effort from the buffer at timeout.
 - `"cancelled"` — Avenor or the operator cancelled the session. Usage may be incomplete.
 - `"quota_exhausted"` — The provider refused the turn because the account's
-  usage quota is exhausted. Exit code `6`. The provider's message stays in
-  `error_message`.
+  usage quota is exhausted. Exit code `6`, and not retried. See
+  [Provider limit failures](#provider-limit-failures) for where the
+  provider's message lands.
 - `"rate_limited"` — The provider refused the turn because of a rate limit.
   Exit code `7`, and retryable by `--max-retries`. When the provider states
   how long to wait, `session.end` also carries `retry_after` (whole seconds).
@@ -297,11 +298,28 @@ reclassified. The classifier covers the shapes each backend forwards:
 | `codex-app-server` | The `turn/completed` failure message |
 | ACP backends | The prompt error text |
 | `opencode-http` | The provider error name, reported as the stop reason |
-| `claude-channel` | The failure summary on the terminal finish record |
+| `claude-channel` | The terminal finish record's `summary`, and only when the summary itself opens with the provider's limit wording; free-text model prose is ignored |
 
 The provider's retry-after hint is parsed from the same text (`try again in
-20s`, `retry-after: 30`, `resets in 2 minutes`) and reported as `retry_after`
+20s`, `retry-after: 30`, `resets in 2 hours`) and reported as `retry_after`
 in whole seconds. A value beyond a day is treated as absent.
+
+A rate-retry wait honors the hint: the CLI and the phase retry loops sleep at
+least `retry_after` (or the configured backoff, whichever is longer) and never
+past the run deadline.
+
+Classification runs once, after the turn settles, from the terminal event's
+own failure field plus the prompt error text, so the result does not depend on
+which arrived first. Where the provider's message lands depends on the path:
+
+- **The terminal event carried it.** The event keeps the field it arrived on
+  (`error_message`, `message`, or a provider-shaped `summary`); Avenor rewrites
+  only `stop_reason`. When the backend's own stop reason was replaced, the
+  original value stays visible in `classified_from`.
+- **Only the prompt error carried it.** No terminal event arrived, so Avenor
+  writes a `session.end` with just `stop_reason` (and `retry_after` when
+  present). The cause is on the `avenor.error` event whose `source` is
+  `"prompt"`.
 
 ## Launch identity
 

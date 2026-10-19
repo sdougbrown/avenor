@@ -863,6 +863,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 
 	resumeID := *resume
+	runDeadline, _ := runCtx.Deadline()
 	var result attemptResult
 	for attempt := 1; ; attempt++ {
 		if controlServer != nil {
@@ -909,7 +910,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 
 		select {
-		case <-retryAfter(backoffDelay(attempt)):
+		case <-runtime.RetryWait(retryAfter, backoffDelay(attempt), result.retryAfter, runDeadline):
 		case <-runCtx.Done():
 			if runCtx.Err() == context.DeadlineExceeded {
 				return exitWithSentinel(124)
@@ -1081,6 +1082,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	var finalRetryAfter int64
 	var promptFailureText string
 	var bufferedUsage map[string]any
+	// terminalEvent holds a consumed session.end until the prompt settles, so
+	// the classification sees both failure sources and the written stop reason
+	// never depends on which arrived first.
+	var terminalEvent *events.Event
+	terminalWritten := false
 	sessionEnded := false
 	promptReturned := false
 	var permissionDone <-chan permissionResult
@@ -1174,14 +1180,52 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		}
 		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, RetryAfter: finalRetryAfter, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
 	}
+	// flushTerminal classifies the settled turn and writes its authoritative
+	// session.end. The terminal event's provider text and the prompt error
+	// describe the same failure, so they are classified together once both have
+	// settled; neither arrival order decides the outcome.
+	flushTerminal := func() sessionResult {
+		if terminalEvent != nil && !terminalWritten {
+			event := *terminalEvent
+			text := failureText(event.Fields)
+			if promptFailureText != "" {
+				if text != "" {
+					text += " "
+				}
+				text += promptFailureText
+			}
+			if reason, retryAfter := runtime.ClassifyProviderLimit(finalStopReason, text); reason != "" {
+				if backend := finalStopReason; backend != "" && backend != reason {
+					// Keep the backend's own verdict visible next to the class
+					// Avenor adopted.
+					event.Fields["classified_from"] = backend
+				}
+				finalStopReason = reason
+				event.Fields["stop_reason"] = reason
+				if retryAfter > 0 {
+					event.Fields["retry_after"] = retryAfter
+					finalRetryAfter = retryAfter
+				}
+			}
+			if _, ok := event.Fields["final_output"]; !ok && fullReply.Len() > 0 {
+				event.Fields["final_output"] = fullReply.String()
+			}
+			if err := deps.Writer.Write(event); err != nil {
+				fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
+				return sessionResult{ExitCode: 1}
+			}
+			terminalWritten = true
+		}
+		return complete()
+	}
 	completeAuthoritativeAfterStop := func() (sessionResult, bool) {
 		if !sessionEnded {
 			return sessionResult{}, false
 		}
-		// Once the provider's terminal event has been forwarded, teardown may
+		// Once the provider's terminal event has been received, teardown may
 		// still need Cancel, but it must not supersede or duplicate that result.
 		stopProvider()
-		return complete(), true
+		return flushTerminal(), true
 	}
 	terminate := func(stopReason string) sessionResult {
 		// The termination branch owns the outcome unless the provider's terminal
@@ -1285,7 +1329,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		// If session.end + promptDone already arrived while we were waiting for
 		// AnswerPermission, exit now that the permission goroutine has resolved.
 		if finalStopReason != "" && promptReturned {
-			return complete(), true
+			return flushTerminal(), true
 		}
 		if eventChClosed && finalStopReason == "" {
 			return sessionResult{ExitCode: 1}, true
@@ -1308,7 +1352,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if finalStopReason == "" {
 					return sessionResult{ExitCode: 1}
 				}
-				return complete()
+				return flushTerminal()
 			}
 			if event.Event == "session.start" {
 				externalID, _ := event.Fields["conversation_id"].(string)
@@ -1463,40 +1507,21 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				continue
 			}
 			if event.Event == "session.end" {
+				event = events.Clone(event)
 				if event.Fields == nil {
 					event.Fields = map[string]any{}
 				}
 				finalStopReason, _ = event.Fields["stop_reason"].(string)
-				text := failureText(event.Fields)
-				if text == "" {
-					text = promptFailureText
+				terminalEvent = &event
+				sessionEnded = true
+				if promptReturned && permissionDone == nil {
+					return flushTerminal()
 				}
-				if reason, retryAfter := runtime.ClassifyProviderLimit(finalStopReason, text); reason != "" {
-					finalStopReason = reason
-					event.Fields["stop_reason"] = reason
-					if retryAfter == 0 {
-						retryAfter = retryAfterField(event.Fields)
-					}
-					if retryAfter > 0 {
-						event.Fields["retry_after"] = retryAfter
-						finalRetryAfter = retryAfter
-					}
-				} else if retryAfter := retryAfterField(event.Fields); retryAfter > 0 {
-					finalRetryAfter = retryAfter
-				}
-				if _, ok := event.Fields["final_output"]; !ok && fullReply.Len() > 0 {
-					event.Fields["final_output"] = fullReply.String()
-				}
+				continue
 			}
 			if err := deps.Writer.Write(event); err != nil {
 				fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
 				return sessionResult{ExitCode: 1}
-			}
-			if event.Event == "session.end" {
-				sessionEnded = true
-				if promptReturned && permissionDone == nil {
-					return complete()
-				}
 			}
 		case err := <-cfg.PromptDone:
 			promptReturned = true
@@ -1513,9 +1538,9 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				}
 				// The provider may be about to deliver the authoritative
 				// session.end: pi's retry exhaustion settles the turn right around
-				// the prompt error, and whichever arrives first decides the
-				// classification. Keep draining under a short grace window so the
-				// terminal event wins over a generic exit-1 fallback.
+				// the prompt error. Keep draining under a short grace window so the
+				// terminal event's provider text is classified with the prompt error
+				// instead of falling back to a generic exit-1 failure.
 				if cfg.EventCh != nil && settlementTimerC == nil {
 					settlementTimer := time.NewTimer(promptSettlementGrace)
 					defer settlementTimer.Stop()
@@ -1528,7 +1553,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				return sessionResult{ExitCode: 1}
 			}
 			if finalStopReason != "" && permissionDone == nil {
-				return complete()
+				return flushTerminal()
 			}
 		case <-settlementTimerC:
 			// The grace expired without an authoritative session.end. A provider
@@ -1574,30 +1599,20 @@ func cancelProvider(turn *ProviderTurn, writer EventSink, sessionID, runID, runL
 	}
 }
 
-// failureText returns the terminal error text a backend attached to
-// session.end. summary is included because the claude-channel failure status
-// carries its cause there.
+// failureText returns the terminal failure text a backend owns on session.end.
+// summary is model-authored prose on the claude-channel finish record, so it
+// only counts when it reports the provider limit itself rather than mentioning
+// one in passing.
 func failureText(fields map[string]any) string {
-	for _, key := range []string{"error_message", "error", "message", "summary"} {
+	for _, key := range []string{"error_message", "error", "message"} {
 		if text, _ := fields[key].(string); text != "" {
 			return text
 		}
 	}
-	return ""
-}
-
-// retryAfterField reads a provider-supplied retry-after hint in seconds.
-func retryAfterField(fields map[string]any) int64 {
-	switch value := fields["retry_after"].(type) {
-	case int:
-		return int64(value)
-	case int64:
-		return value
-	case float64:
-		return int64(value)
-	default:
-		return 0
+	if summary, _ := fields["summary"].(string); runtime.HasProviderLimitSignal(summary) {
+		return summary
 	}
+	return ""
 }
 
 func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string, retryAfter int64, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
