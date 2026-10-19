@@ -163,6 +163,9 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 }
 
 server.listen(socketPath, () => {
+  // A test that must prove no second child started records every started pid.
+  const spawnLog = process.env.AVENOR_TEST_SPAWN_LOG
+  if (spawnLog) fs.appendFileSync(spawnLog, `${process.pid}\n`)
   // Publication after the listen is what makes a launcher's first attach find a
   // stale or absent record; a delay widens that window for tests.
   const publishDelayMs = Number(process.env.AVENOR_TEST_OWNER_PUBLISH_DELAY ?? 0)

@@ -486,6 +486,28 @@ describe.skipIf(process.env.AVENOR_REAL_INTEGRATION === '1')('Owned start agains
     ;(Supervisor as any).instance = null
   })
 
+  it('refuses to replace a live supervisor whose record is gone', async () => {
+    const spawnLog = path.join(os.tmpdir(), `avenor-fake-spawns-${process.pid}.log`)
+    fs.rmSync(spawnLog, { force: true })
+    process.env.AVENOR_TEST_SPAWN_LOG = spawnLog
+    let sup: Supervisor | undefined
+    try {
+      sup = await Supervisor.get()
+      const socketPath = sup.supervisorId
+      fs.rmSync(`${socketPath}.owner.json`)
+      // Another process finding this path sees a live listener with no record.
+      ;(Supervisor as any).instance = null
+
+      await expect(Supervisor.get()).rejects.toBeInstanceOf(OwnerRecordMissingError)
+      expect(await probeControlSocket(socketPath)).toBe('live')
+      expect(fs.readFileSync(spawnLog, 'utf8').trim().split('\n')).toHaveLength(1)
+    } finally {
+      delete process.env.AVENOR_TEST_SPAWN_LOG
+      await sup?.close().catch(() => {})
+      fs.rmSync(spawnLog, { force: true })
+    }
+  })
+
   it('retries a predecessor record until the child publishes its own', async () => {
     const socketPath = path.join(socketsRoot(), `avenor-mcp-${process.pid}.sock`)
     fs.mkdirSync(socketsRoot(), { recursive: true, mode: 0o700 })
