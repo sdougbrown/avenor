@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/durablefile"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
@@ -91,7 +93,7 @@ func (h *FileHandler) Handle(ctx context.Context, provider runtime.Provider, eve
 		return Resolution{}, err
 	}
 	data = append(data, '\n')
-	if err := writeFileAtomic(requestPath, data, 0o600); err != nil {
+	if err := durablefile.WriteFileAtomic(requestPath, filepath.Base(requestPath)+".tmp-*", data, 0o600); err != nil {
 		return Resolution{}, err
 	}
 
@@ -248,14 +250,6 @@ func permissionOptionFromOptions(options any, optionID string) (bool, bool, erro
 		}
 	}
 	return false, false, fmt.Errorf("unknown permission option_id %q", optionID)
-}
-
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 func requestFromEvent(event events.Event) FileRequest {

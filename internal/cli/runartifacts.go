@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // atomicWriteHook, when non-nil, observes each successful atomic write by
@@ -118,25 +120,11 @@ func removePIDFile(path string, pid int) {
 }
 
 // writeFileAtomic writes text to path through a sibling tmp file, so a reader
-// never observes a partial file.
+// never observes a partial file, and reports the completed write to
+// atomicWriteHook.
 func writeFileAtomic(path, pattern, text string) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), pattern)
-	if err != nil {
-		return fmt.Errorf("create tmp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.WriteString(text); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("write tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("close tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename: %w", err)
+	if err := durablefile.WriteFileAtomic(path, pattern, []byte(text), 0o600); err != nil {
+		return err
 	}
 	if atomicWriteHook != nil {
 		atomicWriteHook(path)
