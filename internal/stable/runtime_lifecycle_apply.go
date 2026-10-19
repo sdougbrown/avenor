@@ -393,7 +393,7 @@ func (s *Supervisor) failSafeRunChildTransition(child *childRuntime, fault lifec
 		})
 	}
 	if fault.idleEnd {
-		eff = append(eff, lifecycleEffect{kind: effectEmitSessionEnd, exitCode: fault.exitCode, reason: fault.reason})
+		eff = append(eff, lifecycleEffect{kind: effectEmitSessionEnd, reason: fault.reason})
 	}
 	if fault.parkPath {
 		eff = append(eff, lifecycleEffect{kind: effectSignalCapacity})
@@ -442,7 +442,7 @@ func (s *Supervisor) executeDeferredLifecycleEffects(child *childRuntime, eff []
 		case effectReleaseTreeToken:
 			s.releaseChildTreeToken(child)
 		case effectEmitSessionEnd:
-			s.emitSessionEnd(child, e.exitCode, e.reason)
+			s.emitSessionEnd(child, e.reason)
 		case effectPublishCompletion:
 			child.complete(s, e.boundary)
 		case effectCloseDone:

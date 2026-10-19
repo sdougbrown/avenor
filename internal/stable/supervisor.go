@@ -344,7 +344,10 @@ type childRuntime struct {
 	unknownPhases     diagnote.Gate
 	pendingPermission bool
 	permission        map[string]any
-	directAttempt     *sessionAttempt
+	// runEnds records the sessions that already published a run-level terminal
+	// end, so a run publishes at most one per session.
+	runEnds       map[string]struct{}
+	directAttempt *sessionAttempt
 	// lc is the closed lifecycle state owned by the pure machine
 	// (runtime_lifecycle.go) and committed field by field by the adapter
 	// (runtime_lifecycle_apply.go). Read it through the field-specific
@@ -3855,11 +3858,16 @@ func (s *Supervisor) computeOutputFiles(runtimeID string) []string {
 	return output
 }
 
-func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReason string) {
+// emitSessionEnd publishes the run-level terminal end for a run that stopped
+// while no turn was in flight. It takes the same path as a turn's own
+// session.end: the fanout writer updates the child's presentation, feeds the
+// broker recorder, writes the durable sink and publishes the canonical event.
+// The writer tags the end end_kind=run so it is distinguishable from a turn's
+// own session end, and derives its exit code from the stop reason.
+func (s *Supervisor) emitSessionEnd(child *childRuntime, stopReason string) {
 	fields := map[string]any{
 		"stop_reason": stopReason,
 		"runtime_id":  child.id,
-		"exit_code":   exitCode,
 		"ts":          time.Now().UnixMilli(),
 	}
 	// Compute output file diff if pre-snapshot exists.
@@ -3867,11 +3875,13 @@ func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReaso
 	if len(outputFiles) > 0 {
 		fields["output_files"] = outputFiles
 	}
-	s.control.PublishEvent(events.Event{
+	if err := s.fanoutWriterLocked(child).writeRunEnd(events.Event{
 		Event:     "session.end",
 		SessionID: child.sessionID(),
 		Fields:    fields,
-	})
+	}); err != nil {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: write idle session.end for runtime %s: %v\n", child.id, err)
+	}
 }
 
 // stopReasonForCtxErr maps a run context error to the stop reason the idle
@@ -3904,10 +3914,10 @@ func idleEndFault(child *childRuntime, ctxErr error) lifecycleFault {
 // how the same end reports itself during an attempt: a deadline is a timeout
 // (timeout sentinel, timeout session.end) and a cancel is a kill (cancelled
 // sentinel, cancelled session.end). The exit code comes from the canonical
-// stop-reason mapping. The session.end is published straight to the control
-// plane, bypassing the fanout writer that records an attempt's session.end in
-// child state, so the terminal phase and stop reason are recorded here for
-// status and WaitTurn snapshots.
+// stop-reason mapping. The session.end flows through the child's fanout writer
+// like any other session end, so the recorder, the durable sink and the
+// control plane all see it; the writer owns its exit code and refuses a
+// second run-level end for the same session.
 func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
 	stopReason := stopReasonForCtxErr(ctxErr)
 	exitCode := runtime.ExitCodeForStopReason(stopReason)
@@ -4643,7 +4653,11 @@ func (s *Supervisor) fanoutWriterLocked(child *childRuntime) *runtimeFanoutWrite
 func (s *Supervisor) fanoutWriterForChildLocked(child *childRuntime) *runtimeFanoutWriter {
 	writer := child.fanoutWriter
 	if writer == nil {
-		writer = newRuntimeFanoutWriter(s, child, cli.NewEventMetadata(s.runID, child.label, child.id), nil)
+		// The fallback carries the same recorder and workflow metadata as an
+		// installed writer, so an end published before any attempt installed
+		// one still reaches the broker recording under the child's workflow
+		// identity.
+		writer = newRuntimeFanoutWriter(s, child, workflowEventMetadata(s, child), newRecorderFor(s, child.id))
 	}
 	return writer
 }
@@ -4707,6 +4721,50 @@ func (w *runtimeFanoutWriter) writeHoldingWriteLock(ev events.Event, diagnostics
 	return w.writeLocked(ev, diagnostics)
 }
 
+// writeRunEnd publishes a run-level terminal end. A session gets at most one,
+// and a child that never established a session publishes none: an empty
+// session_id identifies no session to end.
+func (w *runtimeFanoutWriter) writeRunEnd(ev events.Event) error {
+	if w.child == nil {
+		return w.Write(ev)
+	}
+	if w.beforeWriteLock != nil {
+		w.beforeWriteLock()
+	}
+	diagnostics := make([]error, 0, 2)
+	defer func() { reportLifecycleDiagnostics(w.supervisor, w.child, diagnostics) }()
+	w.child.writeMu.Lock()
+	defer w.child.writeMu.Unlock()
+	if ev.SessionID == "" || w.runEndPublished(ev.SessionID) {
+		return nil
+	}
+	if err := w.writeLockedRunEnd(ev, &diagnostics); err != nil {
+		return err
+	}
+	w.markRunEndPublished(ev.SessionID)
+	return nil
+}
+
+// runEndPublished reports whether a run-level end was already published for
+// sessionID. The caller holds writeMu; the record lives under child.mu.
+func (w *runtimeFanoutWriter) runEndPublished(sessionID string) bool {
+	w.child.mu.Lock()
+	defer w.child.mu.Unlock()
+	_, published := w.child.runEnds[sessionID]
+	return published
+}
+
+// markRunEndPublished records sessionID's one run-level end. The caller holds
+// writeMu.
+func (w *runtimeFanoutWriter) markRunEndPublished(sessionID string) {
+	w.child.mu.Lock()
+	defer w.child.mu.Unlock()
+	if w.child.runEnds == nil {
+		w.child.runEnds = make(map[string]struct{}, 1)
+	}
+	w.child.runEnds[sessionID] = struct{}{}
+}
+
 // reportLifecycleDiagnostics reports collected lifecycle errors outside all
 // locks. It is idempotent per call site: callers report each slice once. A
 // nil owner is an invariant violation, never a tolerated path: a
@@ -4754,6 +4812,34 @@ func (e unrecognizedPhaseDiagnostic) Error() string {
 // diagnostics slice before the event proceeds; publication is never suppressed
 // because of a lifecycle diagnostic.
 func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error) error {
+	return w.writeLockedTerminal(ev, diagnostics, false)
+}
+
+// writeLockedRunEnd publishes the run-level terminal end: the same
+// normalization as any other event, except that it is the one write allowed to
+// stamp end_kind.
+func (w *runtimeFanoutWriter) writeLockedRunEnd(ev events.Event, diagnostics *[]error) error {
+	return w.writeLockedTerminal(ev, diagnostics, true)
+}
+
+func (w *runtimeFanoutWriter) writeLockedTerminal(ev events.Event, diagnostics *[]error, runEnd bool) error {
+	// Every session.end carries the exit code its stop reason maps to. The
+	// stop reason is the classification the run reports through its sentinel
+	// and status, so it owns the code; a backend-supplied number never
+	// overrides it. Only the run-level writer tags end_kind, so a backend's own
+	// turn end cannot masquerade as the run's terminal record.
+	if ev.Event == "session.end" {
+		stopReason, _ := ev.Fields["stop_reason"].(string)
+		if ev.Fields == nil {
+			ev.Fields = map[string]any{}
+		}
+		ev.Fields["exit_code"] = runtime.ExitCodeForStopReason(stopReason)
+		if runEnd {
+			ev.Fields["end_kind"] = "run"
+		} else {
+			delete(ev.Fields, "end_kind")
+		}
+	}
 	// stamped is the lossless durable event (written to file/broker);
 	// presentation is the bounded copy for control/status surfaces.
 	stamped := cli.StampFanoutEvent(ev, w.runtimeID, w.metadata, w.control)

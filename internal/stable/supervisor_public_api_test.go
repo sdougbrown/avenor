@@ -888,6 +888,34 @@ func TestSupervisorPublicAPINaturalEndWithPendingPermission(t *testing.T) {
 	h.awaitStatus(rt, "done")
 }
 
+// TestSupervisorPublicAPIRecordsIdleEndInBroker proves an idle-time terminal
+// end reaches the same broker recording as a turn's own session.end: a run
+// cancelled in retry backoff records the terminal cancelled finish after the
+// failed attempt's error finish.
+func TestSupervisorPublicAPIRecordsIdleEndInBroker(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_broker_idle", itestSessionEnd("ses_broker_idle", "error", "")))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	rt := h.spawn(map[string]any{"max_retries": 1})
+	h.log.waitFor(t, "failed attempt session.end", itestStopReasonIs(rt, "error"))
+	if err := h.sup.RuntimeCancel(rt); err != nil {
+		t.Fatalf("RuntimeCancel: %v", err)
+	}
+	h.log.waitFor(t, "idle cancelled session.end", itestStopReasonIs(rt, "cancelled"))
+	// The attempt's own end recorded first; the idle end must be the last
+	// recording the broker holds for the runtime's run.
+	state := h.sup.broker.GetRun(rt)
+	if state == nil {
+		t.Fatalf("broker has no run for %s", rt)
+	}
+	state.Mu.Lock()
+	defer state.Mu.Unlock()
+	if len(state.Reports) == 0 || state.Reports[len(state.Reports)-1].State != "cancelled" {
+		t.Fatalf("broker last recording = %v, want the idle end's cancelled recording", state.Reports)
+	}
+}
+
 func TestSupervisorPublicAPIParkAndResume(t *testing.T) {
 	t.Parallel()
 	gate := newItestGate()

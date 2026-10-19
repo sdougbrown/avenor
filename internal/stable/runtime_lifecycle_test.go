@@ -480,7 +480,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			effects: []lifecycleEffect{
 				{kind: effectSetIdleEndData, exitCode: 130, reason: "cancelled"},
 				{kind: effectWriteSentinel, exitCode: 130, reason: "cancelled"},
-				{kind: effectEmitSessionEnd, exitCode: 130, reason: "cancelled"},
+				{kind: effectEmitSessionEnd, reason: "cancelled"},
 			},
 		},
 		{
@@ -494,7 +494,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			effects: []lifecycleEffect{
 				{kind: effectSetIdleEndData, exitCode: 130, reason: "cancelled"},
 				{kind: effectWriteSentinel, exitCode: 130, reason: "cancelled"},
-				{kind: effectEmitSessionEnd, exitCode: 130, reason: "cancelled"},
+				{kind: effectEmitSessionEnd, reason: "cancelled"},
 			},
 		},
 		{
@@ -510,7 +510,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			effects: []lifecycleEffect{
 				{kind: effectSetIdleEndData, exitCode: 124, reason: "timeout"},
 				{kind: effectWriteSentinel, exitCode: 124, reason: "timeout", sessionID: "ses_idle"},
-				{kind: effectEmitSessionEnd, exitCode: 124, reason: "timeout"},
+				{kind: effectEmitSessionEnd, reason: "timeout"},
 			},
 		},
 		{
@@ -773,7 +773,7 @@ func TestRuntimeLifecycleRepeats(t *testing.T) {
 			want := []lifecycleEffect{
 				{kind: effectSetIdleEndData, exitCode: 124, reason: "timeout"},
 				{kind: effectWriteSentinel, exitCode: 124, reason: "timeout"},
-				{kind: effectEmitSessionEnd, exitCode: 124, reason: "timeout"},
+				{kind: effectEmitSessionEnd, reason: "timeout"},
 			}
 			if !effectsEqual(eff, want) {
 				t.Fatalf("idleContextEnded repeat %d effects = %v", i, eff)
@@ -1744,7 +1744,7 @@ func TestRuntimeLifecycleIdleEndOverwrites(t *testing.T) {
 		wantEff := []lifecycleEffect{
 			{kind: effectSetIdleEndData, exitCode: want.exit, reason: want.reason},
 			{kind: effectWriteSentinel, exitCode: want.exit, reason: want.reason},
-			{kind: effectEmitSessionEnd, exitCode: want.exit, reason: want.reason},
+			{kind: effectEmitSessionEnd, reason: want.reason},
 		}
 		if !effectsEqual(eff, wantEff) {
 			t.Fatalf("idle end %d effects = %+v, want %+v", i, eff, wantEff)

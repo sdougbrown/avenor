@@ -8018,20 +8018,28 @@ func TestRunChildEventSeqMonotonicAcrossTurns(t *testing.T) {
 
 	ends := 0
 	var seqs []int64
+	var runEnds int
 	sink.mu.Lock()
 	for _, ev := range sink.events {
 		if ev.Event == "session.end" {
 			ends++
+			if kind, _ := ev.Fields["end_kind"].(string); kind == "run" {
+				runEnds++
+			}
 			if seq, ok := events.Int64(ev.Fields["seq"]); ok {
 				seqs = append(seqs, seq)
 			}
 		}
 	}
 	sink.mu.Unlock()
-	if ends != 2 {
-		t.Fatalf("captured %d session.end events, want 2", ends)
+	// The cancel ends the parked runtime through the idle-end path, which
+	// publishes the run's own terminal session.end (cancelled) to the same
+	// sink, tagged end_kind=run so it is distinguishable from the two turns'
+	// session ends.
+	if ends != 3 || runEnds != 1 {
+		t.Fatalf("captured %d session.end events (%d tagged as a run end), want 3 and one", ends, runEnds)
 	}
-	if len(seqs) != 2 || seqs[1] <= seqs[0] {
+	if len(seqs) != 3 || seqs[1] <= seqs[0] || seqs[2] <= seqs[1] {
 		t.Fatalf("session.end seqs across turns = %v, want strictly increasing", seqs)
 	}
 }
