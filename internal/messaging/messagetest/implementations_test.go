@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/messaging/hosthttp"
 	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
 	"github.com/sdougbrown/avenor/internal/messaging/internal/hostfixture"
@@ -45,13 +46,13 @@ func TestMessagingImplementations(t *testing.T) {
 	})
 }
 
-func runImplementation(t *testing.T, factory messagetest.TransportFactory, gate messagetest.AdmissionGate, senderRun, targetRun string) {
+func runImplementation(t *testing.T, factory messagetest.TransportFactory, store *askstore.Store, senderRun, targetRun string) {
 	t.Helper()
 	messagetest.RunTransportSuite(t, factory)
 	messagetest.RunFailureMatrix(t, factory)
 	messagetest.RunWithdrawFencesPausedSend(t,
 		factory(t, messaging.Identity{RunID: senderRun, Sender: "alice"}),
-		gate,
+		store,
 		messaging.Identity{RunID: senderRun, Sender: "alice"},
 		messaging.Identity{RunID: targetRun, Sender: "bob"},
 	)
