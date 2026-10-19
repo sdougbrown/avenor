@@ -198,10 +198,11 @@ func TestRunMemberFailureDoesNotCancelPeers(t *testing.T) {
 
 	var executed []string
 	var executedMu sync.Mutex
+	sink := &recordingEventWriter{}
 	result, err := Run(context.Background(), RunOptions{
 		WorkDir:   t.TempDir(),
 		RunID:     "test-run",
-		EventSink: discardEventWriter{},
+		EventSink: sink,
 		Config:    cfg,
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			executedMu.Lock()
@@ -222,6 +223,20 @@ func TestRunMemberFailureDoesNotCancelPeers(t *testing.T) {
 	// Both members should have been allowed to complete
 	if len(executed) != 2 {
 		t.Fatalf("expected 2 members executed, got %d: %v", len(executed), executed)
+	}
+	// Each member's phase.end must name that member's final attempt session so
+	// consumers can join the phase to the session.end carrying its final output.
+	sessionIDs := map[string]string{}
+	for _, ev := range sink.events {
+		if ev.Event == "avenor.phase.end" {
+			sessionIDs[ev.Fields["phase"].(string)], _ = ev.Fields["session_id"].(string)
+		}
+	}
+	if sessionIDs["security"] != "sec-s" {
+		t.Fatalf("security phase.end session_id = %q, want sec-s", sessionIDs["security"])
+	}
+	if sessionIDs["style"] != "style-s" {
+		t.Fatalf("style phase.end session_id = %q, want style-s", sessionIDs["style"])
 	}
 }
 

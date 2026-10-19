@@ -320,12 +320,15 @@ Emitted after each phase's session ends (before any backoff or retry).
   "iteration": 2,
   "run_kind": "loop",
   "stop_reason": "end_turn",
+  "session_id": "s_9f2c",
   "exit_marker": true,
   "exit_marker_label": "tests green"
 }
 ```
 
 The end event carries `run_kind` but not the section `kind`. One start/end pair covers every retry and requirement nudge of that phase invocation.
+
+`session_id` is the phase's final session; it matches `session_id` on that session's `session.end`, whose `final_output` is the phase's final message. Omitted when no session started.
 
 Marker fields appear only when a marker fired during the phase:
 
@@ -445,7 +448,7 @@ The `SpawnResult` returned by a loop spawn has an empty `SessionID`:
 }
 ```
 
-Loop phases each get their own session; those session IDs appear in the event stream (`avenor.phase.start`, `avenor.phase.end` events) rather than in the spawn result. Other stable operations (cancel, prompt, list) work on the runtime as a whole — you cancel the entire loop run, not an individual phase.
+Loop phases each get their own session; those session IDs appear in the event stream (`avenor.phase.end` events) rather than in the spawn result. Other stable operations (cancel, prompt, list) work on the runtime as a whole — you cancel the entire loop run, not an individual phase.
 
 ## Config validation
 

@@ -42,7 +42,7 @@ func EmitPhaseStart(w EventWriter, runID, phase string, iteration int, kind, run
 	})
 }
 
-func EmitPhaseEnd(w EventWriter, runID, phase string, iteration int, runKind, stopReason string, marker *LoopMarker) error {
+func EmitPhaseEnd(w EventWriter, runID, phase string, iteration int, runKind, stopReason, sessionID string, marker *LoopMarker) error {
 	fields := map[string]any{
 		"ts":          time.Now().UnixMilli(),
 		"phase":       phase,
@@ -52,6 +52,9 @@ func EmitPhaseEnd(w EventWriter, runID, phase string, iteration int, runKind, st
 	}
 	if runID != "" {
 		fields["run_id"] = runID
+	}
+	if sessionID != "" {
+		fields["session_id"] = sessionID
 	}
 	if marker != nil {
 		if marker.Directive == "abort" {

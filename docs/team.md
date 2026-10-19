@@ -346,11 +346,14 @@ Emitted after each phase's session ends (before any retry).
   "phase": "auth-tests",
   "iteration": 0,
   "run_kind": "team",
-  "stop_reason": "end_turn"
+  "stop_reason": "end_turn",
+  "session_id": "s_9f2c"
 }
 ```
 
 The end event carries `run_kind` but not the section `kind`. One start/end pair covers every retry of that member.
+
+`session_id` is the member's final session; it matches `session_id` on that session's `session.end`, whose `final_output` is the member's final message. Omitted when no session started.
 
 Abort marker fields appear when a member emitted an abort:
 

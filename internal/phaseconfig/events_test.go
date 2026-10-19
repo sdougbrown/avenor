@@ -25,9 +25,11 @@ func TestPhaseEventsCarryRunKind(t *testing.T) {
 		runKind     string
 		wantRunID   bool
 		wantSection string // section kind the start must keep
+		sessionID   string
+		wantSession bool
 	}{
-		{name: "loop run", runID: "run_1", runKind: "loop", wantRunID: true, wantSection: "pre"},
-		{name: "team run", runID: "run_2", runKind: "team", wantRunID: true, wantSection: "post"},
+		{name: "loop run", runID: "run_1", runKind: "loop", wantRunID: true, wantSection: "pre", sessionID: "ses_final", wantSession: true},
+		{name: "team run", runID: "run_2", runKind: "team", wantRunID: true, wantSection: "post", sessionID: "ses_final", wantSession: true},
 		{name: "empty run id still reports the run kind", runKind: "loop", wantSection: "loop"},
 	}
 	for _, tt := range tests {
@@ -37,7 +39,7 @@ func TestPhaseEventsCarryRunKind(t *testing.T) {
 				t.Fatalf("EmitPhaseStart: %v", err)
 			}
 			marker := &LoopMarker{Directive: "abort", Label: "stop-here"}
-			if err := EmitPhaseEnd(recorder, tt.runID, "code_review", 1, tt.runKind, "end_turn", marker); err != nil {
+			if err := EmitPhaseEnd(recorder, tt.runID, "code_review", 1, tt.runKind, "end_turn", tt.sessionID, marker); err != nil {
 				t.Fatalf("EmitPhaseEnd: %v", err)
 			}
 			if len(recorder.events) != 2 {
@@ -77,6 +79,9 @@ func TestPhaseEventsCarryRunKind(t *testing.T) {
 			}
 			if got := end.Fields["abort_marker_label"]; got != "stop-here" {
 				t.Errorf("end abort_marker_label = %v, want stop-here", got)
+			}
+			if got, ok := end.Fields["session_id"]; ok != tt.wantSession || (ok && got != tt.sessionID) {
+				t.Errorf("end session_id = %v (present %v), want %q (present %v)", got, ok, tt.sessionID, tt.wantSession)
 			}
 		})
 	}
