@@ -541,6 +541,28 @@ func waitForControlClientForTest(t *testing.T, cs *control.ControlServer) {
 	}
 }
 
+// TestNewEventWriterTightensEventLog pins the event log's owner-only mode: the
+// stream carries prompt and turn content, and a leftover file keeps its wider
+// mode through O_TRUNC unless the opened file is tightened.
+func TestNewEventWriterTightensEventLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("seed event log: %v", err)
+	}
+	writer, err := NewEventWriter(path)
+	if err != nil {
+		t.Fatalf("NewEventWriter: %v", err)
+	}
+	defer writer.Close()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat event log: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("event log mode = %o, want 0600", got)
+	}
+}
+
 func TestWaitForSessionAutoApproveAnswersAllowKindAndOrdersEvents(t *testing.T) {
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.ndjson")
