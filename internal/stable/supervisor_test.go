@@ -7648,6 +7648,35 @@ func TestLocalExecutionWithoutMessagingRegistration(t *testing.T) {
 	}
 }
 
+// TestBrokerAskWithStoppedBroker pins the degraded state a supervisor reaches
+// when its broker stopped but its transport is still wired: the ask is admitted
+// by the in-process transport instead of failing fast, and the abandoned wait
+// reports a typed possibly-pending error.
+func TestBrokerAskWithStoppedBroker(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	if _, err := b.CreateRun("target", ""); err != nil {
+		t.Fatalf("create target run: %v", err)
+	}
+	sup := newBrokerSupervisor(t, b)
+	if err := b.Stop(); err != nil {
+		t.Fatalf("stop broker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := sup.BrokerAsk(ctx, "target", "question", "agent")
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if askErr.Outcome != messaging.OutcomePossiblyPending || askErr.Pending {
+		t.Fatalf("ask outcome = %q (pending %v), want a retracted possibly-pending ask", askErr.Outcome, askErr.Pending)
+	}
+}
+
 // startBrokerPrimeAndStop starts a real broker, hands the broker and a fresh
 // supervisor to prime for connection-pool setup, stops the broker, and returns
 // the supervisor for calls against the stopped broker.
