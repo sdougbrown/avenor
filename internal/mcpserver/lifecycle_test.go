@@ -883,6 +883,57 @@ func TestLifecycleShutdownIsIdempotentAfterChildExit(t *testing.T) {
 	}
 }
 
+// TestAuthenticateOwnChildRefusesAnotherOwnerRecord proves the capability is
+// presented only when the record on the path names this launcher's child: a
+// winner that rebound the path receives no credential byte.
+func TestAuthenticateOwnChildRefusesAnotherOwnerRecord(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "mcp-own-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "own.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	presented := make(chan struct{}, 1)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				if _, err := c.Read(make([]byte, 1)); err == nil {
+					presented <- struct{}{}
+				}
+			}(conn)
+		}
+	}()
+	cap, err := control.GenerateOwnerCapability()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeOwnerRecord(t, socket, cap, os.Getpid()+1)
+
+	cl, err := client.Dial(socket)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cl.Close()
+	if err := authenticateOwnChild(cl, socket, os.Getpid()); !isOwnerRecordError(err) {
+		t.Fatalf("authenticateOwnChild = %v, want a retryable record error", err)
+	}
+	select {
+	case <-presented:
+		t.Fatal("presented another owner's capability to this launcher's child")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestStartSupervisorExitsDuringStartup(t *testing.T) {
 	tmpDir := t.TempDir()
 	socketPath := filepath.Join(tmpDir, "exit-test.sock")

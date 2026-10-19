@@ -19,6 +19,14 @@ func publishOwnerRecordForStub(t *testing.T, socketPath string) control.OwnerCap
 	if err != nil {
 		t.Fatal(err)
 	}
+	writeOwnerRecord(t, socketPath, cap, os.Getpid())
+	return cap
+}
+
+// writeOwnerRecord publishes cap beside socketPath as ownerPID's record, which
+// lets a test pose as another process's owner.
+func writeOwnerRecord(t *testing.T, socketPath string, cap control.OwnerCapability, ownerPID int) {
+	t.Helper()
 	info, err := os.Lstat(socketPath)
 	if err != nil {
 		t.Fatalf("stat stub socket: %v", err)
@@ -33,7 +41,7 @@ func publishOwnerRecordForStub(t *testing.T, socketPath string) control.OwnerCap
 		SocketIdentity: control.SocketIdentity{Dev: strconv.FormatUint(uint64(st.Dev), 10), Ino: strconv.FormatUint(st.Ino, 10)},
 		CapabilityID:   cap.ID,
 		Secret:         cap.Secret,
-		OwnerPID:       os.Getpid(),
+		OwnerPID:       ownerPID,
 	}
 	body, err := json.Marshal(record)
 	if err != nil {
@@ -42,7 +50,6 @@ func publishOwnerRecordForStub(t *testing.T, socketPath string) control.OwnerCap
 	if err := os.WriteFile(control.OwnerRecordPath(socketPath), body, 0o600); err != nil {
 		t.Fatalf("write stub owner record: %v", err)
 	}
-	return cap
 }
 
 // ownerAuthResponse answers an authenticate_owner request as cap would.

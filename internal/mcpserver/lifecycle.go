@@ -216,7 +216,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 						// probe proves this particular connection still reaches it, and
 						// the owner capability is loaded and presented on that same
 						// connection so this attempt can never authenticate as a winner.
-						authErr := authenticateOwnChild(cl, socketPath)
+						authErr := authenticateOwnChild(cl, socketPath, cmd.Process.Pid)
 						if authErr == nil {
 							select {
 							case <-exited:
@@ -233,16 +233,24 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 						}
 						_ = cl.Close()
 						if !isOwnerRecordError(authErr) {
-							// This child's own record was rejected: a real fault, so settle
-							// the attempt and reap only the child we captured.
+							// The identity-matched connection refused this child, so no
+							// capability of this attempt's was presented. Retire the child
+							// we spawned and attach the owner that holds the path through
+							// its own record; a genuine fault in this child fails the same
+							// way once it is settled.
 							if cmd.Process != nil {
 								_ = cmd.Process.Kill()
 								<-exited
 							}
+							if isOwnerCapabilityRejection(authErr) {
+								if winner, err := attachWinner(socketPath); err == nil {
+									return winner, nil
+								}
+							}
 							return nil, fmt.Errorf("authenticate owned supervisor %s: %w", socketPath, authErr)
 						}
-						// The published record is not this child's yet. That is the
-						// ordinary replacement window, so retry until the deadline.
+						// The record published on the path is not this child's yet. That
+						// is the ordinary replacement window, so retry until the deadline.
 					} else if identityErr == nil {
 						// A replacement won the path after readiness. Retire the child
 						// we spawned before attaching; it may still be running with its
@@ -365,15 +373,21 @@ func isOwnerRecordError(err error) bool {
 
 // authenticateOwnChild authenticates the connection that proved this attempt's
 // identity token with the record that child published before the token became
-// observable. A record that does not describe the live socket is reported as a
-// retryable error, never as a rejection.
-func authenticateOwnChild(cl *client.Client, socketPath string) error {
+// observable. A record that does not describe the live socket, or that names
+// another owner, is reported as a retryable error, never as a rejection.
+func authenticateOwnChild(cl *client.Client, socketPath string, childPID int) error {
 	record, err := control.LoadOwnerRecord(socketPath)
 	if err != nil {
 		return err
 	}
 	if err := client.ValidateOwnerRecord(socketPath, record); err != nil {
 		return err
+	}
+	if record.OwnerPID != childPID {
+		// A winner rebound the path between the identity probe and this attach.
+		// Presenting its capability would hand the winner's secret to this
+		// launcher's own child.
+		return fmt.Errorf("%w: %s is owned by pid %d, not this launcher's child %d", control.ErrStaleOwnerRecord, socketPath, record.OwnerPID, childPID)
 	}
 	return cl.AuthenticateOwner(control.OwnerCapability{ID: record.CapabilityID, Secret: record.Secret})
 }
