@@ -767,6 +767,9 @@ export function dial(
       // deadline, because an unconnected socket emits neither event.
       timer = setTimeout(() => {
         cleanup()
+        // cleanup() drops the real error listener, and destroy() can still emit a
+        // connect error that was already queued.
+        socket.on('error', () => {})
         socket.destroy()
         reject(new CallTimeoutError(`dial control socket: timed out after ${opts.connectTimeoutMs}ms`))
       }, opts.connectTimeoutMs)
