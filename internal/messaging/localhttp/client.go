@@ -165,6 +165,10 @@ func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messag
 		if t.IsClosed() && httpbase.IsTransportCancelled(err) {
 			return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
 		}
+		// A connection refused before any byte was written never carried the wait.
+		if httpbase.NeverTransmitted(err) {
+			return messaging.WaitResult{Outcome: messaging.OutcomeNotSent}, err
+		}
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, err
 	}
 	body, err := envelopeOf(status, raw)
@@ -300,7 +304,7 @@ func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (
 	// that act on them, and limit leaves the excess queued for the next poll.
 	status, raw, err := t.roundTrip(ctx, http.MethodPost, pathPoll, req.Timeout, map[string]any{
 		"agent_only": true,
-		"limit":      req.Limit,
+		"limit":      messaging.ReceiveLimit(req.Limit),
 	})
 	if err != nil {
 		return messaging.ReceiveResult{}, err

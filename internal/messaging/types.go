@@ -92,6 +92,19 @@ type ReceiveRequest struct {
 	Limit      int
 }
 
+// DefaultReceiveLimit bounds a Receive that does not name a limit, so an absent
+// or zero limit never drains an unbounded queue.
+const DefaultReceiveLimit = 32
+
+// ReceiveLimit resolves an absent, zero or negative Receive limit to
+// DefaultReceiveLimit.
+func ReceiveLimit(limit int) int {
+	if limit <= 0 {
+		return DefaultReceiveLimit
+	}
+	return limit
+}
+
 // ReceiveResult carries drained inbound messages.
 type ReceiveResult struct {
 	Messages   []InboundMessage

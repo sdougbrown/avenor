@@ -63,11 +63,18 @@ func RunFailureMatrix(t *testing.T, newTransport TransportFactory) {
 			t.Skip("transport has no pluggable round tripper")
 		}
 		setter.SetTransport(refusedDial{})
+		msgID := mint(t)
 		res, err := tr.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: mint(t), Generation: pre.Generation, Body: `{"message":"ping"}`,
+			From: alice, To: bob, MessageID: msgID, Generation: pre.Generation, Body: `{"message":"ping"}`,
 		})
 		if err == nil || res.Outcome != messaging.OutcomeNotSent {
 			t.Fatalf("Send = (%+v, %v), want not-sent for a refused dial", res, err)
+		}
+		waited, err := tr.Wait(t.Context(), messaging.WaitRequest{
+			Sender: alice, MessageID: msgID, Generation: pre.Generation, Timeout: time.Second,
+		})
+		if err == nil || waited.Outcome != messaging.OutcomeNotSent {
+			t.Fatalf("Wait = (%+v, %v), want not-sent for a refused dial", waited, err)
 		}
 	})
 

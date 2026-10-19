@@ -494,8 +494,10 @@ func TestLocalWireFixture(t *testing.T) {
 	credsB := credentials(t, b, bob)
 	addr := b.Addr()
 
-	// build renders one request from the fields the document declares for op,
-	// so a declared field the router stops accepting fails here.
+	// build renders every field the document declares for op, so the fixture
+	// pins that the router accepts the declared request shape and returns every
+	// declared response field. The router ignores unknown JSON fields, so a
+	// field it silently stops reading is not caught here.
 	values := map[string]any{
 		"run_id": credsA.RunID, "token": credsA.Token,
 		"from_run_id": alice.RunID, "to_run_id": bob.RunID, "type": "agent_message",

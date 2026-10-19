@@ -97,11 +97,7 @@ func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (
 	if err := t.open(req.Generation); err != nil {
 		return messaging.ReceiveResult{}, err
 	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 32
-	}
-	msgs, err := t.store.Receive(req.Sender.RunID, limit)
+	msgs, err := t.store.Receive(req.Sender.RunID, messaging.ReceiveLimit(req.Limit))
 	return messaging.ReceiveResult{Messages: msgs, Generation: t.store.Generation()}, err
 }
 

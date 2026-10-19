@@ -664,15 +664,8 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 		}
 		st.Mu.Lock()
 	}
-	msgs := st.ControlQueue
-	st.ControlQueue = nil
-	if body.AgentOnly {
-		msgs, st.ControlQueue = partitionAgentMessages(msgs)
-	}
-	if body.Limit > 0 && len(msgs) > body.Limit {
-		st.ControlQueue = append(msgs[body.Limit:], st.ControlQueue...)
-		msgs = msgs[:body.Limit]
-	}
+	msgs, queued := partitionDrained(st.ControlQueue, body.AgentOnly, body.Limit)
+	st.ControlQueue = queued
 	if len(st.ControlQueue) > 0 {
 		st.signalLocked()
 	}
@@ -1194,23 +1187,39 @@ func (b *Broker) PollAgentMessages(ctx context.Context, runID string, onMessage 
 	}
 }
 
-// DrainAgentMessages returns and clears the agent_message control messages
-// queued for runID (asks / sends from peers). Non-agent control messages are
-// left untouched so other consumers still see them.
-func (b *Broker) DrainAgentMessages(runID string) ([]ControlMessage, error) {
+// DrainAgentMessages returns and clears at most limit agent_message control
+// messages queued for runID (asks / sends from peers). A non-positive limit
+// drains every agent message. Other control messages, and the agent messages a
+// limit leaves behind, stay queued in their original order.
+func (b *Broker) DrainAgentMessages(runID string, limit int) ([]ControlMessage, error) {
 	st := b.GetRun(runID)
 	if st == nil {
 		return nil, fmt.Errorf("run not found: %s", runID)
 	}
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
-	agent, rest := partitionAgentMessages(st.ControlQueue)
+	agent, rest := partitionDrained(st.ControlQueue, true, limit)
 	st.ControlQueue = rest
 	out := make([]ControlMessage, 0, len(agent))
 	for _, msg := range agent {
 		out = append(out, *msg)
 	}
 	return out, nil
+}
+
+// partitionDrained splits a control queue into the entries a consumer drains
+// and the entries that stay queued in their original order. agentOnly limits
+// the drain to agent messages; a non-positive limit drains every eligible
+// entry.
+func partitionDrained(queue []*ControlMessage, agentOnly bool, limit int) (drained, queued []*ControlMessage) {
+	for _, msg := range queue {
+		if (!agentOnly || msg.Type == "agent_message") && (limit <= 0 || len(drained) < limit) {
+			drained = append(drained, msg)
+			continue
+		}
+		queued = append(queued, msg)
+	}
+	return drained, queued
 }
 
 // partitionAgentMessages splits a control queue into the agent messages a drain
@@ -1403,7 +1412,7 @@ func (x brokerBackend) Publish(target string, msg messaging.InboundMessage) (fun
 }
 
 func (x brokerBackend) Receive(sender string, limit int) ([]messaging.InboundMessage, error) {
-	msgs, err := x.broker.DrainAgentMessages(sender)
+	msgs, err := x.broker.DrainAgentMessages(sender, limit)
 	if err != nil {
 		return nil, err
 	}

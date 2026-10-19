@@ -143,6 +143,28 @@ func TestAskMintsVersionedID(t *testing.T) {
 	}
 }
 
+func TestAskAdoptsThePayloadID(t *testing.T) {
+	tr := &scriptedTransport{
+		generation:  "gen-1",
+		sendResults: []messaging.SendResult{{Outcome: messaging.OutcomeSent, Generation: "gen-1"}},
+		waitResults: []messaging.WaitResult{{Outcome: messaging.OutcomeTimedOut}},
+	}
+	req := sendRequest("")
+	req.Body = `{"id":"payload-id","message":"ping"}`
+	client := New(tr, Options{})
+	res, err := client.Ask(context.Background(), req, waitRequest(""))
+	var askErr *Error
+	if !errors.As(err, &askErr) || askErr.Outcome != messaging.OutcomeTimedOut {
+		t.Fatalf("Ask error = %v", err)
+	}
+	if res.MessageID != "payload-id" || tr.lastSend.MessageID != "payload-id" {
+		t.Fatalf("ask id = (%q, %q), want the payload id", res.MessageID, tr.lastSend.MessageID)
+	}
+	if tr.lastWait.MessageID != "payload-id" {
+		t.Fatalf("wait id = %q, want the payload id", tr.lastWait.MessageID)
+	}
+}
+
 func TestAskClassifications(t *testing.T) {
 	cases := []struct {
 		name    string

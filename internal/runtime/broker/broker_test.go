@@ -2721,48 +2721,65 @@ func TestBrokerDrainAgentMessages(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("receiver", "")
-	if err != nil {
+	if _, err := b.CreateRun("receiver", ""); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	_ = token
-	senderToken, err := b.CreateRun("sender", "")
+	senderToken, err := b.CreateRun("sender", "sender-display")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
 
-	// Send an ask targeting the receiver.
-	sendAsk(t, b.Addr(), senderToken, "sender", "receiver", "drain-ask", "hello from subagent")
+	askIDs := []string{mintMsgID(t, time.Minute), mintMsgID(t, time.Minute), mintMsgID(t, time.Minute)}
+	for _, askID := range askIDs {
+		if status, body := postBroker(t, b.Addr(), "send", askBody(senderToken, "sender", "receiver", askID, b.Store().Generation())); status != http.StatusOK {
+			t.Fatalf("sendAsk %s = (%d, %v)", askID, status, body)
+		}
+	}
 
 	// Also queue a non-agent control message to verify it is not drained.
 	b.PushControl("receiver", ControlMessage{ID: "ctrl-keep", Type: "continue", RunID: "receiver"})
 
-	// Drain agent messages for the receiver.
-	msgs, err := b.DrainAgentMessages("receiver")
+	// The backend caps the drain at the limit and reports the registered name.
+	first, err := b.Store().Receive("receiver", 2)
+	if err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	if len(first) != 2 || first[0].MessageID != askIDs[0] || first[1].MessageID != askIDs[1] {
+		t.Fatalf("Receive = %+v, want the first two agent messages", first)
+	}
+	for _, msg := range first {
+		if msg.Sender != "sender-display" {
+			t.Errorf("Sender = %q, want the registered display name", msg.Sender)
+		}
+		if msg.FromRunID != "sender" || msg.Kind != "agent_message" {
+			t.Errorf("received message = %+v", msg)
+		}
+	}
+
+	// The agent message the limit left behind and the control message stay
+	// queued, in their original order.
+	msgs, err := b.DrainAgentMessages("receiver", 0)
 	if err != nil {
 		t.Fatalf("DrainAgentMessages: %v", err)
 	}
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 agent message, got %d", len(msgs))
-	}
-	if msgs[0].FromRunID != "sender" {
-		t.Errorf("FromRunID = %q, want sender", msgs[0].FromRunID)
-	}
-	if msgs[0].Type != "agent_message" {
-		t.Errorf("Type = %q, want agent_message", msgs[0].Type)
+	if len(msgs) != 1 || msgs[0].ID != askIDs[2] {
+		t.Fatalf("unlimited drain = %+v, want the agent message the limit left queued", msgs)
 	}
 
-	// The non-agent control message must remain.
 	st := b.GetRun("receiver")
 	st.Mu.Lock()
 	remaining := len(st.ControlQueue)
+	remainingID := ""
+	if remaining > 0 {
+		remainingID = st.ControlQueue[0].ID
+	}
 	st.Mu.Unlock()
-	if remaining != 1 {
-		t.Errorf("expected 1 non-agent control message to remain, got %d", remaining)
+	if remaining != 1 || remainingID != "ctrl-keep" {
+		t.Errorf("queue after the drains = (%d, %q), want only ctrl-keep", remaining, remainingID)
 	}
 
 	// Draining again yields nothing.
-	msgs2, err := b.DrainAgentMessages("receiver")
+	msgs2, err := b.DrainAgentMessages("receiver", 0)
 	if err != nil {
 		t.Fatalf("drain again: %v", err)
 	}
@@ -3059,6 +3076,23 @@ func TestLocalRouterEnvelopeRouting(t *testing.T) {
 		t.Fatal("conflicting send admitted an ask")
 	}
 
+	// Equal ids are the same id, not a conflict: the ask is admitted and
+	// delivered under it.
+	equalID := mintMsgID(t, time.Minute)
+	equal := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"id":%q,"from":"display-name","message":"equal"}}`,
+		senderToken, gen, equalID, equalID)
+	if status, body := postBroker(t, addr, "send", equal); status != http.StatusOK {
+		t.Fatalf("equal-id send = (%d, %v), want 200", status, body)
+	}
+	if queued := b.Store().Pending("envelope_sender", equalID); !queued {
+		t.Fatal("equal-id ask did not land under its id")
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["id"] != equalID {
+		t.Fatalf("equal-id poll = %v", polled)
+	}
+
 	// The display name is bound to the token that authenticated the run: naming
 	// someone else is refused, and naming nobody takes the registered name.
 	mismatch := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
@@ -3122,9 +3156,10 @@ func TestLocalRouterEnvelopeRouting(t *testing.T) {
 	}
 }
 
-// TestLocalPollControlAgentOnlyKeepsControlMessages pins that an
-// agent-message-only drain leaves other control messages queued.
-func TestLocalPollControlAgentOnlyKeepsControlMessages(t *testing.T) {
+// TestLocalPollControlAgentOnlyRespectsLimit pins that an agent-message-only
+// drain leaves control messages queued, and that a limit caps the drained agent
+// messages while the excess keeps its place in the queue.
+func TestLocalPollControlAgentOnlyRespectsLimit(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -3144,21 +3179,26 @@ func TestLocalPollControlAgentOnlyKeepsControlMessages(t *testing.T) {
 	if err := b.PushControl("drain_target", ControlMessage{ID: "ctrl-1", Type: "interrupt", RunID: "drain_target"}); err != nil {
 		t.Fatalf("PushControl: %v", err)
 	}
-	askID := mintMsgID(t, time.Minute)
-	ask := fmt.Sprintf(`{"run_id":"drain_sender","token":%q,"from_run_id":"drain_sender",
-		"to_run_id":"drain_target","type":"agent_message","generation":%q,"message_id":%q,
-		"expects_reply":true,"payload":{"message":"ping"}}`, senderToken, b.Store().Generation(), askID)
-	if status, body := postBroker(t, addr, "send", ask); status != http.StatusOK {
-		t.Fatalf("send = (%d, %v)", status, body)
+	askIDs := []string{mintMsgID(t, time.Minute), mintMsgID(t, time.Minute)}
+	for _, askID := range askIDs {
+		ask := fmt.Sprintf(`{"run_id":"drain_sender","token":%q,"from_run_id":"drain_sender",
+			"to_run_id":"drain_target","type":"agent_message","generation":%q,"message_id":%q,
+			"expects_reply":true,"payload":{"message":"ping"}}`, senderToken, b.Store().Generation(), askID)
+		if status, body := postBroker(t, addr, "send", ask); status != http.StatusOK {
+			t.Fatalf("send = (%d, %v)", status, body)
+		}
 	}
 
-	polled := pollAgentMessages(t, addr, "drain_target", targetToken)
-	if len(polled) != 1 || polled[0]["id"] != askID {
-		t.Fatalf("agent-only poll = %v, want only the agent message", polled)
+	polled := pollControl(t, addr, fmt.Sprintf(
+		`{"run_id":"drain_target","token":%q,"agent_only":true,"limit":1}`, targetToken))
+	if len(polled) != 1 || polled[0]["id"] != askIDs[0] {
+		t.Fatalf("agent-only poll = %v, want the first agent message", polled)
 	}
+	// The control message was queued first, so it stays ahead of the agent
+	// message the limit left behind.
 	rest := pollAllMessages(t, addr, "drain_target", targetToken)
-	if len(rest) != 1 || rest[0]["id"] != "ctrl-1" {
-		t.Fatalf("control message did not survive the agent-only drain: %v", rest)
+	if len(rest) != 2 || rest[0]["id"] != "ctrl-1" || rest[1]["id"] != askIDs[1] {
+		t.Fatalf("queue after the limited drain = %v, want the original order", rest)
 	}
 }
 

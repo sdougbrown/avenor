@@ -88,13 +88,20 @@ func (e *Error) Pending() bool { return e.Outcome == messaging.OutcomePossiblyPe
 func (c *Client) Ask(ctx context.Context, send messaging.SendRequest, wait messaging.WaitRequest) (AskResult, error) {
 	result := AskResult{MessageID: send.MessageID, Generation: send.Generation}
 	if result.MessageID == "" {
-		msgID, err := messaging.NewMsgID(c.now(), time.Time{})
-		if err != nil {
-			result.Outcome = messaging.OutcomeNotSent
-			return result, &Error{Outcome: result.Outcome, Err: err}
+		// A body that names its own id keeps it, so the envelope id the
+		// transport sends never disagrees with the payload id.
+		if id := bodyMessageID(send.Body); id != "" {
+			result.MessageID = id
+			send.MessageID = id
+		} else {
+			msgID, err := messaging.NewMsgID(c.now(), time.Time{})
+			if err != nil {
+				result.Outcome = messaging.OutcomeNotSent
+				return result, &Error{Outcome: result.Outcome, Err: err}
+			}
+			result.MessageID = msgID
+			send.MessageID = msgID
 		}
-		result.MessageID = msgID
-		send.MessageID = msgID
 	}
 	if send.Generation == "" {
 		pre, err := c.transport.Preflight(ctx)
@@ -139,6 +146,18 @@ func (c *Client) Ask(ctx context.Context, send messaging.SendRequest, wait messa
 		return result, &Error{MessageID: result.MessageID, Outcome: result.Outcome, Err: err}
 	}
 	return result, nil
+}
+
+// bodyMessageID reports the id an ask body carries, so a minted envelope id
+// never disagrees with the payload id.
+func bodyMessageID(body string) string {
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal([]byte(body), &payload) != nil {
+		return ""
+	}
+	return payload.ID
 }
 
 // Withdraw withdraws an ask and returns its terminal fence.

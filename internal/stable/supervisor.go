@@ -2144,7 +2144,7 @@ func (s *Supervisor) BrokerReceive() (any, error) {
 		return nil, fmt.Errorf("broker not available")
 	}
 	runID, _ := s.registerBrokerRun()
-	msgs, err := s.broker.DrainAgentMessages(runID)
+	msgs, err := s.broker.DrainAgentMessages(runID, 0)
 	if err != nil {
 		return nil, err
 	}

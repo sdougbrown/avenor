@@ -127,6 +127,39 @@ func RunTransportSuite(t *testing.T, newTransport TransportFactory) {
 		}
 	})
 
+	t.Run("zero limit takes the default", func(t *testing.T) {
+		ids := make([]string, messaging.DefaultReceiveLimit+1)
+		for i := range ids {
+			ids[i] = mint(t, time.Minute)
+			if _, err := at.Send(t.Context(), messaging.SendRequest{
+				From: alice, To: bob, MessageID: ids[i], Generation: pre.Generation, Body: `{"message":"ping"}`,
+			}); err != nil {
+				t.Fatalf("Send %d: %v", i, err)
+			}
+		}
+		first, err := bt.Receive(t.Context(), messaging.ReceiveRequest{
+			Sender: bob, Generation: bpre.Generation, Limit: 0,
+		})
+		if err != nil {
+			t.Fatalf("Receive: %v", err)
+		}
+		if len(first.Messages) != messaging.DefaultReceiveLimit {
+			t.Fatalf("Receive with no limit returned %d messages, want %d", len(first.Messages), messaging.DefaultReceiveLimit)
+		}
+		if first.Messages[0].MessageID != ids[0] || first.Messages[len(first.Messages)-1].MessageID != ids[messaging.DefaultReceiveLimit-1] {
+			t.Fatalf("Receive with no limit = %+v, want the first %d in order", first.Messages, messaging.DefaultReceiveLimit)
+		}
+		last, err := bt.Receive(t.Context(), messaging.ReceiveRequest{
+			Sender: bob, Generation: bpre.Generation, Limit: 0,
+		})
+		if err != nil {
+			t.Fatalf("second Receive: %v", err)
+		}
+		if len(last.Messages) != 1 || last.Messages[0].MessageID != ids[messaging.DefaultReceiveLimit] {
+			t.Fatalf("second Receive = %+v, want the message the default left queued", last.Messages)
+		}
+	})
+
 	t.Run("withdraw fences the ask", func(t *testing.T) {
 		msgID := mint(t, time.Minute)
 		if _, err := at.Send(t.Context(), messaging.SendRequest{
