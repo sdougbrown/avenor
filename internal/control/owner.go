@@ -192,57 +192,79 @@ func rejectSymlinkedParent(path string) error {
 
 // LoadOwnerRecord validates and decodes the record published beside socketPath.
 func LoadOwnerRecord(socketPath string) (OwnerRecord, error) {
+	record, _, err := loadOwnerRecord(socketPath)
+	return record, err
+}
+
+// loadOwnerRecord also returns the file the publication contract inspected, so
+// a caller that acts on the record afterwards can confirm the path still names
+// that same file.
+func loadOwnerRecord(socketPath string) (OwnerRecord, os.FileInfo, error) {
 	path := OwnerRecordPath(socketPath)
 	if err := rejectSymlinkedParent(path); err != nil {
-		return OwnerRecord{}, fmt.Errorf("%w: %v", ErrStaleOwnerRecord, err)
+		return OwnerRecord{}, nil, fmt.Errorf("%w: %v", ErrStaleOwnerRecord, err)
 	}
 	inspected, err := inspectRecord(path)
 	if err != nil {
-		return OwnerRecord{}, err
+		return OwnerRecord{}, nil, err
 	}
 	beforeOwnerRecordOpen()
 	file, err := os.Open(path)
 	if err != nil {
-		return OwnerRecord{}, fmt.Errorf("%w: open %s: %v", ErrStaleOwnerRecord, path, err)
+		return OwnerRecord{}, nil, fmt.Errorf("%w: open %s: %v", ErrStaleOwnerRecord, path, err)
 	}
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil {
-		return OwnerRecord{}, fmt.Errorf("%w: stat %s: %v", ErrStaleOwnerRecord, path, err)
+		return OwnerRecord{}, nil, fmt.Errorf("%w: stat %s: %v", ErrStaleOwnerRecord, path, err)
 	}
 	if !os.SameFile(inspected, opened) {
-		return OwnerRecord{}, fmt.Errorf("%w: %s changed while reading", ErrStaleOwnerRecord, path)
+		return OwnerRecord{}, nil, fmt.Errorf("%w: %s changed while reading", ErrStaleOwnerRecord, path)
 	}
 
 	decoder := json.NewDecoder(io.LimitReader(file, ownerRecordMaxBytes))
 	decoder.DisallowUnknownFields()
 	var record OwnerRecord
 	if err := decoder.Decode(&record); err != nil {
-		return OwnerRecord{}, fmt.Errorf("%w: decode %s: %v", ErrStaleOwnerRecord, path, err)
+		return OwnerRecord{}, nil, fmt.Errorf("%w: decode %s: %v", ErrStaleOwnerRecord, path, err)
 	}
 	if record.Version != ownerRecordVersion {
-		return OwnerRecord{}, fmt.Errorf("%w: %s has version %d", ErrStaleOwnerRecord, path, record.Version)
+		return OwnerRecord{}, nil, fmt.Errorf("%w: %s has version %d", ErrStaleOwnerRecord, path, record.Version)
 	}
 	if record.Socket != socketPath {
-		return OwnerRecord{}, fmt.Errorf("%w: %s names socket %s", ErrStaleOwnerRecord, path, record.Socket)
+		return OwnerRecord{}, nil, fmt.Errorf("%w: %s names socket %s", ErrStaleOwnerRecord, path, record.Socket)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return OwnerRecord{}, fmt.Errorf("%w: %s has trailing data", ErrStaleOwnerRecord, path)
+		return OwnerRecord{}, nil, fmt.Errorf("%w: %s has trailing data", ErrStaleOwnerRecord, path)
 	}
-	return record, nil
+	return record, inspected, nil
 }
 
 // removeOwnerRecord removes the record only when it still names this server's
-// socket identity and capability. A missing record is idempotent success.
+// socket identity and capability. The guard reads one specific file, and the
+// path is re-inspected immediately before the unlink: removal happens only
+// when it still names the file the guard read, so a replacement that renamed a
+// fresh record into place keeps it. A missing record is idempotent success.
 func (s *ControlServer) removeOwnerRecord(socketPath string, identity SocketIdentity, capabilityID string) error {
-	record, err := LoadOwnerRecord(socketPath)
+	record, inspected, err := loadOwnerRecord(socketPath)
 	if err != nil {
 		return nil
 	}
 	if record.CapabilityID != capabilityID || record.SocketIdentity != identity {
 		return nil
 	}
-	if err := testOwnerRecordRemove(OwnerRecordPath(socketPath)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	recordPath := OwnerRecordPath(socketPath)
+	current, err := os.Lstat(recordPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat owner record: %w", err)
+	}
+	if !os.SameFile(inspected, current) {
+		return nil
+	}
+	if err := testOwnerRecordRemove(recordPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove owner record: %w", err)
 	}
 	return nil
