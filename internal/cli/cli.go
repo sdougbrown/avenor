@@ -143,7 +143,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 	exitWithSentinel := func(code int) int {
 		resultPath := ""
-		if *resultFile != "" && finalResult != "" {
+		// A cancelled run has no final answer: the reply so far is a prefix, not
+		// a result, so advertising it would hand a reader a truncated run's text.
+		if *resultFile != "" && finalResult != "" && code != 130 {
 			if err := writeResultFile(*resultFile, finalResult); err != nil {
 				fmt.Fprintf(stderr, "avenor: result-file: %v\n", err)
 			} else {
@@ -332,7 +334,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "avenor: --result-file is not supported with --loop-file or --team-file")
 		return exitWithSentinel(1)
 	}
-	if err := validateArtifactPaths(*resultFile, *pidFile, *sentinelFile); err != nil {
+	if err := validateArtifactPaths(*resultFile, *pidFile, *sentinelFile, *onEvent); err != nil {
 		fmt.Fprintf(stderr, "avenor: %v\n", err)
 		return exitWithSentinel(1)
 	}
@@ -352,6 +354,22 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	effectivePermHandler := effectivePermissionHandler(*sentinelFile, *permissionHandler, *autoApprove)
 	cleanupPermBase := permissionCleanupBase(*sentinelFile, *permissionHandler)
 
+	// The signal trap is installed before the pid file is published, so a
+	// SIGTERM can never leave a pid file behind. Once the first signal has
+	// cancelled the run, stopSignals restores the default disposition so a
+	// second signal still ends a teardown that will not finish.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	signalTrapDone := make(chan struct{})
+	defer close(signalTrapDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			stopSignals()
+		case <-signalTrapDone:
+		}
+	}()
+
 	// Artifact files are written only after every flag has been accepted, so a
 	// rejected invocation neither creates a pid file nor deletes a caller's
 	// earlier answer.
@@ -361,10 +379,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			return exitWithSentinel(1)
 		}
 		defer removePIDFile(*pidFile, os.Getpid())
-	}
-	if *resultFile != "" {
-		// An answer from an earlier run must not outlive this one.
-		removeOrLog(*resultFile, stderr)
 	}
 
 	// Pre-run cleanup: truncate event log and remove stale sentinel/perm files.
@@ -399,7 +413,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	var controlServer *control.ControlServer
 	var httpServer *control.HTTPDebugServer
 	if *controlSocket != "" {
-		controlServer = newControlServer(state)
+		controlServer = control.NewServer(state)
 		if err := controlServer.Start(*controlSocket); err != nil {
 			fmt.Fprintf(stderr, "avenor: start control server: %v\n", err)
 			return exitWithSentinel(1)
@@ -408,7 +422,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	}
 	if *httpDebug != "" {
 		if controlServer == nil {
-			controlServer = newControlServer(state)
+			controlServer = control.NewServer(state)
 		}
 		httpServer, err = control.NewHTTPDebugServer(*httpDebug, controlServer)
 		if err != nil {
@@ -455,8 +469,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		Thinking:  *thinking,
 	}
 
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
 	if controlServer != nil {
 		controlServer.SetCancelFunc(stopSignals)
 	}
@@ -897,6 +909,13 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		return result.ExitCode
 	}
 
+	// An answer from an earlier run must not outlive this one. This sits below
+	// every setup step that can fail, so a run that never starts leaves the
+	// caller's earlier answer alone.
+	if *resultFile != "" {
+		removeOrLog(*resultFile, stderr)
+	}
+
 	resumeID := *resume
 	var result attemptResult
 	for attempt := 1; ; attempt++ {
@@ -956,6 +975,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			if runCtx.Err() == context.DeadlineExceeded {
 				return exitWithSentinel(124)
 			}
+			finalStopReason = runtime.StopReasonForExitCode(130)
 			return exitWithSentinel(130)
 		}
 	}
@@ -1002,7 +1022,6 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 
 var runAttempt = runSingleAttempt
 var retryAfter = time.After
-var newControlServer = control.NewServer
 
 // deadlineFromContext returns the context's deadline, or the zero time when
 // the context carries none.

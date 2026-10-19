@@ -2,44 +2,39 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
-	"sync"
+	"syscall"
 	"testing"
 	"time"
 
-	"github.com/sdougbrown/avenor/internal/control"
-	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
-// TestRunPIDFile records the run's own pid while it is alive and removes the
-// file when it exits. The pid is observed from inside the attempt because the
-// file is gone by the time run() returns. A pid path the run cannot write
-// fails the invocation before any attempt starts.
+// TestRunPIDFile records the run's own pid while it is alive, removes the file
+// on exit, and leaves the caller's earlier answer alone when the pid write
+// fails. The pid is read from inside the attempt because it is gone by the time
+// run() returns.
 func TestRunPIDFile(t *testing.T) {
 	oldRunAttempt := runAttempt
 	t.Cleanup(func() { runAttempt = oldRunAttempt })
 
 	for _, tt := range []struct {
 		name string
-		// subdir names a directory the test never creates, so the pid write
-		// fails.
-		subdir       string
-		exitCode     int
-		wantAttempts int
+		// pidDir names a directory the test never creates, so the pid write
+		// fails before the first attempt.
+		pidDir   string
+		exitCode int
 	}{
-		{name: "successful run", exitCode: 0, wantAttempts: 1},
-		{name: "failed run", exitCode: 1, wantAttempts: 1},
-		{name: "pid file write failure", subdir: "missing", exitCode: 1, wantAttempts: 0},
+		{name: "successful run"},
+		{name: "failed run", exitCode: 1},
+		{name: "pid file write failure", pidDir: "missing", exitCode: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			pidPath := filepath.Join(dir, tt.subdir, "run.pid")
+			pidPath := filepath.Join(dir, tt.pidDir, "run.pid")
 			wantPID := strconv.Itoa(os.Getpid())
 
 			attempts := 0
@@ -55,17 +50,33 @@ func TestRunPIDFile(t *testing.T) {
 				return attemptResult{exitCode: tt.exitCode, sessionID: "ses_pid"}
 			}
 
+			args := []string{"--prompt", "hi", "--pid-file", pidPath}
+			resultPath := filepath.Join(dir, "result.txt")
+			if tt.pidDir != "" {
+				// The pid write must fail before the earlier answer is removed.
+				if err := os.WriteFile(resultPath, []byte("earlier answer"), 0o600); err != nil {
+					t.Fatalf("write earlier answer: %v", err)
+				}
+				args = append(args, "--result-file", resultPath)
+			}
+
 			var stderr strings.Builder
-			if code := run([]string{"--prompt", "hi", "--pid-file", pidPath}, func(string) string { return "" }, &stderr); code != tt.exitCode {
+			if code := run(args, func(string) string { return "" }, &stderr); code != tt.exitCode {
 				t.Fatalf("run() = %d, want %d; stderr=%s", code, tt.exitCode, stderr.String())
 			}
-			if attempts != tt.wantAttempts {
-				t.Fatalf("attempts = %d, want %d", attempts, tt.wantAttempts)
-			}
-			if tt.subdir != "" {
+			wantAttempts := 1
+			if tt.pidDir != "" {
+				wantAttempts = 0
 				if !strings.Contains(stderr.String(), "avenor: pid-file:") {
 					t.Fatalf("stderr = %q, want a pid-file write error", stderr.String())
 				}
+				raw, err := os.ReadFile(resultPath)
+				if err != nil || string(raw) != "earlier answer" {
+					t.Fatalf("pid-file failure touched the earlier answer: %q, %v", raw, err)
+				}
+			}
+			if attempts != wantAttempts {
+				t.Fatalf("attempts = %d, want %d", attempts, wantAttempts)
 			}
 			if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 				t.Fatalf("pid file still exists after run() returned: %v", err)
@@ -115,64 +126,60 @@ func TestRemovePIDFile(t *testing.T) {
 	}
 }
 
-// TestRunResultFile covers the text that reaches the result file and the
-// RESULT= line that points at it. The attempt reports a distinct final_reply
-// so a regression that writes the wrong field cannot pass.
+// TestRunResultFile covers the text that reaches the result file, the RESULT=
+// line that points at it, and the documented ordering: when the sentinel lands,
+// the answer is already whole. The attempt reports a distinct final_reply so a
+// regression that writes the wrong field cannot pass.
 func TestRunResultFile(t *testing.T) {
-	oldRunAttempt := runAttempt
-	t.Cleanup(func() { runAttempt = oldRunAttempt })
+	oldRunAttempt, oldAtomicWriteHook := runAttempt, atomicWriteHook
+	t.Cleanup(func() { runAttempt, atomicWriteHook = oldRunAttempt, oldAtomicWriteHook })
 
 	for _, tt := range []struct {
 		name string
-		// subdir, when set, puts the result file under a directory the test
-		// never creates, so the write fails.
-		subdir      string
+		// subdir puts the result file under a directory the test never creates,
+		// so the write fails.
+		subdir string
+		// resultDir makes the result path a non-empty directory, so the rename
+		// fails after the tmp file was written.
+		resultDir   bool
 		exitCode    int
 		finalOutput string
 		noSentinel  bool
 		wantFile    bool
-		wantContent string
-		wantResult  bool
 	}{
-		{
-			name:        "successful run writes final text",
-			finalOutput: "final answer",
-			wantFile:    true,
-			wantContent: "final answer",
-			wantResult:  true,
-		},
-		{
-			name:        "failed run writes the final text it settled with",
-			exitCode:    1,
-			finalOutput: "refused: needs a decision",
-			wantFile:    true,
-			wantContent: "refused: needs a decision",
-			wantResult:  true,
-		},
-		{
-			name: "no final text writes no file",
-		},
-		{
-			name:        "unwritable path leaves the sentinel without RESULT",
-			subdir:      "missing",
-			finalOutput: "final answer",
-		},
-		{
-			name:        "result file written without a sentinel",
-			finalOutput: "final answer",
-			noSentinel:  true,
-			wantFile:    true,
-			wantContent: "final answer",
-		},
+		{name: "successful run writes final text", finalOutput: "final answer", wantFile: true},
+		{name: "failed run writes the final text it settled with", exitCode: 1, finalOutput: "refused: needs a decision", wantFile: true},
+		{name: "no final text writes no file"},
+		{name: "unwritable path leaves the sentinel without RESULT", subdir: "missing", finalOutput: "final answer"},
+		{name: "rename onto a non-empty directory leaves no tmp file", resultDir: true, finalOutput: "final answer"},
+		{name: "result file written without a sentinel", finalOutput: "final answer", noSentinel: true, wantFile: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			resultPath := filepath.Join(dir, tt.subdir, "result.txt")
 			sentinelPath := filepath.Join(dir, "run.done")
-			// A stale answer from an earlier run must never survive.
-			if tt.subdir == "" {
+			if tt.resultDir {
+				if err := os.MkdirAll(filepath.Join(resultPath, "occupied"), 0o700); err != nil {
+					t.Fatalf("make result dir: %v", err)
+				}
+			} else if tt.subdir == "" {
+				// A stale answer from an earlier run must never survive.
 				if err := os.WriteFile(resultPath, []byte("stale answer"), 0o600); err != nil {
 					t.Fatalf("write stale result: %v", err)
+				}
+			}
+
+			wantResult := tt.wantFile && !tt.noSentinel
+			atomicWriteHook = nil
+			if wantResult {
+				atomicWriteHook = func(path string) {
+					if path != sentinelPath {
+						return
+					}
+					raw, err := os.ReadFile(resultPath)
+					if err != nil || string(raw) != tt.finalOutput {
+						t.Errorf("result file at sentinel time = %q, %v; want %q", raw, err, tt.finalOutput)
+					}
 				}
 			}
 
@@ -195,14 +202,23 @@ func TestRunResultFile(t *testing.T) {
 				t.Fatalf("run() = %d, want %d; stderr=%s", code, tt.exitCode, stderr.String())
 			}
 
-			raw, err := os.ReadFile(resultPath)
-			switch {
-			case tt.wantFile && err != nil:
-				t.Fatalf("result file not written: %v", err)
-			case !tt.wantFile && !os.IsNotExist(err):
-				t.Fatalf("result file present with %q, want none", string(raw))
-			case tt.wantFile && string(raw) != tt.wantContent:
-				t.Fatalf("result file = %q, want %q", string(raw), tt.wantContent)
+			if tt.resultDir {
+				if !strings.Contains(stderr.String(), "avenor: result-file: rename:") {
+					t.Fatalf("stderr = %q, want a result rename error", stderr.String())
+				}
+				if leftovers, _ := filepath.Glob(filepath.Join(dir, ".result-*.tmp")); len(leftovers) != 0 {
+					t.Fatalf("leftover tmp files: %v", leftovers)
+				}
+			} else {
+				raw, err := os.ReadFile(resultPath)
+				switch {
+				case tt.wantFile && err != nil:
+					t.Fatalf("result file not written: %v", err)
+				case !tt.wantFile && !os.IsNotExist(err):
+					t.Fatalf("result file present with %q, want none", string(raw))
+				case tt.wantFile && string(raw) != tt.finalOutput:
+					t.Fatalf("result file = %q, want %q", string(raw), tt.finalOutput)
+				}
 			}
 
 			if tt.noSentinel {
@@ -216,166 +232,61 @@ func TestRunResultFile(t *testing.T) {
 				t.Fatalf("read sentinel: %v", err)
 			}
 			hasResult := strings.Contains(string(sentinel), "RESULT="+resultPath+"\n")
-			if hasResult != tt.wantResult {
-				t.Fatalf("sentinel RESULT presence = %t, want %t; sentinel=%q", hasResult, tt.wantResult, string(sentinel))
+			if hasResult != wantResult {
+				t.Fatalf("sentinel RESULT presence = %t, want %t; sentinel=%q", hasResult, wantResult, string(sentinel))
 			}
 		})
 	}
 }
 
-// TestRunResultWrittenBeforeSentinel pins the documented ordering: a reader
-// that waits for the sentinel never sees a missing or partial answer.
-func TestRunResultWrittenBeforeSentinel(t *testing.T) {
-	oldRunAttempt, oldAtomicWriteHook := runAttempt, atomicWriteHook
-	t.Cleanup(func() {
-		runAttempt, atomicWriteHook = oldRunAttempt, oldAtomicWriteHook
-	})
-
-	dir := t.TempDir()
-	resultPath := filepath.Join(dir, "result.txt")
-	sentinelPath := filepath.Join(dir, "run.done")
-	var written []string
-	atomicWriteHook = func(path string) { written = append(written, path) }
-
-	runAttempt = func(ctx context.Context, cfg attemptConfig, deps attemptDeps) attemptResult {
-		return attemptResult{exitCode: 0, sessionID: "ses_order", finalOutput: "final answer"}
-	}
-
-	var stderr strings.Builder
-	if code := run([]string{
-		"--prompt", "hi",
-		"--result-file", resultPath,
-		"--sentinel-file", sentinelPath,
-	}, func(string) string { return "" }, &stderr); code != 0 {
-		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
-	}
-	if want := []string{resultPath, sentinelPath}; !slices.Equal(written, want) {
-		t.Fatalf("atomic write order = %v, want %v", written, want)
-	}
-}
-
-// TestRunArtifactPathValidation rejects paths a sentinel line cannot advertise
-// and paths two flags would let the last writer clobber.
-func TestRunArtifactPathValidation(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		result   string
-		pid      string
-		sentinel string
-		wantErr  string
-	}{
-		{
-			name:    "result and pid name one path",
-			result:  "same.txt",
-			pid:     "same.txt",
-			wantErr: "--result-file and --pid-file name the same path",
-		},
-		{
-			name:     "result and sentinel name one path",
-			result:   "same.txt",
-			sentinel: "./same.txt",
-			wantErr:  "--result-file and --sentinel-file name the same path",
-		},
-		{
-			name:     "pid and sentinel name one path",
-			pid:      "same.txt",
-			sentinel: "same.txt",
-			wantErr:  "--pid-file and --sentinel-file name the same path",
-		},
-		{
-			name:    "result path with a newline",
-			result:  "line\nbreak.txt",
-			wantErr: "--result-file must be a single-line path",
-		},
-		{
-			name:    "pid path with a newline",
-			pid:     "line\nbreak.txt",
-			wantErr: "--pid-file must be a single-line path",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			args := []string{"--prompt", "hi"}
-			for _, flag := range []struct{ name, value string }{
-				{"--result-file", tt.result},
-				{"--pid-file", tt.pid},
-				{"--sentinel-file", tt.sentinel},
-			} {
-				if flag.value != "" {
-					args = append(args, flag.name, filepath.Join(dir, flag.value))
-				}
-			}
-
-			var stderr strings.Builder
-			if code := run(args, func(string) string { return "" }, &stderr); code != 1 {
-				t.Fatalf("run() = %d, want 1; stderr=%s", code, stderr.String())
-			}
-			if !strings.Contains(stderr.String(), tt.wantErr) {
-				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantErr)
-			}
-			for _, name := range []string{tt.result, tt.pid} {
-				// A sentinel path is written even on rejection, so only the
-				// answer and pid paths prove the writes sit below validation.
-				if name == "" || filepath.Clean(name) == filepath.Clean(tt.sentinel) {
-					continue
-				}
-				if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-					t.Fatalf("rejected invocation created %q: %v", name, err)
-				}
-			}
-		})
-	}
-}
-
-// TestRunRejectedInvocationWritesNoArtifacts proves the artifact writes sit
-// below flag validation: a rejected run neither deletes the caller's earlier
-// answer nor publishes a pid, including in workflow mode where --result-file
-// is unsupported.
+// TestRunRejectedInvocationWritesNoArtifacts proves validation sits above the
+// artifact writes: a rejected run writes no pid file and leaves the caller's
+// earlier answer alone. Every rejection still records a sentinel.
 func TestRunRejectedInvocationWritesNoArtifacts(t *testing.T) {
 	dir := t.TempDir()
-	loopPath := filepath.Join(dir, "loop.json")
-	if err := os.WriteFile(loopPath, []byte(`{"pre":[]}`), 0o600); err != nil {
-		t.Fatalf("write loop config: %v", err)
-	}
-	promptPath := filepath.Join(dir, "prompt.txt")
-	if err := os.WriteFile(promptPath, []byte("hello"), 0o600); err != nil {
-		t.Fatalf("write prompt: %v", err)
-	}
-
 	for _, tt := range []struct {
 		name    string
-		args    []string
+		args    func(dir, result, pid string) []string
 		wantErr string
 	}{
 		{
-			name:    "result file rejected in loop mode",
-			args:    []string{"--loop-file", loopPath},
+			name: "result and pid name one path",
+			args: func(_, result, _ string) []string {
+				return []string{"--prompt", "hi", "--result-file", result, "--pid-file", result}
+			},
+			wantErr: "--result-file and --pid-file name the same path",
+		},
+		{
+			name: "result path with a newline",
+			args: func(dir, _, pid string) []string {
+				return []string{"--prompt", "hi", "--result-file", filepath.Join(dir, "line\nbreak.txt"), "--pid-file", pid}
+			},
+			wantErr: "--result-file must be a single-line path",
+		},
+		{
+			name: "unreadable prompt file",
+			args: func(dir, result, pid string) []string {
+				return []string{"--prompt-file", filepath.Join(dir, "missing.txt"), "--result-file", result, "--pid-file", pid}
+			},
+			wantErr: "read prompt file",
+		},
+		{
+			name: "result file rejected in workflow mode",
+			args: func(dir, result, pid string) []string {
+				return []string{"--loop-file", filepath.Join(dir, "loop.json"), "--result-file", result, "--pid-file", pid}
+			},
 			wantErr: "--result-file is not supported with --loop-file or --team-file",
-		},
-		{
-			name:    "result file rejected in team mode",
-			args:    []string{"--team-file", filepath.Join(dir, "team.json")},
-			wantErr: "--result-file is not supported with --loop-file or --team-file",
-		},
-		{
-			name:    "mutually exclusive prompt sources",
-			args:    []string{"--prompt", "hi", "--prompt-file", promptPath},
-			wantErr: "--prompt and --prompt-file are mutually exclusive",
-		},
-		{
-			name:    "unknown backend",
-			args:    []string{"--prompt", "hi", "--backend", "nope"},
-			wantErr: "unknown backend",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			resultPath := filepath.Join(dir, tt.name+"-result.txt")
 			pidPath := filepath.Join(dir, tt.name+"-run.pid")
+			sentinelPath := filepath.Join(dir, tt.name+"-run.done")
 			if err := os.WriteFile(resultPath, []byte("earlier answer"), 0o600); err != nil {
 				t.Fatalf("write earlier answer: %v", err)
 			}
 
-			args := append(append([]string{}, tt.args...), "--result-file", resultPath, "--pid-file", pidPath)
+			args := append(tt.args(dir, resultPath, pidPath), "--sentinel-file", sentinelPath)
 			var stderr strings.Builder
 			if code := run(args, func(string) string { return "" }, &stderr); code != 1 {
 				t.Fatalf("run() = %d, want 1; stderr=%s", code, stderr.String())
@@ -390,7 +301,59 @@ func TestRunRejectedInvocationWritesNoArtifacts(t *testing.T) {
 			if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 				t.Fatalf("rejected invocation published a pid file: %v", err)
 			}
+			sentinel, err := os.ReadFile(sentinelPath)
+			if err != nil || !strings.HasPrefix(string(sentinel), "FAILED\n") {
+				t.Fatalf("sentinel = %q, %v; want a FAILED outcome", sentinel, err)
+			}
 		})
+	}
+}
+
+// TestValidateArtifactPaths covers spellings the CLI cannot compare as strings:
+// a relative path against an absolute one, a link to an existing file, and
+// --on-event sharing a path with another artifact.
+func TestValidateArtifactPaths(t *testing.T) {
+	dir := t.TempDir()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	abs := filepath.Join(dir, "same.txt")
+	if err := os.WriteFile(abs, nil, 0o600); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	rel, err := filepath.Rel(cwd, abs)
+	if err != nil {
+		t.Fatalf("make relative path: %v", err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(abs, link); err != nil {
+		t.Fatalf("symlink artifact: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name                           string
+		result, pid, sentinel, onEvent string
+		wantErr                        string
+	}{
+		{name: "result and pid abs against rel", result: abs, pid: rel, wantErr: "--result-file and --pid-file name the same path"},
+		{name: "result and sentinel spelling", result: abs, sentinel: rel, wantErr: "--result-file and --sentinel-file name the same path"},
+		{name: "pid and sentinel", pid: "same.txt", sentinel: "same.txt", wantErr: "--pid-file and --sentinel-file name the same path"},
+		{name: "result and on-event", result: abs, onEvent: rel, wantErr: "--result-file and --on-event name the same path"},
+		{name: "pid links to result", result: abs, pid: link, wantErr: "--result-file and --pid-file name the same path"},
+		{name: "result path with a newline", result: "line\nbreak.txt", wantErr: "--result-file must be a single-line path"},
+		{name: "pid path with a newline", pid: "line\nbreak.txt", wantErr: "--pid-file must be a single-line path"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateArtifactPaths(tt.result, tt.pid, tt.sentinel, tt.onEvent)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateArtifactPaths() = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	if err := validateArtifactPaths(abs, filepath.Join(dir, "other.txt"), "", ""); err != nil {
+		t.Fatalf("distinct paths rejected: %v", err)
 	}
 }
 
@@ -403,10 +366,11 @@ func TestRunResultFileFollowsRetryAnswer(t *testing.T) {
 		newProvider, retryAfter = oldNewProvider, oldRetryAfter
 	})
 
-	provider := &scriptedArtifactProvider{turns: []scriptedTurn{
+	provider := newScriptedProvider()
+	provider.turns = []scriptedTurn{
 		{chunk: "first attempt", stopReason: "error"},
 		{chunk: "second attempt", stopReason: "end_turn"},
-	}}
+	}
 	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	retryAfter = func(time.Duration) <-chan time.Time {
 		ch := make(chan time.Time, 1)
@@ -434,139 +398,118 @@ func TestRunResultFileFollowsRetryAnswer(t *testing.T) {
 	if err != nil || string(raw) != "second attempt" {
 		t.Fatalf("result file = %q, %v; want the retry's answer", raw, err)
 	}
+	sentinel, err := os.ReadFile(sentinelPath)
+	if err != nil || !strings.Contains(string(sentinel), "RESULT="+resultPath+"\n") {
+		t.Fatalf("sentinel = %q, %v; want RESULT=%s", sentinel, err, resultPath)
+	}
 }
 
-// TestRunResultFileControlPromptTurn drives a control prompt that starts a
-// second turn: the result file must hold the last turn's final output, not the
-// first turn's text and not the accumulated reply.
-func TestRunResultFileControlPromptTurn(t *testing.T) {
-	oldNewProvider, oldNewControlServer := newProvider, newControlServer
+// TestRunCancelledBySignal sends SIGTERM to the test process once the run is
+// live and pins the trap's contract: exit 130, a killed sentinel naming the
+// cancel, the pid file removed, and no result file advertising a truncated
+// answer. The backoff row covers a cancel that lands between attempts, where
+// the previous attempt's stop reason is still loaded.
+func TestRunCancelledBySignal(t *testing.T) {
+	oldNewProvider, oldRetryAfter := newProvider, retryAfter
 	t.Cleanup(func() {
-		newProvider, newControlServer = oldNewProvider, oldNewControlServer
+		newProvider, retryAfter = oldNewProvider, oldRetryAfter
 	})
 
-	provider := &scriptedArtifactProvider{turns: []scriptedTurn{
-		{chunk: "first draft", stopReason: "end_turn"},
-		{chunk: "second draft", stopReason: "end_turn", finalOutput: "authoritative answer"},
-	}}
-	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
-	newControlServer = func(state *control.ControlState) *control.ControlServer {
-		server := control.NewServer(state)
-		server.QueuePrompt("second question")
-		return server
+	for _, tt := range []struct {
+		name  string
+		turns []scriptedTurn
+		// backoff cancels during the retry backoff instead of a live turn.
+		backoff bool
+	}{
+		{
+			name:  "sigterm during a turn",
+			turns: []scriptedTurn{{chunk: "half an answer"}},
+		},
+		{
+			name:    "sigterm during retry backoff",
+			turns:   []scriptedTurn{{chunk: "first attempt", stopReason: "error"}},
+			backoff: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			started := make(chan struct{}, 1)
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+
+			provider := newScriptedProvider()
+			provider.turns = tt.turns
+			if tt.backoff {
+				retryAfter = func(time.Duration) <-chan time.Time {
+					started <- struct{}{}
+					return make(chan time.Time)
+				}
+			} else {
+				provider.promptStarted = started
+				provider.release = release
+			}
+			newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+			dir := t.TempDir()
+			pidPath := filepath.Join(dir, "run.pid")
+			resultPath := filepath.Join(dir, "result.txt")
+			sentinelPath := filepath.Join(dir, "run.done")
+
+			type outcome struct {
+				code   int
+				stderr string
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				var stderr strings.Builder
+				code := run([]string{
+					"--prompt", "hi",
+					"--backend", "pi",
+					"--max-retries", "1",
+					"--pid-file", pidPath,
+					"--result-file", resultPath,
+					"--sentinel-file", sentinelPath,
+				}, func(string) string { return "" }, &stderr)
+				done <- outcome{code: code, stderr: stderr.String()}
+			}()
+
+			select {
+			case <-started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("run never reached the signal window")
+			}
+			if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+				t.Fatalf("send SIGTERM: %v", err)
+			}
+
+			var got outcome
+			select {
+			case got = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("run did not exit after SIGTERM")
+			}
+			if got.code != 130 {
+				t.Fatalf("run() = %d, want 130; stderr=%s", got.code, got.stderr)
+			}
+
+			raw, err := os.ReadFile(sentinelPath)
+			if err != nil {
+				t.Fatalf("read sentinel: %v", err)
+			}
+			sentinel := string(raw)
+			for _, want := range []string{"KILLED\n", "STOP_REASON=cancelled\n", "EXIT_CODE=130\n"} {
+				if !strings.Contains(sentinel, want) {
+					t.Fatalf("sentinel = %q, want %q", sentinel, want)
+				}
+			}
+			if strings.Contains(sentinel, "RESULT=") {
+				t.Fatalf("cancelled sentinel advertises a result: %q", sentinel)
+			}
+			if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
+				t.Fatalf("cancelled run wrote a result file: %v", err)
+			}
+			if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+				t.Fatalf("pid file outlived the cancelled run: %v", err)
+			}
+		})
 	}
-
-	dir := t.TempDir()
-	resultPath := filepath.Join(dir, "result.txt")
-	sentinelPath := filepath.Join(dir, "run.done")
-	var stderr strings.Builder
-	if code := run([]string{
-		"--prompt", "hi",
-		"--backend", "pi",
-		"--control-socket", filepath.Join(dir, "control.sock"),
-		"--result-file", resultPath,
-		"--sentinel-file", sentinelPath,
-	}, func(string) string { return "" }, &stderr); code != 0 {
-		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
-	}
-	if got := provider.turnsRun(); got != 2 {
-		t.Fatalf("turns = %d, want 2", got)
-	}
-	raw, err := os.ReadFile(resultPath)
-	if err != nil || string(raw) != "authoritative answer" {
-		t.Fatalf("result file = %q, %v; want the control turn's final output", raw, err)
-	}
-}
-
-// scriptedTurn is one Prompt turn and the events it ends with.
-type scriptedTurn struct {
-	chunk      string
-	stopReason string
-	// finalOutput, when set, rides session.end as final_output, which is the
-	// run's final text even when the reply chunks say otherwise.
-	finalOutput string
-}
-
-// scriptedArtifactProvider serves one scriptedTurn per Prompt over a fresh
-// event channel per start or resume, so a retry can resume the same session.
-type scriptedArtifactProvider struct {
-	mu     sync.Mutex
-	turns  []scriptedTurn
-	next   int
-	events map[string]chan events.Event
-}
-
-func (p *scriptedArtifactProvider) open(sessionID string) {
-	p.events[sessionID] = make(chan events.Event, 8)
-}
-
-func (p *scriptedArtifactProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.events == nil {
-		p.events = map[string]chan events.Event{}
-	}
-	const sessionID = "ses_artifact"
-	p.open(sessionID)
-	return runtime.Session{SessionID: sessionID}, nil
-}
-
-func (p *scriptedArtifactProvider) Resume(_ context.Context, sessionID string) (runtime.Session, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.open(sessionID)
-	return runtime.Session{SessionID: sessionID}, nil
-}
-
-func (p *scriptedArtifactProvider) Prompt(_ context.Context, sessionID, _ string) error {
-	p.mu.Lock()
-	if p.next >= len(p.turns) {
-		p.mu.Unlock()
-		return fmt.Errorf("unscripted turn %d", p.next)
-	}
-	turn := p.turns[p.next]
-	p.next++
-	ch := p.events[sessionID]
-	p.mu.Unlock()
-
-	if turn.chunk != "" {
-		ch <- events.Event{
-			Event:     "agent.message_chunk",
-			SessionID: sessionID,
-			Fields:    map[string]any{"content": map[string]any{"text": turn.chunk}},
-		}
-	}
-	fields := map[string]any{"stop_reason": turn.stopReason}
-	if turn.finalOutput != "" {
-		fields["final_output"] = turn.finalOutput
-	}
-	ch <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
-	close(ch)
-	return nil
-}
-
-func (*scriptedArtifactProvider) Cancel(context.Context, string) error { return nil }
-
-func (p *scriptedArtifactProvider) Events(_ context.Context, sessionID string) (<-chan events.Event, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	ch, ok := p.events[sessionID]
-	if !ok {
-		return nil, fmt.Errorf("unknown session %q", sessionID)
-	}
-	return ch, nil
-}
-
-func (*scriptedArtifactProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
-	return nil
-}
-
-func (*scriptedArtifactProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
-	return runtime.Capabilities{}, nil
-}
-
-func (p *scriptedArtifactProvider) turnsRun() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.next
 }

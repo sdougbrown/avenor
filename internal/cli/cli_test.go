@@ -243,10 +243,31 @@ type scriptedSession struct {
 	events chan events.Event
 }
 
+// scriptedTurn is one Prompt turn and the events it ends with.
+type scriptedTurn struct {
+	chunk      string
+	stopReason string
+	// finalOutput, when set, rides session.end as final_output, which is the
+	// run's final text even when the reply chunks say otherwise.
+	finalOutput string
+}
+
+func scriptedChunk(sessionID, text string) events.Event {
+	return events.Event{Event: "agent.message_chunk", SessionID: sessionID, Fields: map[string]any{"content": map[string]any{"text": text}}}
+}
+
 type scriptedProvider struct {
 	mu       sync.Mutex
 	nextID   int
 	sessions map[string]*scriptedSession
+	// turns, when set, replaces the prompt matching with one scripted turn per
+	// Prompt, in order.
+	turns []scriptedTurn
+	next  int
+	// promptStarted, when non-nil, receives once per turn after its chunks are
+	// queued. release, when non-nil, holds the turn open until it is closed.
+	promptStarted chan<- struct{}
+	release       <-chan struct{}
 }
 
 func newScriptedProvider() *scriptedProvider {
@@ -268,45 +289,69 @@ func (p *scriptedProvider) Start(ctx context.Context, opts runtime.StartOptions)
 func (p *scriptedProvider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.sessions[sessionID]; !ok {
+	session, ok := p.sessions[sessionID]
+	if !ok {
 		return runtime.Session{}, fmt.Errorf("unknown session %q", sessionID)
 	}
+	// Each resume opens a fresh subscription for the turn it serves.
+	session.events = make(chan events.Event, 8)
 	return runtime.Session{SessionID: sessionID}, nil
 }
 
 func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt string) error {
 	p.mu.Lock()
 	session, ok := p.sessions[sessionID]
+	var turn scriptedTurn
+	scripted := p.next < len(p.turns)
+	if scripted {
+		turn = p.turns[p.next]
+		p.next++
+	}
+	started, release := p.promptStarted, p.release
 	p.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown session %q", sessionID)
 	}
 	session.prompt = prompt
 
-	var reply string
-	switch {
-	case strings.Contains(prompt, "decide reviewers"):
-		reply = "[team: skip | security]"
-	case strings.Contains(prompt, "review style"):
-		reply = "style findings"
-	case strings.Contains(prompt, "summarize findings"):
-		reply = "final report"
-	default:
-		reply = "ok"
+	if !scripted {
+		var reply string
+		switch {
+		case strings.Contains(prompt, "decide reviewers"):
+			reply = "[team: skip | security]"
+		case strings.Contains(prompt, "review style"):
+			reply = "style findings"
+		case strings.Contains(prompt, "summarize findings"):
+			reply = "final report"
+		default:
+			reply = "ok"
+		}
+
+		session.events <- scriptedChunk(sessionID, reply)
+		session.events <- events.Event{
+			Event:     "session.end",
+			SessionID: sessionID,
+			Fields:    map[string]any{"stop_reason": "end_turn"},
+		}
+		close(session.events)
+		return nil
 	}
 
-	session.events <- events.Event{
-		Event:     "agent.message_chunk",
-		SessionID: sessionID,
-		Fields: map[string]any{
-			"content": map[string]any{"text": reply},
-		},
+	if turn.chunk != "" {
+		session.events <- scriptedChunk(sessionID, turn.chunk)
 	}
-	session.events <- events.Event{
-		Event:     "session.end",
-		SessionID: sessionID,
-		Fields:    map[string]any{"stop_reason": "end_turn"},
+	if started != nil {
+		started <- struct{}{}
 	}
+	if release != nil {
+		<-release
+		return nil
+	}
+	fields := map[string]any{"stop_reason": turn.stopReason}
+	if turn.finalOutput != "" {
+		fields["final_output"] = turn.finalOutput
+	}
+	session.events <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
 	close(session.events)
 	return nil
 }
@@ -342,6 +387,12 @@ func (p *scriptedProvider) snapshotSessions() []scriptedSession {
 		})
 	}
 	return out
+}
+
+func (p *scriptedProvider) turnsRun() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.next
 }
 
 func waitForSessionForTest(

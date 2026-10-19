@@ -81,24 +81,38 @@ turn). The file is written atomically before the sentinel, so a reader that
 waits for the sentinel never sees a partial answer, and the sentinel then ends
 with `RESULT=<path>`. A failed run still writes the final text it settled
 with; a run that ends with no final message writes no file and no `RESULT=`
-line. An answer left by an earlier run at the same path is removed when the
-run starts.
+line. An answer left by an earlier run at the same path is removed once every
+setup step that can fail has passed, before the first prompt.
+
+A cancelled run writes no result file and no `RESULT=` line: the reply collected
+so far is a prefix of an answer, not the run's final message, and advertising it
+would hand a reader a truncated run's text. SIGINT and SIGTERM both end the run
+at exit code 130 with a `KILLED` sentinel carrying `STOP_REASON=cancelled`.
 
 `--pid-file <path>` writes the run's own pid once the flags are accepted and
-removes the file when the run exits, including on SIGINT and SIGTERM: the run
-traps both, writes its result and sentinel, and only then removes the pid file.
-A SIGKILL or a crash skips that cleanup and leaves a stale pid file behind, and
-the kernel recycles pids, so `kill -0 $(cat run.pid)` alone can report an
-unrelated process as live. Check the process identity before signalling —
-compare `/proc/<pid>/cmdline` against the launched command, or wait for the
-sentinel instead. Launch wrappers cannot supply a trustworthy pid: `setsid`
-forks when the caller leads a process group, so a recorded `$!` can name a
-shell that already exited while the run continues. Letting the run publish its
-pid avoids that. The pid file is only removed by the run that wrote it.
+removes the file when the run exits, including on SIGINT and SIGTERM. The signal
+trap is installed before the pid file is published, so a signal landing during
+setup still has a cleanup path and cannot leave the pid file behind. The trap
+serves the first signal; once that signal has cancelled the run the handler
+restores the default disposition, so a second signal still ends a teardown that
+will not finish. A SIGKILL or a crash skips cleanup and leaves a stale pid file
+behind, and the kernel recycles pids, so `kill -0 $(cat run.pid)` alone can
+report an unrelated process as live. Check the process identity before
+signalling — `ps -o command= -p <pid>` works on both Linux and macOS — or wait
+for the sentinel instead. Launch wrappers cannot supply a trustworthy pid:
+`setsid` forks when the caller leads a process group, so a recorded `$!` can
+name a shell that already exited while the run continues. Letting the run
+publish its pid avoids that. The pid file is only removed by the run that wrote
+it.
 
-`--result-file`, `--pid-file` and `--sentinel-file` must name distinct paths,
-and the result and pid paths must be single-line. An invocation rejected by
-flag validation creates none of them and leaves an earlier answer untouched.
+`--result-file`, `--pid-file`, `--sentinel-file` and `--on-event` must name
+distinct paths — compared as absolute paths, and by file identity when the paths
+already exist — and the result and pid paths must be single-line. An invocation
+rejected by flag validation writes no result or pid file and leaves an earlier
+answer untouched. It still writes its sentinel when `--sentinel-file` is set,
+because every exit path records an outcome; treat the sentinel path as the
+run's own output rather than a place to keep an answer, since a rejection
+rewrites it like any other exit.
 
 ```sh
 avenor run --prompt-file my-prompt.txt --label "data-prep" \

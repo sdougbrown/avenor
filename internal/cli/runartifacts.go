@@ -20,8 +20,10 @@ var pidFileRemoveCheck func()
 
 // validateArtifactPaths rejects artifact paths a line-oriented consumer cannot
 // name: a newline in the result or pid path would split the value, and two
-// flags naming one path would let the last write clobber the answer.
-func validateArtifactPaths(resultFile, pidFile, sentinelFile string) error {
+// flags naming one path would let the last write clobber the answer or the pid
+// contract. Paths are compared as absolutes so a relative spelling cannot slip
+// past an absolute one, and existing files are also compared by identity.
+func validateArtifactPaths(resultFile, pidFile, sentinelFile, onEvent string) error {
 	flags := []struct {
 		name       string
 		path       string
@@ -30,8 +32,14 @@ func validateArtifactPaths(resultFile, pidFile, sentinelFile string) error {
 		{"--result-file", resultFile, true},
 		{"--pid-file", pidFile, true},
 		{"--sentinel-file", sentinelFile, false},
+		{"--on-event", onEvent, false},
 	}
-	seen := make(map[string]string, len(flags))
+	type seenPath struct {
+		name string
+		abs  string
+		info os.FileInfo
+	}
+	seen := make([]seenPath, 0, len(flags))
 	for _, f := range flags {
 		if f.path == "" {
 			continue
@@ -39,11 +47,24 @@ func validateArtifactPaths(resultFile, pidFile, sentinelFile string) error {
 		if f.singleLine && strings.ContainsAny(f.path, "\r\n") {
 			return fmt.Errorf("%s must be a single-line path", f.name)
 		}
-		clean := filepath.Clean(f.path)
-		if other, ok := seen[clean]; ok {
-			return fmt.Errorf("%s and %s name the same path %q", other, f.name, clean)
+		abs, err := filepath.Abs(f.path)
+		if err != nil {
+			return fmt.Errorf("%s: %w", f.name, err)
 		}
-		seen[clean] = f.name
+		info, err := os.Stat(abs)
+		if err != nil {
+			info = nil
+		}
+		for _, other := range seen {
+			same := other.abs == abs
+			if !same && info != nil && other.info != nil {
+				same = os.SameFile(info, other.info)
+			}
+			if same {
+				return fmt.Errorf("%s and %s name the same path %q", other.name, f.name, abs)
+			}
+		}
+		seen = append(seen, seenPath{name: f.name, abs: abs, info: info})
 	}
 	return nil
 }
