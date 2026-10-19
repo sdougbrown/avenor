@@ -1605,28 +1605,27 @@ func TestReadOnlyToolNeedsNoOwnerRecord(t *testing.T) {
 	}
 	stubSocketsRoot(t, filepath.Dir(path))
 
-	for _, tc := range []struct {
-		name string
-		opts Options
-		id   string
-	}{
-		{"supervisor_id", Options{Transport: "stdio"}, path},
-		{"configured socket", Options{Transport: "stdio", SupervisorSocket: path, NoAutostart: true}, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, err := NewServer(tc.opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer s.Close()
-			_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{SupervisorID: tc.id})
-			if err != nil {
-				t.Fatalf("read-only status without an owner record: %v", err)
-			}
-			if runs := statusOutputRuns(t, result); len(runs) != 1 || runs[0]["runtime_id"] != "rt_1" {
-				t.Fatalf("runs = %v, want the stub's runtime", runs)
-			}
-		})
+	servers := map[string]Options{
+		"supervisor_id":     {Transport: "stdio"},
+		"configured socket": {Transport: "stdio", SupervisorSocket: path, NoAutostart: true},
+	}
+	for name, opts := range servers {
+		s, err := NewServer(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		supervisorID := ""
+		if opts.SupervisorSocket == "" {
+			supervisorID = path
+		}
+		_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{SupervisorID: supervisorID})
+		if err != nil {
+			t.Fatalf("%s: read-only status without an owner record: %v", name, err)
+		}
+		if runs := statusOutputRuns(t, result); len(runs) != 1 || runs[0]["runtime_id"] != "rt_1" {
+			t.Fatalf("%s: runs = %v, want the stub's runtime", name, runs)
+		}
 	}
 }
 
