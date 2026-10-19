@@ -97,7 +97,7 @@ func (s *ControlServer) publishOwnerRecord(socketPath string, identity SocketIde
 		return err
 	}
 	recordPath := OwnerRecordPath(socketPath)
-	if err := rejectSymlinkComponents(recordPath); err != nil {
+	if err := rejectSymlinkedParent(recordPath); err != nil {
 		return err
 	}
 	body, err := json.Marshal(OwnerRecord{
@@ -177,29 +177,26 @@ func inspectRecord(path string) (os.FileInfo, error) {
 	return info, nil
 }
 
-// rejectSymlinkComponents walks every directory element of path plus the file
-// itself and refuses any symlink. Resolution is not validation.
-func rejectSymlinkComponents(path string) error {
-	for current := filepath.Dir(path); ; {
-		info, err := os.Lstat(current)
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", current, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("owner record path %s has a symlink component %s", path, current)
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return nil
-		}
-		current = parent
+// rejectSymlinkedParent refuses a record whose immediate parent directory is a
+// symlink. The record file itself is checked by inspectRecord; ancestors above
+// the parent are resolved, not validated, because a temp directory can reach
+// its real location through one (macOS /tmp and $TMPDIR both do).
+func rejectSymlinkedParent(path string) error {
+	parent := filepath.Dir(path)
+	info, err := os.Lstat(parent)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", parent, err)
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("owner record path %s has a symlinked parent %s", path, parent)
+	}
+	return nil
 }
 
 // LoadOwnerRecord validates and decodes the record published beside socketPath.
 func LoadOwnerRecord(socketPath string) (OwnerRecord, error) {
 	path := OwnerRecordPath(socketPath)
-	if err := rejectSymlinkComponents(path); err != nil {
+	if err := rejectSymlinkedParent(path); err != nil {
 		return OwnerRecord{}, fmt.Errorf("%w: %v", ErrStaleOwnerRecord, err)
 	}
 	inspected, err := inspectRecord(path)

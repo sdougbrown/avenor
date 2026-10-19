@@ -416,6 +416,34 @@ func TestOwnerRecordSymlinkRejected(t *testing.T) {
 	_ = published
 }
 
+// TestOwnerRecordPublishesThroughSymlinkedAncestor proves an ancestor above the
+// record's parent is resolved rather than refused, so a socket directory
+// reached through one still publishes and loads.
+func TestOwnerRecordPublishesThroughSymlinkedAncestor(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatalf("mkdir real: %v", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink ancestor: %v", err)
+	}
+	path := filepath.Join(link, "sockets", "c.sock")
+	if err := os.Mkdir(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir sockets: %v", err)
+	}
+
+	_, cap := publishTestServer(t, path)
+	record, err := LoadOwnerRecord(path)
+	if err != nil {
+		t.Fatalf("load record through symlinked ancestor: %v", err)
+	}
+	if record.CapabilityID != cap.ID {
+		t.Fatalf("record capability = %q, want %q", record.CapabilityID, cap.ID)
+	}
+}
+
 // TestOwnerRecordModeRejected proves a record with the wrong mode, owner or
 // file type is rejected and never replaced.
 func TestOwnerRecordModeRejected(t *testing.T) {
