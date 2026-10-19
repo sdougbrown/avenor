@@ -583,6 +583,11 @@ func TestRenewLeaseLogsEveryRenewal(t *testing.T) {
 	if rec.Revision != acquired.Revision+2 {
 		t.Fatalf("revision after two renewals: got %d, want %d", rec.Revision, acquired.Revision+2)
 	}
+	// The lease must expire one TTL after the last renewal's own time, not
+	// after the acquisition's.
+	if want := clock.Now().Add(LeaseTTL); !rec.Leader.ExpiresAt.Equal(want) {
+		t.Fatalf("expiry after the last renewal: got %s, want %s", rec.Leader.ExpiresAt, want)
+	}
 }
 
 // renewUntilRotation renews until the previous generation starts beyond after,
