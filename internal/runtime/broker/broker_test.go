@@ -2876,3 +2876,216 @@ func TestBrokerWaitReplyDeliversReplyAfterWriteTimeout(t *testing.T) {
 		t.Fatalf("wait_reply from_run_id = %v, want replier", result["from_run_id"])
 	}
 }
+
+// TestLocalRouterOutcomeFieldsAdditive pins that the ask handlers keep every
+// existing field and status code and add the shared outcome alongside.
+func TestLocalRouterOutcomeFieldsAdditive(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("additive_sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("additive_target"); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+
+	// The legacy path keeps its fields and its semantics: an unversioned ask
+	// records no terminal fence, so a later withdrawal reports absence.
+	legacyID := "additive-ask"
+	status, sent := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", legacyID, ""))
+	if status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, sent)
+	}
+	if sent["queued"] != true || sent["message_id"] != legacyID || sent["expects_reply"] != true {
+		t.Fatalf("send lost its legacy fields: %v", sent)
+	}
+	if sent["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("send outcome = %v", sent["outcome"])
+	}
+	status, waited := postBroker(t, addr, "wait_reply", fmt.Sprintf(
+		`{"run_id":"additive_sender","token":%q,"waiting_for":%q,"timeout_ms":20}`, senderToken, legacyID))
+	if status != http.StatusGatewayTimeout {
+		t.Fatalf("wait = (%d, %v), want 504", status, waited)
+	}
+	if waited["timeout"] != true || waited["message_id"] != legacyID {
+		t.Fatalf("wait lost its legacy fields: %v", waited)
+	}
+	if waited["outcome"] != string(messaging.OutcomeTimedOut) {
+		t.Fatalf("wait outcome = %v", waited["outcome"])
+	}
+	status, absent := postBroker(t, addr, "cancel_message", fmt.Sprintf(
+		`{"run_id":"additive_sender","token":%q,"cancel_message_id":%q}`, senderToken, legacyID))
+	if status != http.StatusNotFound || absent["outcome"] != string(messaging.OutcomeEdgeAbsent) {
+		t.Fatalf("legacy cancel = (%d, %v), want 404 edge-absent", status, absent)
+	}
+
+	// A versioned ask keeps a terminal fence, so its withdrawal is reported as
+	// a terminal outcome next to the legacy fields.
+	versionedID := mintMsgID(t, time.Minute)
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", versionedID, gen)); status != http.StatusOK {
+		t.Fatalf("versioned send = (%d, %v)", status, body)
+	}
+	status, cancelled := postBroker(t, addr, "cancel_message", fmt.Sprintf(
+		`{"run_id":"additive_sender","token":%q,"cancel_message_id":%q,"generation":%q}`, senderToken, versionedID, gen))
+	if status != http.StatusOK {
+		t.Fatalf("cancel = (%d, %v)", status, cancelled)
+	}
+	if cancelled["cancelled"] != true || cancelled["message_id"] != versionedID {
+		t.Fatalf("cancel lost its legacy fields: %v", cancelled)
+	}
+	if cancelled["outcome"] != string(messaging.OutcomeWithdrawn) {
+		t.Fatalf("cancel outcome = %v", cancelled["outcome"])
+	}
+
+	// Re-sending a withdrawn ID keeps its existing 409 and now names the
+	// outcome that refused it.
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", versionedID, gen)); status != http.StatusConflict || body["outcome"] != string(messaging.OutcomeWithdrawn) {
+		t.Fatalf("withdrawn resend = (%d, %v), want 409 withdrawn", status, body)
+	}
+
+	// A duplicate ID that meets a timed-out terminal fence keeps the existing
+	// 409 with the protocol code and outcome alongside.
+	expiredID := mintMsgID(t, time.Minute)
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", expiredID, gen)); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+	if status, body := postBroker(t, addr, "wait_reply", fmt.Sprintf(
+		`{"run_id":"additive_sender","token":%q,"waiting_for":%q,"generation":%q,"timeout_ms":20}`, senderToken, expiredID, gen)); status != http.StatusGatewayTimeout {
+		t.Fatalf("wait = (%d, %v), want 504", status, body)
+	}
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", expiredID, gen)); status != http.StatusConflict {
+		t.Fatalf("duplicate send = (%d, %v), want 409", status, body)
+	} else {
+		if body["error"] != "message id already in use" {
+			t.Fatalf("duplicate send message = %v", body["error"])
+		}
+		if body["code"] != "duplicate-message-id" || body["outcome"] != string(messaging.OutcomeNotSent) {
+			t.Fatalf("duplicate send envelope = %v", body)
+		}
+	}
+}
+
+// TestLocalRouterEnvelopeRouting pins that an ask can route on the envelope
+// alone and still deliver its payload verbatim with the sender name intact.
+func TestLocalRouterEnvelopeRouting(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("envelope_sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	targetToken, err := b.CreateRun("envelope_target")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+	msgID := mintMsgID(t, time.Minute)
+
+	body := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"sender":"display-name","payload":{"message":"ping"}}`,
+		senderToken, gen, msgID)
+	status, sent := postBroker(t, addr, "send", body)
+	if status != http.StatusOK || sent["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("envelope send = (%d, %v)", status, sent)
+	}
+
+	polled := pollAgentMessages(t, addr, "envelope_target", targetToken)
+	if len(polled) != 1 {
+		t.Fatalf("polled %d messages, want 1", len(polled))
+	}
+	entry := polled[0]
+	if entry["id"] != msgID || entry["type"] != "agent_message" {
+		t.Fatalf("polled envelope = %v", entry)
+	}
+	if entry["sender"] != "display-name" {
+		t.Fatalf("polled sender = %v, want the supplied display name", entry["sender"])
+	}
+	raw, err := json.Marshal(entry["payload"])
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if string(raw) != `{"message":"ping"}` {
+		t.Fatalf("polled payload = %s, want the caller's body verbatim", raw)
+	}
+
+	if queued := b.Store().Pending("envelope_sender", msgID); !queued {
+		t.Fatal("envelope ask left no live edge")
+	}
+}
+
+// TestLocalPollControlAgentOnlyKeepsControlMessages pins that an
+// agent-message-only drain leaves other control messages queued.
+func TestLocalPollControlAgentOnlyKeepsControlMessages(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("drain_sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	targetToken, err := b.CreateRun("drain_target")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+
+	if err := b.PushControl("drain_target", ControlMessage{ID: "ctrl-1", Type: "interrupt", RunID: "drain_target"}); err != nil {
+		t.Fatalf("PushControl: %v", err)
+	}
+	askID := mintMsgID(t, time.Minute)
+	ask := fmt.Sprintf(`{"run_id":"drain_sender","token":%q,"from_run_id":"drain_sender",
+		"to_run_id":"drain_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"message":"ping"}}`, senderToken, b.Store().Generation(), askID)
+	if status, body := postBroker(t, addr, "send", ask); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+
+	polled := pollAgentMessages(t, addr, "drain_target", targetToken)
+	if len(polled) != 1 || polled[0]["id"] != askID {
+		t.Fatalf("agent-only poll = %v, want only the agent message", polled)
+	}
+	rest := pollAllMessages(t, addr, "drain_target", targetToken)
+	if len(rest) != 1 || rest[0]["id"] != "ctrl-1" {
+		t.Fatalf("control message did not survive the agent-only drain: %v", rest)
+	}
+}
+
+func pollAgentMessages(t *testing.T, addr, runID, token string) []map[string]any {
+	t.Helper()
+	return pollControl(t, addr, fmt.Sprintf(`{"run_id":%q,"token":%q,"agent_only":true}`, runID, token))
+}
+
+func pollAllMessages(t *testing.T, addr, runID, token string) []map[string]any {
+	t.Helper()
+	return pollControl(t, addr, fmt.Sprintf(`{"run_id":%q,"token":%q}`, runID, token))
+}
+
+func pollControl(t *testing.T, addr, body string) []map[string]any {
+	t.Helper()
+	resp, err := http.Post(fmt.Sprintf("http://%s/poll-control", addr), "application/json", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("poll-control: %v", err)
+	}
+	defer resp.Body.Close()
+	var msgs []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode poll-control: %v", err)
+	}
+	return msgs
+}

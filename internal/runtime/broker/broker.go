@@ -33,6 +33,7 @@ type ControlMessage struct {
 	Type      string          `json:"type"`
 	RunID     string          `json:"run_id"`
 	FromRunID string          `json:"from_run_id,omitempty"`
+	Sender    string          `json:"sender,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 	CreatedAt time.Time       `json:"created_at"`
 }
@@ -604,6 +605,9 @@ func (b *Broker) handlePushControl(w http.ResponseWriter, r *http.Request) {
 func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RunID string `json:"run_id"`
+		// AgentOnly drains the agent_message entries only. Control messages
+		// stay queued for the consumers that act on them.
+		AgentOnly bool `json:"agent_only"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -632,6 +636,21 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 	}
 	msgs := st.ControlQueue
 	st.ControlQueue = nil
+	if body.AgentOnly {
+		var drained, kept []*ControlMessage
+		for _, msg := range msgs {
+			if msg.Type == "agent_message" {
+				drained = append(drained, msg)
+				continue
+			}
+			kept = append(kept, msg)
+		}
+		msgs = drained
+		if len(kept) > 0 {
+			st.ControlQueue = kept
+			st.signalLocked()
+		}
+	}
 	if len(msgs) > 0 {
 		select {
 		case <-st.Notify:
@@ -721,20 +740,24 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var fullBody struct {
-		RunID      string          `json:"run_id"`
-		Token      string          `json:"token"`
-		FromRunID  string          `json:"from_run_id"`
-		ToRunID    string          `json:"to_run_id"`
-		Type       string          `json:"type"`
-		Payload    json.RawMessage `json:"payload"`
-		Generation string          `json:"generation"`
+		RunID        string          `json:"run_id"`
+		Token        string          `json:"token"`
+		FromRunID    string          `json:"from_run_id"`
+		ToRunID      string          `json:"to_run_id"`
+		Type         string          `json:"type"`
+		Payload      json.RawMessage `json:"payload"`
+		Generation   string          `json:"generation"`
+		Sender       string          `json:"sender"`
+		MessageID    string          `json:"message_id"`
+		ReplyTo      string          `json:"reply_to"`
+		ExpectsReply bool            `json:"expects_reply"`
 	}
 	if err := json.Unmarshal(bodyBytes, &fullBody); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if fullBody.FromRunID == "" || fullBody.ToRunID == "" || fullBody.Type == "" {
-		http.Error(w, "missing fields", http.StatusBadRequest)
+		writeCodedError(w, http.StatusBadRequest, "missing fields", "invalid-request")
 		return
 	}
 	// Validate that the authenticated caller matches from_run_id's token.
@@ -742,7 +765,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 	fromSt, ok := b.runs[fullBody.FromRunID]
 	b.mu.RUnlock()
 	if !ok {
-		http.Error(w, "from run not found", http.StatusNotFound)
+		writeCodedError(w, http.StatusNotFound, "from run not found", "invalid-request")
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(fullBody.Token), []byte(fromSt.Token)) != 1 {
@@ -750,38 +773,50 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the agent_message payload to inspect ask/reply fields.
-	msgID := ""
-	replyTo := ""
-	expectsReply := false
+	// Parse the agent_message payload to inspect ask/reply fields. The envelope
+	// carries the same routing for clients that keep the payload opaque; a
+	// payload field always wins so legacy senders keep their exact meaning.
+	msgID := fullBody.MessageID
+	replyTo := fullBody.ReplyTo
+	expectsReply := fullBody.ExpectsReply
 	if fullBody.Type == "agent_message" && len(fullBody.Payload) > 0 {
 		var am AgentMessage
 		if err := json.Unmarshal(fullBody.Payload, &am); err == nil {
-			msgID = am.ID
-			replyTo = am.ReplyTo
-			expectsReply = am.ExpectsReply
+			if am.ID != "" {
+				msgID = am.ID
+			}
+			if am.ReplyTo != "" {
+				replyTo = am.ReplyTo
+			}
+			if am.ExpectsReply {
+				expectsReply = true
+			}
 		}
 	}
 
 	if expectsReply {
 		if msgID == "" {
-			http.Error(w, "expects_reply requires a message id", http.StatusBadRequest)
+			writeCodedError(w, http.StatusBadRequest, "expects_reply requires a message id", "invalid-request")
 			return
 		}
 
 		sender := fullBody.FromRunID
 		target := fullBody.ToRunID
+		senderName := fullBody.Sender
+		if senderName == "" {
+			senderName = sender
+		}
 
 		b.mu.RLock()
 		_, toOk := b.runs[target]
 		b.mu.RUnlock()
 		if !toOk {
-			http.Error(w, "to run not found", http.StatusNotFound)
+			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 			return
 		}
 
 		res, err := b.route().Send(r.Context(), messaging.SendRequest{
-			From:       messaging.Identity{RunID: sender, Sender: sender},
+			From:       messaging.Identity{RunID: sender, Sender: senderName},
 			To:         messaging.Identity{RunID: target, Sender: target},
 			MessageID:  msgID,
 			Generation: fullBody.Generation,
@@ -792,11 +827,18 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if res.Outcome != messaging.OutcomeSent {
-			writeJSONError(w, http.StatusConflict, "message id withdrawn")
+			writeJSONBody(w, http.StatusConflict, map[string]any{
+				"error":   "message id withdrawn",
+				"outcome": res.Outcome,
+			})
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "message_id": msgID, "expects_reply": true})
+		writeJSONBody(w, http.StatusOK, map[string]any{
+			"queued":        true,
+			"message_id":    msgID,
+			"expects_reply": true,
+			"outcome":       messaging.OutcomeSent,
+		})
 		return
 	}
 
@@ -809,7 +851,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		key := messaging.FenceKey{Sender: fullBody.ToRunID, MessageID: replyTo, Generation: b.store.Generation()}
 		outcome, err := b.store.Reply(key, fullBody.FromRunID, fullBody.Payload)
 		if errors.Is(err, messaging.ErrNotAskTarget) {
-			writeJSONError(w, http.StatusForbidden, "not the target of this ask")
+			writeCodedError(w, http.StatusForbidden, "not the target of this ask", "not-ask-target")
 			return
 		}
 		if err != nil {
@@ -821,26 +863,35 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			// rather than completing an edge the store already retired.
 			err = b.SendTo(fullBody.FromRunID, fullBody.ToRunID, fullBody.Type, fullBody.Payload, "")
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusNotFound)
+				writeCodedError(w, http.StatusNotFound, err.Error(), "invalid-request")
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "note": "reply_to edge not found, delivered as fire-and-forget"})
+			writeJSONBody(w, http.StatusOK, map[string]any{
+				"queued":  true,
+				"note":    "reply_to edge not found, delivered as fire-and-forget",
+				"outcome": messaging.OutcomeEdgeAbsent,
+			})
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "reply_to": replyTo})
+		writeJSONBody(w, http.StatusOK, map[string]any{
+			"queued":     true,
+			"reply_to":   replyTo,
+			"message_id": replyTo,
+			"outcome":    outcome,
+		})
 		return
 	}
 
 	// Fire-and-forget: deliver to the target's control queue.
 	err = b.SendTo(fullBody.FromRunID, fullBody.ToRunID, fullBody.Type, fullBody.Payload, "")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeCodedError(w, http.StatusNotFound, err.Error(), "target-unavailable")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"queued": true})
+	writeJSONBody(w, http.StatusOK, map[string]any{
+		"queued":  true,
+		"outcome": messaging.OutcomeSent,
+	})
 }
 
 // handleWaitReply long-polls for a reply to a previously sent ask.
@@ -858,13 +909,14 @@ func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
 		Token      string `json:"token"`
 		WaitingFor string `json:"waiting_for"`
 		Generation string `json:"generation"`
+		TimeoutMS  int64  `json:"timeout_ms"`
 	}
 	if err := json.Unmarshal(bodyBytes, &fullBody); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if fullBody.WaitingFor == "" {
-		http.Error(w, "missing waiting_for", http.StatusBadRequest)
+		writeCodedError(w, http.StatusBadRequest, "missing waiting_for", "invalid-request")
 		return
 	}
 
@@ -881,15 +933,23 @@ func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
 	// consumed. Extend it to cover the wait plus response margin.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(askstore.DefaultAskTimeout + 30*time.Second))
 
+	timeout := askstore.DefaultAskTimeout
+	if fullBody.TimeoutMS > 0 {
+		timeout = time.Duration(fullBody.TimeoutMS) * time.Millisecond
+		if timeout > messaging.MaxWait {
+			timeout = messaging.MaxWait
+		}
+	}
+
 	res, err := b.route().Wait(r.Context(), messaging.WaitRequest{
 		Sender:     messaging.Identity{RunID: fullBody.RunID, Sender: fullBody.RunID},
 		MessageID:  fullBody.WaitingFor,
 		Generation: fullBody.Generation,
-		Timeout:    askstore.DefaultAskTimeout,
+		Timeout:    timeout,
 	})
 	if err != nil {
 		if errors.Is(err, messaging.ErrGenerationMismatch) {
-			writeJSONError(w, http.StatusConflict, "generation mismatch")
+			writeCodedError(w, http.StatusConflict, "generation mismatch", "generation-mismatch")
 			return
 		}
 		if r.Context().Err() != nil {
@@ -902,28 +962,40 @@ func (b *Broker) handleWaitReply(w http.ResponseWriter, r *http.Request) {
 	switch res.Outcome {
 	case messaging.OutcomeReplied:
 		if res.Reply == nil {
-			http.Error(w, "no pending ask for this message id", http.StatusNotFound)
+			writeCodedError(w, http.StatusNotFound, "no pending ask for this message id", "invalid-request")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		writeJSONBody(w, http.StatusOK, map[string]any{
 			"message_id":  fullBody.WaitingFor,
 			"from_run_id": res.Reply.FromRunID,
+			"sender":      res.Reply.Sender,
+			"kind":        res.Reply.Kind,
 			"payload":     res.Reply.Payload,
+			"outcome":     messaging.OutcomeReplied,
 		})
 	case messaging.OutcomeTimedOut:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusGatewayTimeout)
-		_ = json.NewEncoder(w).Encode(map[string]any{"timeout": true, "message_id": fullBody.WaitingFor})
+		writeJSONBody(w, http.StatusGatewayTimeout, map[string]any{
+			"timeout":    true,
+			"message_id": fullBody.WaitingFor,
+			"outcome":    messaging.OutcomeTimedOut,
+		})
 	case messaging.OutcomeWithdrawn:
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"cancelled": true, "message_id": fullBody.WaitingFor})
+		writeJSONBody(w, http.StatusOK, map[string]any{
+			"cancelled":  true,
+			"message_id": fullBody.WaitingFor,
+			"outcome":    messaging.OutcomeWithdrawn,
+		})
 	case messaging.OutcomeLost:
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusGone)
-		_ = json.NewEncoder(w).Encode(map[string]any{"lost": true, "message_id": fullBody.WaitingFor})
+		writeJSONBody(w, http.StatusGone, map[string]any{
+			"lost":       true,
+			"message_id": fullBody.WaitingFor,
+			"outcome":    messaging.OutcomeLost,
+		})
 	case messaging.OutcomeEdgeAbsent:
-		http.Error(w, "no pending ask for this message id", http.StatusNotFound)
+		writeJSONBody(w, http.StatusNotFound, map[string]any{
+			"error":   "no pending ask for this message id",
+			"outcome": messaging.OutcomeEdgeAbsent,
+		})
 	case messaging.OutcomePossiblyPending:
 		// The waiter's connection ended; nothing can be written.
 	}
@@ -946,7 +1018,7 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if fullBody.CancelMessageID == "" {
-		http.Error(w, "missing cancel_message_id", http.StatusBadRequest)
+		writeCodedError(w, http.StatusBadRequest, "missing cancel_message_id", "invalid-request")
 		return
 	}
 
@@ -965,11 +1037,11 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, messaging.ErrGenerationMismatch) {
-			writeJSONError(w, http.StatusConflict, "generation mismatch")
+			writeCodedError(w, http.StatusConflict, "generation mismatch", "generation-mismatch")
 			return
 		}
 		if errors.Is(err, messaging.ErrFenceCapacity) {
-			writeJSONError(w, http.StatusServiceUnavailable, "ask capacity exhausted")
+			writeCodedError(w, http.StatusServiceUnavailable, "ask capacity exhausted", "fence-capacity")
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -977,22 +1049,35 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	switch res.Outcome {
 	case messaging.OutcomeEdgeAbsent:
-		http.Error(w, "no pending ask for this message id", http.StatusNotFound)
+		writeJSONBody(w, http.StatusNotFound, map[string]any{
+			"error":   "no pending ask for this message id",
+			"outcome": messaging.OutcomeEdgeAbsent,
+			"fence":   fenceBody(res.Fence),
+		})
 	default:
 		// A live edge was consumed, or a reply already won the race; both
 		// report the identifier as no longer pending.
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"cancelled": true, "message_id": fullBody.CancelMessageID})
+		writeJSONBody(w, http.StatusOK, map[string]any{
+			"cancelled":  true,
+			"message_id": fullBody.CancelMessageID,
+			"outcome":    res.Outcome,
+			"fence":      fenceBody(res.Fence),
+		})
 	}
 }
 
 // handleSessions returns a list of all registered runs and their metadata.
+// The generation and the messaging protocol marker let a shared client
+// negotiate the local ask protocol before it sends anything.
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
 	sessions := b.sessions()
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions, "generation": generation})
+	writeJSONBody(w, http.StatusOK, map[string]any{
+		"sessions":           sessions,
+		"generation":         generation,
+		"messaging_protocol": messaging.ProtocolVersion,
+	})
 }
 
 // sessions returns a snapshot of the registered runs.
@@ -1236,6 +1321,7 @@ func (x brokerBackend) Publish(target string, msg messaging.InboundMessage) (fun
 		Type:      msg.Kind,
 		RunID:     target,
 		FromRunID: msg.FromRunID,
+		Sender:    msg.Sender,
 		Payload:   msg.Payload,
 		CreatedAt: time.Now(),
 	}
@@ -1319,32 +1405,59 @@ func (r localAskRoute) Withdraw(ctx context.Context, req messaging.WithdrawReque
 }
 
 // writeSendError maps a send failure to the local router's existing status
-// codes and adds the new protocol classes.
+// codes and reports its protocol code plus outcome alongside.
 func writeSendError(w http.ResponseWriter, err error) {
+	code := messaging.WireCodeFor(err)
 	switch {
 	case errors.Is(err, messaging.ErrDuplicateMessageID):
-		writeJSONError(w, http.StatusConflict, "message id already in use")
+		writeCodedError(w, http.StatusConflict, "message id already in use", code)
 	case errors.Is(err, messaging.ErrMutualAsk):
-		writeJSONError(w, http.StatusConflict, "mutual ask refused")
+		writeCodedError(w, http.StatusConflict, "mutual ask refused", code)
 	case errors.Is(err, messaging.ErrGenerationMismatch):
-		writeJSONError(w, http.StatusConflict, "generation mismatch")
+		writeCodedError(w, http.StatusConflict, "generation mismatch", code)
 	case errors.Is(err, messaging.ErrMessageIDExpired):
-		writeJSONError(w, http.StatusConflict, "message id expired")
+		writeCodedError(w, http.StatusConflict, "message id expired", code)
 	case errors.Is(err, messaging.ErrFenceCapacity):
-		writeJSONError(w, http.StatusServiceUnavailable, "ask capacity exhausted")
+		writeCodedError(w, http.StatusServiceUnavailable, "ask capacity exhausted", code)
 	case errors.Is(err, messaging.ErrTargetUnavailable):
-		http.Error(w, "to run not found", http.StatusNotFound)
+		writeCodedError(w, http.StatusNotFound, "to run not found", code)
 	case errors.Is(err, messaging.ErrInvalidRequest),
 		errors.Is(err, messaging.ErrMalformedMessageID),
 		errors.Is(err, messaging.ErrMessageIDHorizon):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCodedError(w, http.StatusBadRequest, err.Error(), code)
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// An unclassified failure may still have admitted the ask, so report
+		// the uncertainty instead of a code the client reads as not-sent.
+		writeJSONBody(w, http.StatusInternalServerError, map[string]any{
+			"error":   err.Error(),
+			"outcome": messaging.OutcomePossiblyPending,
+		})
 	}
 }
 
-func writeJSONError(w http.ResponseWriter, status int, message string) {
+// writeCodedError reports a messaging failure with the legacy message text and
+// the protocol code class that classifies it.
+func writeCodedError(w http.ResponseWriter, status int, message, code string) {
+	writeJSONBody(w, status, map[string]any{
+		"error":   message,
+		"code":    code,
+		"outcome": messaging.WireOutcomeFor(code),
+	})
+}
+
+// fenceBody renders a withdrawal's fence acknowledgement on the wire.
+func fenceBody(ack messaging.FenceAck) map[string]any {
+	return map[string]any{
+		"sender":     ack.Sender,
+		"message_id": ack.MessageID,
+		"generation": ack.Generation,
+		"deadline":   ack.Deadline,
+		"terminal":   ack.Terminal,
+	}
+}
+
+func writeJSONBody(w http.ResponseWriter, status int, body map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": message})
+	_ = json.NewEncoder(w).Encode(body)
 }
