@@ -3024,6 +3024,60 @@ func TestLocalRouterEnvelopeRouting(t *testing.T) {
 	if queued := b.Store().Pending("envelope_sender", msgID); !queued {
 		t.Fatal("envelope ask left no live edge")
 	}
+
+	// A payload that names the id and asks for a reply routes on the payload.
+	payloadID := mintMsgID(t, time.Minute)
+	payloadAsk := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,
+		"payload":{"id":%q,"from":"display-name","message":"payload-routed","expects_reply":true}}`,
+		senderToken, gen, payloadID)
+	if status, body := postBroker(t, addr, "send", payloadAsk); status != http.StatusOK {
+		t.Fatalf("payload-routed send = (%d, %v)", status, body)
+	}
+	if queued := b.Store().Pending("envelope_sender", payloadID); !queued {
+		t.Fatal("payload-routed ask did not land under the payload id")
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["id"] != payloadID {
+		t.Fatalf("payload-routed poll = %v", polled)
+	}
+
+	// Two non-empty ids that disagree are refused instead of resolved by
+	// precedence, and nothing is admitted under either id.
+	conflictID := mintMsgID(t, time.Minute)
+	otherID := mintMsgID(t, time.Minute)
+	conflict := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"id":%q,"from":"display-name","message":"conflict"}}`,
+		senderToken, gen, conflictID, otherID)
+	status, refused := postBroker(t, addr, "send", conflict)
+	if status != http.StatusBadRequest || refused["code"] != "invalid-request" {
+		t.Fatalf("conflicting send = (%d, %v), want 400 invalid-request", status, refused)
+	}
+	if b.Store().Pending("envelope_sender", conflictID) || b.Store().Pending("envelope_sender", otherID) {
+		t.Fatal("conflicting send admitted an ask")
+	}
+
+	// The display name is bound to the token that authenticated the run: naming
+	// someone else is refused, and naming nobody takes the bound name.
+	mismatch := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"sender":"other-name","payload":{"message":"impersonation"}}`,
+		senderToken, gen, mintMsgID(t, time.Minute))
+	status, refused = postBroker(t, addr, "send", mismatch)
+	if status != http.StatusForbidden || refused["code"] != "sender-mismatch" {
+		t.Fatalf("mismatched sender = (%d, %v), want 403 sender-mismatch", status, refused)
+	}
+
+	unnamed := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"message":"unnamed"}}`,
+		senderToken, gen, mintMsgID(t, time.Minute))
+	if status, body := postBroker(t, addr, "send", unnamed); status != http.StatusOK {
+		t.Fatalf("unnamed send = (%d, %v)", status, body)
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["sender"] != "display-name" {
+		t.Fatalf("unnamed send poll = %v, want the bound display name", polled)
+	}
 }
 
 // TestLocalPollControlAgentOnlyKeepsControlMessages pins that an

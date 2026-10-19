@@ -58,6 +58,7 @@ var (
 	ErrDuplicateMessageID   = errors.New("messaging: message id already in use")
 	ErrMutualAsk            = errors.New("messaging: mutual ask refused")
 	ErrFenceCapacity        = errors.New("messaging: fence capacity exhausted")
+	ErrSenderMismatch       = errors.New("messaging: sender does not match this run")
 	ErrNotAskSender         = errors.New("messaging: not the sender of this ask")
 	ErrNotAskTarget         = errors.New("messaging: not the target of this ask")
 	ErrTargetUnavailable    = errors.New("messaging: target unavailable")

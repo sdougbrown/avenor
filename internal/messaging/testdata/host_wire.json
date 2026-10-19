@@ -96,6 +96,7 @@
     {"status": 409, "error": "duplicate-message-id", "outcome": "not-sent"},
     {"status": 400, "error": "mutual-ask", "outcome": "not-sent"},
     {"status": 503, "error": "fence-capacity", "outcome": "not-sent"},
+    {"status": 403, "error": "sender-mismatch", "outcome": "auth-rejected"},
     {"status": 403, "error": "not-ask-sender", "outcome": "edge-absent"},
     {"status": 403, "error": "not-ask-target", "outcome": "edge-absent"},
     {"status": 503, "error": "target-unavailable", "outcome": "not-sent"},

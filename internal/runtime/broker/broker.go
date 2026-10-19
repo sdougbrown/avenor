@@ -164,10 +164,29 @@ type RunState struct {
 
 	// Session metadata for peer discovery
 	Info *SessionInfo
+
+	// SenderName is the display name the run claimed on its first
+	// authenticated send; empty until a send carries one.
+	SenderName string
 }
 
 func (st *RunState) Lock()   { st.Mu.Lock() }
 func (st *RunState) Unlock() { st.Mu.Unlock() }
+
+// bindSender records the display name a run first claims and reports whether
+// name is the run's registered one. A request that names nothing takes the
+// registered name; a request that names someone else is refused.
+func (st *RunState) bindSender(name string) (string, bool) {
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	if st.SenderName == "" {
+		st.SenderName = name
+	}
+	if name == "" {
+		return st.SenderName, true
+	}
+	return st.SenderName, name == st.SenderName
+}
 
 // PushControl queues a control message for the given run.
 func (b *Broker) PushControl(runID string, msg ControlMessage) error {
@@ -608,6 +627,9 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 		// AgentOnly drains the agent_message entries only. Control messages
 		// stay queued for the consumers that act on them.
 		AgentOnly bool `json:"agent_only"`
+		// Limit caps the drained entries. The excess stays queued, so a
+		// bounded poll loses nothing.
+		Limit int `json:"limit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -637,19 +659,14 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 	msgs := st.ControlQueue
 	st.ControlQueue = nil
 	if body.AgentOnly {
-		var drained, kept []*ControlMessage
-		for _, msg := range msgs {
-			if msg.Type == "agent_message" {
-				drained = append(drained, msg)
-				continue
-			}
-			kept = append(kept, msg)
-		}
-		msgs = drained
-		if len(kept) > 0 {
-			st.ControlQueue = kept
-			st.signalLocked()
-		}
+		msgs, st.ControlQueue = partitionAgentMessages(msgs)
+	}
+	if body.Limit > 0 && len(msgs) > body.Limit {
+		st.ControlQueue = append(msgs[body.Limit:], st.ControlQueue...)
+		msgs = msgs[:body.Limit]
+	}
+	if len(st.ControlQueue) > 0 {
+		st.signalLocked()
 	}
 	if len(msgs) > 0 {
 		select {
@@ -773,25 +790,38 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the agent_message payload to inspect ask/reply fields. The envelope
-	// carries the same routing for clients that keep the payload opaque; a
-	// payload field always wins so legacy senders keep their exact meaning.
+	// The display name is bound to the token that authenticated the run, so no
+	// caller can announce itself as a different participant.
+	senderName, ok := fromSt.bindSender(fullBody.Sender)
+	if !ok {
+		writeCodedError(w, http.StatusForbidden, "sender does not match this run", "sender-mismatch")
+		return
+	}
+	if senderName == "" {
+		senderName = fullBody.FromRunID
+	}
+
+	// The payload carries the routing a legacy sender writes; the envelope
+	// carries the same routing for clients that keep the payload opaque. Both
+	// are read, and only a pair that disagrees is refused.
 	msgID := fullBody.MessageID
 	replyTo := fullBody.ReplyTo
 	expectsReply := fullBody.ExpectsReply
 	if fullBody.Type == "agent_message" && len(fullBody.Payload) > 0 {
 		var am AgentMessage
-		if err := json.Unmarshal(fullBody.Payload, &am); err == nil {
-			if am.ID != "" {
-				msgID = am.ID
-			}
-			if am.ReplyTo != "" {
-				replyTo = am.ReplyTo
-			}
-			if am.ExpectsReply {
-				expectsReply = true
-			}
+		if err := json.Unmarshal(fullBody.Payload, &am); err != nil {
+			writeCodedError(w, http.StatusBadRequest, "payload is not an agent message", "invalid-request")
+			return
 		}
+		if msgID, ok = mergedField(am.ID, fullBody.MessageID); !ok {
+			writeCodedError(w, http.StatusBadRequest, "message id in payload and envelope disagree", "invalid-request")
+			return
+		}
+		if replyTo, ok = mergedField(am.ReplyTo, fullBody.ReplyTo); !ok {
+			writeCodedError(w, http.StatusBadRequest, "reply_to in payload and envelope disagree", "invalid-request")
+			return
+		}
+		expectsReply = expectsReply || am.ExpectsReply
 	}
 
 	if expectsReply {
@@ -800,12 +830,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		sender := fullBody.FromRunID
 		target := fullBody.ToRunID
-		senderName := fullBody.Sender
-		if senderName == "" {
-			senderName = sender
-		}
 
 		b.mu.RLock()
 		_, toOk := b.runs[target]
@@ -816,7 +841,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 
 		res, err := b.route().Send(r.Context(), messaging.SendRequest{
-			From:       messaging.Identity{RunID: sender, Sender: senderName},
+			From:       messaging.Identity{RunID: fullBody.FromRunID, Sender: senderName},
 			To:         messaging.Identity{RunID: target, Sender: target},
 			MessageID:  msgID,
 			Generation: fullBody.Generation,
@@ -1136,16 +1161,14 @@ func (b *Broker) PollAgentMessages(ctx context.Context, runID string, onMessage 
 			continue
 		}
 		st.Mu.Lock()
-		msgs := make([]ControlMessage, len(st.ControlQueue))
-		for i, m := range st.ControlQueue {
-			msgs[i] = *m
+		agent, _ := partitionAgentMessages(st.ControlQueue)
+		msgs := make([]ControlMessage, 0, len(agent))
+		for _, msg := range agent {
+			msgs = append(msgs, *msg)
 		}
 		st.ControlQueue = nil
 		st.Mu.Unlock()
 		for _, msg := range msgs {
-			if msg.Type != "agent_message" {
-				continue
-			}
 			var payload struct {
 				Message string `json:"message"`
 			}
@@ -1175,17 +1198,27 @@ func (b *Broker) DrainAgentMessages(runID string) ([]ControlMessage, error) {
 	}
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
-	var out []ControlMessage
-	remaining := st.ControlQueue[:0]
-	for _, msg := range st.ControlQueue {
+	agent, rest := partitionAgentMessages(st.ControlQueue)
+	st.ControlQueue = rest
+	out := make([]ControlMessage, 0, len(agent))
+	for _, msg := range agent {
+		out = append(out, *msg)
+	}
+	return out, nil
+}
+
+// partitionAgentMessages splits a control queue into the agent messages a drain
+// consumes and the control messages it leaves to the consumers that act on
+// them.
+func partitionAgentMessages(queue []*ControlMessage) (agent, other []*ControlMessage) {
+	for _, msg := range queue {
 		if msg.Type == "agent_message" {
-			out = append(out, *msg)
+			agent = append(agent, msg)
 			continue
 		}
-		remaining = append(remaining, msg)
+		other = append(other, msg)
 	}
-	st.ControlQueue = remaining
-	return out, nil
+	return agent, other
 }
 
 // UpdateSessionInfo sets or updates the metadata for a registered run.
@@ -1402,6 +1435,19 @@ func (r localAskRoute) Withdraw(ctx context.Context, req messaging.WithdrawReque
 	return r.broker.store.Withdraw(messaging.FenceKey{
 		Sender: req.Sender.RunID, MessageID: req.MessageID, Generation: req.Generation,
 	})
+}
+
+// mergedField combines a payload field with its envelope counterpart: the
+// payload is authoritative, the envelope fills a field the payload leaves
+// empty, and two non-empty values that disagree report false.
+func mergedField(payload, envelope string) (string, bool) {
+	switch {
+	case payload == "":
+		return envelope, true
+	case envelope == "" || payload == envelope:
+		return payload, true
+	}
+	return "", false
 }
 
 // writeSendError maps a send failure to the local router's existing status

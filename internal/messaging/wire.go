@@ -36,6 +36,7 @@ var wireErrorClasses = []WireErrorClass{
 	{"duplicate-message-id", ErrDuplicateMessageID, http.StatusConflict, OutcomeNotSent},
 	{"mutual-ask", ErrMutualAsk, http.StatusBadRequest, OutcomeNotSent},
 	{"fence-capacity", ErrFenceCapacity, http.StatusServiceUnavailable, OutcomeNotSent},
+	{"sender-mismatch", ErrSenderMismatch, http.StatusForbidden, OutcomeAuthRejected},
 	{"not-ask-sender", ErrNotAskSender, http.StatusForbidden, OutcomeEdgeAbsent},
 	{"not-ask-target", ErrNotAskTarget, http.StatusForbidden, OutcomeEdgeAbsent},
 	{"target-unavailable", ErrTargetUnavailable, http.StatusServiceUnavailable, OutcomeNotSent},

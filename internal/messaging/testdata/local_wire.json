@@ -13,7 +13,7 @@
     "reply": ["run_id", "token", "from_run_id", "to_run_id", "type", "reply_to", "sender", "payload"],
     "wait": ["run_id", "token", "waiting_for", "generation", "timeout_ms"],
     "withdraw": ["run_id", "token", "cancel_message_id", "generation"],
-    "receive": ["run_id", "token", "agent_only"]
+    "receive": ["run_id", "token", "agent_only", "limit"]
   },
   "response_fields": {
     "sessions": ["sessions", "generation", "messaging_protocol"],
@@ -39,6 +39,7 @@
     "duplicate-message-id",
     "mutual-ask",
     "fence-capacity",
+    "sender-mismatch",
     "not-ask-target",
     "target-unavailable"
   ]
