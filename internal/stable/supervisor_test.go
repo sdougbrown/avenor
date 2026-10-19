@@ -30,8 +30,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/broker/brokertest"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
-	"github.com/sdougbrown/avenor/internal/tooltest"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
@@ -7571,7 +7571,7 @@ func TestChildAskCleanupParity(t *testing.T) {
 		asked <- askResult{res: res, err: err}
 	}()
 
-	msgID := tooltest.WaitForAgentMessage(t, b, "child").ID
+	msgID := brokertest.WaitForAgentMessage(t, b, "child").ID
 	if err := sup.BrokerCancel(msgID); err != nil {
 		t.Fatalf("BrokerCancel: %v", err)
 	}

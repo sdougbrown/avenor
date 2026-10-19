@@ -16,6 +16,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askclient"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/broker/brokertest"
 	"github.com/sdougbrown/avenor/internal/tooltest"
 )
 
@@ -655,7 +656,7 @@ func TestSidecarStandaloneLocalAsk(t *testing.T) {
 		t.Fatalf("write ask: %v", err)
 	}
 
-	ask := tooltest.WaitForAgentMessage(t, b, "parent_run")
+	ask := brokertest.WaitForAgentMessage(t, b, "parent_run")
 	if _, err := messaging.ParseMsgID(ask.ID, time.Now()); err != nil {
 		t.Fatalf("ask message id %q is not a versioned id: %v", ask.ID, err)
 	}
