@@ -9,7 +9,8 @@ import {
   Supervisor,
   type RunInfo,
 } from './supervisor.js'
-import { RpcError } from './client.js'
+import { RpcError, OwnerAuthError } from './client.js'
+import { loadOwnerRecord, OwnerRecordMissingError, probeControlSocket } from './owner-attach.js'
 import { followUpTool } from './tools/follow-up.js'
 import { getSupervisorClient } from './tools/get-supervisor-client.js'
 import { shutdownTool } from './tools/shutdown.js'
@@ -478,6 +479,39 @@ describe('Supervisor singleton and run accessors', () => {
   })
 })
 
+
+describe.skipIf(process.env.AVENOR_REAL_INTEGRATION === '1')('Owned start against a published record', () => {
+  afterEach(async () => {
+    await Supervisor.currentInstance()?.close().catch(() => {})
+    ;(Supervisor as any).instance = null
+  })
+
+  it('retries a predecessor record until the child publishes its own', async () => {
+    const socketPath = path.join(socketsRoot(), `avenor-mcp-${process.pid}.sock`)
+    fs.mkdirSync(socketsRoot(), { recursive: true, mode: 0o700 })
+    // A predecessor's record: valid shape, an inode no live socket has.
+    const recordPath = `${socketPath}.owner.json`
+    fs.writeFileSync(recordPath, JSON.stringify({
+      version: 1,
+      socket: socketPath,
+      socket_identity: { dev: '0', ino: '0' },
+      capability_id: 'e'.repeat(32),
+      secret: 'f'.repeat(64),
+      owner_pid: process.pid,
+    }), { mode: 0o600 })
+    fs.chmodSync(recordPath, 0o600)
+    process.env.AVENOR_TEST_OWNER_PUBLISH_DELAY = '600'
+    try {
+      const sup = await Supervisor.get()
+      // The owned start only attaches after the child replaced the predecessor's
+      // record and answered on the connection that proved its attempt token.
+      expect(loadOwnerRecord(socketPath).capability_id).not.toBe('e'.repeat(32))
+      await sup.getClient().cancel()
+    } finally {
+      delete process.env.AVENOR_TEST_OWNER_PUBLISH_DELAY
+    }
+  })
+})
 
 describe.skipIf(process.env.AVENOR_REAL_INTEGRATION !== '1')('Owner attach against a real supervisor', () => {
   function useIsolatedHome(): { restore: () => void } {

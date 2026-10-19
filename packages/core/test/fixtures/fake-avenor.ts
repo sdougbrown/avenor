@@ -163,5 +163,12 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 }
 
 server.listen(socketPath, () => {
+  // Publication after the listen is what makes a launcher's first attach find a
+  // stale or absent record; a delay widens that window for tests.
+  const publishDelayMs = Number(process.env.AVENOR_TEST_OWNER_PUBLISH_DELAY ?? 0)
+  if (publishDelayMs > 0) {
+    setTimeout(() => gate.publish(), publishDelayMs)
+    return
+  }
   gate.publish()
 })
