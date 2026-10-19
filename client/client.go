@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/control"
@@ -158,22 +161,127 @@ func (e *OwnerAuthError) Error() string {
 
 func (e *OwnerAuthError) Unwrap() error { return e.kind }
 
+// ForeignPeerError reports a control socket whose connected peer is a process
+// of another uid. No credential byte is sent to that peer.
+type ForeignPeerError struct {
+	SocketPath string
+	PeerUID    uint32
+	EUID       uint32
+}
+
+func (e *ForeignPeerError) Error() string {
+	return fmt.Sprintf("control socket %s is owned by uid %d, not %d: refusing to send owner credentials", e.SocketPath, e.PeerUID, e.EUID)
+}
+
+// peerUIDFunc is the test seam for the kernel peer-credential call.
+var peerUIDFunc = peerUID
+
+// beforeOwnerAttachDial is a no-op seam used by attach tests to replace the
+// socket between record validation and the dial.
+var beforeOwnerAttachDial = func() {}
+
 // OwnerAttachTimeout bounds a whole owner attach: record load, dial, peer check
 // and the authentication handshake.
 const OwnerAttachTimeout = 5 * time.Second
 
 // AuthenticateOwner presents cap on an existing connection. It is the only
-// place a credential is written to the wire.
+// place a credential is written to the wire, so it binds the connected peer to
+// this euid first.
 func (c *Client) AuthenticateOwner(cap control.OwnerCapability) error {
+	unixConn, ok := c.conn.(*net.UnixConn)
+	if !ok {
+		return errors.New("owner authentication requires a unix control socket")
+	}
+	uid, err := peerUIDFunc(unixConn)
+	if err != nil {
+		return fmt.Errorf("read peer credentials for control socket: %w", err)
+	}
+	if euid := uint32(os.Geteuid()); uid != euid {
+		return &ForeignPeerError{SocketPath: c.conn.RemoteAddr().String(), PeerUID: uid, EUID: euid}
+	}
+	return c.authenticateOwnerUntil(cap, time.Now().Add(OwnerAttachTimeout))
+}
+
+func (c *Client) authenticateOwnerUntil(cap control.OwnerCapability, deadline time.Time) error {
 	var res OwnerAuthResult
 	params := OwnerAuthParams{Version: control.OwnerAuthVersion, CapabilityID: cap.ID, Secret: cap.Secret}
-	if err := c.call("authenticate_owner", params, &res, OwnerAttachTimeout); err != nil {
+	if err := c.call("authenticate_owner", params, &res, remainingUntil(deadline)); err != nil {
 		return classifyOwnerAuthError(err)
 	}
 	if !res.Authenticated || res.Version != control.OwnerAuthVersion || res.CapabilityID != cap.ID {
 		return &OwnerAuthError{kind: ErrUnsupportedOwnerAuth, Reason: "unexpected-result"}
 	}
 	return nil
+}
+
+// AttachOwner loads the owner record published beside socketPath, binds the
+// connected peer to this euid and authenticates, returning an owner client.
+// The whole attach is bounded by OwnerAttachTimeout.
+func AttachOwner(socketPath string) (*Client, error) {
+	deadline := time.Now().Add(OwnerAttachTimeout)
+	record, err := control.LoadOwnerRecord(socketPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireRecordSocket(socketPath, record); err != nil {
+		return nil, err
+	}
+	beforeOwnerAttachDial()
+	conn, err := net.DialTimeout("unix", socketPath, remainingUntil(deadline))
+	if err != nil {
+		return nil, fmt.Errorf("dial control socket: %w", err)
+	}
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, fmt.Errorf("dial control socket %s: not a unix socket", socketPath)
+	}
+	uid, err := peerUIDFunc(unixConn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("read peer credentials for control socket %s: %w", socketPath, err)
+	}
+	if euid := uint32(os.Geteuid()); uid != euid {
+		_ = conn.Close()
+		return nil, &ForeignPeerError{SocketPath: socketPath, PeerUID: uid, EUID: euid}
+	}
+	c := newClient(conn)
+	if err := c.authenticateOwnerUntil(control.OwnerCapability{ID: record.CapabilityID, Secret: record.Secret}, deadline); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// requireRecordSocket requires the live socket to be the one the record names.
+func requireRecordSocket(socketPath string, record control.OwnerRecord) error {
+	info, err := os.Lstat(socketPath)
+	if err != nil {
+		return fmt.Errorf("%w: stat %s: %v", control.ErrStaleOwnerRecord, socketPath, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("%w: %s is not a socket", control.ErrStaleOwnerRecord, socketPath)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%w: stat %s: unsupported stat type", control.ErrStaleOwnerRecord, socketPath)
+	}
+	live := control.SocketIdentity{
+		Dev: strconv.FormatUint(uint64(st.Dev), 10),
+		Ino: strconv.FormatUint(st.Ino, 10),
+	}
+	if live != record.SocketIdentity {
+		return fmt.Errorf("%w: %s does not match the published record", control.ErrStaleOwnerRecord, socketPath)
+	}
+	return nil
+}
+
+func remainingUntil(deadline time.Time) time.Duration {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return time.Millisecond
+	}
+	return remaining
 }
 
 // classifyOwnerAuthError maps authenticate_owner wire codes onto the four
