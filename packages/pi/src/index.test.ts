@@ -496,10 +496,13 @@ describe('Avenor Pi extension', () => {
     const resultToolMock = mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' }))
     const singletonInterruptAndPrompt = mock(async () => {})
     const singletonCancel = mock(async () => {})
-    const externalInterruptAndPrompt = mock(async () => {})
-    const externalClose = mock(() => {})
+    const ownerInterruptAndPrompt = mock(async () => {})
+    const ownerClose = mock(() => {})
+    const dialInterruptAndPrompt = mock(async () => {})
     const singletonClient = { close() {}, cancel: singletonCancel, interruptAndPrompt: singletonInterruptAndPrompt, events() { throw new Error('unused') } }
-    const externalClient = { close: externalClose, cancel: async () => {}, interruptAndPrompt: externalInterruptAndPrompt, events() { throw new Error('unused') } }
+    const ownerClient = { close: ownerClose, cancel: async () => {}, interruptAndPrompt: ownerInterruptAndPrompt, events() { throw new Error('unused') } }
+    const dialClient = { close() {}, cancel: async () => {}, interruptAndPrompt: dialInterruptAndPrompt, events() { throw new Error('unused') } }
+    const attachOwnerMock = mock(async () => ownerClient)
 
     const spawnToolMock = mock(async (args: { supervisorId?: string; label?: string }) => ({
       run_id: args.label === 'roster-run'
@@ -527,8 +530,8 @@ describe('Avenor Pi extension', () => {
       resultTool: resultToolMock,
       shutdownTool: mock(async () => ({ ok: true })),
       observeRun: mock(() => null),
-      dial: mock(async () => externalClient),
-      attachOwner: mock(async () => externalClient),
+      dial: mock(async () => dialClient),
+      attachOwner: attachOwnerMock,
       Supervisor: class {
         static isCurrentInstance(supervisorId: string) {
           return supervisorId === '/tmp/sock'
@@ -702,13 +705,17 @@ describe('Avenor Pi extension', () => {
     )
     expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ backend: 'opencode-acp' })
 
-    let resolveExternalClose!: () => void
-    const externalClosed = new Promise<void>(resolve => { resolveExternalClose = resolve })
-    externalClose.mockImplementation(() => { resolveExternalClose() })
-    await runWatchAction('run-external', externalInterruptAndPrompt, overlay => overlay.submit('continue'))
-    await externalClosed
-    expect(externalInterruptAndPrompt).toHaveBeenCalledWith('rt-1', 'continue')
-    expect(externalClose).toHaveBeenCalledTimes(1)
+    let resolveOwnerClose!: () => void
+    const ownerClosed = new Promise<void>(resolve => { resolveOwnerClose = resolve })
+    ownerClose.mockImplementation(() => { resolveOwnerClose() })
+    await runWatchAction('run-external', ownerInterruptAndPrompt, overlay => overlay.submit('continue'))
+    await ownerClosed
+    // A watch mutation on another process's supervisor goes through the owner
+    // attach, never the credential-free dial.
+    expect(attachOwnerMock).toHaveBeenCalledWith('/tmp/external.sock')
+    expect(ownerInterruptAndPrompt).toHaveBeenCalledWith('rt-1', 'continue')
+    expect(ownerClose).toHaveBeenCalledTimes(1)
+    expect(dialInterruptAndPrompt).not.toHaveBeenCalled()
 
     await registeredTools.avenor_spawn.execute(
       'tool-wait',
