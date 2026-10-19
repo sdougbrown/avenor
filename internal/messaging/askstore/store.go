@@ -97,8 +97,8 @@ type fence struct {
 	// delivered marks the dedup record for a delivered no-reply message: the ID
 	// is spent, but there is no ask edge and no terminal ask state.
 	delivered bool
-	// remove retracts a queued delivery whose waiter gave up. It is set only
-	// for an abandoned ask, so a later withdrawal can still unqueue it.
+	// remove retracts a queued delivery whose waiter gave up. It is set for a
+	// timed-out or abandoned ask, so a later withdrawal can still unqueue it.
 	remove func()
 }
 
@@ -410,10 +410,13 @@ func (s *Store) Withdraw(key messaging.FenceKey) (messaging.WithdrawResult, erro
 		if f.remove != nil {
 			// The waiter gave up before its ask was answered; retracting the
 			// delivery now is what keeps the withdrawal from leaving a stale ask
-			// in the target's queue.
+			// in the target's queue. An abandoned ask becomes withdrawn; a
+			// timed-out one keeps its terminal outcome.
 			f.remove()
 			f.remove = nil
-			f.outcome = messaging.OutcomeWithdrawn
+			if f.outcome == messaging.OutcomePossiblyPending {
+				f.outcome = messaging.OutcomeWithdrawn
+			}
 		}
 		return messaging.WithdrawResult{Outcome: f.outcome, Fence: s.ackLocked(key, f.deadline)}, nil
 	}
@@ -599,9 +602,11 @@ func (s *Store) deadlineLocked(now time.Time, req AdmitRequest) (time.Time, erro
 
 // completeLocked terminally completes an edge exactly once. A replied edge
 // stays active until its waiter consumes the reply so a late wait can still
-// read it. Only a withdrawal retracts the queued ask: a timed-out, abandoned
-// or lost ask stays deliverable and a later reply falls back to
-// fire-and-forget, as the unextracted broker did.
+// read it. A withdrawal retracts the queued ask at once; a timed-out or
+// abandoned ask keeps its retraction handle for a later withdrawal, because
+// its delivery may still be waiting in the target's queue. A lost ask stays
+// deliverable and a later reply falls back to fire-and-forget, as the
+// unextracted broker did.
 func (s *Store) completeLocked(e *edge, outcome messaging.Outcome) {
 	if e.completed {
 		return
@@ -619,8 +624,8 @@ func (s *Store) completeLocked(e *edge, outcome messaging.Outcome) {
 	}
 	if versionedID(e.key.MessageID, s.now()) {
 		f := &fence{deadline: e.deadline, outcome: outcome}
-		if outcome == messaging.OutcomePossiblyPending {
-			// The waiter abandoned the ask but its delivery may still be queued.
+		if outcome == messaging.OutcomeTimedOut || outcome == messaging.OutcomePossiblyPending {
+			// The waiter stopped waiting but its delivery may still be queued.
 			f.remove = e.remove
 			e.remove = nil
 		}

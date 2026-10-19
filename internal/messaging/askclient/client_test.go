@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 // scriptedTransport returns pre-set results and records calls.
@@ -283,6 +285,45 @@ func TestAskFailedWaitWithdraws(t *testing.T) {
 			t.Fatalf("withdraw calls = %d, want none for a refused send", tr.withdrawCalls)
 		}
 	})
+}
+
+// TestAskTimeoutRetractsTheUndeliveredAsk pins that a timed-out fence keeps
+// its retraction handle, so the failed-wait withdrawal empties the target's
+// queue instead of leaving an ask nobody can answer.
+func TestAskTimeoutRetractsTheUndeliveredAsk(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer b.Stop()
+	if _, err := b.CreateRun("bob", ""); err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+
+	client := New(inprocess.New(b.Store()), Options{})
+	msgID, err := messaging.NewMsgID(time.Now(), time.Time{})
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	sender := messaging.Identity{RunID: "alice", Sender: "alice"}
+	_, err = client.Ask(context.Background(), messaging.SendRequest{
+		From:      sender,
+		To:        messaging.Identity{RunID: "bob", Sender: "bob"},
+		MessageID: msgID,
+		Body:      `{"message":"ping"}`,
+	}, messaging.WaitRequest{Sender: sender, Timeout: 20 * time.Millisecond})
+	var askErr *Error
+	if !errors.As(err, &askErr) || askErr.Outcome != messaging.OutcomeTimedOut {
+		t.Fatalf("Ask = %v, want a timed-out *Error", err)
+	}
+
+	queued, err := b.DrainAgentMessages("bob", 0)
+	if err != nil {
+		t.Fatalf("DrainAgentMessages: %v", err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("timed-out ask left %d queued message(s)", len(queued))
+	}
 }
 
 func TestWithdraw(t *testing.T) {

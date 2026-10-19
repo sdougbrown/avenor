@@ -285,9 +285,7 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 			Body:      string(body),
 		}, messaging.WaitRequest{Sender: sender})
 		if err != nil {
-			// This call has returned, so the stdio loop is free again and the
-			// agent can retract an ask the failure left outstanding.
-			return nil, fmt.Errorf("%w; an ask still outstanding can be retracted with avenor_cancel", result.Failure(err))
+			return nil, askFailure(result, err)
 		}
 		replyText, err := result.Text()
 		if err != nil {
@@ -355,6 +353,17 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		return nil, fmt.Errorf("unknown tool %q", name)
 	}
 	return map[string]any{"content": []map[string]any{{"type": "text", "text": "ok"}}}, nil
+}
+
+// askFailure renders a failed ask for the stdio caller. The client already
+// withdrew the ask its failed wait abandoned, so only a retraction it could not
+// confirm still leaves something for avenor_cancel to act on.
+func askFailure(result askclient.AskResult, err error) error {
+	var askErr *askclient.Error
+	if errors.As(err, &askErr) && askErr.Pending() {
+		return fmt.Errorf("%w; an ask still outstanding can be retracted with avenor_cancel", result.Failure(err))
+	}
+	return result.Failure(err)
 }
 
 func (s *Server) brokerGet(ctx context.Context, path string, out any) error {
