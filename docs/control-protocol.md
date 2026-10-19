@@ -94,6 +94,9 @@ Error codes:
 | -32000 | Server error (with message) |
 | -32001 | No pending permission (tried to answer a request that doesn't exist) |
 | -32010 | Permission denied (not owner) |
+| -32011 | Owner authentication rejected (`unauthenticated`) |
+| -32012 | Owner authentication unsupported (`unsupported owner authentication`) |
+| -32013 | Owner authentication timed out. Clients raise it when the handshake gets no answer; the server never sends it |
 | -32020 | Backend prompt unsupported |
 | -32030 | Idempotency store capacity exceeded |
 | -32031 | Idempotency conflict (reused spawn key or re-registered template id+version with different content) |
@@ -421,13 +424,103 @@ The `workflow.controller.create`, `workflow.controller.enable`, `workflow.contro
 
 ## Owner Semantics
 
-The control server is constructed with an immutable owner capability that the owning process generates before construction. Ownership is granted per connection: a connection must present that capability in an `authenticate_owner` request before any mutating method (`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `spawn_mcp`, `shutdown`, `broker_send`, `broker_ask`, `broker_cancel`, `broker_reply`) is accepted. Calls from a connection without a grant fail with error code `-32010` (`permission_denied`); a failed re-authentication clears only that connection's grant.
+The control server is constructed with an immutable owner capability that the owning process generates before construction. Ownership is fixed at construction, not granted to the first caller. A connection receives authority only by presenting the capability in `authenticate_owner`; the grant ends when the connection closes, and a failed re-authentication clears only that connection's grant.
 
-The capability is published beside the socket in `<socket>.owner.json` (mode `0600`, owned by the server's euid). A client loads that record, verifies the live socket's device and inode still match it, dials, and binds the connected peer before writing the capability. Ownership ends when the authenticated connection closes; reconnecting requires presenting the capability again. The handshake is a bearer exchange with no replay protection, so any process that can read the record can authenticate.
+### Gated methods
 
-Binding differs by client runtime because Node exposes no Unix socket peer-credential API. The Go client asks the kernel for the connected peer's uid (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS) and requires it to equal its own euid. The TypeScript client binds by filesystem instead: the socket must be a socket owned by its euid, its immediate parent directory must be owned by that euid or root and must not be group- or other-writable unless it is sticky, and the socket's device and inode are re-checked after connecting and before the capability is written. Both checks fail closed as a typed foreign-peer error: zero credential bytes reach the peer, nothing is unlinked or replaced, and ownership does not transfer. An owned start from either launcher instead proves the child with the per-attempt identity token on the connection it authenticates.
+Eleven methods require a connection's owner grant. A call from a connection without one fails with `-32010` (`permission_denied`) before the handler runs:
 
-Ownership is per socket, not per user. The socket file is created with mode `0600`, so filesystem permissions enforce process-level isolation, and same-uid processes are trusted. There is no separate token beyond the owner capability.
+`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `spawn_mcp`, `shutdown`, `broker_send`, `broker_ask`, `broker_cancel`, `broker_reply`.
+
+### Ungated methods
+
+Twenty-six method names are unauthenticated and stay that way. None of them consults the owner grant, so any client that can open the socket may call them:
+
+- Observation: `identity`, `result`, `status`, `subscribe`, `history`, `wait_turn`, `list`, `broker_peers`, `broker_receive`.
+- Runner plumbing: `send_to_parent`, `tree_budget`, `wait_for_capacity`.
+- Workflow: `workflow.create`, `workflow.instantiate`, `workflow.status`, `workflow.inspect`, `workflow.wait`, `workflow.events`, `workflow.cancel`, `workflow.command`, `workflow.controller.create`, `workflow.controller.enable`, `workflow.controller.disable`, `workflow.controller.status`, `workflow.controller.list`, `workflow.ready`.
+
+The `workflow.*` family is scoped by workflow lease tokens where it is scoped at all (see [workflow.md](workflow.md)); those tokens are independent of the owner capability. `identity` returns this launch's per-attempt identity token, which is informational and grants nothing. Ungated access still exposes state: transcripts, tool input and output, permission details and inbound broker messages are readable by any connected client.
+
+### `authenticate_owner`
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"authenticate_owner",
+ "params":{"version":1,"capability_id":"…","secret":"…"}}
+```
+
+Success:
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{"version":1,"authenticated":true,"capability_id":"…"}}
+```
+
+Rejections carry the code, a message, and `data: {"version":1,"reason":"<short-token>"}`:
+
+| Code | Message | Reason tokens |
+|---|---|---|
+| `-32011` | `unauthenticated` | `capability-mismatch` |
+| `-32012` | `unsupported owner authentication` | `version-<n>` (including `version-0` for missing params), `malformed-params` |
+| `-32013` | `owner authentication timed out` | raised by clients only |
+
+Both halves of the capability are compared in constant time and the secret is never echoed. The exchange is a reusable bearer handshake, not replay protection: every connection authenticates on its own, and any process that can read the published record can authenticate.
+
+### `identity`
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"identity"}
+```
+
+Returns `{"token":"…"}`. The token is the per-attempt startup identity of this launch, made readable only after the server published its record. It proves which process bound the socket to the launcher that spawned it. It is informational: it authorizes nothing and grants no control.
+
+## Owner record
+
+A server that binds a socket publishes its capability beside it, at `<socket>.owner.json`, before it acknowledges readiness or accepts a connection. The record holds `version`, `socket`, `socket_identity` (`dev` and `ino` as decimal strings), `capability_id`, `secret` and `owner_pid`.
+
+Readers validate the file rather than its directory:
+
+- The record must be a regular file with mode `0600`, owned by the reading euid, no larger than 64 KiB, and not a symlink; its immediate parent directory must not be a symlink. Ancestors above the parent are resolved, not validated.
+- `socket` must name the path the record was loaded from, `version` must be supported, and unknown fields are rejected.
+- The opened descriptor must still be the file that was inspected (device and inode), so a swap between the check and the read fails closed.
+- The live socket must be a socket, and its `dev`/`ino` must equal `socket_identity`.
+
+A live socket that does not match the record is `stale-owner-record`, raised before any credential byte is written and never sent on the wire. A missing record is reported separately so a launcher can retry it while its own child starts.
+
+The containing directory's mode and owner are deliberately unchecked. A control socket may live in `TMPDIR` or under `/tmp`, and the credential boundary is the record's own mode plus euid ownership: a foreign uid can neither create a file owned by this euid nor read a `0600` file it does not own. Publication writes a `0600` temp file with `O_EXCL` and renames it into place; a server that binds but cannot publish rolls the whole attempt back and never becomes usable.
+
+`owner_pid` is a diagnostic and a stale-cleanup hint. It never authorizes attach, unlink, replacement or respawn. The one decision it takes part in is an owned start, where the record must also name the child that attempt spawned — and only after the per-attempt identity token has already proved the child.
+
+## Lock file
+
+Every mutation of a socket path — stale-path removal, bind, publication and cleanup — happens under `<socket>.control.lock`. The lock is a persistent file opened `O_CREATE|O_RDWR|O_NOFOLLOW` with mode `0600` and held with `flock(LOCK_EX)`; a permissive inherited mode is tightened to `0600`. It is created or opened, never opened `O_EXCL` and never unlinked, so a restart reopens the same inode and independent starters serialize instead of splitting the lock. It carries no secret, so leaving it behind is not a credential leak.
+
+## Client binding
+
+A client that wants authority loads the record, checks the live socket against it, dials, and binds the connection before it writes the capability. Generic `dial`/`client.Dial` does neither: it reads no record and sends no credential, which is why the read-only callers keep it.
+
+Binding differs by client runtime because Node exposes no Unix socket peer-credential API:
+
+- **Go** asks the kernel for the connected peer's uid (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS) and requires it to equal its own euid. It re-checks the live socket's device and inode after the dial, before the capability is written.
+- **TypeScript** binds by filesystem. Before dialing, the socket must be a socket owned by its euid and its immediate parent directory must be owned by that euid or root and must not be group- or other-writable unless it is sticky. After connecting, and before any credential byte, the socket path's device and inode must still be the ones the record names.
+
+Both checks fail closed with a typed foreign-peer error: zero credential bytes reach the peer, nothing is unlinked or replaced, and ownership does not transfer. The whole attach — record load, dial, binding and handshake — is bounded to five seconds or the caller's shorter deadline.
+
+An **owned start** takes a different route on both sides: the launcher proves the child with the per-attempt identity token on the connection it authenticates, so it never needs to trust a path that a competing starter could have won.
+
+## Dead-owner recovery
+
+A launcher decides whether to *attempt* a replacement; only `control.Start`, under the control lock, may unlink a path and bind a new socket.
+
+- A credential-free dial that fails with `ECONNREFUSED` (or an absent path) proves that no listener holds the path, so a replacement may be attempted.
+- Any other probe outcome — timeout, permission error, or a listener that answers — is uncertain or live and never authorizes a replacement, unlink or shutdown.
+- The tombstone `<socket>.dead` written by `avenor stable` on exit only corroborates a past instance. It is never required to replace a dead owner, and its absence is never liveness: a `SIGKILL` or OOM kill leaves no tombstone. `avenor stable` removes a leftover tombstone when it starts.
+- A launcher never unlinks the socket, the record, the lock file or the tombstone. A losing starter retires only the child it captured; a failed startup leaves every artifact in place.
+
+Owned starts attribute their child by the per-attempt identity token, never by a launch-relative timestamp. The launcher mints the token, hands it to the child in its environment, and the child's `ControlServer.Start` exposes it through `identity` only after the child's own record is on disk. The launcher authenticates on the connection that answered with its token, after confirming the record's socket identity matches the live socket and its `owner_pid` is the captured child. A token mismatch means a competing starter won the path: the launcher reaps only its own child and attaches to the winner through the winner's record. While the child is alive, a missing or mismatched record is retryable until the attempt deadline; only a rejection of the child's own capability, the deadline, a spawn error or child exit settles the attempt.
+
+## Ownership is per socket
+
+Ownership is per socket, not per user. The socket file is created with mode `0600`, so filesystem permissions enforce process-level isolation, and same-uid processes are trusted: a same-uid impostor is inside the accepted boundary. Nothing beyond the owner capability is checked.
 
 Multiple read-only connections may observe state simultaneously (`subscribe`, `history`, `status`, `list`). Event subscriptions and history can contain transcript text, tool inputs or outputs, and permission details, so treat read access as sensitive. Connections without a grant continue to receive notifications.
 
