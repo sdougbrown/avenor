@@ -2,7 +2,7 @@ import * as fs from 'node:fs'
 import * as net from 'node:net'
 import * as path from 'node:path'
 
-import { Client } from './client.js'
+import { CallTimeoutError, Client } from './client.js'
 
 const OWNER_RECORD_VERSION = 1
 const OWNER_RECORD_MAX_BYTES = 64 * 1024
@@ -49,16 +49,6 @@ export class StaleOwnerRecordError extends Error {
   constructor(readonly socketPath: string, readonly reason: string) {
     super(`stale owner record for control socket ${socketPath}: ${reason}`)
     this.name = 'StaleOwnerRecordError'
-  }
-}
-
-/** The dial to a control socket exceeded the remaining attach budget. */
-export class OwnerAttachTimeoutError extends Error {
-  readonly code = 'ETIMEDOUT'
-
-  constructor(readonly socketPath: string) {
-    super(`dial ${socketPath}: timed out`)
-    this.name = 'OwnerAttachTimeoutError'
   }
 }
 
@@ -322,7 +312,7 @@ function connectOwnerSocket(socketPath: string, timeoutMs: number): Promise<net.
     const socket = net.createConnection({ path: socketPath })
     const timer = setTimeout(() => {
       socket.destroy()
-      reject(new OwnerAttachTimeoutError(socketPath))
+      reject(new CallTimeoutError(`dial ${socketPath}: timed out`))
     }, timeoutMs)
     socket.once('connect', () => {
       clearTimeout(timer)
