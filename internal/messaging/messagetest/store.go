@@ -346,6 +346,25 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		admitLegacy(t, store, msgID, "bob")
 	})
 
+	t.Run("legacy reply leaves no fence", func(t *testing.T) {
+		store := newStore(t)
+		msgID := "legacy-replied-id"
+		legacyKey := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID}
+		admitLegacy(t, store, msgID, "bob")
+		if outcome, err := store.Reply(legacyKey, "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+			t.Fatalf("Reply = (%q, %v)", outcome, err)
+		}
+		res, err := store.Wait(t.Context(), legacyKey, time.Second)
+		if err != nil || res.Outcome != messaging.OutcomeReplied || res.Reply == nil {
+			t.Fatalf("Wait = (%+v, %v)", res, err)
+		}
+		if _, ok := store.Fence(legacyKey); ok {
+			t.Fatal("a consumed legacy reply recorded a fence")
+		}
+		// The same unversioned ID can be sent again immediately.
+		admitLegacy(t, store, msgID, "bob")
+	})
+
 	t.Run("reply must name the edge generation", func(t *testing.T) {
 		store := newStore(t)
 		msgID := id(t, time.Minute)

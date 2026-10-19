@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/messaging/messagetest"
 )
 
@@ -243,5 +244,94 @@ func TestWaitResultKeepsTerminalOutcome(t *testing.T) {
 				t.Fatal("terminal reply was dropped")
 			}
 		})
+	}
+}
+
+// gatedBackend holds the store's admission boundary open while its gate is
+// armed, so a test can close the transport while a store call is queued.
+type gatedBackend struct {
+	*messagetest.MemoryBackend
+	gate    chan struct{}
+	reached chan struct{}
+}
+
+func (b *gatedBackend) Publish(target string, msg messaging.InboundMessage) (func(), error) {
+	if b.gate != nil {
+		close(b.reached)
+		<-b.gate
+	}
+	return b.MemoryBackend.Publish(target, msg)
+}
+
+// TestWaitKeepsTerminalOutcomeAcrossClose pins the Transport.Wait wiring: a
+// wait that reaches a terminal outcome keeps it when the transport closes while
+// the call is still in flight, instead of being re-reported as possibly-pending.
+func TestWaitKeepsTerminalOutcomeAcrossClose(t *testing.T) {
+	backend := &gatedBackend{MemoryBackend: messagetest.NewMemoryBackend()}
+	store := askstore.New(askstore.Options{})
+	store.SetBackend(backend)
+	tr := New(store)
+	gen := store.Generation()
+
+	msgID := mintID(t, time.Minute)
+	if _, err := tr.Send(context.Background(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{"message":"ask"}`,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := tr.Reply(context.Background(), messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+	}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+
+	// A second ask blocks inside Publish while holding the store lock, so the
+	// wait below reaches the store only after Close.
+	backend.reached = make(chan struct{})
+	backend.gate = make(chan struct{})
+	secondID := mintID(t, time.Minute)
+	sent := make(chan error, 1)
+	go func() {
+		_, err := tr.Send(context.Background(), messaging.SendRequest{
+			From: alice, To: bob, MessageID: secondID, Generation: gen, Body: `{"message":"second"}`,
+		})
+		sent <- err
+	}()
+	select {
+	case <-backend.reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second send never reached the publish gate")
+	}
+
+	type waitOutcome struct {
+		res messaging.WaitResult
+		err error
+	}
+	waited := make(chan waitOutcome, 1)
+	go func() {
+		res, err := tr.Wait(context.Background(), messaging.WaitRequest{
+			Sender: alice, MessageID: msgID, Generation: gen, Timeout: time.Minute,
+		})
+		waited <- waitOutcome{res: res, err: err}
+	}()
+	time.Sleep(20 * time.Millisecond)
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	close(backend.gate)
+
+	select {
+	case out := <-waited:
+		if out.err != nil {
+			t.Fatalf("Wait: %v", out.err)
+		}
+		if out.res.Outcome != messaging.OutcomeReplied || out.res.Reply == nil {
+			t.Fatalf("Wait = (%+v), want the terminal reply kept across Close", out.res)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return")
+	}
+	if err := <-sent; err != nil {
+		t.Fatalf("second Send: %v", err)
 	}
 }

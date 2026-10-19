@@ -169,6 +169,28 @@ func TestStoreWithdrawAbsentIDPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("absent withdrawal fences a delayed send", func(t *testing.T) {
+		clk := &clock{now: base}
+		store := New(Options{Clock: clk.Now})
+		gen := store.Generation()
+		key := messaging.FenceKey{
+			Sender: sender.RunID, MessageID: mint(t, base, base.Add(time.Minute)), Generation: gen,
+		}
+		res, err := store.Withdraw(key)
+		if err != nil || res.Outcome != messaging.OutcomeEdgeAbsent || !res.Fence.Terminal {
+			t.Fatalf("Withdraw = (%+v, %v)", res, err)
+		}
+		admitted, err := store.Admit(t.Context(), AdmitRequest{
+			Sender: sender, Target: "bob", MessageID: key.MessageID, Generation: gen,
+		})
+		if err != nil || admitted.Outcome != messaging.OutcomeWithdrawn {
+			t.Fatalf("Admit after absent withdrawal = (%+v, %v), want withdrawn", admitted, err)
+		}
+		if store.Pending(sender.RunID, key.MessageID) {
+			t.Fatal("fenced send left a live edge")
+		}
+	})
+
 	t.Run("absent fences are bounded per sender", func(t *testing.T) {
 		clk := &clock{now: base}
 		store := New(Options{Clock: clk.Now, FenceCapacity: 2})
@@ -195,6 +217,28 @@ func TestStoreWithdrawAbsentIDPolicy(t *testing.T) {
 		})
 		if err != nil || res.Outcome != messaging.OutcomeSent {
 			t.Fatalf("bob Admit = (%+v, %v)", res, err)
+		}
+	})
+
+	t.Run("reclaiming absent fences releases the quota", func(t *testing.T) {
+		clk := &clock{now: base}
+		store := New(Options{Clock: clk.Now})
+		gen := store.Generation()
+		for i := 0; i < absentFenceQuota; i++ {
+			key := messaging.FenceKey{
+				Sender: sender.RunID, MessageID: mint(t, base, base.Add(time.Minute)), Generation: gen,
+			}
+			if res, err := store.Withdraw(key); err != nil || !res.Fence.Terminal {
+				t.Fatalf("absent withdrawal %d = (%+v, %v)", i, res, err)
+			}
+		}
+		clk.Advance(2 * time.Minute)
+		store.Prune(clk.Now())
+		res, err := store.Withdraw(messaging.FenceKey{
+			Sender: sender.RunID, MessageID: mint(t, clk.Now(), clk.Now().Add(time.Minute)), Generation: gen,
+		})
+		if err != nil || !res.Fence.Terminal {
+			t.Fatalf("withdrawal after reclaim = (%+v, %v)", res, err)
 		}
 	})
 }

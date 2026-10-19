@@ -1701,6 +1701,103 @@ func postBroker(t *testing.T, addr, path, body string) (int, map[string]any) {
 	return resp.StatusCode, result
 }
 
+// postBrokerTimeout posts body to a broker endpoint under a bounded context, so
+// a long-poll that never completes fails the test instead of hanging it.
+func postBrokerTimeout(t *testing.T, addr, path, body string, timeout time.Duration) (int, map[string]any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/%s", addr, path), bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("new /%s request: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /%s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode /%s: %v", path, err)
+	}
+	return resp.StatusCode, result
+}
+
+// TestBrokerReplyAnswersVersionedAsk pins the reply path for a versioned ask:
+// the reply sender names no generation, so the broker must answer the edge
+// admitted in the store's current generation and release the waiter.
+func TestBrokerReplyAnswersVersionedAsk(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("versioned_asker")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	targetToken, err := b.CreateRun("versioned_replier")
+	if err != nil {
+		t.Fatalf("create replier: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+	msgID := mintMsgID(t, time.Minute)
+
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "versioned_asker", "versioned_replier", msgID, gen)); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+	reply := sendReply(t, addr, targetToken, "versioned_replier", "versioned_asker", msgID, "the answer")
+	if reply["status"] != http.StatusOK || reply["note"] != nil {
+		t.Fatalf("reply = %+v, want the live edge answered", reply)
+	}
+	waitBody := fmt.Sprintf(`{"run_id":"versioned_asker","token":%q,"waiting_for":%q,"generation":%q}`, senderToken, msgID, gen)
+	status, body := postBrokerTimeout(t, addr, "wait_reply", waitBody, 3*time.Second)
+	if status != http.StatusOK || body["from_run_id"] != "versioned_replier" {
+		t.Fatalf("wait_reply = (%d, %v)", status, body)
+	}
+	if b.Store().Pending("versioned_asker", msgID) {
+		t.Fatal("ask edge survived the reply")
+	}
+}
+
+// TestBrokerVersionedIDRequiresGeneration pins that a versioned ID without a
+// generation field is refused on every ask endpoint.
+func TestBrokerVersionedIDRequiresGeneration(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("nogen_sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("nogen_target"); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	msgID := mintMsgID(t, time.Minute)
+
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "nogen_sender", "nogen_target", msgID, "")); status != http.StatusConflict {
+		t.Fatalf("send without generation = (%d, %v), want 409", status, body)
+	}
+	waitBody := fmt.Sprintf(`{"run_id":"nogen_sender","token":%q,"waiting_for":%q}`, senderToken, msgID)
+	if status, body := postBroker(t, addr, "wait_reply", waitBody); status != http.StatusConflict {
+		t.Fatalf("wait_reply without generation = (%d, %v), want 409", status, body)
+	}
+	cancelBody := fmt.Sprintf(`{"run_id":"nogen_sender","token":%q,"cancel_message_id":%q}`, senderToken, msgID)
+	if status, body := postBroker(t, addr, "cancel_message", cancelBody); status != http.StatusConflict {
+		t.Fatalf("cancel_message without generation = (%d, %v), want 409", status, body)
+	}
+	if n := b.Store().ActiveCount(); n != 0 {
+		t.Fatalf("generation-less requests left %d live edges", n)
+	}
+}
+
 // TestBrokerStaleGenerationRejected pins the 409 the local router returns for a
 // stale generation on every ask endpoint.
 func TestBrokerStaleGenerationRejected(t *testing.T) {
@@ -2509,6 +2606,70 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	sender.Mu.Unlock()
 	if queued != 1 {
 		t.Errorf("sender queue = %d, want the late reply delivered", queued)
+	}
+
+	// The unversioned ID carries no fence, so the same ID can be sent again.
+	if r := sendAsk(t, b.Addr(), senderToken, "disco_sender", "disco_target", msgID, "again"); r["status"] != http.StatusOK {
+		t.Fatalf("re-send of the abandoned legacy id = %d, want 200", r["status"])
+	}
+}
+
+// TestBrokerVersionedWaitDisconnectCleanup pins the versioned counterpart: an
+// abandoned versioned wait keeps the queued ask and leaves a terminal fence.
+func TestBrokerVersionedWaitDisconnectCleanup(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("vdisco_sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("vdisco_target"); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+	msgID := mintMsgID(t, time.Minute)
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "vdisco_sender", "vdisco_target", msgID, gen)); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"vdisco_sender","token":%q,"waiting_for":%q,"generation":%q}`, senderToken, msgID, gen)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/wait_reply", addr), body)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		resp.Body.Close()
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for b.Store().Pending("vdisco_sender", msgID) {
+		if time.Now().After(deadline) {
+			t.Fatal("expected the ask edge to be cleaned up on context cancellation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	target := b.GetRun("vdisco_target")
+	target.Mu.Lock()
+	queued := len(target.ControlQueue)
+	target.Mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("target queue = %d, want the abandoned ask retained", queued)
+	}
+	ack, ok := b.Store().Fence(messaging.FenceKey{Sender: "vdisco_sender", MessageID: msgID, Generation: gen})
+	if !ok || !ack.Terminal {
+		t.Fatalf("fence = (%+v, %v), want a terminal record for the abandoned ask", ack, ok)
 	}
 }
 
