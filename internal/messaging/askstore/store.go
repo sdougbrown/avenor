@@ -24,6 +24,10 @@ const (
 	// DefaultFenceCapacity bounds the number of edge and fence records the
 	// store will hold before refusing new work.
 	DefaultFenceCapacity = 1024
+
+	// absentFenceQuota bounds the edge-absent withdrawal fences one sender may
+	// hold, so unknown message IDs cannot consume the shared capacity.
+	absentFenceQuota = 64
 )
 
 // Options configures a Store. Every field has a usable default.
@@ -78,6 +82,9 @@ type edge struct {
 type fence struct {
 	deadline time.Time
 	outcome  messaging.Outcome
+	// absent marks a fence installed by a withdrawal that found no edge. These
+	// are bounded per sender instead of against the shared capacity.
+	absent bool
 }
 
 // gate pauses admission for one key until it is resumed.
@@ -166,12 +173,12 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if req.Generation != "" && req.Generation != s.generation {
+	now := s.now()
+	if err := s.generationErrorLocked(req.Generation, req.MessageID, now, req.Legacy); err != nil {
 		result.Outcome = messaging.OutcomeNotSent
-		return result, messaging.ErrGenerationMismatch
+		return result, err
 	}
 
-	now := s.now()
 	deadline, err := s.deadlineLocked(now, req)
 	if err != nil {
 		result.Outcome = messaging.OutcomeNotSent
@@ -204,7 +211,7 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 			return result, messaging.ErrMutualAsk
 		}
 	}
-	if len(s.active)+len(s.terminal) >= s.fenceCapacity {
+	if s.fenceCountLocked() >= s.fenceCapacity {
 		result.Outcome = messaging.OutcomeNotSent
 		return result, messaging.ErrFenceCapacity
 	}
@@ -241,9 +248,9 @@ func (s *Store) Wait(ctx context.Context, key messaging.FenceKey, timeout time.D
 		timeout = messaging.MaxWait
 	}
 	s.mu.Lock()
-	if key.Generation != "" && key.Generation != s.generation {
+	if err := s.generationErrorLocked(key.Generation, key.MessageID, s.now(), true); err != nil {
 		s.mu.Unlock()
-		return messaging.WaitResult{Outcome: messaging.OutcomeNotSent}, messaging.ErrGenerationMismatch
+		return messaging.WaitResult{Outcome: messaging.OutcomeNotSent}, err
 	}
 	if e := s.active[key]; e != nil {
 		if e.completed {
@@ -295,11 +302,12 @@ func (s *Store) waitOnEdge(ctx context.Context, e *edge, timeout time.Duration) 
 }
 
 // Reply routes a reply to the waiting sender and reports whether a live edge
-// accepted it.
+// accepted it. The key must name the generation the ask was admitted under; a
+// generation-less key only matches a legacy edge.
 func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.RawMessage) (messaging.Outcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e := s.findActiveLocked(key.Sender, key.MessageID)
+	e := s.findActiveLocked(key)
 	if e == nil {
 		return messaging.OutcomeEdgeAbsent, nil
 	}
@@ -322,14 +330,15 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 }
 
 // Withdraw installs a terminal fence for the key. A withdrawal with no live
-// edge still fences the ID; it reports edge-absent because nothing was pending.
+// edge still fences a versioned ID; it reports edge-absent because nothing was
+// pending.
 func (s *Store) Withdraw(key messaging.FenceKey) (messaging.WithdrawResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if key.Generation != "" && key.Generation != s.generation {
-		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, messaging.ErrGenerationMismatch
-	}
 	now := s.now()
+	if err := s.generationErrorLocked(key.Generation, key.MessageID, now, true); err != nil {
+		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
+	}
 	s.reclaimLocked(now)
 	if e := s.active[key]; e != nil {
 		if e.completed {
@@ -347,11 +356,24 @@ func (s *Store) Withdraw(key messaging.FenceKey) (messaging.WithdrawResult, erro
 	if f, ok := s.terminal[key]; ok {
 		return messaging.WithdrawResult{Outcome: f.outcome, Fence: s.ackLocked(key, f.deadline)}, nil
 	}
+	return s.fenceAbsentLocked(key, now)
+}
+
+// fenceAbsentLocked fences a withdrawal that found no edge. Only a versioned ID
+// still inside its acceptance deadline is fenced, and only for a key that names
+// its sender, so a delayed send cannot arrive after the withdrawal reports
+// absence. Unversioned IDs and expired deadlines keep the legacy no-fence
+// behaviour, and the fence is charged to the sender's quota rather than the
+// shared capacity.
+func (s *Store) fenceAbsentLocked(key messaging.FenceKey, now time.Time) (messaging.WithdrawResult, error) {
 	deadline, err := messaging.ParseMsgID(key.MessageID, now)
-	if err != nil {
-		deadline = now.Add(DefaultAskTimeout)
+	if err != nil || key.Sender == "" {
+		return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
 	}
-	s.terminal[key] = &fence{deadline: deadline, outcome: messaging.OutcomeWithdrawn}
+	if s.absentFenceCountLocked(key.Sender) >= absentFenceQuota {
+		return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent}, messaging.ErrFenceCapacity
+	}
+	s.terminal[key] = &fence{deadline: deadline, outcome: messaging.OutcomeWithdrawn, absent: true}
 	return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent, Fence: s.ackLocked(key, deadline)}, nil
 }
 
@@ -403,11 +425,17 @@ func (s *Store) Peers() ([]messaging.Peer, error) {
 	return backend.Peers()
 }
 
-// Pending reports whether a live edge exists for the sender and message ID.
+// Pending reports whether a live edge exists for the sender and message ID in
+// any generation.
 func (s *Store) Pending(sender, messageID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.findActiveLocked(sender, messageID) != nil
+	for key := range s.active {
+		if key.Sender == sender && key.MessageID == messageID {
+			return true
+		}
+	}
+	return false
 }
 
 // PendingCount reports the number of live edges owned by sender.
@@ -508,7 +536,9 @@ func (s *Store) deadlineLocked(now time.Time, req AdmitRequest) (time.Time, erro
 
 // completeLocked terminally completes an edge exactly once. A replied edge
 // stays active until its waiter consumes the reply so a late wait can still
-// read it.
+// read it. Only a withdrawal retracts the queued ask: a timed-out, abandoned
+// or lost ask stays deliverable and a later reply falls back to
+// fire-and-forget, as the unextracted broker did.
 func (s *Store) completeLocked(e *edge, outcome messaging.Outcome) {
 	if e.completed {
 		return
@@ -520,8 +550,10 @@ func (s *Store) completeLocked(e *edge, outcome messaging.Outcome) {
 		return
 	}
 	delete(s.active, e.key)
-	s.terminal[e.key] = &fence{deadline: e.deadline, outcome: outcome}
-	if e.remove != nil {
+	if versionedID(e.key.MessageID, s.now()) {
+		s.terminal[e.key] = &fence{deadline: e.deadline, outcome: outcome}
+	}
+	if outcome == messaging.OutcomeWithdrawn && e.remove != nil {
 		e.remove()
 		e.remove = nil
 	}
@@ -533,13 +565,56 @@ func (s *Store) consumeLocked(e *edge) {
 	s.terminal[e.key] = &fence{deadline: e.deadline, outcome: messaging.OutcomeReplied}
 }
 
-func (s *Store) findActiveLocked(sender, messageID string) *edge {
-	for key, e := range s.active {
-		if key.Sender == sender && key.MessageID == messageID {
-			return e
+// findActiveLocked returns the live edge registered for the exact key, so a
+// reply can only answer the generation it was asked in.
+func (s *Store) findActiveLocked(key messaging.FenceKey) *edge {
+	return s.active[key]
+}
+
+// fenceCountLocked counts the records charged to the shared capacity. Fences
+// from edge-absent withdrawals are bounded per sender instead.
+func (s *Store) fenceCountLocked() int {
+	n := len(s.active)
+	for _, f := range s.terminal {
+		if !f.absent {
+			n++
 		}
 	}
-	return nil
+	return n
+}
+
+// absentFenceCountLocked counts the edge-absent withdrawal fences sender holds.
+func (s *Store) absentFenceCountLocked(sender string) int {
+	n := 0
+	for key, f := range s.terminal {
+		if f.absent && key.Sender == sender {
+			n++
+		}
+	}
+	return n
+}
+
+// generationErrorLocked reports the generation fault for a key. A versioned
+// ID must carry the generation it was admitted under; an unversioned ID may
+// omit it when the caller is on the legacy path. Callers hold s.mu.
+func (s *Store) generationErrorLocked(generation, messageID string, now time.Time, allowLegacy bool) error {
+	if generation != "" {
+		if generation != s.generation {
+			return messaging.ErrGenerationMismatch
+		}
+		return nil
+	}
+	if allowLegacy && !versionedID(messageID, now) {
+		return nil
+	}
+	return messaging.ErrGenerationMismatch
+}
+
+// versionedID reports whether messageID carries the versioned encoding,
+// independent of whether its encoded deadline has passed.
+func versionedID(messageID string, now time.Time) bool {
+	_, err := messaging.ParseMsgID(messageID, now)
+	return !errors.Is(err, messaging.ErrMalformedMessageID)
 }
 
 func (s *Store) reclaimLocked(now time.Time) {

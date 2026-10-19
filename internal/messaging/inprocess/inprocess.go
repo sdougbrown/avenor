@@ -60,7 +60,14 @@ func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messag
 	}
 	defer cancel()
 	res, err := t.store.Wait(child, t.key(req.Sender, req.MessageID, req.Generation), req.Timeout)
-	if t.isClosed() {
+	return waitResult(res, err, t.isClosed())
+}
+
+// waitResult keeps the terminal result the store already returned. Only a wait
+// without a terminal outcome is re-reported as possibly-pending when the
+// transport closed while it was in flight.
+func waitResult(res messaging.WaitResult, err error, closed bool) (messaging.WaitResult, error) {
+	if closed && res.Outcome == messaging.OutcomePossiblyPending {
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
 	}
 	return res, err
@@ -71,7 +78,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID}, messaging.ErrTransportClosed
 	}
 	outcome, err := t.store.Reply(
-		t.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, ""),
+		t.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, t.store.Generation()),
 		req.From.RunID,
 		[]byte(req.Body),
 	)

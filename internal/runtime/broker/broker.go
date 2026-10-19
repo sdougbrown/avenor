@@ -966,6 +966,10 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusConflict, "generation mismatch")
 			return
 		}
+		if errors.Is(err, messaging.ErrFenceCapacity) {
+			writeJSONError(w, http.StatusServiceUnavailable, "ask capacity exhausted")
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
