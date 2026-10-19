@@ -75,6 +75,7 @@ func TestRunArtifacts(t *testing.T) {
 		providerErr bool
 		resultDir   bool // result path is a non-empty directory
 		timeout     bool
+		progress    bool // --progress-timeout ends the run while a turn is open
 		turns       []scriptedTurn
 		eventLink   bool // --on-event is left as a dangling symlink
 		foreignPID  string
@@ -91,6 +92,14 @@ func TestRunArtifacts(t *testing.T) {
 			wantRESULT: true,
 		},
 		{name: "unsettled timeout publishes no file", timeout: true, turns: []scriptedTurn{turn("half an answer", "", "")}, wantCode: 124},
+		{name: "progress timeout publishes no file", progress: true, turns: []scriptedTurn{turn("half an answer", "", "")}, wantCode: 124},
+		{
+			name:       "settled error stop reason publishes its final output",
+			turns:      []scriptedTurn{turn("reply", "error", "answer before the backend failed")},
+			wantCode:   1,
+			wantResult: "answer before the backend failed",
+			wantRESULT: true,
+		},
 		{
 			name:       "a pid file another run owns outlives the run",
 			turns:      []scriptedTurn{turn("reply", "end_turn", "final answer")},
@@ -166,7 +175,7 @@ func TestRunArtifacts(t *testing.T) {
 					return nil, errors.New("no provider")
 				}
 			}
-			if tt.timeout {
+			if tt.timeout || tt.progress {
 				// Hold the first turn open so the deadline, not the reply, ends it.
 				release := make(chan struct{})
 				t.Cleanup(func() { close(release) })
@@ -187,6 +196,9 @@ func TestRunArtifacts(t *testing.T) {
 			}
 			if tt.timeout {
 				args = append(args, "--timeout", "100ms")
+			}
+			if tt.progress {
+				args = append(args, "--progress-timeout", "100ms")
 			}
 			if tt.eventLink {
 				link := filepath.Join(dir, "event-link.ndjson")
