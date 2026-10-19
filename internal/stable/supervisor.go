@@ -4146,6 +4146,11 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 	child.doneOnce.Do(func() {
 		child.releaseTreeToken()
 		child.mu.Lock()
+		// The runtime cannot answer a request once it ends: a leftover pending
+		// flag or request would classify the terminal state as waiting for
+		// permission.
+		child.pendingPermission = false
+		child.permission = nil
 		// The adapter owns the publication: it commits the completion stage
 		// and settles the turn waiters.
 		_, pubEff, pubErr := s.applyLifecycle(child, lifecycleSignal{
