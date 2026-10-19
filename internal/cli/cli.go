@@ -1346,6 +1346,10 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		if text, ok := event.Fields["final_output"].(string); ok {
 			sessionEndFinalOutput, sessionEndFinalOutputSet = text, true
 		}
+		// The terminal event always carries the code its settled stop reason
+		// maps to; a backend-supplied number never wins, so the published
+		// record, the sentinel and the reported status agree.
+		event.Fields["exit_code"] = runtime.ExitCodeForStopReason(finalStopReason)
 		if err := deps.Writer.Write(event); err != nil {
 			fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
 			return sessionResult{ExitCode: 1}
@@ -1738,8 +1742,10 @@ func failureText(fields map[string]any) string {
 }
 
 func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string, retryAfter int64, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
+	exitCode := runtime.ExitCodeForStopReason(stopReason)
 	fields := map[string]any{
 		"stop_reason": stopReason,
+		"exit_code":   exitCode,
 	}
 	if retryAfter > 0 {
 		fields["retry_after"] = retryAfter
@@ -1758,7 +1764,7 @@ func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string,
 		fmt.Fprintf(stderr, "avenor: write terminal event: %v\n", err)
 		return sessionResult{ExitCode: 1}
 	}
-	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, RetryAfter: retryAfter, Output: fullFinalOutput, FinalOutput: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
+	return sessionResult{ExitCode: exitCode, StopReason: stopReason, RetryAfter: retryAfter, Output: fullFinalOutput, FinalOutput: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
 }
 
 type eventWriter struct {
