@@ -233,7 +233,7 @@ Example:
 {"event":"agent.status","session_id":"ses_xyz","phase":"working","label":"reading files","source":"avenor","ts":1234567890}
 ```
 
-**`session.end`** — Terminal record for the session. Always the last event in any run. Fields: `stop_reason`, optional `usage` (object with `input_tokens`, `output_tokens`, `total_tokens`, `cached_read_tokens` in snake_case), and optional complete `final_output` provided by the backend or synthesized by Avenor from the complete `agent.message_chunk` stream. Durable NDJSON retains that complete value. Status, inspection, control history, and subscriptions show bounded previews and set `final_output_truncated: true` when they omit text; `avenor_result` retrieves the complete reply.
+**`session.end`** — Terminal record for the session. Always the last event in any run. Fields: `stop_reason`, optional `usage` (object with `input_tokens`, `output_tokens`, `total_tokens`, `cached_read_tokens` in snake_case), optional `retry_after` (whole seconds, provider limit failures only), optional `classified_from` (the backend's own stop reason when Avenor replaced it), and optional complete `final_output` provided by the backend or synthesized by Avenor from the complete `agent.message_chunk` stream. Durable NDJSON retains that complete value. Status, inspection, control history, and subscriptions show bounded previews and set `final_output_truncated: true` when they omit text; `avenor_result` retrieves the complete reply.
 
 Classifies as MILESTONE.
 
@@ -245,6 +245,13 @@ The `stop_reason` indicates *why* the session ended:
 - `"tool_use"` — Session ended while waiting for tool results (unexpected in normal flows).
 - `"timeout"` — Avenor's client-side timeout fired. Usage is best-effort from the buffer at timeout.
 - `"cancelled"` — Avenor or the operator cancelled the session. Usage may be incomplete.
+- `"quota_exhausted"` — The provider refused the turn because the account's
+  usage quota is exhausted. Exit code `6`, and not retried. See
+  [Provider limit failures](#provider-limit-failures) for where the
+  provider's message lands.
+- `"rate_limited"` — The provider refused the turn because of a rate limit.
+  Exit code `7`, and retryable by `--max-retries`. When the provider states
+  how long to wait, `session.end` also carries `retry_after` (whole seconds).
 - `"degenerate_reasoning_stream"` — The reasoning/thought stream became
   clearly non-productive (provider leakage of internal control tokens, or
   a long run of single-character hex deltas). Avenor aborted the session
@@ -270,6 +277,60 @@ Example (cancelled):
 ```json
 {"event":"session.end","session_id":"ses_123","stop_reason":"cancelled"}
 ```
+
+Example (provider rate limit with a retry hint):
+
+```json
+{"event":"session.end","session_id":"ses_123","stop_reason":"rate_limited","error_message":"429: rate limit reached; try again in 20s","retry_after":20}
+```
+
+#### Provider limit failures
+
+Avenor classifies a provider's usage-limit or rate-limit failure into
+`quota_exhausted` or `rate_limited` from the terminal failure text, so the run
+is not reported as a generic `error`. An explicit stop reason from the backend
+always wins; only failures that would otherwise map to exit code 1 are
+reclassified. The classifier covers the shapes each backend forwards:
+
+| Backend | Failure text source |
+|---|---|
+| `pi` | The provider message in the settled `agent_end` (`error_message`), or the captured child stderr when the event carries none |
+| `codex-app-server` | The `turn/completed` failure message |
+| ACP backends | The prompt error text |
+| `opencode-http` | The provider error name, reported as the stop reason |
+| `claude-channel` | None: the finish record's `summary` is model-authored prose, so it never classifies a run |
+
+The provider's retry-after hint is parsed from the same text (`try again in
+20s`, `retry-after: 30`, `resets in 2 hours`) and reported as `retry_after`
+in whole seconds. A value beyond a day is treated as absent.
+
+A quota failure with a reset hint stays `quota_exhausted`: only an explicit
+throttle signal (a `429`, or rate-limit wording) makes the retryable class, so
+a hard-capped account is not retried against the same refusal.
+
+A retry wait honors the hint: the CLI, the supervisor's child retry loop, and
+the loop/team phase retry loops sleep at least `retry_after` (or the
+configured backoff, whichever is longer), clamped to the run deadline and to a
+five minute ceiling. A hint above the ceiling, or one that cannot fit before
+the run deadline, stops the retry loop instead of sleeping: the run ends
+`rate_limited` with its `RETRY_AFTER` intact.
+
+Classification runs once, after the turn settles, from the terminal event's
+own failure field plus the prompt error text, so the result does not depend on
+which arrived first. Where the provider's message lands depends on the path:
+
+- **The terminal event carried it.** The event keeps the field it arrived on
+  (`error_message`, `error`, or `message`) and Avenor rewrites `stop_reason`.
+  When the backend's own stop reason was replaced, the original value stays
+  visible in `classified_from`, and the event is written once the turn has
+  settled, so it stays the last event.
+- **Only the prompt error carried it.** No terminal event arrived, so Avenor
+  writes a `session.end` with `stop_reason` (and `retry_after` when present).
+  The cause is on the `avenor.error` event whose `source` is `"prompt"`.
+
+Only provider-owned fields classify a run. A model-authored value — notably a
+claude-channel finish `summary` — cannot choose the stop reason or the
+retry-after hint.
 
 ## Launch identity
 

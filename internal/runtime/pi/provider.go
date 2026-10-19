@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -153,6 +154,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	turnCh := make(chan events.Event, 1)
 
+	// Only this turn's output may describe this turn's failure: the rolling
+	// buffer is process-lifetime, so the turn reads from its own mark instead
+	// of discarding what an earlier turn printed.
+	stderrMark := c.stderr.Mark()
 	subCh := make(chan events.Event, 128)
 	c.subscribe(sessionID, subCh)
 
@@ -169,6 +174,11 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			}
 		}
 	}()
+	settle := func() {
+		c.unsubscribe(sessionID, subCh)
+		close(subCh)
+		<-done
+	}
 
 	cmd := map[string]any{
 		"type":    "prompt",
@@ -177,50 +187,88 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	}
 	_, err = c.sendCommand(ctx, cmd)
 	if err != nil {
-		c.unsubscribe(sessionID, subCh)
-		close(subCh)
-		<-done
+		settle()
 		return fmt.Errorf("send prompt: %w", err)
 	}
 
 	select {
 	case ev := <-turnCh:
-		c.unsubscribe(sessionID, subCh)
-		close(subCh)
-		<-done
-
-		reason, _ := ev.Fields["stop_reason"]
-		switch reason {
-		case "end_turn", "end_of_turn":
-			return nil
-		case "cancelled":
-			return fmt.Errorf("turn cancelled for session %s", sessionID)
-		case "error":
-			msg, _ := ev.Fields["error_message"].(string)
-			if msg == "" {
-				msg = "unknown error"
-			}
-			// The child pi process prints model/API failures to stderr; the
-			// session.end event does not always carry them. Surface only the
-			// tail of the captured stderr: the rolling buffer also accumulates
-			// client-side diagnostics and stale lines from earlier turns.
-			if stderr := strings.TrimSpace(c.Stderr()); stderr != "" {
-				lines := strings.Split(stderr, "\n")
-				if len(lines) > 3 {
-					lines = lines[len(lines)-3:]
-				}
-				msg = fmt.Sprintf("%s (stderr: %s)", msg, strings.Join(lines, " | "))
-			}
-			return fmt.Errorf("turn failed for session %s: %s", sessionID, msg)
+		settle()
+		return piTurnResult(sessionID, ev, c.stderrSince(stderrMark))
+	case <-c.done:
+		// The child exited before settling the turn. readLoop closes c.done
+		// right after it fans the terminal event out, and the forwarder may not
+		// have moved it to turnCh yet: close and drain the subscription first,
+		// then read the queued turn before reporting the exit. Waiting on the
+		// caller's deadline would misreport the failure as a timeout.
+		settle()
+		select {
+		case ev := <-turnCh:
+			return piTurnResult(sessionID, ev, c.stderrSince(stderrMark))
 		default:
-			return nil
 		}
+		// The exit cause is whatever the child printed, and the last lines may
+		// still be in the pipe: let the stderr reader drain before reading it.
+		c.waitStderrDrain(piStderrDrainWait)
+		return fmt.Errorf("turn failed for session %s: %s", sessionID, piExitCause(c.stderrSince(stderrMark)))
 	case <-ctx.Done():
-		c.unsubscribe(sessionID, subCh)
-		close(subCh)
-		<-done
+		settle()
 		return ctx.Err()
 	}
+}
+
+// piTurnResult maps a settled agent_end onto Prompt's result. The captured
+// stderr carries failures that the event itself does not name, so it is the
+// cause when error_message is absent.
+func piTurnResult(sessionID string, ev events.Event, stderr string) error {
+	reason, _ := ev.Fields["stop_reason"]
+	switch reason {
+	case "end_turn", "end_of_turn":
+		return nil
+	case "cancelled":
+		return fmt.Errorf("turn cancelled for session %s", sessionID)
+	case "error":
+		msg, _ := ev.Fields["error_message"].(string)
+		detail := piStderrTail(stderr)
+		switch {
+		case msg == "":
+			msg = detail
+		case detail != "":
+			msg = fmt.Sprintf("%s (stderr: %s)", msg, detail)
+		}
+		if msg == "" {
+			msg = "unknown error"
+		}
+		return fmt.Errorf("turn failed for session %s: %s", sessionID, msg)
+	default:
+		return nil
+	}
+}
+
+func piExitCause(stderr string) string {
+	if tail := piStderrTail(stderr); tail != "" {
+		return tail
+	}
+	return "pi exited before the turn settled"
+}
+
+// piStderrDrainWait bounds how long the exit path waits for the child's last
+// stderr lines: the pipe closes with the child, so this only covers a racing
+// reader.
+const piStderrDrainWait = 250 * time.Millisecond
+
+// piStderrTail keeps only the last few captured stderr lines: the same buffer
+// also accumulates client-side diagnostics.
+func piStderrTail(stderr string) string {
+	stderr = strings.TrimSpace(stderr)
+	if stderr == "" {
+		return ""
+	}
+	lines := strings.Split(stderr, "\n")
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+	}
+	return strings.Join(lines, " | ")
 }
 
 func (p *Provider) Cancel(ctx context.Context, sessionID string) error {

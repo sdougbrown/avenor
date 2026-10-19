@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/tools"
 )
@@ -388,8 +389,8 @@ func TestRunLoop_reasoningStreamGuard_controlTokenAborts(t *testing.T) {
 	if err != nil {
 		t.Errorf("RunLoop should not return an error for degenerate streams (would cause pointless retries), got %v", err)
 	}
-	if stopReason != degenerateReasoningStopReason {
-		t.Errorf("stopReason = %q, want %q", stopReason, degenerateReasoningStopReason)
+	if stopReason != runtime.DegenerateReasoningStreamStopReason {
+		t.Errorf("stopReason = %q, want %q", stopReason, runtime.DegenerateReasoningStreamStopReason)
 	}
 
 	evts := drainEvents(ch, 2*time.Second)
@@ -421,8 +422,8 @@ func TestRunLoop_reasoningStreamGuard_controlTokenAborts(t *testing.T) {
 	if endEvt == nil {
 		t.Fatal("expected session.end event in stream")
 	}
-	if got := endEvt.Fields["stop_reason"]; got != degenerateReasoningStopReason {
-		t.Errorf("session.end stop_reason = %v, want %q", got, degenerateReasoningStopReason)
+	if got := endEvt.Fields["stop_reason"]; got != runtime.DegenerateReasoningStreamStopReason {
+		t.Errorf("session.end stop_reason = %v, want %q", got, runtime.DegenerateReasoningStreamStopReason)
 	}
 
 	// The loop must not forward degenerate content to subscribers. The
@@ -476,8 +477,8 @@ func TestRunLoop_reasoningStreamGuard_hexRunAborts(t *testing.T) {
 		t.Fatal("RunLoop did not return after hex run detection")
 	}
 
-	if stopReason != degenerateReasoningStopReason {
-		t.Errorf("stopReason = %q, want %q", stopReason, degenerateReasoningStopReason)
+	if stopReason != runtime.DegenerateReasoningStreamStopReason {
+		t.Errorf("stopReason = %q, want %q", stopReason, runtime.DegenerateReasoningStreamStopReason)
 	}
 	evts := drainEvents(ch, 2*time.Second)
 	errEvt := findEvent(evts, "avenor.error", nil)
@@ -541,8 +542,8 @@ func TestLoopWithRetry_doesNotRetryDegenerateStream(t *testing.T) {
 	if err != nil {
 		t.Errorf("LoopWithRetry returned error %v; degenerate streams should surface as stop_reason, not error", err)
 	}
-	if stopReason != degenerateReasoningStopReason {
-		t.Errorf("stopReason = %q, want %q", stopReason, degenerateReasoningStopReason)
+	if stopReason != runtime.DegenerateReasoningStreamStopReason {
+		t.Errorf("stopReason = %q, want %q", stopReason, runtime.DegenerateReasoningStreamStopReason)
 	}
 	if calls != 1 {
 		t.Errorf("adapter call count = %d, want 1 (no retry on degenerate stream)", calls)

@@ -293,14 +293,15 @@ type lifecycleSignal struct {
 	// a result sentinel. It is the attempt result's session ID for
 	// attemptOutcome and promptContinuation, and the caller-resolved session
 	// ID (read outside mu) for idleContextEnded.
-	runKind           runKind
-	exitCode          int
-	stopReason        string
-	sentinelReason    string
-	resultSessionID   string
-	sessionIDConflict bool
-	retryable         bool
-	retriesRemaining  bool
+	runKind            runKind
+	exitCode           int
+	stopReason         string
+	sentinelReason     string
+	sentinelRetryAfter int64
+	resultSessionID    string
+	sessionIDConflict  bool
+	retryable          bool
+	retriesRemaining   bool
 
 	// promptContinuation inputs. terminalContextErr is sampled inside the
 	// terminal probe after the exit code is recorded and unlocked.
@@ -384,9 +385,10 @@ const (
 type lifecycleEffect struct {
 	kind effectKind
 
-	exitCode  int    // recordOutcomeExit, writeSentinel, setIdleEndData
-	reason    string // writeSentinel (normalized), setIdleEndData; setSessionEndPresentation may be empty
-	sessionID string // writeSentinel
+	exitCode   int    // recordOutcomeExit, writeSentinel, setIdleEndData
+	reason     string // writeSentinel (normalized), setIdleEndData; setSessionEndPresentation may be empty
+	sessionID  string // writeSentinel
+	retryAfter int64  // writeSentinel, provider-supplied hint in seconds
 
 	phase runstate.Phase // setAgentPresentation
 	label string         // setAgentPresentation
@@ -1020,10 +1022,11 @@ func nextAttemptOutcome(st lifecycleState, sig lifecycleSignal) (lifecycleState,
 	}
 	record := lifecycleEffect{kind: effectRecordOutcomeExit, exitCode: sig.exitCode}
 	sentinel := lifecycleEffect{
-		kind:      effectWriteSentinel,
-		exitCode:  sig.exitCode,
-		reason:    sig.sentinelReason,
-		sessionID: sig.resultSessionID,
+		kind:       effectWriteSentinel,
+		exitCode:   sig.exitCode,
+		reason:     sig.sentinelReason,
+		sessionID:  sig.resultSessionID,
+		retryAfter: sig.sentinelRetryAfter,
 	}
 	switch {
 	case !sig.retryable || !sig.retriesRemaining:
@@ -1091,10 +1094,11 @@ func nextPromptContinuation(st lifecycleState, sig lifecycleSignal) (lifecycleSt
 			"lifecycle: prompt continuation with probe %d while probe %d is pending", sig.probeKind, st.pendingProbe)
 	}
 	sentinel := lifecycleEffect{
-		kind:      effectWriteSentinel,
-		exitCode:  sig.exitCode,
-		reason:    sig.sentinelReason,
-		sessionID: sig.resultSessionID,
+		kind:       effectWriteSentinel,
+		exitCode:   sig.exitCode,
+		reason:     sig.sentinelReason,
+		sessionID:  sig.resultSessionID,
+		retryAfter: sig.sentinelRetryAfter,
 	}
 	switch sig.probeKind {
 	case probeTerminalPrompt:

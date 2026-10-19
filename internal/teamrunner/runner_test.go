@@ -576,7 +576,9 @@ func TestRunEventPayloads(t *testing.T) {
 
 func TestRunRetryOnTransientFailure(t *testing.T) {
 	oldRetryAfter := phaseRetryAfter
+	var waited []time.Duration
 	phaseRetryAfter = func(d time.Duration) <-chan time.Time {
+		waited = append(waited, d)
 		ch := make(chan time.Time, 1)
 		ch <- time.Now()
 		return ch
@@ -595,7 +597,8 @@ func TestRunRetryOnTransientFailure(t *testing.T) {
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (PhaseAttemptResult, error) {
 			attempts++
 			if attempts <= 2 {
-				return PhaseAttemptResult{ExitCode: 1, SessionID: fmt.Sprintf("attempt-%d", attempts)}, nil
+				// The provider's hint sizes the wait, not the plain backoff.
+				return PhaseAttemptResult{ExitCode: 7, SessionID: fmt.Sprintf("attempt-%d", attempts), StopReason: runtime.RateLimitedStopReason, RetryAfter: 25}, nil
 			}
 			return PhaseAttemptResult{ExitCode: 0, SessionID: "final-s"}, nil
 		},
@@ -608,6 +611,9 @@ func TestRunRetryOnTransientFailure(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+	if len(waited) != 2 || waited[0] != 25*time.Second || waited[1] != 25*time.Second {
+		t.Fatalf("retry waits = %v, want the provider's 25s hint", waited)
 	}
 }
 

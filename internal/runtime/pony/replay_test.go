@@ -4,12 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model"
 )
 
@@ -86,8 +86,8 @@ func TestReplayFailedRun18_TerminatesOnControlToken(t *testing.T) {
 	t.Logf("RunLoop returned in %v with stop_reason=%q, err=%v", elapsed, stopReason, err)
 
 	// Acceptance: stop_reason must be the new degenerate reason.
-	if stopReason != DegenerateReasoningStopReason() {
-		t.Fatalf("stopReason = %q, want %q", stopReason, DegenerateReasoningStopReason())
+	if stopReason != runtime.DegenerateReasoningStreamStopReason {
+		t.Fatalf("stopReason = %q, want %q", stopReason, runtime.DegenerateReasoningStreamStopReason)
 	}
 	if err != nil {
 		t.Errorf("RunLoop should not return an error for degenerate streams (would cause pointless retries), got %v", err)
@@ -124,25 +124,12 @@ func TestReplayFailedRun18_TerminatesOnControlToken(t *testing.T) {
 	if endEvt == nil {
 		t.Fatal("expected session.end event")
 	}
-	if got := endEvt.Fields["stop_reason"]; got != DegenerateReasoningStopReason() {
-		t.Errorf("session.end stop_reason = %v, want %q", got, DegenerateReasoningStopReason())
+	if got := endEvt.Fields["stop_reason"]; got != runtime.DegenerateReasoningStreamStopReason {
+		t.Errorf("session.end stop_reason = %v, want %q", got, runtime.DegenerateReasoningStreamStopReason)
 	}
 
 	// history should still contain the original user prompt.
 	if len(history) == 0 {
 		t.Error("expected history to be non-empty")
-	}
-}
-
-// Sanity: the constant is what we expect (defends against accidental
-// rename).
-func TestDegenerateReasoningStopReasonConstant(t *testing.T) {
-	if got, want := DegenerateReasoningStopReason(), "degenerate_reasoning_stream"; got != want {
-		t.Errorf("DegenerateReasoningStopReason() = %q, want %q", got, want)
-	}
-	if got := fmt.Sprintf("%s", "degenerate_reasoning_stream"); got != "degenerate_reasoning_stream" {
-		// Defensive: make sure the test file's expectations are in
-		// sync with the loop's emitted value.
-		t.Errorf("constant drift: %q", got)
 	}
 }

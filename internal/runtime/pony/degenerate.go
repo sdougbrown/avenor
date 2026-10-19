@@ -5,19 +5,6 @@ import (
 	"strings"
 )
 
-// degenerateReasoningStopReason is the session-level stop reason emitted when
-// the loop aborts a turn because the upstream reasoning stream has become
-// degenerate (provider leakage of internal control tokens, encoded-payload
-// emission, or other content that is clearly not useful model work and would
-// otherwise consume the entire output budget).
-const degenerateReasoningStopReason = "degenerate_reasoning_stream"
-
-// DegenerateReasoningStopReason exposes the canonical stop reason for tests
-// and other packages that need to recognise or forward it.
-func DegenerateReasoningStopReason() string {
-	return degenerateReasoningStopReason
-}
-
 // reasoningStreamGuard is a per-turn state machine that watches the
 // ChunkTypeReasoning deltas and decides when the stream has become
 // degenerate enough to abort the session.

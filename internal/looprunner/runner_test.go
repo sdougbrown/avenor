@@ -307,7 +307,9 @@ func TestRunSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
 
 func TestRunEmitsRetryEventBeforeRetry(t *testing.T) {
 	oldRetryAfter := phaseRetryAfter
-	phaseRetryAfter = func(time.Duration) <-chan time.Time {
+	var waited []time.Duration
+	phaseRetryAfter = func(delay time.Duration) <-chan time.Time {
+		waited = append(waited, delay)
 		ch := make(chan time.Time, 1)
 		ch <- time.Now()
 		return ch
@@ -325,7 +327,8 @@ func TestRunEmitsRetryEventBeforeRetry(t *testing.T) {
 		PhaseAttempt: func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (PhaseAttemptResult, error) {
 			attempts++
 			if attempts == 1 {
-				return PhaseAttemptResult{ExitCode: 1, SessionID: "ses_1"}, nil
+				// The provider's hint sizes the wait between attempts.
+				return PhaseAttemptResult{ExitCode: 7, SessionID: "ses_1", StopReason: runtime.RateLimitedStopReason, RetryAfter: 25}, nil
 			}
 			return PhaseAttemptResult{ExitCode: 0, SessionID: "ses_2"}, nil
 		},
@@ -347,6 +350,9 @@ func TestRunEmitsRetryEventBeforeRetry(t *testing.T) {
 	}
 	if retries != 1 {
 		t.Fatalf("retry events = %d, want 1; events=%+v", retries, sink.events)
+	}
+	if len(waited) != 1 || waited[0] != 25*time.Second {
+		t.Fatalf("retry waits = %v, want the provider's 25s hint", waited)
 	}
 }
 

@@ -2282,6 +2282,14 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		// Sample the immutable result data the continuation selection needs.
 		retryable := runtime.IsRetryableFailure(result.exitCode, result.stopReason)
 		retriesRemaining := attempt <= maxRetries
+		// A hinted wait this child cannot honor leaves no attempt worth making:
+		// the machine records the terminal result instead of parking the run.
+		var retryWait <-chan time.Time
+		if retryable && retriesRemaining {
+			var honored bool
+			retryWait, honored = runtime.RetryWait(ctx, retryWaitTimer, backoffDelay(attempt), result.retryAfter)
+			retriesRemaining = honored
+		}
 		runKind := runKindOrdinaryDirect
 		if child.permissionDeciderRun {
 			runKind = runKindDecider
@@ -2303,10 +2311,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			// No predicted release ran; the fail-safe records the outcome exit,
 			// returns the tree token, writes the sentinel and ends the run.
 			s.reportLifecycleError(child, retErr)
-			s.failSafeRunChildTransition(child, lifecycleFault{
-				exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
-				recordExit: true,
-			})
+			s.failSafeRunChildTransition(child, resultFault(result, stopReason))
 			return
 		}
 		s.executeDeferredLifecycleEffects(child, retEff)
@@ -2316,26 +2321,24 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		// the lock and selects the continuation this switch executes.
 		child.mu.Lock()
 		cont, eff, err := s.applyLifecycle(child, lifecycleSignal{
-			kind:              signalAttemptOutcome,
-			class:             child.lc.class,
-			runKind:           runKind,
-			exitCode:          result.exitCode,
-			stopReason:        result.stopReason,
-			sentinelReason:    stopReason,
-			resultSessionID:   result.sessionID,
-			sessionIDConflict: conflict,
-			retryable:         retryable,
-			retriesRemaining:  retriesRemaining,
+			kind:               signalAttemptOutcome,
+			class:              child.lc.class,
+			runKind:            runKind,
+			exitCode:           result.exitCode,
+			stopReason:         result.stopReason,
+			sentinelReason:     stopReason,
+			sentinelRetryAfter: result.retryAfter,
+			resultSessionID:    result.sessionID,
+			sessionIDConflict:  conflict,
+			retryable:          retryable,
+			retriesRemaining:   retriesRemaining,
 		})
 		child.mu.Unlock()
 		if err != nil {
 			// The predicted record and sentinel never ran; the fail-safe records
 			// the exit, writes the sentinel and ends the run.
 			s.reportLifecycleError(child, err)
-			s.failSafeRunChildTransition(child, lifecycleFault{
-				exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
-				recordExit: true,
-			})
+			s.failSafeRunChildTransition(child, resultFault(result, stopReason))
 			return
 		}
 		switch cont.kind {
@@ -2377,10 +2380,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				// safe only signals the capacity the park would have freed and
 				// ends the run.
 				s.reportLifecycleError(child, parkErr)
-				s.failSafeRunChildTransition(child, lifecycleFault{
-					exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
-					recordExit: true, sentinelWritten: true, parkPath: true,
-				})
+				fault := resultFault(result, stopReason)
+				fault.sentinelWritten = true
+				fault.parkPath = true
+				s.failSafeRunChildTransition(child, fault)
 				return
 			}
 			// Parking frees a local slot; wake spawn waiters blocked on the cap.
@@ -2398,10 +2401,8 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 					// the run, recording the idle terminal end when the context
 					// ended the wait.
 					s.reportLifecycleError(child, pweErr)
-					fault := lifecycleFault{
-						exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
-						recordExit: true, sentinelWritten: true,
-					}
+					fault := resultFault(result, stopReason)
+					fault.sentinelWritten = true
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						fault = idleEndFault(child, ctxErr)
 					}
@@ -2458,6 +2459,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				promptConsumed:     probeResumed,
 				exitCode:           result.exitCode,
 				sentinelReason:     stopReason,
+				sentinelRetryAfter: result.retryAfter,
 				resultSessionID:    result.sessionID,
 			})
 			child.mu.Unlock()
@@ -2466,10 +2468,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				// it and ends the run. A prompt dequeued before the failure is
 				// consumed by the failed path.
 				s.reportLifecycleError(child, probeErr)
-				s.failSafeRunChildTransition(child, lifecycleFault{
-					exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
-					recordExit: true,
-				})
+				s.failSafeRunChildTransition(child, resultFault(result, stopReason))
 				return
 			}
 			// Whether resuming or ending, this result's sentinel writes
@@ -2507,10 +2506,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 				// the fail-safe records the exit, writes the terminal sentinel
 				// and ends the run.
 				s.reportLifecycleError(child, probeErr)
-				s.failSafeRunChildTransition(child, lifecycleFault{
-					exitCode: result.exitCode, reason: stopReason, sessionID: result.sessionID,
-					recordExit: true,
-				})
+				s.failSafeRunChildTransition(child, resultFault(result, stopReason))
 				return
 			}
 			if probeCont.kind == contIdleContextEnd {
@@ -2520,9 +2516,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			if probeCont.kind == contRetry {
 				continue
 			}
-			// contBackoff runs the backoff timer.
+			// contBackoff runs the retry timer sized before the outcome
+			// transaction: a hint the run cannot honor never reaches it.
 			select {
-			case <-time.After(backoffDelay(attempt)):
+			case <-retryWait:
 			case <-ctx.Done():
 				s.writeIdleContextEnd(child, ctx.Err())
 				return
@@ -2823,6 +2820,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				ExitCode:      result.ExitCode,
 				SessionID:     session.SessionID,
 				StopReason:    result.StopReason,
+				RetryAfter:    result.RetryAfter,
 				LoopDirective: result.LoopDirective,
 				LoopLabel:     result.LoopLabel,
 				BrokerRunID:   brokerRunID,
@@ -2868,9 +2866,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {
-			cli.WriteSentinelWithReason(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.Reason, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, result.Reason, s.stderrWriter())
 		} else {
-			cli.WriteSentinel(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, "", s.stderrWriter())
 		}
 	}
 }
@@ -3108,6 +3106,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				ExitCode:      result.ExitCode,
 				SessionID:     session.SessionID,
 				StopReason:    result.StopReason,
+				RetryAfter:    result.RetryAfter,
 				LoopDirective: result.LoopDirective,
 				LoopLabel:     result.LoopLabel,
 				Output:        result.Output,
@@ -3155,9 +3154,9 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 
 	if child.sentinelFile != "" {
 		if result.Reason != "" {
-			cli.WriteSentinelWithReason(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.Reason, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, result.Reason, s.stderrWriter())
 		} else {
-			cli.WriteSentinel(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, s.stderrWriter())
+			cli.WriteSentinelResult(child.sentinelFile, result.ExitCode, result.SessionID, result.StopReason, s.runID, result.RetryAfter, "", s.stderrWriter())
 		}
 	}
 }
@@ -3166,6 +3165,7 @@ type childAttemptResult struct {
 	exitCode   int
 	sessionID  string
 	stopReason string
+	retryAfter int64
 }
 
 func (c *childRuntime) dequeuePrompt() (string, bool) {
@@ -3752,7 +3752,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		ProviderTurn: providerTurn,
 	})
 	exitCode := result.ExitCode
-	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason}
+	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason, retryAfter: result.RetryAfter}
 }
 
 func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, resumeID string, launchAttempt int) (runtime.Session, error) {
@@ -5373,6 +5373,10 @@ func backoffDelay(attempt int) time.Duration {
 	}
 	return time.Duration(seconds) * time.Second
 }
+
+// retryWaitTimer is the supervisor's retry wait. Tests substitute it to observe
+// the delay a provider's hint produces.
+var retryWaitTimer = time.After
 
 // StableAdapter implementation — used by HTTPDebugServer for per-runtime HTTP endpoints.
 

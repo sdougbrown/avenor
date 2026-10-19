@@ -19,6 +19,7 @@ type NestedResult struct {
 	StopReason string
 	SessionID  string
 	Reason     string
+	RetryAfter int64
 }
 
 type RunOptions struct {
@@ -39,6 +40,7 @@ type PhaseAttemptResult struct {
 	ExitCode      int
 	SessionID     string
 	StopReason    string
+	RetryAfter    int64
 	LoopDirective string
 	LoopLabel     string
 	BrokerRunID   string
@@ -49,6 +51,7 @@ type RunResult struct {
 	StopReason string
 	SessionID  string
 	Reason     string
+	RetryAfter int64
 	// MarkerDirective/MarkerLabel carry the terminal marker the loop exited
 	// on (the exit directive and its label) so the workflow termination path
 	// can select a declared outcome from it.
@@ -149,6 +152,7 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 					ExitCode:   result.ExitCode,
 					StopReason: stopReason,
 					SessionID:  result.SessionID,
+					RetryAfter: result.RetryAfter,
 				}, nil
 			}
 		}
@@ -211,7 +215,7 @@ func runSequentialPhases(ctx context.Context, opts RunOptions, phases []phasecon
 			} else {
 				_ = emitLoopEnd(opts.EventSink, opts.RunID, "phase_failure", "", iterationsCompleted)
 			}
-			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID}
+			r := RunResult{ExitCode: result.ExitCode, StopReason: stopReason, SessionID: result.SessionID, RetryAfter: result.RetryAfter}
 			return &r, nil
 		}
 	}
@@ -244,6 +248,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 			ExitCode:      nestedResult.ExitCode,
 			SessionID:     nestedResult.SessionID,
 			StopReason:    nestedResult.StopReason,
+			RetryAfter:    nestedResult.RetryAfter,
 			LoopDirective: nestedLoopDirective(nestedResult),
 			LoopLabel:     nestedResult.Reason,
 		}, nil
@@ -385,6 +390,12 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 			return result, nil
 		}
 
+		// A hinted wait this run cannot honor leaves no attempt worth making, so
+		// the provider's class and its hint stand as the result.
+		wait, retry := runtime.RetryWait(ctx, phaseRetryAfter, phaseconfig.BackoffDuration(retry-1), result.RetryAfter)
+		if !retry {
+			return result, nil
+		}
 		select {
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
@@ -394,7 +405,7 @@ func runPhaseWithRetry(ctx context.Context, attemptFn func(ctx context.Context) 
 				result.StopReason = "timeout"
 			}
 			return result, nil
-		case <-phaseRetryAfter(phaseconfig.BackoffDuration(retry - 1)):
+		case <-wait:
 		}
 
 		result, err = attemptFn(ctx)

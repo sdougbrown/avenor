@@ -135,6 +135,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	// writes the most recent session ID regardless of which return path fires.
 	var finalSessionID string
 	var finalStopReason string
+	var finalRetryAfter int64
 
 	exitWithSentinel := func(code int) int {
 		if *sentinelFile != "" {
@@ -142,7 +143,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			if sr == "" {
 				sr = runtime.StopReasonForExitCode(code)
 			}
-			WriteSentinel(*sentinelFile, code, finalSessionID, sr, runID, stderr)
+			WriteSentinelResult(*sentinelFile, code, finalSessionID, sr, runID, finalRetryAfter, "", stderr)
 		}
 		return code
 	}
@@ -532,6 +533,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				ExitCode:      r.exitCode,
 				SessionID:     r.sessionID,
 				StopReason:    r.stopReason,
+				RetryAfter:    r.retryAfter,
 				LoopDirective: r.loopDirective,
 				LoopLabel:     r.loopLabel,
 				BrokerRunID:   "",
@@ -596,6 +598,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 				ExitCode:      r.exitCode,
 				SessionID:     r.sessionID,
 				StopReason:    r.stopReason,
+				RetryAfter:    r.retryAfter,
 				LoopDirective: r.loopDirective,
 				LoopLabel:     r.loopLabel,
 				Output:        r.output,
@@ -652,6 +655,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 						StopReason: subResult.StopReason,
 						SessionID:  subResult.SessionID,
 						Reason:     subResult.Reason,
+						RetryAfter: subResult.RetryAfter,
 					}, nil
 				}
 				if runType == "team" {
@@ -666,6 +670,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 							StopReason: nr.StopReason,
 							SessionID:  nr.SessionID,
 							Reason:     nr.Reason,
+							RetryAfter: nr.RetryAfter,
 						}, err
 					}
 					subOpts := teamrunner.RunOptions{
@@ -689,6 +694,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 						StopReason: subResult.StopReason,
 						SessionID:  subResult.SessionID,
 						Reason:     subResult.Reason,
+						RetryAfter: subResult.RetryAfter,
 					}, nil
 				}
 				return looprunner.NestedResult{}, fmt.Errorf("unknown run type %q", runType)
@@ -759,6 +765,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 							StopReason: nr.StopReason,
 							SessionID:  nr.SessionID,
 							Reason:     nr.Reason,
+							RetryAfter: nr.RetryAfter,
 						}, err
 					}
 					subOpts := looprunner.RunOptions{
@@ -782,6 +789,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 						StopReason: subResult.StopReason,
 						SessionID:  subResult.SessionID,
 						Reason:     subResult.Reason,
+						RetryAfter: subResult.RetryAfter,
 					}, nil
 				}
 				if runType == "team" {
@@ -810,6 +818,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 						StopReason: subResult.StopReason,
 						SessionID:  subResult.SessionID,
 						Reason:     subResult.Reason,
+						RetryAfter: subResult.RetryAfter,
 					}, nil
 				}
 				return teamrunner.NestedResult{}, fmt.Errorf("unknown run type %q", runType)
@@ -844,9 +853,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 
 		if *sentinelFile != "" {
 			if result.Reason != "" {
-				WriteSentinelWithReason(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.Reason, stderr)
+				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, stderr)
 			} else {
-				WriteSentinel(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, stderr)
+				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", stderr)
 			}
 		}
 
@@ -880,6 +889,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		})
 		finalSessionID = result.sessionID
 		finalStopReason = result.stopReason
+		finalRetryAfter = result.retryAfter
 
 		if result.err != nil || !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > *maxRetries {
 			break
@@ -889,6 +899,12 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 			resumeID = result.sessionID
 		}
 
+		// A hinted wait this run cannot honor leaves no attempt worth making, so
+		// the provider's own class and RETRY_AFTER stand.
+		wait, retry := runtime.RetryWait(runCtx, retryAfter, backoffDelay(attempt), result.retryAfter)
+		if !retry {
+			break
+		}
 		if err := writeRetryEvent(writer, result.sessionID, runID, attempt+1, *maxRetries, *label); err != nil {
 			fmt.Fprintf(stderr, "avenor: write retry event: %v\n", err)
 			result.exitCode = 1
@@ -899,7 +915,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 		}
 
 		select {
-		case <-retryAfter(backoffDelay(attempt)):
+		case <-wait:
 		case <-runCtx.Done():
 			if runCtx.Err() == context.DeadlineExceeded {
 				return exitWithSentinel(124)
@@ -984,9 +1000,9 @@ func writeSentinelForResult(result looprunner.RunResult, sentinelFile, runID str
 		return
 	}
 	if result.Reason != "" {
-		WriteSentinelWithReason(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.Reason, stderr)
+		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, stderr)
 	} else {
-		WriteSentinel(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, stderr)
+		WriteSentinelResult(sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", stderr)
 	}
 }
 
@@ -1006,6 +1022,7 @@ type permissionResult struct {
 type sessionResult struct {
 	ExitCode      int
 	StopReason    string
+	RetryAfter    int64
 	LoopDirective string
 	LoopLabel     string
 	Output        string
@@ -1067,7 +1084,14 @@ const promptSettlementGrace = 500 * time.Millisecond
 
 func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionWaitConfig, deps SessionWaitDeps) sessionResult {
 	var finalStopReason string
+	var finalRetryAfter int64
+	var promptFailureText string
 	var bufferedUsage map[string]any
+	// terminalEvent holds a consumed session.end until the prompt settles, so
+	// the classification sees both failure sources and the written stop reason
+	// never depends on which arrived first.
+	var terminalEvent *events.Event
+	terminalWritten := false
 	sessionEnded := false
 	promptReturned := false
 	var permissionDone <-chan permissionResult
@@ -1145,30 +1169,86 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			stopProvider()
 		}
 	}()
+	settleStopReason := func() {
+		if finalStopReason != "end_turn" || (!interruptedToolFailure && !deniedPermission) {
+			return
+		}
+		// A backend aborted a tool call (configured deny, or an explicitly
+		// rejected approval request) and still reported a clean end_turn. The
+		// turn did not complete its work: report the denial instead of letting
+		// it count as success. Ordinary failed tool calls without an abort
+		// remain recoverable and keep their own classification.
+		emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "stop_reason", "turn reported end_turn after an aborted or rejected tool call; classified as "+runtime.ToolDeniedStopReason, deps.Stderr, cfg.RunLabel)
+		finalStopReason = runtime.ToolDeniedStopReason
+	}
 	complete := func() sessionResult {
+		settleStopReason()
 		cleanReturn = sessionEnded && promptReturned && permissionDone == nil
 		// Surface the authoritative stop reason: callers derive the sentinel's
 		// classification from it, and an empty value degrades to exit_1 even
 		// when session.end named the real reason.
-		if finalStopReason == "end_turn" && (interruptedToolFailure || deniedPermission) {
-			// A backend aborted a tool call (configured deny, or an explicitly
-			// rejected approval request) and still reported a clean end_turn.
-			// The turn did not complete its work: report the denial instead of
-			// letting it count as success. Ordinary failed tool calls without
-			// an abort remain recoverable and keep their own classification.
-			emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "stop_reason", "turn reported end_turn after an aborted or rejected tool call; classified as "+runtime.ToolDeniedStopReason, deps.Stderr, cfg.RunLabel)
-			finalStopReason = runtime.ToolDeniedStopReason
+		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, RetryAfter: finalRetryAfter, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
+	}
+	// flushTerminal settles the turn and writes its authoritative session.end.
+	// The held terminal record's provider text and the prompt error describe the
+	// same failure, so they are classified together once both have settled:
+	// neither arrival order decides the outcome, the durable record matches the
+	// exit code, and it stays the last event.
+	flushTerminal := func() sessionResult {
+		if terminalEvent == nil {
+			// No terminal record arrived, so the prompt error is the only
+			// provider text left; a limit there still writes session.end.
+			if reason, retryAfter := runtime.ClassifyProviderLimit("error", promptFailureText); reason != "" {
+				return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, reason, retryAfter, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
+			}
+			return complete()
 		}
-		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
+		if terminalWritten {
+			return complete()
+		}
+		event := *terminalEvent
+		backend, _ := event.Fields["stop_reason"].(string)
+		settleStopReason()
+		text := failureText(event.Fields)
+		if promptFailureText != "" {
+			if text != "" {
+				text += " "
+			}
+			text += promptFailureText
+		}
+		if reason, retryAfter := runtime.ClassifyProviderLimit(finalStopReason, text); reason != "" {
+			finalStopReason = reason
+			if retryAfter > 0 {
+				finalRetryAfter = retryAfter
+				event.Fields["retry_after"] = retryAfter
+			}
+		}
+		if finalStopReason != backend {
+			if backend != "" {
+				// Keep the backend's own verdict visible next to the value
+				// Avenor adopted.
+				event.Fields["classified_from"] = backend
+			}
+			event.Fields["stop_reason"] = finalStopReason
+		}
+		if _, ok := event.Fields["final_output"]; !ok && fullReply.Len() > 0 {
+			event.Fields["final_output"] = fullReply.String()
+		}
+		if err := deps.Writer.Write(event); err != nil {
+			fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
+			return sessionResult{ExitCode: 1}
+		}
+		terminalWritten = true
+		return complete()
 	}
 	completeAuthoritativeAfterStop := func() (sessionResult, bool) {
 		if !sessionEnded {
 			return sessionResult{}, false
 		}
-		// Once the provider's terminal event has been forwarded, teardown may
+		// Once the provider's terminal event has been received, teardown may
 		// still need Cancel, but it must not supersede or duplicate that result.
 		stopProvider()
-		return complete(), true
+		return flushTerminal(), true
 	}
 	terminate := func(stopReason string) sessionResult {
 		// The termination branch owns the outcome unless the provider's terminal
@@ -1179,7 +1259,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			return result
 		}
 		stopProvider()
-		return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, stopReason, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
+		return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, stopReason, 0, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
 	}
 
 	chunkBuf := digest.NewChunkBuffer()
@@ -1272,10 +1352,10 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		// If session.end + promptDone already arrived while we were waiting for
 		// AnswerPermission, exit now that the permission goroutine has resolved.
 		if finalStopReason != "" && promptReturned {
-			return complete(), true
+			return flushTerminal(), true
 		}
 		if eventChClosed && finalStopReason == "" {
-			return sessionResult{ExitCode: 1}, true
+			return flushTerminal(), true
 		}
 		return sessionResult{}, false
 	}
@@ -1292,10 +1372,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if permissionDone != nil {
 					continue
 				}
-				if finalStopReason == "" {
-					return sessionResult{ExitCode: 1}
-				}
-				return complete()
+				return flushTerminal()
 			}
 			if event.Event == "session.start" {
 				externalID, _ := event.Fields["conversation_id"].(string)
@@ -1450,23 +1527,21 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				continue
 			}
 			if event.Event == "session.end" {
-				finalStopReason, _ = event.Fields["stop_reason"].(string)
+				event = events.Clone(event)
 				if event.Fields == nil {
 					event.Fields = map[string]any{}
 				}
-				if _, ok := event.Fields["final_output"]; !ok && fullReply.Len() > 0 {
-					event.Fields["final_output"] = fullReply.String()
+				finalStopReason, _ = event.Fields["stop_reason"].(string)
+				terminalEvent = &event
+				sessionEnded = true
+				if promptReturned && permissionDone == nil {
+					return flushTerminal()
 				}
+				continue
 			}
 			if err := deps.Writer.Write(event); err != nil {
 				fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
 				return sessionResult{ExitCode: 1}
-			}
-			if event.Event == "session.end" {
-				sessionEnded = true
-				if promptReturned && permissionDone == nil {
-					return complete()
-				}
 			}
 		case err := <-cfg.PromptDone:
 			promptReturned = true
@@ -1474,6 +1549,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if errors.Is(err, context.Canceled) {
 					return terminate("cancelled")
 				}
+				promptFailureText = err.Error()
 				// The prompt error always leaves a diagnostic in the event log,
 				// even when the authoritative session-end result owns the outcome.
 				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "prompt", fmt.Sprintf("prompt: %v", err), deps.Stderr, cfg.RunLabel)
@@ -1482,23 +1558,24 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				}
 				// The provider may be about to deliver the authoritative
 				// session.end: pi's retry exhaustion settles the turn right around
-				// the prompt error, and whichever arrives first decides the
-				// classification. Keep draining under a short grace window so the
-				// terminal event wins over a generic exit-1 fallback.
+				// the prompt error. Keep draining under a short grace window so the
+				// terminal event's provider text is classified with the prompt error
+				// instead of falling back to a generic exit-1 failure.
 				if cfg.EventCh != nil && settlementTimerC == nil {
 					settlementTimer := time.NewTimer(promptSettlementGrace)
 					defer settlementTimer.Stop()
 					settlementTimerC = settlementTimer.C
 					continue
 				}
-				return sessionResult{ExitCode: 1}
+				return flushTerminal()
 			}
 			if finalStopReason != "" && permissionDone == nil {
-				return complete()
+				return flushTerminal()
 			}
 		case <-settlementTimerC:
-			// The grace expired without an authoritative session.end.
-			return sessionResult{ExitCode: 1}
+			// The grace expired: flush whatever settled, including a terminal
+			// record that arrived after the prompt error.
+			return flushTerminal()
 		case res := <-permissionDone:
 			permissionDone = nil
 			if result, done := handlePermissionResult(res); done {
@@ -1536,9 +1613,24 @@ func cancelProvider(turn *ProviderTurn, writer EventSink, sessionID, runID, runL
 	}
 }
 
-func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
+// failureText returns the terminal failure text a backend owns on session.end.
+// Only provider-owned fields count: model-authored prose such as a
+// claude-channel finish summary never classifies a run.
+func failureText(fields map[string]any) string {
+	for _, key := range []string{"error_message", "error", "message"} {
+		if text, _ := fields[key].(string); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string, retryAfter int64, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
 	fields := map[string]any{
 		"stop_reason": stopReason,
+	}
+	if retryAfter > 0 {
+		fields["retry_after"] = retryAfter
 	}
 	if usage != nil {
 		fields["usage"] = usage
@@ -1554,7 +1646,7 @@ func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string,
 		fmt.Fprintf(stderr, "avenor: write terminal event: %v\n", err)
 		return sessionResult{ExitCode: 1}
 	}
-	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, Output: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
+	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, RetryAfter: retryAfter, Output: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
 }
 
 type eventWriter struct {

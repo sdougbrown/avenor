@@ -71,6 +71,7 @@ func TestSentinelContent(t *testing.T) {
 		sessionID  string
 		stopReason string
 		runID      string
+		retryAfter int64
 		reason     string
 		want       string
 	}{
@@ -178,6 +179,24 @@ func TestSentinelContent(t *testing.T) {
 			want:       "FAILED\nSESSION=ses_r\nSTOP_REASON=refusal\nEXIT_CODE=2\n",
 		},
 		{
+			name:       "exit 6 quota exhausted with retry hint",
+			exitCode:   6,
+			sessionID:  "ses_q",
+			stopReason: "quota_exhausted",
+			retryAfter: 3600,
+			runID:      "deadbeefcafe0006",
+			want:       "FAILED\nSESSION=ses_q\nSTOP_REASON=quota_exhausted\nEXIT_CODE=6\nRETRY_AFTER=3600\nRUN=deadbeefcafe0006\n",
+		},
+		{
+			// Neither a provider-supplied stop reason nor a session id may forge a
+			// line for consumers that split the sentinel on newlines.
+			name:       "newlines cannot forge a sentinel line",
+			exitCode:   7,
+			sessionID:  "ses_rl\nRUN=forged",
+			stopReason: "rate_limited\nEXIT_CODE=0",
+			want:       "FAILED\nSESSION=ses_rl RUN=forged\nSTOP_REASON=rate_limited EXIT_CODE=0\nEXIT_CODE=7\n",
+		},
+		{
 			name:       "empty session id",
 			exitCode:   0,
 			sessionID:  "",
@@ -228,10 +247,10 @@ func TestSentinelContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sentinelContent(tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.reason)
+			got := sentinelContent(tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.retryAfter, tt.reason)
 			if got != tt.want {
-				t.Errorf("sentinelContent(%d, %q, %q, %q, %q):\n got: %q\nwant: %q",
-					tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.reason, got, tt.want)
+				t.Errorf("sentinelContent(%d, %q, %q, %q, %d, %q):\n got: %q\nwant: %q",
+					tt.exitCode, tt.sessionID, tt.stopReason, tt.runID, tt.retryAfter, tt.reason, got, tt.want)
 			}
 		})
 	}
@@ -393,16 +412,16 @@ func TestWriteSentinel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// WriteSentinelWithReason
+// WriteSentinelResult
 // ---------------------------------------------------------------------------
 
-func TestWriteSentinelWithReason(t *testing.T) {
+func TestWriteSentinelResult(t *testing.T) {
 	t.Run("exit 5 blocked without reason writes BLOCKED sentinel", func(t *testing.T) {
 		dir := t.TempDir()
 		sentPath := filepath.Join(dir, "run.done")
 
 		var stderr strings.Builder
-		WriteSentinelWithReason(sentPath, 5, "ses_b", "blocked", "", "", &stderr)
+		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "", 0, "", &stderr)
 
 		if stderr.Len() > 0 {
 			t.Errorf("unexpected stderr: %s", stderr.String())
@@ -424,7 +443,7 @@ func TestWriteSentinelWithReason(t *testing.T) {
 
 		var stderr strings.Builder
 		reason := "architectural issue: layering violation in pkg/db"
-		WriteSentinelWithReason(sentPath, 5, "ses_b", "blocked", "", reason, &stderr)
+		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "", 0, reason, &stderr)
 
 		if stderr.Len() > 0 {
 			t.Errorf("unexpected stderr: %s", stderr.String())
@@ -445,7 +464,7 @@ func TestWriteSentinelWithReason(t *testing.T) {
 		sentPath := filepath.Join(dir, "run.done")
 
 		var stderr strings.Builder
-		WriteSentinelWithReason(sentPath, 5, "ses_b", "blocked", "deadbeefcafe0004", "loop limit exceeded", &stderr)
+		WriteSentinelResult(sentPath, 5, "ses_b", "blocked", "deadbeefcafe0004", 0, "loop limit exceeded", &stderr)
 
 		if stderr.Len() > 0 {
 			t.Errorf("unexpected stderr: %s", stderr.String())
