@@ -74,15 +74,8 @@ export interface OwnerAttachOptions {
   timeoutMs?: number
   /** Binding identity; production uses the process euid. */
   euid?: number
-}
-
-// Package hook, mirroring the Go client's beforeOwnerAttachDial. A test may
-// substitute the step between validation and the dial; production leaves it a
-// no-op.
-let beforeOwnerAttachDial: () => void = () => {}
-
-export function setOwnerAttachDialHook(hook: () => void): void {
-  beforeOwnerAttachDial = hook
+  /** Runs after the pre-dial checks and before the dial. */
+  beforeDial?: () => void
 }
 
 export function ownerRecordPath(socketPath: string): string {
@@ -342,7 +335,7 @@ export async function attachOwner(
   const euid = options.euid ?? processEUID()
   const record = loadOwnerRecord(socketPath)
   requireRecordedSocket(socketPath, record, bindOwnerSocket(socketPath, euid))
-  beforeOwnerAttachDial()
+  options.beforeDial?.()
   const socket = await connectOwnerSocket(socketPath, remainingMs(deadline))
   let client: Client
   try {
