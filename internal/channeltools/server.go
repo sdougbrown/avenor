@@ -300,7 +300,7 @@ func (s *Server) brokerGet(ctx context.Context, path string, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		text, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("broker %s: %s: %s", path, resp.Status, bytes.TrimSpace(text))
+		return brokerError(path, resp.Status, text)
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
@@ -335,12 +335,27 @@ func (s *Server) brokerPostDecode(ctx context.Context, path string, body map[str
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		text, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("broker %s: %s: %s", path, resp.Status, bytes.TrimSpace(text))
+		return brokerError(path, resp.Status, text)
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+// brokerError renders a broker failure with the message text a JSON error body
+// carries, falling back to the raw body when it is not JSON.
+func brokerError(path, status string, body []byte) error {
+	body = bytes.TrimSpace(body)
+	var envelope struct {
+		Error string `json:"error"`
+	}
+	if len(body) > 0 && body[0] == '{' {
+		if err := json.Unmarshal(body, &envelope); err == nil && envelope.Error != "" {
+			return fmt.Errorf("broker %s: %s: %s", path, status, envelope.Error)
+		}
+	}
+	return fmt.Errorf("broker %s: %s: %s", path, status, body)
 }
 
 func (s *Server) writeResult(id json.RawMessage, result any) error {

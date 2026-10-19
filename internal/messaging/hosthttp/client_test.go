@@ -18,6 +18,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/messaging/hosthttp"
 	"github.com/sdougbrown/avenor/internal/messaging/internal/hostfixture"
+	"github.com/sdougbrown/avenor/internal/messaging/internal/httpbase"
 	"github.com/sdougbrown/avenor/internal/messaging/messagetest"
 )
 
@@ -56,6 +57,10 @@ func TestHostClientContract(t *testing.T) {
 
 func TestHostClientFailureMatrix(t *testing.T) {
 	messagetest.RunFailureMatrix(t, fixtureFactory(hostfixture.New(t)))
+}
+
+func TestHostClientPeerFaultRacingClose(t *testing.T) {
+	messagetest.RunPeerFaultCloseSuite(t, fixtureFactory(hostfixture.New(t)))
 }
 
 func TestHostReplyRouting(t *testing.T) {
@@ -465,7 +470,7 @@ func TestHostClientRefusesRedirects(t *testing.T) {
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
-			if err := call(); !errors.Is(err, hosthttp.ErrRedirect) {
+			if err := call(); !errors.Is(err, httpbase.ErrRedirect) {
 				t.Fatalf("%s error = %v, want ErrRedirect", name, err)
 			}
 			mu.Lock()

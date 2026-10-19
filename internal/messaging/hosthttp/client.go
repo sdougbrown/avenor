@@ -10,22 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
-)
-
-const (
-	// defaultRequestTimeout bounds one request when the descriptor sets none.
-	defaultRequestTimeout = 30 * time.Second
-
-	maxResponseBytes = 1 << 20
+	"github.com/sdougbrown/avenor/internal/messaging/internal/httpbase"
 )
 
 // v1 endpoint paths. They are the fixture's design and part of the wire
@@ -45,22 +37,12 @@ const (
 // possibly-pending, never not-sent.
 var ErrMalformedResponse = errors.New("hosthttp: malformed response")
 
-// ErrRedirect reports a response that would redirect the request. The client
-// never follows one, so the capability headers cannot reach another host.
-var ErrRedirect = errors.New("hosthttp: redirect refused")
-
 // Transport is the v1 host messaging transport.
 type Transport struct {
+	*httpbase.Client
+
 	desc    messaging.EndpointDescriptor
 	baseURL string
-	client  *http.Client
-
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-
-	mu     sync.Mutex
-	closed bool
 }
 
 // New validates desc and builds a transport bound to its capability. A
@@ -78,23 +60,13 @@ func New(desc messaging.EndpointDescriptor) (messaging.Transport, error) {
 		return nil, fmt.Errorf("%w: capability credentials are required", messaging.ErrAuthRejected)
 	}
 	if desc.Timeout <= 0 {
-		desc.Timeout = defaultRequestTimeout
+		desc.Timeout = httpbase.DefaultRequestTimeout
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	return &Transport{
+		Client:  httpbase.New(ErrMalformedResponse, desc.Timeout),
 		desc:    desc,
 		baseURL: strings.TrimSuffix(desc.BaseURL, "/"),
-		client: &http.Client{
-			Transport:     &http.Transport{},
-			CheckRedirect: refuseRedirect,
-		},
-		ctx:    ctx,
-		cancel: cancel,
 	}, nil
-}
-
-func refuseRedirect(req *http.Request, _ []*http.Request) error {
-	return fmt.Errorf("%w: %s", ErrRedirect, req.URL.Redacted())
 }
 
 func loopback(host string) bool {
@@ -109,7 +81,7 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 	fail := func(outcome messaging.Outcome, err error) (messaging.SendResult, error) {
 		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: req.Generation}, err
 	}
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return fail(messaging.OutcomeNotSent, err)
 	}
 	body, err := t.call(ctx, pathSend, 0, map[string]any{
@@ -121,7 +93,11 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		"body":        req.Body,
 	})
 	if err != nil {
-		// The ask may have reached the peer before the response was lost.
+		// A connection refused before any byte was written never carried the ask.
+		if httpbase.NeverTransmitted(err) {
+			return fail(messaging.OutcomeNotSent, err)
+		}
+		// Otherwise the ask may have reached the peer before the response was lost.
 		return fail(messaging.OutcomePossiblyPending, err)
 	}
 	if body.Outcome == "" {
@@ -148,13 +124,10 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 }
 
 func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return messaging.WaitResult{Outcome: messaging.OutcomeNotSent}, err
 	}
-	timeout := req.Timeout
-	if timeout <= 0 || timeout > messaging.MaxWait {
-		timeout = messaging.MaxWait
-	}
+	timeout := httpbase.WaitTimeout(req.Timeout)
 	body, err := t.call(ctx, pathWait, timeout+messaging.CleanupDeadline, map[string]any{
 		"epoch":         req.Generation,
 		"sender_run_id": req.Sender.RunID,
@@ -162,7 +135,7 @@ func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messag
 		"timeout_ms":    timeout.Milliseconds(),
 	})
 	if err != nil {
-		if t.isClosed() && transportCancelled(err) {
+		if t.IsClosed() && httpbase.IsTransportCancelled(err) {
 			return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
 		}
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, err
@@ -185,7 +158,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 	fail := func(outcome messaging.Outcome, err error) (messaging.SendResult, error) {
 		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
 	}
-	if t.isClosed() {
+	if t.IsClosed() {
 		return fail(messaging.OutcomeNotSent, messaging.ErrTransportClosed)
 	}
 	body, err := t.call(ctx, pathReply, 0, map[string]any{
@@ -196,6 +169,9 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 		"body":           req.Body,
 	})
 	if err != nil {
+		if httpbase.NeverTransmitted(err) {
+			return fail(messaging.OutcomeNotSent, err)
+		}
 		return fail(messaging.OutcomePossiblyPending, err)
 	}
 	if body.Outcome == "" {
@@ -205,7 +181,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 }
 
 func (t *Transport) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
 	}
 	body, err := t.call(ctx, pathWithdraw, 0, map[string]any{
@@ -224,13 +200,13 @@ func (t *Transport) Withdraw(ctx context.Context, req messaging.WithdrawRequest)
 	}
 	result := messaging.WithdrawResult{Outcome: body.Outcome}
 	if body.Fence != nil {
-		result.Fence = body.Fence.ack()
+		result.Fence = body.Fence.Ack()
 	}
 	return result, body.err()
 }
 
 func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return messaging.ReceiveResult{}, err
 	}
 	limit := req.Limit
@@ -256,7 +232,7 @@ func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (
 }
 
 func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return messaging.PeersResult{}, err
 	}
 	body, err := t.call(ctx, pathPeers, 0, map[string]any{
@@ -277,7 +253,7 @@ func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 }
 
 func (t *Transport) Preflight(ctx context.Context) (messaging.PreflightResult, error) {
-	if t.isClosed() {
+	if t.IsClosed() {
 		return messaging.PreflightResult{}, messaging.ErrTransportClosed
 	}
 	body, err := t.call(ctx, pathPreflight, 0, struct{}{})
@@ -297,38 +273,6 @@ func (t *Transport) Preflight(ctx context.Context) (messaging.PreflightResult, e
 	return result, nil
 }
 
-// Close releases client-side resources, unblocks in-flight waits with a
-// possibly-pending outcome and joins its goroutines. It never stops the peer.
-func (t *Transport) Close() error {
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return nil
-	}
-	t.closed = true
-	t.cancel()
-	t.mu.Unlock()
-	t.wg.Wait()
-	t.client.CloseIdleConnections()
-	return nil
-}
-
-func (t *Transport) isClosed() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.closed
-}
-
-func (t *Transport) open(generation string) error {
-	if t.isClosed() {
-		return messaging.ErrTransportClosed
-	}
-	if generation == "" {
-		return messaging.ErrGenerationMismatch
-	}
-	return nil
-}
-
 // call performs one v1 request with the pinned capability and returns the
 // decoded response envelope. A response body that cannot be decoded is an
 // error; a non-nil error means no trustworthy response arrived.
@@ -338,16 +282,7 @@ func (t *Transport) call(ctx context.Context, path string, timeout time.Duration
 	if err != nil {
 		return body, fmt.Errorf("%w: %v", messaging.ErrInvalidRequest, err)
 	}
-	if timeout <= 0 {
-		timeout = t.desc.Timeout
-	}
-	child, release, ok := t.child(ctx, timeout)
-	if !ok {
-		return body, messaging.ErrTransportClosed
-	}
-	defer release()
-
-	req, err := http.NewRequestWithContext(child, http.MethodPost, t.baseURL+path, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, t.baseURL+path, bytes.NewReader(raw))
 	if err != nil {
 		return body, err
 	}
@@ -356,17 +291,9 @@ func (t *Transport) call(ctx context.Context, path string, timeout time.Duration
 	req.Header.Set(messaging.HeaderCapability, t.desc.CapabilityID)
 	req.Header.Set(messaging.HeaderSecret, t.desc.CapabilitySecret)
 
-	resp, err := t.client.Do(req)
+	_, raw, err = t.Do(ctx, req, timeout)
 	if err != nil {
 		return body, err
-	}
-	defer resp.Body.Close()
-	raw, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err != nil {
-		return body, err
-	}
-	if len(raw) > maxResponseBytes {
-		return body, fmt.Errorf("%w: response body exceeds %d bytes", ErrMalformedResponse, maxResponseBytes)
 	}
 	if len(raw) == 0 {
 		return body, fmt.Errorf("%w: empty response body", ErrMalformedResponse)
@@ -375,36 +302,6 @@ func (t *Transport) call(ctx context.Context, path string, timeout time.Duration
 		return body, fmt.Errorf("%w: %v", ErrMalformedResponse, err)
 	}
 	return body, nil
-}
-
-// transportCancelled reports whether err is the cancellation Close applies to
-// in-flight requests rather than a fault the caller or the peer produced.
-func transportCancelled(err error) bool {
-	return errors.Is(err, messaging.ErrTransportClosed) || errors.Is(err, context.Canceled)
-}
-
-// child returns a request context cancelled by ctx, the request timeout or
-// transport shutdown, and registers the watcher so Close can join it.
-func (t *Transport) child(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc, bool) {
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return nil, nil, false
-	}
-	t.wg.Add(1)
-	t.mu.Unlock()
-
-	base, stop := context.WithTimeout(ctx, timeout)
-	child, cancel := context.WithCancel(base)
-	go func() {
-		defer t.wg.Done()
-		select {
-		case <-t.ctx.Done():
-			cancel()
-		case <-child.Done():
-		}
-	}()
-	return child, func() { cancel(); stop() }, true
 }
 
 // envelope is one v1 response. Every field is optional so a response carries
@@ -416,18 +313,10 @@ type envelope struct {
 	Protocol  int               `json:"protocol"`
 	Epoch     string            `json:"epoch"`
 	MessageID string            `json:"message_id"`
-	Fence     *wireFence        `json:"fence"`
+	Fence     *httpbase.Fence   `json:"fence"`
 	Reply     *wireMessage      `json:"reply"`
 	Messages  []wireMessage     `json:"messages"`
 	Peers     []wirePeer        `json:"peers"`
-}
-
-type wireFence struct {
-	Sender     string    `json:"sender"`
-	MessageID  string    `json:"message_id"`
-	Generation string    `json:"generation"`
-	Deadline   time.Time `json:"deadline"`
-	Terminal   bool      `json:"terminal"`
 }
 
 type wireMessage struct {
@@ -441,16 +330,6 @@ type wireMessage struct {
 type wirePeer struct {
 	RunID   string          `json:"run_id"`
 	Session json.RawMessage `json:"session"`
-}
-
-func (f wireFence) ack() messaging.FenceAck {
-	return messaging.FenceAck{
-		Sender:     f.Sender,
-		MessageID:  f.MessageID,
-		Generation: f.Generation,
-		Deadline:   f.Deadline,
-		Terminal:   f.Terminal,
-	}
 }
 
 func (m wireMessage) inbound() messaging.InboundMessage {

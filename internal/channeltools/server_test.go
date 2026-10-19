@@ -152,34 +152,58 @@ func TestAvenorSendMissingArgs(t *testing.T) {
 }
 
 func TestAvenorSendBrokerFailure(t *testing.T) {
-	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	defer brokerSrv.Close()
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{
+			name:   "plain text body",
+			status: http.StatusInternalServerError,
+			body:   "boom",
+			want:   "broker /send: 500 Internal Server Error: boom",
+		},
+		{
+			name:   "json error body",
+			status: http.StatusNotFound,
+			body:   `{"error":"to run not found","code":"target-unavailable","outcome":"not-sent"}`,
+			want:   "broker /send: 404 Not Found: to run not found",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer brokerSrv.Close()
 
-	input := bytes.NewBufferString(
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
-			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_send","arguments":{"to_run_id":"target_run","message":"hello"}}}` + "\n",
-	)
-	var stdout bytes.Buffer
-	err := Run(context.Background(), Options{
-		RunID:      "run_1",
-		Token:      "tok_1",
-		BrokerURL:  brokerSrv.URL,
-		Stdin:      input,
-		Stdout:     &stdout,
-		Stderr:     io.Discard,
-		HTTPClient: brokerSrv.Client(),
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	responses := decodeRPCResponses(t, stdout.Bytes())
-	errResp, ok := responses[1]["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected JSON-RPC error for broker failure, got %#v", responses[1])
-	}
-	if errResp["message"] != "broker /send: 500 Internal Server Error: boom" {
-		t.Fatalf("broker failure message = %v", errResp["message"])
+			input := bytes.NewBufferString(
+				`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
+					`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_send","arguments":{"to_run_id":"target_run","message":"hello"}}}` + "\n",
+			)
+			var stdout bytes.Buffer
+			err := Run(context.Background(), Options{
+				RunID:      "run_1",
+				Token:      "tok_1",
+				BrokerURL:  brokerSrv.URL,
+				Stdin:      input,
+				Stdout:     &stdout,
+				Stderr:     io.Discard,
+				HTTPClient: brokerSrv.Client(),
+			})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			responses := decodeRPCResponses(t, stdout.Bytes())
+			errResp, ok := responses[1]["error"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected JSON-RPC error for broker failure, got %#v", responses[1])
+			}
+			if errResp["message"] != tc.want {
+				t.Fatalf("broker failure message = %v, want %q", errResp["message"], tc.want)
+			}
+		})
 	}
 }

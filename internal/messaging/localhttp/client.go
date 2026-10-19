@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,13 +19,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
-)
-
-const (
-	// defaultRequestTimeout bounds one request when the caller sets none.
-	defaultRequestTimeout = 30 * time.Second
-
-	maxResponseBytes = 1 << 20
+	"github.com/sdougbrown/avenor/internal/messaging/internal/httpbase"
 )
 
 // Local router paths the adapter drives.
@@ -46,22 +39,14 @@ var ErrUnsupportedLocalProtocol = fmt.Errorf(
 	messaging.ErrUnsupportedProtocol,
 )
 
-// ErrRedirect reports a response that would redirect the request. The adapter
-// never follows one, so a run token cannot be offered to another host.
-var ErrRedirect = errors.New("localhttp: redirect refused")
-
 // Transport is the local HTTP messaging transport.
 type Transport struct {
+	*httpbase.Client
+
 	creds   messaging.LocalCredentials
 	baseURL string
-	client  *http.Client
-
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
 
 	mu         sync.Mutex
-	closed     bool
 	protocol   int
 	generation string
 }
@@ -84,30 +69,20 @@ func New(addr string, creds messaging.LocalCredentials) (messaging.Transport, er
 		return nil, fmt.Errorf("%w: local run credentials are required", messaging.ErrAuthRejected)
 	}
 	if creds.Timeout <= 0 {
-		creds.Timeout = defaultRequestTimeout
+		creds.Timeout = httpbase.DefaultRequestTimeout
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	return &Transport{
+		Client:  httpbase.New(ErrUnsupportedLocalProtocol, creds.Timeout),
 		creds:   creds,
 		baseURL: base,
-		client: &http.Client{
-			Transport:     &http.Transport{},
-			CheckRedirect: refuseRedirect,
-		},
-		ctx:    ctx,
-		cancel: cancel,
 	}, nil
-}
-
-func refuseRedirect(req *http.Request, _ []*http.Request) error {
-	return fmt.Errorf("%w: %s", ErrRedirect, req.URL.Redacted())
 }
 
 func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	fail := func(outcome messaging.Outcome, err error) (messaging.SendResult, error) {
 		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: req.Generation}, err
 	}
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return fail(messaging.OutcomeNotSent, err)
 	}
 	// A broker that predates the protocol marker never received this ask, so
@@ -137,7 +112,7 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		"payload":       payload,
 	})
 	if err != nil {
-		if neverTransmitted(err) {
+		if httpbase.NeverTransmitted(err) {
 			return fail(messaging.OutcomeNotSent, err)
 		}
 		return fail(messaging.OutcomePossiblyPending, err)
@@ -157,7 +132,11 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		return fail(messaging.SendOutcomeFor(body.Code), typed)
 	}
 	if body.Outcome == "" {
-		return fail(body.unenvelopedOutcome(), body.unsolicited())
+		outcome := body.unenvelopedOutcome()
+		if !messaging.IsSendOutcome(outcome) {
+			outcome = messaging.OutcomeNotSent
+		}
+		return fail(outcome, body.unsolicited())
 	}
 	if !messaging.IsSendOutcome(body.Outcome) {
 		return fail(messaging.OutcomePossiblyPending, body.unsolicited())
@@ -173,20 +152,17 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 }
 
 func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return messaging.WaitResult{Outcome: messaging.OutcomeNotSent}, err
 	}
-	timeout := req.Timeout
-	if timeout <= 0 || timeout > messaging.MaxWait {
-		timeout = messaging.MaxWait
-	}
+	timeout := httpbase.WaitTimeout(req.Timeout)
 	status, raw, err := t.roundTrip(ctx, http.MethodPost, pathWait, timeout+messaging.CleanupDeadline, map[string]any{
 		"waiting_for": req.MessageID,
 		"generation":  req.Generation,
 		"timeout_ms":  timeout.Milliseconds(),
 	})
 	if err != nil {
-		if t.isClosed() && transportCancelled(err) {
+		if t.IsClosed() && httpbase.IsTransportCancelled(err) {
 			return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
 		}
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, err
@@ -229,7 +205,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 	fail := func(outcome messaging.Outcome, err error) (messaging.SendResult, error) {
 		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
 	}
-	if t.isClosed() {
+	if t.IsClosed() {
 		return fail(messaging.OutcomeNotSent, messaging.ErrTransportClosed)
 	}
 	payload := json.RawMessage(req.Body)
@@ -248,7 +224,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 		"payload":     payload,
 	})
 	if err != nil {
-		if neverTransmitted(err) {
+		if httpbase.NeverTransmitted(err) {
 			return fail(messaging.OutcomeNotSent, err)
 		}
 		return fail(messaging.OutcomePossiblyPending, err)
@@ -282,7 +258,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 }
 
 func (t *Transport) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
 	}
 	status, raw, err := t.roundTrip(ctx, http.MethodPost, pathWithdraw, 0, map[string]any{
@@ -317,12 +293,15 @@ func (t *Transport) Withdraw(ctx context.Context, req messaging.WithdrawRequest)
 }
 
 func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return messaging.ReceiveResult{}, err
 	}
 	// agent_only leaves non-agent control messages queued for the consumers
-	// that act on them.
-	status, raw, err := t.roundTrip(ctx, http.MethodPost, pathPoll, 0, map[string]any{"agent_only": true})
+	// that act on them, and limit leaves the excess queued for the next poll.
+	status, raw, err := t.roundTrip(ctx, http.MethodPost, pathPoll, req.Timeout, map[string]any{
+		"agent_only": true,
+		"limit":      req.Limit,
+	})
 	if err != nil {
 		return messaging.ReceiveResult{}, err
 	}
@@ -351,7 +330,7 @@ func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (
 }
 
 func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
-	if err := t.open(req.Generation); err != nil {
+	if err := t.Open(req.Generation); err != nil {
 		return messaging.PeersResult{}, err
 	}
 	body, err := t.sessions(ctx)
@@ -374,7 +353,7 @@ func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 // Preflight reports the broker's messaging protocol and current generation.
 // Protocol 0 means the local broker is too old to speak the shared protocol.
 func (t *Transport) Preflight(ctx context.Context) (messaging.PreflightResult, error) {
-	if t.isClosed() {
+	if t.IsClosed() {
 		return messaging.PreflightResult{}, messaging.ErrTransportClosed
 	}
 	body, err := t.sessions(ctx)
@@ -387,38 +366,6 @@ func (t *Transport) Preflight(ctx context.Context) (messaging.PreflightResult, e
 	}
 	t.rememberProtocol(result)
 	return result, nil
-}
-
-// Close releases client-side resources, unblocks in-flight waits with a
-// possibly-pending outcome and joins its goroutines. It never stops the broker.
-func (t *Transport) Close() error {
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return nil
-	}
-	t.closed = true
-	t.cancel()
-	t.mu.Unlock()
-	t.wg.Wait()
-	t.client.CloseIdleConnections()
-	return nil
-}
-
-func (t *Transport) isClosed() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.closed
-}
-
-func (t *Transport) open(generation string) error {
-	if t.isClosed() {
-		return messaging.ErrTransportClosed
-	}
-	if generation == "" {
-		return messaging.ErrGenerationMismatch
-	}
-	return nil
 }
 
 // ensureProtocol negotiates the protocol marker once per connection, before the
@@ -478,15 +425,6 @@ func (t *Transport) sessions(ctx context.Context) (envelope, error) {
 
 // roundTrip performs one authenticated request and returns the raw response.
 func (t *Transport) roundTrip(ctx context.Context, method, path string, timeout time.Duration, payload map[string]any) (int, []byte, error) {
-	if timeout <= 0 {
-		timeout = t.creds.Timeout
-	}
-	child, release, ok := t.child(ctx, timeout)
-	if !ok {
-		return 0, nil, messaging.ErrTransportClosed
-	}
-	defer release()
-
 	target := t.baseURL + path
 	var body io.Reader
 	if method == http.MethodGet {
@@ -504,63 +442,13 @@ func (t *Transport) roundTrip(ctx context.Context, method, path string, timeout 
 		}
 		body = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequestWithContext(child, method, target, body)
+	req, err := http.NewRequest(method, target, body)
 	if err != nil {
 		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err != nil {
-		return resp.StatusCode, nil, err
-	}
-	if len(raw) > maxResponseBytes {
-		return resp.StatusCode, nil, fmt.Errorf("%w: response body exceeds %d bytes", ErrUnsupportedLocalProtocol, maxResponseBytes)
-	}
-	return resp.StatusCode, raw, nil
-}
-
-// child returns a request context cancelled by ctx, the request timeout or
-// transport shutdown, and registers the watcher so Close can join it.
-func (t *Transport) child(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc, bool) {
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return nil, nil, false
-	}
-	t.wg.Add(1)
-	t.mu.Unlock()
-
-	base, stop := context.WithTimeout(ctx, timeout)
-	child, cancel := context.WithCancel(base)
-	go func() {
-		defer t.wg.Done()
-		select {
-		case <-t.ctx.Done():
-			cancel()
-		case <-child.Done():
-		}
-	}()
-	return child, func() { cancel(); stop() }, true
-}
-
-// neverTransmitted reports whether a request provably never reached the broker
-// because the connection could not be established.
-func neverTransmitted(err error) bool {
-	var opErr *net.OpError
-	return errors.As(err, &opErr) && opErr.Op == "dial"
-}
-
-// transportCancelled reports whether err is the cancellation Close applies to
-// in-flight requests rather than a fault the caller or the peer produced.
-func transportCancelled(err error) bool {
-	return errors.Is(err, messaging.ErrTransportClosed) || errors.Is(err, context.Canceled)
+	return t.Do(ctx, req, timeout)
 }
 
 // envelope is one local router response. Every field is optional so a response
@@ -578,24 +466,15 @@ type envelope struct {
 	Generation        string            `json:"generation"`
 	MessagingProtocol int               `json:"messaging_protocol"`
 	Sessions          []json.RawMessage `json:"sessions"`
-	Fence             *wireFence        `json:"fence"`
+	Fence             *httpbase.Fence   `json:"fence"`
 }
 
 type controlEntry struct {
 	ID        string          `json:"id"`
 	Type      string          `json:"type"`
-	RunID     string          `json:"run_id"`
 	FromRunID string          `json:"from_run_id"`
 	Sender    string          `json:"sender"`
 	Payload   json.RawMessage `json:"payload"`
-}
-
-type wireFence struct {
-	Sender     string    `json:"sender"`
-	MessageID  string    `json:"message_id"`
-	Generation string    `json:"generation"`
-	Deadline   time.Time `json:"deadline"`
-	Terminal   bool      `json:"terminal"`
 }
 
 func envelopeOf(status int, raw []byte) (envelope, error) {
@@ -615,25 +494,18 @@ func (e envelope) fenceAck() messaging.FenceAck {
 	if e.Fence == nil {
 		return messaging.FenceAck{}
 	}
-	return messaging.FenceAck{
-		Sender:     e.Fence.Sender,
-		MessageID:  e.Fence.MessageID,
-		Generation: e.Fence.Generation,
-		Deadline:   e.Fence.Deadline,
-		Terminal:   e.Fence.Terminal,
-	}
+	return e.Fence.Ack()
 }
 
 // statusError classifies a response the messaging envelope does not describe.
-// The local router's auth layer answers before a messaging handler, so a
-// 401/403 there is a credential rejection; any other unenveloped failure is a
-// protocol mismatch.
+// The local router's auth layer answers before a messaging handler, so only a
+// 401 there is a credential rejection; a 403 is the router's not-ask-target
+// refusal, and any other unenveloped failure is a protocol mismatch.
 func statusError(e envelope) error {
 	if e.Status == http.StatusOK {
 		return nil
 	}
-	switch e.Status {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	if e.Status == http.StatusUnauthorized {
 		return fmt.Errorf("%w: local broker rejected the run token", messaging.ErrAuthRejected)
 	}
 	if e.Error != "" {
@@ -643,12 +515,15 @@ func statusError(e envelope) error {
 }
 
 // unenvelopedOutcome reports the outcome for a response the messaging envelope
-// does not describe. The router's auth layer answers before a handler, so a
-// rejected credential is reported as such; every other unenveloped failure
-// leaves transmission uncertain.
+// does not describe. Only a 401 is a credential rejection; a code-less 403 is
+// the old router's not-ask-target refusal, whose documented outcome the shared
+// table carries. Every other unenveloped failure leaves transmission uncertain.
 func (e envelope) unenvelopedOutcome() messaging.Outcome {
-	if errors.Is(statusError(e), messaging.ErrAuthRejected) {
+	switch e.Status {
+	case http.StatusUnauthorized:
 		return messaging.OutcomeAuthRejected
+	case http.StatusForbidden:
+		return messaging.WireOutcomeFor("not-ask-target")
 	}
 	return messaging.OutcomePossiblyPending
 }
@@ -658,6 +533,11 @@ func (e envelope) unknownCode() error {
 }
 
 func (e envelope) unsolicited() error {
+	// An unenveloped 403 is the old router's not-ask-target refusal, so it
+	// carries the typed error its coded form would.
+	if e.Status == http.StatusForbidden {
+		return fmt.Errorf("%w: %s", messaging.ErrNotAskTarget, e.Error)
+	}
 	if e.Error != "" {
 		return fmt.Errorf("%w: local broker answered %d: %s", ErrUnsupportedLocalProtocol, e.Status, e.Error)
 	}
