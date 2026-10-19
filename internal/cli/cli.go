@@ -1169,58 +1169,76 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			stopProvider()
 		}
 	}()
+	settleStopReason := func() {
+		if finalStopReason != "end_turn" || (!interruptedToolFailure && !deniedPermission) {
+			return
+		}
+		// A backend aborted a tool call (configured deny, or an explicitly
+		// rejected approval request) and still reported a clean end_turn. The
+		// turn did not complete its work: report the denial instead of letting
+		// it count as success. Ordinary failed tool calls without an abort
+		// remain recoverable and keep their own classification.
+		emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "stop_reason", "turn reported end_turn after an aborted or rejected tool call; classified as "+runtime.ToolDeniedStopReason, deps.Stderr, cfg.RunLabel)
+		finalStopReason = runtime.ToolDeniedStopReason
+	}
 	complete := func() sessionResult {
+		settleStopReason()
 		cleanReturn = sessionEnded && promptReturned && permissionDone == nil
 		// Surface the authoritative stop reason: callers derive the sentinel's
 		// classification from it, and an empty value degrades to exit_1 even
 		// when session.end named the real reason.
-		if finalStopReason == "end_turn" && (interruptedToolFailure || deniedPermission) {
-			// A backend aborted a tool call (configured deny, or an explicitly
-			// rejected approval request) and still reported a clean end_turn.
-			// The turn did not complete its work: report the denial instead of
-			// letting it count as success. Ordinary failed tool calls without
-			// an abort remain recoverable and keep their own classification.
-			emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "stop_reason", "turn reported end_turn after an aborted or rejected tool call; classified as "+runtime.ToolDeniedStopReason, deps.Stderr, cfg.RunLabel)
-			finalStopReason = runtime.ToolDeniedStopReason
-		}
 		return sessionResult{ExitCode: runtime.ExitCodeForStopReason(finalStopReason), StopReason: finalStopReason, RetryAfter: finalRetryAfter, LoopDirective: loopDirective, LoopLabel: loopLabel, Output: output.String(), FinalReply: finalReply.String(), Usage: bufferedUsage}
 	}
-	// flushTerminal classifies the settled turn and writes its authoritative
-	// session.end. The terminal event's provider text and the prompt error
-	// describe the same failure, so they are classified together once both have
-	// settled; neither arrival order decides the outcome.
+	// flushTerminal settles the turn and writes its authoritative session.end.
+	// The held terminal record's provider text and the prompt error describe the
+	// same failure, so they are classified together once both have settled:
+	// neither arrival order decides the outcome, the durable record matches the
+	// exit code, and it stays the last event.
 	flushTerminal := func() sessionResult {
-		if terminalEvent != nil && !terminalWritten {
-			event := *terminalEvent
-			text := failureText(event.Fields)
-			if promptFailureText != "" {
-				if text != "" {
-					text += " "
-				}
-				text += promptFailureText
+		if terminalEvent == nil {
+			// No terminal record arrived, so the prompt error is the only
+			// provider text left; a limit there still writes session.end.
+			if reason, retryAfter := runtime.ClassifyProviderLimit("error", promptFailureText); reason != "" {
+				return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, reason, retryAfter, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
 			}
-			if reason, retryAfter := runtime.ClassifyProviderLimit(finalStopReason, text); reason != "" {
-				if backend := finalStopReason; backend != "" && backend != reason {
-					// Keep the backend's own verdict visible next to the class
-					// Avenor adopted.
-					event.Fields["classified_from"] = backend
-				}
-				finalStopReason = reason
-				event.Fields["stop_reason"] = reason
-				if retryAfter > 0 {
-					event.Fields["retry_after"] = retryAfter
-					finalRetryAfter = retryAfter
-				}
-			}
-			if _, ok := event.Fields["final_output"]; !ok && fullReply.Len() > 0 {
-				event.Fields["final_output"] = fullReply.String()
-			}
-			if err := deps.Writer.Write(event); err != nil {
-				fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
-				return sessionResult{ExitCode: 1}
-			}
-			terminalWritten = true
+			return complete()
 		}
+		if terminalWritten {
+			return complete()
+		}
+		event := *terminalEvent
+		backend, _ := event.Fields["stop_reason"].(string)
+		settleStopReason()
+		text := failureText(event.Fields)
+		if promptFailureText != "" {
+			if text != "" {
+				text += " "
+			}
+			text += promptFailureText
+		}
+		if reason, retryAfter := runtime.ClassifyProviderLimit(finalStopReason, text); reason != "" {
+			finalStopReason = reason
+			if retryAfter > 0 {
+				finalRetryAfter = retryAfter
+				event.Fields["retry_after"] = retryAfter
+			}
+		}
+		if finalStopReason != backend {
+			if backend != "" {
+				// Keep the backend's own verdict visible next to the value
+				// Avenor adopted.
+				event.Fields["classified_from"] = backend
+			}
+			event.Fields["stop_reason"] = finalStopReason
+		}
+		if _, ok := event.Fields["final_output"]; !ok && fullReply.Len() > 0 {
+			event.Fields["final_output"] = fullReply.String()
+		}
+		if err := deps.Writer.Write(event); err != nil {
+			fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
+			return sessionResult{ExitCode: 1}
+		}
+		terminalWritten = true
 		return complete()
 	}
 	completeAuthoritativeAfterStop := func() (sessionResult, bool) {
@@ -1337,7 +1355,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			return flushTerminal(), true
 		}
 		if eventChClosed && finalStopReason == "" {
-			return sessionResult{ExitCode: 1}, true
+			return flushTerminal(), true
 		}
 		return sessionResult{}, false
 	}
@@ -1353,9 +1371,6 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				eventChClosed = true
 				if permissionDone != nil {
 					continue
-				}
-				if finalStopReason == "" {
-					return sessionResult{ExitCode: 1}
 				}
 				return flushTerminal()
 			}
@@ -1552,21 +1567,15 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					settlementTimerC = settlementTimer.C
 					continue
 				}
-				if reason, retryAfter := runtime.ClassifyProviderLimit("error", promptFailureText); reason != "" {
-					return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, reason, retryAfter, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
-				}
-				return sessionResult{ExitCode: 1}
+				return flushTerminal()
 			}
 			if finalStopReason != "" && permissionDone == nil {
 				return flushTerminal()
 			}
 		case <-settlementTimerC:
-			// The grace expired without an authoritative session.end. A provider
-			// limit failure is still classifiable from the prompt error alone.
-			if reason, retryAfter := runtime.ClassifyProviderLimit("error", promptFailureText); reason != "" {
-				return endSession(deps.Writer, cfg.SessionID, cfg.RunID, cfg.RunLabel, reason, retryAfter, deps.Stderr, bufferedUsage, fullReply.String(), finalReply.String())
-			}
-			return sessionResult{ExitCode: 1}
+			// The grace expired: flush whatever settled, including a terminal
+			// record that arrived after the prompt error.
+			return flushTerminal()
 		case res := <-permissionDone:
 			permissionDone = nil
 			if result, done := handlePermissionResult(res); done {

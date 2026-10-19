@@ -43,24 +43,26 @@ type client struct {
 	// Guarded by mu.
 	lastToolPayload map[string]any
 
-	stderr    *rollingBuffer
-	done      chan struct{}
-	closeOnce sync.Once
-	sessionID string
-	sessionCh chan struct{}
+	stderr     *rollingBuffer
+	stderrDone chan struct{}
+	done       chan struct{}
+	closeOnce  sync.Once
+	sessionID  string
+	sessionCh  chan struct{}
 }
 
 func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stderr io.ReadCloser) *client {
 	c := &client{
-		proc:      proc,
-		stdin:     stdin,
-		stdout:    stdout,
-		pending:   map[string]chan json.RawMessage{},
-		subs:      map[string][]chan events.Event{},
-		approvals: map[string]pendingApproval{},
-		stderr:    newRollingBuffer(stderrCap),
-		done:      make(chan struct{}),
-		sessionCh: make(chan struct{}, 1),
+		proc:       proc,
+		stdin:      stdin,
+		stdout:     stdout,
+		pending:    map[string]chan json.RawMessage{},
+		subs:       map[string][]chan events.Event{},
+		approvals:  map[string]pendingApproval{},
+		stderr:     newRollingBuffer(stderrCap),
+		stderrDone: make(chan struct{}),
+		done:       make(chan struct{}),
+		sessionCh:  make(chan struct{}, 1),
 	}
 	go c.drainStderr(stderr)
 	go c.readLoop()
@@ -218,9 +220,22 @@ func (c *client) Close() error {
 
 func (c *client) Stderr() string { return c.stderr.String() }
 
-// resetStderr discards the output of earlier turns so a stale failure cannot
-// describe the current one.
-func (c *client) resetStderr() { c.stderr.Reset() }
+// stderrSince returns the stderr lines appended after mark, so a turn reads
+// only its own output.
+func (c *client) stderrSince(mark int64) string { return c.stderr.Since(mark) }
+
+// waitStderrDrain gives the stderr reader a bounded moment to reach EOF. The
+// child's exit cause is whatever it printed, so the exit path must not read the
+// buffer while the pipe still holds lines; a pipe kept open by a grandchild
+// must not delay the report either.
+func (c *client) waitStderrDrain(timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-c.stderrDone:
+	case <-timer.C:
+	}
+}
 
 func (c *client) writeStdin(data []byte) error {
 	c.stdinMu.Lock()
@@ -605,6 +620,7 @@ func isCriticalEvent(event string) bool {
 }
 
 func (c *client) drainStderr(r io.ReadCloser) {
+	defer close(c.stderrDone)
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		c.stderr.Append(scanner.Text())
@@ -615,9 +631,13 @@ func (c *client) drainStderr(r io.ReadCloser) {
 	_ = r.Close()
 }
 
+// rollingBuffer keeps the child's most recent stderr lines. A mark records how
+// many lines have been appended, so a turn can read only the lines it produced
+// without discarding the output of an earlier turn.
 type rollingBuffer struct {
 	mu    sync.Mutex
 	lines []string
+	seq   int64
 	cap   int
 }
 
@@ -628,28 +648,41 @@ func newRollingBuffer(cap int) *rollingBuffer {
 func (b *rollingBuffer) Append(line string) {
 	b.mu.Lock()
 	b.lines = append(b.lines, line)
+	b.seq++
 	if len(b.lines) > b.cap {
 		b.lines = b.lines[len(b.lines)-b.cap:]
 	}
 	b.mu.Unlock()
 }
 
-func (b *rollingBuffer) Reset() {
-	b.mu.Lock()
-	b.lines = nil
-	b.mu.Unlock()
-}
-
-func (b *rollingBuffer) String() string {
+// Mark returns the position a later Since reads from.
+func (b *rollingBuffer) Mark() int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.seq
+}
+
+// Since returns the lines appended after mark, clamping a mark the buffer has
+// already trimmed away.
+func (b *rollingBuffer) Since(mark int64) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	first := b.seq - int64(len(b.lines))
+	if mark < first {
+		mark = first
+	}
+	if mark > b.seq {
+		mark = b.seq
+	}
 	var sb strings.Builder
-	for _, line := range b.lines {
+	for _, line := range b.lines[mark-first:] {
 		sb.WriteString(line)
 		sb.WriteByte('\n')
 	}
 	return sb.String()
 }
+
+func (b *rollingBuffer) String() string { return b.Since(0) }
 
 var requestIDCounter int64
 

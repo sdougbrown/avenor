@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -154,9 +155,9 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	turnCh := make(chan events.Event, 1)
 
 	// Only this turn's output may describe this turn's failure: the rolling
-	// buffer is process-lifetime, so an earlier turn's 429 would otherwise
-	// reclassify a later, unrelated error.
-	c.resetStderr()
+	// buffer is process-lifetime, so the turn reads from its own mark instead
+	// of discarding what an earlier turn printed.
+	stderrMark := c.stderr.Mark()
 	subCh := make(chan events.Event, 128)
 	c.subscribe(sessionID, subCh)
 
@@ -193,7 +194,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	select {
 	case ev := <-turnCh:
 		settle()
-		return piTurnResult(sessionID, ev, c.Stderr())
+		return piTurnResult(sessionID, ev, c.stderrSince(stderrMark))
 	case <-c.done:
 		// The child exited before settling the turn. readLoop closes c.done
 		// right after it fans the terminal event out, and the forwarder may not
@@ -203,10 +204,13 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		settle()
 		select {
 		case ev := <-turnCh:
-			return piTurnResult(sessionID, ev, c.Stderr())
+			return piTurnResult(sessionID, ev, c.stderrSince(stderrMark))
 		default:
 		}
-		return fmt.Errorf("turn failed for session %s: %s", sessionID, piExitCause(c.Stderr()))
+		// The exit cause is whatever the child printed, and the last lines may
+		// still be in the pipe: let the stderr reader drain before reading it.
+		c.waitStderrDrain(piStderrDrainWait)
+		return fmt.Errorf("turn failed for session %s: %s", sessionID, piExitCause(c.stderrSince(stderrMark)))
 	case <-ctx.Done():
 		settle()
 		return ctx.Err()
@@ -248,8 +252,13 @@ func piExitCause(stderr string) string {
 	return "pi exited before the turn settled"
 }
 
-// piStderrTail keeps only the last few captured stderr lines: the rolling
-// buffer also accumulates client-side diagnostics and stale earlier turns.
+// piStderrDrainWait bounds how long the exit path waits for the child's last
+// stderr lines: the pipe closes with the child, so this only covers a racing
+// reader.
+const piStderrDrainWait = 250 * time.Millisecond
+
+// piStderrTail keeps only the last few captured stderr lines: the same buffer
+// also accumulates client-side diagnostics.
 func piStderrTail(stderr string) string {
 	stderr = strings.TrimSpace(stderr)
 	if stderr == "" {

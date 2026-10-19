@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -792,6 +794,48 @@ func TestPromptStderrIsPerTurn(t *testing.T) {
 	}
 	if err := p.Prompt(context.Background(), "ses-pi-turns", "second"); err == nil || strings.Contains(err.Error(), "429") {
 		t.Fatalf("second Prompt = %v, want only the current turn's cause", err)
+	}
+}
+
+// The child's last stderr lines reach the exit cause through the real pipe: the
+// exit path waits for the drain instead of reading a half-filled buffer.
+func TestPromptExitCauseWaitsForStderrDrain(t *testing.T) {
+	clientIn, clientInW := io.Pipe()
+	clientOut, clientOutW := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+	c := newClient(nil, clientInW, clientOut, stderrR)
+	defer c.Close()
+	c.setSessionID("ses_pi_pipe")
+	p := NewWithOptions(runtime.StartOptions{})
+	p.client = c
+	p.sessions = map[string]struct{}{"ses_pi_pipe": {}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(ctx, "ses_pi_pipe", "hi") }()
+
+	go func() {
+		cmd, err := readCommand(clientIn)
+		if err != nil {
+			return
+		}
+		writeLine(clientOutW, map[string]any{"type": "response", "id": cmd["id"], "success": true})
+		// Stdout ends first, so the exit path runs while the pipe still holds
+		// the cause the child printed.
+		_ = clientOutW.Close()
+		_, _ = fmt.Fprintln(stderrW, `402: {"message":"Insufficient Balance","code":"invalid_request_error"}`)
+		_ = stderrW.Close()
+	}()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Prompt did not return after the child exited")
+	}
+	if err == nil || !strings.Contains(err.Error(), "Insufficient Balance") {
+		t.Fatalf("error = %v; want the cause the child wrote to the stderr pipe", err)
 	}
 }
 
