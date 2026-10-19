@@ -178,8 +178,10 @@ type ControllerLoadFailure struct {
 	Err          error
 }
 
+// Error returns the wrapped load error's message, which already names the
+// controller it belongs to.
 func (f ControllerLoadFailure) Error() string {
-	return fmt.Sprintf("controller %s: %v", f.ControllerID, f.Err)
+	return f.Err.Error()
 }
 
 // Unwrap exposes the underlying load error to errors.Is.
