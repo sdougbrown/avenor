@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 )
 
@@ -1573,6 +1574,14 @@ func TestBrokerCancelMessage(t *testing.T) {
 	if b.Store().Pending("canceller", msgID) {
 		t.Error("ask edge should have been removed after cancel")
 	}
+	// Withdrawal is the only terminal outcome that retracts the queued ask.
+	target := b.GetRun("cancel_target")
+	target.Mu.Lock()
+	queued := len(target.ControlQueue)
+	target.Mu.Unlock()
+	if queued != 1 {
+		t.Errorf("target queue = %d, want only the uncancelled ask", queued)
+	}
 
 	// Cancelling a non-existent message should fail
 	cancelBody2 := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":%q,"token":%q,"cancel_message_id":"nonexistent"}`, "canceller", senderToken)))
@@ -1651,6 +1660,119 @@ func TestBrokerSessionsAdvertisesGeneration(t *testing.T) {
 	}
 	if payload.Generation == "" || payload.Generation != b.Store().Generation() {
 		t.Fatalf("generation = %q, want %q", payload.Generation, b.Store().Generation())
+	}
+}
+
+// mintMsgID mints a versioned message ID with the given lifetime.
+func mintMsgID(t *testing.T, ttl time.Duration) string {
+	t.Helper()
+	now := time.Now().UTC()
+	msgID, err := messaging.NewMsgID(now, now.Add(ttl))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	return msgID
+}
+
+// askBody builds a /send request carrying an ask and an optional generation.
+func askBody(token, fromRunID, toRunID, msgID, generation string) string {
+	payload := fmt.Sprintf(`{"id":%q,"from":%q,"from_run_id":%q,"to_run_id":%q,"message":"ask","expects_reply":true}`,
+		msgID, fromRunID, fromRunID, toRunID)
+	body := fmt.Sprintf(`{"run_id":%q,"token":%q,"from_run_id":%q,"to_run_id":%q,"type":"agent_message","payload":%s`,
+		fromRunID, token, fromRunID, toRunID, payload)
+	if generation != "" {
+		body += fmt.Sprintf(`,"generation":%q`, generation)
+	}
+	return body + "}"
+}
+
+// postBroker posts body to a broker endpoint and returns the status and body.
+func postBroker(t *testing.T, addr, path, body string) (int, map[string]any) {
+	t.Helper()
+	resp, err := http.Post(fmt.Sprintf("http://%s/%s", addr, path), "application/json", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("POST /%s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode /%s: %v", path, err)
+	}
+	return resp.StatusCode, result
+}
+
+// TestBrokerStaleGenerationRejected pins the 409 the local router returns for a
+// stale generation on every ask endpoint.
+func TestBrokerStaleGenerationRejected(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("stale_gen_sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("stale_gen_target"); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	msgID := mintMsgID(t, time.Minute)
+	stale := "stale-generation"
+
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "stale_gen_sender", "stale_gen_target", msgID, stale)); status != http.StatusConflict {
+		t.Fatalf("send with stale generation = (%d, %v), want 409", status, body)
+	}
+	waitBody := fmt.Sprintf(`{"run_id":"stale_gen_sender","token":%q,"waiting_for":%q,"generation":%q}`, senderToken, msgID, stale)
+	if status, body := postBroker(t, addr, "wait_reply", waitBody); status != http.StatusConflict {
+		t.Fatalf("wait_reply with stale generation = (%d, %v), want 409", status, body)
+	}
+	cancelBody := fmt.Sprintf(`{"run_id":"stale_gen_sender","token":%q,"cancel_message_id":%q,"generation":%q}`, senderToken, msgID, stale)
+	if status, body := postBroker(t, addr, "cancel_message", cancelBody); status != http.StatusConflict {
+		t.Fatalf("cancel_message with stale generation = (%d, %v), want 409", status, body)
+	}
+	if n := b.Store().ActiveCount(); n != 0 {
+		t.Fatalf("stale-generation requests left %d live edges", n)
+	}
+}
+
+// TestBrokerWithdrawnVersionedIDRejectedOnResend pins the fence mapping: a
+// versioned ID that was sent and then cancelled cannot be sent again.
+func TestBrokerWithdrawnVersionedIDRejectedOnResend(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("fenced_sender")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("fenced_target"); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+	msgID := mintMsgID(t, time.Minute)
+
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "fenced_sender", "fenced_target", msgID, gen)); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+	cancelBody := fmt.Sprintf(`{"run_id":"fenced_sender","token":%q,"cancel_message_id":%q,"generation":%q}`, senderToken, msgID, gen)
+	if status, body := postBroker(t, addr, "cancel_message", cancelBody); status != http.StatusOK || body["cancelled"] != true {
+		t.Fatalf("cancel = (%d, %v)", status, body)
+	}
+	target := b.GetRun("fenced_target")
+	target.Mu.Lock()
+	queued := len(target.ControlQueue)
+	target.Mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("target queue = %d, want the withdrawn ask retracted", queued)
+	}
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "fenced_sender", "fenced_target", msgID, gen)); status != http.StatusConflict {
+		t.Fatalf("re-send of a withdrawn id = (%d, %v), want 409", status, body)
 	}
 }
 
@@ -2327,7 +2449,8 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	if _, err := b.CreateRun("disco_target"); err != nil {
+	targetToken, err := b.CreateRun("disco_target")
+	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	msgID := "disco-test"
@@ -2354,10 +2477,38 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	}
 
 	// Wait for the handler to process context cancellation.
-	time.Sleep(10 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for b.Store().Pending("disco_sender", msgID) {
+		if time.Now().After(deadline) {
+			t.Fatal("expected the ask edge to be cleaned up on context cancellation")
+		}
+		time.Sleep(time.Millisecond)
+	}
 
-	if b.Store().Pending("disco_sender", msgID) {
-		t.Error("expected the ask edge to be cleaned up on context cancellation")
+	// The abandoned ask stays queued for the target: an unversioned ID records
+	// no fence, exactly as the unextracted broker behaved.
+	target := b.GetRun("disco_target")
+	target.Mu.Lock()
+	queued := len(target.ControlQueue)
+	target.Mu.Unlock()
+	if queued != 1 {
+		t.Errorf("target queue = %d, want the abandoned ask retained", queued)
+	}
+	if ack, ok := b.Store().Fence(messaging.FenceKey{Sender: "disco_sender", MessageID: msgID}); ok {
+		t.Errorf("legacy abandonment recorded a fence: %+v", ack)
+	}
+
+	// A later reply cannot answer the abandoned edge and is delivered to the
+	// sender as fire-and-forget.
+	if r := sendReply(t, b.Addr(), targetToken, "disco_target", "disco_sender", msgID, "late reply"); r["status"] != http.StatusOK || r["note"] == nil {
+		t.Fatalf("late reply = %+v, want the fire-and-forget fallback", r)
+	}
+	sender := b.GetRun("disco_sender")
+	sender.Mu.Lock()
+	queued = len(sender.ControlQueue)
+	sender.Mu.Unlock()
+	if queued != 1 {
+		t.Errorf("sender queue = %d, want the late reply delivered", queued)
 	}
 }
 

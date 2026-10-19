@@ -208,3 +208,40 @@ func TestAskEpochLost(t *testing.T) {
 		t.Fatal("old-generation fence survived rotation")
 	}
 }
+
+// TestWaitResultKeepsTerminalOutcome pins that a wait which already reached a
+// terminal state is not re-reported as possibly-pending when the transport
+// closed while it was in flight.
+func TestWaitResultKeepsTerminalOutcome(t *testing.T) {
+	reply := messaging.WaitResult{
+		Outcome: messaging.OutcomeReplied,
+		Reply:   &messaging.InboundMessage{MessageID: "m-1", Payload: []byte(`{"message":"pong"}`)},
+	}
+	cases := []struct {
+		name    string
+		res     messaging.WaitResult
+		err     error
+		closed  bool
+		want    messaging.Outcome
+		wantErr bool
+	}{
+		{"replied survives close", reply, nil, true, messaging.OutcomeReplied, false},
+		{"timed out survives close", messaging.WaitResult{Outcome: messaging.OutcomeTimedOut}, nil, true, messaging.OutcomeTimedOut, false},
+		{"pending wait is re-reported after close", messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, context.Canceled, true, messaging.OutcomePossiblyPending, false},
+		{"open transport keeps the error", messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, context.Canceled, false, messaging.OutcomePossiblyPending, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := waitResult(tc.res, tc.err, tc.closed)
+			if got.Outcome != tc.want {
+				t.Fatalf("outcome = %q, want %q", got.Outcome, tc.want)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.want == messaging.OutcomeReplied && got.Reply == nil {
+				t.Fatal("terminal reply was dropped")
+			}
+		})
+	}
+}
