@@ -34,11 +34,10 @@ type Options struct {
 }
 
 type Server struct {
-	opts      Options
-	client    *http.Client
-	messaging messaging.Transport
-	ask       *askclient.Client
-	outMu     sync.Mutex
+	opts   Options
+	client *http.Client
+	ask    *askclient.Client
+	outMu  sync.Mutex
 }
 
 type rpcMessage struct {
@@ -75,10 +74,9 @@ func Run(ctx context.Context, opts Options) error {
 	defer func() { _ = transport.Close() }()
 
 	s := &Server{
-		opts:      opts,
-		client:    opts.HTTPClient,
-		messaging: transport,
-		ask:       askclient.New(transport, askclient.Options{}),
+		opts:   opts,
+		client: opts.HTTPClient,
+		ask:    askclient.New(transport, askclient.Options{}),
 	}
 	scanner := bufio.NewScanner(opts.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)

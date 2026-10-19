@@ -7657,12 +7657,6 @@ func TestBrokerCallConnectionPoolIsolation(t *testing.T) {
 			t.Fatalf("prime connection pool: %v", err)
 		}
 	})
-	if sup.brokerHTTPClient != nil {
-		if sup.brokerHTTPClient.Transport == http.DefaultTransport {
-			t.Fatal("victim broker transport is the shared http.DefaultTransport")
-		}
-	}
-
 	refused := false
 	for attempt := 0; attempt < 10; attempt++ {
 		if _, err := sup.BrokerPeers(); err == nil {

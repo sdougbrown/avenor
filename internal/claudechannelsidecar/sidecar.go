@@ -36,7 +36,6 @@ type Options struct {
 type Server struct {
 	opts        Options
 	client      *http.Client
-	messaging   messaging.Transport
 	ask         *askclient.Client
 	outMu       sync.Mutex
 	initialized chan struct{}
@@ -72,7 +71,6 @@ func Run(ctx context.Context, opts Options) error {
 	s := &Server{
 		opts:        opts,
 		client:      opts.HTTPClient,
-		messaging:   transport,
 		ask:         askclient.New(transport, askclient.Options{}),
 		initialized: make(chan struct{}),
 	}
