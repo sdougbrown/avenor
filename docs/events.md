@@ -383,7 +383,7 @@ Assume an observation reported `AVENOR_EXECUTION_ID=a3f9c1`, `AVENOR_KIND=team`,
 
 1. Match `AVENOR_EXECUTION_ID` to the event `runtime_id`.
 2. When `AVENOR_PHASE` is set, select the phase events whose `run_kind` is `AVENOR_KIND`, whose `phase` is `AVENOR_PHASE`, and whose `iteration` is `AVENOR_ITERATION`, or `0` when the variable is absent.
-3. When `AVENOR_PHASE` is set and the run is not nested, expect exactly one `avenor.phase.start` and one `avenor.phase.end`. Read `stop_reason` from the end event.
+3. When `AVENOR_PHASE` is set and the run is not nested, expect exactly one `avenor.phase.start` and one `avenor.phase.end`. Read `stop_reason` from the end event. To read the member's final message, match the end event's `session_id` to the `session_id` on that session's `session.end` and read its `final_output`.
 4. When `AVENOR_KIND` is `team` or `loop`, match `avenor.team.end` or `avenor.loop.end` on the same `runtime_id`. Read `exit_reason` from that event.
 5. A direct run sets `AVENOR_KIND=run` and no `AVENOR_PHASE`, so it emits no phase events. Join it on `session.end` instead: match `runtime_id`, then read `stop_reason` from the last `session.end`. Each retried attempt emits its own `session.end` and none carries an attempt field, so a direct run supports no per-attempt join.
 

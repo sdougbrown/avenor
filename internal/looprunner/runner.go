@@ -280,7 +280,7 @@ func executePhase(ctx context.Context, opts RunOptions, phase phaseconfig.Phase,
 	}
 
 	defer func() {
-		_ = phaseconfig.EmitPhaseEnd(opts.EventSink, opts.RunID, phase.Name, iteration, runtime.LaunchKindLoop, phaseStopReason(result), markerFromResult(result))
+		_ = phaseconfig.EmitPhaseEnd(opts.EventSink, opts.RunID, phase.Name, iteration, runtime.LaunchKindLoop, phaseStopReason(result), result.SessionID, markerFromResult(result))
 	}()
 
 	var retryCount int

@@ -259,6 +259,18 @@ func TestRunPostPhasesEmitCorrectKind(t *testing.T) {
 			}
 		}
 	}
+	sessionIDs := map[string]string{}
+	for _, ev := range sink.events {
+		if ev.Event == "avenor.phase.end" {
+			sessionIDs[ev.Fields["phase"].(string)], _ = ev.Fields["session_id"].(string)
+		}
+	}
+	if sessionIDs["work"] != "work-session" {
+		t.Fatalf("work phase.end session_id = %q, want work-session", sessionIDs["work"])
+	}
+	if sessionIDs["report"] != "report-session" {
+		t.Fatalf("report phase.end session_id = %q, want report-session", sessionIDs["report"])
+	}
 }
 
 func TestRunPhaseWithRetryOnlyRetriesTransientFailure(t *testing.T) {
