@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 func TestStartSupervisorLeavesStaleSocketForChild(t *testing.T) {
@@ -76,6 +77,31 @@ func TestStartSupervisorOmitsLaunchWrapperPolicyByDefault(t *testing.T) {
 	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
 	if strings.Contains(strings.Join(capturedArgs, " "), "mcp-launch-wrapper-policy") {
 		t.Fatalf("args = %v, want no policy flag", capturedArgs)
+	}
+}
+
+// TestStartSupervisorScrubsTestHookEnv proves the autostarted supervisor child
+// never inherits the control test hooks.
+func TestStartSupervisorScrubsTestHookEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(runtime.EnvTestHooks, "1")
+	t.Setenv(runtime.EnvTestOwnerPublishDelay, "5s")
+	var child *exec.Cmd
+	origExec := execCommand
+	execCommand = func(string, ...string) *exec.Cmd {
+		child = exec.Command("/nonexistent/avenor-test-stub")
+		return child
+	}
+	defer func() { execCommand = origExec }()
+
+	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+	if child == nil {
+		t.Fatal("startSupervisor never built a child command")
+	}
+	for _, entry := range child.Env {
+		if strings.HasPrefix(entry, runtime.EnvTestHooks+"=") || strings.HasPrefix(entry, runtime.EnvTestOwnerPublishDelay+"=") {
+			t.Fatalf("test hook %q reached the supervisor child environment", entry)
+		}
 	}
 }
 
