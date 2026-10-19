@@ -241,17 +241,25 @@ function socketFileIdentity(socketPath: string): fs.BigIntStats {
   return info
 }
 
+/** Require identity to be the socket the record names. */
+function requireRecordedSocket(
+  socketPath: string,
+  record: OwnerRecord,
+  identity: SocketIdentity,
+): SocketIdentity {
+  if (identity.dev !== record.socket_identity.dev || identity.ino !== record.socket_identity.ino) {
+    throw stale(socketPath, `${socketPath} does not match the published record`)
+  }
+  return identity
+}
+
 /**
  * Require the live socket to be the one the record names. Returns the socket's
  * device and inode as decimal strings.
  */
 export function validateOwnerRecordSocket(socketPath: string, record: OwnerRecord): SocketIdentity {
   const live = socketFileIdentity(socketPath)
-  const identity = { dev: String(live.dev), ino: String(live.ino) }
-  if (identity.dev !== record.socket_identity.dev || identity.ino !== record.socket_identity.ino) {
-    throw stale(socketPath, `${socketPath} does not match the published record`)
-  }
-  return identity
+  return requireRecordedSocket(socketPath, record, { dev: String(live.dev), ino: String(live.ino) })
 }
 
 /**
@@ -332,8 +340,9 @@ function remainingMs(deadline: number): number {
 }
 
 /**
- * Load the owner record, bind the socket path to this euid, dial, re-check the
- * socket identity and authenticate. The whole attach is bounded by the timeout.
+ * Load the owner record, bind the socket path to this euid and require it to be
+ * the record's socket, dial, re-check the socket identity and authenticate. The
+ * whole attach is bounded by the timeout.
  */
 export async function attachOwner(
   socketPath: string,
@@ -342,8 +351,7 @@ export async function attachOwner(
   const deadline = Date.now() + (options.timeoutMs ?? OWNER_ATTACH_TIMEOUT_MS)
   const euid = options.euid ?? processEUID()
   const record = loadOwnerRecord(socketPath)
-  bindOwnerSocket(socketPath, euid)
-  validateOwnerRecordSocket(socketPath, record)
+  requireRecordedSocket(socketPath, record, bindOwnerSocket(socketPath, euid))
   beforeOwnerAttachDial()
   const socket = await connectOwnerSocket(socketPath, remainingMs(deadline))
   let client: Client
