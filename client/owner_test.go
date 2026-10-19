@@ -130,18 +130,44 @@ func TestOwnerAttachRevalidatesAfterDial(t *testing.T) {
 	path, _ := testOwnerSocket(t)
 	origHook := beforeOwnerAttachDial
 	t.Cleanup(func() { beforeOwnerAttachDial = origHook })
+	var rebuilt net.Listener
 	beforeOwnerAttachDial = func() {
 		if err := os.Remove(path); err != nil {
 			t.Fatalf("unlink owner socket: %v", err)
 		}
-		rebuilt, err := net.Listen("unix", path)
+		l, err := net.Listen("unix", path)
 		if err != nil {
 			t.Fatalf("rebind socket: %v", err)
 		}
-		t.Cleanup(func() { _ = rebuilt.Close() })
+		rebuilt = l
+	}
+	t.Cleanup(func() {
+		if rebuilt != nil {
+			_ = rebuilt.Close()
+		}
+	})
+
+	_, err := AttachOwner(path)
+
+	// The socket that replaced the record's must have received nothing at all.
+	unixRebuilt, ok := rebuilt.(*net.UnixListener)
+	if !ok {
+		t.Fatalf("rebuilt listener type = %T", rebuilt)
+	}
+	_ = unixRebuilt.SetDeadline(time.Now().Add(2 * time.Second))
+	replacement, acceptErr := unixRebuilt.Accept()
+	if acceptErr != nil {
+		t.Fatalf("rebuilt accept: %v", acceptErr)
+	}
+	defer replacement.Close()
+	buf := make([]byte, 128)
+	_ = replacement.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	n, _ := replacement.Read(buf)
+	if n != 0 {
+		t.Fatalf("attach sent %d credential bytes to the socket that replaced it: %q", n, buf[:n])
 	}
 
-	if _, err := AttachOwner(path); !errors.Is(err, control.ErrStaleOwnerRecord) {
+	if !errors.Is(err, control.ErrStaleOwnerRecord) {
 		t.Fatalf("attach after a mid-dial socket rebuild = %v, want stale-owner-record", err)
 	}
 }

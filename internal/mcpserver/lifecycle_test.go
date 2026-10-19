@@ -889,7 +889,7 @@ func TestLifecycleShutdownIsIdempotentAfterChildExit(t *testing.T) {
 // receives nothing.
 func TestAuthenticateOwnChildRefusesAnotherOwnerRecord(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "own.sock")
-	_, _, stop := startStubSupervisorListener(t, socket)
+	_, authCount, _, stop := startStubSupervisorListener(t, socket)
 	defer stop()
 	record, err := control.LoadOwnerRecord(socket)
 	if err != nil {
@@ -904,6 +904,9 @@ func TestAuthenticateOwnChildRefusesAnotherOwnerRecord(t *testing.T) {
 	defer cl.Close()
 	if err := authenticateOwnChild(cl, socket, os.Getpid()); !isOwnerRecordError(err) {
 		t.Fatalf("authenticateOwnChild = %v, want a retryable record error", err)
+	}
+	if n := authCount(); n != 0 {
+		t.Fatalf("the peer that holds the socket answered %d authenticate_owner requests, want 0", n)
 	}
 }
 
@@ -995,7 +998,7 @@ func TestMCPAttachAfterSIGKILLUsesTypedOutcomes(t *testing.T) {
 				if err != nil {
 					return
 				}
-				go serveOwnerAuthOnly(conn, other)
+				go serveOwnerAuthOnly(conn, other, nil)
 			}
 		}()
 		if _, state, err := attachSupervisor(socket); state != supervisorAuthRejected || !errors.Is(err, client.ErrOwnerUnauthenticated) {
@@ -1145,7 +1148,7 @@ func TestNoLauncherUnlinksOwnerArtifacts(t *testing.T) {
 				if err != nil {
 					return
 				}
-				go serveOwnerAuthOnly(conn, other)
+				go serveOwnerAuthOnly(conn, other, nil)
 			}
 		}()
 		if err := os.WriteFile(socket+".control.lock", []byte("lock"), 0o600); err != nil {

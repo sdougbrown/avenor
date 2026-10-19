@@ -682,7 +682,7 @@ func TestGetClientForSupervisorExemptsConfiguredSupervisorSocket(t *testing.T) {
 	// tests; it must stay dialable as the server's own default even though a
 	// tool-arg id at the same path class would be rejected.
 	socketPath := filepath.Join(t.TempDir(), "sup.sock")
-	acceptedCount, _, stopListener := startStubSupervisorListener(t, socketPath)
+	acceptedCount, _, _, stopListener := startStubSupervisorListener(t, socketPath)
 	defer stopListener()
 
 	s, err := NewServer(Options{Transport: "stdio", SupervisorSocket: socketPath, NoAutostart: true})
@@ -4710,13 +4710,14 @@ func TestServerAuthenticatedHTTPHandlerHostChecks(t *testing.T) {
 // startStubSupervisorListener runs a listener that publishes an owner record,
 // answers authenticate_owner and otherwise parks connections; tests use it as
 // an attach target and close accepted conns to simulate a restart.
-func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount func() int, closeAccepted func(), cleanup func()) {
+func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount func() int, authCount func() int, closeAccepted func(), cleanup func()) {
 	t.Helper()
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen %s: %v", socketPath, err)
 	}
 	cap := publishOwnerRecordForStub(t, socketPath)
+	var auths atomic.Int32
 	var mu sync.Mutex
 	var conns []net.Conn
 	go func() {
@@ -4728,7 +4729,7 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 			mu.Lock()
 			conns = append(conns, conn)
 			mu.Unlock()
-			go serveOwnerAuthOnly(conn, cap)
+			go serveOwnerAuthOnly(conn, cap, &auths)
 		}
 	}()
 	acceptedCount = func() int {
@@ -4736,6 +4737,7 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 		defer mu.Unlock()
 		return len(conns)
 	}
+	authCount = func() int { return int(auths.Load()) }
 	closeAccepted = func() {
 		mu.Lock()
 		defer mu.Unlock()
@@ -4750,12 +4752,13 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 		os.Remove(socketPath)
 		os.Remove(control.OwnerRecordPath(socketPath))
 	}
-	return acceptedCount, closeAccepted, cleanup
+	return acceptedCount, authCount, closeAccepted, cleanup
 }
 
 // serveOwnerAuthOnly answers authenticate_owner and ignores every other
-// request, which is all an attach target has to speak.
-func serveOwnerAuthOnly(conn net.Conn, cap control.OwnerCapability) {
+// request, which is all an attach target has to speak. Every credential it is
+// presented is counted in authCount when that is non-nil.
+func serveOwnerAuthOnly(conn net.Conn, cap control.OwnerCapability, authCount *atomic.Int32) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
@@ -4765,6 +4768,9 @@ func serveOwnerAuthOnly(conn net.Conn, cap control.OwnerCapability) {
 		}
 		if req.Method != "authenticate_owner" {
 			continue
+		}
+		if authCount != nil {
+			authCount.Add(1)
 		}
 		resp := ownerAuthResponse(req, cap)
 		data, _ := json.Marshal(resp)
@@ -4820,7 +4826,7 @@ func TestRedialExplicitSupervisorSocketAfterDisconnect(t *testing.T) {
 		t.Fatal("expected supervisor-unavailable error before listener exists")
 	}
 
-	acceptedCount, closeAccepted, stopListener := startStubSupervisorListener(t, socketPath)
+	acceptedCount, _, closeAccepted, stopListener := startStubSupervisorListener(t, socketPath)
 	defer stopListener()
 
 	// The next acquisition redials and succeeds once the supervisor listens.
@@ -4873,7 +4879,7 @@ func TestRedialExplicitSupervisorSocketAfterDisconnect(t *testing.T) {
 
 func TestAutostartRedialsAfterDeadClient(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "sup.sock")
-	_, _, stopListener := startStubSupervisorListener(t, socketPath)
+	_, _, _, stopListener := startStubSupervisorListener(t, socketPath)
 	defer stopListener()
 
 	origStart := startSupervisorFunc
@@ -4922,7 +4928,7 @@ func TestAutostartRedialsAfterDeadClient(t *testing.T) {
 
 func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "sup.sock")
-	acceptedCount, _, stopListener := startStubSupervisorListener(t, socketPath)
+	acceptedCount, _, _, stopListener := startStubSupervisorListener(t, socketPath)
 	defer stopListener()
 
 	const n = 8
