@@ -61,69 +61,13 @@ func mintID(t *testing.T, ttl time.Duration) string {
 // edge, and the fence must stay terminal.
 func TestWithdrawFencesPausedSend(t *testing.T) {
 	store, backend := messagetest.NewMemoryStore(t)
-	tr := New(store)
-	gen := store.Generation()
-	msgID := mintID(t, time.Minute)
-	key := messaging.FenceKey{Sender: alice.RunID, MessageID: msgID, Generation: gen}
-
-	store.PauseAdmission(key)
-
-	type sendOutcome struct {
-		res messaging.SendResult
-		err error
-	}
-	sent := make(chan sendOutcome, 1)
-	go func() {
-		res, err := tr.Send(context.Background(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{"message":"paused ask"}`,
-		})
-		sent <- sendOutcome{res: res, err: err}
-	}()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for !store.AdmissionReached(key) {
-		if time.Now().After(deadline) {
-			t.Fatal("send never reached the admission seam")
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	withdrawn, err := tr.Withdraw(context.Background(), messaging.WithdrawRequest{
-		Sender: alice, MessageID: msgID, Generation: gen,
-	})
-	if err != nil {
-		t.Fatalf("Withdraw: %v", err)
-	}
-	if !withdrawn.Fence.Terminal {
-		t.Fatalf("withdrawal did not install a terminal fence: %+v", withdrawn)
-	}
-
-	store.ResumeAdmission(key)
-
-	select {
-	case out := <-sent:
-		if out.err != nil {
-			t.Fatalf("resumed send error: %v", out.err)
-		}
-		if out.res.Outcome != messaging.OutcomeWithdrawn {
-			t.Fatalf("resumed send outcome = %q, want withdrawn", out.res.Outcome)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("resumed send did not return")
-	}
+	messagetest.RunWithdrawFencesPausedSend(t, New(store), store, alice, bob)
 
 	if delivered := backend.Queued(bob.RunID); delivered != 0 {
 		t.Fatalf("withdrawn ask was delivered %d time(s)", delivered)
 	}
-	if store.Pending(alice.RunID, msgID) {
-		t.Fatal("withdrawn ask left a pending edge")
-	}
 	if store.PendingCount(alice.RunID) != 0 {
 		t.Fatalf("pending count = %d, want 0", store.PendingCount(alice.RunID))
-	}
-	ack, ok := store.Fence(key)
-	if !ok || !ack.Terminal {
-		t.Fatalf("fence = (%+v, %v), want terminal", ack, ok)
 	}
 }
 

@@ -280,59 +280,9 @@ func TestLocalAdapterMissingOutcomeAfterSend(t *testing.T) {
 func TestLocalAdapterPausesSendAdmission(t *testing.T) {
 	b := newBroker(t)
 	sender := newAdapter(t, b, alice)
-	withdrawer := newAdapter(t, b, alice)
 	newAdapter(t, b, bob)
 
-	pre, err := sender.Preflight(t.Context())
-	if err != nil {
-		t.Fatalf("Preflight: %v", err)
-	}
-	msgID := mintID(t, time.Minute)
-	key := messaging.FenceKey{Sender: alice.RunID, MessageID: msgID, Generation: pre.Generation}
-	b.Store().PauseAdmission(key)
-
-	type sendOutcome struct {
-		res messaging.SendResult
-		err error
-	}
-	done := make(chan sendOutcome, 1)
-	go func() {
-		res, err := sender.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: pre.Generation, Body: `{"message":"paused ask"}`,
-		})
-		done <- sendOutcome{res: res, err: err}
-	}()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for !b.Store().AdmissionReached(key) {
-		if time.Now().After(deadline) {
-			t.Fatal("send never reached the store's admission seam")
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	withdrawn, err := withdrawer.Withdraw(t.Context(), messaging.WithdrawRequest{
-		Sender: alice, MessageID: msgID, Generation: pre.Generation,
-	})
-	if err != nil {
-		t.Fatalf("Withdraw: %v", err)
-	}
-	if !withdrawn.Fence.Terminal {
-		t.Fatalf("withdrawal did not install a terminal fence: %+v", withdrawn)
-	}
-	b.Store().ResumeAdmission(key)
-
-	select {
-	case out := <-done:
-		if out.err != nil {
-			t.Fatalf("resumed send error: %v", out.err)
-		}
-		if out.res.Outcome != messaging.OutcomeWithdrawn {
-			t.Fatalf("resumed send outcome = %q, want withdrawn", out.res.Outcome)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("resumed send did not return")
-	}
+	messagetest.RunWithdrawFencesPausedSend(t, sender, b.Store(), alice, bob)
 
 	target := b.GetRun(bob.RunID)
 	target.Mu.Lock()
@@ -340,9 +290,6 @@ func TestLocalAdapterPausesSendAdmission(t *testing.T) {
 	target.Mu.Unlock()
 	if delivered != 0 {
 		t.Fatalf("withdrawn ask was delivered %d time(s)", delivered)
-	}
-	if b.Store().Pending(alice.RunID, msgID) {
-		t.Fatal("withdrawn ask left a pending edge")
 	}
 }
 
