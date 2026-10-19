@@ -39,6 +39,7 @@ type StableAdapter interface {
 
 type HTTPDebugServer struct {
 	control       *ControlServer
+	facade        OwnerFacade
 	stableAdapter atomic.Value // holds StableAdapter, nil if unset
 	server        *http.Server
 	token         string
@@ -54,7 +55,7 @@ func NewHTTPDebugServer(addr string, control *ControlServer) (*HTTPDebugServer, 
 		panic("avenor: failed to generate debug token: " + err.Error())
 	}
 	token := hex.EncodeToString(tokenBytes)
-	h := &HTTPDebugServer{control: control, token: token}
+	h := &HTTPDebugServer{control: control, facade: control.OwnerFacade(), token: token}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status/", h.handleStatusRuntime)
 	mux.HandleFunc("/status", h.handleStatus)
@@ -317,8 +318,8 @@ func (h *HTTPDebugServer) handleCancel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime_id required in stable mode; use POST /cancel/<runtime_id>", http.StatusBadRequest)
 		return
 	}
-	if h.control.cancelFn != nil {
-		h.control.cancelFn()
+	if h.facade != nil {
+		h.facade.Cancel()
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -386,24 +387,17 @@ func (h *HTTPDebugServer) handleAnswerPermission(w http.ResponseWriter, r *http.
 		http.Error(w, "invalid params", http.StatusBadRequest)
 		return
 	}
-	// The early state check and delivery use separate locks. A claim may resolve
-	// after the early check. DeliverPendingPermission rechecks the state under
-	// its own lock and compares against the recorded resolution, returning
-	// AlreadyResolvedSame or AlreadyResolved, so this TOCTOU window is benign:
-	// a conflicting answer can never race into success.
-	if resolved, matches := h.control.ResolvedPermissionMatches("", p.RequestID, p.OptionID, p.Message); resolved {
-		if matches {
-			writeJSON(w, map[string]any{"accepted": true})
-		} else {
-			http.Error(w, "permission request already resolved", http.StatusConflict)
-		}
-		return
-	}
+	// Request shape is validated before the claim lookup, so a malformed message
+	// is a 400 even when the claim already resolved.
 	if err := runtime.ValidatePermissionMessage(p.Message); err != nil {
 		http.Error(w, "invalid permission message", http.StatusBadRequest)
 		return
 	}
-	switch delivery := h.control.DeliverPendingPermission("", p.RequestID, p.OptionID, p.Message); delivery {
+	if h.facade == nil {
+		http.Error(w, "permission handling delegated to provider", http.StatusConflict)
+		return
+	}
+	switch delivery := h.facade.AnswerPermission("", p.RequestID, p.OptionID, p.Message); delivery {
 	case PermissionAnswerDelivered, PermissionAnswerAlreadyResolvedSame:
 		writeJSON(w, map[string]any{"accepted": true})
 	case PermissionAnswerAlreadyResolved:

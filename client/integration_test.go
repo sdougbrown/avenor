@@ -18,7 +18,7 @@ import (
 func TestSubscribeRuntimeWithoutExplicitSubscribeDeliversEvents(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
 
-	srv := control.NewServer(control.NewState("run_test", "", 0))
+	srv, _ := control.NewTestServer(control.NewState("run_test", "", 0))
 	if err := srv.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}

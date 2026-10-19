@@ -30,13 +30,13 @@ func TestWorkflowCLIEndToEnd(t *testing.T) {
 	store := workflow.New(root)
 	mgr := workflow.NewManager(store)
 
-	srv := control.NewServer(control.NewState("run_cli", "", 0))
+	srv, _ := control.NewTestServer(control.NewState("run_cli", "", 0))
 	srv.SetWorkflowHandler(mgr)
 	sock := filepath.Join(t.TempDir(), "control.sock")
 	if err := srv.Start(sock); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}
-	t.Cleanup(srv.Stop)
+	t.Cleanup(func() { _ = srv.Stop() })
 
 	dir := t.TempDir()
 	tmplPath := filepath.Join(dir, "template.json")
@@ -137,13 +137,13 @@ func cliWorkflowEnv(t *testing.T) (func(args ...string) (string, int), *workflow
 	store := workflow.New(root)
 	mgr := workflow.NewManager(store)
 
-	srv := control.NewServer(control.NewState("run_cli", "", 0))
+	srv, _ := control.NewTestServer(control.NewState("run_cli", "", 0))
 	srv.SetWorkflowHandler(mgr)
 	sock := filepath.Join(t.TempDir(), "control.sock")
 	if err := srv.Start(sock); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}
-	t.Cleanup(srv.Stop)
+	t.Cleanup(func() { _ = srv.Stop() })
 
 	dir := t.TempDir()
 	tmplPath := filepath.Join(dir, "template.json")
@@ -471,13 +471,13 @@ func TestWorkflowCLIInstantiateParamsRoundTrip(t *testing.T) {
 	store := workflow.New(root)
 	mgr := workflow.NewManager(store)
 
-	srv := control.NewServer(control.NewState("run_cli_params", "", 0))
+	srv, _ := control.NewTestServer(control.NewState("run_cli_params", "", 0))
 	srv.SetWorkflowHandler(mgr)
 	sock := filepath.Join(t.TempDir(), "control.sock")
 	if err := srv.Start(sock); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}
-	t.Cleanup(srv.Stop)
+	t.Cleanup(func() { _ = srv.Stop() })
 
 	dir := t.TempDir()
 	tmplPath := filepath.Join(dir, "template.json")

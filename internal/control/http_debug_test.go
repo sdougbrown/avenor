@@ -315,7 +315,7 @@ func TestResolveDebugAddrWith(t *testing.T) {
 
 func TestHTTPDebugServerStartBindsLoopbackLiteral(t *testing.T) {
 	state := NewState("run_cli", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 
 	h, err := NewHTTPDebugServer("127.0.0.1:0", ctrl)
 	if err != nil {
@@ -344,7 +344,7 @@ func TestHTTPDebugServerStartBindsLoopbackLiteral(t *testing.T) {
 
 func TestHTTPStatusRuntimeStableMode(t *testing.T) {
 	state := NewState("run_stable", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	adapter := newMockAdapter(map[string]any{
 		"rt_1": map[string]any{
 			"runtime_id": "rt_1",
@@ -375,7 +375,7 @@ func TestHTTPStatusRuntimeStableMode(t *testing.T) {
 
 func TestHTTPStatusRuntimeNotFound(t *testing.T) {
 	state := NewState("run_stable", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	adapter := newMockAdapter(map[string]any{})
 	_, addr, token := startDebugServer(t, ctrl, adapter)
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -390,7 +390,7 @@ func TestHTTPStatusRuntimeNotFound(t *testing.T) {
 func TestHTTPStatusRuntimeCLIMode(t *testing.T) {
 	// No stable adapter — CLI mode. /status/<id> must return 404.
 	state := NewState("run_cli", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	_, addr, token := startDebugServer(t, ctrl, nil)
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -405,7 +405,7 @@ func TestHTTPStatusRuntimeCLIMode(t *testing.T) {
 
 func TestHTTPEventsRuntimeIDFilter(t *testing.T) {
 	state := NewState("run_stable", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	_, addr, token := startDebugServer(t, ctrl, nil)
 
 	// Connect to SSE stream with runtime_id filter.
@@ -499,7 +499,7 @@ loop:
 
 func TestHTTPCancelStableModeRequiresRuntimeID(t *testing.T) {
 	state := NewState("run_stable", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	adapter := newMockAdapter(map[string]any{
 		"rt_1": map[string]any{"runtime_id": "rt_1"},
 	})
@@ -516,7 +516,7 @@ func TestHTTPCancelStableModeRequiresRuntimeID(t *testing.T) {
 
 func TestHTTPCancelRuntimeStableMode(t *testing.T) {
 	state := NewState("run_stable", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	adapter := newMockAdapter(map[string]any{
 		"rt_1": map[string]any{"runtime_id": "rt_1"},
 	})
@@ -543,7 +543,7 @@ func TestHTTPCancelRuntimeStableMode(t *testing.T) {
 
 func TestHTTPCancelRuntimeNotFound(t *testing.T) {
 	state := NewState("run_stable", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	adapter := newMockAdapter(map[string]any{})
 	_, addr, token := startDebugServer(t, ctrl, adapter)
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -558,7 +558,7 @@ func TestHTTPCancelRuntimeNotFound(t *testing.T) {
 func TestHTTPCancelRuntimeCLIMode(t *testing.T) {
 	// No stable adapter — CLI mode. /cancel/<id> must return 404.
 	state := NewState("run_cli", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	_, addr, token := startDebugServer(t, ctrl, nil)
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -572,7 +572,7 @@ func TestHTTPCancelRuntimeCLIMode(t *testing.T) {
 func TestHTTPCancelCLIModeFiresGlobalCancel(t *testing.T) {
 	// CLI mode: POST /cancel (no id) should fire cancelFn.
 	state := NewState("run_cli", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	cancelled := false
 	ctrl.SetCancelFunc(func() { cancelled = true })
 	_, addr, token := startDebugServer(t, ctrl, nil)
@@ -642,7 +642,7 @@ func wrongTokenPost(t *testing.T, client *http.Client, url string) *http.Respons
 
 func TestAuthRequiredStatusRuntime(t *testing.T) {
 	state := NewState("run_stable", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	adapter := newMockAdapter(map[string]any{
 		"rt_1": map[string]any{"runtime_id": "rt_1"},
 	})
@@ -677,7 +677,7 @@ func TestAuthRequiredStatusRuntime(t *testing.T) {
 
 func TestAuthRequiredCancelRuntime(t *testing.T) {
 	state := NewState("run_stable", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	adapter := newMockAdapter(map[string]any{
 		"rt_1": map[string]any{"runtime_id": "rt_1"},
 	})
@@ -714,7 +714,7 @@ func TestAuthRequiredEventsRuntimeIDFilter(t *testing.T) {
 	// /events uses checkAuthEventSource which accepts both header and ?token=
 	// query parameter. Test both the header path and the query-param path.
 	state := NewState("run_stable", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	_, addr, token := startDebugServer(t, ctrl, nil)
 	// Use a very short timeout: we only care about the HTTP status, not the
 	// streaming body.
@@ -802,7 +802,7 @@ func authedPostBody(t *testing.T, client *http.Client, url, token string, body s
 
 func TestHTTPAnswerPermissionInvalidJSON(t *testing.T) {
 	state := NewState("run_cli", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	_, addr, token := startDebugServer(t, ctrl, nil)
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -815,7 +815,7 @@ func TestHTTPAnswerPermissionInvalidJSON(t *testing.T) {
 
 func TestHTTPAnswerPermissionOversizedMessage(t *testing.T) {
 	state := NewState("run_cli", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	_, addr, token := startDebugServer(t, ctrl, nil)
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -831,7 +831,7 @@ func TestHTTPAnswerPermissionOversizedMessage(t *testing.T) {
 
 func TestHTTPAnswerPermissionInvalidUTF8Message(t *testing.T) {
 	state := NewState("run_cli", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	_, addr, token := startDebugServer(t, ctrl, nil)
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -848,7 +848,7 @@ func TestHTTPAnswerPermissionInvalidUTF8Message(t *testing.T) {
 }
 
 func TestHTTPAnswerPermissionInvalidAnswer(t *testing.T) {
-	ctrl := NewServer(NewState("run_cli", "", 0))
+	ctrl, _ := NewTestServer(NewState("run_cli", "", 0))
 	if !ctrl.PreparePermissionClaim("", "req_invalid", PermissionResolverReserved, []any{
 		map[string]any{"optionId": "other", "kind": "allow", "requiresMessage": true},
 	}) {
@@ -873,7 +873,7 @@ func TestHTTPAnswerPermissionInvalidAnswer(t *testing.T) {
 }
 
 func TestHTTPAnswerPermissionNoResolver(t *testing.T) {
-	ctrl := NewServer(NewState("run_cli", "", 0))
+	ctrl, _ := NewTestServer(NewState("run_cli", "", 0))
 	if !ctrl.PreparePermissionClaim("", "req_direct", PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -899,7 +899,7 @@ func TestHTTPAnswerPermissionNoResolver(t *testing.T) {
 }
 
 func TestHTTPAnswerPermissionAlreadyResolved(t *testing.T) {
-	ctrl := NewServer(NewState("run_cli", "", 0))
+	ctrl, _ := NewTestServer(NewState("run_cli", "", 0))
 	if !ctrl.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -925,7 +925,7 @@ func TestHTTPAnswerPermissionAlreadyResolved(t *testing.T) {
 }
 
 func TestHTTPAnswerPermissionConflictingRepeatIsRejected(t *testing.T) {
-	ctrl := NewServer(NewState("run_cli", "", 0))
+	ctrl, _ := NewTestServer(NewState("run_cli", "", 0))
 	if !ctrl.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -963,7 +963,7 @@ func TestHTTPAnswerPermissionEmptyMessageOK(t *testing.T) {
 	// return 409 because no pending permission exists, but that's past
 	// validation.
 	state := NewState("run_cli", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	_, addr, token := startDebugServer(t, ctrl, nil)
 	client := &http.Client{Timeout: 2 * time.Second}
 
@@ -984,7 +984,7 @@ func TestHTTPAnswerPermissionEmptyOptionIDRejected(t *testing.T) {
 
 	// A pending request exists: the empty option_id is rejected before the
 	// comparison, so it must not be accepted or reported as a conflict.
-	ctrl := NewServer(NewState("run_cli", "", 0))
+	ctrl, _ := NewTestServer(NewState("run_cli", "", 0))
 	if !ctrl.PreparePermissionClaim("", "req_pending", PermissionResolverReserved, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -997,7 +997,7 @@ func TestHTTPAnswerPermissionEmptyOptionIDRejected(t *testing.T) {
 
 	// No pending request exists: the empty option_id is still rejected before
 	// the comparison.
-	ctrl2 := NewServer(NewState("run_cli", "", 0))
+	ctrl2, _ := NewTestServer(NewState("run_cli", "", 0))
 	_, addr2, token2 := startDebugServer(t, ctrl2, nil)
 	resp2 := authedPostBody(t, client, "http://"+addr2+"/answer-permission", token2, `{"request_id":"req_missing","option_id":""}`)
 	defer resp2.Body.Close()
@@ -1008,7 +1008,7 @@ func TestHTTPAnswerPermissionEmptyOptionIDRejected(t *testing.T) {
 	// A resolved claim recorded with an empty resolution option: the guard
 	// fires before the comparator, so the response is 400 (not the 409 the
 	// empty-recording comparator rule would produce if the guard moved).
-	ctrl3 := NewServer(NewState("run_cli", "", 0))
+	ctrl3, _ := NewTestServer(NewState("run_cli", "", 0))
 	if !ctrl3.PreparePermissionClaim("", "req_resolved", PermissionResolverReserved, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -1020,5 +1020,49 @@ func TestHTTPAnswerPermissionEmptyOptionIDRejected(t *testing.T) {
 	defer resp3.Body.Close()
 	if resp3.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /answer-permission (empty option_id, resolved claim): %d, want 400", resp3.StatusCode)
+	}
+}
+
+// TestHTTPDebugPermissionAnswerCodes pins the four delivery values the debug
+// adapter maps, so a collapsed result enum cannot reappear.
+func TestHTTPDebugPermissionAnswerCodes(t *testing.T) {
+	ctrl, _ := NewTestServer(NewState("run_cli", "", 0))
+	if !ctrl.PreparePermissionClaim("", "req_shape", PermissionResolverReserved, []any{
+		map[string]any{"optionId": "allow_x", "kind": "allow", "requiresMessage": true},
+	}) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !ctrl.PreparePermissionClaim("", "req_direct", PermissionResolverNoResolver, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !ctrl.PreparePermissionClaim("", "req_done", PermissionResolverAutomatic, nil) {
+		t.Fatal("PreparePermissionClaim returned false")
+	}
+	if !ctrl.MarkPermissionClaimResolved("", "req_done", "avenor", "allow", "") {
+		t.Fatal("MarkPermissionClaimResolved returned false")
+	}
+	_, addr, token := startDebugServer(t, ctrl, nil)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	cases := []struct {
+		name string
+		body string
+		code int
+	}{
+		{name: "option ineligible", body: `{"request_id":"req_shape","option_id":"unoffered"}`, code: http.StatusBadRequest},
+		{name: "required message missing", body: `{"request_id":"req_shape","option_id":"allow_x"}`, code: http.StatusBadRequest},
+		{name: "malformed message on a resolved claim", body: `{"request_id":"req_done","option_id":"allow","message":"` + string([]byte{0xff}) + `"}`, code: http.StatusBadRequest},
+		{name: "no resolver", body: `{"request_id":"req_direct","option_id":"allow"}`, code: http.StatusConflict},
+	}
+	for _, tc := range cases {
+		resp := authedPostBody(t, client, "http://"+addr+"/answer-permission", token, tc.body)
+		if resp.StatusCode != tc.code {
+			resp.Body.Close()
+			t.Fatalf("%s: status = %d, want %d", tc.name, resp.StatusCode, tc.code)
+		}
+		resp.Body.Close()
+	}
+	if got := ctrl.PermissionResolverState("", "req_direct"); got != PermissionResolverDirectDelivery {
+		t.Fatalf("no-resolver request state = %v, want direct delivery", got)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 var execCommand = exec.Command
@@ -133,9 +134,20 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 	}
 	const readyEnv = "AVENOR_CONTROL_READY_FD="
 	const identityEnv = controlIdentityTokenEnv + "="
+	testHookEnvs := []string{runtime.EnvTestHooks + "=", runtime.EnvTestOwnerPublishDelay + "="}
 	cmd.Env = make([]string, 0, len(env)+2)
 	for _, entry := range env {
-		if !strings.HasPrefix(entry, readyEnv) && !strings.HasPrefix(entry, identityEnv) {
+		if strings.HasPrefix(entry, readyEnv) || strings.HasPrefix(entry, identityEnv) {
+			continue
+		}
+		skip := false
+		for _, hook := range testHookEnvs {
+			if strings.HasPrefix(entry, hook) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}

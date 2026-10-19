@@ -84,7 +84,7 @@ func Run(args []string) int {
 	return run(args, os.Getenv, os.Stderr)
 }
 
-func run(args []string, getenv func(string) string, stderr io.Writer) int {
+func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode int) {
 	fs := flag.NewFlagSet("avenor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
@@ -397,18 +397,29 @@ func run(args []string, getenv func(string) string, stderr io.Writer) int {
 	state := control.NewState(runID, *label, *maxRetries)
 	var controlServer *control.ControlServer
 	var httpServer *control.HTTPDebugServer
+	if *controlSocket != "" || *httpDebug != "" {
+		owner, err := control.GenerateOwnerCapability()
+		if err != nil {
+			fmt.Fprintf(stderr, "avenor: %v\n", err)
+			return exitWithSentinel(1)
+		}
+		controlServer = control.NewServer(state, owner)
+	}
 	if *controlSocket != "" {
-		controlServer = control.NewServer(state)
 		if err := controlServer.Start(*controlSocket); err != nil {
 			fmt.Fprintf(stderr, "avenor: start control server: %v\n", err)
 			return exitWithSentinel(1)
 		}
-		defer controlServer.Stop()
+		defer func() {
+			if err := controlServer.Stop(); err != nil {
+				fmt.Fprintf(stderr, "avenor: stop control server: %v\n", err)
+				if exitCode == 0 {
+					exitCode = 1
+				}
+			}
+		}()
 	}
 	if *httpDebug != "" {
-		if controlServer == nil {
-			controlServer = control.NewServer(state)
-		}
 		httpServer, err = control.NewHTTPDebugServer(*httpDebug, controlServer)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: start http debug server: %v\n", err)

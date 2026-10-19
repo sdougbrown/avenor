@@ -598,9 +598,12 @@ type Supervisor struct {
 	// goroutines can use it without synchronization.
 	errWriter io.Writer
 	state     *control.ControlState
-	controlMu sync.Mutex
-	runtimes  map[string]*childRuntime
-	nextID    int
+	// ownerCapability is the immutable control principal this supervisor
+	// publishes and authenticates against; it never changes for the process.
+	ownerCapability control.OwnerCapability
+	controlMu       sync.Mutex
+	runtimes        map[string]*childRuntime
+	nextID          int
 	// outstandingReservations counts admission reservations that hold a local
 	// slot but have not yet converted into a registered runtime. Guarded by
 	// controlMu; the local capacity limit is enforced against active runtimes
@@ -673,11 +676,18 @@ type Supervisor struct {
 func NewSupervisor(cfg Config) *Supervisor {
 	runID := cli.GenerateRunID()
 	state := control.NewState(runID, "", 0)
+	// The owner capability is generated before the control server is built so
+	// construction, not the first mutation, fixes who may control this process.
+	owner, err := control.GenerateOwnerCapability()
+	if err != nil {
+		panic("avenor: failed to generate owner capability: " + err.Error())
+	}
 	sup := &Supervisor{
 		config:                  cfg,
 		runID:                   runID,
 		state:                   state,
-		control:                 control.NewServer(state),
+		ownerCapability:         owner,
+		control:                 control.NewServer(state, owner),
 		idempotency:             newIdempotencyStore(cfg.IdempotencyCapacity),
 		runtimes:                map[string]*childRuntime{},
 		controllerLoops:         map[string]*controllerLoop{},
@@ -733,7 +743,7 @@ func (s *Supervisor) stderrWriter() io.Writer {
 	}
 	return os.Stderr
 }
-func (s *Supervisor) Run() int {
+func (s *Supervisor) Run() (exitCode int) {
 	// NewSupervisor initializes root admission before the control socket is
 	// bound. Close it on every exit, including a control-server start failure.
 	defer s.closeTreeBudget()
@@ -765,7 +775,14 @@ func (s *Supervisor) Run() int {
 		reason = "start_failed"
 		return 1
 	}
-	defer s.control.Stop()
+	defer func() {
+		if err := s.control.Stop(); err != nil {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: stop control server: %v\n", err)
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		}
+	}()
 
 	if s.config.HTTPDebug != "" {
 		var err error

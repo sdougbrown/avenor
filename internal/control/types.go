@@ -5,6 +5,37 @@ import (
 	"time"
 )
 
+// Control-plane JSON-RPC error codes that are part of the wire contract.
+const (
+	CodePermissionDenied     = -32010
+	CodeOwnerUnauthenticated = -32011
+	CodeUnsupportedOwnerAuth = -32012
+	CodeOwnerAuthTimeout     = -32013
+)
+
+// OwnerAuthVersion is the authenticate_owner protocol version.
+const OwnerAuthVersion = 1
+
+// OwnerAuthRequest and OwnerAuthResult are the authenticate_owner wire shapes.
+// The secret is only ever carried in the request.
+type OwnerAuthRequest struct {
+	Version      int    `json:"version"`
+	CapabilityID string `json:"capability_id"`
+	Secret       string `json:"secret"`
+}
+
+type OwnerAuthResult struct {
+	Version       int    `json:"version"`
+	Authenticated bool   `json:"authenticated"`
+	CapabilityID  string `json:"capability_id"`
+}
+
+// OwnerAuthErrorData is the error payload for every owner-auth rejection.
+type OwnerAuthErrorData struct {
+	Version int    `json:"version"`
+	Reason  string `json:"reason"`
+}
+
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      any             `json:"id,omitempty"`

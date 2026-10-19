@@ -15,7 +15,7 @@ import (
 
 func TestSnapshotAgentStatusPhaseNormalization(t *testing.T) {
 	state := NewState("run_1", "label", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 
 	publish := func(fields map[string]any) {
 		t.Helper()

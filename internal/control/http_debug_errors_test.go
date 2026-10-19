@@ -34,7 +34,7 @@ func (m *errMockAdapter) HTTPCancelRuntime(runtimeID string) error {
 func startErrTestServer(t *testing.T, adapter StableAdapter) (string, string) {
 	t.Helper()
 	state := NewState("run_err_test", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	h, err := NewHTTPDebugServer("127.0.0.1:0", ctrl)
 	if err != nil {
 		t.Fatalf("NewHTTPDebugServer: %v", err)
@@ -171,7 +171,7 @@ func TestHandleCancelRuntime_OtherError(t *testing.T) {
 // and the final stored value reads back correctly.
 func TestSetStableAdapter_Concurrent(t *testing.T) {
 	state := NewState("run_race", "", 0)
-	ctrl := NewServer(state)
+	ctrl, _ := NewTestServer(state)
 	h, err := NewHTTPDebugServer("127.0.0.1:0", ctrl)
 	if err != nil {
 		t.Fatalf("NewHTTPDebugServer: %v", err)

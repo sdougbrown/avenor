@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/control"
 )
 
 const maxSendToParentMessageBytes = 64 * 1024
@@ -105,7 +107,109 @@ func Dial(socketPath string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial control socket: %w", err)
 	}
-	c := &Client{
+	c := newClient(conn)
+	// Start reading immediately so an idle EOF (a supervisor that exited
+	// right after the dial) is observable via Closed() before the first RPC.
+	c.eventOnce.Do(func() {
+		go c.readLoop()
+	})
+	return c, nil
+}
+
+// ErrResponseTimeout reports that a request did not receive a response inside
+// its wait budget.
+var ErrResponseTimeout = errors.New("read response: timeout")
+
+// OwnerAuthParams and OwnerAuthResult are the authenticate_owner wire shapes.
+type OwnerAuthParams struct {
+	Version      int    `json:"version"`
+	CapabilityID string `json:"capability_id"`
+	Secret       string `json:"secret"`
+}
+
+type OwnerAuthResult struct {
+	Version       int    `json:"version"`
+	Authenticated bool   `json:"authenticated"`
+	CapabilityID  string `json:"capability_id"`
+}
+
+// Owner-authentication rejections, classified from the wire codes so every
+// client reports the same four classes.
+var (
+	ErrOwnerUnauthenticated = errors.New("owner authentication rejected")
+	ErrUnsupportedOwnerAuth = errors.New("unsupported owner authentication")
+	ErrOwnerAuthTimeout     = errors.New("owner authentication timed out")
+)
+
+// OwnerAuthError is one classified owner-authentication rejection. Code is the
+// wire code when the server answered; Reason is its short token.
+type OwnerAuthError struct {
+	Code   int
+	Reason string
+	kind   error
+}
+
+func (e *OwnerAuthError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("%s: %s", e.kind.Error(), e.Reason)
+	}
+	return e.kind.Error()
+}
+
+func (e *OwnerAuthError) Unwrap() error { return e.kind }
+
+// OwnerAttachTimeout bounds a whole owner attach: record load, dial, peer check
+// and the authentication handshake.
+const OwnerAttachTimeout = 5 * time.Second
+
+// AuthenticateOwner presents cap on an existing connection. It is the only
+// place a credential is written to the wire.
+func (c *Client) AuthenticateOwner(cap control.OwnerCapability) error {
+	var res OwnerAuthResult
+	params := OwnerAuthParams{Version: control.OwnerAuthVersion, CapabilityID: cap.ID, Secret: cap.Secret}
+	if err := c.call("authenticate_owner", params, &res, OwnerAttachTimeout); err != nil {
+		return classifyOwnerAuthError(err)
+	}
+	if !res.Authenticated || res.Version != control.OwnerAuthVersion || res.CapabilityID != cap.ID {
+		return &OwnerAuthError{kind: ErrUnsupportedOwnerAuth, Reason: "unexpected-result"}
+	}
+	return nil
+}
+
+// classifyOwnerAuthError maps authenticate_owner wire codes onto the four
+// client-side classes. An unrecognized code is never success.
+func classifyOwnerAuthError(err error) error {
+	var rpcErr *RPCError
+	if !errors.As(err, &rpcErr) {
+		if errors.Is(err, ErrResponseTimeout) {
+			return &OwnerAuthError{kind: ErrOwnerAuthTimeout}
+		}
+		return err
+	}
+	reason := ""
+	if len(rpcErr.Data) > 0 {
+		var data struct {
+			Reason string `json:"reason"`
+		}
+		if json.Unmarshal(rpcErr.Data, &data) == nil {
+			reason = data.Reason
+		}
+	}
+	switch rpcErr.Code {
+	case control.CodeOwnerUnauthenticated:
+		return &OwnerAuthError{Code: rpcErr.Code, Reason: reason, kind: ErrOwnerUnauthenticated}
+	case control.CodeUnsupportedOwnerAuth:
+		return &OwnerAuthError{Code: rpcErr.Code, Reason: reason, kind: ErrUnsupportedOwnerAuth}
+	case control.CodeOwnerAuthTimeout:
+		return &OwnerAuthError{Code: rpcErr.Code, Reason: reason, kind: ErrOwnerAuthTimeout}
+	default:
+		return &OwnerAuthError{Code: rpcErr.Code, Reason: reason, kind: ErrUnsupportedOwnerAuth}
+	}
+}
+
+// newClient wraps an established connection in a Client.
+func newClient(conn net.Conn) *Client {
+	return &Client{
 		conn:        conn,
 		reader:      bufio.NewReader(conn),
 		pending:     map[int]chan Response{},
@@ -113,12 +217,6 @@ func Dial(socketPath string) (*Client, error) {
 		runtimeSubs: map[string]map[chan Event]struct{}{},
 		closedCh:    make(chan struct{}),
 	}
-	// Start reading immediately so an idle EOF (a supervisor that exited
-	// right after the dial) is observable via Closed() before the first RPC.
-	c.eventOnce.Do(func() {
-		go c.readLoop()
-	})
-	return c, nil
 }
 
 // Closed reports whether the connection is terminally gone: Close was
@@ -226,7 +324,7 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return fmt.Errorf("read response: timeout")
+		return ErrResponseTimeout
 	}
 
 	if resp.Error != nil {

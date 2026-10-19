@@ -77,14 +77,14 @@ func (f *fakeControllerHandler) WorkflowReady(id string, limit int) (any, error)
 // CLI runner plus the handler.
 func cliControllerEnv(t *testing.T) (func(args ...string) (string, int), *fakeControllerHandler) {
 	t.Helper()
-	srv := control.NewServer(control.NewState("run_cli", "", 0))
+	srv, _ := control.NewTestServer(control.NewState("run_cli", "", 0))
 	fake := &fakeControllerHandler{}
 	srv.SetWorkflowControllerHandler(fake)
 	sock := filepath.Join(t.TempDir(), "control.sock")
 	if err := srv.Start(sock); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}
-	t.Cleanup(srv.Stop)
+	t.Cleanup(func() { _ = srv.Stop() })
 
 	run := func(args ...string) (string, int) {
 		var out, errBuf bytes.Buffer

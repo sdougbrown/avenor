@@ -219,6 +219,7 @@ func (h *itestHarness) connectClient() *client.Client {
 	if _, err := c.Identity(); err != nil {
 		h.t.Fatalf("control client identity: %v", err)
 	}
+	attachOwnerForTest(h.t, c, h.sup)
 	return c
 }
 

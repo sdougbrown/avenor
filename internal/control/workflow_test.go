@@ -83,7 +83,7 @@ func (f *fakeWorkflowHandler) WorkflowCancel(id string, payload json.RawMessage)
 
 func newWorkflowTestServer(t *testing.T) (*ControlServer, *fakeWorkflowHandler) {
 	t.Helper()
-	s := NewServer(NewState("run_1", "demo", 0))
+	s, _ := NewTestServer(NewState("run_1", "demo", 0))
 	fake := &fakeWorkflowHandler{}
 	s.SetWorkflowHandler(fake)
 	return s, fake
@@ -269,7 +269,7 @@ func TestWorkflowHandlerErrorSurfacesAsInternalError(t *testing.T) {
 }
 
 func TestWorkflowDispatchWithoutHandlerReturnsMethodNotFound(t *testing.T) {
-	s := NewServer(NewState("run_1", "demo", 0))
+	s, _ := NewTestServer(NewState("run_1", "demo", 0))
 
 	resp := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 1, Method: "workflow.status", Params: json.RawMessage(`{"workflow_id":"wf_1"}`)})
 	if resp.Error == nil || resp.Error.Code != -32601 || resp.Error.Message != "method not found" {
