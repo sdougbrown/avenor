@@ -686,91 +686,68 @@ func TestPromptTurnErrorSurfacesStderrDetail(t *testing.T) {
 	}
 }
 
-// A pi child that exits before settling the turn must fail the prompt with
-// what it printed, not leave the caller waiting on its own deadline.
-func TestPromptFailsWhenClientExitsBeforeSettlement(t *testing.T) {
+// A pi child that exits before the caller's deadline reports what it printed.
+func promptOnClient(c *client, sessionID string) *Provider {
 	p := NewWithOptions(runtime.StartOptions{})
-	c, wOut, rIn := fakeClient()
-	defer c.Close()
-	c.setSessionID("ses-pi-gone")
 	p.client = c
-	p.sessions = map[string]struct{}{"ses-pi-gone": {}}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	errCh := make(chan error, 1)
-	go func() { errCh <- p.Prompt(ctx, "ses-pi-gone", "hi") }()
-
-	go func() {
-		cmd, err := readCommand(rIn)
-		if err != nil {
-			return
-		}
-		c.stderr.Append("pi: authentication failed")
-		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
-		_ = wOut.Close()
-	}()
-
-	var err error
-	select {
-	case err = <-errCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Prompt did not return after the pi child exited")
-	}
-	if err == nil {
-		t.Fatal("expected a turn error")
-	}
-	if !strings.Contains(err.Error(), "authentication failed") {
-		t.Fatalf("error = %v; want the captured stderr", err)
-	}
+	p.sessions = map[string]struct{}{sessionID: {}}
+	return p
 }
 
-// A child that settles the turn and then exits must still report the settled
-// turn: readLoop closes the client's done channel right after it fans the
-// terminal event out, so the exit path has to drain the subscription before it
-// declares a failure.
-func TestPromptSettlesTurnBeforeClientExit(t *testing.T) {
-	p := NewWithOptions(runtime.StartOptions{})
-	c, wOut, rIn := fakeClient()
-	defer c.Close()
-	c.setSessionID("ses-pi-settled")
-	p.client = c
-	p.sessions = map[string]struct{}{"ses-pi-settled": {}}
+func TestPromptHandlesClientExitBeforeDeadline(t *testing.T) {
+	tests := []struct {
+		name   string
+		settle bool
+		want   string // empty: the settled turn is the result
+	}{
+		{name: "settled turn", settle: true},
+		{name: "unsettled turn reports the child's cause", want: "authentication failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, wOut, rIn := fakeClient()
+			defer c.Close()
+			c.setSessionID("ses-pi-exit")
+			p := promptOnClient(c, "ses-pi-exit")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	errCh := make(chan error, 1)
-	go func() { errCh <- p.Prompt(ctx, "ses-pi-settled", "hi") }()
+			errCh := make(chan error, 1)
+			go func() { errCh <- p.Prompt(context.Background(), "ses-pi-exit", "hi") }()
 
-	go func() {
-		cmd, err := readCommand(rIn)
-		if err != nil {
-			return
-		}
-		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
-		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "stop"})
-		_ = wOut.Close()
-	}()
+			go func() {
+				cmd, err := readCommand(rIn)
+				if err != nil {
+					return
+				}
+				c.stderr.Append("pi: authentication failed")
+				writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
+				if tt.settle {
+					writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "stop"})
+				}
+				_ = wOut.Close()
+			}()
 
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("Prompt = %v, want the settled turn", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Prompt did not return after the child exited")
+			select {
+			case err := <-errCh:
+				switch {
+				case tt.want == "" && err != nil:
+					t.Fatalf("Prompt = %v, want the settled turn", err)
+				case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+					t.Fatalf("Prompt = %v, want the child's cause %q", err, tt.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Prompt did not return after the pi child exited")
+			}
+		})
 	}
 }
 
 // The rolling stderr buffer is process-lifetime: a stale limit line from an
 // earlier turn must not describe a later, unrelated failure.
 func TestPromptStderrIsPerTurn(t *testing.T) {
-	p := NewWithOptions(runtime.StartOptions{})
 	c, wOut, rIn := fakeClient()
 	defer c.Close()
 	c.setSessionID("ses-pi-turns")
-	p.client = c
-	p.sessions = map[string]struct{}{"ses-pi-turns": {}}
+	p := promptOnClient(c, "ses-pi-turns")
 
 	go func() {
 		first, err := readCommand(rIn)
@@ -797,8 +774,7 @@ func TestPromptStderrIsPerTurn(t *testing.T) {
 	}
 }
 
-// The child's last stderr lines reach the exit cause through the real pipe: the
-// exit path waits for the drain instead of reading a half-filled buffer.
+// The child's last stderr lines reach the exit cause through the real pipe.
 func TestPromptExitCauseWaitsForStderrDrain(t *testing.T) {
 	clientIn, clientInW := io.Pipe()
 	clientOut, clientOutW := io.Pipe()
@@ -806,14 +782,10 @@ func TestPromptExitCauseWaitsForStderrDrain(t *testing.T) {
 	c := newClient(nil, clientInW, clientOut, stderrR)
 	defer c.Close()
 	c.setSessionID("ses_pi_pipe")
-	p := NewWithOptions(runtime.StartOptions{})
-	p.client = c
-	p.sessions = map[string]struct{}{"ses_pi_pipe": {}}
+	p := promptOnClient(c, "ses_pi_pipe")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- p.Prompt(ctx, "ses_pi_pipe", "hi") }()
+	go func() { errCh <- p.Prompt(context.Background(), "ses_pi_pipe", "hi") }()
 
 	go func() {
 		cmd, err := readCommand(clientIn)
@@ -821,21 +793,20 @@ func TestPromptExitCauseWaitsForStderrDrain(t *testing.T) {
 			return
 		}
 		writeLine(clientOutW, map[string]any{"type": "response", "id": cmd["id"], "success": true})
-		// Stdout ends first, so the exit path runs while the pipe still holds
-		// the cause the child printed.
+		// Stdout ends first, so a reader that does not wait finds no cause yet.
 		_ = clientOutW.Close()
+		time.Sleep(20 * time.Millisecond)
 		_, _ = fmt.Fprintln(stderrW, `402: {"message":"Insufficient Balance","code":"invalid_request_error"}`)
 		_ = stderrW.Close()
 	}()
 
-	var err error
 	select {
-	case err = <-errCh:
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "Insufficient Balance") {
+			t.Fatalf("error = %v; want the cause the child wrote to the stderr pipe", err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Prompt did not return after the child exited")
-	}
-	if err == nil || !strings.Contains(err.Error(), "Insufficient Balance") {
-		t.Fatalf("error = %v; want the cause the child wrote to the stderr pipe", err)
 	}
 }
 

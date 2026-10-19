@@ -12,11 +12,8 @@ func TestIsRetryableFailure(t *testing.T) {
 	if IsRetryableFailure(0, "end_turn") {
 		t.Fatal("successful attempt should not be retryable")
 	}
-	if !IsRetryableFailure(7, RateLimitedStopReason) {
-		t.Fatal("rate-limited attempt should stay retryable")
-	}
-	if IsRetryableFailure(6, QuotaExhaustedStopReason) {
-		t.Fatal("exhausted quota should not be retried in the same run")
+	if !IsRetryableFailure(7, RateLimitedStopReason) || IsRetryableFailure(6, QuotaExhaustedStopReason) {
+		t.Fatal("a rate limit stays retryable; an exhausted quota is not retried in the same run")
 	}
 }
 

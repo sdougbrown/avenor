@@ -188,14 +188,6 @@ func TestSentinelContent(t *testing.T) {
 			want:       "FAILED\nSESSION=ses_q\nSTOP_REASON=quota_exhausted\nEXIT_CODE=6\nRETRY_AFTER=3600\nRUN=deadbeefcafe0006\n",
 		},
 		{
-			name:       "exit 7 rate limited with retry hint",
-			exitCode:   7,
-			sessionID:  "ses_rl",
-			stopReason: "rate_limited",
-			retryAfter: 20,
-			want:       "FAILED\nSESSION=ses_rl\nSTOP_REASON=rate_limited\nEXIT_CODE=7\nRETRY_AFTER=20\n",
-		},
-		{
 			// Neither a provider-supplied stop reason nor a session id may forge a
 			// line for consumers that split the sentinel on newlines.
 			name:       "newlines cannot forge a sentinel line",

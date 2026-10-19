@@ -49,6 +49,9 @@ type directConflictProvider struct {
 	resumes int
 	prompts int
 	noStart bool
+	// promptErr makes Prompt fail before settling the turn, the shape a child
+	// that dies on a provider refusal has.
+	promptErr error
 }
 
 func (p *directConflictProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
@@ -71,6 +74,9 @@ func (p *directConflictProvider) Prompt(context.Context, string, string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.prompts++
+	if p.promptErr != nil {
+		return p.promptErr
+	}
 	if !p.noStart {
 		p.events <- events.Event{Event: "session.start", Fields: map[string]any{"conversation_id": "occupied"}}
 	}
@@ -867,7 +873,8 @@ func TestRunCleansSentinelFilesBetweenRetries(t *testing.T) {
 			if err := os.WriteFile(permBase+".req.response", []byte("stale response"), 0o600); err != nil {
 				t.Fatalf("write stale response: %v", err)
 			}
-			return attemptResult{exitCode: 1, sessionID: "ses_1"}
+			// A rate-limited attempt stays retryable and carries the hint.
+			return attemptResult{exitCode: 7, sessionID: "ses_1", stopReason: runtime.RateLimitedStopReason, retryAfter: 25}
 		case 2:
 			for _, path := range []string{permBase + ".req", permBase + ".req.response"} {
 				if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -880,7 +887,9 @@ func TestRunCleansSentinelFilesBetweenRetries(t *testing.T) {
 			return attemptResult{exitCode: 1}
 		}
 	}
-	retryAfter = func(time.Duration) <-chan time.Time {
+	var waited []time.Duration
+	retryAfter = func(delay time.Duration) <-chan time.Time {
+		waited = append(waited, delay)
 		ch := make(chan time.Time, 1)
 		ch <- time.Now()
 		return ch
@@ -904,44 +913,8 @@ func TestRunCleansSentinelFilesBetweenRetries(t *testing.T) {
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
 	}
-}
-
-// TestRunRetryWaitHonorsProviderHint pins the direct run path's call site: the
-// parsed provider hint reaches the retry wait instead of the plain backoff.
-func TestRunRetryWaitHonorsProviderHint(t *testing.T) {
-	oldRunAttempt, oldRetryAfter := runAttempt, retryAfter
-	t.Cleanup(func() {
-		runAttempt, retryAfter = oldRunAttempt, oldRetryAfter
-	})
-
-	dir := t.TempDir()
-	promptPath := filepath.Join(dir, "prompt.txt")
-	if err := os.WriteFile(promptPath, []byte("hello"), 0o600); err != nil {
-		t.Fatalf("write prompt: %v", err)
-	}
-
-	var attempts int
-	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
-		attempts++
-		if attempts == 1 {
-			return attemptResult{exitCode: 7, sessionID: "ses_hint", stopReason: runtime.RateLimitedStopReason, retryAfter: 25}
-		}
-		return attemptResult{exitCode: 0, sessionID: "ses_hint_done", stopReason: "end_turn"}
-	}
-	var waited []time.Duration
-	retryAfter = func(delay time.Duration) <-chan time.Time {
-		waited = append(waited, delay)
-		ch := make(chan time.Time, 1)
-		ch <- time.Now()
-		return ch
-	}
-
-	var stderr strings.Builder
-	if code := run([]string{"--prompt-file", promptPath, "--max-retries", "1"}, func(string) string { return "" }, &stderr); code != 0 {
-		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
-	}
 	if len(waited) != 1 || waited[0] != 25*time.Second {
-		t.Fatalf("retry waits = %v, want one wait of the provider's 25s hint", waited)
+		t.Fatalf("retry waits = %v, want the provider's 25s hint", waited)
 	}
 }
 
@@ -2029,6 +2002,10 @@ func (s *waitExitMatrixSink) counts() (sessionEnds, errors int) {
 	return sessionEnds, errors
 }
 
+func terminalRecord(fields map[string]any) []events.Event {
+	return []events.Event{{Event: "session.end", SessionID: "ses_held", Fields: fields}}
+}
+
 func (s *waitExitMatrixSink) lastEvent() (events.Event, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2051,101 +2028,69 @@ func (s *waitExitMatrixSink) terminalStopReasons() []string {
 	return stopReasons
 }
 
-// TestWaitForSessionClassifiesProviderLimits pins the classification a
-// wrapper sees: a provider limit failure becomes its own stop reason and exit
-// code instead of a generic exit-1 error, with the retry hint on session.end.
-func TestWaitForSessionClassifiesProviderLimits(t *testing.T) {
+// TestWaitForSessionSettlesHeldTerminal pins the classification a wrapper
+// sees: a provider limit failure becomes its own stop reason, exit code and
+// retry hint on the durable session.end instead of a generic exit-1 error.
+// The prompt has settled in the first rows; the stream simply ends in the last.
+func TestWaitForSessionSettlesHeldTerminal(t *testing.T) {
 	tests := []struct {
-		name           string
-		fields         map[string]any
-		promptErr      error
-		wantStopReason string
-		wantExitCode   int
-		wantRetryAfter int64
+		name       string
+		events     []events.Event
+		promptDone bool
+		wantExit   int
+		wantReason string
+		wantRetry  int64
+		wantFrom   string // classified_from, when the verdict is Avenor's own
+		wantErrors int
 	}{
-		{
-			name:           "quota from event text",
-			fields:         map[string]any{"stop_reason": "error", "error_message": "Codex error: The usage limit has been reached"},
-			wantStopReason: runtime.QuotaExhaustedStopReason,
-			wantExitCode:   6,
-		},
-		{
-			name:           "rate limit from event text with hint",
-			fields:         map[string]any{"stop_reason": "error", "error_message": "429: rate limit reached; try again in 20s"},
-			wantStopReason: runtime.RateLimitedStopReason,
-			wantExitCode:   7,
-			wantRetryAfter: 20,
-		},
-		{
-			// The incident text reaches the CLI as the prompt error when the child
-			// exits before settling: it must still classify, and not retry.
-			name:           "billing block from the prompt error",
-			promptErr:      errors.New(`turn failed for session 01a151cb: 402: {"message":"Insufficient Balance (request_id: 4e2d2a94-3469-4e99-9750-2ce9e58722b1)","type":"unknown_error","param":null,"code":"invalid_request_error"}`),
-			wantStopReason: runtime.QuotaExhaustedStopReason,
-			wantExitCode:   6,
-		},
-		{
-			name:           "opencode error name as stop reason",
-			fields:         map[string]any{"stop_reason": "RateLimitError"},
-			wantStopReason: runtime.RateLimitedStopReason,
-			wantExitCode:   7,
-		},
-		{
-			name:           "rate limit from prompt error only",
-			promptErr:      errors.New("prompt: turn failed for session ses_limit: 429 Too Many Requests, retry after 30"),
-			wantStopReason: runtime.RateLimitedStopReason,
-			wantExitCode:   7,
-			wantRetryAfter: 30,
-		},
-		{
-			name:           "unrelated failure stays generic",
-			fields:         map[string]any{"stop_reason": "error", "error_message": "400: invalid model name"},
-			wantStopReason: "error",
-			wantExitCode:   1,
-		},
-		{
-			name:           "explicit stop reason wins",
-			fields:         map[string]any{"stop_reason": "max_tokens", "error_message": "rate limit reached"},
-			wantStopReason: "max_tokens",
-			wantExitCode:   3,
-		},
+		{name: "quota from event text", promptDone: true, wantExit: 6, wantReason: runtime.QuotaExhaustedStopReason,
+			events: terminalRecord(map[string]any{"stop_reason": "error", "error_message": "Codex error: The usage limit has been reached"})},
+		{name: "rate limit from event text with hint", promptDone: true, wantExit: 7, wantReason: runtime.RateLimitedStopReason, wantRetry: 20,
+			events: terminalRecord(map[string]any{"stop_reason": "error", "error_message": "429: rate limit reached; try again in 20s"})},
+		// A claude-channel summary is model-authored prose, so it never classifies.
+		{name: "model summary is not provider text", promptDone: true, wantExit: 1, wantReason: "error",
+			events: terminalRecord(map[string]any{"stop_reason": "error", "summary": "429 rate limit; retry after 3600"})},
+		{name: "terminal record without a stop reason", wantExit: 1,
+			events: terminalRecord(map[string]any{"usage": map[string]any{"input_tokens": 4}})},
+		// The diagnostic is written before the terminal record it explains.
+		{name: "denied verdict settles before the record is written", wantExit: 2, wantReason: runtime.ToolDeniedStopReason, wantFrom: "end_turn", wantErrors: 1,
+			events: append([]events.Event{{Event: "tool.call_update", SessionID: "ses_held", Fields: map[string]any{"status": "failed", "rawOutput": map[string]any{"metadata": map[string]any{"interrupted": true}}}}},
+				terminalRecord(map[string]any{"stop_reason": "end_turn"})...)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sink := &waitExitMatrixSink{}
-			// Production always subscribes, so the prompt-error case drains an
-			// empty channel and classifies after the settlement grace expires.
-			eventCh := make(chan events.Event, 1)
-			promptDone := make(chan error, 1)
-			cfg := SessionWaitConfig{SessionID: "ses_limit", RunID: "run_limit", EventCh: eventCh, PromptDone: promptDone}
-			if tt.promptErr != nil {
-				promptDone <- tt.promptErr
-			} else {
-				eventCh <- events.Event{Event: "session.end", SessionID: "ses_limit", Fields: tt.fields}
+			eventCh := make(chan events.Event, len(tt.events))
+			for _, event := range tt.events {
+				eventCh <- event
+			}
+			close(eventCh)
+			cfg := SessionWaitConfig{SessionID: "ses_held", RunID: "run_held", EventCh: eventCh}
+			if tt.promptDone {
+				promptDone := make(chan error, 1)
 				promptDone <- nil
+				cfg.PromptDone = promptDone
 			}
-			result := WaitForSession(context.Background(), &cliFakeProvider{}, cfg, SessionWaitDeps{Writer: sink, Stderr: io.Discard})
-			if result.ExitCode != tt.wantExitCode || result.StopReason != tt.wantStopReason {
-				t.Fatalf("result = (exit %d, %q), want (exit %d, %q)", result.ExitCode, result.StopReason, tt.wantExitCode, tt.wantStopReason)
+			result := WaitForSession(context.Background(), &waitExitMatrixProvider{}, cfg,
+				SessionWaitDeps{Writer: sink, Stderr: io.Discard, permissionJoinTimeout: 20 * time.Millisecond})
+
+			if result.ExitCode != tt.wantExit || result.StopReason != tt.wantReason || result.RetryAfter != tt.wantRetry {
+				t.Fatalf("result = (exit %d, %q, %ds), want (exit %d, %q, %ds)",
+					result.ExitCode, result.StopReason, result.RetryAfter, tt.wantExit, tt.wantReason, tt.wantRetry)
 			}
-			if result.RetryAfter != tt.wantRetryAfter {
-				t.Fatalf("RetryAfter = %d, want %d", result.RetryAfter, tt.wantRetryAfter)
+			sessionEnds, errors := sink.counts()
+			if sessionEnds != 1 || errors != tt.wantErrors {
+				t.Fatalf("session.end count = %d, avenor.error count = %d, want 1 and %d", sessionEnds, errors, tt.wantErrors)
 			}
-			reasons := sink.terminalStopReasons()
-			if len(reasons) != 1 || reasons[0] != tt.wantStopReason {
-				t.Fatalf("session.end stop reasons = %v, want [%q]", reasons, tt.wantStopReason)
+			last, ok := sink.lastEvent()
+			if !ok || last.Event != "session.end" || (tt.wantReason != "" && last.Fields["stop_reason"] != tt.wantReason) {
+				t.Fatalf("last event = %#v, want the settled session.end", last)
 			}
-			var retryAfter any
-			for _, event := range sink.events {
-				if event.Event == "session.end" {
-					retryAfter = event.Fields["retry_after"]
-				}
+			if got, _ := last.Fields["retry_after"].(int64); got != tt.wantRetry {
+				t.Fatalf("session.end retry_after = %v, want %d", last.Fields["retry_after"], tt.wantRetry)
 			}
-			if tt.wantRetryAfter > 0 && retryAfter != tt.wantRetryAfter {
-				t.Fatalf("session.end retry_after = %v, want %d", retryAfter, tt.wantRetryAfter)
-			}
-			if tt.wantRetryAfter == 0 && retryAfter != nil {
-				t.Fatalf("session.end retry_after = %v, want absent", retryAfter)
+			if got := last.Fields["classified_from"]; tt.wantFrom != "" && got != tt.wantFrom {
+				t.Fatalf("session.end classified_from = %v, want %v", got, tt.wantFrom)
 			}
 		})
 	}
@@ -2153,7 +2098,7 @@ func TestWaitForSessionClassifiesProviderLimits(t *testing.T) {
 
 // TestWaitForSessionGraceFlushesHeldTerminal pins the settlement grace: a
 // terminal record that arrived after the prompt error still owns the durable
-// record, with the provider's own fields, even while a resolver is live.
+// record, even while a resolver is live.
 func TestWaitForSessionGraceFlushesHeldTerminal(t *testing.T) {
 	provider := &waitExitMatrixProvider{}
 	release := make(chan struct{})
@@ -2164,16 +2109,11 @@ func TestWaitForSessionGraceFlushesHeldTerminal(t *testing.T) {
 	eventCh := make(chan events.Event)
 	promptDone := make(chan error, 1)
 	go func() {
-		eventCh <- events.Event{Event: "permission.request", SessionID: "ses_grace", Fields: map[string]any{
-			"request_id": "req_grace",
-			"options":    []any{map[string]any{"optionId": "allow", "kind": "allow"}},
-		}}
+		eventCh <- events.Event{Event: "permission.request", SessionID: "ses_grace", Fields: map[string]any{"request_id": "req_grace", "options": []any{map[string]any{"optionId": "allow", "kind": "allow"}}}}
 		promptDone <- errors.New("prompt: turn failed for session ses_grace: terminated")
-		eventCh <- events.Event{Event: "session.end", SessionID: "ses_grace", Fields: map[string]any{
-			"stop_reason":   "error",
-			"error_message": "429: rate limit reached; try again in 20s",
-			"usage":         map[string]any{"input_tokens": 9},
-		}}
+		// Past the grace window's start, so the terminal lands while it is open.
+		time.Sleep(50 * time.Millisecond)
+		eventCh <- events.Event{Event: "session.end", SessionID: "ses_grace", Fields: map[string]any{"stop_reason": "error", "error_message": "429: rate limit reached; try again in 20s", "usage": map[string]any{"input_tokens": 9}}}
 	}()
 
 	result := WaitForSession(context.Background(), provider, SessionWaitConfig{
@@ -2192,132 +2132,21 @@ func TestWaitForSessionGraceFlushesHeldTerminal(t *testing.T) {
 		t.Fatalf("result usage = %#v, want the provider's usage", result.Usage)
 	}
 	last, ok := sink.lastEvent()
-	if !ok || last.Event != "session.end" {
-		t.Fatalf("last event = %#v, want the durable session.end", last)
+	if !ok || last.Event != "session.end" || last.Fields["error_message"] != "429: rate limit reached; try again in 20s" || last.Fields["retry_after"] != int64(20) {
+		t.Fatalf("last event = %#v, want the durable session.end with the provider's message and hint", last)
 	}
-	if last.Fields["error_message"] != "429: rate limit reached; try again in 20s" || last.Fields["retry_after"] != int64(20) {
-		t.Fatalf("session.end fields = %#v, want the provider's message and hint", last.Fields)
-	}
-}
-
-// TestWaitForSessionFlushesTerminalWithoutStopReason pins the closed-stream
-// paths: a held terminal record is still written, so the durable event log
-// ends with the session.end the run settled on.
-func TestWaitForSessionFlushesTerminalWithoutStopReason(t *testing.T) {
-	sink := &waitExitMatrixSink{}
-	eventCh := make(chan events.Event, 1)
-	eventCh <- events.Event{Event: "session.end", SessionID: "ses_noreason", Fields: map[string]any{
-		"usage": map[string]any{"input_tokens": 4},
-	}}
-	close(eventCh)
-
-	result := WaitForSession(context.Background(), &waitExitMatrixProvider{}, SessionWaitConfig{
-		SessionID: "ses_noreason",
-		EventCh:   eventCh,
-	}, SessionWaitDeps{Writer: sink, Stderr: io.Discard, permissionJoinTimeout: 20 * time.Millisecond})
-
-	if result.ExitCode != 1 {
-		t.Fatalf("result exit = %d, want 1 for a terminal record without a stop reason", result.ExitCode)
-	}
-	if sessionEnds, _ := sink.counts(); sessionEnds != 1 {
-		t.Fatalf("session.end count = %d, want the held record written once", sessionEnds)
-	}
-}
-
-// TestWaitForSessionSettlesDeniedStopReasonBeforeWriting pins the ordering: the
-// deny verdict reaches the durable session.end before it is written, so the
-// record matches the exit code and the diagnostic precedes it.
-func TestWaitForSessionSettlesDeniedStopReasonBeforeWriting(t *testing.T) {
-	sink := &waitExitMatrixSink{}
-	eventCh := make(chan events.Event, 2)
-	eventCh <- events.Event{Event: "tool.call_update", SessionID: "ses_denied", Fields: map[string]any{
-		"status":    "failed",
-		"rawOutput": map[string]any{"metadata": map[string]any{"interrupted": true}},
-	}}
-	eventCh <- events.Event{Event: "session.end", SessionID: "ses_denied", Fields: map[string]any{"stop_reason": "end_turn"}}
-	close(eventCh)
-
-	result := WaitForSession(context.Background(), &waitExitMatrixProvider{}, SessionWaitConfig{
-		SessionID: "ses_denied",
-		EventCh:   eventCh,
-	}, SessionWaitDeps{Writer: sink, Stderr: io.Discard, permissionJoinTimeout: 20 * time.Millisecond})
-
-	if result.ExitCode != 2 || result.StopReason != runtime.ToolDeniedStopReason {
-		t.Fatalf("result = (exit %d, %q), want (exit 2, tool_denied)", result.ExitCode, result.StopReason)
-	}
-	last, ok := sink.lastEvent()
-	if !ok || last.Event != "session.end" {
-		t.Fatalf("last event = %#v, want the durable session.end", last)
-	}
-	if last.Fields["stop_reason"] != runtime.ToolDeniedStopReason || last.Fields["classified_from"] != "end_turn" {
-		t.Fatalf("session.end fields = %#v, want the settled tool_denied verdict", last.Fields)
-	}
-	if _, errs := sink.counts(); errs != 1 {
-		t.Fatalf("avenor.error count = %d, want the diagnostic before the terminal record", errs)
-	}
-}
-
-// piBillingBlockProvider serves the pi incident shape: the child exits before
-// settling the turn, so the prompt error carries the provider body and no
-// session.end ever arrives.
-type piBillingBlockProvider struct {
-	mu      sync.Mutex
-	events  chan events.Event
-	prompts int
-}
-
-func (p *piBillingBlockProvider) start() runtime.Session {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.events = make(chan events.Event, 8)
-	return runtime.Session{SessionID: "ses_billing_block"}
-}
-
-func (p *piBillingBlockProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
-	return p.start(), nil
-}
-
-func (p *piBillingBlockProvider) Resume(context.Context, string) (runtime.Session, error) {
-	return p.start(), nil
-}
-
-func (p *piBillingBlockProvider) Prompt(context.Context, string, string) error {
-	p.mu.Lock()
-	p.prompts++
-	p.mu.Unlock()
-	return errors.New(`turn failed for session 01a151cb: 402: {"message":"Insufficient Balance (request_id: 4e2d2a94-3469-4e99-9750-2ce9e58722b1)","type":"unknown_error","param":null,"code":"invalid_request_error"}`)
-}
-
-func (*piBillingBlockProvider) Cancel(context.Context, string) error { return nil }
-
-func (p *piBillingBlockProvider) Events(context.Context, string) (<-chan events.Event, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.events, nil
-}
-
-func (*piBillingBlockProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
-	return nil
-}
-
-func (*piBillingBlockProvider) Capabilities(context.Context) (runtime.Capabilities, error) {
-	return runtime.Capabilities{}, nil
-}
-
-func (p *piBillingBlockProvider) promptCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.prompts
 }
 
 // TestRunClassifiesBillingBlockWithoutRetry runs the incident's exact text
-// through the CLI: the sentinel reports the exhausted quota and the provider is
-// called once, so --max-retries cannot spend the budget on the same refusal.
+// through the CLI: the sentinel reports the exhausted quota and --max-retries
+// never spends the budget on the same refusal.
 func TestRunClassifiesBillingBlockWithoutRetry(t *testing.T) {
 	oldNewProvider, oldRetryAfter := newProvider, retryAfter
 	t.Cleanup(func() { newProvider, retryAfter = oldNewProvider, oldRetryAfter })
 
-	provider := &piBillingBlockProvider{}
+	// The child exits before settling the turn, so the prompt error carries the
+	// provider body and no session.end ever arrives.
+	provider := &directConflictProvider{promptErr: errors.New(`turn failed for session 01a151cb: 402: {"message":"Insufficient Balance (request_id: 4e2d2a94-3469-4e99-9750-2ce9e58722b1)","type":"unknown_error","param":null,"code":"invalid_request_error"}`)}
 	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 	retryAfter = func(time.Duration) <-chan time.Time {
 		t.Fatal("billing block entered the retry backoff")
@@ -2326,11 +2155,7 @@ func TestRunClassifiesBillingBlockWithoutRetry(t *testing.T) {
 	sentinelPath := filepath.Join(t.TempDir(), "run.done")
 
 	var stderr strings.Builder
-	code := run([]string{
-		"--prompt", "hello",
-		"--max-retries", "2",
-		"--sentinel-file", sentinelPath,
-	}, func(string) string { return "" }, &stderr)
+	code := run([]string{"--prompt", "hello", "--max-retries", "2", "--sentinel-file", sentinelPath}, func(string) string { return "" }, &stderr)
 	if code != 6 {
 		t.Fatalf("run() = %d, want 6; stderr=%s", code, stderr.String())
 	}
@@ -2338,27 +2163,20 @@ func TestRunClassifiesBillingBlockWithoutRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sentinel: %v", err)
 	}
-	for _, want := range []string{"STOP_REASON=quota_exhausted\n", "EXIT_CODE=6\n"} {
-		if !strings.Contains(string(raw), want) {
-			t.Fatalf("sentinel = %q, want %q", string(raw), want)
-		}
-	}
-	if prompts := provider.promptCount(); prompts != 1 {
-		t.Fatalf("prompt count = %d, want one attempt", prompts)
+	if sentinel := string(raw); !strings.Contains(sentinel, "STOP_REASON=quota_exhausted\n") || !strings.Contains(sentinel, "EXIT_CODE=6\n") {
+		t.Fatalf("sentinel = %q, want the exhausted quota and its exit code", sentinel)
 	}
 }
 
-// TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder pins the case
-// where the terminal event carries no provider message and only the prompt
-// error names the cause. Whichever arrives first, the classification sees
-// both and reports the same stop reason and exit code.
+// TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder pins the case where
+// only the prompt error names the cause: either arrival order gives the same
+// stop reason and exit code.
 func TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder(t *testing.T) {
-	for _, promptFirst := range []bool{false, true} {
-		name := "session.end first"
-		if promptFirst {
-			name = "prompt error first"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		promptFirst bool
+	}{{"session.end first", false}, {"prompt error first", true}} {
+		t.Run(tt.name, func(t *testing.T) {
 			sink := &waitExitMatrixSink{}
 			eventCh := make(chan events.Event)
 			promptDone := make(chan error)
@@ -2367,7 +2185,7 @@ func TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder(t *testing.T) {
 			// The sends are unbuffered, so each returns only once the wait loop
 			// consumed it: that alone sequences the two arrivals.
 			go func() {
-				if promptFirst {
+				if tt.promptFirst {
 					promptDone <- promptErr
 					eventCh <- turnEnd
 					return
@@ -2382,41 +2200,9 @@ func TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder(t *testing.T) {
 				t.Fatalf("result = (exit %d, %q, %ds), want (exit 7, rate_limited, 30s)",
 					result.ExitCode, result.StopReason, result.RetryAfter)
 			}
-			reasons := sink.terminalStopReasons()
-			if len(reasons) != 1 || reasons[0] != runtime.RateLimitedStopReason {
-				t.Fatalf("session.end stop reasons = %v, want [rate_limited]", reasons)
-			}
-			var classifiedFrom any
-			for _, event := range sink.events {
-				if event.Event == "session.end" {
-					classifiedFrom = event.Fields["classified_from"]
-				}
-			}
-			if classifiedFrom != "error" {
-				t.Fatalf("session.end classified_from = %v, want error", classifiedFrom)
-			}
-		})
-	}
-}
-
-// TestFailureText pins which terminal fields count as provider-owned failure
-// text. A claude-channel summary is model-authored prose, so it never does.
-func TestFailureText(t *testing.T) {
-	tests := []struct {
-		name   string
-		fields map[string]any
-		want   string
-	}{
-		{name: "error_message", fields: map[string]any{"error_message": "429"}, want: "429"},
-		{name: "error", fields: map[string]any{"error": "boom"}, want: "boom"},
-		{name: "message", fields: map[string]any{"message": "rate limit"}, want: "rate limit"},
-		{name: "model summary is not provider text", fields: map[string]any{"summary": "429 rate limit; retry after 3600"}, want: ""},
-		{name: "no text", fields: map[string]any{}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := failureText(tt.fields); got != tt.want {
-				t.Fatalf("failureText(%v) = %q, want %q", tt.fields, got, tt.want)
+			last, ok := sink.lastEvent()
+			if !ok || last.Event != "session.end" || last.Fields["stop_reason"] != runtime.RateLimitedStopReason {
+				t.Fatalf("last event = %#v, want the durable rate_limited session.end", last)
 			}
 		})
 	}

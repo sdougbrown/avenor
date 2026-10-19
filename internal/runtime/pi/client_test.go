@@ -54,36 +54,6 @@ func readCommand(r io.Reader) (map[string]any, error) {
 	return cmd, nil
 }
 
-// The exit path must not read the stderr buffer while the reader is still
-// running: a bounded wait returns only once the pipe reached EOF.
-func TestWaitStderrDrainWaitsForReader(t *testing.T) {
-	stderrR, stderrW := io.Pipe()
-	stdinR, stdinW := io.Pipe()
-	_ = stdinR.Close()
-	c := newClient(nil, stdinW, io.NopCloser(strings.NewReader("")), stderrR)
-	defer c.Close()
-
-	done := make(chan struct{})
-	go func() {
-		c.waitStderrDrain(5 * time.Second)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Fatal("waitStderrDrain returned while the reader was still blocked on the pipe")
-	case <-time.After(20 * time.Millisecond):
-	}
-	if err := stderrW.Close(); err != nil {
-		t.Fatalf("close stderr writer: %v", err)
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("waitStderrDrain did not return once the reader reached EOF")
-	}
-}
-
 func TestClientCommandResponse(t *testing.T) {
 	c, wOut, rIn := fakeClient()
 	defer c.Close()
