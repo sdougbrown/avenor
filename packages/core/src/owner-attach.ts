@@ -31,6 +31,19 @@ export class OwnerRecordMissingError extends Error {
   }
 }
 
+/**
+ * The control socket path has no directory entry, so no listener holds it and
+ * a replacement is authorized.
+ */
+export class OwnerSocketAbsentError extends Error {
+  readonly code = 'ENOENT'
+
+  constructor(readonly socketPath: string) {
+    super(`control socket ${socketPath} is absent`)
+    this.name = 'OwnerSocketAbsentError'
+  }
+}
+
 /** The record or the socket it names no longer describes the live path. */
 export class StaleOwnerRecordError extends Error {
   constructor(readonly socketPath: string, readonly reason: string) {
@@ -210,6 +223,9 @@ function socketFileIdentity(socketPath: string): fs.BigIntStats {
   try {
     info = lstatBig(socketPath)
   } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new OwnerSocketAbsentError(socketPath)
+    }
     throw stale(socketPath, `stat ${socketPath}: ${errorMessage(err)}`)
   }
   if (!info.isSocket()) {

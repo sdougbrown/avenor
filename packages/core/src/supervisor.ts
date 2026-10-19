@@ -9,6 +9,7 @@ import {
   ForeignPeerError,
   loadOwnerRecord,
   OwnerRecordMissingError,
+  OwnerSocketAbsentError,
   probeControlSocket,
   StaleOwnerRecordError,
   validateOwnerRecordSocket,
@@ -481,6 +482,12 @@ export class Supervisor {
             if (err instanceof OwnerRecordMissingError || err instanceof StaleOwnerRecordError) {
               // The predecessor's record is still the live one, or publication
               // has not happened yet. Retry until the attempt deadline.
+              await sleep(100)
+              continue
+            }
+            if (err instanceof OwnerSocketAbsentError) {
+              // The path has no listener to talk to yet; the child may still
+              // publish its own socket before the deadline.
               await sleep(100)
               continue
             }

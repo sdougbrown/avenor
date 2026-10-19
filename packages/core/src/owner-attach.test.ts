@@ -7,6 +7,7 @@ import * as path from 'node:path'
 import {
   attachOwner,
   ForeignPeerError,
+  OwnerSocketAbsentError,
   ownerRecordPath,
   StaleOwnerRecordError,
 } from './owner-attach.js'
@@ -85,6 +86,19 @@ describe('owner socket binding', () => {
     publishRecord(socketPath)
 
     await expect(attachOwner(socketPath)).rejects.toBeInstanceOf(ForeignPeerError)
+    expect(listening.connections).toBe(0)
+  })
+
+  it('reports a socket that disappeared after the probe as replaceable, not stale', async () => {
+    const dir = temporaryDir()
+    const socketPath = path.join(dir, 'vanished.sock')
+    const listening = await listenSocket(socketPath)
+    publishRecord(socketPath)
+    fs.unlinkSync(socketPath)
+
+    const failure = await attachOwner(socketPath).catch((err: unknown) => err)
+    expect(failure).toBeInstanceOf(OwnerSocketAbsentError)
+    expect((failure as OwnerSocketAbsentError).code).toBe('ENOENT')
     expect(listening.connections).toBe(0)
   })
 
