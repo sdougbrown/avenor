@@ -314,22 +314,37 @@ func TestRunCancelledBySignal(t *testing.T) {
 // cancel: the cancel stops the run without unregistering the signal trap, so a
 // SIGTERM arriving while the run is still cleaning up is handled and the pid
 // file is still removed. The signal has to land in a live process, so the test
-// re-executes itself.
+// re-executes itself and decides from the subprocess's exit status.
 func TestControlCancelKeepsSignalTrap(t *testing.T) {
 	if os.Getenv("AVENOR_TEST_CONTROL_CANCEL_SIGNAL") == "1" {
 		testControlCancelKeepsSignalTrap(t)
 		return
 	}
+	// The pid file stands outside the subprocess's temp dir so this test can
+	// check it after the subprocess exits.
+	pidPath := filepath.Join(t.TempDir(), "run.pid")
 	cmd := exec.Command(os.Args[0], "-test.run=TestControlCancelKeepsSignalTrap$")
-	cmd.Env = append(os.Environ(), "AVENOR_TEST_CONTROL_CANCEL_SIGNAL=1")
-	if output, err := cmd.CombinedOutput(); err != nil {
+	cmd.Env = append(os.Environ(),
+		"AVENOR_TEST_CONTROL_CANCEL_SIGNAL=1",
+		"AVENOR_TEST_CONTROL_CANCEL_PID="+pidPath,
+	)
+	output, err := cmd.CombinedOutput()
+	// A SIGTERM delivered under the default disposition ends the subprocess by
+	// signal, so a non-nil error means the trap was gone; an exit 0 means the run
+	// survived the signal and cleaned up.
+	if err != nil {
 		t.Fatalf("control cancel signal subprocess failed: %v\n%s", err, output)
 	}
+	requireFile(t, pidPath, "")
 }
 
 func testControlCancelKeepsSignalTrap(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("signal test skipped on Windows")
+	}
+	pidPath := os.Getenv("AVENOR_TEST_CONTROL_CANCEL_PID")
+	if pidPath == "" {
+		t.Fatal("AVENOR_TEST_CONTROL_CANCEL_PID is unset")
 	}
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -339,8 +354,6 @@ func testControlCancelKeepsSignalTrap(t *testing.T) {
 	provider.promptStarted, provider.release = started, release
 	stubProvider(t, provider)
 
-	dir := t.TempDir()
-	pidPath := filepath.Join(dir, "run.pid")
 	socketPath := shortControlSocketPath(t)
 	done := runAsync("--prompt", "hi", "--backend", "pi", "--control-socket", socketPath, "--pid-file", pidPath)
 
@@ -348,16 +361,11 @@ func testControlCancelKeepsSignalTrap(t *testing.T) {
 	requireFile(t, pidPath, strconv.Itoa(os.Getpid())+"\n")
 	// The signal lands during teardown, after the control cancel and before the
 	// pid file is removed. A cancel that had unregistered the trap would leave
-	// the default disposition in place, so the process would die here and the
-	// pid file would survive.
+	// the default disposition in place, and this process would exit by signal.
 	pidFileRemoveCheck = func() {
 		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 			t.Errorf("send SIGTERM: %v", err)
 		}
-		// The default disposition ends the process inside the runtime's signal
-		// handler, which never returns from this wait; returning means the trap
-		// was still registered.
-		time.Sleep(200 * time.Millisecond)
 	}
 	t.Cleanup(func() { pidFileRemoveCheck = nil })
 
