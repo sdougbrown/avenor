@@ -87,6 +87,10 @@ type RunnerStatus struct {
 // host view and reconciles even without change signals.
 const DefaultAntiEntropy = 5 * time.Second
 
+// outcomeLogHole is the terminal status of a runner whose controller history
+// cannot be replayed.
+const outcomeLogHole = "log_hole"
+
 // RunnerConfig configures one Runner. Deps, Store, ControllerID, and OwnerID
 // are required; zero durations fall back to the package defaults and nil
 // channels disable the corresponding wake signals.
@@ -525,6 +529,18 @@ const (
 	stepExit
 )
 
+// stopOnLogHole reports whether err means the controller's history cannot be
+// replayed. Such a hole is permanent until the controller's state directory is
+// removed, so the runner marks the status and exits instead of retrying.
+func (r *Runner) stopOnLogHole(err error) bool {
+	if !errors.Is(err, ErrLogHole) {
+		return false
+	}
+	log.Printf("workflow controller %s: stopping: %v", r.controllerID, err)
+	r.setStatus(func(s *RunnerStatus) { s.LastOutcome = outcomeLogHole })
+	return true
+}
+
 // waitForWake arms the timer at d and blocks for the loop's next event. It
 // is the single place the leader receives on the timer, context, wake
 // channels, and worker/poll result channels: when listenWake is clear (the
@@ -582,6 +598,10 @@ func (r *Runner) acquire(s *leaderState) stepResult {
 			r.drainWorkers(s)
 			return stepExit
 		}
+		if r.stopOnLogHole(err) {
+			r.drainWorkers(s)
+			return stepExit
+		}
 		log.Printf("workflow controller %s: acquire lease: %v", r.controllerID, err)
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "acquire_error" })
 		r.waitForWake(s, r.renewInterval, false)
@@ -606,6 +626,11 @@ func (r *Runner) acquire(s *leaderState) stepResult {
 // returns the record and when the next renewal is due.
 func (r *Runner) renew(s *leaderState) (ControllerRecord, time.Time, stepResult) {
 	if _, err := r.store.RenewLease(r.controllerID, s.leaseID, s.ownerEpoch); err != nil {
+		if r.stopOnLogHole(err) {
+			s.dropLeadership(r)
+			r.drainWorkers(s)
+			return ControllerRecord{}, time.Time{}, stepExit
+		}
 		s.dropLeadership(r)
 		r.waitForWake(s, r.renewInterval, false)
 		return ControllerRecord{}, time.Time{}, stepLoop

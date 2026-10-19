@@ -174,9 +174,18 @@ replay reads the previous generation before the active log. A snapshot whose
 revision is at or above the previous generation's first event minus one
 replays contiguously through both generations to the newest renewal. An older
 snapshot cannot be repaired — the events before the previous generation are
-gone — so replay reports the missing sequence range and the load fails rather
-than fabricating a record from a holed history. A failed rotation leaves both
-files untouched, so an unwritable controller directory only lets the log grow.
+gone — so replay fails with `ErrLogHole`, naming the controller and the
+missing sequence range, rather than fabricating a record from a holed history.
+Only the affected controller stops: its leader loop reports `log_hole` and
+exits, `controller list` reports it under `load_failures`, and every other
+controller keeps recovering and running. To reset it, stop the supervisor and
+remove that controller's state directory,
+`<workflow-root>/controllers/<controller-id>`; the next `controller create`
+starts it again from an empty record. A rotation is a single rename, and a
+missing active log replays as empty while the next append creates it, so a
+failed rotation never loses events: before the rename both files are
+untouched, after it the next append starts a fresh active log. An unwritable
+controller directory only lets the log grow.
 `disable` is the deliberate stop: it halts future dispatch, cancels poll
 contexts, freezes cursors, and releases the lease, leaving running attempts
 alone.

@@ -31,19 +31,33 @@ func newTestStore(t *testing.T) (*ControllerStore, *fakeClock) {
 	return NewStoreWithClock(t.TempDir(), clock.Now), clock
 }
 
-// eventKinds reads a controller's event log and returns the kinds in order.
-func eventKinds(t *testing.T, s *ControllerStore, controllerID string) []string {
+// readEvents returns the events stored in an NDJSON event log, failing the
+// test on an unreadable or malformed line.
+func readEvents(t *testing.T, path string) []ControllerEvent {
 	t.Helper()
-	data, err := os.ReadFile(s.eventsPath(controllerID))
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read events: %v", err)
 	}
-	var kinds []string
+	var events []ControllerEvent
 	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 		var e ControllerEvent
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			t.Fatalf("unmarshal event line %q: %v", line, err)
 		}
+		events = append(events, e)
+	}
+	return events
+}
+
+// eventKinds reads a controller's event log and returns the kinds in order.
+func eventKinds(t *testing.T, s *ControllerStore, controllerID string) []string {
+	t.Helper()
+	var kinds []string
+	for _, e := range readEvents(t, s.eventsPath(controllerID)) {
 		kinds = append(kinds, e.Kind)
 	}
 	return kinds
@@ -51,16 +65,8 @@ func eventKinds(t *testing.T, s *ControllerStore, controllerID string) []string 
 
 func eventReasons(t *testing.T, s *ControllerStore, controllerID, kind string) []string {
 	t.Helper()
-	data, err := os.ReadFile(s.eventsPath(controllerID))
-	if err != nil {
-		t.Fatalf("read events: %v", err)
-	}
 	var reasons []string
-	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
-		var e ControllerEvent
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			t.Fatalf("unmarshal event line %q: %v", line, err)
-		}
+	for _, e := range readEvents(t, s.eventsPath(controllerID)) {
 		if e.Kind == kind {
 			reasons = append(reasons, e.Reason)
 		}
@@ -440,11 +446,11 @@ func TestRecoverExpiresLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover: %v", err)
 	}
-	if len(recovered) != 1 || recovered[0].ControllerID != "alpha" {
+	if len(recovered.Records) != 1 || recovered.Records[0].ControllerID != "alpha" {
 		t.Fatalf("recovered records: %+v", recovered)
 	}
-	if recovered[0].Leader != nil {
-		t.Fatalf("recovery left an expired lease: %+v", recovered[0].Leader)
+	if recovered.Records[0].Leader != nil {
+		t.Fatalf("recovery left an expired lease: %+v", recovered.Records[0].Leader)
 	}
 	if reasons := eventReasons(t, s, "alpha", EventLeaderExpired); len(reasons) != 1 || reasons[0] != "recovery" {
 		t.Fatalf("leader_expired reasons: %v", reasons)
@@ -641,24 +647,18 @@ func renewUntilRotation(
 // generation, and whether that generation exists.
 func prevFirstSeq(t *testing.T, s *ControllerStore, controllerID string) (int64, bool) {
 	t.Helper()
-	data, err := os.ReadFile(s.prevEventsPath(controllerID))
-	if err != nil {
+	path := s.prevEventsPath(controllerID)
+	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return 0, false
 		}
-		t.Fatalf("read previous generation: %v", err)
+		t.Fatalf("stat previous generation: %v", err)
 	}
-	var e ControllerEvent
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			t.Fatalf("unmarshal previous generation: %v", err)
-		}
-		break
+	events := readEvents(t, path)
+	if len(events) == 0 {
+		return 0, false
 	}
-	return e.Seq, true
+	return events[0].Seq, true
 }
 
 // TestRenewalLogCompaction proves a snapshot from before a rotation replays
@@ -690,7 +690,7 @@ func TestRenewalLogCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lock after rewind: %v", err)
 	}
-	replayed, count, err := s.loadLocked("alpha")
+	replayed, _, err := s.loadLocked("alpha")
 	unlock()
 	if err != nil {
 		t.Fatalf("load after rewind: %v", err)
@@ -701,66 +701,107 @@ func TestRenewalLogCompaction(t *testing.T) {
 	if replayed.Leader == nil || !replayed.Leader.ExpiresAt.Equal(rec.Leader.ExpiresAt) {
 		t.Fatalf("replayed lease: %+v, want expiry %s", replayed.Leader, rec.Leader.ExpiresAt)
 	}
-	if want := int(rec.Revision - acquired.Revision); count != want {
-		t.Fatalf("replayed event count: got %d, want %d from both generations", count, want)
-	}
 }
 
-// TestRenewalLogBoundedGenerations proves the log keeps one previous
-// generation: a second rotation replaces events.ndjson.prev rather than
-// accumulating history.
-func TestRenewalLogBoundedGenerations(t *testing.T) {
+// TestRotationDropsActiveLog proves a rotation leaves no active log and that
+// the next renewal recreates it: replay treats the missing file as empty, so
+// the rotation needs no post-rename create.
+func TestRotationDropsActiveLog(t *testing.T) {
 	s, clock := newTestStore(t)
 	s.compactBytes = 1 << 10
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	rec := mustAcquire(t, s, "alpha", "owner-1")
 
-	rec, first := renewUntilRotation(t, s, clock, "alpha", rec, 0)
-	_, second := renewUntilRotation(t, s, clock, "alpha", rec, first)
+	rec, _ = renewUntilRotation(t, s, clock, "alpha", rec, 0)
+	if _, err := os.Stat(s.eventsPath("alpha")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("active log survived the rotation: err=%v", err)
+	}
+	loaded, ok, err := s.Get("alpha")
+	if err != nil || !ok || loaded.Revision != rec.Revision {
+		t.Fatalf("load with no active log: rec=%+v ok=%v err=%v", loaded, ok, err)
+	}
+	clock.Advance(RenewInterval)
+	if _, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch); err != nil {
+		t.Fatalf("renew with no active log: %v", err)
+	}
 	if _, err := os.Stat(s.eventsPath("alpha")); err != nil {
-		t.Fatalf("no active generation after a second rotation: %v", err)
-	}
-	size, err := os.Stat(s.eventsPath("alpha"))
-	if err != nil {
-		t.Fatalf("stat active log: %v", err)
-	}
-	if second <= first {
-		t.Fatalf("previous generation first seq after a second rotation: %d, want > %d", second, first)
-	}
-	if size.Size() > s.compactBytes {
-		t.Fatalf("active log after a second rotation: %d bytes, want <= %d", size.Size(), s.compactBytes)
+		t.Fatalf("renew did not recreate the active log: %v", err)
 	}
 }
 
 // TestReplayRejectsHistoryHole proves replay never fabricates state across a
 // discarded generation: a snapshot older than the previous generation's first
-// event fails to load, naming the events it cannot account for.
+// event fails to load with ErrLogHole naming the events it cannot account for,
+// while a snapshot exactly one event older still replays.
 func TestReplayRejectsHistoryHole(t *testing.T) {
 	s, clock := newTestStore(t)
 	s.compactBytes = 1 << 10
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	acquired := mustAcquire(t, s, "alpha", "owner-1")
-	snap, err := os.ReadFile(s.snapshotPath("alpha"))
-	if err != nil {
-		t.Fatalf("read snapshot after acquire: %v", err)
-	}
 
-	// A second rotation discards the generation that held the events between
-	// the snapshot and the new previous generation.
+	// One previous generation only: a second rotation replaces it instead of
+	// accumulating history, and the next renewal recreates the active log.
 	rec, first := renewUntilRotation(t, s, clock, "alpha", acquired, 0)
-	_, second := renewUntilRotation(t, s, clock, "alpha", rec, first)
-
-	if err := os.WriteFile(s.snapshotPath("alpha"), snap, 0o644); err != nil {
-		t.Fatalf("rewind snapshot: %v", err)
+	rec, second := renewUntilRotation(t, s, clock, "alpha", rec, first)
+	if second <= first {
+		t.Fatalf("previous generation first seq after a second rotation: %d, want > %d", second, first)
 	}
-	unlock, err := s.lockController("alpha")
+	clock.Advance(RenewInterval)
+	renewed, err := s.RenewLease("alpha", rec.Leader.LeaseID, rec.OwnerEpoch)
 	if err != nil {
-		t.Fatalf("lock after rewind: %v", err)
+		t.Fatalf("renew after rotation: %v", err)
 	}
-	_, _, loadErr := s.loadLocked("alpha")
-	unlock()
-	if loadErr == nil {
-		t.Fatal("load across a discarded generation: got nil error")
+	rec = renewed
+	if _, err := os.Stat(s.eventsPath("alpha")); err != nil {
+		t.Fatalf("active log after a renewal: %v", err)
+	}
+
+	live, err := os.ReadFile(s.snapshotPath("alpha"))
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	rewind := func(revision int64) {
+		t.Helper()
+		var snap ControllerRecord
+		if err := json.Unmarshal(live, &snap); err != nil {
+			t.Fatalf("unmarshal snapshot: %v", err)
+		}
+		snap.Revision = revision
+		data, err := json.Marshal(snap)
+		if err != nil {
+			t.Fatalf("marshal rewound snapshot: %v", err)
+		}
+		if err := os.WriteFile(s.snapshotPath("alpha"), data, 0o644); err != nil {
+			t.Fatalf("rewind snapshot: %v", err)
+		}
+	}
+
+	// The legal boundary the doc promises: one revision before the previous
+	// generation's first event still replays to the live record.
+	rewind(second - 1)
+	boundary, ok, err := s.Get("alpha")
+	if err != nil || !ok {
+		t.Fatalf("load at the previous generation boundary: ok=%v err=%v", ok, err)
+	}
+	if boundary.Revision != rec.Revision || boundary.Leader == nil {
+		t.Fatalf("boundary replay: revision %d lease %+v, want revision %d", boundary.Revision, boundary.Leader, rec.Revision)
+	}
+
+	// Exactly one missing event is a hole, not a discontinuity replay may jump.
+	rewind(second - 2)
+	_, _, loadErr := s.Get("alpha")
+	if !errors.Is(loadErr, ErrLogHole) {
+		t.Fatalf("load with one missing event: got err=%v, want ErrLogHole", loadErr)
+	}
+	if want := fmt.Sprintf("missing events %d-%d", second-1, second-1); !strings.Contains(loadErr.Error(), want) {
+		t.Fatalf("hole error: got %q, want it to name %q", loadErr, want)
+	}
+
+	// A snapshot older than the previous generation is the wider hole.
+	rewind(acquired.Revision)
+	_, _, loadErr = s.Get("alpha")
+	if !errors.Is(loadErr, ErrLogHole) {
+		t.Fatalf("load across a discarded generation: got err=%v, want ErrLogHole", loadErr)
 	}
 	if want := fmt.Sprintf("missing events %d-%d", acquired.Revision+1, second-1); !strings.Contains(loadErr.Error(), want) {
 		t.Fatalf("hole error: got %q, want it to name %q", loadErr, want)
@@ -823,6 +864,11 @@ func TestCompactionFailureIsNonFatal(t *testing.T) {
 	if got := len(eventKinds(t, s, "alpha")); got != 1 {
 		t.Fatalf("log after a failed rotation: %d events, want the 1 committed", got)
 	}
+	// The blocked rotation is reported to the caller; the snapshot writer only
+	// logs it.
+	if err := s.compactLog("alpha"); err == nil {
+		t.Fatal("compact with a blocked previous generation: got nil error")
+	}
 	if fi, err := os.Stat(s.prevEventsPath("alpha")); err != nil || !fi.IsDir() {
 		t.Fatalf("rotation replaced the blocking directory: fi=%v err=%v", fi, err)
 	}
@@ -839,6 +885,58 @@ func TestCompactionFailureIsNonFatal(t *testing.T) {
 	}
 	if _, err := os.Stat(s.prevEventsPath("alpha")); err != nil {
 		t.Fatalf("no generation after compaction recovered: %v", err)
+	}
+}
+
+// TestLogHoleIsolatesOneController proves one unreplayable controller does not
+// hide the rest: List and Recover report it by id and keep serving the healthy
+// controller, so a single holed log cannot disable the fleet.
+func TestLogHoleIsolatesOneController(t *testing.T) {
+	s, _ := newTestStore(t)
+	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
+	mustEnable(t, s, mustCreate(t, s, "beta", 1).ControllerID)
+	holed := mustAcquire(t, s, "beta", "owner-1")
+
+	// Keep only beta's final event and rewind its snapshot below it, so replay
+	// cannot account for the events in between.
+	func() {
+		unlock, err := s.lockController("beta")
+		if err != nil {
+			t.Fatalf("lock beta: %v", err)
+		}
+		defer unlock()
+		events := readEvents(t, s.eventsPath("beta"))
+		last, err := json.Marshal(events[len(events)-1])
+		if err != nil {
+			t.Fatalf("marshal last event: %v", err)
+		}
+		if err := os.WriteFile(s.eventsPath("beta"), append(last, '\n'), 0o644); err != nil {
+			t.Fatalf("write holed log: %v", err)
+		}
+		holed.Revision = 0
+		snap, err := json.Marshal(holed)
+		if err != nil {
+			t.Fatalf("marshal rewound snapshot: %v", err)
+		}
+		if err := os.WriteFile(s.snapshotPath("beta"), snap, 0o644); err != nil {
+			t.Fatalf("write rewound snapshot: %v", err)
+		}
+	}()
+
+	for name, read := range map[string]func() (Controllers, error){
+		"list":    s.List,
+		"recover": s.Recover,
+	} {
+		got, err := read()
+		if err != nil {
+			t.Fatalf("%s with one holed controller: %v", name, err)
+		}
+		if len(got.Records) != 1 || got.Records[0].ControllerID != "alpha" {
+			t.Fatalf("%s records: %+v, want only alpha", name, got.Records)
+		}
+		if len(got.Failures) != 1 || got.Failures[0].ControllerID != "beta" || !errors.Is(got.Failures[0], ErrLogHole) {
+			t.Fatalf("%s failures: %+v, want beta with ErrLogHole", name, got.Failures)
+		}
 	}
 }
 
@@ -903,24 +1001,24 @@ func TestFailedAppendRollsBack(t *testing.T) {
 func TestListSortedAndMissingDir(t *testing.T) {
 	s, _ := newTestStore(t)
 
-	records, err := s.List()
+	listed, err := s.List()
 	if err != nil {
 		t.Fatalf("list with missing controllers dir: %v", err)
 	}
-	if len(records) != 0 {
-		t.Fatalf("list with missing controllers dir: got %+v, want empty", records)
+	if len(listed.Records) != 0 {
+		t.Fatalf("list with missing controllers dir: got %+v, want empty", listed)
 	}
 
 	mustCreate(t, s, "beta", 1)
 	mustCreate(t, s, "alpha", 2)
 	mustCreate(t, s, "gamma", 3)
 
-	records, err = s.List()
+	listed, err = s.List()
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	var ids []string
-	for _, rec := range records {
+	for _, rec := range listed.Records {
 		ids = append(ids, rec.ControllerID)
 	}
 	if strings.Join(ids, ",") != "alpha,beta,gamma" {

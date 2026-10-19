@@ -57,6 +57,11 @@ var (
 	// ErrNotLeader is returned when the caller's (lease id, owner epoch) pair
 	// is not the current unexpired leader lease of an enabled controller.
 	ErrNotLeader = errors.New("not the current leader")
+	// ErrLogHole is returned when a snapshot predates the oldest retained
+	// event log generation, so the events between them are gone. Only the
+	// affected controller is unusable: its record cannot be replayed until its
+	// state directory is removed.
+	ErrLogHole = errors.New("event log history hole")
 )
 
 // LeaderLease is the leadership lease held by one controller owner.
