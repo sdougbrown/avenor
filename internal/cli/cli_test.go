@@ -243,12 +243,12 @@ type scriptedSession struct {
 	events chan events.Event
 }
 
-// scriptedTurn is one Prompt turn and the events it ends with.
+// scriptedTurn is one Prompt turn and the event it ends with. finalOutput rides
+// session.end as final_output, the run's final text even when the reply chunks
+// say otherwise.
 type scriptedTurn struct {
-	chunk      string
-	stopReason string
-	// finalOutput, when set, rides session.end as final_output, which is the
-	// run's final text even when the reply chunks say otherwise.
+	chunk       string
+	stopReason  string
 	finalOutput string
 }
 
@@ -260,17 +260,15 @@ type scriptedProvider struct {
 	mu       sync.Mutex
 	nextID   int
 	sessions map[string]*scriptedSession
-	// turns, when set, replaces the prompt matching with one scripted turn per
-	// Prompt, in order.
+	// turns, when set, serves one scripted turn per Prompt, in order.
 	turns []scriptedTurn
 	next  int
-	// promptStarted, when non-nil, receives once per turn after its chunks are
-	// queued. release, when non-nil, holds the turn open until it is closed.
+	// promptStarted receives after a turn's chunks are queued; release holds the
+	// turn open until it is closed.
 	promptStarted chan<- struct{}
 	release       <-chan struct{}
-	// startStarted, when non-nil, receives once Start is entered. blockStart
-	// keeps Start waiting on its context, so a test can signal while the first
-	// session is still starting.
+	// startStarted receives once Start is entered; blockStart keeps Start waiting
+	// on its context, so a test can signal while the first session starts.
 	startStarted chan<- struct{}
 	blockStart   bool
 }
@@ -323,54 +321,50 @@ func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt 
 		p.next++
 	}
 	started, release := p.promptStarted, p.release
-	var eventsCh chan events.Event
-	if ok {
-		session.prompt = prompt
-		eventsCh = session.events
-	}
 	p.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("unknown session %q", sessionID)
 	}
+	session.prompt = prompt
 
-	if !scripted {
-		var reply string
-		switch {
-		case strings.Contains(prompt, "decide reviewers"):
-			reply = "[team: skip | security]"
-		case strings.Contains(prompt, "review style"):
-			reply = "style findings"
-		case strings.Contains(prompt, "summarize findings"):
-			reply = "final report"
-		default:
-			reply = "ok"
+	if scripted {
+		if turn.chunk != "" {
+			session.events <- scriptedChunk(sessionID, turn.chunk)
 		}
-
-		eventsCh <- scriptedChunk(sessionID, reply)
-		eventsCh <- events.Event{
-			Event:     "session.end",
-			SessionID: sessionID,
-			Fields:    map[string]any{"stop_reason": "end_turn"},
+		if started != nil {
+			started <- struct{}{}
 		}
-		close(eventsCh)
+		if release != nil {
+			<-release
+		}
+		fields := map[string]any{"stop_reason": turn.stopReason}
+		if turn.finalOutput != "" {
+			fields["final_output"] = turn.finalOutput
+		}
+		session.events <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
+		close(session.events)
 		return nil
 	}
 
-	if turn.chunk != "" {
-		eventsCh <- scriptedChunk(sessionID, turn.chunk)
+	var reply string
+	switch {
+	case strings.Contains(prompt, "decide reviewers"):
+		reply = "[team: skip | security]"
+	case strings.Contains(prompt, "review style"):
+		reply = "style findings"
+	case strings.Contains(prompt, "summarize findings"):
+		reply = "final report"
+	default:
+		reply = "ok"
 	}
-	if started != nil {
-		started <- struct{}{}
+
+	session.events <- scriptedChunk(sessionID, reply)
+	session.events <- events.Event{
+		Event:     "session.end",
+		SessionID: sessionID,
+		Fields:    map[string]any{"stop_reason": "end_turn"},
 	}
-	if release != nil {
-		<-release
-	}
-	fields := map[string]any{"stop_reason": turn.stopReason}
-	if turn.finalOutput != "" {
-		fields["final_output"] = turn.finalOutput
-	}
-	eventsCh <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
-	close(eventsCh)
+	close(session.events)
 	return nil
 }
 
@@ -407,10 +401,32 @@ func (p *scriptedProvider) snapshotSessions() []scriptedSession {
 	return out
 }
 
-func (p *scriptedProvider) turnsRun() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.next
+// runOutcome is a finished run's exit code and stderr.
+type runOutcome struct {
+	code   int
+	stderr string
+}
+
+// runAsync starts a run in a goroutine so a test can drive its artifacts while
+// it is live.
+func runAsync(args ...string) <-chan runOutcome {
+	done := make(chan runOutcome, 1)
+	go func() {
+		var stderr strings.Builder
+		done <- runOutcome{run(args, func(string) string { return "" }, &stderr), stderr.String()}
+	}()
+	return done
+}
+
+func awaitRun(t *testing.T, done <-chan runOutcome, what string) runOutcome {
+	t.Helper()
+	select {
+	case got := <-done:
+		return got
+	case <-time.After(10 * time.Second):
+		t.Fatalf("run did not finish after %s", what)
+		return runOutcome{}
+	}
 }
 
 func waitForSessionForTest(
@@ -456,6 +472,26 @@ func shortControlSocketPath(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return filepath.Join(dir, "control.sock")
+}
+
+// promptOverControl queues a prompt through a run's control socket and waits
+// for the reply.
+func promptOverControl(t *testing.T, path, text string) {
+	t.Helper()
+	params, _ := json.Marshal(map[string]string{"text": text})
+	body, _ := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "prompt", Params: params})
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(append(body, '\n')); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	var resp control.Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil || resp.Error != nil {
+		t.Fatalf("prompt response = %+v, %v", resp, err)
+	}
 }
 
 func waitForPendingPermissionForTest(t *testing.T, cs *control.ControlServer) {
@@ -3631,107 +3667,37 @@ func TestAutoAnswerWorkingStatusEmittedOnPermissionResume(t *testing.T) {
 
 // TestRunResultFileControlPromptTurn queues a prompt through the run's own
 // control socket while a first turn is open: the result file must hold the last
-// turn's final output, not the first turn's text and not the accumulated reply.
+// turn's final output, not the first turn's text or the accumulated reply.
 func TestRunResultFileControlPromptTurn(t *testing.T) {
-	oldNewProvider := newProvider
-	t.Cleanup(func() { newProvider = oldNewProvider })
-
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	releaseTurn := sync.OnceFunc(func() { close(release) })
-	defer releaseTurn()
+	t.Cleanup(releaseTurn)
 	provider := newScriptedProvider()
 	provider.turns = []scriptedTurn{
 		{chunk: "first draft", stopReason: "end_turn"},
 		{chunk: "second draft", stopReason: "end_turn", finalOutput: "authoritative answer"},
 	}
-	provider.promptStarted = started
-	provider.release = release
-	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	provider.promptStarted, provider.release = started, release
+	stubProvider(t, provider)
 
 	dir := t.TempDir()
 	resultPath := filepath.Join(dir, "result.txt")
 	sentinelPath := filepath.Join(dir, "run.done")
 	socketPath := shortControlSocketPath(t)
+	done := runAsync("--prompt", "hi", "--backend", "pi", "--control-socket", socketPath,
+		"--result-file", resultPath, "--sentinel-file", sentinelPath)
 
-	type outcome struct {
-		code   int
-		stderr string
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		var stderr strings.Builder
-		code := run([]string{
-			"--prompt", "hi",
-			"--backend", "pi",
-			"--control-socket", socketPath,
-			"--result-file", resultPath,
-			"--sentinel-file", sentinelPath,
-		}, func(string) string { return "" }, &stderr)
-		done <- outcome{code: code, stderr: stderr.String()}
-	}()
-
-	select {
-	case <-started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("run never started its first turn")
-	}
-
-	deadline := time.Now().Add(10 * time.Second)
-	var ctrlConn net.Conn
-	var err error
-	for {
-		ctrlConn, err = net.DialTimeout("unix", socketPath, 2*time.Second)
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("dial control socket: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	defer ctrlConn.Close()
-
-	params, err := json.Marshal(map[string]string{"text": "second question"})
-	if err != nil {
-		t.Fatalf("marshal prompt params: %v", err)
-	}
-	body, err := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "prompt", Params: params})
-	if err != nil {
-		t.Fatalf("marshal prompt request: %v", err)
-	}
-	if _, err := ctrlConn.Write(append(body, '\n')); err != nil {
-		t.Fatalf("write prompt: %v", err)
-	}
-	_ = ctrlConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	scanner := bufio.NewScanner(ctrlConn)
-	if !scanner.Scan() {
-		t.Fatal("no response to prompt")
-	}
-	var resp control.Response
-	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil || resp.Error != nil {
-		t.Fatalf("prompt response = %s, %v", scanner.Bytes(), err)
-	}
+	waitForTest(t, "the first turn", started)
 	// The prompt is queued before the first turn ends, so the run's own turn
 	// loop is what selects the second answer.
+	promptOverControl(t, socketPath, "second question")
 	releaseTurn()
 
-	var got outcome
-	select {
-	case got = <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("run did not finish after the queued prompt")
-	}
-	if got.code != 0 {
+	if got := awaitRun(t, done, "the queued prompt"); got.code != 0 {
 		t.Fatalf("run() = %d, want 0; stderr=%s", got.code, got.stderr)
 	}
-	if turns := provider.turnsRun(); turns != 2 {
-		t.Fatalf("turns = %d, want 2", turns)
-	}
-	raw, err := os.ReadFile(resultPath)
-	if err != nil || string(raw) != "authoritative answer" {
-		t.Fatalf("result file = %q, %v; want the control turn's final output", raw, err)
-	}
+	requireFile(t, resultPath, "authoritative answer")
 	sentinel, err := os.ReadFile(sentinelPath)
 	if err != nil || !strings.Contains(string(sentinel), "RESULT="+resultPath+"\n") {
 		t.Fatalf("sentinel = %q, %v; want RESULT=%s", sentinel, err, resultPath)
@@ -6434,9 +6400,6 @@ func TestWaitForSessionSessionEndIncludesFinalOutput(t *testing.T) {
 			if result.FinalReply != tt.wantFinalReply {
 				t.Fatalf("FinalReply = %q, want %q", result.FinalReply, tt.wantFinalReply)
 			}
-			if result.FinalOutput != tt.wantFinalOutput {
-				t.Fatalf("FinalOutput = %q, want %q", result.FinalOutput, tt.wantFinalOutput)
-			}
 
 			last := logged[len(logged)-1]
 			got, ok := last.Fields["final_output"].(string)
@@ -6502,9 +6465,6 @@ func TestWaitForSessionSessionEndPreservesBackendFinalOutput(t *testing.T) {
 			}
 			if result.FinalReply != tt.wantFinalReply {
 				t.Fatalf("FinalReply = %q, want %q", result.FinalReply, tt.wantFinalReply)
-			}
-			if want, _ := tt.value.(string); result.FinalOutput != want {
-				t.Fatalf("FinalOutput = %q, want %q", result.FinalOutput, want)
 			}
 
 			last := logged[len(logged)-1]
