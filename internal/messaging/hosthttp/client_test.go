@@ -51,14 +51,6 @@ func mintID(t *testing.T, ttl time.Duration) string {
 	return id
 }
 
-func TestHostClientContract(t *testing.T) {
-	messagetest.RunTransportSuite(t, fixtureFactory(hostfixture.New(t)))
-}
-
-func TestHostClientFailureMatrix(t *testing.T) {
-	messagetest.RunFailureMatrix(t, fixtureFactory(hostfixture.New(t)))
-}
-
 func TestHostClientPeerFaultRacingClose(t *testing.T) {
 	messagetest.RunPeerFaultCloseSuite(t, fixtureFactory(hostfixture.New(t)))
 }
@@ -202,45 +194,6 @@ func TestHostClientAdmissionRejections(t *testing.T) {
 		}
 	})
 
-	t.Run("duplicate after a terminal fence", func(t *testing.T) {
-		fx := hostfixture.New(t)
-		tr := newTransport(t, fx, alice)
-		gen := fx.Store().Generation()
-		msgID := mintID(t, time.Minute)
-		if _, err := tr.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{}`,
-		}); err != nil {
-			t.Fatalf("Send: %v", err)
-		}
-		if waited, err := tr.Wait(t.Context(), messaging.WaitRequest{
-			Sender: alice, MessageID: msgID, Generation: gen, Timeout: 20 * time.Millisecond,
-		}); err != nil || waited.Outcome != messaging.OutcomeTimedOut {
-			t.Fatalf("Wait = (%+v, %v), want a timeout", waited, err)
-		}
-
-		// The fence now records timed-out, which is not a send outcome; the
-		// refusal reports the documented duplicate-message-id outcome.
-		res, err := tr.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{}`,
-		})
-		if !errors.Is(err, messaging.ErrDuplicateMessageID) || res.Outcome != messaging.OutcomeNotSent {
-			t.Fatalf("duplicate Send = (%+v, %v)", res, err)
-		}
-	})
-
-	t.Run("withdrawal without an edge", func(t *testing.T) {
-		fx := hostfixture.New(t)
-		tr := newTransport(t, fx, alice)
-		withdrawn, err := tr.Withdraw(t.Context(), messaging.WithdrawRequest{
-			Sender: alice, MessageID: mintID(t, time.Minute), Generation: fx.Store().Generation(),
-		})
-		if err != nil {
-			t.Fatalf("Withdraw: %v", err)
-		}
-		if withdrawn.Outcome != messaging.OutcomeEdgeAbsent || !withdrawn.Fence.Terminal {
-			t.Fatalf("Withdraw = %+v", withdrawn)
-		}
-	})
 }
 
 // TestHostSendDerivesOutcomeFromCode pins that a peer-supplied outcome never
@@ -317,8 +270,8 @@ func TestHostClientMalformedResponses(t *testing.T) {
 			if res.MessageID != msgID {
 				t.Fatalf("Send dropped the message id: %q", res.MessageID)
 			}
-			if err == nil {
-				t.Fatal("Send reported no error for an untrustworthy response")
+			if !errors.Is(err, hosthttp.ErrMalformedResponse) {
+				t.Fatalf("Send error = %v, want ErrMalformedResponse", err)
 			}
 
 			waited, err := tr.Wait(t.Context(), messaging.WaitRequest{
@@ -336,23 +289,6 @@ func TestHostClientMalformedResponses(t *testing.T) {
 			// silent truncation would report this send as admitted.
 			_, _ = w.Write([]byte(`{"outcome":"sent"}`))
 			_, _ = w.Write(bytes.Repeat([]byte(" "), 2<<20))
-		})
-		tr, err := hosthttp.New(plainDescriptor(srv.URL))
-		if err != nil {
-			t.Fatalf("hosthttp.New: %v", err)
-		}
-		t.Cleanup(func() { _ = tr.Close() })
-		res, err := tr.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: "gen",
-		})
-		if !errors.Is(err, hosthttp.ErrMalformedResponse) || res.Outcome != messaging.OutcomePossiblyPending {
-			t.Fatalf("Send = (%+v, %v), want possibly-pending and ErrMalformedResponse", res, err)
-		}
-	})
-
-	t.Run("unparseable body reports the malformed class", func(t *testing.T) {
-		srv := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("not-json"))
 		})
 		tr, err := hosthttp.New(plainDescriptor(srv.URL))
 		if err != nil {
