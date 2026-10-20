@@ -512,19 +512,17 @@ func (s *ControlServer) Stop() error {
 	// Serialize cleanup with Start's stale-path inspection and bind. Remove
 	// while the listener is still live; once it is closed, a replacement may
 	// bind and reuse its inode before a parent can safely inspect the path.
-	// The record is removed only while it still names this server, so that part
-	// does not need the lock and still runs when the lock cannot be taken.
+	// The record removal takes the same lock, so a competing Start cannot rename
+	// its own record into place between the identity check and the unlink.
 	if l != nil && path != "" {
 		lockFile, lockErr := lockControlSocket(path)
 		if lockErr != nil {
 			failures = append(failures, lockErr)
 		} else {
 			beforeControlSocketCleanup()
-		}
-		if err := s.removeOwnerRecord(path, identity, s.owner.ID); err != nil {
-			failures = append(failures, err)
-		}
-		if lockErr == nil {
+			if err := s.removeOwnerRecord(path, identity, s.owner.ID); err != nil {
+				failures = append(failures, err)
+			}
 			if err := removeOwnedSocket(l, path, socketInfo); err != nil {
 				failures = append(failures, err)
 			}

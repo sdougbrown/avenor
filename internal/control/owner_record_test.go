@@ -546,9 +546,11 @@ func TestOwnerRecordSwapUnderReaderRejected(t *testing.T) {
 	_ = published
 }
 
-// TestStopRemovesRecordWithoutLock proves the identity-guarded record is still
-// removed when the control lock cannot be taken.
-func TestStopRemovesRecordWithoutLock(t *testing.T) {
+// TestStopLeavesRecordWithoutLock proves Stop removes nothing when it cannot
+// take the control lock. A competing Start holds that lock while it renames its
+// own record into place, so an unguarded removal could delete the winner's
+// record after the identity check passed.
+func TestStopLeavesRecordWithoutLock(t *testing.T) {
 	path := testSocketPath(t)
 	s, _ := publishTestServer(t, path)
 	lockPath := path + ".control.lock"
@@ -563,8 +565,8 @@ func TestStopRemovesRecordWithoutLock(t *testing.T) {
 	if err := s.Stop(); err == nil {
 		t.Fatal("Stop reported no lock failure")
 	}
-	if _, err := os.Lstat(ownerRecordPath(path)); err == nil {
-		t.Fatal("owner record survived Stop after a lock failure")
+	if _, err := os.Lstat(ownerRecordPath(path)); err != nil {
+		t.Fatalf("Stop removed the owner record without the lock: %v", err)
 	}
 }
 
