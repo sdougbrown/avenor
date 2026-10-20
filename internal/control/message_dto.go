@@ -390,23 +390,38 @@ func newSessionLastResult(record broker.LastAgentMessage, ok bool) SessionLastRe
 	}
 }
 
-// messageErrorData classifies a transport failure for error.data.
+// messageErrorData classifies a messaging transport failure for error.data.
+// Those methods report the ask-transport facts, so the payload carries the
+// outcome and the wire code as well as the typed tool code.
 func messageErrorData(err error, outcome messaging.Outcome, messageID string) MessageErrorData {
 	wireCode := messaging.WireCodeFor(err)
 	if outcome == "" {
 		outcome = messaging.WireOutcomeFor(wireCode)
 	}
-	code := wireCode
-	var coded interface{ ToolCode() string }
-	if errors.As(err, &coded) && coded.ToolCode() != "" {
-		code = coded.ToolCode()
-	}
 	return MessageErrorData{
-		Code:      code,
+		Code:      toolCode(err),
 		Outcome:   string(outcome),
 		MessageID: messageID,
 		WireCode:  wireCode,
 	}
+}
+
+// authorityErrorData classifies a resume/session_* failure for error.data.
+// Those verbs report what the authority decided, not what a send did: outcome
+// and wire_code belong to the ask transport, so the payload carries the typed
+// code alone rather than a manufactured send classification.
+func authorityErrorData(err error) MessageErrorData {
+	return MessageErrorData{Code: toolCode(err)}
+}
+
+// toolCode prefers the typed tool code the authority attached; an error that
+// names none keeps the class the wire contract gives it.
+func toolCode(err error) string {
+	var coded interface{ ToolCode() string }
+	if errors.As(err, &coded) && coded.ToolCode() != "" {
+		return coded.ToolCode()
+	}
+	return messaging.WireCodeFor(err)
 }
 
 // --- result decoding (wire → transport) for the client ---

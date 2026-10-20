@@ -9,14 +9,14 @@ import (
 )
 
 // SessionLast reads one run's recorded last turn. It resolves the run before
-// reading, so an unknown runtime is an error while a known run with no
-// recorded turn is a synthesized identity plus ok=false.
+// reading, so an unknown runtime is a typed unknown_target refusal while a
+// known run with no recorded turn is a synthesized identity plus ok=false.
 func (s *Supervisor) SessionLast(rtID string) (broker.LastAgentMessage, bool, error) {
 	if s.broker == nil {
 		return broker.LastAgentMessage{}, false, fmt.Errorf("broker not available")
 	}
 	if s.broker.GetRun(rtID) == nil {
-		return broker.LastAgentMessage{}, false, fmt.Errorf("runtime %q not found", rtID)
+		return broker.LastAgentMessage{}, false, unknownTargetError(rtID)
 	}
 	record, ok := s.broker.LastAgentMessage(rtID)
 	return record, ok, nil

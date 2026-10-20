@@ -345,3 +345,55 @@ func TestMessageWaitDoesNotBlockConnection(t *testing.T) {
 		t.Fatalf("message_wait response after release: %+v", resp.Error)
 	}
 }
+
+// TestMessageRPCNonMessagingErrorData pins the authority verbs' error.data:
+// outcome and wire_code describe an ask transport, so these verbs report the
+// typed code and nothing that would claim a send happened.
+func TestMessageRPCNonMessagingErrorData(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s, cap := NewTestServer(state)
+	s.SetStableHandler(&mockStableHandler{
+		resumeErr:  &router.ToolError{Code: "not_resumable", Message: "run is not resumable"},
+		renameErr:  &router.ToolError{Code: "invalid_name", Message: "bad name"},
+		lastErr:    &router.ToolError{Code: "unknown_target", Message: `no run matches "rt_ghost"`},
+		lastSetErr: &router.ToolError{Code: "not_permitted", Message: "denied"},
+	})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	owner := dialOwner(t, s, cap)
+	defer owner.Close()
+
+	for _, tc := range []struct {
+		id     uint64
+		method string
+		params string
+		code   string
+	}{
+		{id: 2, method: "resume", params: `{"run_id":"run_3","target":"rt_1","message":"again"}`, code: "not_resumable"},
+		{id: 3, method: "session_rename", params: `{"session_id":"supervisor","name":"main"}`, code: "invalid_name"},
+		{id: 4, method: "session_last", params: `{"runtime_id":"rt_ghost"}`, code: "unknown_target"},
+		{id: 5, method: "session_last_set", params: `{"runtime_id":"supervisor","final_output":"x"}`, code: "not_permitted"},
+	} {
+		_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: tc.id, Method: tc.method, Params: json.RawMessage(tc.params)})
+		resp := readRespForID(t, owner, tc.id)
+		if resp.Error == nil {
+			t.Fatalf("%s: no error", tc.method)
+		}
+		data, ok := resp.Error.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("%s error.data = %#v", tc.method, resp.Error.Data)
+		}
+		if data["code"] != tc.code {
+			t.Errorf("%s code = %v, want %s", tc.method, data["code"], tc.code)
+		}
+		for _, field := range []string{"outcome", "wire_code", "message_id"} {
+			if value, ok := data[field]; ok {
+				t.Errorf("%s error.data carries %s=%v", tc.method, field, value)
+			}
+		}
+	}
+}

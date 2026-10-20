@@ -208,9 +208,8 @@ func TestSessionLastRecordsSupervisorOnly(t *testing.T) {
 	if ok || record.RunID != "rt_a" || record.Label != "peer-a" || record.Text != "" {
 		t.Fatalf("no-record answer = %+v ok=%v", record, ok)
 	}
-	if _, _, err := sup.SessionLast("rt_missing"); err == nil || !strings.Contains(err.Error(), `runtime "rt_missing" not found`) {
-		t.Fatalf("unknown runtime error = %v", err)
-	}
+	_, _, err = sup.SessionLast("rt_missing")
+	assertToolCode(t, err, "unknown_target")
 
 	owner := messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}
 	if err := sup.SessionLastSet(owner, "supervisor", "the answer", "done", true); err != nil {
