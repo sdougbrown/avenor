@@ -665,10 +665,18 @@ type Supervisor struct {
 	reaperStop     chan struct{}
 	reaperDone     chan struct{}
 	reaperInterval time.Duration
-	// Artifact retention reports a broken root and a denied path once each: the
-	// prune runs hourly, so the same failure would otherwise repeat forever.
+	// Artifact retention keeps this supervisor's run directory fresh and prunes
+	// stale ones. artifactPruneInterval is the tick, shortened by tests;
+	// artifactRetentionStop and artifactRetentionDone join the goroutine Run
+	// starts and stops.
+	artifactPruneInterval time.Duration
+	artifactRetentionStop chan struct{}
+	artifactRetentionDone chan struct{}
+	// Retention reports a broken root once and a denied path once: the prune runs
+	// hourly, so the same failure would otherwise repeat forever.
 	artifactRootWarn       sync.Once
-	artifactPermissionWarn sync.Once
+	artifactPermissionMu   sync.Mutex
+	artifactPermissionWarn map[string]struct{}
 	// capacityMu guards capacityCh, a broadcast channel closed (and replaced) on
 	// every tree-budget release so callers waiting for capacity can retry. It
 	// does not schedule or prioritize work.
@@ -705,6 +713,8 @@ func NewSupervisor(cfg Config) *Supervisor {
 		handledQuestions:        map[string]handledChildQuestion{},
 		childQuestionTimeout:    cfg.ChildQuestionTimeout,
 		reaperInterval:          5 * time.Second,
+		artifactPruneInterval:   time.Hour,
+		artifactPermissionWarn:  map[string]struct{}{},
 		httpServers:             map[string]*managedHTTPServer{},
 		httpStarting:            map[string]struct{}{},
 		fileSnapshots:           map[string][]string{},
@@ -821,9 +831,8 @@ func (s *Supervisor) Run() (exitCode int) {
 	// Artifact retention keeps this supervisor's run directory fresh and prunes
 	// the run directories of supervisors that are gone. The first pass runs off
 	// the startup path so a large tree never delays the control socket.
-	stopArtifactRetention := make(chan struct{})
-	go s.runArtifactRetention(stopArtifactRetention)
-	defer close(stopArtifactRetention)
+	s.startArtifactRetention()
+	defer s.stopArtifactRetention()
 
 	// Exactly-once startup barrier: when durable workflow or controller state
 	// already exists, recover it before any leader activity; otherwise the

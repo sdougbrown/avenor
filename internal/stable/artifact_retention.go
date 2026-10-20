@@ -16,12 +16,12 @@ const (
 	// without a write. It bounds what unattended hosts and test runs accumulate
 	// without cutting short a read of a finished run's sentinel or event log.
 	artifactRetention = 24 * time.Hour
-	// artifactPruneInterval is how often a running supervisor refreshes its own
-	// run directory and prunes the run directories of supervisors that are gone.
-	artifactPruneInterval = time.Hour
 	// artifactRunPrefix names the only entries the retention policy owns: one
 	// directory per supervisor run. Everything else under the root is left alone.
 	artifactRunPrefix = "run_"
+	// artifactRootHint ends every refusal of an existing root: the root is never
+	// repaired automatically, so the operator has one instruction to follow.
+	artifactRootHint = "remove it, or chown and chmod it to 0700"
 )
 
 // artifactRoot is the directory holding one subdirectory per supervisor run.
@@ -64,13 +64,19 @@ func verifyArtifactRoot(root string) error {
 	// Lstat reports a symlink as a link, so a link to a directory is refused
 	// like any other non-directory.
 	if !info.IsDir() {
-		return fmt.Errorf("artifact root %s is not a directory", root)
+		return fmt.Errorf("artifact root %s is not a directory: %s", root, artifactRootHint)
 	}
-	if st, ok := info.Sys().(*syscall.Stat_t); !ok || st.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("artifact root %s is not owned by uid %d", root, os.Geteuid())
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("artifact root %s has no owner record: %s", root, artifactRootHint)
 	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("artifact root %s is group or other writable", root)
+	if st.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("artifact root %s is owned by uid %d, not %d: %s", root, st.Uid, os.Geteuid(), artifactRootHint)
+	}
+	// Any group or other bit would let another user read artifact contents or
+	// add run directories this policy then prunes.
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("artifact root %s has mode %04o, not 0700: %s", root, perm, artifactRootHint)
 	}
 	return nil
 }
@@ -78,23 +84,44 @@ func verifyArtifactRoot(root string) error {
 // createArtifactRunDir creates one runtime's directory under the verified
 // artifact root and returns it.
 func createArtifactRunDir(runID, rtID string) (string, error) {
-	root, err := ensureArtifactRoot()
-	if err != nil {
+	if _, err := ensureArtifactRoot(); err != nil {
 		return "", err
 	}
-	dir := filepath.Join(root, artifactRunPrefix+runID, rtID)
+	dir := filepath.Join(artifactRunDir(runID), rtID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create artifact dir %s: %w", dir, err)
 	}
 	return dir, nil
 }
 
+// startArtifactRetention launches the goroutine that refreshes this
+// supervisor's run directory and prunes the run directories of supervisors
+// that are gone.
+func (s *Supervisor) startArtifactRetention() {
+	s.artifactRetentionStop = make(chan struct{})
+	s.artifactRetentionDone = make(chan struct{})
+	go s.runArtifactRetention(s.artifactRetentionStop)
+}
+
+// stopArtifactRetention halts the retention goroutine and waits for it to
+// exit.
+func (s *Supervisor) stopArtifactRetention() {
+	stop := s.artifactRetentionStop
+	s.artifactRetentionStop = nil
+	if stop == nil {
+		return
+	}
+	close(stop)
+	<-s.artifactRetentionDone
+}
+
 // runArtifactRetention keeps this supervisor's run directory fresh and prunes
 // stale run directories until stop is closed.
 func (s *Supervisor) runArtifactRetention(stop <-chan struct{}) {
+	defer close(s.artifactRetentionDone)
 	s.touchArtifactRunDir()
 	s.pruneArtifactDirs()
-	ticker := time.NewTicker(artifactPruneInterval)
+	ticker := time.NewTicker(s.artifactPruneInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -115,14 +142,14 @@ func (s *Supervisor) touchArtifactRunDir() {
 	if err := verifyArtifactRoot(root); err != nil {
 		return // the prune that follows reports the refusal once
 	}
-	dir := filepath.Join(root, artifactRunPrefix+s.runID)
+	dir := artifactRunDir(s.runID)
 	// Chtimes follows symlinks, so the directory is confirmed to be one first.
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
 		return
 	}
 	now := time.Now()
 	if err := os.Chtimes(dir, now, now); err != nil {
-		s.reportArtifactError(err, "refresh artifact dir %s: %v", dir, err)
+		s.reportArtifactError(dir, err, "refresh artifact dir %s: %v", dir, err)
 	}
 }
 
@@ -144,7 +171,7 @@ func (s *Supervisor) pruneArtifactDirs() {
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		s.reportArtifactError(err, "read artifact root %s: %v", root, err)
+		s.reportArtifactError(root, err, "read artifact root %s: %v", root, err)
 		return
 	}
 	for _, entry := range entries {
@@ -157,19 +184,15 @@ func (s *Supervisor) pruneArtifactDirs() {
 	}
 }
 
-// pruneArtifactRun removes one run directory once it is stale both when it is
-// inspected and again immediately before removal, so a run that wrote in
-// between is kept. The second read narrows the window between deciding and
-// removing; it does not close it.
+// pruneArtifactRun removes one run directory whose newest entry is older than
+// artifactRetention. A run that writes between that check and the removal still
+// loses the directory.
 func (s *Supervisor) pruneArtifactRun(dir string) {
 	if !artifactRunStale(dir) {
 		return
 	}
-	if !artifactRunStale(dir) {
-		return
-	}
 	if err := os.RemoveAll(dir); err != nil {
-		s.reportArtifactError(err, "prune artifact dir %s: %v", dir, err)
+		s.reportArtifactError(dir, err, "prune artifact dir %s: %v", dir, err)
 	}
 }
 
@@ -180,12 +203,10 @@ func artifactRunStale(dir string) bool {
 	return ok && time.Since(newest) >= artifactRetention
 }
 
-// artifactNewestWrite reports the newest modification time under dir, clamped
-// to now so a future timestamp cannot pin a directory. A walk that fails falls
-// back to dir's own modification time, so an unreadable subtree does not keep
-// its run directory forever.
+// artifactNewestWrite reports the newest modification time under dir. A walk
+// that fails falls back to dir's own modification time, so an unreadable
+// subtree does not keep its run directory forever.
 func artifactNewestWrite(dir string) (time.Time, bool) {
-	now := time.Now()
 	newest, err := newestArtifactTime(dir)
 	if err != nil {
 		info, statErr := os.Lstat(dir)
@@ -193,9 +214,6 @@ func artifactNewestWrite(dir string) (time.Time, bool) {
 			return time.Time{}, false
 		}
 		newest = info.ModTime()
-	}
-	if newest.After(now) {
-		newest = now
 	}
 	return newest, true
 }
@@ -231,12 +249,18 @@ func (s *Supervisor) writeArtifactDiagnostic(format string, args ...any) {
 }
 
 // reportArtifactError reports a retention failure, collapsing repeats of a
-// permission denial into its first occurrence: the prune runs hourly, and the
-// same denied directory fails identically on every pass.
-func (s *Supervisor) reportArtifactError(err error, format string, args ...any) {
+// permission denial for the same path into its first occurrence: the prune runs
+// hourly, and one denied directory fails identically on every pass.
+func (s *Supervisor) reportArtifactError(path string, err error, format string, args ...any) {
 	if !errors.Is(err, fs.ErrPermission) {
 		s.writeArtifactDiagnostic(format, args...)
 		return
 	}
-	s.artifactPermissionWarn.Do(func() { s.writeArtifactDiagnostic(format, args...) })
+	s.artifactPermissionMu.Lock()
+	defer s.artifactPermissionMu.Unlock()
+	if _, reported := s.artifactPermissionWarn[path]; reported {
+		return
+	}
+	s.artifactPermissionWarn[path] = struct{}{}
+	s.writeArtifactDiagnostic(format, args...)
 }
