@@ -5947,7 +5947,9 @@ func TestIdleTimeoutWaitsForParkedRuntime(t *testing.T) {
 
 	reapedAt := awaitRuntimeEnded(t, sup, parked.RuntimeID)
 	awaitIdleRunExit(t, done, tombstonePath, 5*time.Second)
-	if elapsed := time.Since(reapedAt); elapsed < idleTimeout*3/4 {
+	// reapedAt trails the reap by the poll interval, so the bound leaves half a
+	// window of slack; a reap that never re-armed the window returns at once.
+	if elapsed := time.Since(reapedAt); elapsed < idleTimeout/2 {
 		t.Fatalf("Run() returned %v after the parked runtime was reaped, want about %v", elapsed, idleTimeout)
 	}
 }
