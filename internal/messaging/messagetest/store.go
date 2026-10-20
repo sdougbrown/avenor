@@ -453,11 +453,8 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		if !store.Pending(sender.RunID, msgID) || store.PendingCount(sender.RunID) != 1 {
 			t.Fatal("prune terminated an ask before its deadline")
 		}
-		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
-			t.Fatalf("Reply = (%q, %v)", outcome, err)
-		}
-		if res, err := store.Wait(t.Context(), key(store, msgID), time.Second); err != nil || res.Outcome != messaging.OutcomeReplied || res.Reply == nil {
-			t.Fatalf("Wait = (%+v, %v)", res, err)
+		if _, ok := store.Fence(key(store, msgID)); ok {
+			t.Fatal("prune fenced an ask before its deadline")
 		}
 	})
 

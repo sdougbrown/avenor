@@ -64,6 +64,12 @@ func TestStorePruneTerminatesExpiredWaiter(t *testing.T) {
 	if store.Pending(sender.RunID, msgID) {
 		t.Fatal("expired edge survived prune")
 	}
+	// The pruned ID is past its encoded deadline, so it cannot be admitted again.
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
+	}); !errors.Is(err, messaging.ErrMessageIDExpired) {
+		t.Fatalf("expired Admit error = %v, want ErrMessageIDExpired", err)
+	}
 }
 
 // TestStoreWithdrawAbsentIDPolicy pins which edge-absent withdrawals may
