@@ -252,6 +252,16 @@ func TestLastAgentMessageBoundsTextAndCarriesTruncation(t *testing.T) {
 	if !record.Truncated || record.Label != "peer-one" || record.RunID != "rt_1" || record.At == 0 {
 		t.Fatalf("record = %+v", record)
 	}
+
+	// A producer that reports complete text still gets a truncated record when
+	// the store's own bound is what shortened it.
+	if err := b.SetLastAgentMessage("rt_1", long, "done", false); err != nil {
+		t.Fatalf("set last: %v", err)
+	}
+	record, _ = b.LastAgentMessage("rt_1")
+	if !record.Truncated || len([]rune(record.Text)) != events.MaxFinalOutputRunes {
+		t.Fatalf("bounded record = %d runes truncated=%v, want a preview", len([]rune(record.Text)), record.Truncated)
+	}
 }
 
 func TestLastMessageEndpointRows(t *testing.T) {

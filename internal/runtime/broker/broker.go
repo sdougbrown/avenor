@@ -99,8 +99,9 @@ type SessionInfo struct {
 	LastSeen int64  `json:"last_seen"`
 }
 
-// LastAgentMessage is one run's most recent completed turn. Text is bounded
-// and Truncated is carried from the producer, never re-derived here.
+// LastAgentMessage is one run's most recent completed turn. Text is bounded and
+// Truncated reports a preview: the producer's flag, or the store's own bound
+// having shortened the text.
 type LastAgentMessage struct {
 	RunID      string `json:"run_id"`
 	Label      string `json:"label,omitempty"`
@@ -1443,18 +1444,23 @@ func (b *Broker) MatchLabel(label string) []string {
 
 // SetLastAgentMessage records runID's most recent completed turn. It always
 // writes a record, even for empty text, so "no completed turn" stays distinct
-// from "a turn with no final text". Truncated is the producer's fact; the
-// bounding here is a safety net, not the source of the flag.
+// from "a turn with no final text". Truncated is the producer's fact, and the
+// safety-net bound also sets it when it shortens the text: a cut record is a
+// preview regardless of what the producer claimed.
 func (b *Broker) SetLastAgentMessage(runID, text, stopReason string, truncated bool) error {
 	st := b.GetRun(runID)
 	if st == nil {
 		return fmt.Errorf("run not found: %s", runID)
 	}
+	bounded := events.BoundedFinalOutput(text)
+	if bounded != text {
+		truncated = true
+	}
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
 	st.LastMessage = &LastAgentMessage{
 		RunID:      runID,
-		Text:       events.BoundedFinalOutput(text),
+		Text:       bounded,
 		StopReason: stopReason,
 		Truncated:  truncated,
 		At:         time.Now().UnixMilli(),
