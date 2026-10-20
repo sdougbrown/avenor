@@ -5830,10 +5830,12 @@ func TestIdleCheckWindowStartsAtLastRuntimeActivity(t *testing.T) {
 	start := time.Now()
 	select {
 	case <-idleCh:
-	case <-time.After(2 * idleTimeout):
+	case <-time.After(3 * idleTimeout):
 		t.Fatal("idle timer never fired")
 	}
-	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed > 350*time.Millisecond {
+	// A window measured from now instead would end about 400ms out; the upper
+	// bound sits just below that so scheduler delay cannot fail the test alone.
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed >= idleTimeout-25*time.Millisecond {
 		t.Fatalf("idle timer fired after %v, want about %v: the window starts at the last activity", elapsed, idleTimeout/2)
 	}
 }
