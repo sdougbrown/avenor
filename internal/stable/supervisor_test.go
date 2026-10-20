@@ -8143,7 +8143,9 @@ func waitControlSessionEnd(t *testing.T, eventCh <-chan client.Event, runtimeID 
 // before prompting the next turn. Returns the delivered session.end seqs.
 func runControlTurnsTest(t *testing.T, turns int, betweenTurn func(turn int, sup *Supervisor, c *client.Client, runtimeID string)) []int64 {
 	t.Helper()
-	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
+	// A short socket path keeps the control socket under the unix socket path
+	// limit; the test temporary directory is longer than it.
+	socketPath := newStableSocketPath(t, "ctrl-turns")
 
 	provider := &turnEndProvider{}
 

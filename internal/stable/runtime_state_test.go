@@ -7,16 +7,27 @@ import (
 )
 
 // TestMain keeps root-budget runtime state out of a developer's real home
+// directory and the package's runtime artifacts out of the shared temporary
 // directory. Production roots still use the user's Avenor runtime-state
 // directory; this only isolates the package's many direct NewSupervisor tests.
 func TestMain(m *testing.M) {
-	home, err := os.MkdirTemp("", "avenor-stable-home-")
+	root, err := os.MkdirTemp("", "avenor-stable-test-")
 	if err != nil {
 		panic(err)
 	}
+	home := filepath.Join(root, "home")
+	tmp := filepath.Join(root, "tmp")
+	for _, dir := range []string{home, tmp} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			panic(err)
+		}
+	}
 	oldHome, hadHome := os.LookupEnv("HOME")
-	if err := os.Setenv("HOME", home); err != nil {
-		panic(err)
+	oldTmp, hadTmp := os.LookupEnv("TMPDIR")
+	for _, env := range []struct{ key, value string }{{"HOME", home}, {"TMPDIR", tmp}} {
+		if err := os.Setenv(env.key, env.value); err != nil {
+			panic(err)
+		}
 	}
 	code := m.Run()
 	if hadHome {
@@ -24,7 +35,12 @@ func TestMain(m *testing.M) {
 	} else {
 		_ = os.Unsetenv("HOME")
 	}
-	_ = os.RemoveAll(home)
+	if hadTmp {
+		_ = os.Setenv("TMPDIR", oldTmp)
+	} else {
+		_ = os.Unsetenv("TMPDIR")
+	}
+	_ = os.RemoveAll(root)
 	os.Exit(code)
 }
 
