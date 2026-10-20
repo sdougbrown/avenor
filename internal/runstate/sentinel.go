@@ -3,7 +3,10 @@ package runstate
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // Sentinel is a run's completion sentinel: the first line is the status word and
@@ -60,6 +63,11 @@ func ReadSentinelSession(path string) (string, error) {
 	return sentinel.SessionID, nil
 }
 
+// IsResumableStatus reports whether a sentinel status word names a status a
+// resume may continue. It is the one classification the sentinel reader and the
+// resume authority share.
+func IsResumableStatus(raw string) bool { return isResumableSentinel(raw) }
+
 // isResumableSentinel reports whether a sentinel status word names a status a
 // resume may continue. It reads the SentinelStatus mapping rather than
 // re-spelling the status words, so a status added to that vocabulary is
@@ -70,4 +78,19 @@ func isResumableSentinel(raw string) bool {
 		return true
 	}
 	return false
+}
+
+// RunIDFromSentinel extracts the public run id from a sentinel basename shaped
+// avenor-run-<uuid>.done, or returns empty for any other name. It is the one
+// implementation the surfaces and resume share.
+func RunIDFromSentinel(sentinelFile string) string {
+	base := filepath.Base(sentinelFile)
+	id := strings.TrimSuffix(strings.TrimPrefix(base, "avenor-run-"), ".done")
+	if id == "" || id == base {
+		return ""
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return ""
+	}
+	return id
 }

@@ -1,0 +1,235 @@
+package stable
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
+	"github.com/sdougbrown/avenor/internal/runstate"
+)
+
+// Resume continues a prior run in a new one. The target is a resolved broker
+// runtime id; the public run id and artifact paths are minted by the calling
+// surface and never re-derived here.
+func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	if caller.Kind != messaging.CallerOwner {
+		return messaging.ResumeResult{}, &router.ToolError{
+			Code:    "not_permitted",
+			Message: "only the control owner may resume a run",
+		}
+	}
+	if req.Target == "" {
+		return messaging.ResumeResult{}, unknownTargetError(req.Target)
+	}
+	runID, err := s.resolveResumeTarget(req.Target)
+	if err != nil {
+		return messaging.ResumeResult{}, err
+	}
+	prior := s.runtimeByID(runID)
+	if prior == nil {
+		return messaging.ResumeResult{}, &router.ToolError{
+			Code:    "refused",
+			Message: fmt.Sprintf("runtime %q is not owned by this supervisor", runID),
+		}
+	}
+	sessionID, err := s.resumeSessionID(prior, runID)
+	if err != nil {
+		return messaging.ResumeResult{}, err
+	}
+
+	prior.mu.Lock()
+	label := prior.label
+	agent, model, backend := prior.effectiveAgent, prior.effectiveModel, prior.effectiveBackend
+	if agent == "" {
+		agent = prior.agent
+	}
+	if model == "" {
+		model = prior.model
+	}
+	if backend == "" {
+		backend = prior.backend
+	}
+	thinking := prior.thinking
+	agentProfile := prior.agentProfile
+	dir := prior.dir
+	autoApprove := prior.autoApprove
+	rosterFile := prior.rosterFile
+	rosterEntry := prior.rosterEntry
+	prior.mu.Unlock()
+
+	// The prior label is the current display name, so a rename is honoured
+	// here rather than the stale launch label.
+	if s.broker != nil {
+		if current := s.broker.DisplayName(runID); current != "" {
+			label = current
+		}
+	}
+	newLabel := req.Label
+	if newLabel == "" {
+		// label falls back to the prior runtime id when the broker has no
+		// display name, so this is never just "-followup".
+		newLabel = label + "-followup"
+	}
+
+	idempotencyKey := ""
+	if req.IdempotencyKey != "" {
+		idempotencyKey = "follow_up:" + req.IdempotencyKey
+	} else if holder := s.liveLabelHolder(newLabel); holder != "" {
+		// The keyed-spawn gate is the authority; this pre-check only fast-fails
+		// the common case with the existing text.
+		return messaging.ResumeResult{}, &router.ToolError{
+			Code:    "refused",
+			Message: fmt.Sprintf("label already in use: %s (runtime %s)", newLabel, holder),
+		}
+	}
+
+	params := SpawnParams{
+		Prompt:         req.Message,
+		Dir:            dir,
+		Agent:          agent,
+		AgentProfile:   agentProfile,
+		Label:          newLabel,
+		Model:          model,
+		Thinking:       thinking,
+		Backend:        backend,
+		OnEvent:        req.EventLog,
+		SentinelFile:   req.SentinelFile,
+		AutoApprove:    autoApprove,
+		RosterFile:     rosterFile,
+		RosterEntry:    rosterEntry,
+		SessionID:      sessionID,
+		IdempotencyKey: idempotencyKey,
+	}
+	var spawned SpawnResult
+	if idempotencyKey != "" {
+		hash, hashErr := IdempotencyHash(params)
+		if hashErr != nil {
+			return messaging.ResumeResult{}, &router.ToolError{Code: "refused", Message: hashErr.Error()}
+		}
+		spawned, err = s.idempotentSpawn(params, hash)
+	} else {
+		spawned, err = s.spawn(params)
+	}
+	if err != nil {
+		return messaging.ResumeResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
+	}
+
+	result := messaging.ResumeResult{
+		RunID:        req.RunID,
+		Label:        newLabel,
+		RuntimeID:    spawned.RuntimeID,
+		SessionID:    spawned.SessionID,
+		SentinelFile: req.SentinelFile,
+		OnEvent:      req.EventLog,
+	}
+	if idempotencyKey != "" {
+		// A keyed call replays the first run, so the first run's ids win.
+		if spawned.SentinelFile != "" {
+			result.SentinelFile = spawned.SentinelFile
+			if id := runstate.RunIDFromSentinel(spawned.SentinelFile); id != "" {
+				result.RunID = id
+			}
+		}
+		if spawned.OnEvent != "" {
+			result.OnEvent = spawned.OnEvent
+		}
+	}
+	return result, nil
+}
+
+// resolveResumeTarget resolves a resume target through the shared ladder: an
+// exact broker runtime id, then the one display name. A public run id never
+// resolves here; the host surface resolves it by ID before calling.
+func (s *Supervisor) resolveResumeTarget(ref string) (string, error) {
+	if s.broker == nil {
+		return "", unknownTargetError(ref)
+	}
+	if s.broker.GetRun(ref) != nil {
+		return ref, nil
+	}
+	matches := s.broker.MatchLabel(ref)
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return "", unknownTargetError(ref)
+	default:
+		facts := map[string]string{
+			"target":     messaging.Quote(ref),
+			"count":      fmt.Sprint(len(matches)),
+			"candidates": messaging.QuoteList(matches),
+		}
+		return "", &router.ToolError{
+			Code:    "ambiguous_name",
+			Message: messaging.Repair("ambiguous_name", facts),
+			Facts:   facts,
+		}
+	}
+}
+
+func unknownTargetError(ref string) error {
+	return &router.ToolError{
+		Code:    "unknown_target",
+		Message: messaging.Repair("unknown_target", map[string]string{"target": messaging.Quote(ref)}),
+	}
+}
+
+// resumeSessionID reads the session ladder: the sentinel's SESSION, then the
+// runtime's live session id, then a sentinel re-read. A non-resumable sentinel
+// status is the one denial, rendered from the shared repair template.
+func (s *Supervisor) resumeSessionID(prior *childRuntime, runID string) (string, error) {
+	prior.mu.Lock()
+	sentinelPath := prior.sentinelFile
+	prior.mu.Unlock()
+
+	sessionID, err := runstate.ReadSentinelSession(sentinelPath)
+	switch {
+	case err == nil:
+		return sessionID, nil
+	case errors.Is(err, os.ErrNotExist):
+		// No sentinel yet: the run may still be live.
+	default:
+		sentinel, readErr := runstate.ReadSentinel(sentinelPath)
+		if readErr != nil {
+			return "", err
+		}
+		if !runstate.IsResumableStatus(sentinel.Status) {
+			facts := map[string]string{
+				"run_id": messaging.Quote(runID),
+				"status": messaging.Sanitize(strings.ToLower(sentinel.Status)),
+			}
+			return "", &router.ToolError{
+				Code:    "not_resumable",
+				Message: messaging.Repair("not_resumable", facts),
+				Facts:   facts,
+			}
+		}
+		// A resumable sentinel with no SESSION: fall through to the live value.
+	}
+
+	if live := prior.sessionID(); live != "" {
+		return live, nil
+	}
+	if sessionID, err := runstate.ReadSentinelSession(sentinelPath); err == nil {
+		return sessionID, nil
+	}
+	return "", nil
+}
+
+// runtimeByID returns a registered runtime without holding controlMu across the
+// caller's work.
+func (s *Supervisor) runtimeByID(rtID string) *childRuntime {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	return s.runtimes[rtID]
+}
+
+// liveLabelHolder reports the runtime a live run holds newLabel under, or "".
+func (s *Supervisor) liveLabelHolder(label string) string {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	return s.labelHolderLocked(label)
+}

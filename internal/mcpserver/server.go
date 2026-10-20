@@ -741,15 +741,7 @@ func (s *Server) checkLabelAvailable(cl ControlClient, supervisorPath, label str
 // runIDFromSentinel extracts the MCP run UUID from a sentinel basename shaped
 // avenor-run-<uuid>.done, or returns empty for any other name.
 func runIDFromSentinel(sentinelFile string) string {
-	base := filepath.Base(sentinelFile)
-	id := strings.TrimSuffix(strings.TrimPrefix(base, "avenor-run-"), ".done")
-	if id == "" || id == base {
-		return ""
-	}
-	if _, err := uuid.Parse(id); err != nil {
-		return ""
-	}
-	return id
+	return runstate.RunIDFromSentinel(sentinelFile)
 }
 
 // runInfoFromListEntry converts a stable supervisor list entry into a registry
