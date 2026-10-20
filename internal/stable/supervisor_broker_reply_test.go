@@ -131,3 +131,49 @@ func TestNewSupervisorAsksOverItsConstructedTransport(t *testing.T) {
 		t.Fatal("the supervisor's in-process ask never saw its reply")
 	}
 }
+
+// TestChildAskToSupervisorRunIsQueuedAndDrained pins the child→supervisor leg
+// over the same broker HTTP path a spawned pi child uses: an unversioned ask
+// from the child's registered broker run to the supervisor's own run is queued
+// for the supervisor, drained by BrokerReceive, and answered to the child's
+// waiting message id.
+func TestChildAskToSupervisorRunIsQueuedAndDrained(t *testing.T) {
+	sup := NewSupervisor(Config{MaxRuntimes: 1})
+	t.Cleanup(func() { _ = sup.broker.Stop() })
+	if runID, _ := sup.registerBrokerRun(); runID != "supervisor" {
+		t.Fatalf("supervisor broker run = %q, want supervisor", runID)
+	}
+	child := &childRuntime{id: "rt_child", label: "worker"}
+	childToken := sup.ensureChildBrokerRun(child)
+	if childToken == "" {
+		t.Fatal("child broker run was not registered")
+	}
+
+	const msgID = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+	payload := fmt.Sprintf(`{"id":%q,"from":"rt_child","from_run_id":"rt_child","to_run_id":"supervisor","message":"status?","role":"agent","expects_reply":true}`, msgID)
+	ask := fmt.Sprintf(`{"run_id":"rt_child","token":%q,"from_run_id":"rt_child","to_run_id":"supervisor","type":"agent_message","payload":%s}`, childToken, payload)
+	if status, body := brokerPost(t, sup.broker.Addr(), "send", ask); status != http.StatusOK {
+		t.Fatalf("child send = (%d, %v)", status, body)
+	}
+
+	drained, err := sup.BrokerReceive()
+	if err != nil {
+		t.Fatalf("BrokerReceive: %v", err)
+	}
+	asks, ok := drained.([]map[string]any)
+	if !ok || len(asks) != 1 {
+		t.Fatalf("drained = %#v, want the child's ask", drained)
+	}
+	if asks[0]["from_run_id"] != "rt_child" || asks[0]["message_id"] != msgID || asks[0]["message"] != "status?" {
+		t.Fatalf("drained ask = %v, want rt_child's status? ask", asks[0])
+	}
+
+	if err := sup.BrokerReply("rt_child", msgID, "all good"); err != nil {
+		t.Fatalf("BrokerReply: %v", err)
+	}
+	wait := fmt.Sprintf(`{"run_id":"rt_child","token":%q,"waiting_for":%q}`, childToken, msgID)
+	status, body := brokerPost(t, sup.broker.Addr(), "wait_reply", wait)
+	if status != http.StatusOK || body["from_run_id"] != "supervisor" {
+		t.Fatalf("child wait_reply = (%d, %v), want the supervisor's answer", status, body)
+	}
+}
