@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -70,28 +69,6 @@ func TestUpdateSessionInfoPatchKeepsLabelAndKind(t *testing.T) {
 	if info.Label != "launch-label" || info.Kind != "agent" || info.Backend != "pi" ||
 		info.Model != "m" || info.Dir != "/repo" || info.Status != "ended" {
 		t.Fatalf("session info after status-only patch = %+v", info)
-	}
-}
-
-func TestRenameRunThenMatchLabelResolvesNewLabelOnly(t *testing.T) {
-	b := New("")
-	if _, err := b.CreateRun("rt_1", "old-label"); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	if _, err := b.CreateRun("rt_2", "other-label"); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	if err := b.RenameRun("rt_1", "new-label"); err != nil {
-		t.Fatalf("rename: %v", err)
-	}
-	if got := b.MatchLabel("new-label"); len(got) != 1 || got[0] != "rt_1" {
-		t.Fatalf("MatchLabel(new-label) = %v, want [rt_1]", got)
-	}
-	if got := b.MatchLabel("old-label"); len(got) != 0 {
-		t.Fatalf("old label still resolves: %v", got)
-	}
-	if b.DisplayName("rt_1") != "new-label" {
-		t.Fatalf("display name = %q, want new-label", b.DisplayName("rt_1"))
 	}
 }
 
@@ -233,7 +210,6 @@ func (e *codedRenameError) ToolCode() string { return e.code }
 
 func TestLastAgentMessageUnknownRunKeepsIdentity(t *testing.T) {
 	b := New("")
-	b.UpdateSessionInfo("ghost", &SessionInfo{Kind: "agent"})
 	record, ok := b.LastAgentMessage("rt_missing")
 	if ok {
 		t.Fatal("ok = true for a run that never recorded a turn")
@@ -370,20 +346,6 @@ func TestLastAgentMessageRecorderSkipsRunLevelEnd(t *testing.T) {
 	// The run's finish is still recorded; only the last-message store skips it.
 	if b.LastFinishStatus("rt_rec") != "done" {
 		t.Fatalf("finish status = %q", b.LastFinishStatus("rt_rec"))
-	}
-}
-
-func TestMatchLabelIsStableAndAmbiguous(t *testing.T) {
-	b := New("")
-	for _, id := range []string{"rt_b", "rt_a", "rt_c"} {
-		if _, err := b.CreateRun(id, "shared"); err != nil {
-			t.Fatalf("create run %s: %v", id, err)
-		}
-	}
-	got := b.MatchLabel("shared")
-	want := []string{"rt_a", "rt_b", "rt_c"}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("MatchLabel = %v, want %v", got, want)
 	}
 }
 

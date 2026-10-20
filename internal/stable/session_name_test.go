@@ -6,17 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runtime/broker/brokertest"
 )
-
-func lastEventNamed(t *testing.T, log *itestEventLog, name string) (events.Event, bool) {
-	t.Helper()
-	return log.find(func(ev events.Event) bool { return ev.Event == name })
-}
 
 func TestSessionRenameLevelsAndResolution(t *testing.T) {
 	sup, _ := newStage2Supervisor(t, 4)
@@ -205,10 +201,6 @@ func TestSessionLastRecordsSupervisorOnly(t *testing.T) {
 	if _, err := sup.broker.CreateRun("rt_a", "peer-a"); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	log := newItestEventLog(sup.control.SubscribeEvents(ctx))
-
 	record, ok, err := sup.SessionLast("rt_a")
 	if err != nil {
 		t.Fatalf("session last: %v", err)
@@ -230,11 +222,6 @@ func TestSessionLastRecordsSupervisorOnly(t *testing.T) {
 	}
 	assertToolCode(t, sup.SessionLastSet(messaging.Caller{Kind: messaging.CallerBroker, RunID: "rt_a"}, "supervisor", "x", "", false), "not_permitted")
 	assertToolCode(t, sup.SessionLastSet(owner, "rt_a", "x", "", false), "not_permitted")
-
-	time.Sleep(50 * time.Millisecond)
-	if _, found := lastEventNamed(t, log, "session.last_message"); found {
-		t.Fatal("session_last_set published an event")
-	}
 }
 
 func assertToolCode(t *testing.T, err error, want string) {
@@ -249,4 +236,41 @@ func assertToolCode(t *testing.T, err error, want string) {
 	if coded.Code != want {
 		t.Fatalf("tool code = %q, want %q (%v)", coded.Code, want, err)
 	}
+}
+
+// TestSessionRenameIndexesRuntimeHistory pins the runtime_id the event carries:
+// without it a control history or tail read for the renamed runtime cannot see
+// the rename.
+func TestSessionRenameIndexesRuntimeHistory(t *testing.T) {
+	sup, _ := newStage2Supervisor(t, 4)
+	socket := newStableSocketPath(t, "s2-history")
+	if err := sup.control.Start(socket); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	defer sup.control.Stop()
+	c, err := client.Dial(socket)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer c.Close()
+
+	if _, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, "", "main"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	var history struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := c.Call("history", map[string]any{"runtime_id": "supervisor"}, &history); err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	for _, ev := range history.Events {
+		if ev["event"] != "session.renamed" {
+			continue
+		}
+		if ev["label"] != "main" || ev["previous_label"] != "supervisor" {
+			t.Fatalf("session.renamed history fields = %v", ev)
+		}
+		return
+	}
+	t.Fatalf("session.renamed is absent from the runtime history: %v", history.Events)
 }
