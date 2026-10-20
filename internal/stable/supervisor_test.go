@@ -293,7 +293,7 @@ func TestSpawnLoopFileFailureCleansReservedRuntime(t *testing.T) {
 	if err == nil {
 		t.Fatal("spawn with missing loop file should error")
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0", got)
 	}
 	if len(sup.runtimes) != 0 {
@@ -311,7 +311,7 @@ func TestSpawnTeamFileFailureCleansReservedRuntime(t *testing.T) {
 	if err == nil {
 		t.Fatal("spawn with missing team file should error")
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0", got)
 	}
 	if len(sup.runtimes) != 0 {
@@ -422,7 +422,7 @@ func TestActiveRuntimeCountIgnoresCompletedHistory(t *testing.T) {
 	initializeCompletedTestChild(t, sup, doneChild)
 	sup.runtimes["rt_done"] = doneChild
 
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0 for completed history", got)
 	}
 }

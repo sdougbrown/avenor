@@ -208,6 +208,14 @@ func newTestSupervisor(t *testing.T, cfg Config) *Supervisor {
 	return sup
 }
 
+// activeRuntimeCount reads the admission-visible runtime count under the lock
+// its production callers hold.
+func activeRuntimeCount(sup *Supervisor) int {
+	sup.controlMu.Lock()
+	defer sup.controlMu.Unlock()
+	return sup.activeRuntimeCountLocked()
+}
+
 // stopAllTestRuntimes cancels every runtime the supervisor still owns so
 // teardown-driven children complete before the lifecycle counter assertion.
 // Cancellation is idempotent for already-ended children.

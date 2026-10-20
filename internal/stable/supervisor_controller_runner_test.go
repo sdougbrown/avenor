@@ -169,7 +169,7 @@ func (f *runnerFixture) stop(t *testing.T) {
 		}
 	}
 	waitFor(t, f.sup.supervisorIdentity()+" runtimes terminal at cleanup", func() bool {
-		return f.sup.activeRuntimeCount() == 0
+		return activeRuntimeCount(f.sup) == 0
 	})
 	// The terminal attempt-termination write lags the runtime's completed
 	// flag; give it the same settle window the dispatch tests use.
@@ -324,7 +324,7 @@ func TestControllerRunnerNeverExceedsMaxInflight(t *testing.T) {
 	go func() {
 		defer close(sampling)
 		for {
-			n := int32(f.sup.activeRuntimeCount())
+			n := int32(activeRuntimeCount(f.sup))
 			for {
 				cur := maxActive.Load()
 				if n <= cur || maxActive.CompareAndSwap(cur, n) {
@@ -339,12 +339,12 @@ func TestControllerRunnerNeverExceedsMaxInflight(t *testing.T) {
 		}
 	}()
 
-	waitFor(t, "first two dispatches", func() bool { return f.sup.activeRuntimeCount() == 2 })
+	waitFor(t, "first two dispatches", func() bool { return activeRuntimeCount(f.sup) == 2 })
 	// Several fast passes must not exceed the bound while two runtimes are
 	// unreported.
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if n := f.sup.activeRuntimeCount(); n > 2 {
+		if n := activeRuntimeCount(f.sup); n > 2 {
 			t.Fatalf("%d live runtimes with max_inflight=2", n)
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -365,7 +365,7 @@ func TestControllerRunnerNeverExceedsMaxInflight(t *testing.T) {
 				total++
 			}
 		}
-		return total == 2 && f.sup.activeRuntimeCount() == 2
+		return total == 2 && activeRuntimeCount(f.sup) == 2
 	})
 	// Let the final two runtimes park before cleanup re-closes release.
 }
@@ -656,7 +656,7 @@ func TestControllerRunnerCollidingRuntimeIDsIndependentProgress(t *testing.T) {
 	f2.enableController(t, "c2", 1)
 
 	waitFor(t, "both supervisors dispatched their own workflow", func() bool {
-		return f1.sup.activeRuntimeCount() == 1 && f2.sup.activeRuntimeCount() == 1
+		return activeRuntimeCount(f1.sup) == 1 && activeRuntimeCount(f2.sup) == 1
 	})
 
 	// Both runtimes exist under the colliding id rt_1.
@@ -785,7 +785,7 @@ func TestControllerViewsIsolatedAcrossSupervisorRoots(t *testing.T) {
 	f1.enableController(t, "c1", 4)
 	f2.enableController(t, "c2", 4)
 	waitFor(t, "both supervisors dispatched their own workflow", func() bool {
-		return f1.sup.activeRuntimeCount() == 1 && f2.sup.activeRuntimeCount() == 1
+		return activeRuntimeCount(f1.sup) == 1 && activeRuntimeCount(f2.sup) == 1
 	})
 
 	// Both runtimes exist under the colliding id rt_1, one per supervisor.
@@ -880,7 +880,7 @@ func TestControllerInflightViewDistinguishesSupervisorsOnSharedRoot(t *testing.T
 	f2.enableController(t, "c2", 1)
 
 	waitFor(t, "both supervisors dispatched their own workflow", func() bool {
-		return f1.sup.activeRuntimeCount() == 1 && f2.sup.activeRuntimeCount() == 1
+		return activeRuntimeCount(f1.sup) == 1 && activeRuntimeCount(f2.sup) == 1
 	})
 
 	// Both runtimes exist under the colliding id rt_1, one per supervisor.

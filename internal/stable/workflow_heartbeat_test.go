@@ -130,7 +130,7 @@ func TestHeartbeatKeepsLeaseAliveWhileRuntimeLive(t *testing.T) {
 			if out.Kind != Dispatched {
 				t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 			}
-			waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+			waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 			waitHeartbeatEvents(t, f, 1)
 
 			// Over > 3×TTL the lease stays renewed (never in the past), the
@@ -230,7 +230,7 @@ func TestHeartbeatExitsWhenLeaseSweptWhileRuntimeLive(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	waitHeartbeatEvents(t, f, 1)
 
 	act := workflowActivation(t, f)
@@ -288,7 +288,7 @@ func TestHeartbeatExitsWhenLeaseSweptWhileRuntimeLive(t *testing.T) {
 		defer f.sup.heartbeatMu.Unlock()
 		return len(f.sup.heartbeats) == 0
 	})
-	if got := f.sup.activeRuntimeCount(); got != 1 {
+	if got := activeRuntimeCount(f.sup); got != 1 {
 		t.Fatalf("active runtime count = %d, want 1 (runtime must stay live)", got)
 	}
 }
@@ -305,13 +305,13 @@ func TestHeartbeatStopsWhenRuntimeTerminates(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	waitHeartbeatEvents(t, f, 1)
 
 	// Drive the runtime to a terminal state by canceling it (the fixture
 	// cleanup owns the release channel).
 	_ = f.sup.cancelRuntime(out.RuntimeID)
-	waitFor(t, "runtime terminal", func() bool { return f.sup.activeRuntimeCount() == 0 })
+	waitFor(t, "runtime terminal", func() bool { return activeRuntimeCount(f.sup) == 0 })
 
 	// The heartbeat goroutine exits once the runtime is terminal: wait for
 	// its registry entry to be gone before sampling.
@@ -439,7 +439,7 @@ func TestLeaseExpiryReleasesKeyAndAllowsReplacement(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("replacement outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "replacement runtime live", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "replacement runtime live", func() bool { return activeRuntimeCount(f.sup) == 1 })
 
 	// The replacement's lease is heartbeat-renewed, not swept.
 	waitHeartbeatEvents(t, f, 1)

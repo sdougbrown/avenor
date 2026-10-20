@@ -4034,12 +4034,6 @@ func (s *Supervisor) shutdown(mode string) int {
 	return 0
 }
 
-func (s *Supervisor) activeRuntimeCount() int {
-	s.controlMu.Lock()
-	defer s.controlMu.Unlock()
-	return s.activeRuntimeCountLocked()
-}
-
 // liveRuntimeCount counts registered runtimes that have not completed,
 // including parked runtimes: a parked runtime still owns a live backend
 // process awaiting a follow-up prompt.

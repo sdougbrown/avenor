@@ -182,7 +182,7 @@ func newDispatchFixtureTemplate(t *testing.T, name string, maxRuntimes, maxTreeB
 				_ = sup.cancelRuntime(id)
 			}
 		}
-		waitFor(t, "runtimes terminal at cleanup", func() bool { return sup.activeRuntimeCount() == 0 })
+		waitFor(t, "runtimes terminal at cleanup", func() bool { return activeRuntimeCount(sup) == 0 })
 		_ = sup.broker.Stop()
 		sup.stopReaper()
 	})
@@ -245,11 +245,11 @@ func TestDispatchConsumesExactlyOneReservation(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	if got := f.treeActive(t); got != 1 {
 		t.Fatalf("tree slots active = %d, want exactly 1", got)
 	}
-	if got := f.sup.activeRuntimeCount(); got != 1 {
+	if got := activeRuntimeCount(f.sup); got != 1 {
 		t.Fatalf("active runtimes = %d, want 1", got)
 	}
 	f.sup.controlMu.Lock()
@@ -280,7 +280,7 @@ func TestDispatchReservationReleasedOnPreStartFailure(t *testing.T) {
 	if got := f.treeActive(t); got != 0 {
 		t.Fatalf("tree slots active = %d, want 0 after pre-start failure", got)
 	}
-	if got := f.sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(f.sup); got != 0 {
 		t.Fatalf("active runtimes = %d, want 0", got)
 	}
 	f.sup.controlMu.Lock()
@@ -458,7 +458,7 @@ func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("first outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "first runtime live", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "first runtime live", func() bool { return activeRuntimeCount(f.sup) == 1 })
 
 	// A second supervisor on the same root (separate store handle, like a
 	// separate process) must see the key as held.
@@ -483,7 +483,7 @@ func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
 				_ = sup2.cancelRuntime(id)
 			}
 		}
-		waitFor(t, "sup2 runtimes terminal at cleanup", func() bool { return sup2.activeRuntimeCount() == 0 })
+		waitFor(t, "sup2 runtimes terminal at cleanup", func() bool { return activeRuntimeCount(sup2) == 0 })
 		_ = sup2.broker.Stop()
 		sup2.stopReaper()
 	})
@@ -555,7 +555,7 @@ func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
 	// workflow dispatches. The manual claim's stranded lease is recovered by
 	// the same sweep.
 	_ = f.sup.cancelRuntime(out.RuntimeID)
-	waitFor(t, "first runtime terminal", func() bool { return f.sup.activeRuntimeCount() == 0 })
+	waitFor(t, "first runtime terminal", func() bool { return activeRuntimeCount(f.sup) == 0 })
 	waitFor(t, "manual lease recovery re-arms the candidate", func() bool {
 		if _, err := mgr2.ResumeAwaitingChildren(); err != nil {
 			return false
@@ -726,7 +726,7 @@ func TestDispatchAssignmentAutoApproveRunsUnattended(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	runtimes := f.sup.listRuntimes()
 	if len(runtimes) != 1 {
 		t.Fatalf("runtimes = %d, want 1", len(runtimes))
@@ -876,7 +876,7 @@ func TestSpawnRejectsAutoApproveWithPermissionDecider(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "permission_decider and permission_model_decider are mutually exclusive") {
 		t.Fatalf("err = %v, want decider/decider_model mutual exclusion", err)
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawns", got)
 	}
 }
@@ -1484,7 +1484,7 @@ func TestDispatchCrashAfterBeginDispatchRecovers(t *testing.T) {
 	// reaper reclaims it (here: never, same process), which is the documented
 	// crash behavior: no second live attempt, capacity reclaimable by the
 	// reaper, and no completion inferred from the released reservation.
-	waitFor(t, "single live runtime", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "single live runtime", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	if got := f.treeActive(t); got < 1 {
 		t.Fatalf("tree slots active = %d, want at least the replacement's 1", got)
 	}
@@ -1584,7 +1584,7 @@ func TestSpawnConsumesReservationOnSuccess(t *testing.T) {
 	if _, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: t.TempDir()}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	waitFor(t, "runtime registration", func() bool { return sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(sup) == 1 })
 	if active, _, _ := sup.treeBudgetStatusValues(); active != 1 {
 		t.Fatalf("tree slots active = %d, want 1 after successful spawn", active)
 	}
@@ -1694,7 +1694,7 @@ func TestDispatchCanceledAfterBeginDispatch(t *testing.T) {
 	if got := f.treeActive(t); got != 0 {
 		t.Fatalf("tree slots active = %d, want 0", got)
 	}
-	waitFor(t, "runtime absent after cancel", func() bool { return f.sup.activeRuntimeCount() == 0 })
+	waitFor(t, "runtime absent after cancel", func() bool { return activeRuntimeCount(f.sup) == 0 })
 	insp, err := f.mgr.WorkflowInspect(f.wf)
 	if err != nil {
 		t.Fatalf("WorkflowInspect: %v", err)
@@ -1736,7 +1736,7 @@ func TestDispatchKeyHeldOutcomeReleasesReservation(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("first outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "first runtime live", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "first runtime live", func() bool { return activeRuntimeCount(f.sup) == 1 })
 
 	// A second workflow sharing the key under the same controller.
 	if _, err := f.mgr.WorkflowCreate(dispatchTemplateJSONTTL(t, "tmpl-dispatch-key-outcome-2", "c1", "deploys", 900)); err != nil {
@@ -1832,11 +1832,11 @@ func TestDispatchSingleAcquirePerAction(t *testing.T) {
 			if out.Kind != Dispatched {
 				t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 			}
-			waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+			waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 			if got := f.treeActive(t); got != 1 {
 				t.Fatalf("tree slots active = %d, want exactly 1 (no second acquire)", got)
 			}
-			if got := f.sup.activeRuntimeCount(); got != 1 {
+			if got := activeRuntimeCount(f.sup); got != 1 {
 				t.Fatalf("active runtimes = %d, want 1", got)
 			}
 			f.sup.controlMu.Lock()
@@ -1930,7 +1930,7 @@ func TestDispatchKeyHeldThroughRunnerDeps(t *testing.T) {
 	if _, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil)); err != nil {
 		t.Fatalf("first dispatch: %v", err)
 	}
-	waitFor(t, "first runtime live", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "first runtime live", func() bool { return activeRuntimeCount(f.sup) == 1 })
 
 	// The second workflow's candidate is ready, but its key is held.
 	cands, err := f.mgr.CandidatesForController("c1", 10)
@@ -2209,7 +2209,7 @@ func TestDispatchModelDeciderAnswersRequest(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	status, err := f.sup.RuntimeStatus(out.RuntimeID)
 	if err != nil {
 		t.Fatalf("RuntimeStatus: %v", err)
@@ -2393,7 +2393,7 @@ func TestSpawnModelDeciderRequiresResolvableKey(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "MODEL_DECIDER_TEST_UNSET_KEY") {
 		t.Fatalf("err = %v, want unset api_key_env failure", err)
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawn", got)
 	}
 }
@@ -2483,7 +2483,7 @@ func TestDispatchModelDeciderHumanAnswerWinsRace(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	waitFor(t, "request pending", func() bool {
 		status, err := f.sup.RuntimeStatus(out.RuntimeID)
 		if err != nil {

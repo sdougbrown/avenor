@@ -231,7 +231,7 @@ func TestSpawnReleaseOnStartupFailure(t *testing.T) {
 	if active != 0 {
 		t.Fatalf("active = %d, want 0 after startup failure", active)
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("local active = %d, want 0 after startup failure", got)
 	}
 }
@@ -253,7 +253,7 @@ func TestSpawnReleaseOnLoopFileFailure(t *testing.T) {
 	if active != 0 {
 		t.Fatalf("active = %d, want 0 after loop failure", active)
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("local active = %d, want 0 after loop failure", got)
 	}
 }
