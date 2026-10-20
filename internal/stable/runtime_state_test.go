@@ -99,7 +99,7 @@ func TestSupervisorStartupPrunesStaleArtifactDirectories(t *testing.T) {
 }
 
 func TestRootTreeBudgetUsesAvenorRuntimeStateAndCleansUp(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "project", "control.sock")
+	socketPath := newStableSocketPath(t, "root-tree-budget")
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: socketPath,
 		MaxRuntimes:   1,
@@ -132,7 +132,7 @@ func TestRootTreeBudgetUsesAvenorRuntimeStateAndCleansUp(t *testing.T) {
 	// A nested supervisor receives the root's explicit path and therefore joins
 	// the same budget even though its own control socket is elsewhere.
 	nested := newTestSupervisor(t, Config{
-		ControlSocket:  filepath.Join(t.TempDir(), "worktree", "nested.sock"),
+		ControlSocket:  newStableSocketPath(t, "nested-tree-budget"),
 		MaxRuntimes:    1,
 		TreeBudgetFile: budgetPath,
 	})

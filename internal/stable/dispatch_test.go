@@ -1504,7 +1504,7 @@ func TestReservationDegradedLocalOnlyMode(t *testing.T) {
 	var sup *Supervisor
 	stderr := captureStderr(t, func(stderr io.Writer) {
 		sup = newTestSupervisor(t, Config{
-			ControlSocket:   filepath.Join(t.TempDir(), "control.sock"),
+			ControlSocket:   newStableSocketPath(t, "reservation-degraded"),
 			MaxRuntimes:     2,
 			MaxTreeBudget:   8,
 			ShutdownTimeout: 0,

@@ -532,7 +532,7 @@ func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
 	var sup *Supervisor
 	stderr := captureStderr(t, func(stderr io.Writer) {
 		sup = newTestSupervisor(t, Config{
-			ControlSocket:   filepath.Join(t.TempDir(), "control.sock"),
+			ControlSocket:   newStableSocketPath(t, "degraded-mode"),
 			MaxRuntimes:     1,
 			MaxTreeBudget:   8,
 			ShutdownTimeout: 0,
