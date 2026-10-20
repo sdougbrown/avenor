@@ -96,7 +96,9 @@ cat "$SOCK.dead"    # STOPPED reason=shutdown pid=<pid> at=<timestamp>
 - The supervisor writes child state under
   `${TMPDIR:-/tmp}/avenor-stable-$(id -u)/run_<supervisor_run_id>/`. The root
   is created `0700` and refused if it is a symlink, owned by another euid, or
-  group- or other-writable. A child's default artifact directory outlives the
+  grants any group or other permission; the refusal names the root and says to
+  remove it, or to chown and chmod it to `0700`. A child's default artifact
+  directory outlives the
   supervisor — its sentinel and event log stay readable after shutdown — and
   prune only considers `run_*` directories, hourly, removing one only once
   nothing in it has been written for 24 hours while its supervisor kept

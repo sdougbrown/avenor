@@ -469,8 +469,8 @@ The `SpawnResult` returned by a team spawn has an empty `SessionID`:
 {
   "runtime_id": "rt_1",
   "session_id": "",
-  "on_event": "/tmp/avenor-stable-1000/run_.../events.ndjson",
-  "sentinel_file": "/tmp/avenor-stable-1000/run_.../sentinel.env"
+  "on_event": "/tmp/avenor-stable-1000/run_.../<runtime_id>/events.ndjson",
+  "sentinel_file": "/tmp/avenor-stable-1000/run_.../<runtime_id>/sentinel.env"
 }
 ```
 
