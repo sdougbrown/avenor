@@ -1139,8 +1139,8 @@ func TestClientClosedOnServerDisconnect(t *testing.T) {
 }
 
 // startErrorAndHangServer returns a stub supervisor that replies with a
-// JSON-RPC error frame for the "rpc_error" method and accepts but never
-// replies (keeping the connection open) for any other method.
+// JSON-RPC error frame for the "rpc_error" and "subscribe" methods and accepts
+// but never replies (keeping the connection open) for any other method.
 func startErrorAndHangServer(t *testing.T) (string, func()) {
 	t.Helper()
 	path := filepath.Join(os.TempDir(), "avc-client-err-hang-"+time.Now().Format("150405.000000")+".sock")
@@ -1170,6 +1170,11 @@ func startErrorAndHangServer(t *testing.T) (string, func()) {
 					respData, _ := json.Marshal(resp)
 					_, _ = c.Write(append(respData, '\n'))
 				}
+				if req.Method == "subscribe" {
+					resp := Response{JSONRPC: "2.0", ID: req.ID, Error: &RespError{Code: -32000, Message: "control server stopped"}}
+					respData, _ := json.Marshal(resp)
+					_, _ = c.Write(append(respData, '\n'))
+				}
 				// Keep the connection open until cleanup so the client's readLoop
 				// does not observe an EOF.
 				<-done
@@ -1179,7 +1184,10 @@ func startErrorAndHangServer(t *testing.T) (string, func()) {
 	return path, func() { close(done); ln.Close(); os.Remove(path) }
 }
 
-func TestClientClosedFalseOnRPCErrorAndTimeout(t *testing.T) {
+// TestClientClosedStateByFailureKind pins which failures leave the connection
+// usable: an RPC error and a response timeout do not, while a subscribe refused
+// during server shutdown reports the connection as closed.
+func TestClientClosedStateByFailureKind(t *testing.T) {
 	path, cleanup := startErrorAndHangServer(t)
 	defer cleanup()
 
@@ -1205,6 +1213,23 @@ func TestClientClosedFalseOnRPCErrorAndTimeout(t *testing.T) {
 		}
 		if c.Closed() {
 			t.Fatal("Closed() = true after an RPC error, want false")
+		}
+	})
+
+	t.Run("stopped subscribe refusal closes", func(t *testing.T) {
+		c, err := Dial(path)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer c.Close()
+		// The server refuses a subscribe once shutdown begins and closes the
+		// connection right after, so the caller sees a closed connection.
+		err = c.Call("subscribe", nil, nil)
+		if !errors.Is(err, ErrConnectionClosed) {
+			t.Fatalf("error = %v, want ErrConnectionClosed", err)
+		}
+		if !c.Closed() {
+			t.Fatal("Closed() = false after a stopped subscribe refusal, want true")
 		}
 	})
 

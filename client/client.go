@@ -130,6 +130,10 @@ func Dial(socketPath string) (*Client, error) {
 // its wait budget.
 var ErrResponseTimeout = errors.New("read response: timeout")
 
+// ErrConnectionClosed reports that the control connection ended before the
+// server answered: the socket dropped, the server stopped, or Close was called.
+var ErrConnectionClosed = errors.New("connection closed")
+
 // Owner-authentication rejections, classified from the wire codes so every
 // client reports the same four classes.
 var (
@@ -389,7 +393,7 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	}
 	if c.closed.Load() {
 		c.mu.Unlock()
-		return fmt.Errorf("call %s: connection closed", method)
+		return fmt.Errorf("call %s: %w", method, ErrConnectionClosed)
 	}
 	// Register the response waiter before writing so an already-running
 	// readLoop cannot receive and discard a fast response.
@@ -426,7 +430,7 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	select {
 	case r, ok := <-respCh:
 		if !ok {
-			return fmt.Errorf("read response: connection closed")
+			return fmt.Errorf("read response: %w", ErrConnectionClosed)
 		}
 		resp = r
 	case <-timerC:
@@ -437,6 +441,12 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	}
 
 	if resp.Error != nil {
+		// A server that is shutting down refuses new subscriptions and then
+		// closes every connection, so the refusal is the connection closing.
+		if resp.Error.Code == control.CodeControlStopped && resp.Error.Message == control.ErrControlStopped.Error() {
+			c.markClosed()
+			return fmt.Errorf("call %s: %w", method, ErrConnectionClosed)
+		}
 		return &RPCError{Code: resp.Error.Code, Message: resp.Error.Message, Data: resp.Error.Data}
 	}
 	if result != nil && len(resp.Result) > 0 {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -90,7 +91,9 @@ func cmdList(c *client.Client) int {
 }
 
 func cmdTail(c *client.Client) int {
-	if err := c.Call("subscribe", nil, nil); err != nil {
+	// A connection that closes before the subscribe is answered ends the stream
+	// the caller asked to tail, so it is not a failure to report.
+	if err := c.Call("subscribe", nil, nil); err != nil && !errors.Is(err, client.ErrConnectionClosed) {
 		fmt.Fprintf(os.Stderr, "avenor control: subscribe: %v\n", err)
 		return 1
 	}
