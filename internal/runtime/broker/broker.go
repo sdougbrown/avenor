@@ -1155,35 +1155,41 @@ func (b *Broker) PollAgentMessages(ctx context.Context, runID string, onMessage 
 			return
 		case <-ticker.C:
 		}
-		st := b.GetRun(runID)
-		if st == nil {
+		b.pollAgentMessagesOnce(runID, onMessage)
+	}
+}
+
+// pollAgentMessagesOnce delivers runID's queued agent messages to onMessage and
+// leaves every other control message queued for the consumers that act on it.
+func (b *Broker) pollAgentMessagesOnce(runID string, onMessage func(wrappedContent string)) {
+	st := b.GetRun(runID)
+	if st == nil {
+		return
+	}
+	st.Mu.Lock()
+	agent, other := partitionAgentMessages(st.ControlQueue)
+	msgs := make([]ControlMessage, 0, len(agent))
+	for _, msg := range agent {
+		msgs = append(msgs, *msg)
+	}
+	st.ControlQueue = other
+	st.Mu.Unlock()
+	for _, msg := range msgs {
+		var payload struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.Message == "" {
 			continue
 		}
-		st.Mu.Lock()
-		agent, _ := partitionAgentMessages(st.ControlQueue)
-		msgs := make([]ControlMessage, 0, len(agent))
-		for _, msg := range agent {
-			msgs = append(msgs, *msg)
-		}
-		st.ControlQueue = nil
-		st.Mu.Unlock()
-		for _, msg := range msgs {
-			var payload struct {
-				Message string `json:"message"`
-			}
-			if err := json.Unmarshal(msg.Payload, &payload); err != nil || payload.Message == "" {
-				continue
-			}
 
-			// Include from_run_id in the channel metadata so the
-			// receiving agent knows which run sent the message.
-			meta := map[string]string{"from_run_id": msg.FromRunID}
-			if msg.FromRunID != "" {
-				meta["from_run_id"] = msg.FromRunID
-			}
-			wrapped := channelwrap.ChannelWrap(payload.Message, channelwrap.AgentName("agent"), meta)
-			onMessage(wrapped)
+		// Include from_run_id in the channel metadata so the
+		// receiving agent knows which run sent the message.
+		meta := map[string]string{"from_run_id": msg.FromRunID}
+		if msg.FromRunID != "" {
+			meta["from_run_id"] = msg.FromRunID
 		}
+		wrapped := channelwrap.ChannelWrap(payload.Message, channelwrap.AgentName("agent"), meta)
+		onMessage(wrapped)
 	}
 }
 

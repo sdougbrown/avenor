@@ -1048,6 +1048,31 @@ func TestPollAgentMessagesUsesAuthenticatedFromRunID(t *testing.T) {
 	}
 }
 
+// TestPollAgentMessagesKeepsNonAgentControl pins that a poll drains only agent
+// messages: the control messages other consumers act on stay queued in order.
+func TestPollAgentMessagesKeepsNonAgentControl(t *testing.T) {
+	b := New("")
+	status := &ControlMessage{Type: "request_status", Payload: json.RawMessage(`{"message":"status?"}`)}
+	agent := &ControlMessage{Type: "agent_message", FromRunID: "peer", Payload: json.RawMessage(`{"message":"hello"}`)}
+	shutdown := &ControlMessage{Type: "shutdown"}
+	st := &RunState{ControlQueue: []*ControlMessage{status, agent, shutdown}}
+	b.mu.Lock()
+	b.runs["target"] = st
+	b.mu.Unlock()
+
+	var delivered []string
+	b.pollAgentMessagesOnce("target", func(wrapped string) { delivered = append(delivered, wrapped) })
+
+	if len(delivered) != 1 || !strings.Contains(delivered[0], "hello") {
+		t.Fatalf("poll delivered %v, want only the agent message", delivered)
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	if len(st.ControlQueue) != 2 || st.ControlQueue[0] != status || st.ControlQueue[1] != shutdown {
+		t.Fatalf("control queue = %v, want the non-agent messages in their original order", st.ControlQueue)
+	}
+}
+
 // --- Ask/Reply Tests ---
 
 // sendAsk is a helper that sends a message with expects_reply=true
