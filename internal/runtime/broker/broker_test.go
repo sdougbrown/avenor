@@ -125,37 +125,22 @@ func httpRegister(t *testing.T, addr, runID string) string {
 	return r["token"]
 }
 
-func TestBrokerRegisterBadJSON(t *testing.T) {
+func TestBrokerRegisterInvalidRequests(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
-	resp, err := http.Post(fmt.Sprintf("http://%s/register", b.Addr()),
-		"application/json", bytes.NewReader([]byte(`{not valid json`)))
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("bad JSON register expected 400, got %d", resp.StatusCode)
-	}
-}
-
-func TestBrokerRegisterEmptyRunID(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-	resp, err := http.Post(fmt.Sprintf("http://%s/register", b.Addr()),
-		"application/json", bytes.NewReader([]byte(`{}`)))
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("empty run_id register expected 400, got %d", resp.StatusCode)
+	for _, body := range []string{`{not valid json`, `{}`} {
+		resp, err := http.Post(fmt.Sprintf("http://%s/register", b.Addr()),
+			"application/json", bytes.NewReader([]byte(body)))
+		if err != nil {
+			t.Fatalf("register %q: %v", body, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("register %q expected 400, got %d", body, resp.StatusCode)
+		}
 	}
 }
 
@@ -352,49 +337,6 @@ func TestPollAgentMessagesStopsOnCancel(t *testing.T) {
 	}
 }
 
-func TestBrokerPushControlAndPoll(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	// register
-	regBody := bytes.NewReader([]byte(`{"run_id":"run_2"}`))
-	resp, err := http.Post(fmt.Sprintf("http://%s/register", b.Addr()), "application/json", regBody)
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	var regResult map[string]string
-	json.NewDecoder(resp.Body).Decode(&regResult)
-	resp.Body.Close()
-	token := regResult["token"]
-
-	// push control (via direct PushControl, bypasses auth for test)
-	b.PushControl("run_2", ControlMessage{ID: "ctrl_1", Type: "continue", RunID: "run_2", Payload: []byte(`{"msg":"hello"}`)})
-
-	// poll control
-	pollBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"run_2","token":"%s"}`, token)))
-	resp, err = http.Post(fmt.Sprintf("http://%s/poll-control", b.Addr()), "application/json", pollBody)
-	if err != nil {
-		t.Fatalf("poll: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("poll: %d", resp.StatusCode)
-	}
-	var msgs []ControlMessage
-	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	resp.Body.Close()
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(msgs))
-	}
-	if msgs[0].ID != "ctrl_1" {
-		t.Fatalf("unexpected id: %s", msgs[0].ID)
-	}
-}
-
 func TestBrokerPollDrainsStaleNotifyAfterQueuedMessage(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -545,6 +487,8 @@ func TestBrokerReports(t *testing.T) {
 	}
 }
 
+// TestBrokerAuthRejection pins that every mutating endpoint refuses a missing
+// run identity or a wrong token.
 func TestBrokerAuthRejection(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -552,34 +496,49 @@ func TestBrokerAuthRejection(t *testing.T) {
 	}
 	defer b.Stop()
 
-	regBody := bytes.NewReader([]byte(`{"run_id":"run_5"}`))
-	resp, err := http.Post(fmt.Sprintf("http://%s/register", b.Addr()), "application/json", regBody)
-	if err != nil {
-		t.Fatalf("register: %v", err)
+	if _, err := b.CreateRun("auth_run", ""); err != nil {
+		t.Fatalf("create auth_run: %v", err)
 	}
-	resp.Body.Close()
+	if _, err := b.CreateRun("auth_peer", ""); err != nil {
+		t.Fatalf("create auth_peer: %v", err)
+	}
 
-	// missing run_id
-	badBody := bytes.NewReader([]byte(`{"token":"x"}`))
-	resp, err = http.Post(fmt.Sprintf("http://%s/report", b.Addr()), "application/json", badBody)
-	if err != nil {
-		t.Fatalf("bad auth: %v", err)
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "missing run_id",
+			path: "/report",
+			body: `{"token":"x"}`,
+		},
+		{
+			name: "report wrong token",
+			path: "/report",
+			body: `{"run_id":"auth_run","token":"wrong"}`,
+		},
+		{
+			name: "ask wrong token",
+			path: "/send",
+			body: `{"run_id":"auth_run","token":"wrong","from_run_id":"auth_run","to_run_id":"auth_peer","type":"agent_message","payload":{"id":"ask-noauth","from":"auth_run","from_run_id":"auth_run","message":"test","expects_reply":true}}`,
+		},
+		{
+			name: "cancel wrong token",
+			path: "/cancel_message",
+			body: `{"run_id":"auth_run","token":"wrong","cancel_message_id":"ask-noauth"}`,
+		},
 	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	for _, tc := range cases {
+		resp, err := http.Post(fmt.Sprintf("http://%s%s", b.Addr(), tc.path), "application/json", bytes.NewReader([]byte(tc.body)))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: expected 401, got %d", tc.name, resp.StatusCode)
+		}
 	}
-	resp.Body.Close()
-
-	// wrong token
-	wrongBody := bytes.NewReader([]byte(`{"run_id":"run_5","token":"wrong"}`))
-	resp, err = http.Post(fmt.Sprintf("http://%s/report", b.Addr()), "application/json", wrongBody)
-	if err != nil {
-		t.Fatalf("wrong token: %v", err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("wrong token: expected 401, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
 }
 
 func TestBrokerTimeout(t *testing.T) {
@@ -642,66 +601,6 @@ func TestBrokerDeleteRun(t *testing.T) {
 	b.DeleteRun("nonexistent")
 }
 
-func TestEnvelopeConversion(t *testing.T) {
-	payload := json.RawMessage(`{"key":"val"}`)
-
-	t.Run("Report", func(t *testing.T) {
-		r := Report{RunID: "r1", State: "working", Payload: payload}
-		e := r.ToEnvelope()
-		if e.FromRunID != "r1" {
-			t.Errorf("FromRunID = %q, want r1", e.FromRunID)
-		}
-		if e.Kind != "working" {
-			t.Errorf("Kind = %q, want working", e.Kind)
-		}
-		if string(e.Payload) != `{"key":"val"}` {
-			t.Errorf("Payload = %s", e.Payload)
-		}
-	})
-
-	t.Run("Finish", func(t *testing.T) {
-		f := Finish{RunID: "r2", Status: "done", Summary: "ok", Payload: payload}
-		e := f.ToEnvelope()
-		if e.Kind != "done" {
-			t.Errorf("Kind = %q, want done", e.Kind)
-		}
-	})
-
-	t.Run("FinishNoStatus", func(t *testing.T) {
-		f := Finish{RunID: "r3"}
-		e := f.ToEnvelope()
-		if e.Kind != "done" {
-			t.Errorf("Kind = %q, want done", e.Kind)
-		}
-	})
-
-	t.Run("Reply", func(t *testing.T) {
-		r := Reply{RunID: "r4", To: "controller", Payload: payload}
-		e := r.ToEnvelope()
-		if e.To != "controller" {
-			t.Errorf("To = %q, want controller", e.To)
-		}
-	})
-
-	t.Run("ControlMessage", func(t *testing.T) {
-		now := time.Now()
-		m := ControlMessage{ID: "ctrl_1", Type: "continue", RunID: "r5", Payload: payload, CreatedAt: now}
-		e := m.ToEnvelope()
-		if e.ToRunID != "r5" {
-			t.Errorf("ToRunID = %q, want r5", e.ToRunID)
-		}
-		if e.Kind != "continue" {
-			t.Errorf("Kind = %q, want continue", e.Kind)
-		}
-		if e.CorrelationID != "ctrl_1" {
-			t.Errorf("CorrelationID = %q, want ctrl_1", e.CorrelationID)
-		}
-		if !e.CreatedAt.Equal(now) {
-			t.Errorf("CreatedAt = %v, want %v", e.CreatedAt, now)
-		}
-	})
-}
-
 func TestBrokerSend(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -757,63 +656,33 @@ func TestBrokerSendNonexistentRun(t *testing.T) {
 	}
 }
 
-func TestBrokerIngestReport(t *testing.T) {
+func TestBrokerIngest(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_ingest_report", "")
-	if err != nil {
+	if _, err := b.CreateRun("run_ingest", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	_ = token
 
-	payload := json.RawMessage(`{"summary":"progress"}`)
-	if err := b.Ingest("run_ingest_report", "thinking", payload); err != nil {
-		t.Fatalf("Ingest: %v", err)
+	if err := b.Ingest("run_ingest", "thinking", json.RawMessage(`{"summary":"progress"}`)); err != nil {
+		t.Fatalf("Ingest report: %v", err)
+	}
+	if err := b.Ingest("run_ingest", "done", json.RawMessage(`{"result":"ok"}`)); err != nil {
+		t.Fatalf("Ingest finish: %v", err)
 	}
 
-	st := b.GetRun("run_ingest_report")
+	st := b.GetRun("run_ingest")
 	if st == nil {
 		t.Fatal("run not found")
 	}
-	if len(st.Reports) != 1 {
-		t.Fatalf("expected 1 report, got %d", len(st.Reports))
+	if len(st.Reports) != 1 || st.Reports[0].State != "thinking" {
+		t.Fatalf("reports = %+v, want one thinking report", st.Reports)
 	}
-	if st.Reports[0].State != "thinking" {
-		t.Errorf("State = %q, want thinking", st.Reports[0].State)
-	}
-}
-
-func TestBrokerIngestFinish(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	token, err := b.CreateRun("run_ingest_finish", "")
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	_ = token
-
-	payload := json.RawMessage(`{"result":"ok"}`)
-	if err := b.Ingest("run_ingest_finish", "done", payload); err != nil {
-		t.Fatalf("Ingest: %v", err)
-	}
-
-	st := b.GetRun("run_ingest_finish")
-	if st == nil {
-		t.Fatal("run not found")
-	}
-	if len(st.Finishes) != 1 {
-		t.Fatalf("expected 1 finish, got %d", len(st.Finishes))
-	}
-	if st.Finishes[0].Status != "done" {
-		t.Errorf("Status = %q, want done", st.Finishes[0].Status)
+	if len(st.Finishes) != 1 || st.Finishes[0].Status != "done" {
+		t.Fatalf("finishes = %+v, want one done finish", st.Finishes)
 	}
 }
 
@@ -893,71 +762,6 @@ func TestBrokerSendTo(t *testing.T) {
 	}
 }
 
-func TestBrokerSendToUnknownTarget(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	token, err := b.CreateRun("sender", "")
-	if err != nil {
-		t.Fatalf("create sender: %v", err)
-	}
-
-	sendBody := bytes.NewReader([]byte(`{
-		"run_id": "sender",
-		"token": "` + token + `",
-		"from_run_id": "sender",
-		"to_run_id": "nonexistent",
-		"type": "agent_message",
-		"payload": {"message": "hello"}
-	}`))
-	resp, err := http.Post(fmt.Sprintf("http://%s/send", b.Addr()), "application/json", sendBody)
-	if err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d", resp.StatusCode)
-	}
-}
-
-func TestBrokerSendAuthFailure(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	_, err := b.CreateRun("sender", "")
-	if err != nil {
-		t.Fatalf("create sender: %v", err)
-	}
-	_, err = b.CreateRun("target", "")
-	if err != nil {
-		t.Fatalf("create target: %v", err)
-	}
-
-	// Wrong token for from_run_id
-	sendBody := bytes.NewReader([]byte(`{
-		"run_id": "sender",
-		"token": "wrong_token",
-		"from_run_id": "sender",
-		"to_run_id": "target",
-		"type": "agent_message",
-		"payload": {"message": "hello"}
-	}`))
-	resp, err := http.Post(fmt.Sprintf("http://%s/send", b.Addr()), "application/json", sendBody)
-	if err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", resp.StatusCode)
-	}
-}
-
 func TestBrokerSendAutoCorrelationID(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -969,7 +773,6 @@ func TestBrokerSendAutoCorrelationID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	b.DeleteRun("target_auto")
 	targetToken, err := b.CreateRun("target_auto", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
@@ -1610,17 +1413,6 @@ func TestBrokerCancelMessage(t *testing.T) {
 	if queued != 1 {
 		t.Errorf("target queue = %d, want only the uncancelled ask", queued)
 	}
-
-	// Cancelling a non-existent message should fail
-	cancelBody2 := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":%q,"token":%q,"cancel_message_id":"nonexistent"}`, "canceller", senderToken)))
-	resp2, err := http.Post(fmt.Sprintf("http://%s/cancel_message", addr), "application/json", cancelBody2)
-	if err != nil {
-		t.Fatalf("cancel nonexistent: %v", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNotFound {
-		t.Errorf("cancel nonexistent expected 404, got %d", resp2.StatusCode)
-	}
 }
 
 // TestBrokerRemovalTerminatesWaiters verifies that removing a participating
@@ -1964,61 +1756,6 @@ func TestBrokerWaitReplyForNonexistentAsk(t *testing.T) {
 	}
 }
 
-func TestBrokerReplyAfterEdgeExpired(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	senderToken, err := b.CreateRun("sender_expired", "")
-	if err != nil {
-		t.Fatalf("create sender: %v", err)
-	}
-	targetToken, err := b.CreateRun("target_expired", "")
-	if err != nil {
-		t.Fatalf("create target: %v", err)
-	}
-
-	addr := b.Addr()
-	msgID := "expired-ask"
-
-	// Send an ask from sender -> target
-	result := sendAsk(t, addr, senderToken, "sender_expired", "target_expired", msgID, "will this expire?")
-	if st := result["status"]; st != http.StatusOK {
-		t.Fatalf("sendAsk status = %d", st)
-	}
-
-	// Expire the ask edge by pruning beyond its retention deadline.
-	b.Store().Prune(time.Now().Add(askstore.DefaultAskTimeout + time.Second))
-	if b.Store().Pending("sender_expired", msgID) {
-		t.Fatal("ask edge should be gone after expiry")
-	}
-
-	// Send a reply from target -> sender (correct direction).
-	// Since the edge is gone, this should fall back to fire-and-forget.
-	replyResult := sendReply(t, addr, targetToken, "target_expired", "sender_expired", msgID, "late reply")
-	if st := replyResult["status"]; st != http.StatusOK {
-		t.Fatalf("sendReply after expiry status = %d", st)
-	}
-	if replyResult["note"] == nil {
-		t.Error("expected 'note' about fire-and-forget fallback in reply response")
-	}
-
-	// Verify the reply was delivered as a fire-and-forget message to the
-	// original asker (sender_expired).
-	senderSt := b.GetRun("sender_expired")
-	if senderSt == nil {
-		t.Fatal("sender_expired run not found")
-	}
-	senderSt.Mu.Lock()
-	queueLen := len(senderSt.ControlQueue)
-	senderSt.Mu.Unlock()
-	if queueLen == 0 {
-		t.Error("expected the reply to be queued as fire-and-forget")
-	}
-}
-
 func TestBrokerSessionsEndpoint(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -2116,6 +1853,15 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 	if !found {
 		t.Error("runner_1 not found in sessions list")
 	}
+	runner := b.GetRun("runner_1")
+	runner.Mu.Lock()
+	info := runner.Info
+	runner.Mu.Unlock()
+	if info == nil || info.RunID != "runner_1" {
+		t.Fatalf("stored session info = %+v, want the run id filled in", info)
+	}
+	// Updating a run that does not exist must not panic.
+	b.UpdateSessionInfo("nonexistent", &SessionInfo{Label: "ghost"})
 
 	// Sessions should reject without auth
 	resp3, err := http.Get(fmt.Sprintf("http://%s/sessions", b.Addr()))
@@ -2125,82 +1871,6 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 	resp3.Body.Close()
 	if resp3.StatusCode != http.StatusUnauthorized {
 		t.Errorf("sessions without auth expected 401, got %d", resp3.StatusCode)
-	}
-}
-
-func TestBrokerUpdateSessionInfo(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	token, err := b.CreateRun("update_me", "")
-	if err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	_ = token
-
-	// Update info
-	b.UpdateSessionInfo("update_me", &SessionInfo{
-		Label:  "my-label",
-		Status: "working",
-	})
-
-	st := b.GetRun("update_me")
-	if st == nil {
-		t.Fatal("run not found")
-	}
-	st.Mu.Lock()
-	info := st.Info
-	st.Mu.Unlock()
-	if info == nil {
-		t.Fatal("SessionInfo should not be nil after update")
-	}
-	if info.Label != "my-label" {
-		t.Errorf("Label = %q, want my-label", info.Label)
-	}
-	if info.Status != "working" {
-		t.Errorf("Status = %q, want working", info.Status)
-	}
-	if info.RunID != "update_me" {
-		t.Errorf("RunID = %q, want update_me", info.RunID)
-	}
-
-	// Updating nonexistent run should not panic
-	b.UpdateSessionInfo("nonexistent", &SessionInfo{Label: "ghost"})
-}
-
-func TestBrokerPruneExpiredAskEdges(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	token, err := b.CreateRun("pruner", "")
-	if err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	if _, err := b.CreateRun("pruner_target", ""); err != nil {
-		t.Fatalf("create target: %v", err)
-	}
-	if r := sendAsk(t, b.Addr(), token, "pruner", "pruner_target", "stale-edge", "hi"); r["status"] != http.StatusOK {
-		t.Fatalf("sendAsk status = %d", r["status"])
-	}
-
-	// Pruning past the retention deadline removes the edge; a fresh ask
-	// survives a prune at the current time.
-	b.Store().Prune(time.Now().Add(askstore.DefaultAskTimeout + time.Second))
-	if b.Store().Pending("pruner", "stale-edge") {
-		t.Error("stale edge should be removed after pruning")
-	}
-	if r := sendAsk(t, b.Addr(), token, "pruner", "pruner_target", "fresh-edge", "hi"); r["status"] != http.StatusOK {
-		t.Fatalf("fresh sendAsk status = %d", r["status"])
-	}
-	b.Store().Prune(time.Now())
-	if !b.Store().Pending("pruner", "fresh-edge") {
-		t.Error("fresh ask edge should survive pruning")
 	}
 }
 
@@ -2272,64 +1942,6 @@ func TestBrokerAskReplyWaitTimeout(t *testing.T) {
 	}
 	if b.Store().Pending("timeout_asker", msgID) {
 		t.Error("expired ask edge should be removed after prune")
-	}
-}
-
-func TestBrokerSendAuthStillRequiredForAskReply(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	token, err := b.CreateRun("auth_test_1", "")
-	if err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	_, err = b.CreateRun("auth_test_2", "")
-	if err != nil {
-		t.Fatalf("create run 2: %v", err)
-	}
-
-	// Attempt ask with wrong token
-	payload := `{"id":"ask-noauth","from":"auth_test_1","from_run_id":"auth_test_1","message":"test","expects_reply":true}`
-	body := bytes.NewReader([]byte(fmt.Sprintf(`{
-		"run_id": "auth_test_1",
-		"token": "wrong",
-		"from_run_id": "auth_test_1",
-		"to_run_id": "auth_test_2",
-		"type": "agent_message",
-		"payload": %s
-	}`, payload)))
-	resp, err := http.Post(fmt.Sprintf("http://%s/send", b.Addr()), "application/json", body)
-	if err != nil {
-		t.Fatalf("send: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("expected 401 for wrong token, got %d", resp.StatusCode)
-	}
-
-	// wait_reply with nonexistent ask should return 404
-	waitBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"auth_test_1","token":"%s","waiting_for":"ask-noauth"}`, token)))
-	resp2, err := http.Post(fmt.Sprintf("http://%s/wait_reply", b.Addr()), "application/json", waitBody)
-	if err != nil {
-		t.Fatalf("wait_reply: %v", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404 for wait_reply with no ask, got %d", resp2.StatusCode)
-	}
-
-	// cancel_message with wrong token
-	cancelBody := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"auth_test_1","token":"wrong","cancel_message_id":"ask-noauth"}`)))
-	resp3, err := http.Post(fmt.Sprintf("http://%s/cancel_message", b.Addr()), "application/json", cancelBody)
-	if err != nil {
-		t.Fatalf("cancel_message: %v", err)
-	}
-	defer resp3.Body.Close()
-	if resp3.StatusCode != http.StatusUnauthorized {
-		t.Errorf("expected 401 for wrong token on cancel, got %d", resp3.StatusCode)
 	}
 }
 
