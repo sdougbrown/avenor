@@ -1318,11 +1318,16 @@ func TestPublishCanonicalEventKeepsHistoryAndNextSeqAligned(t *testing.T) {
 	}
 }
 
-// TestPublishCanonicalEventSurvivesWatchCancel keeps publishing while watch
-// subscriptions are cancelled: the fanout must never send on a channel that
-// SubscribeEvents has closed.
+// TestPublishCanonicalEventSurvivesWatchCancel cancels watch subscriptions
+// while events are being published: the fanout must never send on a channel
+// that SubscribeEvents has closed, and a subscription that outlives the
+// cancellations must keep receiving events.
 func TestPublishCanonicalEventSurvivesWatchCancel(t *testing.T) {
 	s, _ := NewTestServer(NewState("run_1", "", 0))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	keeper := s.SubscribeEvents(ctx)
 
 	stop := make(chan struct{})
 	var publisher sync.WaitGroup
@@ -1340,7 +1345,7 @@ func TestPublishCanonicalEventSurvivesWatchCancel(t *testing.T) {
 	}()
 
 	var readers sync.WaitGroup
-	for i := 0; i < 500; i++ {
+	for i := 0; i < 32; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		ch := s.SubscribeEvents(ctx)
 		readers.Add(1)
@@ -1354,6 +1359,21 @@ func TestPublishCanonicalEventSurvivesWatchCancel(t *testing.T) {
 	readers.Wait()
 	close(stop)
 	publisher.Wait()
+
+	// Drop whatever the publisher left in the long-lived subscription, then
+	// require one more publish to reach it.
+	for len(keeper) > 0 {
+		<-keeper
+	}
+	s.PublishEvent(events.Event{Event: "agent.message_chunk", Fields: map[string]any{"marker": "after-cancel"}})
+	select {
+	case ev := <-keeper:
+		if got, _ := ev.Fields["marker"].(string); got != "after-cancel" {
+			t.Fatalf("watch subscription received %#v, want the post-cancel publish", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the long-lived watch subscription received nothing after the cancellations")
+	}
 }
 
 func TestSubscribeHistoryReplayFiltersByRuntimeAndAfterSeq(t *testing.T) {

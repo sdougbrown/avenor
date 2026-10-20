@@ -3782,8 +3782,9 @@ func TestRunResultFileControlPromptTurn(t *testing.T) {
 
 // TestControlStreamDeliversDirectRunSessionEnd wires a direct run's event
 // fanout to a subscribed control client: a run started without a supervisor
-// still publishes through the control socket, and the client's event channel
-// carries its session.end and stop reason.
+// still publishes through the control socket, the client's event channel
+// carries its session.end and stop reason even though the run exits and stops
+// its control server immediately after publishing it.
 func TestControlStreamDeliversDirectRunSessionEnd(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
