@@ -586,7 +586,7 @@ func TestMarkPermissionClaimResolvedConcurrent(t *testing.T) {
 // that stamp must not turn a resolved claim back into an unanswered one.
 func TestSetPermissionResolverStateKeepsAnsweredClaims(t *testing.T) {
 	t.Run("resolved", func(t *testing.T) {
-		s := NewServer(NewState("run_1", "", 0))
+		s, _ := NewTestServer(NewState("run_1", "", 0))
 		if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverNoResolver, nil) {
 			t.Fatal("PreparePermissionClaim returned false")
 		}
@@ -608,7 +608,7 @@ func TestSetPermissionResolverStateKeepsAnsweredClaims(t *testing.T) {
 	})
 
 	t.Run("direct delivery in flight", func(t *testing.T) {
-		s := NewServer(NewState("run_1", "", 0))
+		s, _ := NewTestServer(NewState("run_1", "", 0))
 		if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverNoResolver, nil) {
 			t.Fatal("PreparePermissionClaim returned false")
 		}
