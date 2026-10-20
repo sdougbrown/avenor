@@ -108,8 +108,9 @@ func peersList(ctx context.Context, p Provider, action string) (Result, error) {
 }
 
 // peersRename forwards the rename to the provider and passes its typed error
-// through unchanged. The executor adds no validation of its own: the rename
-// authority owns name validation, resolution and permission, in that order.
+// through unchanged. Phase-1 admission owns the name's length and pattern,
+// counted in runes like the published schema; the rename authority owns every
+// other name rule plus resolution and permission.
 func peersRename(ctx context.Context, p Provider, action string, input peersInput) (Result, error) {
 	renamed, err := p.Rename(ctx, messaging.RenameRequest{SessionID: input.SessionID, Name: input.Name})
 	if err != nil {

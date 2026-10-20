@@ -14,7 +14,6 @@
           "description": "List the sessions visible to the caller."
         }
       },
-      "required": ["action"],
       "additionalProperties": false
     },
     {
@@ -29,7 +28,7 @@
           "minLength": 1,
           "maxLength": 64,
           "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]+$",
-          "description": "New display name, 1-64 characters with no control or formatting characters (including bidi overrides and zero-width characters, so a label cannot be rendered to look like another peer\u0027s). The schema is permissive about the byte/character distinction; the rename authority rejects a name that is too long in bytes."
+          "description": "New display name, 1-64 characters with no control or formatting characters (including bidi overrides and zero-width characters, so a label cannot be rendered to look like another peer\u0027s). Length is counted in Unicode code points, as JSON Schema maxLength counts it; the rename authority applies the same rune rule as a second check."
         },
         "session_id": {
           "type": "string",

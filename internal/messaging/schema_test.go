@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -121,7 +122,7 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 			if !ok {
 				t.Fatalf("%s: fixture action %q has no table entry", fixture.name, action)
 			}
-			if !reflect.DeepEqual(want.Permitted, got.Permitted) || !reflect.DeepEqual(want.Required, got.Required) || !reflect.DeepEqual(want.Types, got.Types) {
+			if !reflect.DeepEqual(want.Permitted, got.Permitted) || !slices.Equal(want.Required, got.Required) || !reflect.DeepEqual(want.Types, got.Types) {
 				t.Fatalf("%s/%s: fixture = %+v, table = %+v; run go generate", fixture.name, action, want, got)
 			}
 		}
@@ -164,7 +165,7 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 			sort.Strings(fromSchema)
 			fromTable := append([]string(nil), entry.Required...)
 			sort.Strings(fromTable)
-			if !reflect.DeepEqual(fromSchema, fromTable) {
+			if !slices.Equal(fromSchema, fromTable) {
 				t.Fatalf("%s/%s: required = %v, table = %v", fixture.name, action, fromSchema, fromTable)
 			}
 			if additional, ok := variant["additionalProperties"].(bool); !ok || additional {
