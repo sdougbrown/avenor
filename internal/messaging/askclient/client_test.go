@@ -359,58 +359,38 @@ func TestWithdraw(t *testing.T) {
 	}
 }
 
-// TestExtractReplyMessageOutcomes pins the renderings the deleted broker helper
-// used to produce, and extends them to every non-replied outcome the ask client
-// now reports. Text is the reply rendering; Failure is what the tool surfaces
-// return for the remaining outcomes.
-func TestExtractReplyMessageOutcomes(t *testing.T) {
+// TestFailureRendersNonRepliedOutcomes pins the text a tool surface returns for
+// an ask that got no reply: the outcome's rendering, the message id a cancel
+// tool acts on, the typed cause, and the retraction hint a possibly pending ask
+// keeps.
+func TestFailureRendersNonRepliedOutcomes(t *testing.T) {
 	const msgID = "msg-1"
 
-	t.Run("replied", func(t *testing.T) {
-		cases := []struct{ payload, want string }{
-			{`{"message":"hello"}`, "hello"},
-			// A reply without message text keeps the broker's wait-result
-			// rendering: the ids and the untouched payload.
-			{`{"summary":"ok"}`, `{"from_run_id":"bob","message_id":"msg-1","payload":{"summary":"ok"}}`},
-			{`raw`, "raw"},
-			{"", "(empty reply)"},
+	cases := []struct {
+		outcome messaging.Outcome
+		text    string
+		cause   error
+		pending bool
+	}{
+		{messaging.OutcomeTimedOut, "(timeout: no reply received)", nil, false},
+		{messaging.OutcomeWithdrawn, "(cancelled)", nil, false},
+		{messaging.OutcomeEdgeAbsent, "(no pending ask)", nil, false},
+		{messaging.OutcomePossiblyPending, "(possibly pending: no terminal reply)", messaging.ErrUnsupportedProtocol, true},
+		{messaging.OutcomeLost, "(ask lost)", nil, false},
+	}
+	for _, tc := range cases {
+		res := AskResult{MessageID: msgID, Outcome: tc.outcome}
+		err := res.Failure(&Error{MessageID: msgID, Outcome: tc.outcome, Err: tc.cause})
+		if !strings.HasPrefix(err.Error(), tc.text) || !strings.Contains(err.Error(), msgID) {
+			t.Errorf("Failure(%q) = %v, want %q naming %q", tc.outcome, err, tc.text, msgID)
 		}
-		for _, tc := range cases {
-			res := AskResult{MessageID: msgID, Outcome: messaging.OutcomeReplied, Reply: &messaging.InboundMessage{MessageID: msgID, FromRunID: "bob", Payload: []byte(tc.payload)}}
-			got, err := res.Text()
-			if err != nil || got != tc.want {
-				t.Errorf("Text(%q) = (%q, %v), want %q", tc.payload, got, err, tc.want)
-			}
+		if tc.cause != nil && !errors.Is(err, tc.cause) {
+			t.Errorf("Failure(%q) lost its cause: %v", tc.outcome, err)
 		}
-	})
-
-	t.Run("not replied", func(t *testing.T) {
-		cases := []struct {
-			outcome messaging.Outcome
-			text    string
-			cause   error
-			pending bool
-		}{
-			{messaging.OutcomeTimedOut, "(timeout: no reply received)", nil, false},
-			{messaging.OutcomeWithdrawn, "(cancelled)", nil, false},
-			{messaging.OutcomeEdgeAbsent, "(no pending ask)", nil, false},
-			{messaging.OutcomePossiblyPending, "(possibly pending: no terminal reply)", messaging.ErrUnsupportedProtocol, true},
-			{messaging.OutcomeLost, "(ask lost)", nil, false},
+		if got := strings.Contains(err.Error(), "avenor_cancel"); got != tc.pending {
+			t.Errorf("Failure(%q) = %v, want cancel guidance %v", tc.outcome, err, tc.pending)
 		}
-		for _, tc := range cases {
-			res := AskResult{MessageID: msgID, Outcome: tc.outcome}
-			err := res.Failure(&Error{MessageID: msgID, Outcome: tc.outcome, Err: tc.cause})
-			if !strings.HasPrefix(err.Error(), tc.text) || !strings.Contains(err.Error(), msgID) {
-				t.Errorf("Failure(%q) = %v, want %q naming %q", tc.outcome, err, tc.text, msgID)
-			}
-			if tc.cause != nil && !errors.Is(err, tc.cause) {
-				t.Errorf("Failure(%q) lost its cause: %v", tc.outcome, err)
-			}
-			if got := strings.Contains(err.Error(), "avenor_cancel"); got != tc.pending {
-				t.Errorf("Failure(%q) = %v, want cancel guidance %v", tc.outcome, err, tc.pending)
-			}
-		}
-	})
+	}
 }
 
 func TestRenderReply(t *testing.T) {
@@ -423,6 +403,7 @@ func TestRenderReply(t *testing.T) {
 		{messaging.OutcomeReplied, &messaging.InboundMessage{Payload: []byte(`{"message":"hello"}`)}, "hello", false},
 		{messaging.OutcomeReplied, &messaging.InboundMessage{MessageID: "msg-1", FromRunID: "bob", Payload: []byte(`{"summary":"ok"}`)}, `{"from_run_id":"bob","message_id":"msg-1","payload":{"summary":"ok"}}`, false},
 		{messaging.OutcomeReplied, &messaging.InboundMessage{Payload: []byte(`raw`)}, "raw", false},
+		{messaging.OutcomeReplied, &messaging.InboundMessage{}, "(empty reply)", false},
 		{messaging.OutcomeReplied, nil, "", true},
 		{messaging.OutcomeTimedOut, nil, "(timeout: no reply received)", false},
 		{messaging.OutcomeWithdrawn, nil, "(cancelled)", false},
