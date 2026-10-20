@@ -1130,7 +1130,12 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 	handler := b.renameAuthority()
 	if handler == nil {
 		// Broker-only fallback: the authority is the broker's own registry, so
-		// this path can never grant more than the caller's own record.
+		// this path can never grant more than the caller's own record. The name
+		// rule is the same one the handler applies.
+		if !messaging.ValidSessionName(body.Name) {
+			writeCodedError(w, http.StatusBadRequest, messaging.SessionNameRuleMessage(body.Name), "invalid-name")
+			return
+		}
 		previous := b.DisplayName(body.RunID)
 		if err := b.RenameRun(body.RunID, body.Name); err != nil {
 			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")

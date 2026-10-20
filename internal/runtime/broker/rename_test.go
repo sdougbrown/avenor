@@ -95,7 +95,7 @@ func TestRenameRunThenMatchLabelResolvesNewLabelOnly(t *testing.T) {
 	}
 }
 
-func TestRenameEndpointWithoutHandlerIsSelfOnly(t *testing.T) {
+func TestRenameEndpointWithoutHandlerUsesSharedNameRule(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -111,6 +111,16 @@ func TestRenameEndpointWithoutHandlerIsSelfOnly(t *testing.T) {
 	}
 	if body["run_id"] != "rt_1" || body["label"] != "after" || body["previous_label"] != "before" {
 		t.Fatalf("rename body = %v", body)
+	}
+
+	// The fallback applies the authority's name rule, so it cannot store a name
+	// SessionRename would refuse.
+	status, body = postAuthBroker(t, b.Addr(), "/rename", "rt_1", token, map[string]any{"name": "two\nlines\u202Eevil"})
+	if status != http.StatusBadRequest || body["code"] != "invalid-name" {
+		t.Fatalf("invalid name = %d %v, want 400 invalid-name", status, body)
+	}
+	if got := b.DisplayName("rt_1"); got != "after" {
+		t.Fatalf("label after rejected rename = %q, want after", got)
 	}
 }
 

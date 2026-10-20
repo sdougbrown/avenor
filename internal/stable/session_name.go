@@ -3,7 +3,6 @@ package stable
 import (
 	"fmt"
 	"time"
-	"unicode"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -22,10 +21,10 @@ const (
 // Broker.RenameRun (the one display-name writer), and publishes
 // session.renamed after the write.
 func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name string) (messaging.RenameResult, error) {
-	if !validSessionName(name) {
+	if !messaging.ValidSessionName(name) {
 		return messaging.RenameResult{}, &router.ToolError{
 			Code:    "invalid_name",
-			Message: fmt.Sprintf("name must be 1-64 characters with no control or formatting characters: %q", name),
+			Message: messaging.SessionNameRuleMessage(name),
 			Facts:   map[string]string{"name": messaging.Quote(name)},
 		}
 	}
@@ -107,21 +106,6 @@ func (s *Supervisor) resolveRenameTarget(caller messaging.Caller, sessionID stri
 			Facts:   facts,
 		}
 	}
-}
-
-// validSessionName applies the same rune rule admission publishes: 1-64 runes
-// with no control, format, line- or paragraph-separator characters.
-func validSessionName(name string) bool {
-	runes := []rune(name)
-	if len(runes) == 0 || len(runes) > 64 {
-		return false
-	}
-	for _, r := range runes {
-		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
-			return false
-		}
-	}
-	return true
 }
 
 // publishSessionRenamed publishes the rename to the control stream. runtime_id
