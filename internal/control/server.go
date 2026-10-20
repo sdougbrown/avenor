@@ -195,9 +195,10 @@ type connState struct {
 	// askSlots bounds concurrent in-flight broker asks on this connection.
 	askSlots chan struct{}
 
-	// messageWaitSlots bounds concurrent in-flight message_wait requests on
-	// this connection, matching the broker_ask and wait_turn bounds.
-	messageWaitSlots chan struct{}
+	// messageSlots bounds concurrent in-flight blocking message verbs
+	// (message_wait, message_receive) on this connection, matching the
+	// broker_ask and wait_turn bounds.
+	messageSlots chan struct{}
 }
 
 type subscriber struct {
@@ -1185,7 +1186,7 @@ func (s *ControlServer) acceptLoop() {
 			id: seq, server: s, conn: conn,
 			askSlots:         make(chan struct{}, maxInflightAsksPerConn),
 			waitSlots:        make(chan struct{}, maxInflightAsksPerConn),
-			messageWaitSlots: make(chan struct{}, maxInflightAsksPerConn),
+			messageSlots:     make(chan struct{}, maxInflightAsksPerConn),
 		}
 		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
@@ -1783,20 +1784,20 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		// Bound concurrent in-flight waits per connection so one owner cannot
 		// accumulate unbounded parked goroutines and edges.
 		select {
-		case c.messageWaitSlots <- struct{}{}:
+		case c.messageSlots <- struct{}{}:
 		default:
-			return failure(req.ID, -32000, "too many in-flight message waits on this connection", nil)
+			return failure(req.ID, -32000, "too many in-flight message waits or receives on this connection", nil)
 		}
 		tr, err := s.stableHandler.MessageTransport()
 		if err != nil {
-			<-c.messageWaitSlots
+			<-c.messageSlots
 			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
 		}
 		// Run the wait on a background goroutine bound to the connection
 		// context: an unanswered wait must not stall subsequent requests on
 		// this connection, and a disconnect cancels the pending wait.
 		go func() {
-			defer func() { <-c.messageWaitSlots }()
+			defer func() { <-c.messageSlots }()
 			res, err := tr.Wait(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
 			if req.ID == nil || c.ctx.Err() != nil {
 				return
@@ -1856,15 +1857,40 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
+		if p.TimeoutMS < 0 {
+			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
+		}
+		// The receive shares message_wait's ceiling and slot budget: both are
+		// blocking verbs whose transport may park until its own deadline.
+		if p.TimeoutMS > maxAskTimeoutMS {
+			p.TimeoutMS = maxAskTimeoutMS
+		}
+		select {
+		case c.messageSlots <- struct{}{}:
+		default:
+			return failure(req.ID, -32000, "too many in-flight message waits or receives on this connection", nil)
+		}
 		tr, err := s.stableHandler.MessageTransport()
 		if err != nil {
+			<-c.messageSlots
 			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
 		}
-		res, err := tr.Receive(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
-		}
-		return success(req.ID, newMessageReceiveResult(res))
+		// Like message_wait, run the receive off the read loop and bind it to the
+		// connection context so a parked receive neither stalls the connection
+		// nor outlives it.
+		go func() {
+			defer func() { <-c.messageSlots }()
+			res, err := tr.Receive(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+			if req.ID == nil || c.ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				_ = c.writeJSON(failure(req.ID, -32000, err.Error(), messageErrorData(err, "", "")))
+				return
+			}
+			_ = c.writeJSON(success(req.ID, newMessageReceiveResult(res)))
+		}()
+		return asyncResponse
 	case "message_peers":
 		if s.stableHandler == nil {
 			return failure(req.ID, -32601, "method not found", nil)
