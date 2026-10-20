@@ -1,7 +1,8 @@
-// Package hosthttp implements the v1 host messaging client. It owns its own
-// HTTP client, talks only to a caller-supplied endpoint descriptor and reports
-// facts to the shared ask client; it never registers, spawns, prompts or reads
-// ambient credentials.
+// Package hosthttp implements the v1 host transport client. It is exercised
+// against the protocol fixture in internal/messaging/internal/hostfixture, and no
+// provider installs it: it owns its own HTTP client, talks only to a
+// caller-supplied endpoint descriptor and reports facts to the shared ask client,
+// and it never registers, spawns, prompts or reads ambient credentials.
 package hosthttp
 
 import (
