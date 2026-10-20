@@ -2161,6 +2161,20 @@ func (s *waitExitMatrixSink) counts() (sessionEnds, errors int) {
 	return sessionEnds, errors
 }
 
+// sessionEndExitCodes returns the exit_code each published session.end carries.
+func (s *waitExitMatrixSink) sessionEndExitCodes() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var codes []int64
+	for _, event := range s.events {
+		if event.Event == "session.end" {
+			code, _ := events.Int64(event.Fields["exit_code"])
+			codes = append(codes, code)
+		}
+	}
+	return codes
+}
+
 func terminalRecord(fields map[string]any) []events.Event {
 	return []events.Event{{Event: "session.end", SessionID: "ses_held", Fields: fields}}
 }
@@ -2582,6 +2596,11 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 			sessionEnds, errorEvents := sink.counts()
 			if sessionEnds != tt.wantSessionEnds || errorEvents != tt.wantErrors {
 				t.Fatalf("audit counts = {session.end:%d errors:%d}, want {%d %d}", sessionEnds, errorEvents, tt.wantSessionEnds, tt.wantErrors)
+			}
+			for _, code := range sink.sessionEndExitCodes() {
+				if code != int64(tt.wantExitCode) {
+					t.Fatalf("published session.end exit_code = %d, want %d", code, tt.wantExitCode)
+				}
 			}
 		})
 	}
