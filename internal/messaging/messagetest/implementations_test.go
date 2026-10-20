@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
-	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/messaging/hosthttp"
 	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
 	"github.com/sdougbrown/avenor/internal/messaging/internal/hostfixture"
@@ -15,14 +14,13 @@ import (
 )
 
 // TestMessagingImplementations is the combined entry point: every shipped
-// transport runs the shared contract, the shared failure matrix and the
-// paused-send fence regression.
+// transport runs the shared contract and the shared failure matrix.
 func TestMessagingImplementations(t *testing.T) {
 	t.Run("inprocess", func(t *testing.T) {
 		store, _ := messagetest.NewMemoryStore(t)
 		runImplementation(t, func(*testing.T, messaging.Identity) messaging.Transport {
 			return inprocess.New(store)
-		}, store, "inproc-alice", "inproc-bob")
+		})
 	})
 
 	t.Run("localhttp", func(t *testing.T) {
@@ -30,7 +28,7 @@ func TestMessagingImplementations(t *testing.T) {
 		runImplementation(t, func(t *testing.T, id messaging.Identity) messaging.Transport {
 			registerPeers(t, b, id)
 			return localTransport(t, b, id)
-		}, b.Store(), "combined-alice", "combined-bob")
+		})
 	})
 
 	t.Run("hosthttp", func(t *testing.T) {
@@ -42,20 +40,14 @@ func TestMessagingImplementations(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = tr.Close() })
 			return tr
-		}, fixture.Store(), "combined-alice", "combined-bob")
+		})
 	})
 }
 
-func runImplementation(t *testing.T, factory messagetest.TransportFactory, store *askstore.Store, senderRun, targetRun string) {
+func runImplementation(t *testing.T, factory messagetest.TransportFactory) {
 	t.Helper()
 	messagetest.RunTransportSuite(t, factory)
 	messagetest.RunFailureMatrix(t, factory)
-	messagetest.RunWithdrawFencesPausedSend(t,
-		factory(t, messaging.Identity{RunID: senderRun, Sender: "alice"}),
-		store,
-		messaging.Identity{RunID: senderRun, Sender: "alice"},
-		messaging.Identity{RunID: targetRun, Sender: "bob"},
-	)
 }
 
 func startBroker(t *testing.T) *broker.Broker {

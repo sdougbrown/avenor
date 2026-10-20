@@ -921,3 +921,18 @@ func TestSubscribeChangesCancelStopsWakes(t *testing.T) {
 	default:
 	}
 }
+
+func TestControllerStateFilesAreOwnerOnly(t *testing.T) {
+	s, _ := newTestStore(t)
+	mustCreate(t, s, "perm", 1)
+	mustEnable(t, s, "perm")
+	for _, path := range []string{s.snapshotPath("perm"), s.eventsPath("perm")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("%s mode = %o, want 600", path, perm)
+		}
+	}
+}

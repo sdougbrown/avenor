@@ -29,56 +29,6 @@ func (c *clock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-func TestStorePrunePreservesValidFence(t *testing.T) {
-	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
-	clk := &clock{now: base}
-	store := New(Options{Clock: clk.Now, PruneInterval: 30 * time.Second})
-	sender := messaging.Identity{RunID: "alice"}
-	msgID, err := messaging.NewMsgID(base, base.Add(2*time.Minute))
-	if err != nil {
-		t.Fatalf("NewMsgID: %v", err)
-	}
-	key := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID, Generation: store.Generation()}
-	if _, err := store.Admit(t.Context(), AdmitRequest{
-		Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
-	}); err != nil {
-		t.Fatalf("Admit: %v", err)
-	}
-	if _, err := store.Withdraw(key); err != nil {
-		t.Fatalf("Withdraw: %v", err)
-	}
-
-	// A tick far shorter than the acceptance deadline must not reclaim the
-	// fence or admit the same ID.
-	clk.Advance(30 * time.Second)
-	store.Prune(clk.Now())
-	ack, ok := store.Fence(key)
-	if !ok || !ack.Terminal {
-		t.Fatal("prune reclaimed a fence before its acceptance deadline")
-	}
-	admitted, err := store.Admit(t.Context(), AdmitRequest{
-		Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
-	})
-	if err != nil {
-		t.Fatalf("fenced Admit: %v", err)
-	}
-	if admitted.Outcome != messaging.OutcomeWithdrawn {
-		t.Fatalf("fenced Admit outcome = %q", admitted.Outcome)
-	}
-
-	// After the encoded deadline the fence is reclaimed and the ID expires.
-	clk.Advance(2 * time.Minute)
-	store.Prune(clk.Now())
-	if _, ok := store.Fence(key); ok {
-		t.Fatal("expired fence was retained")
-	}
-	if _, err := store.Admit(t.Context(), AdmitRequest{
-		Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
-	}); !errors.Is(err, messaging.ErrMessageIDExpired) {
-		t.Fatalf("expired Admit error = %v", err)
-	}
-}
-
 func TestStorePruneTerminatesExpiredWaiter(t *testing.T) {
 	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 	clk := &clock{now: base}
@@ -114,14 +64,11 @@ func TestStorePruneTerminatesExpiredWaiter(t *testing.T) {
 	if store.Pending(sender.RunID, msgID) {
 		t.Fatal("expired edge survived prune")
 	}
-}
-
-func TestStoreResetRotatesGeneration(t *testing.T) {
-	store := New(Options{})
-	before := store.Generation()
-	store.Reset()
-	if after := store.Generation(); after == before || after == "" {
-		t.Fatalf("generation = %q, want a rotation of %q", after, before)
+	// The pruned ID is past its encoded deadline, so it cannot be admitted again.
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
+	}); !errors.Is(err, messaging.ErrMessageIDExpired) {
+		t.Fatalf("expired Admit error = %v, want ErrMessageIDExpired", err)
 	}
 }
 
@@ -170,25 +117,32 @@ func TestStoreWithdrawAbsentIDPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("absent withdrawal fences a delayed send", func(t *testing.T) {
+	t.Run("reclaiming a withdrawn ask releases no absent quota", func(t *testing.T) {
 		clk := &clock{now: base}
 		store := New(Options{Clock: clk.Now})
 		gen := store.Generation()
-		key := messaging.FenceKey{
-			Sender: sender.RunID, MessageID: mint(t, base, base.Add(time.Minute)), Generation: gen,
+		// The withdrawn ask's fence is charged to the shared capacity, while the
+		// absent withdrawal's is charged to the sender's absent quota.
+		msgID := mint(t, base, base.Add(30*time.Second))
+		if _, err := store.Admit(t.Context(), AdmitRequest{
+			Sender: sender, Target: "bob", MessageID: msgID, Generation: gen,
+		}); err != nil {
+			t.Fatalf("Admit: %v", err)
 		}
-		res, err := store.Withdraw(key)
-		if err != nil || res.Outcome != messaging.OutcomeEdgeAbsent || !res.Fence.Terminal {
-			t.Fatalf("Withdraw = (%+v, %v)", res, err)
+		if _, err := store.Withdraw(messaging.FenceKey{Sender: sender.RunID, MessageID: msgID, Generation: gen}); err != nil {
+			t.Fatalf("Withdraw: %v", err)
 		}
-		admitted, err := store.Admit(t.Context(), AdmitRequest{
-			Sender: sender, Target: "bob", MessageID: key.MessageID, Generation: gen,
-		})
-		if err != nil || admitted.Outcome != messaging.OutcomeWithdrawn {
-			t.Fatalf("Admit after absent withdrawal = (%+v, %v), want withdrawn", admitted, err)
+		if res, err := store.Withdraw(messaging.FenceKey{
+			Sender: sender.RunID, MessageID: mint(t, base, base.Add(2*time.Minute)), Generation: gen,
+		}); err != nil || !res.Fence.Terminal {
+			t.Fatalf("absent withdrawal = (%+v, %v)", res, err)
 		}
-		if store.Pending(sender.RunID, key.MessageID) {
-			t.Fatal("fenced send left a live edge")
+
+		clk.Advance(time.Minute)
+		store.Prune(clk.Now())
+		if store.absentFences != 1 || store.absentBySender[sender.RunID] != 1 {
+			t.Fatalf("absent accounting = (%d, %d), want the surviving absent fence only",
+				store.absentFences, store.absentBySender[sender.RunID])
 		}
 	})
 

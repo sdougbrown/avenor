@@ -209,7 +209,7 @@ func (s *Store) loadSnapshot(workflowID WorkflowID) (Snapshot, bool, error) {
 
 // appendEvents durably appends complete JSON events to the NDJSON log.
 func (s *Store) appendEvents(workflowID WorkflowID, events []Event) error {
-	f, err := os.OpenFile(s.eventsPath(workflowID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(s.eventsPath(workflowID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -242,31 +242,12 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(s.instanceDir(workflowID), "workflow.json.tmp*")
-	if err != nil {
+	dir := s.instanceDir(workflowID)
+	path := s.workflowPath(workflowID)
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o600); err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, s.workflowPath(workflowID)); err != nil {
-		return err
-	}
-	return durablefile.FsyncDir(s.instanceDir(workflowID))
+	return durablefile.FsyncDir(dir)
 }
 
 // StoreTemplate atomically persists a versioned template under
@@ -330,28 +311,7 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, string(templateVersion)+".json.tmp*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o600); err != nil {
 		return err
 	}
 	return durablefile.FsyncDir(dir)

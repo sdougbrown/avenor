@@ -440,21 +440,42 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		}
 	})
 
+	t.Run("prune keeps an ask that is not yet due", func(t *testing.T) {
+		store := newStore(t)
+		minted := time.Now().UTC()
+		msgID, err := messaging.NewMsgID(minted, minted.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("NewMsgID: %v", err)
+		}
+		admit(t, store, msgID, "bob")
+
+		store.Prune(minted.Add(30 * time.Second))
+		if !store.Pending(sender.RunID, msgID) || store.PendingCount(sender.RunID) != 1 {
+			t.Fatal("prune terminated an ask before its deadline")
+		}
+		if _, ok := store.Fence(key(store, msgID)); ok {
+			t.Fatal("prune fenced an ask before its deadline")
+		}
+	})
+
 	t.Run("prune expires a fenced id after its deadline", func(t *testing.T) {
 		store := newStore(t)
-		msgID := id(t, 50*time.Millisecond)
-		if _, err := store.Withdraw(key(store, msgID)); err != nil {
+		minted := time.Now().UTC()
+		msgID, err := messaging.NewMsgID(minted, minted.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("NewMsgID: %v", err)
+		}
+		withdrawn, err := store.Withdraw(key(store, msgID))
+		if err != nil {
 			t.Fatalf("Withdraw: %v", err)
 		}
-		time.Sleep(60 * time.Millisecond)
-		store.Prune(time.Now())
+		if !withdrawn.Fence.Terminal {
+			t.Fatalf("Withdraw = %+v, want a terminal fence", withdrawn)
+		}
+
+		store.Prune(minted.Add(2 * time.Minute))
 		if _, ok := store.Fence(key(store, msgID)); ok {
 			t.Fatal("expired fence was retained")
-		}
-		if _, err := store.Admit(t.Context(), askstore.AdmitRequest{
-			Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
-		}); !errors.Is(err, messaging.ErrMessageIDExpired) {
-			t.Fatalf("expired Admit error = %v", err)
 		}
 	})
 

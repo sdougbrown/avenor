@@ -10,6 +10,7 @@ state named in each file is the acceptance bar for that feature.
 | Supervisor + control plane | [stable-control.md](stable-control.md) | `avenor stable` + `avenor control` |
 | Event stream reader | [watch.md](watch.md) | `avenor watch` |
 | Permission answering | [permissions.md](permissions.md) | `avenor answer` + permission handler files |
+| Broker messages | [broker-messaging.md](broker-messaging.md) | spawned child ↔ supervisor ask/reply over the broker |
 | Config validation | [verify-command.md](verify-command.md) | `avenor verify` |
 | Launch identity | [provenance.md](provenance.md) | `avenor run --team-file` → MCP env + phase/team events |
 

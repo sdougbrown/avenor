@@ -359,10 +359,10 @@ func TestWithdraw(t *testing.T) {
 	}
 }
 
-// TestFailureRendersNonRepliedOutcomes pins the text a tool surface returns for
-// an ask that got no reply: the outcome's rendering, the message id a cancel
-// tool acts on, the typed cause, and the retraction hint a possibly pending ask
-// keeps.
+// TestFailureRendersNonRepliedOutcomes pins what a failed ask's text adds to
+// the outcome rendering: the message id a cancel tool acts on, the typed cause,
+// and the retraction hint a possibly pending ask keeps. The rendering itself is
+// pinned by TestRenderReply.
 func TestFailureRendersNonRepliedOutcomes(t *testing.T) {
 	const msgID = "msg-1"
 

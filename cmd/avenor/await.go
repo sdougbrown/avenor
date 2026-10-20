@@ -91,11 +91,11 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 		return awaitCallError(stderr, err)
 	}
 	if _, err := awaitCall(ctx, c, func() (struct{}, error) {
-		return struct{}{}, c.Call("subscribe", map[string]any{
+		return struct{}{}, c.Subscribe(map[string]any{
 			"runtime_id": runtimeID,
 			"replay":     true,
 			"after_seq":  history.LatestSeq,
-		}, nil)
+		})
 	}); err != nil {
 		return awaitCallError(stderr, err)
 	}
@@ -490,7 +490,7 @@ func awaitCallError(stderr io.Writer, err error) int {
 		fmt.Fprintln(stderr, "avenor await: timeout elapsed")
 		return awaitExitWallTimeout
 	}
-	if errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "connection closed") || strings.Contains(err.Error(), "broken pipe") {
+	if errors.Is(err, client.ErrConnectionClosed) || errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "broken pipe") {
 		fmt.Fprintln(stderr, "avenor await: supervisor connection lost")
 		return 2
 	}

@@ -14,6 +14,15 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
+// errProviderClosed is returned by a launch the provider abandoned because
+// Close ran first.
+var errProviderClosed = errors.New("provider is closed")
+
+// launchSettleTimeout bounds how long Close waits for an in-flight launch to
+// return before it finishes on its own. A launch can be stuck in a start that
+// ignores both the caller's context and the provider lifetime.
+const launchSettleTimeout = 2 * time.Second
+
 type ProviderConfig struct {
 	BackendID           string
 	Bin                 string
@@ -37,6 +46,24 @@ type Provider struct {
 	events         chan events.Event
 	sessions       map[string]*Session
 	pendingOptions map[string]map[string][]any
+
+	// startClient starts the backend process and completes its handshake.
+	// Overridable in tests; nil uses the provider's own launch.
+	startClient func(context.Context, ClientConfig) (*Client, error)
+
+	// closing latches when Close runs. A launch still in flight when Close is
+	// called tears down what it started instead of installing it afterwards.
+	// launching counts those in-flight launches and launchIdle is closed when
+	// the last of them settles.
+	closing    bool
+	launching  int
+	launchIdle chan struct{}
+
+	// lifetimeCtx ends when Close runs, so a launch Close abandoned cannot
+	// outlive the provider. The first admitted launch creates it under the same
+	// lock Close latches closing under, so Close can always cancel it.
+	lifetimeCtx    context.Context
+	lifetimeCancel context.CancelFunc
 
 	subprocessDiscovery bool
 	appendCWDArg        bool
@@ -79,38 +106,48 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	merged := runtime.MergeStartOptions(p.opts, opts)
 
 	runID, brokerToken, brokerRef := p.launchRun(merged)
-	if _, err := p.ensureClient(ctx, merged, func() (map[string]string, func() error) {
+	client, release, err := p.ensureClient(ctx, merged, func() (map[string]string, func() error) {
 		return p.launchEnv(merged, runID, brokerToken, brokerRef)
-	}); err != nil {
-		return runtime.Session{}, err
-	}
-
-	session, err := p.client.NewSessionWithOptions(ctx, SessionOpenOptions{})
+	})
 	if err != nil {
 		return runtime.Session{}, err
 	}
+	// The launch stays counted as in flight until this call is done with the
+	// client it handed back, so Close cannot finish under it.
+	defer release()
+
+	session, err := client.NewSessionWithOptions(ctx, SessionOpenOptions{})
+	if err != nil {
+		return runtime.Session{}, p.abandonedError(client, err)
+	}
 	if p.configureSession != nil {
 		if err := p.configureSession(ctx, session, merged); err != nil {
-			return runtime.Session{}, err
+			return runtime.Session{}, p.abandonedError(client, err)
 		}
 	}
 
 	session.RunID = runID
 	session.BrokerToken = brokerToken
+
 	p.mu.Lock()
+	if p.closing {
+		p.mu.Unlock()
+		return runtime.Session{}, fmt.Errorf("%s: %w", p.backendID, errProviderClosed)
+	}
+	// A session with a run polls the broker for messages until Close or its
+	// caller is done; without a run there is nothing to poll.
+	pollCtx, cancel := context.WithCancel(ctx)
 	p.sessions[session.SessionID] = session
 	if runID != "" {
 		p.runIDs[session.SessionID] = runID
+		p.pollContexts[session.SessionID] = pollCtx
+		p.pollCancels[session.SessionID] = cancel
+	} else {
+		cancel()
 	}
 	p.mu.Unlock()
 
-	// Start the broker message polling goroutine if we have a broker and runID.
 	if runID != "" {
-		pollCtx, cancel := context.WithCancel(ctx)
-		p.mu.Lock()
-		p.pollContexts[session.SessionID] = pollCtx
-		p.pollCancels[session.SessionID] = cancel
-		p.mu.Unlock()
 		go brokerRef.PollAgentMessages(pollCtx, runID, func(wrapped string) {
 			p.pendingMu.Lock()
 			p.pendingMessages[session.SessionID] = append(p.pendingMessages[session.SessionID], wrapped)
@@ -122,7 +159,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		SessionID: session.SessionID,
 		Backend:   p.backendID,
 		Dir:       merged.Dir,
-		PID:       p.client.PID(),
+		PID:       client.PID(),
 	}, nil
 }
 
@@ -152,21 +189,27 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 			return p.launchEnv(opts, runID, brokerToken, brokerRef)
 		}
 	}
-	if _, err := p.ensureClient(ctx, opts, buildEnv); err != nil {
-		return runtime.Session{}, err
-	}
-
-	session, err := p.client.ResumeSession(ctx, sessionID)
+	client, release, err := p.ensureClient(ctx, opts, buildEnv)
 	if err != nil {
 		return runtime.Session{}, err
 	}
+	defer release()
+
+	session, err := client.ResumeSession(ctx, sessionID)
+	if err != nil {
+		return runtime.Session{}, p.abandonedError(client, err)
+	}
 	if p.configureSession != nil {
 		if err := p.configureSession(ctx, session, opts); err != nil {
-			return runtime.Session{}, err
+			return runtime.Session{}, p.abandonedError(client, err)
 		}
 	}
 
 	p.mu.Lock()
+	if p.closing {
+		p.mu.Unlock()
+		return runtime.Session{}, fmt.Errorf("%s: %w", p.backendID, errProviderClosed)
+	}
 	p.sessions[session.SessionID] = session
 	p.mu.Unlock()
 
@@ -174,8 +217,28 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 		SessionID: session.SessionID,
 		Backend:   p.backendID,
 		Dir:       opts.Dir,
-		PID:       p.client.PID(),
+		PID:       client.PID(),
 	}, nil
+}
+
+// abandonedError reports the provider's own closure when Close ended the work in
+// progress, keeping the underlying cause attached: Close cancelled the context
+// a launch runs under, or closed the client the work was using. A failure that
+// merely overlapped shutdown keeps its own error.
+func (p *Provider) abandonedError(client *Client, err error) error {
+	if err == nil {
+		return nil
+	}
+	p.mu.Lock()
+	closing := p.closing
+	p.mu.Unlock()
+	if !closing {
+		return err
+	}
+	if !errors.Is(err, context.Canceled) && (client == nil || !client.ended()) {
+		return err
+	}
+	return fmt.Errorf("%s: %w: %w", p.backendID, errProviderClosed, err)
 }
 
 // retainBroker records the caller's broker when the provider holds none, so a
@@ -323,7 +386,12 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 
 func (p *Provider) Close() error {
 	p.mu.Lock()
+	p.closing = true
+	if p.lifetimeCancel != nil {
+		p.lifetimeCancel()
+	}
 	client := p.client
+	idle := p.launchIdle
 	cancels := make([]context.CancelFunc, 0, len(p.pollCancels))
 	for _, cancel := range p.pollCancels {
 		cancels = append(cancels, cancel)
@@ -332,12 +400,29 @@ func (p *Provider) Close() error {
 	cleanup := p.clientEnvCleanup
 	p.clientEnvCleanup = nil
 	p.pendingOptions = nil
+	p.sessions = map[string]*Session{}
 	p.runIDs = nil
 	p.pollContexts = map[string]context.Context{}
 	p.pollCancels = map[string]context.CancelFunc{}
 	p.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
+	}
+	// A launch still in flight sees the closing flag when it tries to install,
+	// tears down what it started, and returns an error. Wait for that within a
+	// bound, since a launch can ignore both its caller's context and the
+	// provider lifetime and never return.
+	if idle != nil {
+		select {
+		case <-idle:
+		case <-time.After(launchSettleTimeout):
+			// Closing is latched, so no launch is admitted any more and the count
+			// never has to wake Close again: forgetting the idle channel is enough
+			// to keep a later Close from waiting out the bound once more.
+			p.mu.Lock()
+			p.launchIdle = nil
+			p.mu.Unlock()
+		}
 	}
 	p.pendingMu.Lock()
 	p.pendingMessages = map[string][]string{}
@@ -351,22 +436,93 @@ func (p *Provider) Close() error {
 	return client.Close()
 }
 
-// ensureClient starts the backend client when none is retained yet. buildEnv,
-// when non-nil, builds the environment for that new client only, so a retained
-// client never pays for a launch it will not use. A launch that does not become
-// the provider's client — because a client is already live, another launch won
-// the install, or startup failed — cleans up its own generated config before
-// returning. A retained client takes ownership of its config until Close.
-func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, buildEnv func() (map[string]string, func() error)) (bool, error) {
+// beginLaunch admits one launch attempt, rejecting it once Close has run. It
+// also creates the provider lifetime if this is the first attempt, inside the
+// same critical section, so a launch admitted here always has a lifetime Close
+// cancels instead of building one Close has already passed.
+func (p *Provider) beginLaunch() error {
 	p.mu.Lock()
-	if p.client != nil {
-		p.mu.Unlock()
-		return false, nil
+	defer p.mu.Unlock()
+	if p.closing {
+		return fmt.Errorf("%s: %w", p.backendID, errProviderClosed)
 	}
+	if p.lifetimeCtx == nil {
+		p.lifetimeCtx, p.lifetimeCancel = context.WithCancel(context.Background())
+	}
+	if p.launching == 0 {
+		p.launchIdle = make(chan struct{})
+	}
+	p.launching++
+	return nil
+}
+
+// settleLaunch records that a counted launch returned, waking Close once the
+// last one has.
+func (p *Provider) settleLaunch() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.launching > 0 {
+		p.launching--
+	}
+	if p.launching > 0 || p.launchIdle == nil {
+		return
+	}
+	close(p.launchIdle)
+	p.launchIdle = nil
+}
+
+// launchContext derives the context for one launch attempt admitted by
+// beginLaunch. It ends when the caller's context ends or when Close cancels the
+// provider lifetime, so a launch nobody is waiting for cannot leave its child
+// behind. keepAlive detaches the attempt from the lifetime once it has handed
+// its client over, which lets Close close that client normally; abandon also
+// ends the context, killing a process that is still starting. The lifetime is
+// created at admission, so a launch cannot outrun Close by building its own.
+func (p *Provider) launchContext(ctx context.Context) (launchCtx context.Context, keepAlive, abandon func()) {
+	p.mu.Lock()
+	lifetime := p.lifetimeCtx
 	p.mu.Unlock()
 
+	launchCtx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(lifetime, cancel)
+	return launchCtx, func() { stop() }, func() { stop(); cancel() }
+}
+
+// ensureClient returns the provider's client, starting one when none is
+// retained yet. buildEnv, when non-nil, builds the environment for that new
+// client only, so a retained client never pays for a launch it will not use.
+// The returned release ends the launch attempt and must be called exactly once,
+// after the caller is done with the client: until then that launch counts as in
+// flight, so Close waits for it and cancels it instead of finishing early. A
+// client that was already installed when Close ran is not covered by that count,
+// so a call on it can still see the client closed underneath. A launch that does
+// not become the provider's client — because a client is already live, another
+// launch won the install, Close ran first, or startup failed — cleans up its own
+// generated config before returning. A retained client takes ownership of its
+// config until Close.
+func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, buildEnv func() (map[string]string, func() error)) (*Client, func(), error) {
+	p.mu.Lock()
+	client := p.client
+	p.mu.Unlock()
+	if client != nil {
+		return client, func() {}, nil
+	}
+	if err := p.beginLaunch(); err != nil {
+		return nil, nil, err
+	}
+
+	launchCtx, keepAlive, abandon := p.launchContext(ctx)
+	handedOff := false
+	defer func() {
+		if handedOff {
+			return
+		}
+		abandon()
+		p.settleLaunch()
+	}()
+
 	if opts.ServerURL != "" {
-		return false, fmt.Errorf("%s external server URL transport is not implemented by the stdio client", p.backendID)
+		return nil, nil, fmt.Errorf("%s external server URL transport is not implemented by the stdio client", p.backendID)
 	}
 
 	var (
@@ -377,7 +533,11 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 		env, cleanup = buildEnv()
 	}
 
-	client, err := NewClient(ctx, ClientConfig{
+	start := p.startClient
+	if start == nil {
+		start = p.launch
+	}
+	launched, err := start(launchCtx, ClientConfig{
 		Bin:                  p.bin,
 		Args:                 p.args,
 		Wrapper:              opts.LaunchWrapper,
@@ -389,33 +549,56 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 	})
 	if err != nil {
 		runCleanup(cleanup)
-		return false, err
+		return nil, nil, p.abandonedError(nil, err)
+	}
+
+	p.mu.Lock()
+	switch {
+	case p.closing:
+		p.mu.Unlock()
+		_ = launched.Close()
+		runCleanup(cleanup)
+		return nil, nil, fmt.Errorf("%s: %w", p.backendID, errProviderClosed)
+	case p.client != nil:
+		retained := p.client
+		p.mu.Unlock()
+		_ = launched.Close()
+		runCleanup(cleanup)
+		return retained, func() {}, nil
+	}
+	p.client = launched
+	p.clientEnvCleanup = cleanup
+	p.events = make(chan events.Event, 256)
+	go p.pumpClientEvents(launched, p.events)
+	// The client is the provider's now: Close closes it normally instead of
+	// ending its launch context. Detaching under the same lock Close latches
+	// closing under keeps Close from killing a client it is about to adopt.
+	keepAlive()
+	p.mu.Unlock()
+
+	// The attempt still counts as in flight, so Close waits for the caller to
+	// finish with the client.
+	handedOff = true
+	return launched, p.settleLaunch, nil
+}
+
+// launch starts the backend process and completes its handshake.
+func (p *Provider) launch(ctx context.Context, cfg ClientConfig) (*Client, error) {
+	client, err := NewClient(ctx, cfg)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := client.Initialize(ctx); err != nil {
 		_ = client.Close()
-		runCleanup(cleanup)
-		return false, err
+		return nil, err
 	}
 	if p.authenticateID != "" {
 		if err := client.Authenticate(ctx, p.authenticateID); err != nil {
 			_ = client.Close()
-			runCleanup(cleanup)
-			return false, err
+			return nil, err
 		}
 	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.client != nil {
-		_ = client.Close()
-		runCleanup(cleanup)
-		return false, nil
-	}
-	p.client = client
-	p.clientEnvCleanup = cleanup
-	p.events = make(chan events.Event, 256)
-	go p.pumpClientEvents(client, p.events)
-	return true, nil
+	return client, nil
 }
 
 func runCleanup(cleanup func() error) {

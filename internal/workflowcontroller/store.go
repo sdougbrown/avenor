@@ -752,7 +752,7 @@ func (s *ControllerStore) notifySubscribers() {
 // a torn line anywhere before the final one, so a partial write must not reach
 // the log.
 func (s *ControllerStore) appendEvents(controllerID string, events []ControllerEvent) error {
-	f, err := os.OpenFile(s.eventsPath(controllerID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(s.eventsPath(controllerID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -799,28 +799,8 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 		return err
 	}
 	dir := s.controllerDir(controllerID)
-	tmp, err := os.CreateTemp(dir, "controller.json.tmp*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, s.snapshotPath(controllerID)); err != nil {
+	path := s.snapshotPath(controllerID)
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o600); err != nil {
 		return err
 	}
 	if err := durablefile.FsyncDir(dir); err != nil {

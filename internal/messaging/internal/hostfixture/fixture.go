@@ -103,23 +103,6 @@ func (f *Fixture) Descriptor(id messaging.Identity) messaging.EndpointDescriptor
 	}
 }
 
-// PauseSend blocks the next admission of key until ResumeSend is called. It is
-// a thin wrapper over the shared store seam, so the paused-send fence behaves
-// exactly as it does in the in-process leg.
-func (f *Fixture) PauseSend(sender messaging.Identity, messageID, generation string) {
-	f.store.PauseAdmission(fenceKey(sender, messageID, generation))
-}
-
-// ResumeSend releases an admission paused by PauseSend.
-func (f *Fixture) ResumeSend(sender messaging.Identity, messageID, generation string) {
-	f.store.ResumeAdmission(fenceKey(sender, messageID, generation))
-}
-
-// Reached reports whether PauseSend's key waited at the admission seam.
-func (f *Fixture) Reached(sender messaging.Identity, messageID, generation string) bool {
-	return f.store.AdmissionReached(fenceKey(sender, messageID, generation))
-}
-
 func fenceKey(sender messaging.Identity, messageID, generation string) messaging.FenceKey {
 	return messaging.FenceKey{Sender: sender.RunID, MessageID: messageID, Generation: generation}
 }

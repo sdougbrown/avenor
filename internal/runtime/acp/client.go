@@ -111,6 +111,16 @@ func (c *Client) PID() int {
 	return c.pid
 }
 
+// ended reports whether the client's process has ended.
+func (c *Client) ended() bool {
+	select {
+	case <-c.done:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Client) Events() <-chan events.Event {
 	return c.events
 }

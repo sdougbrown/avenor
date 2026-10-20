@@ -97,6 +97,7 @@ Error codes:
 | -32011 | Owner authentication rejected (`unauthenticated`) |
 | -32012 | Owner authentication unsupported (`unsupported owner authentication`) |
 | -32013 | Owner authentication timed out. Clients raise it when the handshake gets no answer; the server never sends it |
+| -32014 | Control server stopped (`control server stopped`): refused because the server is shutting down |
 | -32020 | Backend prompt unsupported |
 | -32030 | Idempotency store capacity exceeded |
 | -32031 | Idempotency conflict (reused spawn key or re-registered template id+version with different content) |
@@ -177,6 +178,8 @@ Returns `{"final_output":"..."}` with the complete terminal assistant reply. Thi
 ```
 
 Returns `{"subscribed":true}`. Event notifications then arrive on the same connection. Omitting parameters selects the backward-compatible, unfiltered, live-only subscription.
+
+A subscribe that arrives once the server has begun shutting down is refused with `-32014` (`control server stopped`) and the connection is closed, so no event ever arrives on it. Subscribe before the run ends if you need the terminal `session.end`.
 
 To replay recent events from one runtime before following it live:
 
