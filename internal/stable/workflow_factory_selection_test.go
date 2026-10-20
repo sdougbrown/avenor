@@ -165,7 +165,7 @@ func newFactorySelectionFixtureRoster(t *testing.T, name string, ttlSeconds int,
 				_ = sup.cancelRuntime(id)
 			}
 		}
-		waitFor(t, "runtimes terminal at cleanup", func() bool { return sup.activeRuntimeCount() == 0 })
+		waitFor(t, "runtimes terminal at cleanup", func() bool { return activeRuntimeCount(sup) == 0 })
 		_ = sup.broker.Stop()
 		sup.stopReaper()
 	})

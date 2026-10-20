@@ -293,7 +293,7 @@ func TestSpawnLoopFileFailureCleansReservedRuntime(t *testing.T) {
 	if err == nil {
 		t.Fatal("spawn with missing loop file should error")
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0", got)
 	}
 	if len(sup.runtimes) != 0 {
@@ -311,7 +311,7 @@ func TestSpawnTeamFileFailureCleansReservedRuntime(t *testing.T) {
 	if err == nil {
 		t.Fatal("spawn with missing team file should error")
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0", got)
 	}
 	if len(sup.runtimes) != 0 {
@@ -422,7 +422,7 @@ func TestActiveRuntimeCountIgnoresCompletedHistory(t *testing.T) {
 	initializeCompletedTestChild(t, sup, doneChild)
 	sup.runtimes["rt_done"] = doneChild
 
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0 for completed history", got)
 	}
 }
@@ -5791,23 +5791,7 @@ func TestTombstoneOnGracefulShutdown(t *testing.T) {
 		ShutdownTimeout: time.Second,
 	})
 
-	done := make(chan int, 1)
-	go func() {
-		done <- sup.Run()
-	}()
-
-	// Wait for socket to exist.
-	ready := false
-	for i := 0; i < 100; i++ {
-		if _, err := os.Stat(socketPath); err == nil {
-			ready = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !ready {
-		t.Fatal("socket never appeared")
-	}
+	done := startStableRun(t, sup, socketPath)
 
 	// Trigger graceful shutdown.
 	sup.Shutdown("graceful")
@@ -5832,6 +5816,30 @@ func TestTombstoneOnGracefulShutdown(t *testing.T) {
 	}
 }
 
+// TestIdleCheckWindowStartsAtLastRuntimeActivity proves the idle timer fires at
+// the end of the window that started with the last runtime activity, not one
+// full timeout after the loop notices: with activity 200ms ago and a 400ms
+// timeout, the end lands about 200ms out, neither immediately nor a further
+// 400ms away.
+func TestIdleCheckWindowStartsAtLastRuntimeActivity(t *testing.T) {
+	const idleTimeout = 400 * time.Millisecond
+	idleCh := idleCheck(idleTimeout, 0, time.Now().Add(-200*time.Millisecond))
+	if idleCh == nil {
+		t.Fatal("idleCheck disarmed the timer with no live runtime")
+	}
+	start := time.Now()
+	select {
+	case <-idleCh:
+	case <-time.After(3 * idleTimeout):
+		t.Fatal("idle timer never fired")
+	}
+	// A window measured from now instead would end about 400ms out; the upper
+	// bound sits just below that so scheduler delay cannot fail the test alone.
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond || elapsed >= idleTimeout-25*time.Millisecond {
+		t.Fatalf("idle timer fired after %v, want about %v: the window starts at the last activity", elapsed, idleTimeout/2)
+	}
+}
+
 func TestTombstoneOnIdleTimeout(t *testing.T) {
 	socketPath := newStableSocketPath(t, "idle")
 	tombstonePath := socketPath + ".dead"
@@ -5843,42 +5851,135 @@ func TestTombstoneOnIdleTimeout(t *testing.T) {
 		IdleTimeout:   200 * time.Millisecond,
 	})
 
+	done := startStableRun(t, sup, socketPath)
+	awaitIdleRunExit(t, done, tombstonePath, 2*time.Second)
+}
+
+// startStableRun starts Run in the background and blocks until the control
+// socket answers, so a test can spawn into a live supervisor.
+func startStableRun(t *testing.T, sup *Supervisor, socketPath string) <-chan int {
+	t.Helper()
 	done := make(chan int, 1)
 	go func() {
 		done <- sup.Run()
 	}()
-
-	// Wait for startup readiness before relying on idle timeout.
-	ready := false
-	for i := 0; i < 100; i++ {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
 		if _, err := os.Stat(socketPath); err == nil {
-			ready = true
-			break
+			return done
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("control socket never appeared")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !ready {
-		t.Fatal("socket never appeared")
-	}
+}
 
-	var code int
+// awaitIdleRunExit requires Run to return cleanly within timeout and to leave
+// an idle tombstone.
+func awaitIdleRunExit(t *testing.T, done <-chan int, tombstonePath string, timeout time.Duration) {
+	t.Helper()
 	select {
-	case code = <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run() did not return after idle timeout")
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("Run() = %d, want 0", code)
+		}
+	case <-time.After(timeout):
+		t.Fatal("Run() did not return after the last runtime ended")
 	}
-	if code != 0 {
-		t.Fatalf("Run() = %d, want 0", code)
-	}
-
 	data, err := os.ReadFile(tombstonePath)
 	if err != nil {
 		t.Fatalf("tombstone not written: %v", err)
 	}
-	content := string(data)
-	if !strings.Contains(content, "reason=idle") {
+	if content := string(data); !strings.Contains(content, "reason=idle") {
 		t.Fatalf("tombstone = %q, want reason=idle", content)
 	}
+}
+
+// TestIdleTimeoutWaitsForParkedRuntime proves a parked runtime counts as live:
+// it still owns a backend process, so another runtime ending must not let the
+// idle window expire while it is parked. The parked runtime's own reap starts a
+// fresh idle window.
+func TestIdleTimeoutWaitsForParkedRuntime(t *testing.T) {
+	socketPath := newStableSocketPath(t, "idle-parked")
+	tombstonePath := socketPath + ".dead"
+
+	const idleTimeout = 400 * time.Millisecond
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:        socketPath,
+		TombstoneFile:        tombstonePath,
+		MaxRuntimes:          2,
+		IdleTimeout:          idleTimeout,
+		ParkedRuntimeTimeout: 3 * time.Second,
+	})
+	provider := newItestProvider(
+		itestAttempt("ses_idle_parked", itestSessionEnd("ses_idle_parked", "end_turn", "done")),
+		itestAttempt("ses_idle_second", itestSessionEnd("ses_idle_second", "error", "")),
+	)
+	sup.newProviderFunc = itestSingleProvider(provider)
+	done := startStableRun(t, sup, socketPath)
+
+	parked, err := sup.spawn(SpawnParams{
+		Prompt: "go", Dir: t.TempDir(), Backend: "pony", Label: "idle-parked",
+	})
+	if err != nil {
+		t.Fatalf("spawn parked runtime: %v", err)
+	}
+	awaitRuntimeStatus(t, sup, parked.RuntimeID, func(rt map[string]any) bool {
+		return rt["status"] == "idle" && rt["phase"] == "done"
+	}, "spawned runtime never parked")
+	// A second runtime ends while the first is parked. Its completion wakes
+	// the idle loop; the parked runtime must still count as live.
+	second, err := sup.spawn(SpawnParams{
+		Prompt: "go", Dir: t.TempDir(), Backend: "pony", Label: "idle-second", MaxRetries: 0,
+	})
+	if err != nil {
+		t.Fatalf("spawn second runtime: %v", err)
+	}
+	awaitRuntimeEnded(t, sup, second.RuntimeID)
+	// The reap is three seconds away, so a two-window wait cannot be a
+	// false failure under CI load.
+	select {
+	case code := <-done:
+		t.Fatalf("Run() = %d while a parked runtime was still live", code)
+	case <-time.After(2 * idleTimeout):
+	}
+
+	reapedAt := awaitRuntimeEnded(t, sup, parked.RuntimeID)
+	awaitIdleRunExit(t, done, tombstonePath, 5*time.Second)
+	// reapedAt trails the reap by the poll interval, so the bound leaves half a
+	// window of slack; a reap that never re-armed the window returns at once.
+	if elapsed := time.Since(reapedAt); elapsed < idleTimeout/2 {
+		t.Fatalf("Run() returned %v after the parked runtime was reaped, want about %v", elapsed, idleTimeout)
+	}
+}
+
+// awaitRuntimeStatus blocks until the runtime status satisfies cond.
+func awaitRuntimeStatus(t *testing.T, sup *Supervisor, rtID string, cond func(map[string]any) bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status, err := sup.RuntimeStatus(rtID)
+		if err == nil {
+			if rt, _ := status.(map[string]any); cond(rt) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// awaitRuntimeEnded blocks until the runtime reports the ended status and
+// returns when that was observed.
+func awaitRuntimeEnded(t *testing.T, sup *Supervisor, rtID string) time.Time {
+	t.Helper()
+	awaitRuntimeStatus(t, sup, rtID, func(rt map[string]any) bool {
+		return rt["status"] == "ended"
+	}, "runtime never ended")
+	return time.Now()
 }
 
 func TestTombstoneOnSignal(t *testing.T) {
@@ -7921,20 +8022,28 @@ func TestRunChildEventSeqMonotonicAcrossTurns(t *testing.T) {
 
 	ends := 0
 	var seqs []int64
+	var runEnds int
 	sink.mu.Lock()
 	for _, ev := range sink.events {
 		if ev.Event == "session.end" {
 			ends++
+			if kind, _ := ev.Fields["end_kind"].(string); kind == "run" {
+				runEnds++
+			}
 			if seq, ok := events.Int64(ev.Fields["seq"]); ok {
 				seqs = append(seqs, seq)
 			}
 		}
 	}
 	sink.mu.Unlock()
-	if ends != 2 {
-		t.Fatalf("captured %d session.end events, want 2", ends)
+	// The cancel ends the parked runtime through the idle-end path, which
+	// publishes the run's own terminal session.end (cancelled) to the same
+	// sink, tagged end_kind=run so it is distinguishable from the two turns'
+	// session ends.
+	if ends != 3 || runEnds != 1 {
+		t.Fatalf("captured %d session.end events (%d tagged as a run end), want 3 and one", ends, runEnds)
 	}
-	if len(seqs) != 2 || seqs[1] <= seqs[0] {
+	if len(seqs) != 3 || seqs[1] <= seqs[0] || seqs[2] <= seqs[1] {
 		t.Fatalf("session.end seqs across turns = %v, want strictly increasing", seqs)
 	}
 }

@@ -278,7 +278,7 @@ avenor stable --control-socket /tmp/avenor.sock
 | `--http-debug` | (none) | HTTP debug adapter bind address (e.g., `127.0.0.1:8080`) |
 | `--max-runtimes` | `16` | Maximum concurrent child runtimes for this supervisor (parked finished runtimes do not count) |
 | `--max-tree-budget` | `64` | Maximum concurrent executing runtimes across the whole supervisor tree including nested supervisors |
-| `--idle-timeout` | `0` (disabled) | Exit after this duration with no child runtimes and no control connections |
+| `--idle-timeout` | `0` (disabled) | Exit after this duration with no live child runtimes (parked runtimes count as live); control connections do not delay it |
 | `--parked-timeout` | `30m` | Reap a finished runtime parked for follow-up after this duration (0 = park until shutdown) |
 | `--lease-sweep-interval` | `10s` | Expire workflow leases whose heartbeat stopped at this cadence (0 = disable; leases expire only on restart recovery) |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout before killing children |

@@ -182,7 +182,7 @@ func newDispatchFixtureTemplate(t *testing.T, name string, maxRuntimes, maxTreeB
 				_ = sup.cancelRuntime(id)
 			}
 		}
-		waitFor(t, "runtimes terminal at cleanup", func() bool { return sup.activeRuntimeCount() == 0 })
+		waitFor(t, "runtimes terminal at cleanup", func() bool { return activeRuntimeCount(sup) == 0 })
 		_ = sup.broker.Stop()
 		sup.stopReaper()
 	})
@@ -245,11 +245,11 @@ func TestDispatchConsumesExactlyOneReservation(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	if got := f.treeActive(t); got != 1 {
 		t.Fatalf("tree slots active = %d, want exactly 1", got)
 	}
-	if got := f.sup.activeRuntimeCount(); got != 1 {
+	if got := activeRuntimeCount(f.sup); got != 1 {
 		t.Fatalf("active runtimes = %d, want 1", got)
 	}
 	f.sup.controlMu.Lock()
@@ -280,7 +280,7 @@ func TestDispatchReservationReleasedOnPreStartFailure(t *testing.T) {
 	if got := f.treeActive(t); got != 0 {
 		t.Fatalf("tree slots active = %d, want 0 after pre-start failure", got)
 	}
-	if got := f.sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(f.sup); got != 0 {
 		t.Fatalf("active runtimes = %d, want 0", got)
 	}
 	f.sup.controlMu.Lock()
@@ -458,7 +458,7 @@ func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("first outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "first runtime live", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "first runtime live", func() bool { return activeRuntimeCount(f.sup) == 1 })
 
 	// A second supervisor on the same root (separate store handle, like a
 	// separate process) must see the key as held.
@@ -483,7 +483,7 @@ func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
 				_ = sup2.cancelRuntime(id)
 			}
 		}
-		waitFor(t, "sup2 runtimes terminal at cleanup", func() bool { return sup2.activeRuntimeCount() == 0 })
+		waitFor(t, "sup2 runtimes terminal at cleanup", func() bool { return activeRuntimeCount(sup2) == 0 })
 		_ = sup2.broker.Stop()
 		sup2.stopReaper()
 	})
@@ -555,7 +555,7 @@ func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
 	// workflow dispatches. The manual claim's stranded lease is recovered by
 	// the same sweep.
 	_ = f.sup.cancelRuntime(out.RuntimeID)
-	waitFor(t, "first runtime terminal", func() bool { return f.sup.activeRuntimeCount() == 0 })
+	waitFor(t, "first runtime terminal", func() bool { return activeRuntimeCount(f.sup) == 0 })
 	waitFor(t, "manual lease recovery re-arms the candidate", func() bool {
 		if _, err := mgr2.ResumeAwaitingChildren(); err != nil {
 			return false
@@ -726,7 +726,7 @@ func TestDispatchAssignmentAutoApproveRunsUnattended(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	runtimes := f.sup.listRuntimes()
 	if len(runtimes) != 1 {
 		t.Fatalf("runtimes = %d, want 1", len(runtimes))
@@ -876,7 +876,7 @@ func TestSpawnRejectsAutoApproveWithPermissionDecider(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "permission_decider and permission_model_decider are mutually exclusive") {
 		t.Fatalf("err = %v, want decider/decider_model mutual exclusion", err)
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawns", got)
 	}
 }
@@ -896,29 +896,45 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 	f := newDispatchFixtureTemplate(t, "dispatch-permdec", 4, 4, template)
 	requestID := "perm_req_1"
 	var providerSeq int64
-	// Capture the spawn dirs so the test can prove the decider runs in a
-	// neutral scratch directory instead of the worker's workspace.
-	var workerDir, deciderDir string
+	// The worker is gated after its permission request so the request stays
+	// pending for the assertions instead of ending with the scripted turn.
+	workerGate := make(chan struct{})
+	defer close(workerGate)
+	// Each spawn publishes its own dir and session; the assertions read them
+	// only after the spawn published the matching session identity.
+	type permdecSpawn struct {
+		sessionID, dir string
+	}
+	workerSpawned := make(chan permdecSpawn, 4)
+	deciderSpawned := make(chan permdecSpawn, 4)
 	f.sup.newProviderFunc = func(startOpts runtime.StartOptions, _ string) (runtime.Provider, error) {
-		if strings.HasPrefix(startOpts.Label, "permdec:") {
-			deciderDir = startOpts.Dir
-		} else {
-			workerDir = startOpts.Dir
-		}
+		decider := strings.HasPrefix(startOpts.Label, "permdec:")
 		n := atomic.AddInt64(&providerSeq, 1)
-		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{
-			sessionID: fmt.Sprintf("ses_permdec_%d", n),
-			events: []stableScriptedEvent{{event: events.Event{
-				Event:     "permission.request",
-				SessionID: fmt.Sprintf("ses_permdec_%d", n),
-				Fields: map[string]any{
-					"request_id": requestID,
-					"tool":       "bash",
-					"command":    "rm -rf /tmp/build",
-					"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
-				},
-			}, release: nil}},
-		}}}, nil
+		sessionID := fmt.Sprintf("ses_permdec_%d", n)
+		spawned := workerSpawned
+		if decider {
+			spawned = deciderSpawned
+		}
+		// A second creation of the same kind must not block the factory: the
+		// assertions read the first spawn's identity.
+		select {
+		case spawned <- permdecSpawn{sessionID: sessionID, dir: startOpts.Dir}:
+		default:
+		}
+		events := []stableScriptedEvent{{event: events.Event{
+			Event:     "permission.request",
+			SessionID: sessionID,
+			Fields: map[string]any{
+				"request_id": requestID,
+				"tool":       "bash",
+				"command":    "rm -rf /tmp/build",
+				"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow"}},
+			},
+		}}}
+		if !decider {
+			events = append(events, stableScriptedEvent{release: workerGate})
+		}
+		return &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{{sessionID: sessionID, events: events}}}, nil
 	}
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
 	if err != nil {
@@ -927,26 +943,32 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	// The request must surface as pending on the worker runtime, with the
-	// declared decider, and no file permission handler may have been derived.
-	// Wait on the runtime's pending_permission status rather than the active
-	// runtime count: the scripted worker finishes its turn right after
-	// emitting permission.request, so the runtime can tear down (leaving a
-	// status tombstone that still reports the pending request) before an
-	// active-count poll ever observes it.
-	var worker map[string]any
-	waitFor(t, "pending permission", func() bool {
+	// The routed request stays pending: the decider owns it, so the claim is
+	// reserved for a resolver and never auto-resolved.
+	waitFor(t, "routed request claim", func() bool {
+		state := f.sup.control.PermissionResolverState(out.RuntimeID, requestID)
+		return state != control.PermissionResolverUnknown && state != control.PermissionResolverResolved
+	})
+	// The claim is prepared before the permission.request event is written, so
+	// pending_permission appears only once the fanout writer handles that
+	// event: wait for the flag instead of reading it once.
+	waitFor(t, "worker pending_permission", func() bool {
 		status, err := f.sup.RuntimeStatus(out.RuntimeID)
 		if err != nil {
 			return false
 		}
-		rt, _ := status.(map[string]any)
-		if pending, _ := rt["pending_permission"].(bool); pending {
-			worker = rt
-			return true
-		}
-		return false
+		worker, _ := status.(map[string]any)
+		pending, _ := worker["pending_permission"].(bool)
+		return pending
 	})
+	// The worker's routing policy is fixed at spawn, and its held-open turn
+	// still reports the routed request. No file permission handler is derived
+	// when a decider owns the request.
+	status, err := f.sup.RuntimeStatus(out.RuntimeID)
+	if err != nil {
+		t.Fatalf("worker RuntimeStatus: %v", err)
+	}
+	worker, _ := status.(map[string]any)
 	if got, _ := worker["permission_decider"].(string); got != "rm-guard" {
 		t.Fatalf("worker permission_decider = %q, want rm-guard", got)
 	}
@@ -955,18 +977,31 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 	}
 
 	// The declared decider run spawns for the pending request, under the
-	// decider identity, auto-approved so the decider itself cannot stall.
-	var decider map[string]any
-	waitFor(t, "decider runtime", func() bool {
-		runtimes := f.sup.listRuntimes()
-		for _, rt := range runtimes {
-			if label, _ := rt["label"].(string); strings.HasPrefix(label, "permdec:") {
-				decider = rt
+	// decider identity, auto-approved so the decider itself cannot stall. Its
+	// session registry entry is published only after StartSession resolved the
+	// identity, so waiting for it keeps the identity assertions off the
+	// spawn's still-unpublished fields.
+	workerSpawn := itestRecv(t, workerSpawned, "worker provider spawn")
+	deciderSpawn := itestRecv(t, deciderSpawned, "decider provider spawn")
+	waitFor(t, "decider identity published", func() bool {
+		_, ok := f.sup.sessionIdentity(deciderSpawn.sessionID)
+		return ok
+	})
+	deciderRuntimeID := ""
+	waitFor(t, "decider runtime row", func() bool {
+		for _, rt := range f.sup.listRuntimes() {
+			if label, _ := rt["label"].(string); label == permdecLabelPrefix+out.RuntimeID+":"+requestID {
+				deciderRuntimeID, _ = rt["runtime_id"].(string)
 				return true
 			}
 		}
 		return false
 	})
+	status, err = f.sup.RuntimeStatus(deciderRuntimeID)
+	if err != nil {
+		t.Fatalf("decider RuntimeStatus: %v", err)
+	}
+	decider, _ := status.(map[string]any)
 	if got, _ := decider["agent"].(string); got != "rm-guard" {
 		t.Fatalf("decider agent = %q, want rm-guard", got)
 	}
@@ -985,20 +1020,16 @@ func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
 	// The decider must not run in the worker's workspace: it is spawned in a
 	// neutral per-request scratch directory under the system temp dir, then
 	// that directory is removed when the decider run tears down.
-	if deciderDir == "" || deciderDir == workerDir {
-		t.Fatalf("decider dir = %q, want a scratch dir distinct from the worker dir %q", deciderDir, workerDir)
+	if deciderSpawn.dir == "" || deciderSpawn.dir == workerSpawn.dir {
+		t.Fatalf("decider dir = %q, want a scratch dir distinct from the worker dir %q", deciderSpawn.dir, workerSpawn.dir)
 	}
-	if !strings.HasPrefix(deciderDir, filepath.Clean(os.TempDir())+string(os.PathSeparator)) {
-		t.Fatalf("decider dir = %q, want a scratch dir under %s", deciderDir, os.TempDir())
+	if !strings.HasPrefix(deciderSpawn.dir, filepath.Clean(os.TempDir())+string(os.PathSeparator)) {
+		t.Fatalf("decider dir = %q, want a scratch dir under %s", deciderSpawn.dir, os.TempDir())
 	}
 	waitFor(t, "decider scratch dir removed", func() bool {
-		_, err := os.Stat(deciderDir)
+		_, err := os.Stat(deciderSpawn.dir)
 		return os.IsNotExist(err)
 	})
-	// The request stays pending: the kernel routed it, it did not answer it.
-	if pending, _ := worker["pending_permission"].(bool); !pending {
-		t.Fatal("worker pending_permission = false, want the request to stay pending")
-	}
 }
 
 // dispatchPermdecTemplate builds the single-node dispatch template whose
@@ -1453,7 +1484,7 @@ func TestDispatchCrashAfterBeginDispatchRecovers(t *testing.T) {
 	// reaper reclaims it (here: never, same process), which is the documented
 	// crash behavior: no second live attempt, capacity reclaimable by the
 	// reaper, and no completion inferred from the released reservation.
-	waitFor(t, "single live runtime", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "single live runtime", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	if got := f.treeActive(t); got < 1 {
 		t.Fatalf("tree slots active = %d, want at least the replacement's 1", got)
 	}
@@ -1553,7 +1584,7 @@ func TestSpawnConsumesReservationOnSuccess(t *testing.T) {
 	if _, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: t.TempDir()}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	waitFor(t, "runtime registration", func() bool { return sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(sup) == 1 })
 	if active, _, _ := sup.treeBudgetStatusValues(); active != 1 {
 		t.Fatalf("tree slots active = %d, want 1 after successful spawn", active)
 	}
@@ -1663,7 +1694,7 @@ func TestDispatchCanceledAfterBeginDispatch(t *testing.T) {
 	if got := f.treeActive(t); got != 0 {
 		t.Fatalf("tree slots active = %d, want 0", got)
 	}
-	waitFor(t, "runtime absent after cancel", func() bool { return f.sup.activeRuntimeCount() == 0 })
+	waitFor(t, "runtime absent after cancel", func() bool { return activeRuntimeCount(f.sup) == 0 })
 	insp, err := f.mgr.WorkflowInspect(f.wf)
 	if err != nil {
 		t.Fatalf("WorkflowInspect: %v", err)
@@ -1705,7 +1736,7 @@ func TestDispatchKeyHeldOutcomeReleasesReservation(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("first outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "first runtime live", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "first runtime live", func() bool { return activeRuntimeCount(f.sup) == 1 })
 
 	// A second workflow sharing the key under the same controller.
 	if _, err := f.mgr.WorkflowCreate(dispatchTemplateJSONTTL(t, "tmpl-dispatch-key-outcome-2", "c1", "deploys", 900)); err != nil {
@@ -1801,11 +1832,11 @@ func TestDispatchSingleAcquirePerAction(t *testing.T) {
 			if out.Kind != Dispatched {
 				t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 			}
-			waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+			waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 			if got := f.treeActive(t); got != 1 {
 				t.Fatalf("tree slots active = %d, want exactly 1 (no second acquire)", got)
 			}
-			if got := f.sup.activeRuntimeCount(); got != 1 {
+			if got := activeRuntimeCount(f.sup); got != 1 {
 				t.Fatalf("active runtimes = %d, want 1", got)
 			}
 			f.sup.controlMu.Lock()
@@ -1899,7 +1930,7 @@ func TestDispatchKeyHeldThroughRunnerDeps(t *testing.T) {
 	if _, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil)); err != nil {
 		t.Fatalf("first dispatch: %v", err)
 	}
-	waitFor(t, "first runtime live", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "first runtime live", func() bool { return activeRuntimeCount(f.sup) == 1 })
 
 	// The second workflow's candidate is ready, but its key is held.
 	cands, err := f.mgr.CandidatesForController("c1", 10)
@@ -2178,7 +2209,7 @@ func TestDispatchModelDeciderAnswersRequest(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	status, err := f.sup.RuntimeStatus(out.RuntimeID)
 	if err != nil {
 		t.Fatalf("RuntimeStatus: %v", err)
@@ -2362,7 +2393,7 @@ func TestSpawnModelDeciderRequiresResolvableKey(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "MODEL_DECIDER_TEST_UNSET_KEY") {
 		t.Fatalf("err = %v, want unset api_key_env failure", err)
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount() = %d, want 0 after rejected spawn", got)
 	}
 }
@@ -2452,7 +2483,7 @@ func TestDispatchModelDeciderHumanAnswerWinsRace(t *testing.T) {
 	if out.Kind != Dispatched {
 		t.Fatalf("outcome = %s (%s), want dispatched", out.Kind, out.Detail)
 	}
-	waitFor(t, "runtime registration", func() bool { return f.sup.activeRuntimeCount() == 1 })
+	waitFor(t, "runtime registration", func() bool { return activeRuntimeCount(f.sup) == 1 })
 	waitFor(t, "request pending", func() bool {
 		status, err := f.sup.RuntimeStatus(out.RuntimeID)
 		if err != nil {

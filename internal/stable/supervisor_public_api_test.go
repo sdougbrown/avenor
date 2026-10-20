@@ -823,6 +823,99 @@ func TestSupervisorPublicAPICancelDuringBackoff(t *testing.T) {
 	})
 }
 
+// TestSupervisorPublicAPICancelWithPendingPermission proves a runtime
+// cancelled while a permission request is pending ends with
+// pending_permission cleared: the terminal status must not keep advertising a
+// request no live turn can answer.
+func TestSupervisorPublicAPICancelWithPendingPermission(t *testing.T) {
+	t.Parallel()
+	gate := newItestGate()
+	defer gate.open()
+	provider := newItestProvider(itestAttempt("ses_perm_cancel",
+		itestPermissionRequest("ses_perm_cancel", "req_perm_cancel"),
+		gate.step()))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+	h.connectClient()
+
+	rt := h.spawn(nil)
+	h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
+	if v := h.view(rt); !v.PendingPermission {
+		t.Fatalf("view with a pending request = %+v, want pending_permission", v)
+	}
+	if err := h.sup.RuntimeCancel(rt); err != nil {
+		t.Fatalf("RuntimeCancel: %v", err)
+	}
+	v := h.awaitStatus(rt, "killed")
+	if v.PendingPermission {
+		t.Fatal("killed runtime still reports pending_permission")
+	}
+	if perm := h.rawRuntimeStatus(rt)["permission"]; perm != nil {
+		t.Fatalf("killed runtime still reports a permission request: %#v", perm)
+	}
+}
+
+// TestSupervisorPublicAPINaturalEndWithPendingPermission proves a turn that
+// ends on its own while a request is unanswered holds its terminal event until
+// the answer settles. The terminal pending_permission cleanup is pinned by
+// TestSupervisorPublicAPICancelWithPendingPermission, the only path that ends
+// without a permission.response to clear it.
+func TestSupervisorPublicAPINaturalEndWithPendingPermission(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_perm_end",
+		itestPermissionRequest("ses_perm_end", "req_perm_end"),
+		itestSessionEnd("ses_perm_end", "end_turn", "done"),
+		// A status event after the terminal one: seeing it proves the end
+		// arrived while the answer was still pending.
+		stableScriptedEvent{event: events.Event{Event: "agent.status", SessionID: "ses_perm_end", Fields: map[string]any{"phase": "working"}}},
+	))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+	h.connectClient()
+
+	rt := h.spawn(nil)
+	h.log.waitFor(t, "permission.request", itestEventIs("permission.request", rt))
+	if perm := h.rawRuntimeStatus(rt)["permission"]; perm == nil {
+		t.Fatal("running runtime with a pending request reports no permission record")
+	}
+	h.log.waitFor(t, "status after the terminal event", itestEventIs("agent.status", rt))
+	if got := h.log.count(itestStopReasonIs(rt, "end_turn")); got != 0 {
+		t.Fatalf("session.end published %d times before the pending answer settled, want 0", got)
+	}
+
+	if err := h.sup.RuntimeAnswerPermission(rt, "req_perm_end", "allow_once", ""); err != nil {
+		t.Fatalf("RuntimeAnswerPermission: %v", err)
+	}
+	h.requireSessionEnd(rt, "end_turn", 0)
+	h.awaitStatus(rt, "done")
+}
+
+// TestSupervisorPublicAPIRecordsIdleEndInBroker proves an idle-time terminal
+// end reaches the same broker recording as a turn's own session.end: a run
+// cancelled in retry backoff records the terminal cancelled finish after the
+// failed attempt's error finish.
+func TestSupervisorPublicAPIRecordsIdleEndInBroker(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_broker_idle", itestSessionEnd("ses_broker_idle", "error", "")))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	rt := h.spawn(map[string]any{"max_retries": 1})
+	h.log.waitFor(t, "failed attempt session.end", itestStopReasonIs(rt, "error"))
+	if err := h.sup.RuntimeCancel(rt); err != nil {
+		t.Fatalf("RuntimeCancel: %v", err)
+	}
+	h.log.waitFor(t, "idle cancelled session.end", itestStopReasonIs(rt, "cancelled"))
+	// The attempt's own end recorded first; the idle end must be the last
+	// recording the broker holds for the runtime's run.
+	state := h.sup.broker.GetRun(rt)
+	if state == nil {
+		t.Fatalf("broker has no run for %s", rt)
+	}
+	state.Mu.Lock()
+	defer state.Mu.Unlock()
+	if len(state.Reports) == 0 || state.Reports[len(state.Reports)-1].State != "cancelled" {
+		t.Fatalf("broker last recording = %v, want the idle end's cancelled recording", state.Reports)
+	}
+}
+
 func TestSupervisorPublicAPIParkAndResume(t *testing.T) {
 	t.Parallel()
 	gate := newItestGate()

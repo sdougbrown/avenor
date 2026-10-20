@@ -344,7 +344,10 @@ type childRuntime struct {
 	unknownPhases     diagnote.Gate
 	pendingPermission bool
 	permission        map[string]any
-	directAttempt     *sessionAttempt
+	// runEnds records the sessions that already published a run-level terminal
+	// end, so a run publishes at most one per session.
+	runEnds       map[string]struct{}
+	directAttempt *sessionAttempt
 	// lc is the closed lifecycle state owned by the pure machine
 	// (runtime_lifecycle.go) and committed field by field by the adapter
 	// (runtime_lifecycle_apply.go). Read it through the field-specific
@@ -610,12 +613,16 @@ type Supervisor struct {
 	shutdownChOnce          sync.Once
 	// heartbeatMu guards heartbeats, the registry of live executor lease
 	// heartbeat goroutines stopped on supervisor shutdown.
-	heartbeatMu      sync.Mutex
-	heartbeats       map[*leaseHeartbeat]struct{}
-	runtimeActivity  chan struct{}
-	childQuestionSeq int
-	pendingQuestions map[string]pendingChildQuestion // child runtime ID -> pending question
-	handledQuestions map[string]handledChildQuestion // child runtime ID -> latest handled request
+	heartbeatMu     sync.Mutex
+	heartbeats      map[*leaseHeartbeat]struct{}
+	runtimeActivity chan struct{}
+	// runtimeActivityAt is the last spawn or completion, in Unix nanoseconds.
+	// The idle timer measures its window from it rather than from the moment
+	// the loop happens to observe the last runtime end.
+	runtimeActivityAt atomic.Int64
+	childQuestionSeq  int
+	pendingQuestions  map[string]pendingChildQuestion // child runtime ID -> pending question
+	handledQuestions  map[string]handledChildQuestion // child runtime ID -> latest handled request
 	// childQuestionTimeout is the deadline for a parent to answer a child's
 	// question before the child is prompted to continue on its own.
 	childQuestionTimeout          time.Duration
@@ -689,7 +696,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		controllerRenewInterval: workflowcontroller.RenewInterval,
 		candidateRefreshWindow:  workflowcontroller.DefaultAntiEntropy,
 		shutdownCh:              make(chan struct{}),
-		runtimeActivity:         make(chan struct{}),
+		runtimeActivity:         make(chan struct{}, 1),
 		pendingQuestions:        map[string]pendingChildQuestion{},
 		handledQuestions:        map[string]handledChildQuestion{},
 		childQuestionTimeout:    cfg.ChildQuestionTimeout,
@@ -800,10 +807,8 @@ func (s *Supervisor) Run() (exitCode int) {
 		}()
 	}
 
-	var idleDeadline time.Time
-	if s.config.IdleTimeout > 0 {
-		idleDeadline = time.Now().Add(s.config.IdleTimeout)
-	}
+	// lastActivity anchors the idle window before the first runtime acts.
+	lastActivity := time.Now()
 
 	s.startReaper()
 	defer s.stopReaper()
@@ -817,7 +822,10 @@ func (s *Supervisor) Run() (exitCode int) {
 	}
 
 	for {
-		idleCh := idleCheck(s.config.IdleTimeout, s.activeRuntimeCount(), &idleDeadline)
+		if at := s.lastRuntimeActivity(); at.After(lastActivity) {
+			lastActivity = at
+		}
+		idleCh := idleCheck(s.config.IdleTimeout, s.liveRuntimeCount(), lastActivity)
 		select {
 		case <-ctx.Done():
 			reason = "signal"
@@ -826,6 +834,12 @@ func (s *Supervisor) Run() (exitCode int) {
 			reason = "shutdown"
 			return s.shutdown("graceful")
 		case <-idleCh:
+			// The timer may have fired in the same iteration that a spawn or a
+			// completion made pending: only a supervisor that is still idle
+			// expires.
+			if s.liveRuntimeCount() > 0 || s.lastRuntimeActivity().After(lastActivity) {
+				continue
+			}
 			reason = "idle"
 			return s.shutdown("graceful")
 		case <-s.runtimeActivity:
@@ -1213,15 +1227,36 @@ func (s *Supervisor) writeTombstone(reason string) {
 	}
 }
 
-func idleCheck(idleTimeout time.Duration, active int, deadline *time.Time) <-chan time.Time {
-	if idleTimeout <= 0 {
+// signalRuntimeActivity records runtime activity and wakes Run's activity
+// select without blocking. The supervisor may be outside its select when
+// activity happens, so the wake channel is buffered and an unread wake is
+// enough for the next evaluation.
+func (s *Supervisor) signalRuntimeActivity() {
+	s.runtimeActivityAt.Store(time.Now().UnixNano())
+	select {
+	case s.runtimeActivity <- struct{}{}:
+	default:
+	}
+}
+
+// lastRuntimeActivity returns the most recent spawn or completion.
+func (s *Supervisor) lastRuntimeActivity() time.Time {
+	nanos := s.runtimeActivityAt.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
+// idleCheck returns the idle timer for the current live runtime count. A
+// nonempty live count disarms the timer; once no runtime is live, the window
+// is lastActivity plus the timeout, so a supervisor never expires before a
+// full idle window has passed since its last runtime acted.
+func idleCheck(idleTimeout time.Duration, live int, lastActivity time.Time) <-chan time.Time {
+	if idleTimeout <= 0 || live > 0 {
 		return nil
 	}
-	if active > 0 {
-		*deadline = time.Now().Add(idleTimeout)
-		return nil
-	}
-	return time.After(time.Until(*deadline))
+	return time.After(time.Until(lastActivity.Add(idleTimeout)))
 }
 
 // acquireLocalRuntimeSlot re-gates a parked runtime on the local
@@ -1357,13 +1392,20 @@ func (s *Supervisor) reserveAdmission() (*admissionReservation, error) {
 	return res, nil
 }
 
+// activeRuntimeCountLocked counts the runtimes that hold a MaxRuntimes slot.
+// Parked runtimes await an optional follow-up prompt with no turn in flight, so
+// they are excluded.
 func (s *Supervisor) activeRuntimeCountLocked() int {
+	return s.countRuntimesLocked(false)
+}
+
+// countRuntimesLocked counts registered runtimes that have not completed,
+// counting parked runtimes only when includeParked is set.
+func (s *Supervisor) countRuntimesLocked(includeParked bool) int {
 	n := 0
 	for _, rt := range s.runtimes {
 		rt.mu.Lock()
-		// Parked runtimes await an optional follow-up prompt; they hold no
-		// turn in flight, so they must not consume a MaxRuntimes slot.
-		if !rt.lc.isCompleted() && !rt.lc.isParked() {
+		if !rt.lc.isCompleted() && (includeParked || !rt.lc.isParked()) {
 			n++
 		}
 		rt.mu.Unlock()
@@ -1682,10 +1724,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		child.sentinelFile = sentinelFile
 		// provider and session remain zero-valued for loop children
 
-		select {
-		case s.runtimeActivity <- struct{}{}:
-		default:
-		}
+		s.signalRuntimeActivity()
 
 		releaseReservation = nil
 		go s.runLoopChild(childCtx, child, cfg, params.Timeout, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.Thinking, params.ServerURL, backend)
@@ -1740,10 +1779,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		child.onEvent = onEvent
 		child.sentinelFile = sentinelFile
 
-		select {
-		case s.runtimeActivity <- struct{}{}:
-		default:
-		}
+		s.signalRuntimeActivity()
 
 		releaseReservation = nil
 		go s.runTeamChild(childCtx, child, cfg, params.Timeout, params.MaxRetries, params.Agent, params.AgentProfile, params.Model, params.Thinking, params.ServerURL, backend)
@@ -1848,10 +1884,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	releaseReservation = nil
 	go s.runChild(childCtx, child, promptText, params.Timeout, params.MaxRetries)
 
-	select {
-	case s.runtimeActivity <- struct{}{}:
-	default:
-	}
+	s.signalRuntimeActivity()
 
 	brokerURL := s.brokerURL()
 	return SpawnResult{
@@ -3832,11 +3865,16 @@ func (s *Supervisor) computeOutputFiles(runtimeID string) []string {
 	return output
 }
 
-func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReason string) {
+// emitSessionEnd publishes the run-level terminal end for a run that stopped
+// while no turn was in flight. It takes the same path as a turn's own
+// session.end: the fanout writer updates the child's presentation, feeds the
+// broker recorder, writes the durable sink and publishes the canonical event.
+// The writer tags the end end_kind=run so it is distinguishable from a turn's
+// own session end, and derives its exit code from the stop reason.
+func (s *Supervisor) emitSessionEnd(child *childRuntime, stopReason string) {
 	fields := map[string]any{
 		"stop_reason": stopReason,
 		"runtime_id":  child.id,
-		"exit_code":   exitCode,
 		"ts":          time.Now().UnixMilli(),
 	}
 	// Compute output file diff if pre-snapshot exists.
@@ -3844,11 +3882,13 @@ func (s *Supervisor) emitSessionEnd(child *childRuntime, exitCode int, stopReaso
 	if len(outputFiles) > 0 {
 		fields["output_files"] = outputFiles
 	}
-	s.control.PublishEvent(events.Event{
+	if err := s.fanoutWriterLocked(child).writeRunEnd(events.Event{
 		Event:     "session.end",
 		SessionID: child.sessionID(),
 		Fields:    fields,
-	})
+	}); err != nil {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: write idle session.end for runtime %s: %v\n", child.id, err)
+	}
 }
 
 // stopReasonForCtxErr maps a run context error to the stop reason the idle
@@ -3881,10 +3921,10 @@ func idleEndFault(child *childRuntime, ctxErr error) lifecycleFault {
 // how the same end reports itself during an attempt: a deadline is a timeout
 // (timeout sentinel, timeout session.end) and a cancel is a kill (cancelled
 // sentinel, cancelled session.end). The exit code comes from the canonical
-// stop-reason mapping. The session.end is published straight to the control
-// plane, bypassing the fanout writer that records an attempt's session.end in
-// child state, so the terminal phase and stop reason are recorded here for
-// status and WaitTurn snapshots.
+// stop-reason mapping. The session.end flows through the child's fanout writer
+// like any other session end, so the recorder, the durable sink and the
+// control plane all see it; the writer owns its exit code and refuses a
+// second run-level end for the same session.
 func (s *Supervisor) writeIdleContextEnd(child *childRuntime, ctxErr error) {
 	stopReason := stopReasonForCtxErr(ctxErr)
 	exitCode := runtime.ExitCodeForStopReason(stopReason)
@@ -4001,10 +4041,13 @@ func (s *Supervisor) shutdown(mode string) int {
 	return 0
 }
 
-func (s *Supervisor) activeRuntimeCount() int {
+// liveRuntimeCount counts registered runtimes that have not completed,
+// including parked runtimes: a parked runtime still owns a live backend
+// process awaiting a follow-up prompt.
+func (s *Supervisor) liveRuntimeCount() int {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
-	return s.activeRuntimeCountLocked()
+	return s.countRuntimesLocked(true)
 }
 
 func (s *Supervisor) listRuntimes() []map[string]any {
@@ -4146,6 +4189,11 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 	child.doneOnce.Do(func() {
 		child.releaseTreeToken()
 		child.mu.Lock()
+		// The runtime cannot answer a request once it ends: a leftover pending
+		// flag or request would classify the terminal state as waiting for
+		// permission.
+		child.pendingPermission = false
+		child.permission = nil
 		// The adapter owns the publication: it commits the completion stage
 		// and settles the turn waiters.
 		_, pubEff, pubErr := s.applyLifecycle(child, lifecycleSignal{
@@ -4166,6 +4214,8 @@ func (child *childRuntime) complete(s *Supervisor, boundary completionBoundary) 
 			// closeDone runs inside doneOnce, after the publication transaction.
 			s.executeDeferredLifecycleEffects(child, pubEff)
 		}
+		// The runtime no longer counts as live; re-evaluate the idle timer.
+		s.signalRuntimeActivity()
 	})
 }
 
@@ -4596,7 +4646,11 @@ func (s *Supervisor) fanoutWriterLocked(child *childRuntime) *runtimeFanoutWrite
 func (s *Supervisor) fanoutWriterForChildLocked(child *childRuntime) *runtimeFanoutWriter {
 	writer := child.fanoutWriter
 	if writer == nil {
-		writer = newRuntimeFanoutWriter(s, child, cli.NewEventMetadata(s.runID, child.label, child.id), nil)
+		// The fallback carries the same recorder and workflow metadata as an
+		// installed writer, so an end published before any attempt installed
+		// one still reaches the broker recording under the child's workflow
+		// identity.
+		writer = newRuntimeFanoutWriter(s, child, workflowEventMetadata(s, child), newRecorderFor(s, child.id))
 	}
 	return writer
 }
@@ -4660,6 +4714,49 @@ func (w *runtimeFanoutWriter) writeHoldingWriteLock(ev events.Event, diagnostics
 	return w.writeLocked(ev, diagnostics)
 }
 
+// writeRunEnd publishes a run-level terminal end. A session gets at most one,
+// and a child that never established a session publishes none: an empty
+// session_id identifies no session to end. The writer must bear a child: the
+// write lock it publishes under and the record of already-published ends both
+// live on it.
+func (w *runtimeFanoutWriter) writeRunEnd(ev events.Event) error {
+	if w.beforeWriteLock != nil {
+		w.beforeWriteLock()
+	}
+	diagnostics := make([]error, 0, 2)
+	defer func() { reportLifecycleDiagnostics(w.supervisor, w.child, diagnostics) }()
+	w.child.writeMu.Lock()
+	defer w.child.writeMu.Unlock()
+	if ev.SessionID == "" || w.runEndPublished(ev.SessionID) {
+		return nil
+	}
+	if err := w.writeLockedRunEnd(ev, &diagnostics); err != nil {
+		return err
+	}
+	w.markRunEndPublished(ev.SessionID)
+	return nil
+}
+
+// runEndPublished reports whether a run-level end was already published for
+// sessionID. The caller holds writeMu; the record lives under child.mu.
+func (w *runtimeFanoutWriter) runEndPublished(sessionID string) bool {
+	w.child.mu.Lock()
+	defer w.child.mu.Unlock()
+	_, published := w.child.runEnds[sessionID]
+	return published
+}
+
+// markRunEndPublished records sessionID's one run-level end. The caller holds
+// writeMu.
+func (w *runtimeFanoutWriter) markRunEndPublished(sessionID string) {
+	w.child.mu.Lock()
+	defer w.child.mu.Unlock()
+	if w.child.runEnds == nil {
+		w.child.runEnds = make(map[string]struct{}, 1)
+	}
+	w.child.runEnds[sessionID] = struct{}{}
+}
+
 // reportLifecycleDiagnostics reports collected lifecycle errors outside all
 // locks. It is idempotent per call site: callers report each slice once. A
 // nil owner is an invariant violation, never a tolerated path: a
@@ -4707,9 +4804,32 @@ func (e unrecognizedPhaseDiagnostic) Error() string {
 // diagnostics slice before the event proceeds; publication is never suppressed
 // because of a lifecycle diagnostic.
 func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error) error {
+	return w.writeLockedTerminal(ev, diagnostics, false)
+}
+
+// writeLockedRunEnd publishes the run-level terminal end: the same
+// normalization as any other event, except that it is the one write allowed to
+// stamp end_kind.
+func (w *runtimeFanoutWriter) writeLockedRunEnd(ev events.Event, diagnostics *[]error) error {
+	return w.writeLockedTerminal(ev, diagnostics, true)
+}
+
+func (w *runtimeFanoutWriter) writeLockedTerminal(ev events.Event, diagnostics *[]error, runEnd bool) error {
+	if ev.Event == "session.end" {
+		stopReason, _ := ev.Fields["stop_reason"].(string)
+		if ev.Fields == nil {
+			ev.Fields = map[string]any{}
+		}
+		runtime.SetSessionEndExitCode(ev.Fields, stopReason)
+	}
 	// stamped is the lossless durable event (written to file/broker);
 	// presentation is the bounded copy for control/status surfaces.
 	stamped := cli.StampFanoutEvent(ev, w.runtimeID, w.metadata, w.control)
+	if runEnd && stamped.Event == "session.end" {
+		// Stamping strips a backend-supplied end_kind, so the run-level writer
+		// tags its end afterwards.
+		stamped.Fields["end_kind"] = "run"
+	}
 	presentation := events.BoundFinalOutput(stamped)
 	if presentation.Event == "permission.request" && w.onPermissionReq != nil {
 		if requestID, _ := presentation.Fields["request_id"].(string); requestID != "" {
@@ -4804,14 +4924,16 @@ func (w *runtimeFanoutWriter) writeLocked(ev events.Event, diagnostics *[]error)
 		}
 		w.child.mu.Unlock()
 	}
-	rec := w.recorder
-	if rec != nil {
-		rec.Feed(presentation)
-	}
+	// The recorder is fed only once the durable write succeeded, so a failed
+	// write cannot leave the broker holding a terminal record for a run whose
+	// end the durable log rejected.
 	if w.base != nil {
 		if err := w.base.Write(stamped); err != nil {
 			return err
 		}
+	}
+	if w.recorder != nil {
+		w.recorder.Feed(presentation)
 	}
 	if w.control != nil {
 		w.control.PublishCanonicalEvent(stamped)

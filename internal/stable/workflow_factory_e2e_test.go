@@ -484,7 +484,7 @@ func (f *factoryE2E) stop(t *testing.T) {
 			_ = f.sup.cancelRuntime(id)
 		}
 	}
-	waitFor(t, "runtimes terminal at cleanup", func() bool { return f.sup.activeRuntimeCount() == 0 })
+	waitFor(t, "runtimes terminal at cleanup", func() bool { return activeRuntimeCount(f.sup) == 0 })
 	_ = f.sup.broker.Stop()
 	f.sup.stopReaper()
 }

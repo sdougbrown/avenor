@@ -1569,6 +1569,7 @@ func TestFanoutWriterWithoutControlStampsEventLogOnce(t *testing.T) {
 		{Event: "agent.status", SessionID: "ses_1", Fields: map[string]any{"phase": "working", "custom": "keep"}},
 		{Event: "tool.call", SessionID: "ses_1", Fields: map[string]any{"seq": int64(99), "ts": int64(123), "title": "build"}},
 		{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"stop_reason": "end_turn"}},
+		{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"stop_reason": "cancelled", "end_kind": "run"}},
 	} {
 		if err := writer.Write(ev); err != nil {
 			t.Fatalf("Write(%s): %v", ev.Event, err)
@@ -1579,8 +1580,8 @@ func TestFanoutWriterWithoutControlStampsEventLogOnce(t *testing.T) {
 	}
 
 	got := readEventLogForTest(t, path)
-	if len(got) != 3 {
-		t.Fatalf("event count = %d, want 3", len(got))
+	if len(got) != 4 {
+		t.Fatalf("event count = %d, want 4", len(got))
 	}
 	if got[0].Fields["run_id"] != "run_1" {
 		t.Fatalf("run_id = %v, want run_1", got[0].Fields["run_id"])
@@ -1605,6 +1606,9 @@ func TestFanoutWriterWithoutControlStampsEventLogOnce(t *testing.T) {
 	}
 	if seq := got[2].Fields["seq"]; seq != float64(100) {
 		t.Fatalf("third seq = %v, want 100", seq)
+	}
+	if kind, ok := got[3].Fields["end_kind"]; ok {
+		t.Fatalf("direct-run end_kind = %v, want it stripped by the fanout stamping", kind)
 	}
 }
 
@@ -2157,6 +2161,20 @@ func (s *waitExitMatrixSink) counts() (sessionEnds, errors int) {
 	return sessionEnds, errors
 }
 
+// sessionEndExitCodes returns the exit_code each published session.end carries.
+func (s *waitExitMatrixSink) sessionEndExitCodes() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var codes []int64
+	for _, event := range s.events {
+		if event.Event == "session.end" {
+			code, _ := events.Int64(event.Fields["exit_code"])
+			codes = append(codes, code)
+		}
+	}
+	return codes
+}
+
 func terminalRecord(fields map[string]any) []events.Event {
 	return []events.Event{{Event: "session.end", SessionID: "ses_held", Fields: fields}}
 }
@@ -2358,6 +2376,9 @@ func TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder(t *testing.T) {
 			last, ok := sink.lastEvent()
 			if !ok || last.Event != "session.end" || last.Fields["stop_reason"] != runtime.RateLimitedStopReason {
 				t.Fatalf("last event = %#v, want the durable rate_limited session.end", last)
+			}
+			if code, _ := events.Int64(last.Fields["exit_code"]); code != 7 {
+				t.Fatalf("published exit_code = %v, want 7", last.Fields["exit_code"])
 			}
 		})
 	}
@@ -2575,6 +2596,11 @@ func TestWaitForSessionExitMatrixStopsEveryNonCleanReturn(t *testing.T) {
 			sessionEnds, errorEvents := sink.counts()
 			if sessionEnds != tt.wantSessionEnds || errorEvents != tt.wantErrors {
 				t.Fatalf("audit counts = {session.end:%d errors:%d}, want {%d %d}", sessionEnds, errorEvents, tt.wantSessionEnds, tt.wantErrors)
+			}
+			for _, code := range sink.sessionEndExitCodes() {
+				if code != int64(tt.wantExitCode) {
+					t.Fatalf("published session.end exit_code = %d, want %d", code, tt.wantExitCode)
+				}
 			}
 		})
 	}

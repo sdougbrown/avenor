@@ -21,7 +21,7 @@ func runStable(args []string) int {
 	maxRuntimes := fs.Int("max-runtimes", 16, "maximum concurrent child runtimes")
 	maxTreeBudget := fs.Int("max-tree-budget", admission.DefaultTreeBudget, "maximum concurrent runtimes across the whole supervisor tree including nested supervisors (0 uses the default)")
 	idempotencyCapacity := fs.Int("idempotency-capacity", 1024, "idempotent-spawn store capacity: completed entries plus in-flight reservations (must be > 0)")
-	idleTimeout := fs.Duration("idle-timeout", 0, "exit after this duration with no child runtimes and no control connections")
+	idleTimeout := fs.Duration("idle-timeout", 0, "exit after this duration with no live child runtimes (parked runtimes count as live); control connections do not delay it")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout before killing children")
 	parkedTimeout := fs.Duration("parked-timeout", 30*time.Minute, "how long a finished runtime stays parked awaiting a follow-up prompt before it is reaped (0 = park until shutdown)")
 	leaseSweepInterval := fs.Duration("lease-sweep-interval", stable.DefaultLeaseSweepInterval, "how often the supervisor expires workflow leases whose heartbeat stopped (0 = disable; leases then expire only on restart recovery)")

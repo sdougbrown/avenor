@@ -62,7 +62,7 @@ func waitForActiveRuntimeCount(t *testing.T, sup *Supervisor, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if sup.activeRuntimeCount() == want {
+		if activeRuntimeCount(sup) == want {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -217,7 +217,7 @@ func TestParkedRuntimeReapedAfterTimeout(t *testing.T) {
 	if fetchChild(t, sup, result.RuntimeID) == nil {
 		t.Fatal("reaped runtime must stay in the runtime map as a tombstone")
 	}
-	if got := sup.activeRuntimeCount(); got != 0 {
+	if got := activeRuntimeCount(sup); got != 0 {
 		t.Fatalf("activeRuntimeCount = %d, want 0 after reaping", got)
 	}
 }
@@ -345,10 +345,10 @@ func TestRunningRuntimeStillCountsAgainstMaxRuntimes(t *testing.T) {
 	}
 	// The first runtime is mid-turn and must hold the only slot.
 	deadline := time.Now().Add(5 * time.Second)
-	for sup.activeRuntimeCount() == 0 && time.Now().Before(deadline) {
+	for activeRuntimeCount(sup) == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := sup.activeRuntimeCount(); got != 1 {
+	if got := activeRuntimeCount(sup); got != 1 {
 		t.Fatalf("activeRuntimeCount = %d, want 1 while a turn is running", got)
 	}
 	_, err := sup.spawn(SpawnParams{Prompt: "second", Dir: dir})
@@ -409,7 +409,7 @@ func TestParkedRuntimeResumeWaitsForLocalCapacity(t *testing.T) {
 		if len(provider.emitted) > 0 {
 			t.Fatal("resumed turn started while the local cap was full")
 		}
-		if got := sup.activeRuntimeCount(); got > 1 {
+		if got := activeRuntimeCount(sup); got > 1 {
 			t.Fatalf("activeRuntimeCount = %d, want <= 1", got)
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -423,7 +423,7 @@ func TestParkedRuntimeResumeWaitsForLocalCapacity(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("parked runtime did not resume after a slot freed")
 	}
-	if got := sup.activeRuntimeCount(); got > 1 {
+	if got := activeRuntimeCount(sup); got > 1 {
 		t.Fatalf("activeRuntimeCount = %d, want <= 1 while resumed turn runs", got)
 	}
 	waitForActiveRuntimeCount(t, sup, 0) // parks again

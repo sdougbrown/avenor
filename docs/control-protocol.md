@@ -153,7 +153,7 @@ Returns the current state snapshot:
 - `phase_label` — human-readable description of the current turn (e.g. a test name).
 - `last_event` — the event type of the most recent published event.
 - `retry_attempt` / `max_retries` — counts for automatic retry after backend errors.
-- `pending_permission` — true when a permission request is waiting for an answer.
+- `pending_permission` — true when a permission request is waiting for an answer. It is cleared when the runtime ends, so an ended runtime never reports a request no live turn can answer.
 - `permission` — the full permission request object (all fields from the `permission.request` event), or null.
 - `turn_state` — internal turn lifecycle: `"idle"`, `"starting"`, `"running"`, `"ending"`, `"cancelling"`, `"ended"`.
 - Times are Unix milliseconds.

@@ -580,6 +580,56 @@ func TestMarkPermissionClaimResolvedConcurrent(t *testing.T) {
 	}
 }
 
+// TestSetPermissionResolverStateKeepsAnsweredClaims pins the ordering between a
+// resolver stamping its fallback state and an answer that already landed: the
+// no-resolver resolver stamps after the direct answer in one interleaving, and
+// that stamp must not turn a resolved claim back into an unanswered one.
+func TestSetPermissionResolverStateKeepsAnsweredClaims(t *testing.T) {
+	t.Run("resolved", func(t *testing.T) {
+		s, _ := NewTestServer(NewState("run_1", "", 0))
+		if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverNoResolver, nil) {
+			t.Fatal("PreparePermissionClaim returned false")
+		}
+		if got := s.DeliverPendingPermission("rt_1", "req_1", "allow_once", "decided"); got != PermissionAnswerNoResolver {
+			t.Fatalf("direct delivery = %v, want no-resolver", got)
+		}
+		if !s.MarkPermissionClaimResolved("rt_1", "req_1", "direct", "allow_once", "decided") {
+			t.Fatal("MarkPermissionClaimResolved returned false")
+		}
+
+		s.SetPermissionResolverState("rt_1", "req_1", PermissionResolverNoResolver)
+
+		if got := s.PermissionResolverState("rt_1", "req_1"); got != PermissionResolverResolved {
+			t.Fatalf("resolver state after stamp = %v, want resolved", got)
+		}
+		if resolved, matches := s.ResolvedPermissionMatches("rt_1", "req_1", "allow_once", "decided"); !resolved || !matches {
+			t.Fatalf("ResolvedPermissionMatches = (%v, %v), want (true, true)", resolved, matches)
+		}
+	})
+
+	t.Run("direct delivery in flight", func(t *testing.T) {
+		s, _ := NewTestServer(NewState("run_1", "", 0))
+		if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverNoResolver, nil) {
+			t.Fatal("PreparePermissionClaim returned false")
+		}
+		if got := s.DeliverPendingPermission("rt_1", "req_1", "allow_once", "decided"); got != PermissionAnswerNoResolver {
+			t.Fatalf("direct delivery = %v, want no-resolver", got)
+		}
+
+		s.SetPermissionResolverState("rt_1", "req_1", PermissionResolverNoResolver)
+
+		if got := s.PermissionResolverState("rt_1", "req_1"); got != PermissionResolverDirectDelivery {
+			t.Fatalf("resolver state after stamp = %v, want direct_delivery", got)
+		}
+		if !s.MarkPermissionClaimResolved("rt_1", "req_1", "direct", "allow_once", "decided") {
+			t.Fatal("MarkPermissionClaimResolved returned false")
+		}
+		if resolved, matches := s.ResolvedPermissionMatches("rt_1", "req_1", "allow_once", "decided"); !resolved || !matches {
+			t.Fatalf("ResolvedPermissionMatches = (%v, %v), want (true, true)", resolved, matches)
+		}
+	})
+}
+
 func TestPreparePermissionClaimReplacesResolvedTombstone(t *testing.T) {
 	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {

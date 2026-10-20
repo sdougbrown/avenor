@@ -145,7 +145,7 @@ func (f *autoHandoffFixture) stop(t *testing.T) {
 		}
 	}
 	waitFor(t, f.sup.supervisorIdentity()+" runtimes terminal at cleanup", func() bool {
-		return f.sup.activeRuntimeCount() == 0
+		return activeRuntimeCount(f.sup) == 0
 	})
 	_ = f.sup.broker.Stop()
 	f.sup.stopReaper()

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 type recordingSink struct {
@@ -78,15 +79,27 @@ func TestWaitForSessionDeniedToolCallIsNotCleanEndTurn(t *testing.T) {
 		t.Fatalf("StopReason = %q, want tool_denied", result.StopReason)
 	}
 	var diagnostic bool
+	publishedReason := ""
+	publishedExitCode := int64(-1)
 	for _, ev := range sink.snapshot() {
 		if ev.Event == "avenor.error" {
 			if msg, _ := ev.Fields["message"].(string); strings.Contains(msg, "tool_denied") {
 				diagnostic = true
 			}
 		}
+		if ev.Event == "session.end" {
+			publishedReason, _ = ev.Fields["stop_reason"].(string)
+			publishedExitCode, _ = events.Int64(ev.Fields["exit_code"])
+		}
 	}
 	if !diagnostic {
 		t.Fatal("expected an avenor.error diagnostic explaining the tool_denied classification")
+	}
+	if publishedReason != runtime.ToolDeniedStopReason {
+		t.Fatalf("published session.end stop_reason = %q, want %q", publishedReason, runtime.ToolDeniedStopReason)
+	}
+	if publishedExitCode != 2 {
+		t.Fatalf("published session.end exit_code = %d, want 2", publishedExitCode)
 	}
 }
 

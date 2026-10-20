@@ -780,7 +780,7 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		eff = append(eff,
 			lifecycleEffect{kind: effectSetIdleEndData, exitCode: sig.idleExitCode, reason: sig.idleStopReason},
 			lifecycleEffect{kind: effectWriteSentinel, exitCode: sig.idleExitCode, reason: sig.idleStopReason, sessionID: sig.resultSessionID},
-			lifecycleEffect{kind: effectEmitSessionEnd, exitCode: sig.idleExitCode, reason: sig.idleStopReason},
+			lifecycleEffect{kind: effectEmitSessionEnd, reason: sig.idleStopReason},
 		)
 
 	case signalRunEnded:

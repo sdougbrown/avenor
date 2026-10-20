@@ -55,7 +55,7 @@ func TestWorkflowCancelTerminatesInFlightRuntimes(t *testing.T) {
 		return act != nil && act.Status == workflow.ActivationRunning
 	})
 	waitFor(t, "the attempt runtime to be in flight", func() bool {
-		return f.sup.activeRuntimeCount() == 1
+		return activeRuntimeCount(f.sup) == 1
 	})
 
 	// Cancel through the real control RPC, so the request lands on whatever
@@ -89,7 +89,7 @@ func TestWorkflowCancelTerminatesInFlightRuntimes(t *testing.T) {
 		return len(attempts) == 1 && attempts[0].Status == workflow.AttemptCanceled
 	})
 	waitFor(t, "the in-flight runtime to tear down after cancel", func() bool {
-		return f.sup.activeRuntimeCount() == 0
+		return activeRuntimeCount(f.sup) == 0
 	})
 }
 
@@ -150,7 +150,7 @@ func TestWorkflowCancelTerminatesEveryInFlightRuntime(t *testing.T) {
 		return running == 2
 	})
 	waitFor(t, "both attempt runtimes to be in flight", func() bool {
-		return f.sup.activeRuntimeCount() == 2
+		return activeRuntimeCount(f.sup) == 2
 	})
 
 	socket := f.sup.config.ControlSocket
@@ -181,6 +181,6 @@ func TestWorkflowCancelTerminatesEveryInFlightRuntime(t *testing.T) {
 			len(b) == 1 && b[0].Status == workflow.AttemptCanceled
 	})
 	waitFor(t, "both in-flight runtimes to tear down after cancel", func() bool {
-		return f.sup.activeRuntimeCount() == 0
+		return activeRuntimeCount(f.sup) == 0
 	})
 }

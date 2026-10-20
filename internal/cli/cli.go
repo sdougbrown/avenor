@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1346,6 +1347,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		if text, ok := event.Fields["final_output"].(string); ok {
 			sessionEndFinalOutput, sessionEndFinalOutputSet = text, true
 		}
+		runtime.SetSessionEndExitCode(event.Fields, finalStopReason)
 		if err := deps.Writer.Write(event); err != nil {
 			fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
 			return sessionResult{ExitCode: 1}
@@ -1738,9 +1740,8 @@ func failureText(fields map[string]any) string {
 }
 
 func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string, retryAfter int64, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
-	fields := map[string]any{
-		"stop_reason": stopReason,
-	}
+	fields := map[string]any{"stop_reason": stopReason}
+	exitCode := runtime.SetSessionEndExitCode(fields, stopReason)
 	if retryAfter > 0 {
 		fields["retry_after"] = retryAfter
 	}
@@ -1758,7 +1759,7 @@ func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string,
 		fmt.Fprintf(stderr, "avenor: write terminal event: %v\n", err)
 		return sessionResult{ExitCode: 1}
 	}
-	return sessionResult{ExitCode: runtime.ExitCodeForStopReason(stopReason), StopReason: stopReason, RetryAfter: retryAfter, Output: fullFinalOutput, FinalOutput: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
+	return sessionResult{ExitCode: exitCode, StopReason: stopReason, RetryAfter: retryAfter, Output: fullFinalOutput, FinalOutput: fullFinalOutput, FinalReply: lastBlockFinalReply, Usage: usage}
 }
 
 type eventWriter struct {
@@ -1890,8 +1891,14 @@ func newFanoutWriter(base EventSink, cs *control.ControlServer, metadata *EventM
 // per runtime and subscriber dedup, replay cursors, and persistence can never
 // disagree about event order. Without a control server, the EventMetadata
 // stamps the seq itself; with neither, the event only carries its runtime
-// identity. The returned event is the lossless durable form.
+// identity. The returned event is the lossless durable form. A session.end
+// leaves here without an end_kind: only the run-level writer tags that, after
+// stamping, so a backend's own turn end cannot claim the run's terminal record.
 func StampFanoutEvent(ev events.Event, runtimeID string, metadata *EventMetadata, cs *control.ControlServer) events.Event {
+	if _, tagged := ev.Fields["end_kind"]; tagged && ev.Event == "session.end" {
+		ev.Fields = maps.Clone(ev.Fields)
+		delete(ev.Fields, "end_kind")
+	}
 	if cs != nil {
 		if metadata != nil {
 			ev = metadata.Tag(ev)
