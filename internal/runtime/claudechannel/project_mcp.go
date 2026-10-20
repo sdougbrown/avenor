@@ -147,6 +147,5 @@ func writeProjectMCPConfig(path string, cfg map[string]any) error {
 	if err != nil {
 		return err
 	}
-	pattern := filepath.Base(path) + ".tmp-*"
-	return durablefile.WriteFileAtomic(path, pattern, append(data, '\n'), 0o600)
+	return durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), append(data, '\n'), 0o600)
 }

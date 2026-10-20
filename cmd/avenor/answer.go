@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
@@ -214,14 +213,13 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 	// enc.Encode appends a trailing newline; keep it.
 	data := buf.Bytes()
 
-	// Write atomically through a uniquely-named tmp file: linked into place so
+	// Write atomically through a uniquely-named temp file: linked into place so
 	// an existing response is never replaced, or renamed over it under --force.
-	pattern := filepath.Base(responsePath) + ".tmp-*"
 	write := durablefile.WriteFileAtomic
 	if !flags.force {
 		write = durablefile.WriteFileAtomicExclusive
 	}
-	if err := write(responsePath, pattern, data, 0o600); err != nil {
+	if err := write(responsePath, durablefile.TempPattern(responsePath), data, 0o600); err != nil {
 		if !flags.force && errors.Is(err, os.ErrExist) {
 			fmt.Fprintf(errOut, "avenor answer: response already exists at %s; pass --force to overwrite\n", responsePath)
 			return 2

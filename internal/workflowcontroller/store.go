@@ -799,7 +799,8 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 		return err
 	}
 	dir := s.controllerDir(controllerID)
-	if err := durablefile.WriteFileAtomic(s.snapshotPath(controllerID), "controller.json.tmp-*", data, 0o644); err != nil {
+	path := s.snapshotPath(controllerID)
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o644); err != nil {
 		return err
 	}
 	if err := durablefile.FsyncDir(dir); err != nil {

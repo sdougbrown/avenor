@@ -243,7 +243,8 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 		return err
 	}
 	dir := s.instanceDir(workflowID)
-	if err := durablefile.WriteFileAtomic(s.workflowPath(workflowID), "workflow.json.tmp-*", data, 0o644); err != nil {
+	path := s.workflowPath(workflowID)
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o644); err != nil {
 		return err
 	}
 	return durablefile.FsyncDir(dir)
@@ -310,8 +311,7 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	pattern := string(templateVersion) + ".json.tmp-*"
-	if err := durablefile.WriteFileAtomic(path, pattern, data, 0o644); err != nil {
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o644); err != nil {
 		return err
 	}
 	return durablefile.FsyncDir(dir)

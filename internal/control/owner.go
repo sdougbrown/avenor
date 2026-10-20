@@ -112,11 +112,10 @@ func (s *ControlServer) publishOwnerRecord(socketPath string, identity SocketIde
 		return fmt.Errorf("encode owner record: %w", err)
 	}
 
-	// The temp file is created exclusively in recordPath's directory, so it
-	// cannot land on a symlink or a pre-existing entry, and the record only
+	// The exclusive temp file cannot land on a symlink or a pre-existing entry;
+	// the rename that follows still replaces recordPath, and the record only
 	// becomes visible once its contents are synced.
-	pattern := filepath.Base(recordPath) + ".tmp-*"
-	if err := durablefile.WriteFileAtomic(recordPath, pattern, body, 0o600); err != nil {
+	if err := durablefile.WriteFileAtomic(recordPath, durablefile.TempPattern(recordPath), body, 0o600); err != nil {
 		return fmt.Errorf("publish owner record: %w", err)
 	}
 	if _, err := inspectRecord(recordPath); err != nil {

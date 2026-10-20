@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
@@ -93,7 +92,7 @@ func (h *FileHandler) Handle(ctx context.Context, provider runtime.Provider, eve
 		return Resolution{}, err
 	}
 	data = append(data, '\n')
-	if err := durablefile.WriteFileAtomic(requestPath, filepath.Base(requestPath)+".tmp-*", data, 0o600); err != nil {
+	if err := durablefile.WriteFileAtomic(requestPath, durablefile.TempPattern(requestPath), data, 0o600); err != nil {
 		return Resolution{}, err
 	}
 
