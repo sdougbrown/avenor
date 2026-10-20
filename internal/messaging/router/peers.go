@@ -80,8 +80,10 @@ func peersInvalidAction() *ToolError {
 }
 
 // peersList reads the broker's peer listing. There is no name key: Label is the
-// display name, so the list is the rename's read path. The list carries no
-// text, because it stays small.
+// display name, so the list is the rename's read path. A transport may return
+// peers together with an error, which is a listing that read only part of the
+// peer set: those peers are kept and the result reports the incomplete listing
+// through the contract's text, so a partial read never renders as a clean list.
 func peersList(ctx context.Context, p Provider, action string) (Result, error) {
 	peers, err := p.Peers(ctx, messaging.PeersRequest{
 		Sender:     messaging.Identity{RunID: p.Caller().RunID},
@@ -103,7 +105,17 @@ func peersList(ctx context.Context, p Provider, action string) (Result, error) {
 		}
 		records = append(records, record)
 	}
-	return Result{Action: action, Peers: records}, nil
+	result := Result{Action: action, Peers: records}
+	if err != nil {
+		// Classify through refused once so the detail carries the same
+		// filesystem-path rule the empty-listing failure uses instead of naming
+		// an absolute path in the text.
+		result.Outcome = messaging.OutcomeLost
+		result.Text = messaging.RenderOutcome(peersListOutcomeKey, result.Outcome, map[string]string{
+			"detail": sanitize(refused(err).Message),
+		})
+	}
+	return result, nil
 }
 
 // peersRename forwards the rename to the provider and passes its typed error

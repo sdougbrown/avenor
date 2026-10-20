@@ -3,6 +3,7 @@ package router
 import (
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"reflect"
 	"sort"
 	"strings"
@@ -224,5 +225,38 @@ func TestPeersLastEscapesStopReason(t *testing.T) {
 	}
 	if !strings.Contains(result.Text, `\u202e`) {
 		t.Fatalf("text does not carry the escaped stop reason: %q", result.Text)
+	}
+}
+
+// TestPeersListIncompleteListingKeepsPeers pins both halves of a partial read:
+// the peers that were read survive, and the failure is reported through the
+// contract's incomplete-listing text with a filesystem error classified instead
+// of naming an absolute path.
+func TestPeersListIncompleteListingKeepsPeers(t *testing.T) {
+	session, err := json.Marshal(map[string]string{"run_id": "rt_7", "label": "child-a"})
+	if err != nil {
+		t.Fatalf("encode peer session: %v", err)
+	}
+	provider := &fakeProvider{
+		caller:  messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+		peers:   []messaging.Peer{{RunID: "rt_7", Session: session}},
+		peerErr: &fs.PathError{Op: "open", Path: "/home/u/.avenor/peers.json", Err: fs.ErrNotExist},
+	}
+
+	result, err := ExecutePeers(t.Context(), provider, json.RawMessage(`{"action": "list"}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Outcome != messaging.OutcomeLost {
+		t.Fatalf("outcome = %q, want %q", result.Outcome, messaging.OutcomeLost)
+	}
+	if len(result.Peers) != 1 || result.Peers[0].RunID != "rt_7" {
+		t.Fatalf("peers = %+v, want the peer that was read", result.Peers)
+	}
+	if strings.Contains(result.Text, "/home/u") {
+		t.Fatalf("text names a filesystem path: %q", result.Text)
+	}
+	if !strings.Contains(result.Text, messaging.Repair("refused_io", nil)) {
+		t.Fatalf("text = %q, want the classified read failure", result.Text)
 	}
 }

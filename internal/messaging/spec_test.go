@@ -155,6 +155,7 @@ func TestOutcomeRenderTotal(t *testing.T) {
 	vocabulary := map[string]bool{
 		"message_id": true, "target": true, "reply": true,
 		"run_id": true, "label": true, "previous_label": true,
+		"detail": true,
 	}
 	spec := LoadOutcomeSpec()
 	known := map[string]bool{}

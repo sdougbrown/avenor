@@ -281,6 +281,9 @@ func newFake(t *testing.T, c messaging.ConformanceCase) *fakeProvider {
 	if message := stringOf(c.Provider["last_error"]); message != "" {
 		provider.lastErr = errors.New(message)
 	}
+	if message := stringOf(c.Provider["peers_error"]); message != "" {
+		provider.peerErr = errors.New(message)
+	}
 	for _, peer := range objectsOf(c.Provider["peers"]) {
 		session, err := json.Marshal(peer)
 		if err != nil {

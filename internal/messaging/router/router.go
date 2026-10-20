@@ -78,7 +78,8 @@ type Result struct {
 	Text      string
 	// Peers is the peers `list` action's output: one record per visible peer,
 	// already decoded from the broker's peer listing. It is empty for every
-	// other action, and `list` sets no text.
+	// other action. `list` sets no text for a complete listing; an incomplete
+	// one keeps the peers it read and carries the incomplete-listing text.
 	Peers []messaging.PeerRecord
 	// PreviousLabel is the label before a peers `rename`, which the
 	// peers_rename:renamed template and the surface's result object report.
@@ -617,6 +618,10 @@ const (
 	actionControlReply = "control_reply"
 
 	aliasSelf = "self"
+
+	// peersListOutcomeKey is the outcome matrix's key for the peers list
+	// action, whose one non-clean outcome is an incomplete listing.
+	peersListOutcomeKey = "peers_list"
 
 	outcomeResumed = messaging.Outcome("resumed")
 	outcomeRenamed = messaging.Outcome("renamed")
