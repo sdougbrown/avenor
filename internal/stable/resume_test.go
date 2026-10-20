@@ -95,14 +95,17 @@ func TestResumeRefusesWithoutResolvableSession(t *testing.T) {
 		t.Fatalf("spawn prior: %v", err)
 	}
 	// A registered runtime whose live session is gone and whose sentinel was
-	// never written: neither rung of the ladder can name a session. The
-	// attempt adopts its session asynchronously, so wait for that write before
-	// clearing it; the parked attempt writes nothing afterwards.
+	// never written: neither rung of the ladder can name a session. The spawn
+	// installs a bootstrap session before the run goroutine claims it, so a
+	// clear before that claim makes the attempt start a second one. Wait for
+	// the attempt to be running: it has then taken the session, and only a
+	// session.start event could replace it again, which this provider never
+	// emits.
 	child := sup.runtimeByID(prior.RuntimeID)
 	if child == nil {
 		t.Fatalf("runtime %q is not registered", prior.RuntimeID)
 	}
-	waitFor(t, "the prior attempt to adopt its session", func() bool { return child.sessionID() != "" })
+	waitForStableChild(t, child, func(active, _ bool, _, _ string) bool { return active })
 	child.mu.Lock()
 	child.session = runtime.Session{}
 	child.mu.Unlock()
