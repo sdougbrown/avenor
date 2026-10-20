@@ -11,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askclient"
+	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/broker/brokertest"
 )
 
@@ -611,4 +615,78 @@ func TestSidecarStandaloneLocalAsk(t *testing.T) {
 			})
 		},
 	})
+}
+
+// TestSidecarCancelWithdrawsLiveAsk drives avenor_cancel through a real broker:
+// a live ask is withdrawn, and an ask the broker never queued reports that
+// nothing is pending.
+func TestSidecarCancelWithdrawsLiveAsk(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	defer func() { _ = b.Stop() }()
+	childToken, err := b.CreateRun("child_run", "claude-child")
+	if err != nil {
+		t.Fatalf("CreateRun child: %v", err)
+	}
+	if _, err := b.CreateRun("parent_run", "parent"); err != nil {
+		t.Fatalf("CreateRun parent: %v", err)
+	}
+	transport, err := localhttp.New("", messaging.LocalCredentials{
+		RunID:   "child_run",
+		Token:   childToken,
+		BaseURL: "http://" + b.Addr(),
+	})
+	if err != nil {
+		t.Fatalf("localhttp.New: %v", err)
+	}
+	defer func() { _ = transport.Close() }()
+	s := &Server{
+		opts: Options{RunID: "child_run", Sender: "claude-child", Token: childToken, BrokerURL: "http://" + b.Addr()},
+		ask:  askclient.New(transport, askclient.Options{}),
+	}
+
+	ctx := context.Background()
+	askDone := make(chan error, 1)
+	go func() {
+		_, err := s.callTool(ctx, "avenor_ask", json.RawMessage(`{"to_run_id":"parent_run","message":"status?"}`))
+		askDone <- err
+	}()
+	ask := brokertest.WaitForAgentMessage(t, b, "parent_run")
+	args, err := json.Marshal(map[string]any{"message_id": ask.ID})
+	if err != nil {
+		t.Fatalf("marshal cancel: %v", err)
+	}
+
+	result, err := s.callTool(ctx, "avenor_cancel", args)
+	if err != nil {
+		t.Fatalf("first cancel: %v", err)
+	}
+	content, _ := result.(map[string]any)["content"].([]map[string]any)
+	if len(content) != 1 {
+		t.Fatalf("first cancel content = %#v", content)
+	}
+	text, _ := content[0]["text"].(string)
+	if text != "Cancellation requested for "+ask.ID {
+		t.Fatalf("first cancel text = %q", text)
+	}
+
+	unasked, err := messaging.NewMsgID(time.Now(), time.Time{})
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	args, err = json.Marshal(map[string]any{"message_id": unasked})
+	if err != nil {
+		t.Fatalf("marshal cancel: %v", err)
+	}
+	if _, err := s.callTool(ctx, "avenor_cancel", args); err == nil || err.Error() != "no pending ask for "+unasked {
+		t.Fatalf("absent cancel error = %v, want the pending-ask error", err)
+	}
+
+	select {
+	case <-askDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the withdrawn ask did not return")
+	}
 }
