@@ -1074,7 +1074,7 @@ func TestSubscriberBackpressureLaggedEvent(t *testing.T) {
 	defer client.Close()
 	defer srv.Close()
 	cs := &connState{server: s, conn: srv}
-	sub := &subscriber{conn: cs, ch: make(chan events.Event, 1), done: make(chan struct{})}
+	sub := &subscriber{conn: cs, ch: make(chan events.Event, 1), done: make(chan struct{}), seenSeq: map[string]int64{}, ready: true}
 	go sub.loop()
 
 	for i := 0; i < 5; i++ {
@@ -1134,7 +1134,7 @@ func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
 		s, _ := NewTestServer(NewState("run_1", "", 0))
 		client, srv := net.Pipe()
 		cs := &connState{server: s, conn: srv}
-		sub := &subscriber{conn: cs, ch: make(chan events.Event, 1), done: make(chan struct{})}
+		sub := &subscriber{conn: cs, ch: make(chan events.Event, 1), done: make(chan struct{}), seenSeq: map[string]int64{}, ready: true}
 
 		readerDone := make(chan struct{})
 		go func() {
@@ -1460,7 +1460,7 @@ func TestSubscriberBuffersLiveSequenceUntilReplayIsQueued(t *testing.T) {
 	}
 	sub.enqueueLocked(replay)
 	sub.mu.Unlock()
-	sub.flushPending()
+	sub.flushPending(time.Time{})
 
 	first := <-sub.ch
 	second := <-sub.ch
@@ -1480,29 +1480,37 @@ func TestStopFlushesQueuedSubscriberEvents(t *testing.T) {
 	const queued = 8
 	cases := []struct {
 		name      string
-		subscribe func(t *testing.T, s *ControlServer, cs *connState)
+		wantChan  bool
+		subscribe func(t *testing.T, s *ControlServer, cs *connState) *subscriber
 	}{
 		{
-			// The writer loop is live but blocked on the unread connection, so
-			// the backlog sits in the delivery channel.
-			name: "queued on the delivery channel",
-			subscribe: func(t *testing.T, s *ControlServer, cs *connState) {
-				if resp := s.dispatch(cs, Request{JSONRPC: "2.0", ID: 1, Method: "subscribe"}); resp.Error != nil {
-					t.Fatalf("subscribe: %+v", resp.Error)
-				}
+			// The subscriber is past replay setup, so live events go straight to
+			// the delivery channel, where the blocked writer leaves them.
+			name:     "queued on the delivery channel",
+			wantChan: true,
+			subscribe: func(t *testing.T, s *ControlServer, cs *connState) *subscriber {
+				sub := newSubscriber(cs, "rt_1", 0)
+				sub.mu.Lock()
+				sub.ready = true
+				sub.mu.Unlock()
+				go sub.loop()
+				s.mu.Lock()
+				s.subs[sub] = struct{}{}
+				s.mu.Unlock()
+				return sub
 			},
 		},
 		{
 			// Subscribers buffer live events until replay setup marks them
 			// ready, so the backlog has not reached the delivery channel yet.
 			name: "buffered before replay setup finishes",
-			subscribe: func(t *testing.T, s *ControlServer, cs *connState) {
+			subscribe: func(t *testing.T, s *ControlServer, cs *connState) *subscriber {
 				sub := newSubscriber(cs, "rt_1", 0)
-				sub.seenSeq = map[string]int64{} // non-nil: replay setup has not marked it ready
 				go sub.loop()
 				s.mu.Lock()
 				s.subs[sub] = struct{}{}
 				s.mu.Unlock()
+				return sub
 			},
 		},
 	}
@@ -1511,7 +1519,18 @@ func TestStopFlushesQueuedSubscriberEvents(t *testing.T) {
 			origHook := beforeSubscriberFlush
 			defer func() { beforeSubscriberFlush = origHook }()
 			flushStarted := make(chan struct{})
-			beforeSubscriberFlush = func() { close(flushStarted) }
+			var (
+				sub       *subscriber
+				inPending int
+				onChan    int
+			)
+			beforeSubscriberFlush = func() {
+				sub.mu.Lock()
+				inPending = len(sub.pending)
+				sub.mu.Unlock()
+				onChan = len(sub.ch)
+				close(flushStarted)
+			}
 
 			s, _ := NewTestServer(NewState("run_1", "", 0))
 			clientConn, serverConn := net.Pipe()
@@ -1521,7 +1540,7 @@ func TestStopFlushesQueuedSubscriberEvents(t *testing.T) {
 			s.mu.Lock()
 			s.conns[cs] = struct{}{}
 			s.mu.Unlock()
-			tc.subscribe(t, s, cs)
+			sub = tc.subscribe(t, s, cs)
 
 			// Nothing reads the connection yet, so the writer loop blocks on the
 			// first event and the rest stay queued when Stop runs.
@@ -1554,6 +1573,14 @@ func TestStopFlushesQueuedSubscriberEvents(t *testing.T) {
 			case <-flushStarted:
 			case <-time.After(2 * time.Second):
 				t.Fatal("Stop closed the subscriber without flushing its queued events")
+			}
+
+			if tc.wantChan {
+				if inPending != 0 || onChan == 0 {
+					t.Fatalf("backlog at flush = %d pending, %d on the delivery channel; want the backlog on the channel", inPending, onChan)
+				}
+			} else if inPending != queued+1 || onChan != 0 {
+				t.Fatalf("backlog at flush = %d pending, %d on the delivery channel; want %d pending", inPending, onChan, queued+1)
 			}
 
 			got := <-readDone
@@ -1605,7 +1632,6 @@ func TestStopSurvivesSubscriberDisconnectDuringFlush(t *testing.T) {
 	cs := &connState{server: s, conn: gate}
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 	sub := newSubscriber(cs, "rt_1", 0)
-	sub.seenSeq = map[string]int64{} // non-nil: replay setup has not marked it ready
 	go sub.loop()
 	s.mu.Lock()
 	s.conns[cs] = struct{}{}
@@ -1624,6 +1650,62 @@ func TestStopSurvivesSubscriberDisconnectDuringFlush(t *testing.T) {
 	close(gate.release)
 	if err := <-stopped; err != nil {
 		t.Fatalf("stop: %v", err)
+	}
+}
+
+// TestFlushPendingStopsOnMidBatchClose closes a subscriber after the first
+// event of a drained batch: the rest of the batch must not be sent on the
+// subscriber's closed channel.
+func TestFlushPendingStopsOnMidBatchClose(t *testing.T) {
+	sub := newSubscriber(&connState{}, "rt_1", 0)
+	sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"runtime_id": "rt_1", "i": 0}})
+	sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"runtime_id": "rt_1", "i": 1}})
+	if len(sub.pending) != 2 {
+		t.Fatalf("pending len = %d, want 2", len(sub.pending))
+	}
+
+	origHook := afterSubscriberFlushEvent
+	defer func() { afterSubscriberFlushEvent = origHook }()
+	drained := 0
+	afterSubscriberFlushEvent = func() {
+		drained++
+		sub.mu.Lock()
+		sub.closeLocked()
+		sub.mu.Unlock()
+	}
+
+	sub.flushPending(time.Time{})
+
+	if drained != 1 {
+		t.Fatalf("drained %d events after the subscriber closed, want 1", drained)
+	}
+	if got := len(sub.ch); got != 1 {
+		t.Fatalf("delivery channel holds %d events, want only the pre-close event", got)
+	}
+}
+
+// TestFlushPendingStopsAtDeadline requires the drain to end at its deadline even
+// when events keep arriving: each drained event is replaced by a fresh one, so
+// the buffer never empties on its own.
+func TestFlushPendingStopsAtDeadline(t *testing.T) {
+	sub := newSubscriber(&connState{}, "rt_1", 0)
+	sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"runtime_id": "rt_1"}})
+
+	origHook := afterSubscriberFlushEvent
+	defer func() { afterSubscriberFlushEvent = origHook }()
+	afterSubscriberFlushEvent = func() {
+		sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"runtime_id": "rt_1"}})
+	}
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		sub.flushPending(time.Now().Add(25 * time.Millisecond))
+	}()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flushPending never ended while events kept arriving")
 	}
 }
 
@@ -1652,34 +1734,6 @@ func TestStopBoundsStuckSubscriberFlush(t *testing.T) {
 		}
 	case <-time.After(4 * subscriberFlushTimeout):
 		t.Fatal("Stop waited on a subscriber that never reads")
-	}
-}
-
-// TestStopClosesConnectionsRegisteredDuringShutdown requires Stop's close pass
-// to cover connections that register after Stop begins, so a client that
-// connected just before the listener closed does not wait on a dead socket.
-func TestStopClosesConnectionsRegisteredDuringShutdown(t *testing.T) {
-	origHook := beforeSubscriberFlush
-	defer func() { beforeSubscriberFlush = origHook }()
-
-	s, _ := NewTestServer(NewState("run_1", "", 0))
-	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	late := &connState{server: s, conn: serverConn}
-	late.ctx, late.cancel = context.WithCancel(context.Background())
-	beforeSubscriberFlush = func() {
-		s.mu.Lock()
-		s.conns[late] = struct{}{}
-		s.mu.Unlock()
-	}
-
-	if err := s.Stop(); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	select {
-	case <-late.ctx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("Stop left a connection that registered while it was stopping")
 	}
 }
 

@@ -13,6 +13,11 @@ const (
 	CodeOwnerAuthTimeout     = -32013
 )
 
+// CodeControlStopped is the code a request refused during shutdown reports,
+// paired with ErrControlStopped's message. Alone it is the generic server error
+// code, so a client must match the message too.
+const CodeControlStopped = -32000
+
 // OwnerAuthVersion is the authenticate_owner protocol version.
 const OwnerAuthVersion = 1
 

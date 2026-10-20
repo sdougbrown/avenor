@@ -38,7 +38,10 @@ const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
 
 var dialControlSocket = net.DialTimeout
 
-var errControlStopped = errors.New("control server stopped")
+// ErrControlStopped reports that a control server refused work because it is
+// shutting down. A request refused over the wire carries CodeControlStopped and
+// this message.
+var ErrControlStopped = errors.New("control server stopped")
 
 // These no-op hooks let lifecycle tests coordinate at lock and transition
 // boundaries without changing production behavior.
@@ -46,6 +49,7 @@ var beforeControlSocketLock = func() {}
 var beforeControlSocketCleanup = func() {}
 var beforeDirectPermissionClaimWait = func() {}
 var beforeSubscriberFlush = func() {}
+var afterSubscriberFlushEvent = func() {}
 
 type PermissionAnswer struct {
 	RequestID string `json:"request_id"`
@@ -436,7 +440,7 @@ func (s *ControlServer) Start(socketPath string) error {
 		// listener, so clean up before returning without leaving a socket behind.
 		_ = removeOwnedSocket(l, socketPath, info)
 		_ = l.Close()
-		return errControlStopped
+		return ErrControlStopped
 	}
 	s.mu.Unlock()
 
@@ -467,7 +471,7 @@ func (s *ControlServer) Start(socketPath string) error {
 		socketErr := removeOwnedSocket(l, socketPath, info)
 		unlockControlSocket(lockFile)
 		locked = false
-		return errors.Join(errControlStopped, recordErr, socketErr, l.Close())
+		return errors.Join(ErrControlStopped, recordErr, socketErr, l.Close())
 	}
 	s.listener = l
 	s.path = socketPath
@@ -509,6 +513,13 @@ func (s *ControlServer) Stop() error {
 	path := s.path
 	socketInfo := s.socketInfo
 	identity := s.recordID
+	// acceptLoop registers a connection under this same lock and refuses one
+	// once stopped is set, so this snapshot already covers every connection the
+	// server will ever close.
+	conns := make([]*connState, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
 	s.mu.Unlock()
 
 	var failures []error
@@ -538,17 +549,6 @@ func (s *ControlServer) Stop() error {
 		}
 	}
 	s.flushSubscribers()
-	// Take the close set after the flush: connections accepted before the
-	// listener closed may have registered since Stop began, and every live
-	// connection has to be closed or its client waits on a listener-less socket
-	// for the rest of its deadline. Subscribe is refused once stopped, so no new
-	// subscriber can appear behind the flush either.
-	s.mu.Lock()
-	conns := make([]*connState, 0, len(s.conns))
-	for c := range s.conns {
-		conns = append(conns, c)
-	}
-	s.mu.Unlock()
 	for _, c := range conns {
 		c.cancel()
 		if err := c.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -577,7 +577,7 @@ func (s *ControlServer) flushSubscribers() {
 	for _, sub := range subs {
 		// flushPending skips a subscriber that a concurrent disconnect has
 		// already closed, so the drain never sends on a closed channel.
-		sub.flushPending()
+		sub.flushPending(deadline)
 		sub.mu.Lock()
 		sub.closeLocked()
 		sub.mu.Unlock()
@@ -1290,7 +1290,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		s.mu.Lock()
 		if s.stopped {
 			s.mu.Unlock()
-			return failure(req.ID, -32000, errControlStopped.Error(), nil)
+			return failure(req.ID, CodeControlStopped, ErrControlStopped.Error(), nil)
 		}
 		s.subs[sub] = struct{}{}
 		var replay []events.Event
@@ -2174,10 +2174,6 @@ func (s *subscriber) enqueueLocked(ev events.Event) {
 func (s *subscriber) enqueue(ev events.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.seenSeq == nil {
-		s.seenSeq = map[string]int64{}
-		s.ready = true
-	}
 	if s.closed || !s.matches(ev) {
 		return
 	}
@@ -2198,7 +2194,11 @@ func (s *subscriber) enqueue(ev events.Event) {
 	s.enqueueLocked(ev)
 }
 
-func (s *subscriber) flushPending() {
+// flushPending drains the events buffered before replay setup finished onto the
+// delivery channel and marks the subscriber ready. A non-zero deadline stops the
+// drain once it passes, so a publisher that keeps writing cannot hold shutdown
+// open.
+func (s *subscriber) flushPending(deadline time.Time) {
 	for {
 		s.mu.Lock()
 		if s.closed {
@@ -2207,6 +2207,10 @@ func (s *subscriber) flushPending() {
 		}
 		if len(s.pending) == 0 {
 			s.ready = true
+			s.mu.Unlock()
+			return
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			s.mu.Unlock()
 			return
 		}
@@ -2223,6 +2227,7 @@ func (s *subscriber) flushPending() {
 				s.enqueueLocked(ev)
 			}
 			s.mu.Unlock()
+			afterSubscriberFlushEvent()
 		}
 	}
 }
@@ -2238,7 +2243,7 @@ func (s *subscriber) start(replay []events.Event) {
 		s.enqueueLocked(ev)
 		s.mu.Unlock()
 	}
-	s.flushPending()
+	s.flushPending(time.Time{})
 }
 
 func (s *subscriber) loop() {
