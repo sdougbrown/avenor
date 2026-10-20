@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // answerOption mirrors the per-entry shape from the options array in a .req file.
@@ -212,53 +213,26 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 	// enc.Encode appends a trailing newline; keep it.
 	data := buf.Bytes()
 
-	// Write atomically via a uniquely-named tmp file, then link/rename.
-	dir := filepath.Dir(responsePath)
-	base := filepath.Base(responsePath)
-	tmpFile, err := os.CreateTemp(dir, base+".tmp.*")
-	if err != nil {
-		fmt.Fprintf(errOut, "avenor answer: create tmp: %v\n", err)
+	// Write atomically through a uniquely-named temp file: linked into place so
+	// an existing response is never replaced, or renamed over it under --force.
+	write := durablefile.WriteFileAtomic
+	if !flags.force {
+		write = durablefile.WriteFileAtomicExclusive
+	}
+	if err := write(responsePath, durablefile.TempPattern(responsePath), data, 0o600); err != nil {
+		var leftover *durablefile.TempNotRemovedError
+		if errors.As(err, &leftover) {
+			// The response is published; only the staged temp file survived it.
+			fmt.Fprintf(errOut, "avenor answer: wrote %s, but could not remove the temp file %s: %v\n",
+				responsePath, leftover.Path, leftover.Err)
+			return 0
+		}
+		if !flags.force && errors.Is(err, os.ErrExist) {
+			fmt.Fprintf(errOut, "avenor answer: response already exists at %s; pass --force to overwrite\n", responsePath)
+			return 2
+		}
+		fmt.Fprintf(errOut, "avenor answer: write %s: %v\n", responsePath, err)
 		return 1
 	}
-	tmpPath := tmpFile.Name()
-
-	// Ensure tmp is removed on any failure path after this point.
-	tmpCleaned := false
-	defer func() {
-		if !tmpCleaned {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		fmt.Fprintf(errOut, "avenor answer: write %s: %v\n", tmpPath, err)
-		return 1
-	}
-	if err := tmpFile.Close(); err != nil {
-		fmt.Fprintf(errOut, "avenor answer: close %s: %v\n", tmpPath, err)
-		return 1
-	}
-
-	if flags.force {
-		// Atomic overwrite.
-		if err := os.Rename(tmpPath, responsePath); err != nil {
-			fmt.Fprintf(errOut, "avenor answer: rename to %s: %v\n", responsePath, err)
-			return 1
-		}
-	} else {
-		// Atomic exclusive-create: Link fails if target already exists, eliminating TOCTOU.
-		if err := os.Link(tmpPath, responsePath); err != nil {
-			if os.IsExist(err) {
-				fmt.Fprintf(errOut, "avenor answer: response already exists at %s; pass --force to overwrite\n", responsePath)
-				return 2
-			}
-			fmt.Fprintf(errOut, "avenor answer: link to %s: %v\n", responsePath, err)
-			return 1
-		}
-		_ = os.Remove(tmpPath)
-	}
-
-	tmpCleaned = true
 	return 0
 }

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // projectMCPStore owns read-modify-write access to project-level .mcp.json
@@ -145,20 +147,5 @@ func writeProjectMCPConfig(path string, cfg map[string]any) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".mcp.json.*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		_ = os.Remove(tmpPath)
-	}()
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), append(data, '\n'), 0o600)
 }

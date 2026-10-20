@@ -483,15 +483,20 @@ func TestCursorFollowPeriodicRewrite(t *testing.T) {
 	}
 }
 
-// TestCursorFileIsParseable verifies the writeCursor helper produces the
-// correct format (decimal + newline, no extras).
-func TestCursorFileIsParseable(t *testing.T) {
+// TestCursorRewriteTightensMode verifies a cursor rewrite writes the decimal
+// offset and newline the reader parses, and leaves a cursor seeded
+// world-readable at 0600.
+func TestCursorRewriteTightensMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cursor")
+	if err := os.WriteFile(path, []byte("7\n"), 0o644); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
 
 	if err := writeCursor(path, 12345); err != nil {
 		t.Fatalf("writeCursor: %v", err)
 	}
+
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -499,53 +504,38 @@ func TestCursorFileIsParseable(t *testing.T) {
 	if string(got) != "12345\n" {
 		t.Fatalf("cursor content = %q, want %q", got, "12345\n")
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("cursor mode = %04o, want 0600", perm)
+	}
 }
 
-// TestCursorWriteCleansUpTempFileOnSuccess verifies that writeCursor does not
-// leave a .tmp file behind after a successful write.
-func TestCursorWriteCleansUpTempFileOnSuccess(t *testing.T) {
+// TestCursorWriteFailureLeavesTargetIntact verifies a cursor write that cannot
+// commit reports an error, leaves the directory's lone entry in place, and
+// stages no temp file behind.
+func TestCursorWriteFailureLeavesTargetIntact(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cursor")
-
-	if err := writeCursor(path, 99); err != nil {
-		t.Fatalf("writeCursor: %v", err)
-	}
-	tmpPath := path + ".tmp"
-	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
-		t.Fatalf(".tmp file still exists after writeCursor success")
-	}
-}
-
-// TestCursorWriteRenameFailure verifies that when os.Rename fails (simulated
-// by placing a directory at the target path so rename is rejected), writeCursor
-// returns an error, does NOT overwrite the original target, and cleans up the
-// .tmp file.
-func TestCursorWriteRenameFailure(t *testing.T) {
-	dir := t.TempDir()
-	// Place a directory at the cursor path so os.Rename into it will fail.
-	targetPath := filepath.Join(dir, "cursor")
-	if err := os.Mkdir(targetPath, 0o755); err != nil {
-		t.Fatalf("mkdir target: %v", err)
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("mkdir cursor: %v", err)
 	}
 
-	err := writeCursor(targetPath, 42)
-	if err == nil {
-		t.Fatal("writeCursor: expected error when target is a directory, got nil")
+	if err := writeCursor(path, 42); err == nil {
+		t.Fatal("writeCursor: expected an error when the cursor path is a directory")
 	}
 
-	// The .tmp file must be cleaned up even on failure.
-	tmpPath := targetPath + ".tmp"
-	if _, statErr := os.Stat(tmpPath); !os.IsNotExist(statErr) {
-		t.Fatalf(".tmp file still exists after rename failure")
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("cursor path is no longer the directory that made the write fail (err %v)", err)
 	}
-
-	// The original directory (target) must be untouched.
-	info, statErr := os.Stat(targetPath)
-	if statErr != nil {
-		t.Fatalf("target path gone after failure: %v", statErr)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
 	}
-	if !info.IsDir() {
-		t.Fatalf("target path is no longer a directory after failure")
+	if len(entries) != 1 {
+		t.Fatalf("cursor directory holds %d entries, want only the cursor", len(entries))
 	}
 }
 
