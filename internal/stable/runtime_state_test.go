@@ -1,9 +1,11 @@
 package stable
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestMain keeps root-budget runtime state out of a developer's real home
@@ -42,6 +44,58 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.RemoveAll(root)
 	os.Exit(code)
+}
+
+// TestSupervisorStartupPrunesStaleArtifactDirectories proves the retention
+// policy of the default artifact tree: startup removes a run directory whose
+// newest entry is older than the retention window, keeps a fresh one, and
+// never follows a symlink out of the tree.
+func TestSupervisorStartupPrunesStaleArtifactDirectories(t *testing.T) {
+	root := artifactRoot()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staleRun := filepath.Join(root, "run_stale")
+	freshRun := filepath.Join(root, "run_fresh")
+	outside := filepath.Join(t.TempDir(), "outside")
+	for _, dir := range []string{staleRun, freshRun, outside} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(freshRun) })
+	staleSentinel := filepath.Join(staleRun, "sentinel.env")
+	if err := os.WriteFile(staleSentinel, []byte("status=DONE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(freshRun, "sentinel.env"), []byte("status=DONE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsideFile := filepath.Join(outside, "keep.env")
+	if err := os.WriteFile(outsideFile, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(staleRun, "linked-run")); err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().Add(-artifactRetention - time.Hour)
+	for _, path := range []string{staleSentinel, staleRun} {
+		if err := os.Chtimes(path, stale, stale); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	newTestSupervisor(t, Config{Stderr: io.Discard, MaxRuntimes: 1})
+
+	if _, err := os.Stat(staleRun); !os.IsNotExist(err) {
+		t.Fatalf("stale run directory after startup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(freshRun, "sentinel.env")); err != nil {
+		t.Fatalf("fresh run directory after startup: %v", err)
+	}
+	if _, err := os.Stat(outsideFile); err != nil {
+		t.Fatalf("artifacts outside the tree after startup: %v", err)
+	}
 }
 
 func TestRootTreeBudgetUsesAvenorRuntimeStateAndCleansUp(t *testing.T) {

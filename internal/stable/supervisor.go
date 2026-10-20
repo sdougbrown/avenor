@@ -734,6 +734,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 	sup.newProviderFunc = factory.NewProvider
 	sup.permissions = newPermissionRouter(supervisorPermissionHost{sup: sup}, sup.control, &sup.testHooks)
 	sup.initTreeBudget()
+	sup.pruneArtifactDirs()
 	return sup
 }
 
@@ -1635,7 +1636,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}
 
 	// Per-runtime artifact directory.
-	artifactDir := filepath.Join(os.TempDir(), "avenor-stable", s.runID, rtID)
+	artifactDir := filepath.Join(artifactRoot(), s.runID, rtID)
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return SpawnResult{}, fmt.Errorf("create artifact dir: %w", err)
 	}
