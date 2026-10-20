@@ -8,6 +8,7 @@ import (
 
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/control/controltest"
 	"github.com/sdougbrown/avenor/internal/events"
 )
 
@@ -18,7 +19,7 @@ import (
 func TestSubscribeRuntimeWithoutExplicitSubscribeDeliversEvents(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
 
-	srv := control.NewServer(control.NewState("run_test", "", 0))
+	srv, _ := controltest.NewServer(control.NewState("run_test", "", 0))
 	if err := srv.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}

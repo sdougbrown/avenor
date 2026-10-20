@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,9 +24,13 @@ import (
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askstore"
+	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/broker/brokertest"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
@@ -2179,7 +2182,7 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 
 	// Pre-register the child's broker run so the EnsureRun inside runTeamChild
 	// settles on this exact token.
-	wantToken, _ := b.EnsureRun(child.id)
+	wantToken, _ := b.EnsureRun(child.id, "")
 
 	cfg := &teamrunner.TeamConfig{
 		Team: []phaseconfig.Phase{{Name: "review", Prompt: "review"}},
@@ -2216,7 +2219,7 @@ func TestRuntimeFanoutWriterFeedsRecorder(t *testing.T) {
 		t.Fatalf("broker.Start: %v", err)
 	}
 	defer b.Stop()
-	if _, err := b.CreateRun("writer-run"); err != nil {
+	if _, err := b.CreateRun("writer-run", ""); err != nil {
 		t.Fatalf("broker.CreateRun: %v", err)
 	}
 
@@ -2732,6 +2735,19 @@ func TestStableResultOverControlSocketUsesRuntimeIDAndPreservesLargeOutput(t *te
 	}
 	if got, _ := result["final_output"].(string); got != complete {
 		t.Fatalf("final_output byte length = %d, want %d", len(got), len(complete))
+	}
+}
+
+// attachOwnerForTest authenticates c as the owner published at socketPath.
+func attachOwnerForTest(t *testing.T, c *client.Client, socketPath string) {
+	t.Helper()
+	record, err := control.LoadOwnerRecord(socketPath)
+	if err != nil {
+		t.Fatalf("load owner record: %v", err)
+	}
+	owner := control.OwnerCapability{ID: record.CapabilityID, Secret: record.Secret}
+	if err := c.AuthenticateOwner(owner); err != nil {
+		t.Fatalf("authenticate owner: %v", err)
 	}
 }
 
@@ -6063,6 +6079,7 @@ func TestSpawnAndSendToParent(t *testing.T) {
 		t.Fatalf("dial control socket: %v", err)
 	}
 	defer c.Close()
+	attachOwnerForTest(t, c, socketPath)
 
 	// Subscribe to events so the server pushes them to this client.
 	if err := c.Call("subscribe", nil, nil); err != nil {
@@ -7444,9 +7461,18 @@ func TestWorkflowMarkerEvidenceParity(t *testing.T) {
 	}
 }
 
+// newBrokerSupervisor builds a supervisor around b and the in-process messaging
+// transport NewSupervisor installs over the same store the broker router serves.
+func newBrokerSupervisor(t *testing.T, b *broker.Broker) *Supervisor {
+	t.Helper()
+	sup := &Supervisor{broker: b, messaging: inprocess.New(b.Store())}
+	t.Cleanup(func() { _ = sup.messaging.Close() })
+	return sup
+}
+
 // TestBrokerAskContextCancellation verifies that a cancelled ask wait returns
-// an AskError carrying the message ID and pending=false after the successful
-// cleanup POST withdraws the ask edge (#243).
+// an AskError naming the message ID, retracts the ask it abandoned, and leaves
+// nothing behind that blocks the target's own ask.
 func TestBrokerAskContextCancellation(t *testing.T) {
 	b := broker.New("")
 	if err := b.Start(); err != nil {
@@ -7454,14 +7480,14 @@ func TestBrokerAskContextCancellation(t *testing.T) {
 	}
 	defer b.Stop()
 
-	sup := &Supervisor{broker: b}
-	if _, err := b.CreateRun("target"); err != nil {
+	sup := newBrokerSupervisor(t, b)
+	if _, err := b.CreateRun("target", ""); err != nil {
 		t.Fatalf("create target run: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		cancel()
 	}()
 
@@ -7476,80 +7502,48 @@ func TestBrokerAskContextCancellation(t *testing.T) {
 	if askErr.MessageID == "" {
 		t.Fatal("AskError.MessageID is empty")
 	}
-	if askErr.Pending {
-		t.Fatal("AskError.Pending = true, want false after successful cleanup")
+	if askErr.Outcome != messaging.OutcomePossiblyPending || askErr.Pending {
+		t.Fatalf("ask outcome = %q (pending %v), want a retracted possibly-pending ask", askErr.Outcome, askErr.Pending)
+	}
+	if b.Store().Pending("supervisor", askErr.MessageID) {
+		t.Fatal("cancelled wait left a live edge behind")
+	}
+	queued, err := b.DrainAgentMessages("target", 0)
+	if err != nil {
+		t.Fatalf("DrainAgentMessages: %v", err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("cancelled ask left %d queued message(s)", len(queued))
+	}
+
+	now := time.Now().UTC()
+	reverseID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	reverse, err := b.Store().Admit(context.Background(), askstore.AdmitRequest{
+		Sender:     messaging.Identity{RunID: "target", Sender: "target"},
+		Target:     "supervisor",
+		MessageID:  reverseID,
+		Generation: b.Store().Generation(),
+		Body:       `{"message":"reverse"}`,
+	})
+	if err != nil || reverse.Outcome != messaging.OutcomeSent {
+		t.Fatalf("reverse ask = (%+v, %v), want sent", reverse, err)
 	}
 }
 
-// TestWithdrawAskClassification verifies pending classification: a broker
-// that answers "no pending ask" reports the edge gone; an unreachable broker
-// reports the edge as possibly pending.
-func TestWithdrawAskClassification(t *testing.T) {
+// TestBrokerAskSendTargetMissingRunsCleanup exercises a send to an unregistered
+// target: the ask is reported not sent, so no cleanup can be outstanding.
+func TestBrokerAskSendTargetMissingRunsCleanup(t *testing.T) {
 	b := broker.New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
 	}
-	sup := &Supervisor{broker: b}
-	if sup.withdrawAsk("never-sent-id") {
-		t.Fatal("withdrawAsk = true, want false when the broker reports no pending ask")
-	}
-	if err := b.Stop(); err != nil {
-		t.Fatalf("stop broker: %v", err)
-	}
-	if !sup.withdrawAsk("never-sent-id") {
-		t.Fatal("withdrawAsk = false, want true when the broker is unreachable")
-	}
-}
+	defer b.Stop()
 
-// TestWithdrawAskTransportErrorBeforeSubstringCheck pins the ordering inside
-// withdrawAsk: a transport-level *url.Error must classify as cleanup-failed
-// even when its URL happens to contain the digits "404" (e.g. a broker port
-// like 44045). A substring-first implementation would read the "404" in the
-// URL as the broker's "no pending ask" response and wrongly report the edge
-// as already gone.
-func TestWithdrawAskTransportErrorBeforeSubstringCheck(t *testing.T) {
-	b := broker.New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	defer func() { _ = b.Stop() }()
-
-	for _, tc := range []struct {
-		name string
-		url  string
-	}{
-		{"url contains 404", "http://127.0.0.1:44045/cancel_message"},
-		{"url without 404", "http://127.0.0.1:5050/cancel_message"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			stubbed := &Supervisor{broker: b}
-			// Consume the lazy client init so the stub client below survives.
-			stubbed.brokerHTTPClientOnce.Do(func() {})
-			stubbed.brokerHTTPClient = &http.Client{Transport: stubBrokerTransport{err: &url.Error{Op: "Post", URL: tc.url, Err: io.EOF}}}
-
-			if !stubbed.withdrawAsk("some-msg") {
-				t.Fatalf("withdrawAsk = false, want true: the transport error drew no HTTP response (URL %q), so the edge must be reported as possibly surviving", tc.url)
-			}
-		})
-	}
-}
-
-// TestBrokerAskSendFailureWithDeadBrokerNotPending verifies that a send
-// failure against an unreachable broker (request never delivered) reports the
-// ask as not pending, since no edge can have been registered.
-func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
-	b := broker.New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	sup := &Supervisor{broker: b}
-	if _, err := b.CreateRun("target"); err != nil {
-		t.Fatalf("create target run: %v", err)
-	}
-	if err := b.Stop(); err != nil {
-		t.Fatalf("stop broker: %v", err)
-	}
-
+	sup := newBrokerSupervisor(t, b)
+	// "target" is never registered, so the ask cannot be published.
 	_, err := sup.BrokerAsk(context.Background(), "target", "interruption", "agent")
 	if err == nil {
 		t.Fatal("expected error from failed ask")
@@ -7558,15 +7552,126 @@ func TestBrokerAskSendFailureWithDeadBrokerNotPending(t *testing.T) {
 	if !errors.As(err, &askErr) {
 		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
 	}
-	if askErr.Pending {
-		t.Fatalf("AskError.Pending = true, want false when the request never reached the broker; send error: %v", err)
+	if askErr.Outcome != messaging.OutcomeNotSent || askErr.Pending {
+		t.Fatalf("ask outcome = %q (pending %v), want not-sent", askErr.Outcome, askErr.Pending)
+	}
+	if !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("error = %v, want the target-unavailable class", err)
 	}
 }
 
-// startBrokerPrimeAndStop starts a real broker, registers a "target" run,
-// hands the broker and a fresh supervisor to prime for connection-pool setup,
-// stops the broker, and returns the supervisor for sends against the stopped
-// broker.
+// TestChildAskCleanupParity drives the supervisor's child ask/cancel path: an
+// ask queued for a child is withdrawn by its message ID, the asker sees a
+// withdrawn outcome, and the child's undelivered message is retracted.
+func TestChildAskCleanupParity(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	defer b.Stop()
+
+	sup := newBrokerSupervisor(t, b)
+	if _, err := b.CreateRun("child", "child"); err != nil {
+		t.Fatalf("create child run: %v", err)
+	}
+
+	type askResult struct {
+		res any
+		err error
+	}
+	asked := make(chan askResult, 1)
+	go func() {
+		res, err := sup.BrokerAsk(context.Background(), "child", "question", "agent")
+		asked <- askResult{res: res, err: err}
+	}()
+
+	msgID := brokertest.WaitForAgentMessage(t, b, "child").ID
+	if err := sup.BrokerCancel(msgID); err != nil {
+		t.Fatalf("BrokerCancel: %v", err)
+	}
+
+	select {
+	case out := <-asked:
+		if out.err == nil {
+			t.Fatalf("cancelled ask returned a reply: %+v", out.res)
+		}
+		var askErr *control.AskError
+		if !errors.As(out.err, &askErr) {
+			t.Fatalf("error type = %T, want *control.AskError: %v", out.err, out.err)
+		}
+		if askErr.MessageID != msgID || askErr.Outcome != messaging.OutcomeWithdrawn || askErr.Pending {
+			t.Fatalf("cancelled ask = (%q, %q, pending %v), want (%q, withdrawn, false)", askErr.MessageID, askErr.Outcome, askErr.Pending, msgID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled ask did not return")
+	}
+
+	queued, err := b.DrainAgentMessages("child", 0)
+	if err != nil {
+		t.Fatalf("DrainAgentMessages: %v", err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("withdrawn ask left %d queued message(s)", len(queued))
+	}
+	if b.Store().Pending("supervisor", msgID) {
+		t.Fatal("withdrawn ask left a live edge")
+	}
+}
+
+// TestLocalExecutionWithoutMessagingRegistration pins the degraded path: a
+// supervisor with no broker and no messaging transport still reports typed ask
+// results instead of panicking, and local receive reports the missing broker.
+func TestLocalExecutionWithoutMessagingRegistration(t *testing.T) {
+	sup := &Supervisor{}
+
+	_, err := sup.BrokerAsk(context.Background(), "target", "question", "agent")
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if askErr.Outcome != messaging.OutcomeNotSent || askErr.Pending {
+		t.Fatalf("ask outcome = %q (pending %v), want not-sent", askErr.Outcome, askErr.Pending)
+	}
+	if err := sup.BrokerCancel("msg"); err == nil {
+		t.Fatal("BrokerCancel without a broker returned no error")
+	}
+	if _, err := sup.BrokerReceive(); err == nil {
+		t.Fatal("BrokerReceive without a broker returned no error")
+	}
+}
+
+// TestBrokerAskWithStoppedBroker pins the degraded state a supervisor reaches
+// when its broker stopped but its transport is still wired: the ask is admitted
+// by the in-process transport instead of failing fast, and the abandoned wait
+// reports a typed possibly-pending error.
+func TestBrokerAskWithStoppedBroker(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	if _, err := b.CreateRun("target", ""); err != nil {
+		t.Fatalf("create target run: %v", err)
+	}
+	sup := newBrokerSupervisor(t, b)
+	if err := b.Stop(); err != nil {
+		t.Fatalf("stop broker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := sup.BrokerAsk(ctx, "target", "question", "agent")
+	var askErr *control.AskError
+	if !errors.As(err, &askErr) {
+		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
+	}
+	if askErr.Outcome != messaging.OutcomePossiblyPending || askErr.Pending {
+		t.Fatalf("ask outcome = %q (pending %v), want a retracted possibly-pending ask", askErr.Outcome, askErr.Pending)
+	}
+}
+
+// startBrokerPrimeAndStop starts a real broker, hands the broker and a fresh
+// supervisor to prime for connection-pool setup, stops the broker, and returns
+// the supervisor for calls against the stopped broker.
 func startBrokerPrimeAndStop(t *testing.T, prime func(sup *Supervisor, b *broker.Broker)) *Supervisor {
 	t.Helper()
 	b := broker.New("")
@@ -7575,7 +7680,7 @@ func startBrokerPrimeAndStop(t *testing.T, prime func(sup *Supervisor, b *broker
 	}
 	sup := &Supervisor{broker: b}
 	prime(sup, b)
-	if _, err := b.CreateRun("target"); err != nil {
+	if _, err := b.CreateRun("target", ""); err != nil {
 		t.Fatalf("create target run: %v", err)
 	}
 	if err := b.Stop(); err != nil {
@@ -7584,52 +7689,13 @@ func startBrokerPrimeAndStop(t *testing.T, prime func(sup *Supervisor, b *broker
 	return sup
 }
 
-// retryBrokerAskAfterStop sends BrokerAsk against a stopped broker up to 10
-// times (10ms apart), asserting on every attempt that the send fails with
-// *control.AskError and Pending=false. It stops early when verdict reports
-// done; a nil verdict runs all 10 attempts.
-func retryBrokerAskAfterStop(t *testing.T, sup *Supervisor, verdict func(attempt int, err error) bool) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for attempt := 0; attempt < 10; attempt++ {
-		_, err := sup.BrokerAsk(ctx, "target", "interruption", "agent")
-		if err == nil {
-			t.Fatalf("attempt %d: expected error from failed ask", attempt)
-		}
-		var askErr *control.AskError
-		if !errors.As(err, &askErr) {
-			t.Fatalf("attempt %d: error type = %T, want *control.AskError: %v", attempt, err, err)
-		}
-		if askErr.Pending {
-			t.Fatalf("attempt %d: AskError.Pending = true, want false when the broker is unreachable and the send drew no HTTP response; send error: %v", attempt, err)
-		}
-		if verdict != nil && verdict(attempt, err) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// TestBrokerAskSendFailureIsolatedConnPool pins the connection-pool isolation
-// behind the pending classification: a supervisor's broker HTTP client must
-// not reuse idle keep-alive connections pooled by another supervisor's
-// client. The neighbor primes its own private broker client's pool with a
+// TestBrokerCallConnectionPoolIsolation pins that a supervisor's broker HTTP
+// client does not reuse idle keep-alive connections pooled by another
+// supervisor's client. The neighbor primes its own client's pool with a
 // connection to the broker; after the broker stops, a victim with a private
-// transport reaches it with a fresh dial, so its send failure reports
-// "connection refused". A victim that inherited the neighbor's stale
-// connection would surface "connection reset" or EOF instead — that is the
-// failure shape this test guards against.
-//
-// The transport's readLoop usually notices the server-side close and drains
-// the stale connection before the victim's first attempt, so a reset on an
-// early attempt is benign: the assertion is that every attempt reports
-// Pending=false and some attempt within the bound observes a fresh-dial
-// refusal. If brokerPostContext regresses to a shared client, the victim can
-// inherit the stale connection and observe reset/EOF instead of refusal.
-func TestBrokerAskSendFailureIsolatedConnPool(t *testing.T) {
-	// A neighboring supervisor leaves an idle keep-alive connection to this
-	// broker's address in the HTTP connection pool its client uses.
+// transport reaches it with a fresh dial and observes "connection refused"
+// rather than a stale reset or EOF.
+func TestBrokerCallConnectionPoolIsolation(t *testing.T) {
 	sup := startBrokerPrimeAndStop(t, func(_ *Supervisor, b *broker.Broker) {
 		neighbor := &Supervisor{broker: b}
 		if _, err := neighbor.BrokerPeers(); err != nil {
@@ -7637,161 +7703,31 @@ func TestBrokerAskSendFailureIsolatedConnPool(t *testing.T) {
 		}
 	})
 	refused := false
-	retryBrokerAskAfterStop(t, sup, func(_ int, err error) bool {
-		if sendNeverReachedBroker(err) {
+	for attempt := 0; attempt < 10; attempt++ {
+		if _, err := sup.BrokerPeers(); err == nil {
+			t.Fatalf("attempt %d: BrokerPeers against a stopped broker succeeded", attempt)
+		} else if dialRefused(err) {
 			refused = true
-			return true
+			break
 		}
-		// The victim's private pool is empty, so a non-refused failure means
-		// the dial was accepted and then reset — possible only in a narrow
-		// kernel window around the listener teardown. Retry before concluding
-		// the isolation regressed.
-		return false
-	})
-	if !refused {
-		t.Fatal("no attempt failed with a fresh-dial refusal (a provably " +
-			"never-reached failure): the victim inherited a stale pooled connection " +
-			"or the send did not fail as expected")
+		time.Sleep(10 * time.Millisecond)
 	}
-	// Behavioral pin on the isolation itself: the victim must have installed
-	// its own private client rather than falling back to a shared one.
 	if sup.brokerHTTPClient == nil {
-		t.Fatal("victim broker client not installed; sends share http.DefaultClient's pool")
+		t.Fatal("victim broker client not installed; calls share http.DefaultClient's pool")
 	}
 	if sup.brokerHTTPClient.Transport == http.DefaultTransport {
 		t.Fatal("victim broker transport is the shared http.DefaultTransport")
 	}
-}
-
-// stubBrokerTransport short-circuits a supervisor's broker HTTP client with a
-// fixed RoundTrip error, so a test can dictate the failure an established
-// connection to a stopped broker would produce.
-type stubBrokerTransport struct {
-	err error
-}
-
-func (rt stubBrokerTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, rt.err
-}
-
-// TestBrokerAskSendFailureStaleConnNotPending pins the pending classification
-// for send failures on an established connection: a just-stopped broker can
-// reset (or EOF) an established connection instead of refusing a fresh dial,
-// and such a failure must classify as not pending via the
-// isTransportFailure && !brokerReachable branch in BrokerAsk — the request
-// drew no HTTP response, so no ask edge can survive on the stopped broker.
-//
-// The real-pool phase primes this supervisor's private transport with
-// keep-alive connections and asserts that every send attempt after the
-// broker stops reports Pending=false, whatever the underlying error. The
-// transport's readLoop drains idle connections as soon as the server side
-// closes, so the stale-connection error itself is rarely observable there;
-// the stub-transport cases produce those failures deterministically.
-// A reset or EOF reaches neither the sendNeverReachedBroker branch nor a
-// successful withdrawAsk, so Pending=false proves the crux branch ran.
-func TestBrokerAskSendFailureStaleConnNotPending(t *testing.T) {
-	// Prime this supervisor's private transport with idle keep-alive
-	// connections (withdrawAsk POSTs through brokerHTTPClientDo; the bogus
-	// message id draws a 404 and no edge is touched).
-	sup := startBrokerPrimeAndStop(t, func(sup *Supervisor, _ *broker.Broker) {
-		for i := 0; i < 5; i++ {
-			sup.withdrawAsk("no-such-message")
-		}
-	})
-	retryBrokerAskAfterStop(t, sup, nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for _, tc := range []struct {
-		name string
-		err  error
-	}{
-		{"connection reset", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}},
-		{"eof", io.EOF},
-		{"unexpected eof", fmt.Errorf("read: %w", io.ErrUnexpectedEOF)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			stubbed := &Supervisor{broker: sup.broker}
-			// Consume the lazy client init so the stub client below survives.
-			stubbed.brokerHTTPClientOnce.Do(func() {})
-			stubbed.brokerHTTPClient = &http.Client{Transport: stubBrokerTransport{err: tc.err}}
-
-			_, err := stubbed.BrokerAsk(ctx, "target", "interruption", "agent")
-			if err == nil {
-				t.Fatal("expected error from failed ask")
-			}
-			var askErr *control.AskError
-			if !errors.As(err, &askErr) {
-				t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
-			}
-			if askErr.Pending {
-				t.Fatalf("AskError.Pending = true, want false for an established-connection failure (%v) against an unreachable broker; send error: %v", tc.err, err)
-			}
-		})
+	if !refused {
+		t.Fatal("no attempt failed with a fresh-dial refusal: the victim inherited a stale pooled connection")
 	}
 }
 
-// TestBrokerAskSendTransportFailureReachableBrokerWithdraws pins the
-// withdrawAsk fallback: a transport failure (reset/EOF) against a broker
-// that is still accepting connections must not classify as never-delivered,
-// because the send may have reached the broker before the connection broke.
-// The classification must therefore fall through to withdrawAsk; the stub
-// transport fails the withdraw POST too, so withdrawAsk reports the edge as
-// possibly surviving and Pending stays true. If the !brokerReachable() guard
-// were dropped from the classification gate, this case would short-circuit
-// to Pending=false and the test would fail.
-func TestBrokerAskSendTransportFailureReachableBrokerWithdraws(t *testing.T) {
-	b := broker.New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	defer func() { _ = b.Stop() }()
-
-	stubbed := &Supervisor{broker: b}
-	// Consume the lazy client init so the stub client below survives.
-	stubbed.brokerHTTPClientOnce.Do(func() {})
-	stubbed.brokerHTTPClient = &http.Client{Transport: stubBrokerTransport{err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}}}
-
-	_, err := stubbed.BrokerAsk(context.Background(), "target", "interruption", "agent")
-	if err == nil {
-		t.Fatal("expected error from failed ask")
-	}
-	var askErr *control.AskError
-	if !errors.As(err, &askErr) {
-		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
-	}
-	if !askErr.Pending {
-		t.Fatalf("AskError.Pending = false, want true when the send drew no HTTP response against a reachable broker and the withdraw cleanup also failed; send error: %v", err)
-	}
-}
-
-// TestBrokerAskSendTargetMissingRunsCleanup exercises the send-failure branch
-// that runs withdrawAsk against a live broker: a 404 target leaves no edge,
-// so the classification must report pending=false.
-func TestBrokerAskSendTargetMissingRunsCleanup(t *testing.T) {
-	b := broker.New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	defer b.Stop()
-
-	sup := &Supervisor{broker: b}
-	// "target" is never registered, so /send fails with a 404.
-
-	_, err := sup.BrokerAsk(context.Background(), "target", "interruption", "agent")
-	if err == nil {
-		t.Fatal("expected error from failed ask")
-	}
-	var askErr *control.AskError
-	if !errors.As(err, &askErr) {
-		t.Fatalf("error type = %T, want *control.AskError: %v", err, err)
-	}
-	if !strings.Contains(askErr.Error(), "send ask") {
-		t.Fatalf("error = %v, want send-path failure", askErr)
-	}
-	if askErr.Pending {
-		t.Fatal("AskError.Pending = true, want false when the live broker reports no pending ask")
-	}
+// dialRefused reports whether err is a failed dial, which proves the request
+// never reached a peer.
+func dialRefused(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
 // A start that completes after shutdownManagedHTTPServers must not insert its
@@ -8116,6 +8052,7 @@ func runControlTurnsTest(t *testing.T, turns int, betweenTurn func(turn int, sup
 		t.Fatalf("dial control socket: %v", err)
 	}
 	defer c.Close()
+	attachOwnerForTest(t, c, socketPath)
 
 	// Subscribe before spawning so no turn's events are missed.
 	if err := c.Call("subscribe", nil, nil); err != nil {
@@ -8220,6 +8157,7 @@ func TestSubscribeRuntimeOnlyReceivesSessionEnd(t *testing.T) {
 		t.Fatalf("dial control socket: %v", err)
 	}
 	defer c.Close()
+	attachOwnerForTest(t, c, socketPath)
 
 	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "pony"})
 	if err != nil {

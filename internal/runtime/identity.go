@@ -20,6 +20,11 @@ const (
 	// envParentRunID is superseded by EnvExecutionID. It is never emitted and
 	// only scrubbed so inherited values from older harness versions go away.
 	envParentRunID = "AVENOR_PARENT_RUN_ID"
+
+	// Test-only switches. They are never emitted and are scrubbed at every
+	// strip point so a child cannot inherit them.
+	EnvTestHooks             = "AVENOR_TEST_HOOKS"
+	EnvTestOwnerPublishDelay = "AVENOR_TEST_OWNER_PUBLISH_DELAY"
 )
 
 var identityEnvNames = []string{
@@ -33,9 +38,13 @@ var identityEnvNames = []string{
 	envParentRunID,
 }
 
+// scrubbedEnvNames is everything a child must not inherit: launch identity plus
+// the test-only switches. Only identityEnvNames is ever emitted.
+var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay)
+
 var identityEnvKeys = func() map[string]struct{} {
-	keys := make(map[string]struct{}, len(identityEnvNames))
-	for _, name := range identityEnvNames {
+	keys := make(map[string]struct{}, len(scrubbedEnvNames))
+	for _, name := range scrubbedEnvNames {
 		keys[name] = struct{}{}
 	}
 	return keys

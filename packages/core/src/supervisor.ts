@@ -3,12 +3,131 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
-import { dial, Client, type SpawnParams, type SpawnResult, type ThinkingLevel } from './client.js'
+import { dial, Client, OwnerAuthError, type SpawnParams, type SpawnResult, type ThinkingLevel } from './client.js'
+import {
+  attachOwner,
+  ForeignPeerError,
+  loadOwnerRecord,
+  OwnerRecordMissingError,
+  OwnerSocketAbsentError,
+  probeControlSocket,
+  StaleOwnerRecordError,
+  validateOwnerRecordSocket,
+} from './owner-attach.js'
 import { validateSpawnSelection } from './spawn-selection.js'
 import { ensureRunPaths, socketsRoot } from './paths.js'
 import { installerBinaryPath } from './install-path.js'
 
 export { installerBinaryPath } from './install-path.js'
+
+const STARTUP_TIMEOUT_MS = 10_000
+const STARTUP_PROBE_CALL_TIMEOUT_MS = 1_000
+const CHILD_REAP_GRACE_MS = 5_000
+
+type ExistingSupervisorState = 'live' | 'dead' | 'auth-rejected' | 'uncertain'
+
+interface ExistingSupervisor {
+  client?: Client
+  state: ExistingSupervisorState
+  error?: Error
+}
+
+// Only a peer that refused, did not support or timed out the capability, or a
+// path this euid cannot bind, is an authentication outcome.
+function isOwnerRejection(err: unknown): boolean {
+  return err instanceof OwnerAuthError ||
+    err instanceof ForeignPeerError ||
+    err instanceof OwnerRecordMissingError ||
+    err instanceof StaleOwnerRecordError
+}
+
+// Classification of an attach that followed a live probe. An authentication
+// outcome is terminal. Everything else, including a socket that is absent or
+// refusing by now, is uncertainty and authorizes no replacement: a socket can
+// vanish while its owner is still shutting down, so only a fresh probe that
+// finds no listener is proof of a dead leftover.
+function classifyAttachError(err: unknown): ExistingSupervisorState {
+  return isOwnerRejection(err) ? 'auth-rejected' : 'uncertain'
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/** Wait until the Go server has removed its socket, bounded by the timeout. */
+async function waitForSocketRemoval(socketPath: string, timeoutMs = CHILD_REAP_GRACE_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      fs.lstatSync(socketPath)
+    } catch {
+      return
+    }
+    await sleep(50)
+  }
+}
+
+/** Wait for the child to exit on its own, bounded by the timeout. */
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true
+  return new Promise<boolean>((resolve) => {
+    const onExit = () => {
+      clearTimeout(timer)
+      resolve(true)
+    }
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit)
+      resolve(false)
+    }, timeoutMs)
+    child.once('exit', onExit)
+  })
+}
+
+/** Terminate the captured child and wait for it to exit. */
+async function reapChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
+  try {
+    child.kill('SIGTERM')
+  } catch {
+    return
+  }
+  const escalate = setTimeout(() => {
+    try {
+      child.kill('SIGKILL')
+    } catch {
+      // already gone
+    }
+  }, CHILD_REAP_GRACE_MS)
+  await exited
+  clearTimeout(escalate)
+}
+
+/**
+ * Classify an existing control socket path without presenting a credential.
+ * A bound unix listener never refuses, so ECONNREFUSED (or an absent path)
+ * proves no listener holds it; anything else is uncertain.
+ */
+async function attachExistingSupervisor(socketPath: string): Promise<ExistingSupervisor> {
+  const probe = await probeControlSocket(socketPath)
+  if (probe !== 'live') {
+    return {
+      state: probe,
+      error: probe === 'uncertain'
+        ? new Error(`control socket probe for ${socketPath} was inconclusive`)
+        : undefined,
+    }
+  }
+  try {
+    return { client: await attachOwner(socketPath), state: 'live' }
+  } catch (err) {
+    return { state: classifyAttachError(err), error: err instanceof Error ? err : new Error(String(err)) }
+  }
+}
 
 export interface RunInfo {
   runId: string
@@ -203,31 +322,27 @@ export class Supervisor {
     }
 
     if (socketExists) {
-      try {
-        const probeClient = await dial(socketPath, { callTimeoutMs: 2000 })
-        try {
-          await probeClient.status()
-          probeClient.close()
-          const client = await dial(socketPath)
-          const sup = new Supervisor(binaryPath, socketPath, opts)
-          sup.client = client
-          Supervisor.instance = sup
-          return sup
-        } catch {
-          probeClient.close()
-          try {
-            await fs.promises.unlink(socketPath)
-          } catch {
-            // couldn't unlink
-          }
+      const existing = await attachExistingSupervisor(socketPath)
+      if (existing.client) {
+        const sup = new Supervisor(binaryPath, socketPath, opts)
+        sup.client = existing.client
+        // A crashed instance may still hold the child that owns this socket;
+        // carrying the handle keeps its cleanup reachable from the new one.
+        const previous = Supervisor.instance
+        if (previous && previous.socketPath === socketPath && previous.childProcess) {
+          sup.childProcess = previous.childProcess
+          previous.childProcess = null
         }
-      } catch {
-        try {
-          await fs.promises.unlink(socketPath)
-        } catch {
-          // couldn't unlink
-        }
+        Supervisor.instance = sup
+        return sup
       }
+      if (existing.state !== 'dead') {
+        // A live path this process cannot authenticate to, or a probe that
+        // proves nothing, is terminal: never unlink it, never start over it.
+        throw existing.error ?? new Error(`control socket ${socketPath} is not attachable`)
+      }
+      // The path is a dead-owner leftover. The new server is the only authority
+      // that may remove it, so the launcher leaves every artifact in place.
     }
 
     const sup = new Supervisor(binaryPath, socketPath, opts)
@@ -238,9 +353,12 @@ export class Supervisor {
 
   private startProcess(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      let resolved = false
+      let settled = false
+      let ignoreChildExit = false
+      const attemptToken = crypto.randomBytes(32).toString('hex')
+      const deadline = Date.now() + STARTUP_TIMEOUT_MS
 
-      this.childProcess = spawn(
+      const child = spawn(
         this.binaryPath,
         [
           'stable',
@@ -249,17 +367,43 @@ export class Supervisor {
           '--idle-timeout',
           '30m',
         ],
-        { detached: false },
+        {
+          detached: false,
+          env: { ...process.env, AVENOR_CONTROL_IDENTITY_TOKEN: attemptToken },
+        },
       )
+      this.childProcess = child
 
-      this.childProcess.on('exit', (code, signal) => {
-        if (!resolved) {
-          resolved = true
-          reject(
-            new Error(
-              `avenor exited with code ${code}${signal ? ' signal ' + signal : ''} during startup`,
-            ),
+      const settleFailure = (err: Error): void => {
+        if (settled) return
+        settled = true
+        ignoreChildExit = true
+        void reapChild(child).finally(() => {
+          if (this.childProcess === child) this.childProcess = null
+          reject(err)
+        })
+      }
+
+      child.on('exit', (code, signal) => {
+        if (ignoreChildExit) return
+        if (!settled) {
+          // A competing starter may have won the bind, so re-check before
+          // declaring this attempt failed: probe the path through its published
+          // record, attach the winner when it is live, and never unlink it.
+          const exitError = new Error(
+            `avenor exited with code ${code}${signal ? ' signal ' + signal : ''} during startup`,
           )
+          settled = true
+          ignoreChildExit = true
+          void (async () => {
+            if (this.childProcess === child) this.childProcess = null
+            try {
+              this.client = await attachOwner(this.socketPath)
+              resolve()
+            } catch {
+              reject(exitError)
+            }
+          })()
           return
         }
         // A clean supervisor exit still invalidates the cached client (for
@@ -277,37 +421,107 @@ export class Supervisor {
         }
       })
 
-      this.childProcess.on('error', (err) => {
-        if (!resolved) {
-          resolved = true
-          reject(new Error(`failed to start avenor: ${err.message}`))
-        }
+      child.on('error', (err) => {
+        settleFailure(new Error(`failed to start avenor: ${err.message}`))
       })
 
-      const timeout = setTimeout(() => {
-        if (!resolved) {
-          resolved = true
-          reject(new Error('timed out waiting for avenor socket'))
-        }
-      }, 10_000)
+      const attachOwned = async (): Promise<void> => {
+        while (!settled) {
+          if (Date.now() >= deadline) {
+            settleFailure(new Error('timed out waiting for avenor socket'))
+            return
+          }
+          if (child.exitCode !== null || child.signalCode !== null) return
 
-      const retryDial = async () => {
-        while (!resolved) {
+          let client: Client
           try {
-            await new Promise<void>((r) => setTimeout(r, 100))
-            this.client = await dial(this.socketPath, {
+            // The connect is bounded by what is left of the attempt, so a hung
+            // dial cannot outlive the startup deadline.
+            client = await dial(this.socketPath, {
               callTimeoutMs: this.callTimeoutMs,
+              connectTimeoutMs: Math.max(1, deadline - Date.now()),
             })
-            clearTimeout(timeout)
-            resolved = true
+          } catch {
+            await sleep(100)
+            continue
+          }
+          if (settled) {
+            client.close()
+            return
+          }
+
+          let token: string
+          try {
+            token = await client.identity(STARTUP_PROBE_CALL_TIMEOUT_MS)
+          } catch {
+            client.close()
+            if (settled) return
+            await sleep(100)
+            continue
+          }
+          if (settled) {
+            client.close()
+            return
+          }
+
+          if (token !== attemptToken) {
+            client.close()
+            // A competing starter holds the path. Retire only the child this
+            // attempt spawned, then attach the winner through its record.
+            settled = true
+            ignoreChildExit = true
+            await reapChild(child)
+            try {
+              this.client = await attachOwner(this.socketPath)
+              resolve()
+            } catch (err) {
+              reject(new Error(`supervisor exited during startup: ${errorMessage(err)}`))
+            }
+            return
+          }
+
+          try {
+            const record = loadOwnerRecord(this.socketPath)
+            validateOwnerRecordSocket(this.socketPath, record)
+            if (record.owner_pid !== child.pid) {
+              throw new StaleOwnerRecordError(
+                this.socketPath,
+                `record names pid ${record.owner_pid}, not this child ${child.pid}`,
+              )
+            }
+            // This connection answered with this attempt's token, and the
+            // record it just published names this child, so the capability is
+            // this child's. Presenting it on this connection cannot hand a
+            // competing winner's secret to this launcher.
+            await client.authenticateOwner(
+              { id: record.capability_id, secret: record.secret },
+              STARTUP_PROBE_CALL_TIMEOUT_MS * 2,
+            )
+            this.client = client
+            settled = true
             resolve()
             return
-          } catch {
-            // retry
+          } catch (err) {
+            client.close()
+            if (settled) return
+            if (err instanceof OwnerRecordMissingError || err instanceof StaleOwnerRecordError) {
+              // The predecessor's record is still the live one, or publication
+              // has not happened yet. Retry until the attempt deadline.
+              await sleep(100)
+              continue
+            }
+            if (err instanceof OwnerSocketAbsentError) {
+              // The path has no listener to talk to yet; the child may still
+              // publish its own socket before the deadline.
+              await sleep(100)
+              continue
+            }
+            settleFailure(err instanceof Error ? err : new Error(String(err)))
+            return
           }
         }
       }
-      retryDial()
+      void attachOwned()
     })
   }
 
@@ -481,7 +695,11 @@ export class Supervisor {
   }
 
   async close(options: { skipShutdown?: boolean } = {}): Promise<void> {
+    let shutdownSent = false
     if (this.client && !options.skipShutdown) {
+      // Track the request rather than its answer: a shutdown that errors or
+      // times out still gets the grace period below.
+      shutdownSent = true
       try {
         await this.client.shutdown('graceful')
       } catch {
@@ -490,8 +708,21 @@ export class Supervisor {
     }
 
     if (this.childProcess) {
-      this.childProcess.kill()
+      const child = this.childProcess
       this.childProcess = null
+      // The Go server traps only interrupts, so signalling it before it has
+      // finished shutting down skips the cleanup that removes its socket and
+      // owner record. Give it the grace period to exit on its own first.
+      if (!shutdownSent || !(await waitForChildExit(child, CHILD_REAP_GRACE_MS))) {
+        await reapChild(child)
+      }
+      // The Go server removes its own socket and owner record while it shuts
+      // down; the launcher never unlinks either path.
+      await waitForSocketRemoval(this.socketPath)
+    } else if (shutdownSent) {
+      // An attached supervisor is not this launcher's child, so the only
+      // completion signal is the server's own cleanup.
+      await waitForSocketRemoval(this.socketPath)
     }
 
     if (this.client) {
@@ -501,12 +732,6 @@ export class Supervisor {
         // ignore close errors
       }
       this.client = null
-    }
-
-    try {
-      await fs.promises.unlink(this.socketPath)
-    } catch {
-      // ignore
     }
 
     this.crashed = false

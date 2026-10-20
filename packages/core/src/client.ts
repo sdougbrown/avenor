@@ -193,6 +193,74 @@ export class RpcError extends Error {
   }
 }
 
+/**
+ * A call or connect that produced no result inside the caller's timeout. It is
+ * a transport outcome, not a peer's structured rejection.
+ */
+export class CallTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT'
+
+  constructor(message = 'read response: timeout') {
+    super(message)
+    this.name = 'CallTimeoutError'
+  }
+}
+
+const OWNER_AUTH_VERSION = 1
+export const OWNER_UNAUTHENTICATED_CODE = -32011
+export const UNSUPPORTED_OWNER_AUTH_CODE = -32012
+export const OWNER_AUTH_TIMEOUT_CODE = -32013
+
+export type OwnerAuthFailureKind = 'unauthenticated' | 'unsupported' | 'timeout'
+
+/** A classified owner-authentication rejection, not generic transport failure. */
+export class OwnerAuthError extends Error {
+  constructor(
+    readonly kind: OwnerAuthFailureKind,
+    options: { code?: number, reason?: string } = {},
+  ) {
+    const label = kind === 'unauthenticated'
+      ? 'owner authentication rejected'
+      : kind === 'unsupported'
+        ? 'unsupported owner authentication'
+        : 'owner authentication timed out'
+    super(options.reason ? `${label}: ${options.reason}` : label)
+    this.name = 'OwnerAuthError'
+  }
+}
+
+/**
+ * Map authenticate_owner failures onto the three client-side classes. A peer
+ * that never answered the handshake call timed the capability out, which is an
+ * authentication verdict; a dial that never connected rejects before this
+ * mapping runs.
+ */
+function classifyOwnerAuthError(err: unknown): unknown {
+  if (err instanceof CallTimeoutError) {
+    return new OwnerAuthError('timeout')
+  }
+  if (err instanceof RpcError) {
+    const reason = ownerAuthReason(err.data)
+    switch (err.code) {
+      case OWNER_UNAUTHENTICATED_CODE:
+        return new OwnerAuthError('unauthenticated', { code: err.code, reason })
+      case UNSUPPORTED_OWNER_AUTH_CODE:
+        return new OwnerAuthError('unsupported', { code: err.code, reason })
+      case OWNER_AUTH_TIMEOUT_CODE:
+        return new OwnerAuthError('timeout', { code: err.code, reason })
+      default:
+        return new OwnerAuthError('unsupported', { code: err.code, reason })
+    }
+  }
+  return err
+}
+
+function ownerAuthReason(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) return undefined
+  const reason = (data as Record<string, unknown>).reason
+  return typeof reason === 'string' ? reason : undefined
+}
+
 export class Client {
   private socket: net.Socket
   private rl: readline.Interface
@@ -298,19 +366,6 @@ export class Client {
   }
 
   async call(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<unknown> {
-    if (this.isClosed()) {
-      throw new Error('control socket is closed')
-    }
-    this.startReadLoop()
-
-    const id = ++this.nextID
-    const req: JsonRpcRequest = { jsonrpc: '2.0', id, method }
-    if (params !== undefined) {
-      req.params = params
-    }
-
-    const data = JSON.stringify(req) + '\n'
-
     // A per-call timeout_ms bounds the server-side wait; the client must not
     // fire first. The +10s margin lets the server's structured ask-error
     // response (written after bounded cleanup) arrive before the timer fires.
@@ -324,11 +379,69 @@ export class Client {
             : Math.max(this.callTimeout, opts.timeoutMs + 10_000))
         : this.callTimeout
     const timeout = Number.isFinite(requested) ? Math.min(requested, MAX_TIMER_MS) : MAX_TIMER_MS
+    return this.sendCall(method, params, timeout)
+  }
+
+  /**
+   * Send a credential-free identity probe. The control server returns the
+   * startup token only after it has published its own owner record.
+   */
+  async identity(timeoutMs?: number): Promise<string> {
+    const result = await this.sendCall('identity', undefined, timeoutMs ?? this.callTimeout) as
+      | { token?: unknown }
+      | null
+    return typeof result?.token === 'string' ? result.token : ''
+  }
+
+  /**
+   * Present the owner capability on this connection. The caller must already
+   * have bound the connection to a trusted peer: an owner attach checks the
+   * socket's ownership and identity, and an owned start proves the child with
+   * its attempt token.
+   */
+  async authenticateOwner(
+    capability: { id: string, secret: string },
+    timeoutMs?: number,
+  ): Promise<void> {
+    let result: unknown
+    try {
+      result = await this.sendCall(
+        'authenticate_owner',
+        { version: OWNER_AUTH_VERSION, capability_id: capability.id, secret: capability.secret },
+        timeoutMs ?? this.callTimeout,
+      )
+    } catch (err) {
+      throw classifyOwnerAuthError(err)
+    }
+    const value = result as Record<string, unknown> | null
+    if (
+      !value ||
+      value.authenticated !== true ||
+      value.version !== OWNER_AUTH_VERSION ||
+      value.capability_id !== capability.id
+    ) {
+      throw new OwnerAuthError('unsupported', { reason: 'unexpected-result' })
+    }
+  }
+
+  private sendCall(method: string, params: unknown, timeout: number): Promise<unknown> {
+    if (this.isClosed()) {
+      return Promise.reject(new Error('control socket is closed'))
+    }
+    this.startReadLoop()
+
+    const id = ++this.nextID
+    const req: JsonRpcRequest = { jsonrpc: '2.0', id, method }
+    if (params !== undefined) {
+      req.params = params
+    }
+
+    const data = JSON.stringify(req) + '\n'
 
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new Error('read response: timeout'))
+        reject(new CallTimeoutError())
       }, timeout)
 
       this.pending.set(id, { resolve, reject, timer })
@@ -637,18 +750,37 @@ export class Client {
 
 export function dial(
   socketPath: string,
-  opts?: { callTimeoutMs?: number },
+  opts?: { callTimeoutMs?: number, connectTimeoutMs?: number },
 ): Promise<Client> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ path: socketPath })
+    let timer: ReturnType<typeof setTimeout> | undefined
 
-    const onConnect = () => {
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer)
+      socket.removeListener('connect', onConnect)
       socket.removeListener('error', onError)
+    }
+    const onConnect = () => {
+      cleanup()
       resolve(new Client(socket, opts))
     }
     const onError = (err: Error) => {
-      socket.removeListener('connect', onConnect)
+      cleanup()
       reject(new Error(`dial control socket: ${err.message}`))
+    }
+
+    if (opts?.connectTimeoutMs !== undefined) {
+      // A connect that never completes would otherwise outlive any caller
+      // deadline, because an unconnected socket emits neither event.
+      timer = setTimeout(() => {
+        cleanup()
+        // cleanup() drops the real error listener, and destroy() can still emit a
+        // connect error that was already queued.
+        socket.on('error', () => {})
+        socket.destroy()
+        reject(new CallTimeoutError(`dial control socket: timed out after ${opts.connectTimeoutMs}ms`))
+      }, opts.connectTimeoutMs)
     }
 
     socket.on('connect', onConnect)

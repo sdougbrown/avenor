@@ -49,7 +49,7 @@ async function executeAskTool(
   args: AskToolArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<AskResult> {
-  const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
+  const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId, { owner: true })
   try {
     // Resolve the caller's reference (public run ID, label, or broker runtime
     // ID) to the broker's runtime ID, mirroring the sibling tools. The broker

@@ -3,6 +3,7 @@ import * as fs from 'node:fs'
 import * as net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { createOwnerGate } from '../../test/fixtures/owner-gate.js'
 import type { SpawnParams } from '../client.js'
 import { socketsRoot } from '../paths.js'
 
@@ -81,17 +82,28 @@ async function startSpawnServer(): Promise<{
     socketsRoot(),
     `avenor-mcp-spawn-test-${process.pid}-${Math.random().toString(36).slice(2)}.sock`,
   )
+  const gate = createOwnerGate({ socketPath })
   const received: SpawnParams[] = []
   const server = net.createServer((socket) => {
     let buffer = ''
+    const session = gate.session(line => socket.write(line))
     socket.on('data', (chunk) => {
       buffer += chunk.toString()
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
       for (const line of lines) {
         if (!line.trim()) continue
-        const request = JSON.parse(line) as { id: number; params: SpawnParams }
-        received.push(request.params)
+        const request = JSON.parse(line) as {
+          id: number
+          method: string
+          params?: Record<string, unknown> & SpawnParams
+        }
+        if (session.handle(request)) continue
+        if (!session.authenticated) {
+          socket.write(gate.deny(request.id))
+          continue
+        }
+        received.push(request.params ?? {})
         socket.write(JSON.stringify({
           jsonrpc: '2.0',
           id: request.id,
@@ -104,15 +116,18 @@ async function startSpawnServer(): Promise<{
     server.once('error', reject)
     server.listen(socketPath, resolve)
   })
+  gate.publish()
   return { server, socketPath, received }
 }
 
 async function stopSpawnServer(server: net.Server, socketPath: string): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()))
-  try {
-    await os.promises.unlink(socketPath)
-  } catch {
-    // The server may have removed the socket during close.
+  for (const file of [socketPath, `${socketPath}.owner.json`]) {
+    try {
+      await os.promises.unlink(file)
+    } catch {
+      // The server may have removed the socket during close.
+    }
   }
 }
 

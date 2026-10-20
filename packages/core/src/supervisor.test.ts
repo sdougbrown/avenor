@@ -1,14 +1,22 @@
 import { describe, it, expect, afterEach, afterAll, mock } from 'bun:test'
+import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
+import * as net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { createOwnerGate } from '../test/fixtures/owner-gate.js'
 import {
   findAvenorBinary,
   installerBinaryPath,
   Supervisor,
   type RunInfo,
 } from './supervisor.js'
+import { RpcError, OwnerAuthError } from './client.js'
+import { loadOwnerRecord, OwnerRecordMissingError, probeControlSocket } from './owner-attach.js'
 import { followUpTool } from './tools/follow-up.js'
+import { getSupervisorClient } from './tools/get-supervisor-client.js'
+import { shutdownTool } from './tools/shutdown.js'
+import { socketsRoot } from './paths.js'
 
 function useFakeAvenorUnlessRealIntegration(): void {
   if (process.env.AVENOR_REAL_INTEGRATION === '1') return
@@ -440,6 +448,19 @@ describe('Supervisor singleton and run accessors', () => {
     expect(Supervisor.isCurrentInstance('/tmp/other.sock')).toBe(false)
   })
 
+  it('lets the server finish its own cleanup before signalling the child', async () => {
+    process.env.AVENOR_TEST_IGNORE_SIGTERM = '1'
+    try {
+      const sup = await Supervisor.get()
+      const socketPath = sup.supervisorId
+      await sup.close()
+      expect(fs.existsSync(socketPath)).toBe(false)
+      expect(fs.existsSync(`${socketPath}.owner.json`)).toBe(false)
+    } finally {
+      delete process.env.AVENOR_TEST_IGNORE_SIGTERM
+    }
+  })
+
   it('forEachRun iterates stored runs without exposing the map', async () => {
     const sup = await Supervisor.get()
     const first: RunInfo = {
@@ -458,4 +479,226 @@ describe('Supervisor singleton and run accessors', () => {
     sup.forEachRun(info => seen.push(info.runId))
     expect(seen).toEqual(['run-iter-1', 'run-iter-2'])
   })
+})
+
+
+describe.skipIf(process.env.AVENOR_REAL_INTEGRATION === '1')('Owned start against a published record', () => {
+  afterEach(async () => {
+    await Supervisor.currentInstance()?.close().catch(() => {})
+    ;(Supervisor as any).instance = null
+  })
+
+  it('refuses to replace a live supervisor whose record is gone', async () => {
+    const spawnLog = path.join(os.tmpdir(), `avenor-fake-spawns-${process.pid}.log`)
+    fs.rmSync(spawnLog, { force: true })
+    process.env.AVENOR_TEST_SPAWN_LOG = spawnLog
+    let sup: Supervisor | undefined
+    try {
+      sup = await Supervisor.get()
+      const socketPath = sup.supervisorId
+      fs.rmSync(`${socketPath}.owner.json`)
+      // Another process finding this path sees a live listener with no record.
+      ;(Supervisor as any).instance = null
+
+      await expect(Supervisor.get()).rejects.toBeInstanceOf(OwnerRecordMissingError)
+      expect(await probeControlSocket(socketPath)).toBe('live')
+      expect(fs.readFileSync(spawnLog, 'utf8').trim().split('\n')).toHaveLength(1)
+    } finally {
+      delete process.env.AVENOR_TEST_SPAWN_LOG
+      await sup?.close().catch(() => {})
+      fs.rmSync(spawnLog, { force: true })
+    }
+  })
+
+  it('treats a socket that vanishes after a live probe as uncertain, not dead', async () => {
+    const spawnLog = path.join(os.tmpdir(), `avenor-fake-spawns-vanished-${process.pid}.log`)
+    fs.rmSync(spawnLog, { force: true })
+    process.env.AVENOR_TEST_SPAWN_LOG = spawnLog
+    const socketPath = path.join(socketsRoot(), `avenor-mcp-${process.pid}.sock`)
+    fs.mkdirSync(socketsRoot(), { recursive: true, mode: 0o700 })
+    const gate = createOwnerGate({ socketPath })
+    const connections = new Set<net.Socket>()
+    // A listener that answers the probe and then takes the path away.
+    const holder = net.createServer((socket) => {
+      connections.add(socket)
+      fs.unlinkSync(socketPath)
+    })
+    await new Promise<void>((resolve, reject) => {
+      holder.once('error', reject)
+      holder.listen(socketPath, resolve)
+    })
+    gate.publish()
+    try {
+      const failure = await Supervisor.get().catch((err: unknown) => err)
+      expect((failure as NodeJS.ErrnoException).code).toBe('ENOENT')
+      expect(fs.existsSync(spawnLog)).toBe(false)
+    } finally {
+      delete process.env.AVENOR_TEST_SPAWN_LOG
+      holder.close()
+      for (const socket of connections) socket.destroy()
+      gate.remove()
+      fs.rmSync(spawnLog, { force: true })
+    }
+  })
+
+  it('fails at once and reaps the child when its own capability is rejected', async () => {
+    const spawnLog = path.join(os.tmpdir(), `avenor-fake-spawns-rejected-${process.pid}.log`)
+    fs.rmSync(spawnLog, { force: true })
+    process.env.AVENOR_TEST_SPAWN_LOG = spawnLog
+    process.env.AVENOR_TEST_OWNER_SECRET_MISMATCH = '1'
+    try {
+      const startedAt = Date.now()
+      const failure = await Supervisor.get().catch((err: unknown) => err)
+      // The attempt token proved the child and the record named its socket, so a
+      // rejected capability is terminal rather than something to retry.
+      expect(failure).toBeInstanceOf(OwnerAuthError)
+      expect((failure as OwnerAuthError).kind).toBe('unauthenticated')
+      expect(Date.now() - startedAt).toBeLessThan(5_000)
+      const pid = Number(fs.readFileSync(spawnLog, 'utf8').trim())
+      expect(pid).toBeGreaterThan(0)
+      expect(() => process.kill(pid, 0)).toThrow()
+    } finally {
+      delete process.env.AVENOR_TEST_SPAWN_LOG
+      delete process.env.AVENOR_TEST_OWNER_SECRET_MISMATCH
+      fs.rmSync(spawnLog, { force: true })
+    }
+  })
+
+  it('attaches the winner when the child exits during startup', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-exit-startup-'))
+    const launcher = path.join(tmpDir, 'exit-during-startup.sh')
+    const socketPath = path.join(socketsRoot(), `avenor-mcp-${process.pid}.sock`)
+    // The attempt's child starts a competing supervisor that outlives it, waits
+    // until that supervisor has published, then exits during startup.
+    fs.writeFileSync(launcher, [
+      '#!/bin/sh',
+      `"${process.execPath}" "${process.env.AVENOR_BIN}" "$@" >/dev/null 2>&1 &`,
+      'i=0',
+      'while [ "$i" -lt 400 ]; do',
+      '  [ -f "$3.owner.json" ] && break',
+      '  sleep 0.025',
+      '  i=$((i+1))',
+      'done',
+      'exit 1',
+    ].join('\n'), { mode: 0o755 })
+    try {
+      const sup = await Supervisor.get({ binaryPath: launcher })
+      // The winner answers, not the exited child: the launcher attached it
+      // through the record it published and left the socket in place.
+      expect(await sup.getClient().status()).toBeObject()
+      expect(fs.existsSync(socketPath)).toBe(true)
+    } finally {
+      await Supervisor.currentInstance()?.close().catch(() => {})
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('retries a predecessor record until the child publishes its own', async () => {
+    const socketPath = path.join(socketsRoot(), `avenor-mcp-${process.pid}.sock`)
+    fs.mkdirSync(socketsRoot(), { recursive: true, mode: 0o700 })
+    // A predecessor's record: valid shape, an inode no live socket has.
+    const recordPath = `${socketPath}.owner.json`
+    fs.writeFileSync(recordPath, JSON.stringify({
+      version: 1,
+      socket: socketPath,
+      socket_identity: { dev: '0', ino: '0' },
+      capability_id: 'e'.repeat(32),
+      secret: 'f'.repeat(64),
+      owner_pid: process.pid,
+    }), { mode: 0o600 })
+    fs.chmodSync(recordPath, 0o600)
+    process.env.AVENOR_TEST_OWNER_PUBLISH_DELAY = '600'
+    try {
+      const sup = await Supervisor.get()
+      // The owned start only attaches after the child replaced the predecessor's
+      // record and answered on the connection that proved its attempt token.
+      expect(loadOwnerRecord(socketPath).capability_id).not.toBe('e'.repeat(32))
+      await sup.getClient().cancel()
+    } finally {
+      delete process.env.AVENOR_TEST_OWNER_PUBLISH_DELAY
+    }
+  })
+})
+
+describe.skipIf(process.env.AVENOR_REAL_INTEGRATION !== '1')('Owner attach against a real supervisor', () => {
+  function useIsolatedHome(): { restore: () => void } {
+    const previous = process.env.AVENOR_HOME
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-owner-real-'))
+    process.env.AVENOR_HOME = home
+    fs.mkdirSync(socketsRoot(), { recursive: true, mode: 0o700 })
+    return {
+      restore: () => {
+        fs.rmSync(home, { recursive: true, force: true })
+        if (previous === undefined) delete process.env.AVENOR_HOME
+        else process.env.AVENOR_HOME = previous
+      },
+    }
+  }
+
+  async function waitForRecord(socketPath: string): Promise<void> {
+    for (let i = 0; i < 100; i++) {
+      try {
+        fs.lstatSync(socketPath)
+        fs.lstatSync(`${socketPath}.owner.json`)
+        return
+      } catch {
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+    }
+    throw new Error(`supervisor did not publish ${socketPath}`)
+  }
+
+  it('an owned start attaches and reaches a gated method', async () => {
+    const home = useIsolatedHome()
+    let sup: Supervisor | undefined
+    try {
+      sup = await Supervisor.get()
+      const socketPath = sup.supervisorId
+      // cancel is owner-gated and needs no spawned runtime.
+      await sup.getClient().cancel()
+      expect(await sup.getClient().status()).toBeObject()
+      // The server removes its own artifacts once it shuts down cleanly, which
+      // only happens if the launcher waits instead of signalling it early.
+      await sup.close()
+      expect(fs.existsSync(socketPath)).toBe(false)
+      expect(fs.existsSync(`${socketPath}.owner.json`)).toBe(false)
+    } finally {
+      await sup?.close().catch(() => {})
+      await Supervisor.currentInstance()?.close().catch(() => {})
+      home.restore()
+    }
+  }, 30_000)
+
+  it('attaches a gated call to a supervisor this process did not start', async () => {
+    const home = useIsolatedHome()
+    const socketPath = path.join(socketsRoot(), `avenor-mcp-external-${process.pid}.sock`)
+    const child = spawn(findAvenorBinary(), ['stable', '--control-socket', socketPath, '--idle-timeout', '2m'], {
+      stdio: 'ignore',
+    })
+    const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
+    try {
+      await waitForRecord(socketPath)
+
+      // Read-only access stays credential-free and keeps working.
+      const readOnly = await getSupervisorClient(socketPath)
+      expect(await readOnly.client.status()).toBeObject()
+      await expect(readOnly.client.cancel()).rejects.toMatchObject({ code: -32010 })
+      readOnly.client.close()
+
+      // The gated path attaches with the published capability.
+      const owner = await getSupervisorClient(socketPath, { owner: true })
+      await owner.client.cancel()
+      owner.client.close()
+
+      // A gated tool also reaches a supervisor started by someone else.
+      expect(await shutdownTool({ supervisorId: socketPath })).toMatchObject({ ok: true })
+      await exited
+      expect(() => fs.lstatSync(socketPath)).toThrow()
+      expect(() => fs.lstatSync(`${socketPath}.owner.json`)).toThrow()
+    } finally {
+      child.kill('SIGKILL')
+      await exited
+      home.restore()
+    }
+  }, 30_000)
 })

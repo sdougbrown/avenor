@@ -77,7 +77,7 @@ async function executeSpawnTool(
   }
 
   if (args.supervisorId) {
-    const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
+    const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId, { owner: true })
 
     if (isSingleton && sup) {
       const runInfo = await sup.spawn(baseParams, runId)

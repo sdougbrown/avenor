@@ -59,7 +59,7 @@ func (f *fakeWorkflowControllerHandler) WorkflowReady(id string, limit int) (any
 
 func newWorkflowControllerTestServer(t *testing.T) (*ControlServer, *fakeWorkflowControllerHandler) {
 	t.Helper()
-	s := NewServer(NewState("run_1", "demo", 0))
+	s, _ := NewTestServer(NewState("run_1", "demo", 0))
 	fake := &fakeWorkflowControllerHandler{}
 	s.SetWorkflowControllerHandler(fake)
 	return s, fake
@@ -70,7 +70,7 @@ func newWorkflowControllerTestServer(t *testing.T) (*ControlServer, *fakeWorkflo
 // including workflow.ready which must not fall through to the workflow
 // handler.
 func TestWorkflowControllerDispatchWithoutHandlerReturnsMethodNotFound(t *testing.T) {
-	s := NewServer(NewState("run_1", "demo", 0))
+	s, _ := NewTestServer(NewState("run_1", "demo", 0))
 	methods := []struct {
 		method string
 		params json.RawMessage

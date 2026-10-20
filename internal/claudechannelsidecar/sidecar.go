@@ -9,17 +9,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
-
-	"github.com/sdougbrown/avenor/internal/brokertools"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askclient"
+	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
 )
 
 type Options struct {
-	RunID      string
+	RunID string
+	// Sender is the run's registered display name. An empty value leaves the
+	// name to the broker, which reports the run ID.
+	Sender     string
 	Token      string
 	BrokerURL  string
 	Stdin      io.Reader
@@ -31,6 +35,7 @@ type Options struct {
 type Server struct {
 	opts        Options
 	client      *http.Client
+	ask         *askclient.Client
 	outMu       sync.Mutex
 	initialized chan struct{}
 	initOnce    sync.Once
@@ -52,8 +57,22 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: 10 * time.Second}
 	}
+	transport, err := localhttp.New("", messaging.LocalCredentials{
+		RunID:   opts.RunID,
+		Token:   opts.Token,
+		BaseURL: opts.BrokerURL,
+	})
+	if err != nil {
+		return fmt.Errorf("local broker messaging: %w", err)
+	}
+	defer func() { _ = transport.Close() }()
 
-	s := &Server{opts: opts, client: opts.HTTPClient, initialized: make(chan struct{})}
+	s := &Server{
+		opts:        opts,
+		client:      opts.HTTPClient,
+		ask:         askclient.New(transport, askclient.Options{}),
+		initialized: make(chan struct{}),
+	}
 	if err := s.brokerPost(ctx, "/register", map[string]any{}); err != nil {
 		return fmt.Errorf("register with broker: %w", err)
 	}
@@ -224,13 +243,21 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if role == "" {
 			role = "agent"
 		}
-		if err := s.brokerPost(ctx, "/send", map[string]any{
-			"from_run_id": s.opts.RunID,
-			"to_run_id":   p.ToRunID,
-			"type":        "agent_message",
-			"payload":     map[string]any{"from": s.opts.RunID, "from_run_id": s.opts.RunID, "message": p.Message, "role": role},
-		}); err != nil {
+		body, err := messaging.SendBody(s.opts.RunID, p.ToRunID, p.Message, role)
+		if err != nil {
 			return nil, err
+		}
+		sent, err := s.ask.Send(ctx, messaging.SendRequest{
+			From:    messaging.Identity{RunID: s.opts.RunID, Sender: s.opts.Sender},
+			To:      messaging.Identity{RunID: p.ToRunID, Sender: p.ToRunID},
+			Body:    string(body),
+			NoReply: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("send to %s: %w", p.ToRunID, err)
+		}
+		if sent.Outcome != messaging.OutcomeSent {
+			return nil, fmt.Errorf("send to %s: %s", p.ToRunID, sent.Outcome)
 		}
 		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("sent message to run %q", p.ToRunID)}}}, nil
 	case "avenor_ask":
@@ -249,33 +276,19 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if role == "" {
 			role = "agent"
 		}
-		// Generate a unique message ID and send with expects_reply=true.
-		msgID := brokertools.MakeMsgID()
-		if err := s.brokerPost(ctx, "/send", map[string]any{
-			"from_run_id": s.opts.RunID,
-			"to_run_id":   p.ToRunID,
-			"type":        "agent_message",
-			"payload": map[string]any{
-				"id":            msgID,
-				"from":          s.opts.RunID,
-				"from_run_id":   s.opts.RunID,
-				"to_run_id":     p.ToRunID,
-				"message":       p.Message,
-				"role":          role,
-				"expects_reply": true,
-			},
-		}); err != nil {
+		sender := messaging.Identity{RunID: s.opts.RunID, Sender: s.opts.Sender}
+		send, wait, err := s.ask.AskRequest(sender, s.opts.RunID, p.ToRunID, p.Message, role)
+		if err != nil {
 			return nil, err
 		}
-		// Long-poll for the reply.
-		var replyResult map[string]any
-		if err := s.brokerPostDecode(ctx, "/wait_reply", map[string]any{
-			"waiting_for": msgID,
-		}, &replyResult); err != nil {
-			return nil, fmt.Errorf("waiting for reply: %w", err)
+		result, err := s.ask.Ask(ctx, send, wait)
+		if err != nil {
+			return nil, result.Failure(err)
 		}
-		// Try to extract the reply message from the payload.
-		replyText := brokertools.ExtractReplyMessage(replyResult)
+		replyText, err := result.Text()
+		if err != nil {
+			return nil, err
+		}
 		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("Reply from %s:\n%s", p.ToRunID, replyText)}}}, nil
 	case "avenor_peers":
 		var sessionsResult map[string]any
@@ -323,10 +336,15 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if p.MessageID == "" {
 			return nil, fmt.Errorf("message_id is required")
 		}
-		if err := s.brokerPost(ctx, "/cancel_message", map[string]any{
-			"cancel_message_id": p.MessageID,
-		}); err != nil {
-			return nil, err
+		withdrawn, err := s.ask.Withdraw(ctx, messaging.WithdrawRequest{
+			Sender:    messaging.Identity{RunID: s.opts.RunID, Sender: s.opts.Sender},
+			MessageID: p.MessageID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("cancel %s: %w", p.MessageID, err)
+		}
+		if withdrawn.Outcome == messaging.OutcomeEdgeAbsent {
+			return nil, fmt.Errorf("no pending ask for %s", p.MessageID)
 		}
 		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("Cancellation requested for %s", p.MessageID)}}}, nil
 	default:
@@ -336,10 +354,12 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 }
 
 func (s *Server) brokerGet(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.opts.BrokerURL+path+"?run_id="+url.QueryEscape(s.opts.RunID)+"&token="+url.QueryEscape(s.opts.Token), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.opts.BrokerURL+path, nil)
 	if err != nil {
 		return err
 	}
+	req.Header.Set(messaging.HeaderRunID, s.opts.RunID)
+	req.Header.Set(messaging.HeaderRunToken, s.opts.Token)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return err

@@ -186,6 +186,8 @@ avenor mcp --supervisor-socket /tmp/avenor-stable.sock --no-autostart
 
 `--supervisor-socket` disables autostart. `--no-autostart` requires `--supervisor-socket`.
 
+The server reaches a supervisor as its owner, not anonymously. An autostarted child hands back its per-attempt identity token, and the server authenticates on the connection that proved it; an existing supervisor is reached by loading the record published beside its socket, binding the connection, and presenting the capability. Read-only calls that do not reuse that connection stay credential-free. See [Control Protocol → Owner Semantics](control-protocol.md#owner-semantics).
+
 Tool arguments can only target a supervisor socket directly inside the sockets root (`AVENOR_HOME/sockets` when set, otherwise `~/.avenor/sockets`) with the `avenor-mcp-*.sock` naming; other paths are rejected with `invalid supervisorId`. The configured `--supervisor-socket` and the autostarted default are exempt. This mirrors the TypeScript core and prevents clients from pointing the server at an arbitrary local Unix socket.
 
 ## Flags

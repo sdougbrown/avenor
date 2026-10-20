@@ -1,0 +1,9 @@
+{
+  "admissionRejections": [
+    {"case": "admission-rejected", "outcome": "not-sent", "mayHaveBeenTransmitted": false},
+    {"case": "credential-rejected", "outcome": "auth-rejected", "mayHaveBeenTransmitted": false},
+    {"case": "generation-mismatch-after-transmission", "outcome": "possibly-pending", "mayHaveBeenTransmitted": true},
+    {"case": "generation-replaced-after-transmission", "outcome": "lost", "mayHaveBeenTransmitted": true},
+    {"case": "cancellation-rejected-without-terminal-fence", "outcome": "edge-absent", "mayHaveBeenTransmitted": true}
+  ]
+}

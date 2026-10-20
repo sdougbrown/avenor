@@ -15,7 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/control/controltest"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -475,41 +477,29 @@ func shortControlSocketPath(t *testing.T) string {
 }
 
 // promptOverControl queues a prompt through a run's control socket and waits
-// for the reply.
+// promptOverControl queues a prompt through the run's control socket, attached
+// as owner, and waits for the reply.
 func promptOverControl(t *testing.T, path, text string) {
 	t.Helper()
-	params, _ := json.Marshal(map[string]string{"text": text})
-	body, _ := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "prompt", Params: params})
-	conn, err := net.Dial("unix", path)
-	if err != nil {
-		t.Fatalf("dial control socket: %v", err)
-	}
-	defer conn.Close()
-	if _, err := conn.Write(append(body, '\n')); err != nil {
-		t.Fatalf("write prompt: %v", err)
-	}
-	var resp control.Response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil || resp.Error != nil {
-		t.Fatalf("prompt response = %+v, %v", resp, err)
-	}
+	callOwnerOverControl(t, path, "prompt", map[string]string{"text": text})
 }
 
-// cancelOverControl cancels a run through its control socket and waits for the
-// reply. The first client to connect owns the socket, so this client owns it.
+// cancelOverControl cancels a run through its control socket, attached as
+// owner, and waits for the reply.
 func cancelOverControl(t *testing.T, path string) {
 	t.Helper()
-	body, _ := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "cancel"})
-	conn, err := net.Dial("unix", path)
+	callOwnerOverControl(t, path, "cancel", nil)
+}
+
+func callOwnerOverControl(t *testing.T, path, method string, params any) {
+	t.Helper()
+	c, err := client.AttachOwner(path)
 	if err != nil {
-		t.Fatalf("dial control socket: %v", err)
+		t.Fatalf("attach owner to control socket: %v", err)
 	}
-	defer conn.Close()
-	if _, err := conn.Write(append(body, '\n')); err != nil {
-		t.Fatalf("write cancel: %v", err)
-	}
-	var resp control.Response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil || resp.Error != nil {
-		t.Fatalf("cancel response = %+v, %v", resp, err)
+	defer c.Close()
+	if err := c.Call(method, params, nil); err != nil {
+		t.Fatalf("%s over control: %v", method, err)
 	}
 }
 
@@ -688,7 +678,7 @@ func TestPermissionRequestEmitsEffectiveResolverAndClaimState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cs := control.NewServer(control.NewState("run_1", "", 0))
+			cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 			var conn net.Conn
 			if tt.connectControl {
 				socketPath := shortControlSocketPath(t)
@@ -1625,7 +1615,7 @@ func TestFanoutWriterWithControlAndNoMetadataPreservesOutputAndBoundsStatus(t *t
 		t.Fatalf("NewEventWriter: %v", err)
 	}
 	state := control.NewState("run_control", "review", 0)
-	server := control.NewServer(state)
+	server, _ := controltest.NewServer(state)
 	writer := newFanoutWriter(baseWriter, server, nil)
 	finalOutput := strings.Repeat("é", events.MaxFinalOutputRunes+10)
 
@@ -3767,9 +3757,50 @@ func TestRunResultFileControlPromptTurn(t *testing.T) {
 // TestControlPermissionResolution verifies that a control socket owner can
 // answer a permission.request via answer_permission, which flows through
 // resolvePermission and calls AnswerPermission on the provider.
+
+// authenticateOwnerForTest presents the construction capability on a connection
+// the fixture dialed itself.
+func authenticateOwnerForTest(t *testing.T, conn net.Conn, cap control.OwnerCapability) {
+	t.Helper()
+	params, err := json.Marshal(control.OwnerAuthRequest{Version: control.OwnerAuthVersion, CapabilityID: cap.ID, Secret: cap.Secret})
+	if err != nil {
+		t.Fatalf("marshal authenticate_owner: %v", err)
+	}
+	body, err := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "authenticate_owner", Params: params})
+	if err != nil {
+		t.Fatalf("marshal authenticate_owner request: %v", err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write(append(body, '\n')); err != nil {
+		t.Fatalf("write authenticate_owner: %v", err)
+	}
+	line := make([]byte, 0, 128)
+	buf := make([]byte, 1)
+	for {
+		n, err := conn.Read(buf)
+		if n > 0 {
+			line = append(line, buf[0])
+			if buf[0] == '\n' {
+				break
+			}
+		}
+		if err != nil {
+			t.Fatalf("read authenticate_owner response: %v", err)
+		}
+	}
+	_ = conn.SetDeadline(time.Time{})
+	var resp control.Response
+	if err := json.Unmarshal(line, &resp); err != nil {
+		t.Fatalf("decode authenticate_owner response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("authenticate_owner: %+v", resp.Error)
+	}
+}
+
 func TestControlPermissionResolution(t *testing.T) {
 	state := control.NewState("run_1", "mylabel", 0)
-	cs := control.NewServer(state)
+	cs, cap := controltest.NewServer(state)
 	socketPath := filepath.Join(t.TempDir(), "cs.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control: %v", err)
@@ -3822,6 +3853,7 @@ func TestControlPermissionResolution(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	defer ctrlConn.Close()
+	authenticateOwnerForTest(t, ctrlConn, cap)
 	waitForControlClientForTest(t, cs)
 
 	var wg sync.WaitGroup
@@ -3923,7 +3955,7 @@ func TestControlPermissionNonLiteralOptionIDMapsByKind(t *testing.T) {
 		t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 		state := control.NewState("run_map", "label", 0)
-		cs := control.NewServer(state)
+		cs, cap := controltest.NewServer(state)
 		socketPath := filepath.Join(sockDir, "m.sock")
 		if err := cs.Start(socketPath); err != nil {
 			t.Fatalf("start control: %v", err)
@@ -3971,6 +4003,7 @@ func TestControlPermissionNonLiteralOptionIDMapsByKind(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		defer ctrlConn.Close()
+		authenticateOwnerForTest(t, ctrlConn, cap)
 		waitForControlClientForTest(t, cs)
 
 		var wg sync.WaitGroup
@@ -4045,7 +4078,7 @@ func TestControlPermissionRejectsUnknownOptionID(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_bad", "label", 0)
-	cs := control.NewServer(state)
+	cs, cap := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "cs.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control: %v", err)
@@ -4089,6 +4122,7 @@ func TestControlPermissionRejectsUnknownOptionID(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	defer ctrlConn.Close()
+	authenticateOwnerForTest(t, ctrlConn, cap)
 	waitForControlClientForTest(t, cs)
 
 	var wg sync.WaitGroup
@@ -4128,7 +4162,7 @@ func TestControlPermissionRejectsUnsupportedKind(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_bad_kind", "label", 0)
-	cs := control.NewServer(state)
+	cs, cap := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "cs.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control: %v", err)
@@ -4171,6 +4205,7 @@ func TestControlPermissionRejectsUnsupportedKind(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	defer ctrlConn.Close()
+	authenticateOwnerForTest(t, ctrlConn, cap)
 	waitForControlClientForTest(t, cs)
 
 	var wg sync.WaitGroup
@@ -4337,7 +4372,7 @@ func TestPermissionRequestConsumesCompletedResolverBeforeReusedID(t *testing.T) 
 			}
 		},
 	}
-	controlServer := control.NewServer(control.NewState("run_1", "", 0))
+	controlServer, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	eventCh := make(chan events.Event, 4)
 	eventCh <- events.Event{
 		Event:     "permission.request",
@@ -4467,7 +4502,7 @@ func TestPermissionRequestRejectsExistingDirectDeliveryBeforePublishing(t *testi
 		t.Fatalf("newEventWriter: %v", err)
 	}
 
-	cs := control.NewServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -4556,7 +4591,7 @@ func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T
 	if err != nil {
 		t.Fatalf("newEventWriter: %v", err)
 	}
-	cs := control.NewServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	if !cs.PreparePermissionClaim("rt_1", "req_reused", control.PermissionResolverNoResolver, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -4605,7 +4640,7 @@ func TestPermissionRequestRejectsExistingNoResolverBeforePublishing(t *testing.T
 // auto-approve producer records the chosen option, a matching manual repeat
 // succeeds, and a conflicting one is rejected.
 func TestAutoApprovedResolutionAcceptsMatchingManualAnswer(t *testing.T) {
-	cs := control.NewServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -4666,7 +4701,7 @@ func TestAutoApprovedResolutionAcceptsMatchingManualAnswer(t *testing.T) {
 // rejecting it: a replay of the universally guessable ("", "") must not be
 // accepted as a matching repeat.
 func TestAutoApprovedResolutionWithoutAllowOptionRecordsEmptyAndRejectsReplay(t *testing.T) {
-	cs := control.NewServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -4748,7 +4783,7 @@ func TestControlPermissionClaimDisconnectFallsThrough(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_timeout", "label", 0)
-	cs := control.NewServer(state)
+	cs, _ := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "t.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -4816,7 +4851,7 @@ func TestControlPermissionClaimDisconnectFallsThrough(t *testing.T) {
 }
 
 func TestScopedControlPermissionClaimCompletesAndReleasesForNextRequest(t *testing.T) {
-	cs := control.NewServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -4907,7 +4942,7 @@ func TestScopedControlPermissionClaimCompletesAndReleasesForNextRequest(t *testi
 }
 
 func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
-	cs := control.NewServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -4983,7 +5018,7 @@ func TestPermissionClaimIsReservedBeforeSynchronousRequestSink(t *testing.T) {
 }
 
 func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
-	cs := control.NewServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	socketPath := shortControlSocketPath(t)
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -5048,7 +5083,7 @@ func TestLateControlAnswerIsBlockedWhileFileResolverOwnsRequest(t *testing.T) {
 }
 
 func TestFailedAutomaticPermissionRemovesClaim(t *testing.T) {
-	cs := control.NewServer(control.NewState("run_1", "", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	cs.PreparePermissionClaim("rt_auto", "0", control.PermissionResolverAutomatic, nil)
 	provider := &errorFakeProvider{answerErr: errors.New("answer failed")}
 	event := events.Event{
@@ -5082,7 +5117,7 @@ func TestControlPermissionClaimDisconnectFallsToFileHandler(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_fh", "label", 0)
-	cs := control.NewServer(state)
+	cs, _ := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "f.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -5245,7 +5280,7 @@ func TestFilePermissionRepeatComparisonRecordsMessage(t *testing.T) {
 	// No control client is connected, so the resolver state is File. Prepare
 	// the claim so the file producer's MarkPermissionClaimResolved records the
 	// resolution.
-	cs := control.NewServer(control.NewState("run_file", "label", 0))
+	cs, _ := controltest.NewServer(control.NewState("run_file", "label", 0))
 	if !cs.PreparePermissionClaim("", "req_file_rep", control.PermissionResolverFile, []any{
 		map[string]any{"optionId": "deny", "kind": "reject"},
 		map[string]any{"optionId": "allow_f", "kind": "allow", "requiresMessage": true},
@@ -5453,7 +5488,7 @@ func TestControlPermissionClaimContextCancelReleasesClaim(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_cancel", "label", 0)
-	cs := control.NewServer(state)
+	cs, _ := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "x.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)
@@ -5535,7 +5570,7 @@ func TestControlPermissionClaimExplicitTimeoutFallsThrough(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
 
 	state := control.NewState("run_et", "label", 0)
-	cs := control.NewServer(state)
+	cs, _ := controltest.NewServer(state)
 	socketPath := filepath.Join(sockDir, "et.sock")
 	if err := cs.Start(socketPath); err != nil {
 		t.Fatalf("start control server: %v", err)

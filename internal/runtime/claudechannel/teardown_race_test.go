@@ -160,7 +160,7 @@ func TestPollBrokerEventsDeliversViaRunSession(t *testing.T) {
 
 	// Register the run in the broker and push reports so pollBrokerEvents has
 	// data to send on the first pollTick.
-	if _, err := p.broker.CreateRun("run-poll"); err != nil {
+	if _, err := p.broker.CreateRun("run-poll", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	st := p.broker.GetRun("run-poll")

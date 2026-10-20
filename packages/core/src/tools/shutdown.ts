@@ -1,6 +1,6 @@
 import * as fs from 'node:fs'
 import { Supervisor } from '../supervisor.js'
-import { dial } from '../client.js'
+import { attachOwner } from '../owner-attach.js'
 import { validateSupervisorSocketPath } from './validate.js'
 import { clearExternalRuns, externalRunMetadataPath } from './run-registry.js'
 
@@ -35,7 +35,7 @@ export async function shutdownTool(args: {
 
       await sup.close({ skipShutdown: true })
     } else {
-      const client = await dial(supervisorId)
+      const client = await attachOwner(supervisorId)
       try {
         // A failed shutdown may leave live runtimes. Keep their durable mappings
         // instead of orphaning them by cleaning artifacts on an unconfirmed stop.

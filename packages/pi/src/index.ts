@@ -16,6 +16,7 @@ import {
 import {
   answerPermissionTool,
   askTool,
+  attachOwner,
   brokerReceiveTool,
   brokerReplyTool,
   cancelTool,
@@ -128,6 +129,7 @@ export interface ExtensionDeps {
   workflowReadyTool: typeof workflowReadyTool
   observeRun: typeof observeRun
   dial: typeof dial
+  attachOwner: typeof attachOwner
   Supervisor: typeof Supervisor
 }
 
@@ -153,6 +155,7 @@ const defaultDeps: ExtensionDeps = {
   workflowReadyTool,
   observeRun,
   dial,
+  attachOwner,
   Supervisor,
 }
 
@@ -1003,15 +1006,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
 
       async function withClient<T>(run: WatchRunRef, work: (client: Client) => Promise<T>): Promise<T> {
-        // The singleton supervisor grants mutations to the client that spawned
-        // the run. Re-dialing it creates a non-owner connection, which the
-        // control server correctly rejects with permission_denied.
         if (!run.supervisorId || deps.Supervisor.isCurrentInstance(run.supervisorId)) {
           const supervisor = await deps.Supervisor.get()
           return work(supervisor.getClient())
         }
 
-        const client = await deps.dial(run.supervisorId)
+        const client = await deps.attachOwner(run.supervisorId)
         try {
           return await work(client)
         } finally {

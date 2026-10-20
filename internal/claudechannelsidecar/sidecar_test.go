@@ -10,6 +10,12 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askclient"
+	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/broker/brokertest"
 )
 
 func TestRunHandlesInitializeToolsAndReport(t *testing.T) {
@@ -419,13 +425,15 @@ func TestAvenorSendToolCall(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/poll-control":
 			_ = json.NewEncoder(w).Encode([]any{})
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
 		case "/send":
 			if err := json.NewDecoder(r.Body).Decode(&sentBody); err != nil {
 				t.Errorf("decode send: %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "outcome": "sent"})
 		default:
 			t.Errorf("unexpected broker path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -486,13 +494,15 @@ func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/poll-control":
 			_ = json.NewEncoder(w).Encode([]any{})
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
 		case "/send":
 			if err := json.NewDecoder(r.Body).Decode(&sentBody); err != nil {
 				t.Errorf("decode send: %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "outcome": "sent"})
 		default:
 			t.Errorf("unexpected broker path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -586,5 +596,101 @@ func TestAvenorSendMissingArgs(t *testing.T) {
 	}
 	if responses[1]["error"] == nil {
 		t.Fatalf("expected JSON-RPC error for missing args, got %#v", responses[1])
+	}
+}
+
+// TestSidecarStandaloneLocalAsk drives avenor_ask end to end against a real
+// local broker: the sidecar sends a versioned ask under its own sender name,
+// the target answers over the broker, and the sidecar renders the reply.
+func TestSidecarStandaloneLocalAsk(t *testing.T) {
+	brokertest.RunStandaloneLocalAsk(t, brokertest.StandaloneAsk{
+		Sender:       "claude-child",
+		ReplyMessage: "all good",
+		WantText:     "Reply from parent_run:\nall good",
+		Run: func(ctx context.Context, in brokertest.StandaloneAskRun) error {
+			return Run(ctx, Options{
+				RunID:     in.RunID,
+				Sender:    in.Sender,
+				Token:     in.Token,
+				BrokerURL: in.BrokerURL,
+				Stdin:     in.Stdin,
+				Stdout:    in.Stdout,
+				Stderr:    io.Discard,
+			})
+		},
+	})
+}
+
+// TestSidecarCancelWithdrawsLiveAsk drives avenor_cancel through a real broker:
+// a live ask is withdrawn, and an ask the broker never queued reports that
+// nothing is pending.
+func TestSidecarCancelWithdrawsLiveAsk(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	defer func() { _ = b.Stop() }()
+	childToken, err := b.CreateRun("child_run", "claude-child")
+	if err != nil {
+		t.Fatalf("CreateRun child: %v", err)
+	}
+	if _, err := b.CreateRun("parent_run", "parent"); err != nil {
+		t.Fatalf("CreateRun parent: %v", err)
+	}
+	transport, err := localhttp.New("", messaging.LocalCredentials{
+		RunID:   "child_run",
+		Token:   childToken,
+		BaseURL: "http://" + b.Addr(),
+	})
+	if err != nil {
+		t.Fatalf("localhttp.New: %v", err)
+	}
+	defer func() { _ = transport.Close() }()
+	s := &Server{
+		opts: Options{RunID: "child_run", Sender: "claude-child", Token: childToken, BrokerURL: "http://" + b.Addr()},
+		ask:  askclient.New(transport, askclient.Options{}),
+	}
+
+	ctx := context.Background()
+	askDone := make(chan error, 1)
+	go func() {
+		_, err := s.callTool(ctx, "avenor_ask", json.RawMessage(`{"to_run_id":"parent_run","message":"status?"}`))
+		askDone <- err
+	}()
+	ask := brokertest.WaitForAgentMessage(t, b, "parent_run")
+	args, err := json.Marshal(map[string]any{"message_id": ask.ID})
+	if err != nil {
+		t.Fatalf("marshal cancel: %v", err)
+	}
+
+	result, err := s.callTool(ctx, "avenor_cancel", args)
+	if err != nil {
+		t.Fatalf("first cancel: %v", err)
+	}
+	content, _ := result.(map[string]any)["content"].([]map[string]any)
+	if len(content) != 1 {
+		t.Fatalf("first cancel content = %#v", content)
+	}
+	text, _ := content[0]["text"].(string)
+	if text != "Cancellation requested for "+ask.ID {
+		t.Fatalf("first cancel text = %q", text)
+	}
+
+	unasked, err := messaging.NewMsgID(time.Now(), time.Time{})
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	args, err = json.Marshal(map[string]any{"message_id": unasked})
+	if err != nil {
+		t.Fatalf("marshal cancel: %v", err)
+	}
+	if _, err := s.callTool(ctx, "avenor_cancel", args); err == nil || err.Error() != "no pending ask for "+unasked {
+		t.Fatalf("absent cancel error = %v, want the pending-ask error", err)
+	}
+
+	select {
+	case <-askDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the withdrawn ask did not return")
 	}
 }

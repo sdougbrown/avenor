@@ -11,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 )
 
 func TestBrokerHealth(t *testing.T) {
@@ -76,7 +79,7 @@ func TestBrokerRegisterExistingRunWithMatchingToken(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_existing")
+	token, err := b.CreateRun("run_existing", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -330,7 +333,7 @@ func TestPollAgentMessagesStopsOnCancel(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
-	if _, err := b.CreateRun("poll_cancel"); err != nil {
+	if _, err := b.CreateRun("poll_cancel", ""); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 
@@ -399,7 +402,7 @@ func TestBrokerPollDrainsStaleNotifyAfterQueuedMessage(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_poll")
+	token, err := b.CreateRun("run_poll", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -622,7 +625,7 @@ func TestBrokerDeleteRun(t *testing.T) {
 	}
 	defer b.Stop()
 
-	if _, err := b.CreateRun("run_to_delete"); err != nil {
+	if _, err := b.CreateRun("run_to_delete", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	if st := b.GetRun("run_to_delete"); st == nil {
@@ -706,7 +709,7 @@ func TestBrokerSend(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_send")
+	token, err := b.CreateRun("run_send", "")
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -761,7 +764,7 @@ func TestBrokerIngestReport(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_ingest_report")
+	token, err := b.CreateRun("run_ingest_report", "")
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -791,7 +794,7 @@ func TestBrokerIngestFinish(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("run_ingest_finish")
+	token, err := b.CreateRun("run_ingest_finish", "")
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -835,11 +838,11 @@ func TestBrokerSendTo(t *testing.T) {
 	defer b.Stop()
 
 	// Create two runs
-	senderToken, err := b.CreateRun("sender")
+	senderToken, err := b.CreateRun("sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("target")
+	targetToken, err := b.CreateRun("target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -882,6 +885,9 @@ func TestBrokerSendTo(t *testing.T) {
 	if msgs[0].FromRunID != "sender" {
 		t.Errorf("FromRunID = %q, want sender", msgs[0].FromRunID)
 	}
+	if msgs[0].Sender != "sender" {
+		t.Errorf("Sender = %q, want the registered name", msgs[0].Sender)
+	}
 	if msgs[0].Type != "agent_message" {
 		t.Errorf("Type = %q, want agent_message", msgs[0].Type)
 	}
@@ -894,7 +900,7 @@ func TestBrokerSendToUnknownTarget(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("sender")
+	token, err := b.CreateRun("sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
@@ -924,11 +930,11 @@ func TestBrokerSendAuthFailure(t *testing.T) {
 	}
 	defer b.Stop()
 
-	_, err := b.CreateRun("sender")
+	_, err := b.CreateRun("sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	_, err = b.CreateRun("target")
+	_, err = b.CreateRun("target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -959,12 +965,12 @@ func TestBrokerSendAutoCorrelationID(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("sender_auto")
+	senderToken, err := b.CreateRun("sender_auto", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
 	b.DeleteRun("target_auto")
-	targetToken, err := b.CreateRun("target_auto")
+	targetToken, err := b.CreateRun("target_auto", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -1039,6 +1045,31 @@ func TestPollAgentMessagesUsesAuthenticatedFromRunID(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for wrapped agent message")
+	}
+}
+
+// TestPollAgentMessagesKeepsNonAgentControl pins that a poll drains only agent
+// messages: the control messages other consumers act on stay queued in order.
+func TestPollAgentMessagesKeepsNonAgentControl(t *testing.T) {
+	b := New("")
+	status := &ControlMessage{Type: "request_status", Payload: json.RawMessage(`{"message":"status?"}`)}
+	agent := &ControlMessage{Type: "agent_message", FromRunID: "peer", Payload: json.RawMessage(`{"message":"hello"}`)}
+	shutdown := &ControlMessage{Type: "shutdown"}
+	st := &RunState{ControlQueue: []*ControlMessage{status, agent, shutdown}}
+	b.mu.Lock()
+	b.runs["target"] = st
+	b.mu.Unlock()
+
+	var delivered []string
+	b.pollAgentMessagesOnce("target", func(wrapped string) { delivered = append(delivered, wrapped) })
+
+	if len(delivered) != 1 || !strings.Contains(delivered[0], "hello") {
+		t.Fatalf("poll delivered %v, want only the agent message", delivered)
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	if len(st.ControlQueue) != 2 || st.ControlQueue[0] != status || st.ControlQueue[1] != shutdown {
+		t.Fatalf("control queue = %v, want the non-agent messages in their original order", st.ControlQueue)
 	}
 }
 
@@ -1123,7 +1154,7 @@ func fireAndForgetSend(t *testing.T, addr, fromToken, fromRunID, toRunID, messag
 func waitReply(t *testing.T, addr, token, runID, waitingFor string) map[string]any {
 	t.Helper()
 	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":%q,"token":%q,"waiting_for":%q}`, runID, token, waitingFor)))
-	// Use a short timeout so tests don't hang for DefaultAskTimeout (10m) on failure.
+	// Use a short timeout so tests don't hang for the ask retention window on failure.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -1153,11 +1184,11 @@ func TestBrokerAskReplyHappyPath(t *testing.T) {
 	defer b.Stop()
 
 	// Register two runs
-	senderToken, err := b.CreateRun("asker")
+	senderToken, err := b.CreateRun("asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	replierToken, err := b.CreateRun("replier")
+	replierToken, err := b.CreateRun("replier", "")
 	if err != nil {
 		t.Fatalf("create replier: %v", err)
 	}
@@ -1221,19 +1252,8 @@ func TestBrokerAskReplyHappyPath(t *testing.T) {
 	}
 
 	// Verify the ask edge was cleaned up
-	st := b.GetRun("asker")
-	if st == nil {
-		t.Fatal("asker run not found")
-	}
-	st.Mu.Lock()
-	_, pendingOk := st.PendingAsks[msgID]
-	_, waitOk := st.WaitingReply[msgID]
-	st.Mu.Unlock()
-	if pendingOk {
+	if b.Store().Pending("asker", msgID) {
 		t.Error("ask edge should have been removed after reply")
-	}
-	if waitOk {
-		t.Error("waiting reply channel should have been removed after reply")
 	}
 }
 
@@ -1244,11 +1264,11 @@ func TestBrokerAskReplyFireAndForgetRemainsUnchanged(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("ff_sender")
+	senderToken, err := b.CreateRun("ff_sender", "")
 	if err != nil {
 		t.Fatalf("create ff_sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("ff_target")
+	targetToken, err := b.CreateRun("ff_target", "")
 	if err != nil {
 		t.Fatalf("create ff_target: %v", err)
 	}
@@ -1260,14 +1280,7 @@ func TestBrokerAskReplyFireAndForgetRemainsUnchanged(t *testing.T) {
 	}
 
 	// Verify no ask edge was created
-	st := b.GetRun("ff_sender")
-	if st == nil {
-		t.Fatal("ff_sender run not found")
-	}
-	st.Mu.Lock()
-	pendingCount := len(st.PendingAsks)
-	st.Mu.Unlock()
-	if pendingCount != 0 {
+	if pendingCount := b.Store().PendingCount("ff_sender"); pendingCount != 0 {
 		t.Errorf("expected 0 pending asks for fire-and-forget, got %d", pendingCount)
 	}
 
@@ -1294,11 +1307,11 @@ func TestBrokerAskRequiresMessageID(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("asker_no_id")
+	senderToken, err := b.CreateRun("asker_no_id", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	_, err = b.CreateRun("target_no_id")
+	_, err = b.CreateRun("target_no_id", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -1330,11 +1343,11 @@ func TestBrokerMutualAskGuard(t *testing.T) {
 	}
 	defer b.Stop()
 
-	aToken, err := b.CreateRun("agent_a")
+	aToken, err := b.CreateRun("agent_a", "")
 	if err != nil {
 		t.Fatalf("create agent_a: %v", err)
 	}
-	bToken, err := b.CreateRun("agent_b")
+	bToken, err := b.CreateRun("agent_b", "")
 	if err != nil {
 		t.Fatalf("create agent_b: %v", err)
 	}
@@ -1364,11 +1377,11 @@ func TestBrokerMutualAskGuardConcurrent(t *testing.T) {
 	}
 	defer b.Stop()
 
-	aToken, err := b.CreateRun("ca")
+	aToken, err := b.CreateRun("ca", "")
 	if err != nil {
 		t.Fatalf("create ca: %v", err)
 	}
-	bToken, err := b.CreateRun("cb")
+	bToken, err := b.CreateRun("cb", "")
 	if err != nil {
 		t.Fatalf("create cb: %v", err)
 	}
@@ -1409,11 +1422,8 @@ func TestBrokerMutualAskGuardConcurrent(t *testing.T) {
 		t.Errorf("expected exactly one accepted (200) and one rejected (409), got %v", statuses)
 	}
 
-	// Exactly one edge should remain in the global registry.
-	b.globalAskEdgesMu.RLock()
-	n := len(b.globalAskEdges)
-	b.globalAskEdgesMu.RUnlock()
-	if n != 1 {
+	// Exactly one edge should survive.
+	if n := b.Store().ActiveCount(); n != 1 {
 		t.Errorf("expected exactly 1 surviving ask edge, got %d", n)
 	}
 }
@@ -1427,11 +1437,11 @@ func TestBrokerAskReusesMessageIDConflict(t *testing.T) {
 	}
 	defer b.Stop()
 
-	at, err := b.CreateRun("dup_a")
+	at, err := b.CreateRun("dup_a", "")
 	if err != nil {
 		t.Fatalf("create dup_a: %v", err)
 	}
-	if _, err := b.CreateRun("dup_b"); err != nil {
+	if _, err := b.CreateRun("dup_b", ""); err != nil {
 		t.Fatalf("create dup_b: %v", err)
 	}
 	addr := b.Addr()
@@ -1455,11 +1465,11 @@ func TestBrokerDeleteRunCleansAskEdges(t *testing.T) {
 	}
 	defer b.Stop()
 
-	aToken, err := b.CreateRun("del_a")
+	aToken, err := b.CreateRun("del_a", "")
 	if err != nil {
 		t.Fatalf("create del_a: %v", err)
 	}
-	if _, err := b.CreateRun("del_b"); err != nil {
+	if _, err := b.CreateRun("del_b", ""); err != nil {
 		t.Fatalf("create del_b: %v", err)
 	}
 	addr := b.Addr()
@@ -1467,31 +1477,20 @@ func TestBrokerDeleteRunCleansAskEdges(t *testing.T) {
 	if r := sendAsk(t, addr, aToken, "del_a", "del_b", "del-ask-1", "hi"); r["status"] != http.StatusOK {
 		t.Fatalf("ask should succeed, got %d", r["status"])
 	}
-
-	key := edgeKey("del_a", "del-ask-1")
-	b.globalAskEdgesMu.RLock()
-	_, existed := b.globalAskEdges[key]
-	b.globalAskEdgesMu.RUnlock()
-	if !existed {
+	if !b.Store().Pending("del_a", "del-ask-1") {
 		t.Fatal("ask edge should exist before DeleteRun")
 	}
 
 	b.DeleteRun("del_a")
 
-	b.globalAskEdgesMu.RLock()
-	_, gEdge := b.globalAskEdges[key]
-	_, gCh := b.globalReplyChannels[key]
-	b.globalAskEdgesMu.RUnlock()
-	if gEdge || gCh {
-		t.Error("DeleteRun should remove the run's ask edges from global registries")
+	if b.Store().Pending("del_a", "del-ask-1") {
+		t.Error("DeleteRun should remove the run's ask edges")
 	}
 	if b.GetRun("del_a") != nil {
 		t.Error("run should no longer exist after DeleteRun")
 	}
 }
 
-// TestBrokerResetCleansAskEdges verifies Reset drops all run state including
-// the global ask-edge registries.
 func TestBrokerResetCleansAskEdges(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -1499,11 +1498,11 @@ func TestBrokerResetCleansAskEdges(t *testing.T) {
 	}
 	defer b.Stop()
 
-	aToken, err := b.CreateRun("res_a")
+	aToken, err := b.CreateRun("res_a", "")
 	if err != nil {
 		t.Fatalf("create res_a: %v", err)
 	}
-	if _, err := b.CreateRun("res_b"); err != nil {
+	if _, err := b.CreateRun("res_b", ""); err != nil {
 		t.Fatalf("create res_b: %v", err)
 	}
 	addr := b.Addr()
@@ -1514,11 +1513,8 @@ func TestBrokerResetCleansAskEdges(t *testing.T) {
 
 	b.Reset()
 
-	b.globalAskEdgesMu.RLock()
-	n := len(b.globalAskEdges)
-	b.globalAskEdgesMu.RUnlock()
-	if n != 0 {
-		t.Errorf("Reset should clear global ask edges, got %d remaining", n)
+	if n := b.Store().ActiveCount(); n != 0 {
+		t.Errorf("Reset should clear ask edges, got %d remaining", n)
 	}
 	if b.RunCount() != 0 {
 		t.Errorf("Reset should clear runs, got %d", b.RunCount())
@@ -1532,11 +1528,11 @@ func TestBrokerCancelMessage(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("canceller")
+	senderToken, err := b.CreateRun("canceller", "")
 	if err != nil {
 		t.Fatalf("create canceller: %v", err)
 	}
-	targetToken, err := b.CreateRun("cancel_target")
+	targetToken, err := b.CreateRun("cancel_target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -1551,14 +1547,7 @@ func TestBrokerCancelMessage(t *testing.T) {
 	}
 
 	// Verify the ask edge exists
-	st := b.GetRun("canceller")
-	if st == nil {
-		t.Fatal("canceller run not found")
-	}
-	st.Mu.Lock()
-	_, pendingOk := st.PendingAsks[msgID]
-	st.Mu.Unlock()
-	if !pendingOk {
+	if !b.Store().Pending("canceller", msgID) {
 		t.Fatal("ask edge should exist before cancel")
 	}
 
@@ -1610,15 +1599,16 @@ func TestBrokerCancelMessage(t *testing.T) {
 	}
 
 	// Verify the ask edge was cleaned up
-	st.Mu.Lock()
-	_, pendingOk = st.PendingAsks[msgID]
-	_, waitOk := st.WaitingReply[msgID]
-	st.Mu.Unlock()
-	if pendingOk {
+	if b.Store().Pending("canceller", msgID) {
 		t.Error("ask edge should have been removed after cancel")
 	}
-	if waitOk {
-		t.Error("waiting reply channel should have been removed after cancel")
+	// Withdrawal is the only terminal outcome that retracts the queued ask.
+	target := b.GetRun("cancel_target")
+	target.Mu.Lock()
+	queued := len(target.ControlQueue)
+	target.Mu.Unlock()
+	if queued != 1 {
+		t.Errorf("target queue = %d, want only the uncancelled ask", queued)
 	}
 
 	// Cancelling a non-existent message should fail
@@ -1633,6 +1623,323 @@ func TestBrokerCancelMessage(t *testing.T) {
 	}
 }
 
+// TestBrokerRemovalTerminatesWaiters verifies that removing a participating
+// run terminates an in-flight wait instead of leaving it until the deadline.
+func TestBrokerRemovalTerminatesWaiters(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("removal_sender", "")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("removal_target", ""); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	msgID := "removal-ask"
+	if r := sendAsk(t, b.Addr(), senderToken, "removal_sender", "removal_target", msgID, "hi"); r["status"] != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", r["status"])
+	}
+
+	resultCh := make(chan map[string]any, 1)
+	go func() {
+		resultCh <- waitReply(t, b.Addr(), senderToken, "removal_sender", msgID)
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	b.DeleteRun("removal_target")
+
+	select {
+	case result := <-resultCh:
+		if result["status"] != http.StatusGone || result["lost"] != true {
+			t.Fatalf("wait result = %+v, want 410 lost", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter outlived the removed run")
+	}
+}
+
+// TestBrokerSessionsAdvertisesGeneration pins the generation the local router
+// exposes to versioned clients.
+func TestBrokerSessionsAdvertisesGeneration(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	token, err := b.CreateRun("gen_reader", "")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	resp, err := getSessions(b.Addr(), "gen_reader", token)
+	if err != nil {
+		t.Fatalf("sessions: %v", err)
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Generation string `json:"generation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Generation == "" || payload.Generation != b.Store().Generation() {
+		t.Fatalf("generation = %q, want %q", payload.Generation, b.Store().Generation())
+	}
+}
+
+// mintMsgID mints a versioned message ID with the given lifetime.
+func mintMsgID(t *testing.T, ttl time.Duration) string {
+	t.Helper()
+	now := time.Now().UTC()
+	msgID, err := messaging.NewMsgID(now, now.Add(ttl))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	return msgID
+}
+
+// askBody builds a /send request carrying an ask and an optional generation.
+func askBody(token, fromRunID, toRunID, msgID, generation string) string {
+	payload := fmt.Sprintf(`{"id":%q,"from":%q,"from_run_id":%q,"to_run_id":%q,"message":"ask","expects_reply":true}`,
+		msgID, fromRunID, fromRunID, toRunID)
+	body := fmt.Sprintf(`{"run_id":%q,"token":%q,"from_run_id":%q,"to_run_id":%q,"type":"agent_message","payload":%s`,
+		fromRunID, token, fromRunID, toRunID, payload)
+	if generation != "" {
+		body += fmt.Sprintf(`,"generation":%q`, generation)
+	}
+	return body + "}"
+}
+
+// postBroker posts body to a broker endpoint and returns the status and body.
+func postBroker(t *testing.T, addr, path, body string) (int, map[string]any) {
+	t.Helper()
+	resp, err := http.Post(fmt.Sprintf("http://%s/%s", addr, path), "application/json", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("POST /%s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode /%s: %v", path, err)
+	}
+	return resp.StatusCode, result
+}
+
+// postBrokerTimeout posts body to a broker endpoint under a bounded context, so
+// a long-poll that never completes fails the test instead of hanging it.
+func postBrokerTimeout(t *testing.T, addr, path, body string, timeout time.Duration) (int, map[string]any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/%s", addr, path), bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("new /%s request: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /%s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode /%s: %v", path, err)
+	}
+	return resp.StatusCode, result
+}
+
+// TestBrokerReplyAnswersVersionedAsk pins the reply path for a versioned ask:
+// the reply sender names no generation, so the broker must answer the edge
+// admitted in the store's current generation and release the waiter.
+func TestBrokerReplyAnswersVersionedAsk(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("versioned_asker", "")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	targetToken, err := b.CreateRun("versioned_replier", "")
+	if err != nil {
+		t.Fatalf("create replier: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+	msgID := mintMsgID(t, time.Minute)
+
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "versioned_asker", "versioned_replier", msgID, gen)); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+	reply := sendReply(t, addr, targetToken, "versioned_replier", "versioned_asker", msgID, "the answer")
+	if reply["status"] != http.StatusOK || reply["note"] != nil {
+		t.Fatalf("reply = %+v, want the live edge answered", reply)
+	}
+	waitBody := fmt.Sprintf(`{"run_id":"versioned_asker","token":%q,"waiting_for":%q,"generation":%q}`, senderToken, msgID, gen)
+	status, body := postBrokerTimeout(t, addr, "wait_reply", waitBody, 3*time.Second)
+	if status != http.StatusOK || body["from_run_id"] != "versioned_replier" {
+		t.Fatalf("wait_reply = (%d, %v)", status, body)
+	}
+	if b.Store().Pending("versioned_asker", msgID) {
+		t.Fatal("ask edge survived the reply")
+	}
+}
+
+// TestBrokerReplyAfterRotationFallsBackToDelivery pins the broker's
+// fire-and-forget fallback: a rotation retires the edge, and the reply still
+// reaches the asker as a plain delivery.
+func TestBrokerReplyAfterRotationFallsBackToDelivery(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("rotated_asker", "")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	targetToken, err := b.CreateRun("rotated_replier", "")
+	if err != nil {
+		t.Fatalf("create replier: %v", err)
+	}
+	addr := b.Addr()
+	msgID := mintMsgID(t, time.Minute)
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "rotated_asker", "rotated_replier", msgID, b.Store().Generation())); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+
+	b.Store().Reset()
+
+	reply := sendReply(t, addr, targetToken, "rotated_replier", "rotated_asker", msgID, "after the rotation")
+	if reply["status"] != http.StatusOK || reply["note"] == nil {
+		t.Fatalf("reply = %+v, want the fire-and-forget fallback", reply)
+	}
+	sender := b.GetRun("rotated_asker")
+	sender.Mu.Lock()
+	queued := len(sender.ControlQueue)
+	sender.Mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("asker queue = %d, want the reply delivered", queued)
+	}
+}
+
+// TestBrokerVersionedIDRequiresGeneration pins that a versioned ID without a
+// generation field is refused on every ask endpoint.
+func TestBrokerVersionedIDRequiresGeneration(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("nogen_sender", "")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("nogen_target", ""); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	msgID := mintMsgID(t, time.Minute)
+
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "nogen_sender", "nogen_target", msgID, "")); status != http.StatusConflict {
+		t.Fatalf("send without generation = (%d, %v), want 409", status, body)
+	}
+	waitBody := fmt.Sprintf(`{"run_id":"nogen_sender","token":%q,"waiting_for":%q}`, senderToken, msgID)
+	if status, body := postBroker(t, addr, "wait_reply", waitBody); status != http.StatusConflict {
+		t.Fatalf("wait_reply without generation = (%d, %v), want 409", status, body)
+	}
+	cancelBody := fmt.Sprintf(`{"run_id":"nogen_sender","token":%q,"cancel_message_id":%q}`, senderToken, msgID)
+	if status, body := postBroker(t, addr, "cancel_message", cancelBody); status != http.StatusConflict {
+		t.Fatalf("cancel_message without generation = (%d, %v), want 409", status, body)
+	}
+	if n := b.Store().ActiveCount(); n != 0 {
+		t.Fatalf("generation-less requests left %d live edges", n)
+	}
+}
+
+// TestBrokerStaleGenerationRejected pins the 409 the local router returns for a
+// stale generation on every ask endpoint.
+func TestBrokerStaleGenerationRejected(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("stale_gen_sender", "")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("stale_gen_target", ""); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	msgID := mintMsgID(t, time.Minute)
+	stale := "stale-generation"
+
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "stale_gen_sender", "stale_gen_target", msgID, stale)); status != http.StatusConflict {
+		t.Fatalf("send with stale generation = (%d, %v), want 409", status, body)
+	}
+	waitBody := fmt.Sprintf(`{"run_id":"stale_gen_sender","token":%q,"waiting_for":%q,"generation":%q}`, senderToken, msgID, stale)
+	if status, body := postBroker(t, addr, "wait_reply", waitBody); status != http.StatusConflict {
+		t.Fatalf("wait_reply with stale generation = (%d, %v), want 409", status, body)
+	}
+	cancelBody := fmt.Sprintf(`{"run_id":"stale_gen_sender","token":%q,"cancel_message_id":%q,"generation":%q}`, senderToken, msgID, stale)
+	if status, body := postBroker(t, addr, "cancel_message", cancelBody); status != http.StatusConflict {
+		t.Fatalf("cancel_message with stale generation = (%d, %v), want 409", status, body)
+	}
+	if n := b.Store().ActiveCount(); n != 0 {
+		t.Fatalf("stale-generation requests left %d live edges", n)
+	}
+}
+
+// TestBrokerWithdrawnVersionedIDRejectedOnResend pins the fence mapping: a
+// versioned ID that was sent and then cancelled cannot be sent again.
+func TestBrokerWithdrawnVersionedIDRejectedOnResend(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("fenced_sender", "")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("fenced_target", ""); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+	msgID := mintMsgID(t, time.Minute)
+
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "fenced_sender", "fenced_target", msgID, gen)); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+	cancelBody := fmt.Sprintf(`{"run_id":"fenced_sender","token":%q,"cancel_message_id":%q,"generation":%q}`, senderToken, msgID, gen)
+	if status, body := postBroker(t, addr, "cancel_message", cancelBody); status != http.StatusOK || body["cancelled"] != true {
+		t.Fatalf("cancel = (%d, %v)", status, body)
+	}
+	target := b.GetRun("fenced_target")
+	target.Mu.Lock()
+	queued := len(target.ControlQueue)
+	target.Mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("target queue = %d, want the withdrawn ask retracted", queued)
+	}
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "fenced_sender", "fenced_target", msgID, gen)); status != http.StatusConflict {
+		t.Fatalf("re-send of a withdrawn id = (%d, %v), want 409", status, body)
+	}
+}
+
 func TestBrokerWaitReplyForNonexistentAsk(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -1640,7 +1947,7 @@ func TestBrokerWaitReplyForNonexistentAsk(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("nobody")
+	token, err := b.CreateRun("nobody", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -1664,11 +1971,11 @@ func TestBrokerReplyAfterEdgeExpired(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("sender_expired")
+	senderToken, err := b.CreateRun("sender_expired", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("target_expired")
+	targetToken, err := b.CreateRun("target_expired", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -1682,21 +1989,11 @@ func TestBrokerReplyAfterEdgeExpired(t *testing.T) {
 		t.Fatalf("sendAsk status = %d", st)
 	}
 
-	// Manually remove the ask edge from both per-run and global registries
-	// to simulate expiry. Use the namespaced key.
-	st := b.GetRun("sender_expired")
-	if st == nil {
-		t.Fatal("sender_expired run not found")
+	// Expire the ask edge by pruning beyond its retention deadline.
+	b.Store().Prune(time.Now().Add(askstore.DefaultAskTimeout + time.Second))
+	if b.Store().Pending("sender_expired", msgID) {
+		t.Fatal("ask edge should be gone after expiry")
 	}
-	key := edgeKey("sender_expired", msgID)
-	b.globalAskEdgesMu.Lock()
-	delete(b.globalAskEdges, key)
-	delete(b.globalReplyChannels, key)
-	b.globalAskEdgesMu.Unlock()
-	st.Mu.Lock()
-	delete(st.PendingAsks, msgID)
-	delete(st.WaitingReply, msgID)
-	st.Mu.Unlock()
 
 	// Send a reply from target -> sender (correct direction).
 	// Since the edge is gone, this should fall back to fire-and-forget.
@@ -1730,13 +2027,23 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 	defer b.Stop()
 
 	// Register a run so we have auth credentials.
-	token, err := b.CreateRun("sessions_user")
+	token, err := b.CreateRun("sessions_user", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 
+	// Credentials in the URL are not accepted: a GET authenticates by header.
+	queryResp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=sessions_user&token=%s", b.Addr(), token))
+	if err != nil {
+		t.Fatalf("sessions with query credentials: %v", err)
+	}
+	queryResp.Body.Close()
+	if queryResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("sessions with query credentials status = %d, want 401", queryResp.StatusCode)
+	}
+
 	// No sessions metadata set yet
-	resp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=sessions_user&token=%s", b.Addr(), token))
+	resp, err := getSessions(b.Addr(), "sessions_user", token)
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
 	}
@@ -1758,7 +2065,7 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 	}
 
 	// Register a run and check again
-	_, err = b.CreateRun("runner_1")
+	_, err = b.CreateRun("runner_1", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -1771,7 +2078,7 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 		Status:  "thinking",
 	})
 
-	resp2, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=sessions_user&token=%s", b.Addr(), token))
+	resp2, err := getSessions(b.Addr(), "sessions_user", token)
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
 	}
@@ -1828,7 +2135,7 @@ func TestBrokerUpdateSessionInfo(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("update_me")
+	token, err := b.CreateRun("update_me", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -1865,150 +2172,61 @@ func TestBrokerUpdateSessionInfo(t *testing.T) {
 }
 
 func TestBrokerPruneExpiredAskEdges(t *testing.T) {
-	// Test the pruning logic directly with an expired edge.
-	// We use a very short expiration override by directly manipulating the map.
-	b := New("")
-
-	token, err := b.CreateRun("pruner")
-	if err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	_ = token
-
-	st := b.GetRun("pruner")
-	if st == nil {
-		t.Fatal("run not found")
-	}
-
-	// Add an ask edge that's already expired
-	edge := &AskEdge{
-		FromRunID: "pruner",
-		ToRunID:   "other",
-		MessageID: "stale-edge",
-		CreatedAt: time.Now().Add(-DefaultAskTimeout - time.Second),
-	}
-	replyCh := make(chan AskReply, 1)
-	st.Mu.Lock()
-	st.PendingAsks["stale-edge"] = edge
-	st.WaitingReply["stale-edge"] = replyCh
-	st.Mu.Unlock()
-	b.globalAskEdgesMu.Lock()
-	b.globalAskEdges[edgeKey("pruner", "stale-edge")] = edge
-	b.globalReplyChannels[edgeKey("pruner", "stale-edge")] = replyCh
-	b.globalAskEdgesMu.Unlock()
-
-	// Run pruning
-	b.pruneExpiredAskEdges()
-
-	// Pruning sends a timeout signal to the channel but does NOT delete
-	// the registry entries — the wait_reply handler is responsible for
-	// that after receiving.
-	select {
-	case sig := <-replyCh:
-		if sig.FromRunID != "" {
-			t.Errorf("timeout signal from_run_id = %q, want empty", sig.FromRunID)
-		}
-		var payload struct{ Timeout bool }
-		if err := json.Unmarshal(sig.Payload, &payload); err != nil {
-			t.Errorf("unmarshal timeout payload: %v", err)
-		} else if !payload.Timeout {
-			t.Errorf("expected timeout=true in signal payload")
-		}
-	case <-time.After(time.Second):
-		t.Error("expected timeout signal on channel")
-	}
-
-	// Entries should be removed after pruning (leak fix: no /wait_reply needed).
-	st.Mu.Lock()
-	_, pendingOk := st.PendingAsks["stale-edge"]
-	_, waitOk := st.WaitingReply["stale-edge"]
-	st.Mu.Unlock()
-	if pendingOk {
-		t.Error("stale edge should be removed from run state after pruning")
-	}
-	if waitOk {
-		t.Error("stale channel should be removed from run state after pruning")
-	}
-	// Global registry entries should also be removed.
-	b.globalAskEdgesMu.RLock()
-	_, gPendingOk := b.globalAskEdges[edgeKey("pruner", "stale-edge")]
-	_, gWaitOk := b.globalReplyChannels[edgeKey("pruner", "stale-edge")]
-	b.globalAskEdgesMu.RUnlock()
-	if gPendingOk {
-		t.Error("global edge should be removed after pruning")
-	}
-	if gWaitOk {
-		t.Error("global wait channel should be removed after pruning")
-	}
-
-	// A fresh edge should NOT receive a timeout signal
-	st.Mu.Lock()
-	st.PendingAsks["fresh-edge"] = &AskEdge{
-		FromRunID: "pruner",
-		ToRunID:   "other",
-		MessageID: "fresh-edge",
-		CreatedAt: time.Now(),
-	}
-	st.WaitingReply["fresh-edge"] = make(chan AskReply, 1)
-	st.Mu.Unlock()
-
-	b.pruneExpiredAskEdges()
-
-	st.Mu.Lock()
-	_, freshOk := st.PendingAsks["fresh-edge"]
-	st.Mu.Unlock()
-	if !freshOk {
-		t.Error("fresh ask edge should still exist after pruning")
-	}
-}
-
-func TestBrokerAskReplyWaitTimeout(t *testing.T) {
-	// Override the ask timeout to be very short so the test doesn't take 10 minutes.
-	// We do this by calling pruneExpiredAskEdges after placing an edge with an
-	// expired timestamp, avoiding the need to actually wait real wall time.
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("timeout_asker")
+	token, err := b.CreateRun("pruner", "")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if _, err := b.CreateRun("pruner_target", ""); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if r := sendAsk(t, b.Addr(), token, "pruner", "pruner_target", "stale-edge", "hi"); r["status"] != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", r["status"])
+	}
+
+	// Pruning past the retention deadline removes the edge; a fresh ask
+	// survives a prune at the current time.
+	b.Store().Prune(time.Now().Add(askstore.DefaultAskTimeout + time.Second))
+	if b.Store().Pending("pruner", "stale-edge") {
+		t.Error("stale edge should be removed after pruning")
+	}
+	if r := sendAsk(t, b.Addr(), token, "pruner", "pruner_target", "fresh-edge", "hi"); r["status"] != http.StatusOK {
+		t.Fatalf("fresh sendAsk status = %d", r["status"])
+	}
+	b.Store().Prune(time.Now())
+	if !b.Store().Pending("pruner", "fresh-edge") {
+		t.Error("fresh ask edge should survive pruning")
+	}
+}
+
+func TestBrokerAskReplyWaitTimeout(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("timeout_asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
+	}
+	if _, err := b.CreateRun("timeout_target", ""); err != nil {
+		t.Fatalf("create target: %v", err)
 	}
 
 	addr := b.Addr()
 	msgID := "will-timeout"
-
-	// Place the ask edge directly (bypassing /send) with an expired timestamp.
-	// Must register in both the per-run state and the global registry.
-	st := b.GetRun("timeout_asker")
-	if st == nil {
-		t.Fatal("run not found")
+	if r := sendAsk(t, addr, senderToken, "timeout_asker", "timeout_target", msgID, "wait forever"); r["status"] != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", r["status"])
 	}
-	edge := &AskEdge{
-		FromRunID: "timeout_asker",
-		ToRunID:   "somewhere",
-		MessageID: msgID,
-		CreatedAt: time.Now().Add(-DefaultAskTimeout - time.Second),
-	}
-	replyCh := make(chan AskReply, 1)
 
-	st.Mu.Lock()
-	st.PendingAsks[msgID] = edge
-	st.WaitingReply[msgID] = replyCh
-	st.Mu.Unlock()
-
-	b.globalAskEdgesMu.Lock()
-	b.globalAskEdges[edgeKey("timeout_asker", msgID)] = edge
-	b.globalReplyChannels[edgeKey("timeout_asker", msgID)] = replyCh
-	b.globalAskEdgesMu.Unlock()
-
-	// Start the waiter in-flight so it looks up the reply channel before
-	// pruning, then trigger pruning to deliver the timeout signal to the
-	// blocked request. The /wait_reply handler captures the channel pointer
-	// at request start, so it still receives the signal even though pruning
-	// removes the registry entries.
+	// Start the waiter in flight, then prune past the deadline so the prune
+	// terminates the captured waiter.
 	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"timeout_asker","token":%q,"waiting_for":%q}`, senderToken, msgID)))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -2034,9 +2252,9 @@ func TestBrokerAskReplyWaitTimeout(t *testing.T) {
 		result["status"] = resp.StatusCode
 		resultCh <- result
 	}()
-	// Allow the wait_reply handler to register and block on the channel.
+	// Allow the wait_reply handler to capture the edge.
 	time.Sleep(100 * time.Millisecond)
-	b.pruneExpiredAskEdges()
+	b.Store().Prune(time.Now().Add(askstore.DefaultAskTimeout + time.Second))
 
 	var result map[string]any
 	select {
@@ -2052,21 +2270,8 @@ func TestBrokerAskReplyWaitTimeout(t *testing.T) {
 	if result["timeout"] != true {
 		t.Errorf("expected timeout=true in response")
 	}
-
-	// The expired edge should have been cleaned up from the global registry
-	// and the run state by pruning (leak fix).
-	b.globalAskEdgesMu.RLock()
-	_, gOk := b.globalAskEdges[edgeKey("timeout_asker", msgID)]
-	b.globalAskEdgesMu.RUnlock()
-	if gOk {
-		t.Error("expired ask edge should be removed from global registry after prune")
-	}
-	st.Mu.Lock()
-	_, pendingOk := st.PendingAsks[msgID]
-	_, waitOk := st.WaitingReply[msgID]
-	st.Mu.Unlock()
-	if pendingOk || waitOk {
-		t.Error("expired ask edge should be removed from run state after prune")
+	if b.Store().Pending("timeout_asker", msgID) {
+		t.Error("expired ask edge should be removed after prune")
 	}
 }
 
@@ -2077,11 +2282,11 @@ func TestBrokerSendAuthStillRequiredForAskReply(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("auth_test_1")
+	token, err := b.CreateRun("auth_test_1", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	_, err = b.CreateRun("auth_test_2")
+	_, err = b.CreateRun("auth_test_2", "")
 	if err != nil {
 		t.Fatalf("create run 2: %v", err)
 	}
@@ -2135,15 +2340,15 @@ func TestBrokerReplyByNonTargetReturns403(t *testing.T) {
 	}
 	defer b.Stop()
 
-	askerToken, err := b.CreateRun("asker")
+	askerToken, err := b.CreateRun("asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	targetToken, err := b.CreateRun("target")
+	targetToken, err := b.CreateRun("target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
-	thirdToken, err := b.CreateRun("third")
+	thirdToken, err := b.CreateRun("third", "")
 	if err != nil {
 		t.Fatalf("create third: %v", err)
 	}
@@ -2170,20 +2375,20 @@ func TestBrokerReplyByNonTargetReturns403(t *testing.T) {
 	}
 }
 
-func TestBrokerSessionsNilInfo(t *testing.T) {
+func TestBrokerSessionsLaunchName(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("no_info_run")
+	token, err := b.CreateRun("no_info_run", "")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 
-	// Query sessions without calling UpdateSessionInfo — st.Info should be nil.
-	resp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=no_info_run&token=%s", b.Addr(), token))
+	// A run registered without a label reports its run ID as its display name.
+	resp, err := getSessions(b.Addr(), "no_info_run", token)
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
 	}
@@ -2203,9 +2408,8 @@ func TestBrokerSessionsNilInfo(t *testing.T) {
 	if s0["run_id"] != "no_info_run" {
 		t.Errorf("run_id = %q, want no_info_run", s0["run_id"])
 	}
-	// Without UpdateSessionInfo, label/status should be empty
-	if label, ok := s0["label"]; ok && label != "" {
-		t.Errorf("expected empty label, got %q", label)
+	if s0["label"] != "no_info_run" {
+		t.Errorf("label = %v, want the run ID", s0["label"])
 	}
 	if status, ok := s0["status"]; ok && status != "" {
 		t.Errorf("expected empty status, got %q", status)
@@ -2225,11 +2429,11 @@ func TestBrokerCancelSignalViaWaitReply(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("canceller_wait")
+	senderToken, err := b.CreateRun("canceller_wait", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	_, err = b.CreateRun("victim")
+	_, err = b.CreateRun("victim", "")
 	if err != nil {
 		t.Fatalf("create victim: %v", err)
 	}
@@ -2314,11 +2518,11 @@ func TestBrokerReplyDropOnFullChannel(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("drop_sender")
+	senderToken, err := b.CreateRun("drop_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("drop_target")
+	targetToken, err := b.CreateRun("drop_target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -2359,11 +2563,11 @@ func TestBrokerCancelDropOnFullChannel(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("cdrop_sender")
+	senderToken, err := b.CreateRun("cdrop_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	targetToken, err := b.CreateRun("cdrop_target")
+	targetToken, err := b.CreateRun("cdrop_target", "")
 	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
@@ -2400,14 +2604,10 @@ func TestBrokerCancelDropOnFullChannel(t *testing.T) {
 		t.Errorf("expected cancelled=true, got %v", cr)
 	}
 
-	// The cancel also cleans up the registries even though the signal was
-	// dropped, so nothing leaks.
-	b.globalAskEdgesMu.RLock()
-	_, gOk := b.globalAskEdges[edgeKey("cdrop_sender", msgID)]
-	_, gCh := b.globalReplyChannels[edgeKey("cdrop_sender", msgID)]
-	b.globalAskEdgesMu.RUnlock()
-	if gOk || gCh {
-		t.Error("ask edge should be removed after cancel even when the signal is dropped")
+	// The cancel also cleans up the edge even though the reply won the race,
+	// so nothing leaks.
+	if b.Store().Pending("cdrop_sender", msgID) {
+		t.Error("ask edge should be removed after cancel")
 	}
 }
 
@@ -2418,34 +2618,18 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	}
 	defer b.Stop()
 
-	senderToken, err := b.CreateRun("disco_sender")
+	senderToken, err := b.CreateRun("disco_sender", "")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
+	targetToken, err := b.CreateRun("disco_target", "")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
 	msgID := "disco-test"
-
-	// Directly register an ask edge (no reply expected).
-	key := edgeKey("disco_sender", msgID)
-	edge := &AskEdge{
-		FromRunID: "disco_sender",
-		ToRunID:   "somewhere",
-		MessageID: msgID,
-		CreatedAt: time.Now(),
+	if r := sendAsk(t, b.Addr(), senderToken, "disco_sender", "disco_target", msgID, "hi"); r["status"] != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", r["status"])
 	}
-	replyCh := make(chan AskReply, 1)
-
-	st := b.GetRun("disco_sender")
-	if st == nil {
-		t.Fatal("run not found")
-	}
-	st.Mu.Lock()
-	st.PendingAsks[msgID] = edge
-	st.WaitingReply[msgID] = replyCh
-	st.Mu.Unlock()
-	b.globalAskEdgesMu.Lock()
-	b.globalAskEdges[key] = edge
-	b.globalReplyChannels[key] = replyCh
-	b.globalAskEdgesMu.Unlock()
 
 	// Start wait_reply, then cancel the context mid-wait to trigger cleanup.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2466,23 +2650,102 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	}
 
 	// Wait for the handler to process context cancellation.
-	time.Sleep(10 * time.Millisecond)
-
-	// Verify the edge was cleaned up.
-	b.globalAskEdgesMu.RLock()
-	_, edgeExists := b.globalAskEdges[key]
-	_, chExists := b.globalReplyChannels[key]
-	b.globalAskEdgesMu.RUnlock()
-	if edgeExists || chExists {
-		t.Error("expected edge and channel to be cleaned up on context cancellation")
+	deadline := time.Now().Add(2 * time.Second)
+	for b.Store().Pending("disco_sender", msgID) {
+		if time.Now().After(deadline) {
+			t.Fatal("expected the ask edge to be cleaned up on context cancellation")
+		}
+		time.Sleep(time.Millisecond)
 	}
 
-	st.Mu.Lock()
-	_, pendingExists := st.PendingAsks[msgID]
-	_, waitExists := st.WaitingReply[msgID]
-	st.Mu.Unlock()
-	if pendingExists || waitExists {
-		t.Error("expected per-run state to be cleaned up on context cancellation")
+	// The abandoned ask stays queued for the target: an unversioned ID records
+	// no fence, exactly as the unextracted broker behaved.
+	target := b.GetRun("disco_target")
+	target.Mu.Lock()
+	queued := len(target.ControlQueue)
+	target.Mu.Unlock()
+	if queued != 1 {
+		t.Errorf("target queue = %d, want the abandoned ask retained", queued)
+	}
+	if ack, ok := b.Store().Fence(messaging.FenceKey{Sender: "disco_sender", MessageID: msgID}); ok {
+		t.Errorf("legacy abandonment recorded a fence: %+v", ack)
+	}
+
+	// A later reply cannot answer the abandoned edge and is delivered to the
+	// sender as fire-and-forget.
+	if r := sendReply(t, b.Addr(), targetToken, "disco_target", "disco_sender", msgID, "late reply"); r["status"] != http.StatusOK || r["note"] == nil {
+		t.Fatalf("late reply = %+v, want the fire-and-forget fallback", r)
+	}
+	sender := b.GetRun("disco_sender")
+	sender.Mu.Lock()
+	queued = len(sender.ControlQueue)
+	sender.Mu.Unlock()
+	if queued != 1 {
+		t.Errorf("sender queue = %d, want the late reply delivered", queued)
+	}
+
+	// The unversioned ID carries no fence, so the same ID can be sent again.
+	if r := sendAsk(t, b.Addr(), senderToken, "disco_sender", "disco_target", msgID, "again"); r["status"] != http.StatusOK {
+		t.Fatalf("re-send of the abandoned legacy id = %d, want 200", r["status"])
+	}
+}
+
+// TestBrokerVersionedWaitDisconnectCleanup pins the versioned counterpart: an
+// abandoned versioned wait keeps the queued ask and leaves a terminal fence.
+func TestBrokerVersionedWaitDisconnectCleanup(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("vdisco_sender", "")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("vdisco_target", ""); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+	msgID := mintMsgID(t, time.Minute)
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "vdisco_sender", "vdisco_target", msgID, gen)); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"vdisco_sender","token":%q,"waiting_for":%q,"generation":%q}`, senderToken, msgID, gen)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/wait_reply", addr), body)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		resp.Body.Close()
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for b.Store().Pending("vdisco_sender", msgID) {
+		if time.Now().After(deadline) {
+			t.Fatal("expected the ask edge to be cleaned up on context cancellation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	target := b.GetRun("vdisco_target")
+	target.Mu.Lock()
+	queued := len(target.ControlQueue)
+	target.Mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("target queue = %d, want the abandoned ask retained", queued)
+	}
+	ack, ok := b.Store().Fence(messaging.FenceKey{Sender: "vdisco_sender", MessageID: msgID, Generation: gen})
+	if !ok || !ack.Terminal {
+		t.Fatalf("fence = (%+v, %v), want a terminal record for the abandoned ask", ack, ok)
 	}
 }
 
@@ -2493,48 +2756,65 @@ func TestBrokerDrainAgentMessages(t *testing.T) {
 	}
 	defer b.Stop()
 
-	token, err := b.CreateRun("receiver")
-	if err != nil {
+	if _, err := b.CreateRun("receiver", ""); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	_ = token
-	senderToken, err := b.CreateRun("sender")
+	senderToken, err := b.CreateRun("sender", "sender-display")
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
 
-	// Send an ask targeting the receiver.
-	sendAsk(t, b.Addr(), senderToken, "sender", "receiver", "drain-ask", "hello from subagent")
+	askIDs := []string{mintMsgID(t, time.Minute), mintMsgID(t, time.Minute), mintMsgID(t, time.Minute)}
+	for _, askID := range askIDs {
+		if status, body := postBroker(t, b.Addr(), "send", askBody(senderToken, "sender", "receiver", askID, b.Store().Generation())); status != http.StatusOK {
+			t.Fatalf("sendAsk %s = (%d, %v)", askID, status, body)
+		}
+	}
 
 	// Also queue a non-agent control message to verify it is not drained.
 	b.PushControl("receiver", ControlMessage{ID: "ctrl-keep", Type: "continue", RunID: "receiver"})
 
-	// Drain agent messages for the receiver.
-	msgs, err := b.DrainAgentMessages("receiver")
+	// The backend caps the drain at the limit and reports the registered name.
+	first, err := b.Store().Receive("receiver", 2)
+	if err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	if len(first) != 2 || first[0].MessageID != askIDs[0] || first[1].MessageID != askIDs[1] {
+		t.Fatalf("Receive = %+v, want the first two agent messages", first)
+	}
+	for _, msg := range first {
+		if msg.Sender != "sender-display" {
+			t.Errorf("Sender = %q, want the registered display name", msg.Sender)
+		}
+		if msg.FromRunID != "sender" || msg.Kind != "agent_message" {
+			t.Errorf("received message = %+v", msg)
+		}
+	}
+
+	// The agent message the limit left behind and the control message stay
+	// queued, in their original order.
+	msgs, err := b.DrainAgentMessages("receiver", 0)
 	if err != nil {
 		t.Fatalf("DrainAgentMessages: %v", err)
 	}
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 agent message, got %d", len(msgs))
-	}
-	if msgs[0].FromRunID != "sender" {
-		t.Errorf("FromRunID = %q, want sender", msgs[0].FromRunID)
-	}
-	if msgs[0].Type != "agent_message" {
-		t.Errorf("Type = %q, want agent_message", msgs[0].Type)
+	if len(msgs) != 1 || msgs[0].ID != askIDs[2] {
+		t.Fatalf("unlimited drain = %+v, want the agent message the limit left queued", msgs)
 	}
 
-	// The non-agent control message must remain.
 	st := b.GetRun("receiver")
 	st.Mu.Lock()
 	remaining := len(st.ControlQueue)
+	remainingID := ""
+	if remaining > 0 {
+		remainingID = st.ControlQueue[0].ID
+	}
 	st.Mu.Unlock()
-	if remaining != 1 {
-		t.Errorf("expected 1 non-agent control message to remain, got %d", remaining)
+	if remaining != 1 || remainingID != "ctrl-keep" {
+		t.Errorf("queue after the drains = (%d, %q), want only ctrl-keep", remaining, remainingID)
 	}
 
 	// Draining again yields nothing.
-	msgs2, err := b.DrainAgentMessages("receiver")
+	msgs2, err := b.DrainAgentMessages("receiver", 0)
 	if err != nil {
 		t.Fatalf("drain again: %v", err)
 	}
@@ -2559,11 +2839,11 @@ func TestBrokerWaitReplyDeliversReplyAfterWriteTimeout(t *testing.T) {
 	// Fresh connections per request so each wait_reply gets its own deadline.
 	noKeepAlive := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 
-	senderToken, err := b.CreateRun("asker")
+	senderToken, err := b.CreateRun("asker", "")
 	if err != nil {
 		t.Fatalf("create asker: %v", err)
 	}
-	replierToken, err := b.CreateRun("replier")
+	replierToken, err := b.CreateRun("replier", "")
 	if err != nil {
 		t.Fatalf("create replier: %v", err)
 	}
@@ -2649,4 +2929,345 @@ func TestBrokerWaitReplyDeliversReplyAfterWriteTimeout(t *testing.T) {
 	if result["from_run_id"] != "replier" {
 		t.Fatalf("wait_reply from_run_id = %v, want replier", result["from_run_id"])
 	}
+}
+
+// TestLocalRouterOutcomeFieldsAdditive pins that the ask handlers keep every
+// existing field and status code and add the shared outcome alongside.
+func TestLocalRouterOutcomeFieldsAdditive(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("additive_sender", "")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	if _, err := b.CreateRun("additive_target", ""); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+
+	// The legacy path keeps its fields and its semantics: an unversioned ask
+	// records no terminal fence, so a later withdrawal reports absence.
+	legacyID := "additive-ask"
+	status, sent := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", legacyID, ""))
+	if status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, sent)
+	}
+	if sent["queued"] != true || sent["message_id"] != legacyID || sent["expects_reply"] != true {
+		t.Fatalf("send lost its legacy fields: %v", sent)
+	}
+	if sent["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("send outcome = %v", sent["outcome"])
+	}
+	status, waited := postBroker(t, addr, "wait_reply", fmt.Sprintf(
+		`{"run_id":"additive_sender","token":%q,"waiting_for":%q,"timeout_ms":20}`, senderToken, legacyID))
+	if status != http.StatusGatewayTimeout {
+		t.Fatalf("wait = (%d, %v), want 504", status, waited)
+	}
+	if waited["timeout"] != true || waited["message_id"] != legacyID {
+		t.Fatalf("wait lost its legacy fields: %v", waited)
+	}
+	if waited["outcome"] != string(messaging.OutcomeTimedOut) {
+		t.Fatalf("wait outcome = %v", waited["outcome"])
+	}
+	status, absent := postBroker(t, addr, "cancel_message", fmt.Sprintf(
+		`{"run_id":"additive_sender","token":%q,"cancel_message_id":%q}`, senderToken, legacyID))
+	if status != http.StatusNotFound || absent["outcome"] != string(messaging.OutcomeEdgeAbsent) {
+		t.Fatalf("legacy cancel = (%d, %v), want 404 edge-absent", status, absent)
+	}
+
+	// A versioned ask keeps a terminal fence, so its withdrawal is reported as
+	// a terminal outcome next to the legacy fields.
+	versionedID := mintMsgID(t, time.Minute)
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", versionedID, gen)); status != http.StatusOK {
+		t.Fatalf("versioned send = (%d, %v)", status, body)
+	}
+	status, cancelled := postBroker(t, addr, "cancel_message", fmt.Sprintf(
+		`{"run_id":"additive_sender","token":%q,"cancel_message_id":%q,"generation":%q}`, senderToken, versionedID, gen))
+	if status != http.StatusOK {
+		t.Fatalf("cancel = (%d, %v)", status, cancelled)
+	}
+	if cancelled["cancelled"] != true || cancelled["message_id"] != versionedID {
+		t.Fatalf("cancel lost its legacy fields: %v", cancelled)
+	}
+	if cancelled["outcome"] != string(messaging.OutcomeWithdrawn) {
+		t.Fatalf("cancel outcome = %v", cancelled["outcome"])
+	}
+
+	// Re-sending a withdrawn ID keeps its existing 409 and now names the
+	// outcome that refused it.
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", versionedID, gen)); status != http.StatusConflict || body["outcome"] != string(messaging.OutcomeWithdrawn) {
+		t.Fatalf("withdrawn resend = (%d, %v), want 409 withdrawn", status, body)
+	}
+
+	// A duplicate ID that meets a timed-out terminal fence keeps the existing
+	// 409 with the protocol code and outcome alongside.
+	expiredID := mintMsgID(t, time.Minute)
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", expiredID, gen)); status != http.StatusOK {
+		t.Fatalf("send = (%d, %v)", status, body)
+	}
+	if status, body := postBroker(t, addr, "wait_reply", fmt.Sprintf(
+		`{"run_id":"additive_sender","token":%q,"waiting_for":%q,"generation":%q,"timeout_ms":20}`, senderToken, expiredID, gen)); status != http.StatusGatewayTimeout {
+		t.Fatalf("wait = (%d, %v), want 504", status, body)
+	}
+	if status, body := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", expiredID, gen)); status != http.StatusConflict {
+		t.Fatalf("duplicate send = (%d, %v), want 409", status, body)
+	} else {
+		if body["error"] != "message id already in use" {
+			t.Fatalf("duplicate send message = %v", body["error"])
+		}
+		if body["code"] != "duplicate-message-id" || body["outcome"] != string(messaging.OutcomeNotSent) {
+			t.Fatalf("duplicate send envelope = %v", body)
+		}
+	}
+}
+
+// TestLocalRouterEnvelopeRouting pins that an ask can route on the envelope
+// alone and still deliver its payload verbatim with the sender name intact.
+func TestLocalRouterEnvelopeRouting(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("envelope_sender", "display-name")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	targetToken, err := b.CreateRun("envelope_target", "")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+	gen := b.Store().Generation()
+	msgID := mintMsgID(t, time.Minute)
+
+	body := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"sender":"display-name","payload":{"message":"ping"}}`,
+		senderToken, gen, msgID)
+	status, sent := postBroker(t, addr, "send", body)
+	if status != http.StatusOK || sent["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("envelope send = (%d, %v)", status, sent)
+	}
+
+	polled := pollAgentMessages(t, addr, "envelope_target", targetToken)
+	if len(polled) != 1 {
+		t.Fatalf("polled %d messages, want 1", len(polled))
+	}
+	entry := polled[0]
+	if entry["id"] != msgID || entry["type"] != "agent_message" {
+		t.Fatalf("polled envelope = %v", entry)
+	}
+	if entry["sender"] != "display-name" {
+		t.Fatalf("polled sender = %v, want the registered display name", entry["sender"])
+	}
+	raw, err := json.Marshal(entry["payload"])
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if string(raw) != `{"message":"ping"}` {
+		t.Fatalf("polled payload = %s, want the caller's body verbatim", raw)
+	}
+
+	if queued := b.Store().Pending("envelope_sender", msgID); !queued {
+		t.Fatal("envelope ask left no live edge")
+	}
+
+	// A payload that names the id and asks for a reply routes on the payload.
+	payloadID := mintMsgID(t, time.Minute)
+	payloadAsk := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,
+		"payload":{"id":%q,"from":"display-name","message":"payload-routed","expects_reply":true}}`,
+		senderToken, gen, payloadID)
+	if status, body := postBroker(t, addr, "send", payloadAsk); status != http.StatusOK {
+		t.Fatalf("payload-routed send = (%d, %v)", status, body)
+	}
+	if queued := b.Store().Pending("envelope_sender", payloadID); !queued {
+		t.Fatal("payload-routed ask did not land under the payload id")
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["id"] != payloadID {
+		t.Fatalf("payload-routed poll = %v", polled)
+	}
+
+	// Two non-empty ids that disagree are refused instead of resolved by
+	// precedence, and nothing is admitted under either id.
+	conflictID := mintMsgID(t, time.Minute)
+	otherID := mintMsgID(t, time.Minute)
+	conflict := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"id":%q,"from":"display-name","message":"conflict"}}`,
+		senderToken, gen, conflictID, otherID)
+	status, refused := postBroker(t, addr, "send", conflict)
+	if status != http.StatusBadRequest || refused["code"] != "invalid-request" {
+		t.Fatalf("conflicting send = (%d, %v), want 400 invalid-request", status, refused)
+	}
+	if b.Store().Pending("envelope_sender", conflictID) || b.Store().Pending("envelope_sender", otherID) {
+		t.Fatal("conflicting send admitted an ask")
+	}
+
+	// Equal ids are the same id, not a conflict: the ask is admitted and
+	// delivered under it.
+	equalID := mintMsgID(t, time.Minute)
+	equal := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"id":%q,"from":"display-name","message":"equal"}}`,
+		senderToken, gen, equalID, equalID)
+	if status, body := postBroker(t, addr, "send", equal); status != http.StatusOK {
+		t.Fatalf("equal-id send = (%d, %v), want 200", status, body)
+	}
+	if queued := b.Store().Pending("envelope_sender", equalID); !queued {
+		t.Fatal("equal-id ask did not land under its id")
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["id"] != equalID {
+		t.Fatalf("equal-id poll = %v", polled)
+	}
+
+	// The display name is bound to the token that authenticated the run: naming
+	// someone else is refused, and naming nobody takes the registered name.
+	mismatch := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"sender":"other-name","payload":{"message":"impersonation"}}`,
+		senderToken, gen, mintMsgID(t, time.Minute))
+	status, refused = postBroker(t, addr, "send", mismatch)
+	if status != http.StatusForbidden || refused["code"] != "sender-mismatch" {
+		t.Fatalf("mismatched sender = (%d, %v), want 403 sender-mismatch", status, refused)
+	}
+
+	unnamed := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"message":"unnamed"}}`,
+		senderToken, gen, mintMsgID(t, time.Minute))
+	if status, body := postBroker(t, addr, "send", unnamed); status != http.StatusOK {
+		t.Fatalf("unnamed send = (%d, %v)", status, body)
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["sender"] != "display-name" {
+		t.Fatalf("unnamed send poll = %v, want the registered display name", polled)
+	}
+
+	// Fire-and-forget delivery reports the registered name too, not the raw
+	// payload `from`.
+	if status := fireAndForgetSend(t, addr, senderToken, "envelope_sender", "envelope_target", "note"); status != http.StatusOK {
+		t.Fatalf("fire-and-forget status = %d", status)
+	}
+	if polled := pollAllMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["sender"] != "display-name" {
+		t.Fatalf("fire-and-forget poll = %v, want the registered display name", polled)
+	}
+
+	// An unlabeled run reports its run ID as the display name.
+	unlabeledToken, err := b.CreateRun("unlabeled_sender", "")
+	if err != nil {
+		t.Fatalf("create unlabeled sender: %v", err)
+	}
+	unlabeled := fmt.Sprintf(`{"run_id":"unlabeled_sender","token":%q,"from_run_id":"unlabeled_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"message":"unlabeled"}}`,
+		unlabeledToken, gen, mintMsgID(t, time.Minute))
+	if status, body := postBroker(t, addr, "send", unlabeled); status != http.StatusOK {
+		t.Fatalf("unlabeled send = (%d, %v)", status, body)
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["sender"] != "unlabeled_sender" {
+		t.Fatalf("unlabeled send poll = %v, want the run ID as the display name", polled)
+	}
+
+	// Renaming changes the name the recipient sees on the next delivery.
+	if err := b.RenameRun("envelope_sender", "renamed-sender"); err != nil {
+		t.Fatalf("RenameRun: %v", err)
+	}
+	renamed := fmt.Sprintf(`{"run_id":"envelope_sender","token":%q,"from_run_id":"envelope_sender",
+		"to_run_id":"envelope_target","type":"agent_message","generation":%q,"message_id":%q,
+		"expects_reply":true,"payload":{"message":"renamed"}}`,
+		senderToken, gen, mintMsgID(t, time.Minute))
+	if status, body := postBroker(t, addr, "send", renamed); status != http.StatusOK {
+		t.Fatalf("renamed send = (%d, %v)", status, body)
+	}
+	if polled := pollAgentMessages(t, addr, "envelope_target", targetToken); len(polled) != 1 || polled[0]["sender"] != "renamed-sender" {
+		t.Fatalf("renamed send poll = %v, want the new name", polled)
+	}
+}
+
+// TestLocalPollControlAgentOnlyRespectsLimit pins that an agent-message-only
+// drain leaves control messages queued, and that a limit caps the drained agent
+// messages while the excess keeps its place in the queue.
+func TestLocalPollControlAgentOnlyRespectsLimit(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("drain_sender", "")
+	if err != nil {
+		t.Fatalf("create sender: %v", err)
+	}
+	targetToken, err := b.CreateRun("drain_target", "")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	addr := b.Addr()
+
+	if err := b.PushControl("drain_target", ControlMessage{ID: "ctrl-1", Type: "interrupt", RunID: "drain_target"}); err != nil {
+		t.Fatalf("PushControl: %v", err)
+	}
+	askIDs := []string{mintMsgID(t, time.Minute), mintMsgID(t, time.Minute)}
+	for _, askID := range askIDs {
+		ask := fmt.Sprintf(`{"run_id":"drain_sender","token":%q,"from_run_id":"drain_sender",
+			"to_run_id":"drain_target","type":"agent_message","generation":%q,"message_id":%q,
+			"expects_reply":true,"payload":{"message":"ping"}}`, senderToken, b.Store().Generation(), askID)
+		if status, body := postBroker(t, addr, "send", ask); status != http.StatusOK {
+			t.Fatalf("send = (%d, %v)", status, body)
+		}
+	}
+
+	polled := pollControl(t, addr, fmt.Sprintf(
+		`{"run_id":"drain_target","token":%q,"agent_only":true,"limit":1}`, targetToken))
+	if len(polled) != 1 || polled[0]["id"] != askIDs[0] {
+		t.Fatalf("agent-only poll = %v, want the first agent message", polled)
+	}
+	// The control message was queued first, so it stays ahead of the agent
+	// message the limit left behind.
+	rest := pollAllMessages(t, addr, "drain_target", targetToken)
+	if len(rest) != 2 || rest[0]["id"] != "ctrl-1" || rest[1]["id"] != askIDs[1] {
+		t.Fatalf("queue after the limited drain = %v, want the original order", rest)
+	}
+}
+
+func pollAgentMessages(t *testing.T, addr, runID, token string) []map[string]any {
+	t.Helper()
+	return pollControl(t, addr, fmt.Sprintf(`{"run_id":%q,"token":%q,"agent_only":true}`, runID, token))
+}
+
+func pollAllMessages(t *testing.T, addr, runID, token string) []map[string]any {
+	t.Helper()
+	return pollControl(t, addr, fmt.Sprintf(`{"run_id":%q,"token":%q}`, runID, token))
+}
+
+func pollControl(t *testing.T, addr, body string) []map[string]any {
+	t.Helper()
+	resp, err := http.Post(fmt.Sprintf("http://%s/poll-control", addr), "application/json", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("poll-control: %v", err)
+	}
+	defer resp.Body.Close()
+	var msgs []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		t.Fatalf("decode poll-control: %v", err)
+	}
+	return msgs
+}
+
+// getSessions reads /sessions with the run's credentials in request headers.
+func getSessions(addr, runID, token string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/sessions", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(messaging.HeaderRunID, runID)
+	req.Header.Set(messaging.HeaderRunToken, token)
+	return http.DefaultClient.Do(req)
 }

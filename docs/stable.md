@@ -25,7 +25,7 @@ Flags:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--control-socket` `<path>` | (required) | Unix socket path for the control plane. Avenor writes a tombstone file at `<path>.dead` to signal abnormal shutdown |
+| `--control-socket` `<path>` | (required) | Unix socket path for the control plane. Avenor writes a tombstone file at `<path>.dead` to signal abnormal shutdown, an owner record at `<path>.owner.json`, and a persistent lock at `<path>.control.lock` |
 | `--max-runtimes` | 16 | Maximum concurrent child runtimes for this supervisor. Spawn requests are rejected once this limit is hit. Runtimes parked after a successful turn do not count against this limit |
 | `--max-tree-budget` | 64 | Maximum concurrent executing runtimes across the whole supervisor tree including nested supervisors. Bounds recursive fan-out |
 | `--idle-timeout` | 0 | Exit cleanly after this duration with no child runtimes running and no control connections active. 0 disables (supervisor runs until signaled) |
@@ -54,6 +54,16 @@ Possible reasons:
 - `crashed` — panic in supervisor goroutine
 
 The tombstone exists so that external tooling (e.g. a process monitor checking for stale sockets) can detect that the supervisor is gone and clean up accordingly. Avenor removes any existing tombstone file before starting, so its mere presence indicates a previous instance.
+
+A tombstone corroborates a past instance; it authorizes nothing. Nothing requires it before a replacement starts, and its absence is not liveness — a `SIGKILL` or OOM kill leaves none. `avenor` itself replaces a dead supervisor from the socket state alone: a credential-free dial that is refused or finds no path proves the owner is gone, and the replacement then binds under the control lock.
+
+### Owner Record and Lock
+
+A supervisor that binds a socket publishes its owner capability at `<control-socket>.owner.json` (mode `0600`, owned by the supervisor's euid) before it accepts a connection. Attaching clients load that record, verify the live socket's device and inode against it, bind the connection, and then authenticate; see [Control Protocol → Owner Semantics](control-protocol.md#owner-semantics).
+
+A persistent `<control-socket>.control.lock` file serializes every change to the socket path — stale-path removal, bind, publication and cleanup. It is created or opened and never unlinked, so it survives a restart.
+
+On shutdown the supervisor removes its own socket and record while its listener is still live and the lock is held, and leaves the lock file and the tombstone in place.
 
 ## Spawning Child Runtimes
 

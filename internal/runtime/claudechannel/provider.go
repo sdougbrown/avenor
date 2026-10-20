@@ -124,7 +124,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	// Generate IDs.
 	sessionID := uuid.New().String()
 	runID := uuid.New().String()
-	sidecarTok, err := p.broker.CreateRun(runID)
+	sidecarTok, err := p.broker.CreateRun(runID, merged.Label)
 	if err != nil {
 		return runtime.Session{}, fmt.Errorf("broker create run: %w", err)
 	}
@@ -150,6 +150,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 				"args": []string{
 					"claude-channel",
 					"--run-id", runID,
+					"--sender", merged.Label,
 					"--token", sidecarTok,
 					"--broker-url", brokerURL,
 				},

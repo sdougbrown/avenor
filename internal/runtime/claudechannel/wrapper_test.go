@@ -2,6 +2,7 @@ package claudechannel
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,14 +39,18 @@ func fakeClaudeOnPath(t *testing.T) {
 // TestProviderStartWrapperPrefixesCommand proves the provider-level handoff:
 // StartOptions.LaunchWrapper must reach claudecore.LaunchCommand, so the
 // terminal command the provider launches is the wrapper followed by claude.
+// The generated MCP args are pinned here too: the sidecar registers under the
+// session's label, and dropping --sender silently falls back to the run ID.
 func TestProviderStartWrapperPrefixesCommand(t *testing.T) {
 	fakeClaudeOnPath(t)
 	l := &captureLauncher{term: terminal.NewFakeSession("avenor-channel-test", 4242, "ready")}
 	p := New().(*Provider)
 	p.launcher = l
 
+	dir := t.TempDir()
 	sess, err := p.Start(context.Background(), runtime.StartOptions{
-		Dir:           t.TempDir(),
+		Dir:           dir,
+		Label:         "worker",
 		LaunchWrapper: []string{"nice", "-n", "5"},
 	})
 	if err != nil {
@@ -55,6 +60,32 @@ func TestProviderStartWrapperPrefixesCommand(t *testing.T) {
 	wantPrefix := "exec 'nice' '-n' '5' claude "
 	if !strings.HasPrefix(l.command, wantPrefix) {
 		t.Fatalf("terminal command = %q, want prefix %q", l.command, wantPrefix)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
+	if err != nil {
+		t.Fatalf("read project mcp config: %v", err)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Args []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode project mcp config: %v", err)
+	}
+	found := false
+	for name, server := range cfg.MCPServers {
+		if !strings.HasPrefix(name, "avenor-channel-") {
+			continue
+		}
+		found = true
+		if got := strings.Join(server.Args, " "); !strings.Contains(got, "--sender worker") {
+			t.Fatalf("channel sidecar args = %q, want --sender worker", got)
+		}
+	}
+	if !found {
+		t.Fatalf("project mcp config has no channel server: %v", cfg.MCPServers)
 	}
 
 	// Stop the supervision goroutine started by Start.

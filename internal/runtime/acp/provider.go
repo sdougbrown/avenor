@@ -203,7 +203,7 @@ func (p *Provider) launchRun(opts runtime.StartOptions) (runID, brokerToken stri
 	if runID == "" {
 		runID = uuid.New().String()
 	}
-	brokerToken, _ = brokerRef.EnsureRun(runID)
+	brokerToken, _ = brokerRef.EnsureRun(runID, opts.Label)
 	return runID, brokerToken, brokerRef
 }
 

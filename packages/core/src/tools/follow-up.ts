@@ -103,7 +103,7 @@ async function executeFollowUpTool(
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<FollowUpToolResult> {
   if (args.supervisorId) {
-    const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId)
+    const { client, isSingleton, sup, supervisorId } = await getSupervisorClient(args.supervisorId, { owner: true })
     try {
       validateRunId(args.runId)
 

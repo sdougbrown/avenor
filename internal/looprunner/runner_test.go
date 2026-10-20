@@ -468,7 +468,7 @@ func (w *recordingEventWriter) Write(ev events.Event) error {
 
 func TestEnrichFromBroker(t *testing.T) {
 	b := broker.New("test-token")
-	_, _ = b.CreateRun("test-run")
+	_, _ = b.CreateRun("test-run", "")
 	_ = b.Ingest("test-run", "done", json.RawMessage(`{"ok":true}`))
 	_ = b.Ingest("test-run", "failed", json.RawMessage(`{"ok":false}`))
 
@@ -510,7 +510,7 @@ func TestEnrichFromBroker(t *testing.T) {
 
 	t.Run("empty finishes", func(t *testing.T) {
 		b2 := broker.New("test")
-		_, _ = b2.CreateRun("empty-run")
+		_, _ = b2.CreateRun("empty-run", "")
 		opts := RunOptions{Broker: b2}
 		result := &PhaseAttemptResult{BrokerRunID: "empty-run", StopReason: ""}
 		enrichFromBroker(opts, result)
@@ -521,7 +521,7 @@ func TestEnrichFromBroker(t *testing.T) {
 
 	t.Run("finish with empty status", func(t *testing.T) {
 		b3 := broker.New("test")
-		_, _ = b3.CreateRun("empty-status-run")
+		_, _ = b3.CreateRun("empty-status-run", "")
 		// Add a Finish with empty Status directly (defensive-zero-branch).
 		run := b3.GetRun("empty-status-run")
 		run.Mu.Lock()

@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
-import * as net from 'node:net'
 import * as fs from 'node:fs'
+import * as net from 'node:net'
+
+import { createOwnerGate, fail, respond } from './owner-gate.js'
 
 type Request = {
   jsonrpc: '2.0'
@@ -25,14 +27,6 @@ function argValue(name: string): string | undefined {
   return process.argv[index + 1]
 }
 
-function respond(id: number | undefined, result: unknown) {
-  return JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n'
-}
-
-function fail(id: number | undefined, code: number, message: string) {
-  return JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }) + '\n'
-}
-
 if (process.argv[2] !== 'stable') {
   console.error('fake avenor only supports stable')
   process.exit(1)
@@ -44,6 +38,19 @@ if (!socketPath) {
   process.exit(1)
 }
 
+// The launcher hands its per-attempt token through the environment; the real
+// server exposes it through identity only after it publishes its own record.
+const attemptToken = process.env.AVENOR_CONTROL_IDENTITY_TOKEN ?? ''
+delete process.env.AVENOR_CONTROL_IDENTITY_TOKEN
+
+// A record whose secret the server does not accept: the launcher's token proves
+// the child, the record names its socket, and authentication still fails.
+const recordSecret = process.env.AVENOR_TEST_OWNER_SECRET_MISMATCH === '1'
+  ? '0'.repeat(64)
+  : undefined
+
+const gate = createOwnerGate({ socketPath, attemptToken, recordSecret })
+
 try {
   fs.unlinkSync(socketPath)
 } catch {}
@@ -53,6 +60,7 @@ const runtimes = new Map<string, Runtime>()
 
 const server = net.createServer((socket) => {
   let buffer = ''
+  const session = gate.session(line => socket.write(line))
 
   socket.on('data', (chunk) => {
     buffer += chunk.toString()
@@ -67,6 +75,13 @@ const server = net.createServer((socket) => {
         req = JSON.parse(line)
       } catch {
         socket.write(fail(undefined, -32700, 'parse error'))
+        continue
+      }
+
+      if (session.handle(req)) continue
+
+      if (gate.isGated(req.method) && !session.authenticated) {
+        socket.write(gate.deny(req.id))
         continue
       }
 
@@ -93,6 +108,10 @@ const server = net.createServer((socket) => {
 
         case 'list':
           socket.write(respond(req.id, Array.from(runtimes.values())))
+          break
+
+        case 'cancel':
+          socket.write(respond(req.id, { ok: true }))
           break
 
         case 'spawn': {
@@ -127,10 +146,8 @@ const server = net.createServer((socket) => {
         case 'shutdown':
           socket.write(respond(req.id, { ok: true }))
           setTimeout(() => {
+            gate.remove()
             server.close()
-            try {
-              fs.unlinkSync(socketPath)
-            } catch {}
             process.exit(0)
           }, 0)
           break
@@ -142,4 +159,25 @@ const server = net.createServer((socket) => {
   })
 })
 
-server.listen(socketPath)
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  if (signal === 'SIGTERM' && process.env.AVENOR_TEST_IGNORE_SIGTERM === '1') continue
+  process.on(signal, () => {
+    gate.remove()
+    server.close()
+    process.exit(0)
+  })
+}
+
+server.listen(socketPath, () => {
+  // A test that must prove no second child started records every started pid.
+  const spawnLog = process.env.AVENOR_TEST_SPAWN_LOG
+  if (spawnLog) fs.appendFileSync(spawnLog, `${process.pid}\n`)
+  // Publication after the listen is what makes a launcher's first attach find a
+  // stale or absent record; a delay widens that window for tests.
+  const publishDelayMs = Number(process.env.AVENOR_TEST_OWNER_PUBLISH_DELAY ?? 0)
+  if (publishDelayMs > 0) {
+    setTimeout(() => gate.publish(), publishDelayMs)
+    return
+  }
+  gate.publish()
+})

@@ -1,0 +1,351 @@
+// Package askclient is the single Go ask client. It owns send/wait/withdraw
+// ordering and result classification; transports only report facts.
+package askclient
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
+)
+
+// Options configures a Client.
+type Options struct {
+	// Clock mints message IDs; nil means time.Now.
+	Clock func() time.Time
+	// CleanupDeadline bounds cleanup work after a wait; zero means
+	// messaging.CleanupDeadline.
+	CleanupDeadline time.Duration
+}
+
+// Client drives one transport.
+type Client struct {
+	transport messaging.Transport
+	now       func() time.Time
+	cleanup   time.Duration
+}
+
+// New builds an ask client over transport.
+func New(t messaging.Transport, opts Options) *Client {
+	c := &Client{transport: t, now: opts.Clock, cleanup: opts.CleanupDeadline}
+	if c.now == nil {
+		c.now = time.Now
+	}
+	if c.cleanup <= 0 {
+		c.cleanup = messaging.CleanupDeadline
+	}
+	return c
+}
+
+// AskResult is the caller-facing result of one ask attempt.
+type AskResult struct {
+	MessageID  string
+	Generation string
+	Outcome    messaging.Outcome
+	Reply      *messaging.InboundMessage
+}
+
+// Text renders the ask result as text. It is the single renderer shared by the
+// MCP tool surfaces.
+func (r AskResult) Text() (string, error) {
+	return RenderReply(messaging.WaitResult{Outcome: r.Outcome, Reply: r.Reply})
+}
+
+// Failure renders a non-replied ask for a tool surface: the outcome's text, the
+// message ID a cancel tool can act on, and the typed cause when the transport
+// reported one. The client already withdrew the ask its failed wait abandoned,
+// so the retraction hint is only appended when that withdrawal could not
+// confirm a terminal fence.
+func (r AskResult) Failure(err error) error {
+	if err == nil {
+		return nil
+	}
+	text, renderErr := r.Text()
+	if renderErr != nil {
+		return err
+	}
+	var askErr *Error
+	var failure error
+	if errors.As(err, &askErr) && askErr.Err != nil {
+		failure = fmt.Errorf("%s (message_id: %s): %w", text, r.MessageID, askErr.Err)
+	} else {
+		failure = fmt.Errorf("%s (message_id: %s)", text, r.MessageID)
+	}
+	if askErr != nil && askErr.Pending() {
+		return fmt.Errorf("%w; an ask still outstanding can be retracted with avenor_cancel", failure)
+	}
+	return failure
+}
+
+// Error is a failed ask. Pending reports whether the message ID may still be
+// outstanding: a possibly-pending wait whose cleanup withdrawal confirmed a
+// terminal fence is no longer pending.
+type Error struct {
+	MessageID string
+	Outcome   messaging.Outcome
+	Err       error
+	// retracted records a failed wait whose cleanup withdrawal installed a
+	// terminal fence for the ask.
+	retracted bool
+}
+
+func (e *Error) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("ask %s: %s", e.MessageID, e.Outcome)
+}
+
+func (e *Error) Unwrap() error { return e.Err }
+
+// Pending reports whether the ask may still be outstanding.
+func (e *Error) Pending() bool {
+	return e.Outcome == messaging.OutcomePossiblyPending && !e.retracted
+}
+
+// Ask sends one ask and waits for its terminal state. A caller-supplied
+// MessageID must be versioned; an empty one is minted with the wait cap as its
+// deadline.
+//
+// Outcome mapping for the callers that adopt this client:
+//   - replied: the legacy any-return is {message_id, from_run_id, payload};
+//     the tool surfaces render `Reply from <target>:\n` plus Text().
+//   - timed-out, withdrawn, edge-absent, lost and possibly-pending return an
+//     *Error carrying the outcome; the legacy ask error maps it to
+//     control.AskError with Pending set only for possibly-pending.
+//   - not-sent and auth-rejected are terminal send failures and never retried.
+func (c *Client) Ask(ctx context.Context, send messaging.SendRequest, wait messaging.WaitRequest) (AskResult, error) {
+	result := AskResult{MessageID: send.MessageID, Generation: send.Generation}
+	if result.MessageID == "" {
+		// A body that names its own id keeps it, so the envelope id the
+		// transport sends never disagrees with the payload id.
+		if id := bodyMessageID(send.Body); id != "" {
+			result.MessageID = id
+			send.MessageID = id
+		} else {
+			msgID, err := messaging.NewMsgID(c.now(), time.Time{})
+			if err != nil {
+				result.Outcome = messaging.OutcomeNotSent
+				return result, &Error{Outcome: result.Outcome, Err: err}
+			}
+			result.MessageID = msgID
+			send.MessageID = msgID
+		}
+	}
+	if send.Generation == "" {
+		pre, err := c.transport.Preflight(ctx)
+		if err != nil {
+			result.Outcome = classifySendError(err)
+			return result, &Error{MessageID: result.MessageID, Outcome: result.Outcome, Err: err}
+		}
+		result.Generation = pre.Generation
+		send.Generation = pre.Generation
+	}
+	if wait.MessageID == "" {
+		wait.MessageID = send.MessageID
+	}
+	if wait.Sender.RunID == "" {
+		wait.Sender = send.From
+	}
+	if wait.Generation == "" {
+		wait.Generation = send.Generation
+	}
+	if wait.Timeout <= 0 || wait.Timeout > messaging.MaxWait {
+		wait.Timeout = messaging.MaxWait
+	}
+
+	sent, err := c.transport.Send(ctx, send)
+	if sent.Outcome == "" {
+		sent.Outcome = classifySendError(err)
+	}
+	result.Outcome = sent.Outcome
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		return result, &Error{MessageID: result.MessageID, Outcome: result.Outcome, Err: err}
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, wait.Timeout+c.cleanup)
+	defer cancel()
+	waited, err := c.transport.Wait(waitCtx, wait)
+	if waited.Outcome == "" {
+		waited.Outcome = messaging.OutcomePossiblyPending
+	}
+	result.Outcome = waited.Outcome
+	result.Reply = waited.Reply
+	if err != nil || waited.Outcome != messaging.OutcomeReplied {
+		return result, &Error{
+			MessageID: result.MessageID,
+			Outcome:   result.Outcome,
+			Err:       err,
+			retracted: c.withdrawFailedWait(send, result),
+		}
+	}
+	return result, nil
+}
+
+// Send admits one fire-and-forget message. A request that pins no generation
+// takes the one Preflight reports, and a transport that reports no outcome is
+// classified from its error.
+func (c *Client) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	if req.Generation == "" {
+		pre, err := c.transport.Preflight(ctx)
+		if err != nil {
+			return messaging.SendResult{Outcome: classifySendError(err)}, err
+		}
+		req.Generation = pre.Generation
+	}
+	sent, err := c.transport.Send(ctx, req)
+	if sent.Outcome == "" {
+		sent.Outcome = classifySendError(err)
+	}
+	return sent, err
+}
+
+// AskRequest builds the send and wait requests for one agent ask: it mints the
+// message id and builds the body the target reads. from is the identity the
+// transport authenticates, and bodyFrom is the run id the payload names, which
+// is the asker's own name on surfaces that speak as a named role. The returned
+// request carries the minted id even when body construction fails, so the
+// caller can still name the ask it reports.
+func (c *Client) AskRequest(from messaging.Identity, bodyFrom, toRunID, message, role string) (messaging.SendRequest, messaging.WaitRequest, error) {
+	msgID, err := messaging.NewMsgID(c.now(), time.Time{})
+	if err != nil {
+		return messaging.SendRequest{}, messaging.WaitRequest{}, err
+	}
+	send := messaging.SendRequest{
+		From:      from,
+		To:        messaging.Identity{RunID: toRunID, Sender: toRunID},
+		MessageID: msgID,
+	}
+	body, err := messaging.AskBody(msgID, bodyFrom, toRunID, message, role)
+	if err != nil {
+		return send, messaging.WaitRequest{}, err
+	}
+	send.Body = string(body)
+	return send, messaging.WaitRequest{Sender: from}, nil
+}
+
+// withdrawFailedWait retracts an ask whose wait ended without a reply and
+// reports whether a terminal fence now covers it. The wait may have ended
+// because its context was cancelled, so the withdrawal gets its own cleanup
+// budget; without it an undelivered ask would stay queued for a target that
+// can no longer answer it.
+func (c *Client) withdrawFailedWait(send messaging.SendRequest, result AskResult) bool {
+	if result.MessageID == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.cleanup)
+	defer cancel()
+	withdrawn, err := c.Withdraw(ctx, messaging.WithdrawRequest{
+		Sender:     send.From,
+		MessageID:  result.MessageID,
+		Generation: send.Generation,
+	})
+	if err != nil {
+		return false
+	}
+	return withdrawn.Outcome != messaging.OutcomePossiblyPending
+}
+
+// bodyMessageID reports the id an ask body carries, so a minted envelope id
+// never disagrees with the payload id.
+func bodyMessageID(body string) string {
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal([]byte(body), &payload) != nil {
+		return ""
+	}
+	return payload.ID
+}
+
+// Withdraw withdraws an ask and returns its terminal fence. A request that pins
+// no generation takes the one Preflight reports.
+func (c *Client) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	if req.MessageID == "" {
+		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, messaging.ErrInvalidRequest
+	}
+	if req.Generation == "" {
+		pre, err := c.transport.Preflight(ctx)
+		if err != nil {
+			return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
+		}
+		req.Generation = pre.Generation
+	}
+	return c.transport.Withdraw(ctx, req)
+}
+
+// RenderReply renders a wait result as text. It is the shared result renderer
+// for every Go ask caller.
+func RenderReply(res messaging.WaitResult) (string, error) {
+	switch res.Outcome {
+	case messaging.OutcomeReplied:
+		if res.Reply == nil {
+			return "", errors.New("askclient: replied without a reply")
+		}
+		if len(res.Reply.Payload) == 0 {
+			return "(empty reply)", nil
+		}
+		var payload struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(res.Reply.Payload, &payload) == nil && payload.Message != "" {
+			return payload.Message, nil
+		}
+		return renderFullReply(res.Reply), nil
+	case messaging.OutcomeTimedOut:
+		return "(timeout: no reply received)", nil
+	case messaging.OutcomeWithdrawn:
+		return "(cancelled)", nil
+	case messaging.OutcomeEdgeAbsent:
+		return "(no pending ask)", nil
+	case messaging.OutcomePossiblyPending:
+		return "(possibly pending: no terminal reply)", nil
+	case messaging.OutcomeLost:
+		return "(ask lost)", nil
+	}
+	return "", fmt.Errorf("askclient: cannot render outcome %q", res.Outcome)
+}
+
+// renderFullReply renders a reply whose payload carries no message text: the
+// correlation id and the replier name the answer, and the payload is passed
+// through untouched. A payload that is not JSON is rendered as it arrived.
+func renderFullReply(reply *messaging.InboundMessage) string {
+	rendered, err := json.Marshal(map[string]any{
+		"message_id":  reply.MessageID,
+		"from_run_id": reply.FromRunID,
+		"payload":     reply.Payload,
+	})
+	if err != nil {
+		return string(reply.Payload)
+	}
+	return string(rendered)
+}
+
+// classifySendError maps a pre-response send failure to an outcome. A typed
+// error proves the ask was not admitted; an untyped one may have been
+// transmitted.
+func classifySendError(err error) messaging.Outcome {
+	switch {
+	case err == nil:
+		return messaging.OutcomeSent
+	case errors.Is(err, messaging.ErrAuthRejected):
+		return messaging.OutcomeAuthRejected
+	case errors.Is(err, messaging.ErrGenerationMismatch),
+		errors.Is(err, messaging.ErrUnsupportedProtocol),
+		errors.Is(err, messaging.ErrInvalidRequest),
+		errors.Is(err, messaging.ErrMalformedMessageID),
+		errors.Is(err, messaging.ErrMessageIDExpired),
+		errors.Is(err, messaging.ErrMessageIDHorizon),
+		errors.Is(err, messaging.ErrDuplicateMessageID),
+		errors.Is(err, messaging.ErrMutualAsk),
+		errors.Is(err, messaging.ErrFenceCapacity),
+		errors.Is(err, messaging.ErrTargetUnavailable),
+		errors.Is(err, messaging.ErrTransportClosed):
+		return messaging.OutcomeNotSent
+	default:
+		return messaging.OutcomePossiblyPending
+	}
+}

@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32012,
+    "message": "unsupported owner authentication",
+    "data": { "version": 1, "reason": "version-2" }
+  }
+}

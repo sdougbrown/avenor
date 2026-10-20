@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32011,
+    "message": "unauthenticated",
+    "data": { "version": 1, "reason": "capability-mismatch" }
+  }
+}

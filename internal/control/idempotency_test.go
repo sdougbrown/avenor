@@ -10,14 +10,14 @@ import (
 func spawnTestResponse(t *testing.T, spawnErr error) Response {
 	t.Helper()
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{spawnErr: spawnErr})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	t.Cleanup(s.Stop)
-	c := mustDial(t, path)
+	t.Cleanup(func() { _ = s.Stop() })
+	c := dialOwner(t, s, cap)
 	t.Cleanup(func() { _ = c.Close() })
 	params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
 	if err := writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn", Params: params}); err != nil {

@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/events"
 )
@@ -31,7 +30,7 @@ func TestSocketStartSignalsReadinessFD(t *testing.T) {
 	defer readyWriter.Close()
 	t.Setenv("AVENOR_CONTROL_READY_FD", strconv.Itoa(int(readyWriter.Fd())))
 
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if err := s.Start(testSocketPath(t)); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -67,7 +66,7 @@ func TestSocketStartRemovesStalePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start after stale socket: %v", err)
 	}
@@ -94,7 +93,7 @@ func TestSocketStartDoesNotUnlinkAmbiguousProbe(t *testing.T) {
 	}
 	defer func() { dialControlSocket = origDial }()
 
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if err := s.Start(path); err == nil {
 		t.Fatal("expected ambiguous probe to fail")
 	}
@@ -103,32 +102,9 @@ func TestSocketStartDoesNotUnlinkAmbiguousProbe(t *testing.T) {
 	}
 }
 
-func TestSocketStartIdentityTokenIsOneShot(t *testing.T) {
-	path := testSocketPath(t)
-	t.Setenv(controlIdentityTokenEnv, "child-token")
-
-	s := NewServer(NewState("run_1", "", 0))
-	if err := s.Start(path); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer s.Stop()
-
-	if got := os.Getenv(controlIdentityTokenEnv); got != "" {
-		t.Fatalf("identity token still in environment: %q", got)
-	}
-	cl, err := client.Dial(path)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer cl.Close()
-	if token, err := cl.Identity(); err != nil || token != "child-token" {
-		t.Fatalf("identity = %q, %v; want child-token, nil", token, err)
-	}
-}
-
 func TestSocketStopDoesNotUnlinkReplacement(t *testing.T) {
 	path := testSocketPath(t)
-	first := NewServer(NewState("run_1", "", 0))
+	first, _ := NewTestServer(NewState("run_1", "", 0))
 	if err := first.Start(path); err != nil {
 		t.Fatalf("start first: %v", err)
 	}
@@ -155,7 +131,7 @@ func TestSocketStopDoesNotUnlinkReplacement(t *testing.T) {
 
 func TestSocketStartStopCooperateWithoutRemovingWinner(t *testing.T) {
 	path := testSocketPath(t)
-	first := NewServer(NewState("run_1", "", 0))
+	first, _ := NewTestServer(NewState("run_1", "", 0))
 	if err := first.Start(path); err != nil {
 		t.Fatalf("start first: %v", err)
 	}
@@ -189,7 +165,7 @@ func TestSocketStartStopCooperateWithoutRemovingWinner(t *testing.T) {
 	<-cleanupOwnsLock
 	<-startAtLock // Stop reached the socket-lock boundary.
 
-	winner := NewServer(NewState("run_2", "", 0))
+	winner, _ := NewTestServer(NewState("run_2", "", 0))
 	started := make(chan error, 1)
 	go func() { started <- winner.Start(path) }()
 	<-startAtLock // The competing Start is now blocked on Stop's lock.
@@ -211,14 +187,14 @@ func TestSocketStartStopCooperateWithoutRemovingWinner(t *testing.T) {
 
 func TestSocketLifecycleActiveListenerFails(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s1 := NewServer(state)
+	s1, _ := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s1.Start(path); err != nil {
 		t.Fatalf("start first: %v", err)
 	}
 	defer s1.Stop()
 
-	s2 := NewServer(state)
+	s2, _ := NewTestServer(state)
 	if err := s2.Start(path); err == nil {
 		t.Fatal("expected active listener failure")
 	}
@@ -227,7 +203,7 @@ func TestSocketLifecycleActiveListenerFails(t *testing.T) {
 // Acceptance: a negative timeout_ms is invalid params, not an unbounded wait.
 func TestWaitTurnRejectsNegativeTimeout(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -248,14 +224,14 @@ func TestWaitTurnRejectsNegativeTimeout(t *testing.T) {
 
 func TestOwnerRejectionForMutatingMethods(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer s.Stop()
 
-	c1 := mustDial(t, path)
+	c1 := dialOwner(t, s, cap)
 	defer c1.Close()
 	c2 := mustDial(t, path)
 	defer c2.Close()
@@ -280,7 +256,7 @@ func TestOwnerRejectionForMutatingMethods(t *testing.T) {
 }
 
 func TestJSONAnswerPermissionSameRepeatIsAccepted(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, cap := NewTestServer(NewState("run_1", "", 0))
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
@@ -293,7 +269,7 @@ func TestJSONAnswerPermissionSameRepeatIsAccepted(t *testing.T) {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 
-	conn := mustDial(t, path)
+	conn := dialOwner(t, s, cap)
 	defer conn.Close()
 	params, _ := json.Marshal(PermissionAnswer{RequestID: "req_done", OptionID: "allow"})
 	_ = writeReq(t, conn, Request{JSONRPC: "2.0", ID: 1, Method: "answer_permission", Params: params})
@@ -308,7 +284,7 @@ func TestJSONAnswerPermissionSameRepeatIsAccepted(t *testing.T) {
 }
 
 func TestJSONAnswerPermissionConflictingRepeatIsRejected(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, cap := NewTestServer(NewState("run_1", "", 0))
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
@@ -321,7 +297,7 @@ func TestJSONAnswerPermissionConflictingRepeatIsRejected(t *testing.T) {
 		t.Fatal("MarkPermissionClaimResolved returned false")
 	}
 
-	conn := mustDial(t, path)
+	conn := dialOwner(t, s, cap)
 	defer conn.Close()
 	for _, tt := range []struct {
 		name   string
@@ -370,7 +346,7 @@ func TestPermissionResolverStateString(t *testing.T) {
 }
 
 func TestMarkPermissionClaimResolvedRetainsTombstone(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, []any{
 		map[string]any{"optionId": "allow", "kind": "allow", "requiresMessage": true},
 	}) {
@@ -404,7 +380,7 @@ func TestMarkPermissionClaimResolvedRetainsTombstone(t *testing.T) {
 // option: that empty recording must not be matchable by the universally
 // guessable ("", "") without knowing the real answer.
 func TestResolvedPermissionMatchesRejectsEmptyRecordedOption(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -420,7 +396,7 @@ func TestResolvedPermissionMatchesRejectsEmptyRecordedOption(t *testing.T) {
 }
 
 func TestDeliverPendingPermissionRechecksResolutionUnderLock(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -445,7 +421,7 @@ func TestDeliverPendingPermissionRechecksResolutionUnderLock(t *testing.T) {
 }
 
 func TestDeliverPendingPermissionRaceWithResolution(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	// Reserved so delivery is actually reachable: an Automatic claim would
 	// take the default branch and return ResolverOwned, making delivery
 	// (and the race with resolution) unobservable.
@@ -550,7 +526,7 @@ func TestDeliverPendingPermissionRaceWithResolution(t *testing.T) {
 }
 
 func TestMarkPermissionClaimResolvedDoubleClose(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -565,7 +541,7 @@ func TestMarkPermissionClaimResolvedDoubleClose(t *testing.T) {
 }
 
 func TestMarkPermissionClaimResolvedConcurrent(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -605,7 +581,7 @@ func TestMarkPermissionClaimResolvedConcurrent(t *testing.T) {
 }
 
 func TestPreparePermissionClaimReplacesResolvedTombstone(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "req_1", PermissionResolverAutomatic, nil) {
 		t.Fatal("initial PreparePermissionClaim returned false")
 	}
@@ -624,7 +600,7 @@ func TestPreparePermissionClaimReplacesResolvedTombstone(t *testing.T) {
 }
 
 func TestPreparePermissionClaimWaitsForDirectCompletionBeforeReusedID(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "reused", PermissionResolverNoResolver, nil) {
 		t.Fatal("initial PreparePermissionClaim returned false")
 	}
@@ -659,7 +635,7 @@ func TestPreparePermissionClaimWaitsForDirectCompletionBeforeReusedID(t *testing
 }
 
 func TestReservedClaimCreatedAfterCompletedDisconnectScanIsSignalled(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if err := s.Start(testSocketPath(t)); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -712,7 +688,7 @@ func TestReservedClaimCreatedAfterCompletedDisconnectScanIsSignalled(t *testing.
 
 func TestPermissionClaimsCreatedWithoutClientsSignalDisconnect(t *testing.T) {
 	t.Run("direct begin", func(t *testing.T) {
-		s := NewServer(NewState("run_1", "", 0))
+		s, _ := NewTestServer(NewState("run_1", "", 0))
 		_, disconnectCh, ok := s.BeginPermissionClaim("rt_1", "direct")
 		if !ok {
 			t.Fatal("BeginPermissionClaim returned false")
@@ -725,7 +701,7 @@ func TestPermissionClaimsCreatedWithoutClientsSignalDisconnect(t *testing.T) {
 	})
 
 	t.Run("replacement after direct delivery", func(t *testing.T) {
-		s := NewServer(NewState("run_1", "", 0))
+		s, _ := NewTestServer(NewState("run_1", "", 0))
 		if !s.PreparePermissionClaim("rt_1", "reused", PermissionResolverNoResolver, nil) {
 			t.Fatal("initial PreparePermissionClaim returned false")
 		}
@@ -772,7 +748,7 @@ func TestPermissionClaimsCreatedWithoutClientsSignalDisconnect(t *testing.T) {
 }
 
 func TestPreparePermissionClaimAfterDirectDeliveryCancellation(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "reused", PermissionResolverNoResolver, nil) {
 		t.Fatal("initial PreparePermissionClaim returned false")
 	}
@@ -819,7 +795,7 @@ func TestPreparePermissionClaimAfterDirectDeliveryCancellation(t *testing.T) {
 }
 
 func TestPreparePermissionClaimAfterDirectDeliveryAbandoned(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "reused", PermissionResolverNoResolver, nil) {
 		t.Fatal("initial PreparePermissionClaim returned false")
 	}
@@ -852,7 +828,7 @@ func TestPreparePermissionClaimAfterDirectDeliveryAbandoned(t *testing.T) {
 }
 
 func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	answerCh, _, ok := s.BeginPermissionClaim("", "req_1")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
@@ -873,7 +849,7 @@ func TestAnswerPendingPermissionDeliversMatchingAnswer(t *testing.T) {
 }
 
 func TestAnswerPendingPermissionRejectsMismatchedRequest(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	answerCh, _, ok := s.BeginPermissionClaim("", "req_1")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
@@ -891,7 +867,7 @@ func TestAnswerPendingPermissionRejectsMismatchedRequest(t *testing.T) {
 }
 
 func TestPermissionClaimsAreScopedAndReportFullChannel(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	first, _, ok := s.BeginPermissionClaim("rt_1", "0")
 	if !ok {
 		t.Fatal("first BeginPermissionClaim returned false")
@@ -922,7 +898,7 @@ func TestPermissionClaimsAreScopedAndReportFullChannel(t *testing.T) {
 }
 
 func TestPermissionClaimRejectsDuplicateAfterFirstAnswerIsDrained(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	answerCh, _, ok := s.BeginPermissionClaim("rt_1", "0")
 	if !ok {
 		t.Fatal("BeginPermissionClaim returned false")
@@ -949,7 +925,7 @@ func TestPermissionClaimRejectsDuplicateAfterFirstAnswerIsDrained(t *testing.T) 
 }
 
 func TestBeginPermissionClaimPreservesAnswerQueuedWhileReserved(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved, nil) {
 		t.Fatal("PreparePermissionClaim returned false")
 	}
@@ -971,7 +947,7 @@ func TestBeginPermissionClaimPreservesAnswerQueuedWhileReserved(t *testing.T) {
 }
 
 func TestHandoffPermissionClaimAtomicallyConsumesQueuedAnswerOrTransfersToFile(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved, nil) {
 		t.Fatal("prepare queued-answer claim failed")
 	}
@@ -999,7 +975,7 @@ func TestHandoffPermissionClaimAtomicallyConsumesQueuedAnswerOrTransfersToFile(t
 }
 
 func TestHandoffPermissionClaimAtomicallyClosesCancelledClaim(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverReserved, nil) {
 		t.Fatal("prepare claim failed")
 	}
@@ -1015,7 +991,7 @@ func TestHandoffPermissionClaimAtomicallyClosesCancelledClaim(t *testing.T) {
 }
 
 func TestPreparePermissionClaimRejectsExistingNoResolver(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	if !s.PreparePermissionClaim("rt_1", "0", PermissionResolverNoResolver, nil) {
 		t.Fatal("initial PreparePermissionClaim returned false")
 	}
@@ -1028,7 +1004,7 @@ func TestPreparePermissionClaimRejectsExistingNoResolver(t *testing.T) {
 }
 
 func TestClearPermissionClaimsRemovesOnlyRequestedScope(t *testing.T) {
-	s := NewServer(NewState("run_1", "", 0))
+	s, _ := NewTestServer(NewState("run_1", "", 0))
 	s.PreparePermissionClaim("rt_1", "0", PermissionResolverFile, nil)
 	s.MarkPermissionClaimResolved("rt_1", "0", "file", "", "")
 	s.PreparePermissionClaim("rt_2", "0", PermissionResolverFile, nil)
@@ -1041,57 +1017,9 @@ func TestClearPermissionClaimsRemovesOnlyRequestedScope(t *testing.T) {
 	}
 }
 
-func TestOwnershipTransferOnDisconnect(t *testing.T) {
-	state := NewState("run_1", "", 0)
-	s := NewServer(state)
-	path := testSocketPath(t)
-	if err := s.Start(path); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer s.Stop()
-
-	c1 := mustDial(t, path)
-	_ = writeReq(t, c1, Request{JSONRPC: "2.0", ID: 1, Method: "cancel"})
-	r1 := readResp(t, c1)
-	if r1.Error != nil {
-		t.Fatalf("owner cancel failed: %+v", r1.Error)
-	}
-	c1.Close()
-
-	// Poll until owner is cleared (server processes disconnect).
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		s.mu.Lock()
-		owner := s.owner
-		s.mu.Unlock()
-		if owner == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("owner not cleared after close")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	c2 := mustDial(t, path)
-	defer c2.Close()
-	_ = writeReq(t, c2, Request{JSONRPC: "2.0", ID: 2, Method: "cancel"})
-	r2 := readResp(t, c2)
-	if r2.Error != nil {
-		t.Fatalf("new owner cancel failed: %+v", r2.Error)
-	}
-	res, ok := r2.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result type: %T", r2.Result)
-	}
-	if v, _ := res["ok"].(bool); !v {
-		t.Fatal("expected ok=true")
-	}
-}
-
 func TestSubscriberBackpressureLaggedEvent(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	client, srv := net.Pipe()
 	defer client.Close()
 	defer srv.Close()
@@ -1153,7 +1081,7 @@ func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
 	)
 
 	for i := 0; i < iterations; i++ {
-		s := NewServer(NewState("run_1", "", 0))
+		s, _ := NewTestServer(NewState("run_1", "", 0))
 		client, srv := net.Pipe()
 		cs := &connState{server: s, conn: srv}
 		sub := &subscriber{conn: cs, ch: make(chan events.Event, 1)}
@@ -1240,7 +1168,7 @@ func TestNormalizeHistoryLimit(t *testing.T) {
 
 func TestResultReturnsFullTerminalOutputWhileStatusIsBounded(t *testing.T) {
 	state := NewState("run_1", "demo", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	full := strings.Repeat("é", events.MaxFinalOutputRunes+10)
 	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"runtime_id": "rt_1", "final_output": full}})
 
@@ -1262,35 +1190,9 @@ func TestResultReturnsFullTerminalOutputWhileStatusIsBounded(t *testing.T) {
 	}
 }
 
-func TestResultOverControlSocketReadsReplyBeyondScannerLimit(t *testing.T) {
-	state := NewState("run_1", "demo", 0)
-	s := NewServer(state)
-	path := testSocketPath(t)
-	if err := s.Start(path); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer s.Stop()
-
-	complete := strings.Repeat("é", 40_000) // 80 KiB UTF-8, beyond Scanner's 64 KiB default.
-	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"final_output": complete}})
-
-	c, err := client.Dial(path)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer c.Close()
-	result, err := c.Result("")
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if got, _ := result["final_output"].(string); got != complete {
-		t.Fatalf("final_output byte length = %d, want %d", len(got), len(complete))
-	}
-}
-
 func TestPublishEventCanonicalizesIdentityAndPreservesProvidedMetadata(t *testing.T) {
 	state := NewState("run_1", "label", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 
 	first := s.PublishEvent(events.Event{Event: "agent.message_chunk", SessionID: "ses_1", Fields: map[string]any{"runtime_id": "rt_1"}})
 	if got, _ := first.Fields["run_id"].(string); got != "run_1" {
@@ -1335,7 +1237,7 @@ func TestPublishEventCanonicalizesIdentityAndPreservesProvidedMetadata(t *testin
 
 func TestPublishCanonicalEventKeepsHistoryAndNextSeqAligned(t *testing.T) {
 	state := NewState("run_1", "label", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 
 	s.PublishCanonicalEvent(events.Event{
 		Event:     "agent.message_chunk",
@@ -1368,7 +1270,7 @@ func TestPublishCanonicalEventKeepsHistoryAndNextSeqAligned(t *testing.T) {
 
 func TestSubscribeHistoryReplayFiltersByRuntimeAndAfterSeq(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1484,7 +1386,7 @@ func TestSubscriberBuffersLiveSequenceUntilReplayIsQueued(t *testing.T) {
 
 func TestSubscriberDisconnectCleansUp(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1526,7 +1428,7 @@ func TestSubscriberDisconnectCleansUp(t *testing.T) {
 
 func TestSubscribeAndStatus(t *testing.T) {
 	state := NewState("run_1", "label", 2)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1621,7 +1523,7 @@ func readNotification(t *testing.T, c net.Conn) Notification {
 
 func TestHTTPDebugStatusAndCancel(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	h, err := NewHTTPDebugServer("127.0.0.1:0", s)
 	if err != nil {
 		t.Fatalf("NewHTTPDebugServer: %v", err)
@@ -1704,14 +1606,14 @@ func TestHTTPDebugStatusAndCancel(t *testing.T) {
 
 func TestPromptDispatch(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	params, _ := json.Marshal(map[string]any{"text": "do something"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "prompt", Params: params})
@@ -1730,7 +1632,7 @@ func TestPromptDispatch(t *testing.T) {
 
 func TestInterruptAndPromptDispatch(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
@@ -1738,7 +1640,7 @@ func TestInterruptAndPromptDispatch(t *testing.T) {
 	defer s.Stop()
 
 	ch := s.InterruptChan()
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	params, _ := json.Marshal(map[string]any{"text": "new task"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "interrupt_and_prompt", Params: params})
@@ -1762,14 +1664,14 @@ func TestInterruptAndPromptDispatch(t *testing.T) {
 
 func TestPromptRejectedForNonOwner(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer s.Stop()
 
-	c1 := mustDial(t, path)
+	c1 := dialOwner(t, s, cap)
 	defer c1.Close()
 	_ = writeReq(t, c1, Request{JSONRPC: "2.0", ID: 1, Method: "cancel"})
 	r1 := readResp(t, c1)
@@ -1789,14 +1691,14 @@ func TestPromptRejectedForNonOwner(t *testing.T) {
 
 func TestInterruptAndPromptRejectedForNonOwner(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer s.Stop()
 
-	c1 := mustDial(t, path)
+	c1 := dialOwner(t, s, cap)
 	defer c1.Close()
 	_ = writeReq(t, c1, Request{JSONRPC: "2.0", ID: 1, Method: "cancel"})
 	r1 := readResp(t, c1)
@@ -1816,14 +1718,14 @@ func TestInterruptAndPromptRejectedForNonOwner(t *testing.T) {
 
 func TestPromptMissingTextReturnsError(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	params, _ := json.Marshal(map[string]any{"text": ""})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "prompt", Params: params})
@@ -1835,7 +1737,7 @@ func TestPromptMissingTextReturnsError(t *testing.T) {
 
 func TestDequeuePromptOrder(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 
 	s.QueuePrompt("prompt1")
 	s.QueuePrompt("prompt2")
@@ -1959,7 +1861,7 @@ func (m *mockStableHandler) WaitForCapacityMS(timeoutMS int) error {
 
 func TestStableSpawnMCPMethod(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	mock := &mockStableHandler{
 		spawnResult: map[string]any{"runtime_id": "rt_1", "session_id": "ses_x"},
 	}
@@ -1970,7 +1872,7 @@ func TestStableSpawnMCPMethod(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn_mcp", Params: params})
@@ -1988,7 +1890,7 @@ func TestStableSpawnMCPMethod(t *testing.T) {
 
 func TestStableSpawnMethod(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{
 		spawnResult: map[string]any{"runtime_id": "rt_1", "session_id": "ses_x"},
 	})
@@ -1998,7 +1900,7 @@ func TestStableSpawnMethod(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn", Params: params})
@@ -2032,7 +1934,7 @@ func TestWaitTurnSlotLimitAndDisconnectCancel(t *testing.T) {
 		waitCanceled: make(chan struct{}, 16),
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -2105,7 +2007,7 @@ func TestWaitTurnSlotLimitAndDisconnectCancel(t *testing.T) {
 func TestStableSpawnCapacityErrorIsTyped(t *testing.T) {
 	t.Run("tree", func(t *testing.T) {
 		state := NewState("run_1", "", 0)
-		s := NewServer(state)
+		s, cap := NewTestServer(state)
 		s.SetStableHandler(&mockStableHandler{
 			spawnErr: &admission.CapacityError{Source: "tree", Limit: 3, Active: 3, RootID: "root_x"},
 		})
@@ -2115,7 +2017,7 @@ func TestStableSpawnCapacityErrorIsTyped(t *testing.T) {
 		}
 		defer s.Stop()
 
-		c := mustDial(t, path)
+		c := dialOwner(t, s, cap)
 		defer c.Close()
 		params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
 		_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn", Params: params})
@@ -2146,7 +2048,7 @@ func TestStableSpawnCapacityErrorIsTyped(t *testing.T) {
 
 	t.Run("local", func(t *testing.T) {
 		state := NewState("run_1", "", 0)
-		s := NewServer(state)
+		s, cap := NewTestServer(state)
 		s.SetStableHandler(&mockStableHandler{
 			spawnErr: &admission.CapacityError{Source: "local", Limit: 7, Active: 7},
 		})
@@ -2156,7 +2058,7 @@ func TestStableSpawnCapacityErrorIsTyped(t *testing.T) {
 		}
 		defer s.Stop()
 
-		c := mustDial(t, path)
+		c := dialOwner(t, s, cap)
 		defer c.Close()
 		params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
 		_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn", Params: params})
@@ -2189,7 +2091,7 @@ func TestStableSpawnCapacityErrorIsTyped(t *testing.T) {
 func TestStableSpawnMCPCapacityErrorIsTyped(t *testing.T) {
 	t.Run("tree", func(t *testing.T) {
 		state := NewState("run_1", "", 0)
-		s := NewServer(state)
+		s, cap := NewTestServer(state)
 		s.SetStableHandler(&mockStableHandler{
 			spawnErr: &admission.CapacityError{Source: "tree", Limit: 3, Active: 3, RootID: "root_x"},
 		})
@@ -2199,7 +2101,7 @@ func TestStableSpawnMCPCapacityErrorIsTyped(t *testing.T) {
 		}
 		defer s.Stop()
 
-		c := mustDial(t, path)
+		c := dialOwner(t, s, cap)
 		defer c.Close()
 		params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
 		_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn_mcp", Params: params})
@@ -2230,7 +2132,7 @@ func TestStableSpawnMCPCapacityErrorIsTyped(t *testing.T) {
 
 	t.Run("local", func(t *testing.T) {
 		state := NewState("run_1", "", 0)
-		s := NewServer(state)
+		s, cap := NewTestServer(state)
 		s.SetStableHandler(&mockStableHandler{
 			spawnErr: &admission.CapacityError{Source: "local", Limit: 7, Active: 7},
 		})
@@ -2240,7 +2142,7 @@ func TestStableSpawnMCPCapacityErrorIsTyped(t *testing.T) {
 		}
 		defer s.Stop()
 
-		c := mustDial(t, path)
+		c := dialOwner(t, s, cap)
 		defer c.Close()
 		params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
 		_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn_mcp", Params: params})
@@ -2269,7 +2171,7 @@ func TestStableSpawnMCPCapacityErrorIsTyped(t *testing.T) {
 
 func TestStableTreeBudgetMethod(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -2304,7 +2206,7 @@ func TestStableTreeBudgetMethod(t *testing.T) {
 
 func TestStableWaitForCapacityMethod(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -2345,7 +2247,7 @@ func TestStableWaitForCapacityMethod(t *testing.T) {
 
 func TestStableListMethod(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{
 		listResult: []map[string]any{
 			{"runtime_id": "rt_1", "status": "running"},
@@ -2375,7 +2277,7 @@ func TestStableListMethod(t *testing.T) {
 
 func TestStableStatusWithRuntimeID(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -2402,7 +2304,7 @@ func TestStableStatusWithRuntimeID(t *testing.T) {
 
 func TestStableCancelWithRuntimeID(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -2410,7 +2312,7 @@ func TestStableCancelWithRuntimeID(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	params, _ := json.Marshal(map[string]any{"runtime_id": "rt_1"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "cancel", Params: params})
@@ -2422,14 +2324,14 @@ func TestStableCancelWithRuntimeID(t *testing.T) {
 
 func TestStableSpawnRejectedWithoutHandler(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	params, _ := json.Marshal(map[string]any{"prompt": "hello", "dir": "/tmp"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "spawn", Params: params})
@@ -2441,7 +2343,7 @@ func TestStableSpawnRejectedWithoutHandler(t *testing.T) {
 
 func TestStableSendToParent(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	mock := &mockStableHandler{}
 	s.SetStableHandler(mock)
 	path := testSocketPath(t)
@@ -2468,7 +2370,7 @@ func TestStableSendToParent(t *testing.T) {
 
 func TestStableSendToParentMissingRuntimeID(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	mock := &mockStableHandler{}
 	s.SetStableHandler(mock)
 	path := testSocketPath(t)
@@ -2492,7 +2394,7 @@ func TestStableSendToParentMissingRuntimeID(t *testing.T) {
 
 func TestStableSendToParentMissingMessage(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	mock := &mockStableHandler{}
 	s.SetStableHandler(mock)
 	path := testSocketPath(t)
@@ -2516,7 +2418,7 @@ func TestStableSendToParentMissingMessage(t *testing.T) {
 
 func TestStableSendToParentMessageTooLarge(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	mock := &mockStableHandler{}
 	s.SetStableHandler(mock)
 	path := testSocketPath(t)
@@ -2545,7 +2447,7 @@ func TestStableSendToParentMessageTooLarge(t *testing.T) {
 // fall through to a fallback handler.
 func TestPermissionClaimDisconnectChClosedOnClientDisconnect(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
@@ -2583,7 +2485,7 @@ func TestPermissionClaimDisconnectChClosedOnClientDisconnect(t *testing.T) {
 // one client is still connected.
 func TestPermissionClaimDisconnectChNotClosedWithClientsRemaining(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
@@ -2631,7 +2533,7 @@ func TestPermissionClaimDisconnectChNotClosedWithClientsRemaining(t *testing.T) 
 // disconnects and the disconnect channel fires.
 func TestPermissionClaimDisconnectChFiresOnRealDisconnect(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
@@ -2702,7 +2604,7 @@ func TestPermissionAnswerRejectsUnpairedSurrogateMessage(t *testing.T) {
 }
 
 func TestPermissionAnswerPreservesMessage(t *testing.T) {
-	s := NewServer(NewState("run_msg", "", 0))
+	s, _ := NewTestServer(NewState("run_msg", "", 0))
 
 	scope := "rt_msg"
 	s.PreparePermissionClaim(scope, "req_msg", PermissionResolverReserved, nil)
@@ -2730,7 +2632,7 @@ func TestPermissionAnswerPreservesMessage(t *testing.T) {
 }
 
 func TestDeliverPendingPermissionRequiresMessageWithoutConsumingClaim(t *testing.T) {
-	s := NewServer(NewState("run", "label", 0))
+	s, _ := NewTestServer(NewState("run", "label", 0))
 	options := []any{map[string]any{"optionId": "other", "kind": "allow", "requiresMessage": true}}
 	if !s.PreparePermissionClaim("scope", "req", PermissionResolverReserved, options) {
 		t.Fatal("PreparePermissionClaim returned false")
@@ -2759,7 +2661,7 @@ func TestDeliverPendingPermissionRequiresMessageWithoutConsumingClaim(t *testing
 }
 
 func TestDeliverPendingPermissionPreservesMessage(t *testing.T) {
-	s := NewServer(NewState("run_deliver", "", 0))
+	s, _ := NewTestServer(NewState("run_deliver", "", 0))
 
 	scope := "rt_deliver"
 	s.PreparePermissionClaim(scope, "req_deliver", PermissionResolverReserved, nil)
@@ -2791,7 +2693,7 @@ func TestDeliverPendingPermissionPreservesMessage(t *testing.T) {
 
 func TestBrokerRPCDispatch(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -2799,7 +2701,7 @@ func TestBrokerRPCDispatch(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c1 := mustDial(t, path) // owner
+	c1 := dialOwner(t, s, cap) // owner
 	defer c1.Close()
 	c2 := mustDial(t, path) // non-owner
 	defer c2.Close()
@@ -2860,7 +2762,7 @@ func TestBrokerRPCDispatch(t *testing.T) {
 
 func TestBrokerRPCDispatchInvalidParams(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, _ := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -2926,7 +2828,7 @@ func TestBrokerAskDoesNotBlockConnection(t *testing.T) {
 		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -2934,7 +2836,7 @@ func TestBrokerAskDoesNotBlockConnection(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 
 	// Fire an ask that will never be answered while the test waits on status.
@@ -2975,7 +2877,7 @@ func TestBrokerAskCancelledOnDisconnect(t *testing.T) {
 		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -2983,7 +2885,7 @@ func TestBrokerAskCancelledOnDisconnect(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
 	select {
@@ -3018,7 +2920,7 @@ func TestBrokerAskErrorCarriesMessageID(t *testing.T) {
 		askErr:            &AskError{MessageID: "ask123", Pending: false, Err: errors.New("ask timed out")},
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -3026,7 +2928,7 @@ func TestBrokerAskErrorCarriesMessageID(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
@@ -3063,7 +2965,7 @@ func TestBrokerAskErrorCarriesPendingTrue(t *testing.T) {
 		askErr:            &AskError{MessageID: "ask456", Pending: true, Err: errors.New("cleanup failed")},
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -3071,7 +2973,7 @@ func TestBrokerAskErrorCarriesPendingTrue(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
@@ -3137,7 +3039,7 @@ func TestBrokerAskNotificationGetsNoResponse(t *testing.T) {
 		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -3145,7 +3047,7 @@ func TestBrokerAskNotificationGetsNoResponse(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
@@ -3176,7 +3078,7 @@ func TestBrokerAskWritesResponseExactlyOnce(t *testing.T) {
 		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -3184,7 +3086,7 @@ func TestBrokerAskWritesResponseExactlyOnce(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
@@ -3215,7 +3117,7 @@ func TestBrokerAskServerSideTimeout(t *testing.T) {
 		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -3223,7 +3125,7 @@ func TestBrokerAskServerSideTimeout(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": 500})
@@ -3259,14 +3161,14 @@ func TestBrokerAskCancelledOnServerStop(t *testing.T) {
 		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "broker_ask", Params: askParams})
@@ -3294,7 +3196,7 @@ func TestBrokerAskInFlightCap(t *testing.T) {
 		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -3302,7 +3204,7 @@ func TestBrokerAskInFlightCap(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction"})
@@ -3372,7 +3274,7 @@ func TestBrokerAskTimeoutClampedToMax(t *testing.T) {
 		finished:          make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -3380,7 +3282,7 @@ func TestBrokerAskTimeoutClampedToMax(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": 999_999_999})
@@ -3406,7 +3308,7 @@ func TestBrokerAskTimeoutClampedToMax(t *testing.T) {
 // negative timeout_ms.
 func TestBrokerAskNegativeTimeoutRejected(t *testing.T) {
 	state := NewState("run_1", "", 0)
-	s := NewServer(state)
+	s, cap := NewTestServer(state)
 	s.SetStableHandler(&mockStableHandler{})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
@@ -3414,7 +3316,7 @@ func TestBrokerAskNegativeTimeoutRejected(t *testing.T) {
 	}
 	defer s.Stop()
 
-	c := mustDial(t, path)
+	c := dialOwner(t, s, cap)
 	defer c.Close()
 
 	askParams, _ := json.Marshal(map[string]any{"to_run_id": "rt_1", "message": "correction", "timeout_ms": -1})

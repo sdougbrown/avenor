@@ -19,6 +19,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/control"
 )
 
 // statusOutputMap flattens a typed avenor_status tool output into the map
@@ -617,13 +618,13 @@ func TestGetClientForSupervisorDialsValidInRootID(t *testing.T) {
 	defer s.Close()
 
 	socketPath := filepath.Join(root, "avenor-mcp-missing.sock")
-	origDial := dialSupervisorClient
+	origDial := attachSupervisorClient
 	var dialed string
-	dialSupervisorClient = func(p string) (*client.Client, error) {
+	attachSupervisorClient = func(p string) (*client.Client, error) {
 		dialed = p
 		return origDial(p)
 	}
-	t.Cleanup(func() { dialSupervisorClient = origDial })
+	t.Cleanup(func() { attachSupervisorClient = origDial })
 
 	if _, _, err := s.getClientForSupervisor(socketPath); err == nil || !strings.Contains(err.Error(), "dial supervisor socket") {
 		t.Fatalf("expected dial failure on missing in-root socket, got: %v", err)
@@ -681,7 +682,7 @@ func TestGetClientForSupervisorExemptsConfiguredSupervisorSocket(t *testing.T) {
 	// tests; it must stay dialable as the server's own default even though a
 	// tool-arg id at the same path class would be rejected.
 	socketPath := filepath.Join(t.TempDir(), "sup.sock")
-	acceptedCount, _, stopListener := startStubSupervisorListener(t, socketPath)
+	acceptedCount, _, _, stopListener := startStubSupervisorListener(t, socketPath)
 	defer stopListener()
 
 	s, err := NewServer(Options{Transport: "stdio", SupervisorSocket: socketPath, NoAutostart: true})
@@ -1550,6 +1551,7 @@ func startFakeSupervisorNamed(t *testing.T, name string) (string, func()) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	cap := publishOwnerRecordForStub(t, path)
 
 	go func() {
 		for {
@@ -1567,6 +1569,8 @@ func startFakeSupervisorNamed(t *testing.T, name string) (string, func()) {
 					}
 					var resp client.Response
 					switch req.Method {
+					case "authenticate_owner":
+						resp = ownerAuthResponse(req, cap)
 					case "status":
 						resp = client.Response{JSONRPC: "2.0", ID: req.ID}
 						snap := map[string]any{"session_id": "ses_test", "phase": "working"}
@@ -1587,6 +1591,42 @@ func startFakeSupervisorNamed(t *testing.T, name string) (string, func()) {
 	}()
 
 	return path, func() { ln.Close() }
+}
+
+// TestReadOnlyToolNeedsNoOwnerRecord proves a read-only tool acquires its
+// supervisor client without owner credentials: a live supervisor that never
+// published a record still serves avenor_status, whether the caller names it
+// with supervisor_id or the deployment configures its socket.
+func TestReadOnlyToolNeedsNoOwnerRecord(t *testing.T) {
+	path, cleanup := startFakeSupervisorNamed(t, "avenor-mcp-readonly.sock")
+	defer cleanup()
+	if err := os.Remove(control.OwnerRecordPath(path)); err != nil {
+		t.Fatalf("remove owner record: %v", err)
+	}
+	stubSocketsRoot(t, filepath.Dir(path))
+
+	servers := map[string]Options{
+		"supervisor_id":     {Transport: "stdio"},
+		"configured socket": {Transport: "stdio", SupervisorSocket: path, NoAutostart: true},
+	}
+	for name, opts := range servers {
+		s, err := NewServer(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		supervisorID := ""
+		if opts.SupervisorSocket == "" {
+			supervisorID = path
+		}
+		_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{SupervisorID: supervisorID})
+		if err != nil {
+			t.Fatalf("%s: read-only status without an owner record: %v", name, err)
+		}
+		if runs := statusOutputRuns(t, result); len(runs) != 1 || runs[0]["runtime_id"] != "rt_1" {
+			t.Fatalf("%s: runs = %v, want the stub's runtime", name, runs)
+		}
+	}
 }
 
 func TestServerWithRealSocketStatus(t *testing.T) {
@@ -4667,15 +4707,17 @@ func TestServerAuthenticatedHTTPHandlerHostChecks(t *testing.T) {
 	})
 }
 
-// startStubSupervisorListener runs a listener that accepts supervisor
-// connections and parks them without speaking the control protocol; tests
-// use it as a dial target and close accepted conns to simulate a restart.
-func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount func() int, closeAccepted func(), cleanup func()) {
+// startStubSupervisorListener runs a listener that publishes an owner record,
+// answers authenticate_owner and otherwise parks connections; tests use it as
+// an attach target and close accepted conns to simulate a restart.
+func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount func() int, authCount func() int, closeAccepted func(), cleanup func()) {
 	t.Helper()
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen %s: %v", socketPath, err)
 	}
+	cap := publishOwnerRecordForStub(t, socketPath)
+	var auths atomic.Int32
 	var mu sync.Mutex
 	var conns []net.Conn
 	go func() {
@@ -4687,6 +4729,7 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 			mu.Lock()
 			conns = append(conns, conn)
 			mu.Unlock()
+			go serveOwnerAuthOnly(conn, cap, &auths)
 		}
 	}()
 	acceptedCount = func() int {
@@ -4694,6 +4737,7 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 		defer mu.Unlock()
 		return len(conns)
 	}
+	authCount = func() int { return int(auths.Load()) }
 	closeAccepted = func() {
 		mu.Lock()
 		defer mu.Unlock()
@@ -4706,11 +4750,35 @@ func startStubSupervisorListener(t *testing.T, socketPath string) (acceptedCount
 		ln.Close()
 		closeAccepted()
 		os.Remove(socketPath)
+		os.Remove(control.OwnerRecordPath(socketPath))
 	}
-	return acceptedCount, closeAccepted, cleanup
+	return acceptedCount, authCount, closeAccepted, cleanup
 }
 
-// withCountedDials swaps dialSupervisorClient for a counting wrapper that
+// serveOwnerAuthOnly answers authenticate_owner and ignores every other
+// request, which is all an attach target has to speak. Every credential it is
+// presented is counted in authCount when that is non-nil.
+func serveOwnerAuthOnly(conn net.Conn, cap control.OwnerCapability, authCount *atomic.Int32) {
+	defer conn.Close()
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		var req client.Request
+		if json.Unmarshal(scanner.Bytes(), &req) != nil {
+			continue
+		}
+		if req.Method != "authenticate_owner" {
+			continue
+		}
+		if authCount != nil {
+			authCount.Add(1)
+		}
+		resp := ownerAuthResponse(req, cap)
+		data, _ := json.Marshal(resp)
+		_, _ = conn.Write(append(data, '\n'))
+	}
+}
+
+// withCountedDials swaps attachSupervisorClient for a counting wrapper that
 // delegates to the original dial, restoring the seam when the test ends.
 // Tests that must block inside the dial keep their own wrapper instead.
 // stubSocketsRoot points validateSupervisorSocketPath at dir for the test's
@@ -4732,12 +4800,12 @@ func stubSocketsRoot(t *testing.T, dir string) string {
 func withCountedDials(t *testing.T) *atomic.Int32 {
 	t.Helper()
 	var dials atomic.Int32
-	origDial := dialSupervisorClient
-	dialSupervisorClient = func(p string) (*client.Client, error) {
+	origDial := attachSupervisorClient
+	attachSupervisorClient = func(p string) (*client.Client, error) {
 		dials.Add(1)
 		return origDial(p)
 	}
-	t.Cleanup(func() { dialSupervisorClient = origDial })
+	t.Cleanup(func() { attachSupervisorClient = origDial })
 	return &dials
 }
 
@@ -4758,7 +4826,7 @@ func TestRedialExplicitSupervisorSocketAfterDisconnect(t *testing.T) {
 		t.Fatal("expected supervisor-unavailable error before listener exists")
 	}
 
-	acceptedCount, closeAccepted, stopListener := startStubSupervisorListener(t, socketPath)
+	acceptedCount, _, closeAccepted, stopListener := startStubSupervisorListener(t, socketPath)
 	defer stopListener()
 
 	// The next acquisition redials and succeeds once the supervisor listens.
@@ -4811,7 +4879,7 @@ func TestRedialExplicitSupervisorSocketAfterDisconnect(t *testing.T) {
 
 func TestAutostartRedialsAfterDeadClient(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "sup.sock")
-	_, _, stopListener := startStubSupervisorListener(t, socketPath)
+	_, _, _, stopListener := startStubSupervisorListener(t, socketPath)
 	defer stopListener()
 
 	origStart := startSupervisorFunc
@@ -4860,7 +4928,7 @@ func TestAutostartRedialsAfterDeadClient(t *testing.T) {
 
 func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "sup.sock")
-	acceptedCount, _, stopListener := startStubSupervisorListener(t, socketPath)
+	acceptedCount, _, _, stopListener := startStubSupervisorListener(t, socketPath)
 	defer stopListener()
 
 	const n = 8
@@ -4868,14 +4936,14 @@ func TestConcurrentAcquisitionsShareOneDial(t *testing.T) {
 	var dials atomic.Int32
 	dialEntered := make(chan struct{})
 	releaseDial := make(chan struct{})
-	origDial := dialSupervisorClient
-	dialSupervisorClient = func(p string) (*client.Client, error) {
+	origDial := attachSupervisorClient
+	attachSupervisorClient = func(p string) (*client.Client, error) {
 		dials.Add(1)
 		dialEntered <- struct{}{}
 		<-releaseDial
 		return origDial(p)
 	}
-	defer func() { dialSupervisorClient = origDial }()
+	defer func() { attachSupervisorClient = origDial }()
 
 	atLockBoundary := make(chan struct{}, n)
 	releaseLockBoundary := make(chan struct{})

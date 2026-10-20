@@ -172,7 +172,7 @@ func (e *errorConfigurer) SetSessionMode(_ context.Context, _, _ string) error {
 }
 
 func TestBuildClientEnv(t *testing.T) {
-	env, cleanup := buildClientEnv(runtime.StartOptions{}, "run_123", "tok_456", "127.0.0.1:9999")
+	env, cleanup := buildClientEnv(runtime.StartOptions{Label: "worker"}, "run_123", "tok_456", "127.0.0.1:9999")
 	if cleanup != nil {
 		defer func() { _ = cleanup() }()
 	}
@@ -222,14 +222,14 @@ func TestBuildClientEnv(t *testing.T) {
 		}
 		command = append(command, value)
 	}
-	if len(command) != 8 {
-		t.Fatalf("command len = %d, want 8", len(command))
+	if len(command) != 10 {
+		t.Fatalf("command len = %d, want 10", len(command))
 	}
-	if command[0] != mustExecutable(t) || command[1] != "channel-tools" || command[2] != "--run-id" || command[3] != "run_123" || command[4] != "--token" || command[5] != "tok_456" || command[6] != "--broker-url" {
+	if command[0] != mustExecutable(t) || command[1] != "channel-tools" || command[2] != "--run-id" || command[3] != "run_123" || command[4] != "--sender" || command[5] != "worker" || command[6] != "--token" || command[7] != "tok_456" || command[8] != "--broker-url" {
 		t.Fatalf("unexpected command: %#v", command)
 	}
-	if command[7] != "http://127.0.0.1:9999" {
-		t.Fatalf("broker url arg = %q, want http://127.0.0.1:9999", command[7])
+	if command[9] != "http://127.0.0.1:9999" {
+		t.Fatalf("broker url arg = %q, want http://127.0.0.1:9999", command[9])
 	}
 	tools, ok := payload["tools"].(map[string]any)
 	if !ok {

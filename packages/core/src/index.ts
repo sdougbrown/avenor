@@ -1,4 +1,11 @@
-export { dial, RpcError } from './client.js'
+export { dial, RpcError, OwnerAuthError } from './client.js'
+export {
+  attachOwner,
+  ForeignPeerError,
+  OwnerRecordMissingError,
+  StaleOwnerRecordError,
+} from './owner-attach.js'
+export type { OwnerAttachOptions } from './owner-attach.js'
 export type {
   Client,
   Event,

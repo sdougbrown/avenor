@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32013,
+    "message": "owner authentication timed out",
+    "data": { "version": 1, "reason": "attach-deadline" }
+  }
+}

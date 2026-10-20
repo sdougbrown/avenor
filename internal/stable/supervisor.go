@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -28,6 +26,9 @@ import (
 	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askclient"
+	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
@@ -622,15 +623,19 @@ type Supervisor struct {
 	httpServer                    *control.HTTPDebugServer
 	// permissions owns supervisor-level permission routing state, decider
 	// accounting and the provider bindings direct answers target.
-	permissions                  *permissionRouter
-	httpServers                  map[string]*managedHTTPServer // dir → ready server
-	httpStarting                 map[string]struct{}           // dirs with a start in flight
-	httpShutdownStarted          bool
-	httpServerMu                 sync.Mutex
-	httpServerCond               *sync.Cond
-	fileSnapshots                map[string][]string // runtimeID → pre-run file list for output detection
-	fileSnapMu                   sync.Mutex
-	broker                       *broker.Broker
+	permissions         *permissionRouter
+	httpServers         map[string]*managedHTTPServer // dir → ready server
+	httpStarting        map[string]struct{}           // dirs with a start in flight
+	httpShutdownStarted bool
+	httpServerMu        sync.Mutex
+	httpServerCond      *sync.Cond
+	fileSnapshots       map[string][]string // runtimeID → pre-run file list for output detection
+	fileSnapMu          sync.Mutex
+	broker              *broker.Broker
+	// messaging is the supervisor's own transport over the broker's ask store.
+	// It is the only transport the supervisor closes, and it never outlives
+	// the broker.
+	messaging                    messaging.Transport
 	brokerRunID                  string
 	brokerToken                  string
 	brokerRunMu                  sync.Mutex
@@ -667,11 +672,17 @@ type Supervisor struct {
 func NewSupervisor(cfg Config) *Supervisor {
 	runID := cli.GenerateRunID()
 	state := control.NewState(runID, "", 0)
+	// The owner capability is generated before the control server is built so
+	// construction, not the first mutation, fixes who may control this process.
+	owner, err := control.GenerateOwnerCapability()
+	if err != nil {
+		panic("avenor: failed to generate owner capability: " + err.Error())
+	}
 	sup := &Supervisor{
 		config:                  cfg,
 		runID:                   runID,
 		state:                   state,
-		control:                 control.NewServer(state),
+		control:                 control.NewServer(state, owner),
 		idempotency:             newIdempotencyStore(cfg.IdempotencyCapacity),
 		runtimes:                map[string]*childRuntime{},
 		controllerLoops:         map[string]*controllerLoop{},
@@ -699,6 +710,10 @@ func NewSupervisor(cfg Config) *Supervisor {
 		// asks before the host performs any outbound broker call. Without this,
 		// a child asking its parent first would fail "to run not found".
 		sup.registerBrokerRun()
+		// Both the in-process transport and the HTTP router read this store,
+		// so an ask the supervisor makes is the same ask a child can answer
+		// over HTTP.
+		sup.messaging = inprocess.New(sup.broker.Store())
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	sup.capacityCh = make(chan struct{})
@@ -723,7 +738,7 @@ func (s *Supervisor) stderrWriter() io.Writer {
 	}
 	return os.Stderr
 }
-func (s *Supervisor) Run() int {
+func (s *Supervisor) Run() (exitCode int) {
 	// NewSupervisor initializes root admission before the control socket is
 	// bound. Close it on every exit, including a control-server start failure.
 	defer s.closeTreeBudget()
@@ -755,7 +770,14 @@ func (s *Supervisor) Run() int {
 		reason = "start_failed"
 		return 1
 	}
-	defer s.control.Stop()
+	defer func() {
+		if err := s.control.Stop(); err != nil {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: stop control server: %v\n", err)
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		}
+	}()
 
 	if s.config.HTTPDebug != "" {
 		var err error
@@ -1558,7 +1580,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// the parent run ID to the child's prompt so it knows where to reply.
 	var parentToken string
 	if params.ParentRunID != "" && s.broker != nil {
-		parentToken, _ = s.broker.EnsureRun(params.ParentRunID)
+		parentToken, _ = s.broker.EnsureRun(params.ParentRunID, "")
 		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Use avenor_send with this run ID to send status updates, findings, or questions back to your parent.\n\n", params.ParentRunID)
 		promptText = parentNote + promptText
 	}
@@ -1872,7 +1894,7 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 	// EnsureRun is idempotent, so concurrent first-use calls settle on the
 	// same run and token instead of racing CreateRun and failing "already
 	// registered" on the second call.
-	token, _ := s.broker.EnsureRun("supervisor")
+	token, _ := s.broker.EnsureRun("supervisor", "supervisor")
 	if token == "" {
 		return "", ""
 	}
@@ -1889,7 +1911,7 @@ func (s *Supervisor) ensureChildBrokerRun(child *childRuntime) string {
 	if s.broker == nil {
 		return ""
 	}
-	token, _ := s.broker.EnsureRun(child.id)
+	token, _ := s.broker.EnsureRun(child.id, child.label)
 	child.mu.Lock()
 	child.brokerToken = token
 	child.mu.Unlock()
@@ -1906,8 +1928,7 @@ func (s *Supervisor) brokerPost(path string, body map[string]any) ([]byte, error
 // connections by host:port across every supervisor in the process, so a
 // connection left behind by one broker can be reused against another (or
 // against a recycled loopback port) and surface as EOF or connection-reset
-// instead of connection refused — which flips the ask pending classification
-// in BrokerAsk and withdrawAsk.
+// instead of connection refused.
 func (s *Supervisor) brokerHTTPClientDo(req *http.Request) (*http.Response, error) {
 	s.brokerHTTPClientOnce.Do(func() {
 		s.brokerHTTPClient = &http.Client{
@@ -1958,11 +1979,12 @@ func (s *Supervisor) brokerGet(path string) ([]byte, error) {
 	if runID == "" {
 		return nil, fmt.Errorf("broker not available")
 	}
-	url := fmt.Sprintf("%s%s?run_id=%s&token=%s", s.brokerURL(), path, url.QueryEscape(runID), url.QueryEscape(token))
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequest(http.MethodGet, s.brokerURL()+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("broker %s: %w", path, err)
 	}
+	req.Header.Set(messaging.HeaderRunID, runID)
+	req.Header.Set(messaging.HeaderRunToken, token)
 	resp, err := s.brokerHTTPClientDo(req)
 	if err != nil {
 		return nil, fmt.Errorf("broker %s: %w", path, err)
@@ -1995,126 +2017,42 @@ func (s *Supervisor) BrokerSend(fromRunID, toRunID, message, role string) error 
 	return err
 }
 
+// BrokerAsk asks another run a question and waits for its reply. The ask is
+// sent over the supervisor's messaging transport under the supervisor's own
+// registered identity.
 func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error) {
-	msgID := broker.MakeToken()[:16]
-	payload := map[string]any{
-		"id":            msgID,
-		"from":          "supervisor",
-		"from_run_id":   "supervisor",
-		"to_run_id":     toRunID,
-		"message":       message,
-		"role":          role,
-		"expects_reply": true,
-	}
-	// Send with expects_reply
-	sendBody := map[string]any{
-		"from_run_id": "supervisor",
-		"to_run_id":   toRunID,
-		"type":        "agent_message",
-		"payload":     payload,
-	}
-	if _, err := s.brokerPostContext(ctx, "/send", sendBody); err != nil {
-		err = fmt.Errorf("send ask: %w", err)
-		pending := true
-		switch {
-		case sendNeverReachedBroker(err):
-			// The connection never carried the request to the broker, so no
-			// edge can have been registered.
-			pending = false
-		case isTransportFailure(err) && !s.brokerReachable():
-			// The send drew no HTTP response and the broker is now
-			// unreachable: its in-memory edge registry cannot hold this ask.
-			// A just-stopped broker can also reset the connection instead of
-			// refusing it, so refusal alone is not the only never-delivered
-			// signal.
-			pending = false
-		default:
-			// A transport failure after the broker processed the send can
-			// leave the ask edge registered; attempt cleanup instead of
-			// assuming.
-			pending = s.withdrawAsk(msgID)
+	if s.messaging == nil {
+		return nil, &control.AskError{
+			Outcome: messaging.OutcomeNotSent,
+			Err:     fmt.Errorf("broker not available"),
 		}
-		return nil, &control.AskError{MessageID: msgID, Pending: pending, Err: err}
 	}
-	// Wait for reply. A failed wait (caller cancellation, broker error, or
-	// dropped connection) leaves or already cleaned the ask edge; withdraw
-	// and classify so the caller knows whether cancel can still act.
-	replyBody, err := s.brokerPostContext(ctx, "/wait_reply", map[string]any{
-		"waiting_for": msgID,
-	})
+	runID, _ := s.registerBrokerRun()
+	sender := messaging.Identity{RunID: runID, Sender: "supervisor"}
+	client := askclient.New(s.messaging, askclient.Options{})
+	send, wait, err := client.AskRequest(sender, "supervisor", toRunID, message, role)
 	if err != nil {
-		return nil, &control.AskError{MessageID: msgID, Pending: s.withdrawAsk(msgID), Err: fmt.Errorf("wait for reply: %w", err)}
+		return nil, &control.AskError{MessageID: send.MessageID, Outcome: messaging.OutcomeNotSent, Err: err}
 	}
-	// Parse the reply
-	var result map[string]any
-	if err := json.Unmarshal(replyBody, &result); err != nil {
-		return nil, &control.AskError{MessageID: msgID, Pending: false, Err: fmt.Errorf("parse reply: %w", err)}
-	}
-	return result, nil
-}
-
-// sendNeverReachedBroker reports whether a failed ask send provably never
-// reached the broker: the dial itself failed (the connection was never
-// established), or there was no broker to talk to at all.
-func sendNeverReachedBroker(err error) bool {
-	var opErr *net.OpError
-	if errors.As(err, &opErr) && opErr.Op == "dial" {
-		return true
-	}
-	return strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "broker not available")
-}
-
-// isTransportFailure reports whether a request failed at the connection level
-// without ever drawing an HTTP response.
-func isTransportFailure(err error) bool {
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return true
-	}
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-}
-
-// brokerReachable reports whether the broker's HTTP endpoint currently
-// accepts TCP connections.
-func (s *Supervisor) brokerReachable() bool {
-	if s.broker == nil {
-		return false
-	}
-	conn, err := net.DialTimeout("tcp", s.broker.Addr(), 250*time.Millisecond)
+	result, err := client.Ask(ctx, send, wait)
 	if err != nil {
-		return false
+		pending := false
+		var askErr *askclient.Error
+		if errors.As(err, &askErr) {
+			pending = askErr.Pending()
+		}
+		return nil, &control.AskError{
+			MessageID: result.MessageID,
+			Outcome:   result.Outcome,
+			Pending:   pending,
+			Err:       err,
+		}
 	}
-	_ = conn.Close()
-	return true
-}
-
-// withdrawAsk attempts to withdraw a pending ask and classifies whether the
-// edge may still exist on the broker. It returns true only when the cleanup
-// attempt failed for a reason other than the edge already being gone.
-func (s *Supervisor) withdrawAsk(msgID string) bool {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := s.brokerPostContext(cleanupCtx, "/cancel_message", map[string]any{
-		"cancel_message_id": msgID,
-	})
-	if err == nil {
-		return false
-	}
-	// A transport-level failure drew no HTTP response, so it cannot be the
-	// broker's 404 response; report the edge as possibly surviving. This check
-	// must come first: the substring match below would otherwise also match
-	// the digits "404" inside the request URL (e.g. a broker port like 44045).
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		return true
-	}
-	// The broker clears the edge itself when a cancelled wait_reply request
-	// disconnects; either a successful cancel or a 404 "no pending ask"
-	// response means the edge is already gone.
-	if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "no pending ask for this message id") {
-		return false
-	}
-	return true
+	return map[string]any{
+		"message_id":  result.MessageID,
+		"from_run_id": result.Reply.FromRunID,
+		"payload":     result.Reply.Payload,
+	}, nil
 }
 
 func (s *Supervisor) BrokerPeers() (any, error) {
@@ -2129,22 +2067,40 @@ func (s *Supervisor) BrokerPeers() (any, error) {
 	return result, nil
 }
 
+// BrokerCancel withdraws an outstanding ask and reports whether a terminal
+// fence now covers it.
 func (s *Supervisor) BrokerCancel(messageID string) error {
-	_, err := s.brokerPost("/cancel_message", map[string]any{
-		"cancel_message_id": messageID,
+	if s.messaging == nil {
+		return fmt.Errorf("broker not available")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), messaging.CleanupDeadline)
+	defer cancel()
+	runID, _ := s.registerBrokerRun()
+	withdrawn, err := askclient.New(s.messaging, askclient.Options{}).Withdraw(ctx, messaging.WithdrawRequest{
+		Sender:    messaging.Identity{RunID: runID, Sender: "supervisor"},
+		MessageID: messageID,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if withdrawn.Outcome == messaging.OutcomeEdgeAbsent {
+		return fmt.Errorf("no pending ask for %s", messageID)
+	}
+	return nil
 }
 
 // BrokerReceive drains inbound agent_message control messages (asks from
 // sub-agents) queued for the supervisor run, returning them structured so the
-// top-level Pi host can surface them in the session and reply.
+// top-level Pi host can surface them in the session and reply. It drains the
+// broker queue directly because that control method returns every queued agent
+// message in one call; Transport.Receive caps the batch at
+// messaging.DefaultReceiveLimit and requires a generation.
 func (s *Supervisor) BrokerReceive() (any, error) {
 	if s.broker == nil {
 		return nil, fmt.Errorf("broker not available")
 	}
 	runID, _ := s.registerBrokerRun()
-	msgs, err := s.broker.DrainAgentMessages(runID)
+	msgs, err := s.broker.DrainAgentMessages(runID, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -2169,8 +2125,12 @@ func (s *Supervisor) BrokerReceive() (any, error) {
 // given ask. replyTo is the original ask message id; toRunID the asker run.
 func (s *Supervisor) BrokerReply(toRunID, replyTo, message string) error {
 	runID, _ := s.registerBrokerRun()
+	msgID, err := messaging.NewMsgID(time.Now(), time.Time{})
+	if err != nil {
+		return err
+	}
 	payload := map[string]any{
-		"id":          broker.MakeToken()[:16],
+		"id":          msgID,
 		"from":        runID,
 		"from_run_id": runID,
 		"to_run_id":   toRunID,
@@ -2178,7 +2138,7 @@ func (s *Supervisor) BrokerReply(toRunID, replyTo, message string) error {
 		"role":        "supervisor",
 		"reply_to":    replyTo,
 	}
-	_, err := s.brokerPost("/send", map[string]any{
+	_, err = s.brokerPost("/send", map[string]any{
 		"from_run_id": runID,
 		"to_run_id":   toRunID,
 		"type":        "agent_message",
@@ -2717,7 +2677,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			attemptWriter := taggedWriter
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
-				s.broker.CreateRun(brokerRunID)
+				s.broker.CreateRun(brokerRunID, "")
 				brokerAttemptIDsMu.Lock()
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
 				brokerAttemptIDsMu.Unlock()
@@ -3003,7 +2963,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			attemptWriter := taggedWriter
 			if s.broker != nil {
 				brokerRunID = broker.MakeToken()
-				s.broker.CreateRun(brokerRunID)
+				s.broker.CreateRun(brokerRunID, "")
 				brokerAttemptIDsMu.Lock()
 				brokerAttemptIDs = append(brokerAttemptIDs, brokerRunID)
 				brokerAttemptIDsMu.Unlock()
@@ -3967,6 +3927,9 @@ func (s *Supervisor) shutdown(mode string) int {
 	defer func() {
 		if s.broker != nil {
 			_ = s.broker.Stop()
+		}
+		if s.messaging != nil {
+			_ = s.messaging.Close()
 		}
 		s.closeTreeBudget()
 	}()

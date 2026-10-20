@@ -320,7 +320,7 @@ func TestRunPostPhaseFailure(t *testing.T) {
 
 func TestEnrichFromBroker(t *testing.T) {
 	b := broker.New("team-test-token")
-	if _, err := b.CreateRun("team-run"); err != nil {
+	if _, err := b.CreateRun("team-run", ""); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	run := b.GetRun("team-run")
@@ -370,7 +370,7 @@ func TestEnrichFromBroker(t *testing.T) {
 
 	t.Run("ignores empty finish status", func(t *testing.T) {
 		b2 := broker.New("team-empty-status-token")
-		if _, err := b2.CreateRun("team-empty-status"); err != nil {
+		if _, err := b2.CreateRun("team-empty-status", ""); err != nil {
 			t.Fatalf("CreateRun: %v", err)
 		}
 		run := b2.GetRun("team-empty-status")

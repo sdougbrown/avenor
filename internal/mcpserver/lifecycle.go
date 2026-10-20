@@ -3,7 +3,10 @@ package mcpserver
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +16,8 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 var execCommand = exec.Command
@@ -80,12 +85,16 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 		_ = lockFile.Close()
 	}()
 
-	if cl, ok := dialHealthySupervisor(socketPath); ok {
+	if cl, state, err := attachSupervisor(socketPath); state == supervisorLive {
 		return &supervisorLifecycle{
 			socketPath: socketPath,
 			client:     cl,
 			shared:     true,
 		}, nil
+	} else if state != supervisorDead {
+		// Nothing proves the path is free, so a replacement is never started for
+		// it: the running server keeps its socket, record and owner access.
+		return nil, fmt.Errorf("attach supervisor %s: %w", socketPath, err)
 	}
 
 	// Stale-path removal belongs to ControlServer.Start, which serializes it
@@ -133,9 +142,20 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 	}
 	const readyEnv = "AVENOR_CONTROL_READY_FD="
 	const identityEnv = controlIdentityTokenEnv + "="
+	testHookEnvs := []string{runtime.EnvTestHooks + "=", runtime.EnvTestOwnerPublishDelay + "="}
 	cmd.Env = make([]string, 0, len(env)+2)
 	for _, entry := range env {
-		if !strings.HasPrefix(entry, readyEnv) && !strings.HasPrefix(entry, identityEnv) {
+		if strings.HasPrefix(entry, readyEnv) || strings.HasPrefix(entry, identityEnv) {
+			continue
+		}
+		skip := false
+		for _, hook := range testHookEnvs {
+			if strings.HasPrefix(entry, hook) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
@@ -177,14 +197,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 		case <-exited:
 			// A competing starter may have won the bind. Re-check before
 			// declaring failure, and never unlink or shut down its socket.
-			if cl, ok := dialHealthySupervisor(socketPath); ok {
-				return &supervisorLifecycle{
-					socketPath: socketPath,
-					client:     cl,
-					shared:     true,
-				}, nil
-			}
-			return nil, fmt.Errorf("supervisor exited during startup")
+			return attachWinner(socketPath)
 		case <-deadline:
 			_ = cmd.Process.Kill()
 			<-exited
@@ -200,24 +213,45 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 					identity, identityErr := cl.Identity()
 					if identityErr == nil && identity == identityToken {
 						// Readiness proves the child bound the path once. The identity
-						// probe proves this particular connection still reaches it.
-						select {
-						case <-exited:
-							_ = cl.Close()
-							if winner, ok := dialHealthySupervisor(socketPath); ok {
-								return &supervisorLifecycle{socketPath: socketPath, client: winner, shared: true}, nil
+						// probe proves this particular connection still reaches it, and
+						// the owner capability is loaded and presented on that same
+						// connection so this attempt can never authenticate as a winner.
+						authErr := authenticateOwnChild(cl, socketPath, cmd.Process.Pid)
+						if authErr == nil {
+							select {
+							case <-exited:
+								_ = cl.Close()
+								return attachWinner(socketPath)
+							default:
+								return &supervisorLifecycle{
+									socketPath: socketPath,
+									cmd:        cmd,
+									client:     cl,
+									exited:     exited,
+								}, nil
 							}
-							return nil, fmt.Errorf("supervisor exited during startup")
-						default:
-							return &supervisorLifecycle{
-								socketPath: socketPath,
-								cmd:        cmd,
-								client:     cl,
-								exited:     exited,
-							}, nil
 						}
-					}
-					if identityErr == nil {
+						_ = cl.Close()
+						if !isOwnerRecordError(authErr) {
+							// The identity-matched connection refused this child, so no
+							// capability of this attempt's was presented. Retire the child
+							// we spawned and attach the owner that holds the path through
+							// its own record; a genuine fault in this child fails the same
+							// way once it is settled.
+							if cmd.Process != nil {
+								_ = cmd.Process.Kill()
+								<-exited
+							}
+							if isOwnerCapabilityRejection(authErr) {
+								if winner, err := attachWinner(socketPath); err == nil {
+									return winner, nil
+								}
+							}
+							return nil, fmt.Errorf("authenticate owned supervisor %s: %w", socketPath, authErr)
+						}
+						// The record published on the path is not this child's yet. That
+						// is the ordinary replacement window, so retry until the deadline.
+					} else if identityErr == nil {
 						// A replacement won the path after readiness. Retire the child
 						// we spawned before attaching; it may still be running with its
 						// original socket unlinked and must not become an orphan.
@@ -225,7 +259,8 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 							_ = cmd.Process.Kill()
 							<-exited
 						}
-						return &supervisorLifecycle{socketPath: socketPath, client: cl, shared: true}, nil
+						_ = cl.Close()
+						return attachWinner(socketPath)
 					}
 				}
 				_ = cl.Close()
@@ -240,16 +275,121 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 	}
 }
 
-func dialHealthySupervisor(socketPath string) (*client.Client, bool) {
-	cl, err := client.Dial(socketPath)
+// supervisorProbeTimeout bounds the credential-free dial that decides whether
+// a listener holds the control socket path.
+const supervisorProbeTimeout = 250 * time.Millisecond
+
+// supervisorState is the launcher's replacement decision for an existing
+// control socket path.
+type supervisorState int
+
+const (
+	// supervisorLive means a listener holds the path and accepted the owner
+	// capability published beside it.
+	supervisorLive supervisorState = iota
+	// supervisorDead means no listener holds the path, so a replacement may be
+	// attempted.
+	supervisorDead
+	// supervisorAuthRejected means a listener answers but this process cannot
+	// authenticate as its owner.
+	supervisorAuthRejected
+	// supervisorUncertain means the probe proved neither liveness nor absence.
+	supervisorUncertain
+)
+
+// supervisorProbeDial is the credential-free dial the replacement decision is
+// based on; tests replace it to inject a probe outcome.
+var supervisorProbeDial = func(socketPath string) (net.Conn, error) {
+	return net.DialTimeout("unix", socketPath, supervisorProbeTimeout)
+}
+
+// attachSupervisor classifies an existing control socket and, when it is live,
+// attaches to it with its published owner capability.
+func attachSupervisor(socketPath string) (*client.Client, supervisorState, error) {
+	conn, err := supervisorProbeDial(socketPath)
 	if err != nil {
-		return nil, false
+		return nil, classifyProbeError(err), err
 	}
-	if _, err := cl.Status(""); err != nil {
-		_ = cl.Close()
-		return nil, false
+	_ = conn.Close()
+	cl, err := client.AttachOwner(socketPath)
+	if err != nil {
+		return nil, classifyAttachError(err), err
 	}
-	return cl, true
+	return cl, supervisorLive, nil
+}
+
+// attachWinner returns the shared lifecycle of the supervisor that holds
+// socketPath after this attempt's own child lost it.
+func attachWinner(socketPath string) (*supervisorLifecycle, error) {
+	cl, state, err := attachSupervisor(socketPath)
+	if state == supervisorLive {
+		return &supervisorLifecycle{socketPath: socketPath, client: cl, shared: true}, nil
+	}
+	if state != supervisorDead {
+		return nil, fmt.Errorf("attach competing supervisor %s: %w", socketPath, err)
+	}
+	return nil, fmt.Errorf("supervisor exited during startup")
+}
+
+// classifyProbeError decides the replacement decision from a credential-free
+// dial: a bound unix listener never refuses, so ECONNREFUSED proves that no
+// listener holds the path. Anything else is uncertain and never authorizes a
+// replacement.
+func classifyProbeError(err error) supervisorState {
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, fs.ErrNotExist) {
+		return supervisorDead
+	}
+	return supervisorUncertain
+}
+
+// classifyAttachError separates a live socket this process may not authenticate
+// to from one that vanished between the probe and the attach.
+func classifyAttachError(err error) supervisorState {
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, fs.ErrNotExist) {
+		return supervisorDead
+	}
+	if isOwnerCapabilityRejection(err) || isOwnerRecordError(err) {
+		return supervisorAuthRejected
+	}
+	return supervisorUncertain
+}
+
+// isOwnerCapabilityRejection reports a peer that refused, did not support or
+// timed out the presented capability, or was not a same-uid process.
+func isOwnerCapabilityRejection(err error) bool {
+	var foreign *client.ForeignPeerError
+	return errors.Is(err, client.ErrOwnerUnauthenticated) ||
+		errors.Is(err, client.ErrUnsupportedOwnerAuth) ||
+		errors.Is(err, client.ErrOwnerAuthTimeout) ||
+		errors.As(err, &foreign)
+}
+
+// isOwnerRecordError reports a record that is absent or does not describe the
+// live socket. During an owned start that record belongs to a predecessor and
+// is retryable; for an existing socket it is terminal.
+func isOwnerRecordError(err error) bool {
+	return errors.Is(err, control.ErrOwnerRecordMissing) || errors.Is(err, control.ErrStaleOwnerRecord)
+}
+
+// authenticateOwnChild authenticates the connection that proved this attempt's
+// identity token with the record that child published before the token became
+// observable. A record that does not describe the live socket, or that names
+// another owner, is reported as a retryable error, never as a rejection.
+func authenticateOwnChild(cl *client.Client, socketPath string, childPID int) error {
+	record, err := control.LoadOwnerRecord(socketPath)
+	if err != nil {
+		return err
+	}
+	if err := client.ValidateOwnerRecord(socketPath, record); err != nil {
+		return err
+	}
+	if record.OwnerPID != childPID {
+		// A winner rebound the path between the identity probe and this attach.
+		// Presenting its capability would hand the winner's secret to this
+		// launcher's own child.
+		return fmt.Errorf("%w: %s is owned by pid %d, not this launcher's child %d", control.ErrStaleOwnerRecord, socketPath, record.OwnerPID, childPID)
+	}
+	return cl.AuthenticateOwner(control.OwnerCapability{ID: record.CapabilityID, Secret: record.Secret})
 }
 
 func (l *supervisorLifecycle) Shutdown() error {

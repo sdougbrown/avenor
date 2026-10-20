@@ -3,7 +3,7 @@ import * as net from 'node:net'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { PassThrough } from 'node:stream'
-import { Client, dial, RpcError, type Event } from './client.js'
+import { Client, dial, OwnerAuthError, RpcError, type Event } from './client.js'
 import type {
   ExecutionIdentity,
   WorkflowCompleteParams,
@@ -883,6 +883,83 @@ describe('Client.close', () => {
     await expect(client.status()).rejects.toThrow()
     server.close()
   })
+})
+
+describe('Client.authenticateOwner', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  const ownerAuthError = (code: number, message: string, reason: string) =>
+    (req: any, sock: net.Socket) => {
+      sock.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: req.id,
+        error: { code, message, data: { version: 1, reason } },
+      }) + '\n')
+    }
+
+  const cases: Array<{
+    name: string
+    reply: (req: any, sock: net.Socket) => void
+    callTimeoutMs?: number
+    assert: (failure: unknown) => void
+  }> = [
+    {
+      name: 'a rejected capability',
+      reply: ownerAuthError(-32011, 'unauthenticated', 'capability-rejected'),
+      assert: failure => {
+        expect(failure).toBeInstanceOf(OwnerAuthError)
+        expect(failure).toMatchObject({ kind: 'unauthenticated' })
+        expect((failure as Error).message).toContain('capability-rejected')
+      },
+    },
+    {
+      name: 'a capability version the peer does not speak',
+      reply: ownerAuthError(-32012, 'unsupported owner authentication', 'unsupported-version'),
+      assert: failure => {
+        expect(failure).toBeInstanceOf(OwnerAuthError)
+        expect(failure).toMatchObject({ kind: 'unsupported' })
+      },
+    },
+    {
+      name: 'a peer-side authentication timeout',
+      reply: ownerAuthError(-32013, 'owner authentication timed out', 'peer-timeout'),
+      assert: failure => {
+        expect(failure).toBeInstanceOf(OwnerAuthError)
+        expect(failure).toMatchObject({ kind: 'timeout' })
+      },
+    },
+    {
+      name: 'no answer to the handshake',
+      reply: () => {},
+      callTimeoutMs: 100,
+      assert: failure => {
+        // The handshake call itself timed out, so the peer never answered the
+        // capability.
+        expect(failure).toBeInstanceOf(OwnerAuthError)
+        expect(failure).toMatchObject({ kind: 'timeout' })
+      },
+    },
+  ]
+
+  for (const testCase of cases) {
+    it(`classifies ${testCase.name}`, async () => {
+      const socketPath = tempSocketPath()
+      server = await startMockServer(socketPath, testCase.reply)
+      const client = await dial(socketPath, { callTimeoutMs: testCase.callTimeoutMs })
+      try {
+        const failure = await client
+          .authenticateOwner({ id: 'a'.repeat(32), secret: 'b'.repeat(64) })
+          .catch((err: unknown) => err)
+        testCase.assert(failure)
+      } finally {
+        client.close()
+      }
+    })
+  }
 })
 
 describe('Client.dial failure', () => {

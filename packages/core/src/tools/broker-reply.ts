@@ -15,7 +15,7 @@ async function executeBrokerReply(
   args: BrokerReplyArgs,
   getSupervisorClient: typeof realGetSupervisorClient,
 ): Promise<BrokerReplyResult> {
-  const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
+  const { client, isSingleton } = await getSupervisorClient(args.supervisorId, { owner: true })
   try {
     await client.brokerReply(args.toRunId, args.replyTo, args.message)
     return { ok: true }

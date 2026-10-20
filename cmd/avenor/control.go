@@ -13,6 +13,26 @@ import (
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
 
+// controlVerb is one control subcommand and the connection it needs: the
+// read-only verbs dial anonymously so they work against a live socket with no
+// published owner record, and the gated verbs attach as the socket's owner.
+type controlVerb struct {
+	dial func(string) (*client.Client, error)
+	run  func(*client.Client, []string) int
+}
+
+var controlVerbs = map[string]controlVerb{
+	"status":               {client.Dial, cmdStatus},
+	"list":                 {client.Dial, func(c *client.Client, _ []string) int { return cmdList(c) }},
+	"tail":                 {client.Dial, func(c *client.Client, _ []string) int { return cmdTail(c) }},
+	"spawn":                {client.AttachOwner, cmdSpawn},
+	"cancel":               {client.AttachOwner, cmdCancel},
+	"prompt":               {client.AttachOwner, cmdPrompt},
+	"interrupt-and-prompt": {client.AttachOwner, cmdInterruptAndPrompt},
+	"answer-permission":    {client.AttachOwner, cmdAnswerPermission},
+	"shutdown":             {client.AttachOwner, cmdShutdown},
+}
+
 func runControl(args []string) int {
 	fs := flag.NewFlagSet("control", flag.ContinueOnError)
 	socketFile := fs.String("socket", "", "control socket path (required)")
@@ -28,37 +48,19 @@ func runControl(args []string) int {
 		fmt.Fprintln(os.Stderr, "avenor control: command required (status, list, tail, spawn, cancel, prompt, interrupt-and-prompt, answer-permission, shutdown)")
 		return 1
 	}
+	verb, ok := controlVerbs[nonFlag[0]]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "avenor control: unknown command %q\n", nonFlag[0])
+		return 1
+	}
 
-	c, err := client.Dial(*socketFile)
+	c, err := verb.dial(*socketFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "avenor control: %v\n", err)
 		return 1
 	}
 	defer c.Close()
-
-	switch nonFlag[0] {
-	case "status":
-		return cmdStatus(c, nonFlag[1:])
-	case "list":
-		return cmdList(c)
-	case "tail":
-		return cmdTail(c)
-	case "spawn":
-		return cmdSpawn(c, nonFlag[1:])
-	case "cancel":
-		return cmdCancel(c, nonFlag[1:])
-	case "prompt":
-		return cmdPrompt(c, nonFlag[1:])
-	case "interrupt-and-prompt":
-		return cmdInterruptAndPrompt(c, nonFlag[1:])
-	case "answer-permission":
-		return cmdAnswerPermission(c, nonFlag[1:])
-	case "shutdown":
-		return cmdShutdown(c, nonFlag[1:])
-	default:
-		fmt.Fprintf(os.Stderr, "avenor control: unknown command %q\n", nonFlag[0])
-		return 1
-	}
+	return verb.run(c, nonFlag[1:])
 }
 
 func cmdStatus(c *client.Client, args []string) int {

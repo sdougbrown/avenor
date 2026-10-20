@@ -3,9 +3,11 @@ package control
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,8 +20,9 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/runtime"
-	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
@@ -29,6 +32,8 @@ const maxSendToParentMessageBytes = 64 * 1024
 const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
 
 var dialControlSocket = net.DialTimeout
+
+var errControlStopped = errors.New("control server stopped")
 
 // These no-op hooks let lifecycle tests coordinate at lock and transition
 // boundaries without changing production behavior.
@@ -67,11 +72,15 @@ type ControlServer struct {
 	path          string
 	socketInfo    os.FileInfo
 	identityToken string
-	stopped       bool
+	// identityTokenOverride supplies the attempt token instead of the
+	// environment, so tests can race two attempts with distinct tokens.
+	identityTokenOverride string
+	stopped               bool
 
 	conns      map[*connState]struct{}
 	subs       map[*subscriber]struct{}
-	owner      *connState
+	owner      OwnerCapability
+	recordID   SocketIdentity
 	watch      map[chan events.Event]struct{}
 	eventState map[string]*runtimeEventState
 
@@ -123,12 +132,13 @@ type StableHandler interface {
 }
 
 // AskError carries the broker message ID of a failed ask plus whether the
-// ask edge may still be pending on the broker. Pending is true only when the
-// edge was not provably cleaned up; callers can then withdraw it with
-// broker_cancel instead of retrying blind.
+// ask edge may still be pending. A failed wait is retracted by the ask client,
+// so Pending is false once that cleanup confirmed a terminal fence; callers can
+// withdraw a still-pending ask with broker_cancel instead of retrying blind.
 type AskError struct {
 	MessageID string
 	Pending   bool
+	Outcome   messaging.Outcome
 	Err       error
 }
 
@@ -139,7 +149,11 @@ func (e *AskError) Unwrap() error { return e.Err }
 func askErrorData(err error) any {
 	var ae *AskError
 	if errors.As(err, &ae) {
-		return map[string]any{"message_id": ae.MessageID, "pending": ae.Pending}
+		data := map[string]any{"message_id": ae.MessageID, "pending": ae.Pending}
+		if ae.Outcome != "" {
+			data["outcome"] = ae.Outcome
+		}
+		return data
 	}
 	return nil
 }
@@ -177,9 +191,10 @@ type subscriber struct {
 	closed    bool
 }
 
-func NewServer(state *ControlState) *ControlServer {
+func NewServer(state *ControlState, owner OwnerCapability) *ControlServer {
 	return &ControlServer{
 		state:         state,
+		owner:         owner,
 		conns:         map[*connState]struct{}{},
 		subs:          map[*subscriber]struct{}{},
 		watch:         map[chan events.Event]struct{}{},
@@ -269,15 +284,41 @@ func (s *ControlServer) SetCancelFunc(fn func()) { s.cancelFn = fn }
 // through stale-path removal and bind; Stop holds it through owned-path removal.
 func lockControlSocket(socketPath string) (*os.File, error) {
 	beforeControlSocketLock()
-	lockFile, err := os.OpenFile(socketPath+".control.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	lockFile, err := os.OpenFile(socketPath+".control.lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open control socket lock: %w", err)
+	}
+	if err := validateControlLock(lockFile); err != nil {
+		_ = lockFile.Close()
+		return nil, err
 	}
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
 		_ = lockFile.Close()
 		return nil, fmt.Errorf("lock control socket: %w", err)
 	}
 	return lockFile, nil
+}
+
+// validateControlLock validates the opened lock inode rather than its path, and
+// converges an inherited permissive mode without replacing the file.
+func validateControlLock(lockFile *os.File) error {
+	info, err := lockFile.Stat()
+	if err != nil {
+		return fmt.Errorf("stat control socket lock: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("control socket lock is not a regular file")
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("control socket lock is not owned by uid %d", os.Geteuid())
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := lockFile.Chmod(0o600); err != nil {
+			return fmt.Errorf("chmod control socket lock: %w", err)
+		}
+	}
+	return nil
 }
 
 func unlockControlSocket(lockFile *os.File) {
@@ -287,24 +328,35 @@ func unlockControlSocket(lockFile *os.File) {
 
 // removeOwnedSocket removes path only while l still proves it is the active
 // listener and path still names that listener's identity. The caller must hold
-// the control socket lock.
-func removeOwnedSocket(l net.Listener, path string, socketInfo os.FileInfo) {
+// the control socket lock. A path that no longer names this listener belongs to
+// a replacement and is left alone.
+func removeOwnedSocket(l net.Listener, path string, socketInfo os.FileInfo) error {
 	unixListener, ok := l.(*net.UnixListener)
 	if !ok || unixListener.SetDeadline(time.Now()) != nil {
-		return
+		return nil
 	}
 	current, err := os.Stat(path)
-	if err == nil && (socketInfo == nil || os.SameFile(current, socketInfo)) {
-		_ = os.Remove(path)
+	if err != nil {
+		return nil
 	}
+	if socketInfo != nil && !os.SameFile(current, socketInfo) {
+		return nil
+	}
+	if err := testOwnerSocketRemove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove control socket %s: %w", path, err)
+	}
+	return nil
 }
 
 func (s *ControlServer) Start(socketPath string) error {
 	// startSupervisor passes this one-shot token to prove that the process
 	// which acknowledged readiness is the process later reached by its parent.
 	// Clear it immediately so spawned providers cannot inherit it.
-	identityToken := os.Getenv(controlIdentityTokenEnv)
-	_ = os.Unsetenv(controlIdentityTokenEnv)
+	identityToken := s.identityTokenOverride
+	if identityToken == "" {
+		identityToken = os.Getenv(controlIdentityTokenEnv)
+		_ = os.Unsetenv(controlIdentityTokenEnv)
+	}
 
 	if socketPath == "" {
 		return nil
@@ -312,19 +364,23 @@ func (s *ControlServer) Start(socketPath string) error {
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 		return fmt.Errorf("create control socket dir: %w", err)
 	}
-	// Serialize stale-socket inspection and bind across independent stable
-	// starters. The lock is held only through Listen, so an attached client
-	// is never blocked from converging on the winner.
+	// Serialize stale-socket inspection, bind and publication across
+	// independent starters. Only the holder may unlink and bind.
 	lockFile, err := lockControlSocket(socketPath)
 	if err != nil {
 		return err
 	}
-	defer unlockControlSocket(lockFile)
+	locked := true
+	defer func() {
+		if locked {
+			unlockControlSocket(lockFile)
+		}
+	}()
 
 	if _, err := os.Stat(socketPath); err == nil {
 		if c, dialErr := dialControlSocket("unix", socketPath, 250*time.Millisecond); dialErr == nil {
 			_ = c.Close()
-			return fmt.Errorf("control socket already in use: %s", socketPath)
+			return fmt.Errorf("%w: %s", ErrSocketInUse, socketPath)
 		} else if !errors.Is(dialErr, syscall.ECONNREFUSED) {
 			// A timeout or transient error does not prove the socket is stale.
 			// Leave it intact rather than risking an active peer's path.
@@ -359,25 +415,68 @@ func (s *ControlServer) Start(socketPath string) error {
 		_ = os.Remove(socketPath)
 		return fmt.Errorf("stat control socket: %w", err)
 	}
+	identity, err := socketIdentity(info)
+	if err != nil {
+		_ = l.Close()
+		_ = os.Remove(socketPath)
+		return err
+	}
 
 	s.mu.Lock()
 	if s.stopped {
 		s.mu.Unlock()
 		// Start and Stop raced. We still own the control lock and the live
 		// listener, so clean up before returning without leaving a socket behind.
-		removeOwnedSocket(l, socketPath, info)
+		_ = removeOwnedSocket(l, socketPath, info)
 		_ = l.Close()
-		return fmt.Errorf("control server stopped")
+		return errControlStopped
+	}
+	s.mu.Unlock()
+
+	// A test can force the connectable-before-published window so a launcher's
+	// retry path is exercised against the real ordering instead of a race.
+	if os.Getenv(runtime.EnvTestHooks) == "1" {
+		if delay, err := time.ParseDuration(os.Getenv(runtime.EnvTestOwnerPublishDelay)); err == nil && delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+
+	// Bound-but-unpublished is not a usable server. Publish this child's record
+	// while the lock is still held and the listener is still live, and roll the
+	// whole attempt back if publication cannot be completed.
+	if err := s.publishOwnerRecord(socketPath, identity); err != nil {
+		recordErr := s.removeOwnerRecord(socketPath, identity, s.owner.ID)
+		socketErr := removeOwnedSocket(l, socketPath, info)
+		unlockControlSocket(lockFile)
+		locked = false
+		closeErr := l.Close()
+		return errors.Join(err, recordErr, socketErr, closeErr)
+	}
+
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		recordErr := s.removeOwnerRecord(socketPath, identity, s.owner.ID)
+		socketErr := removeOwnedSocket(l, socketPath, info)
+		unlockControlSocket(lockFile)
+		locked = false
+		return errors.Join(errControlStopped, recordErr, socketErr, l.Close())
 	}
 	s.listener = l
 	s.path = socketPath
 	s.socketInfo = info
+	s.recordID = identity
+	// The attempt token becomes observable only after this child's own record
+	// is on disk, so a launcher that reads the token can attribute the record
+	// to this process without ordering by time.
 	s.identityToken = identityToken
 	s.mu.Unlock()
+	unlockControlSocket(lockFile)
+	locked = false
 
 	// startSupervisor supplies this one-shot inherited descriptor. Signalling
-	// only after Listen succeeds lets its parent distinguish this child from a
-	// competing stable process that bound the same path first.
+	// only after bind and publication lets its parent distinguish this child
+	// from a competing stable process that bound the same path first.
 	readyFDValue := os.Getenv("AVENOR_CONTROL_READY_FD")
 	_ = os.Unsetenv("AVENOR_CONTROL_READY_FD")
 	if readyFD, err := strconv.Atoi(readyFDValue); err == nil && readyFD >= 3 {
@@ -392,39 +491,56 @@ func (s *ControlServer) Start(socketPath string) error {
 	return nil
 }
 
-func (s *ControlServer) Stop() {
+func (s *ControlServer) Stop() error {
 	s.mu.Lock()
 	if s.stopped {
 		s.mu.Unlock()
-		return
+		return nil
 	}
 	s.stopped = true
 	l := s.listener
 	path := s.path
 	socketInfo := s.socketInfo
+	identity := s.recordID
 	conns := make([]*connState, 0, len(s.conns))
 	for c := range s.conns {
 		conns = append(conns, c)
 	}
 	s.mu.Unlock()
 
+	var failures []error
 	// Serialize cleanup with Start's stale-path inspection and bind. Remove
 	// while the listener is still live; once it is closed, a replacement may
 	// bind and reuse its inode before a parent can safely inspect the path.
+	// The record removal takes the same lock, so a competing Start cannot rename
+	// its own record into place between the identity check and the unlink.
 	if l != nil && path != "" {
-		if lockFile, err := lockControlSocket(path); err == nil {
+		lockFile, lockErr := lockControlSocket(path)
+		if lockErr != nil {
+			failures = append(failures, lockErr)
+		} else {
 			beforeControlSocketCleanup()
-			removeOwnedSocket(l, path, socketInfo)
+			if err := s.removeOwnerRecord(path, identity, s.owner.ID); err != nil {
+				failures = append(failures, err)
+			}
+			if err := removeOwnedSocket(l, path, socketInfo); err != nil {
+				failures = append(failures, err)
+			}
 			unlockControlSocket(lockFile)
 		}
 	}
 	if l != nil {
-		_ = l.Close()
+		if err := l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			failures = append(failures, fmt.Errorf("close control listener: %w", err))
+		}
 	}
 	for _, c := range conns {
 		c.cancel()
-		_ = c.conn.Close()
+		if err := c.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			failures = append(failures, fmt.Errorf("close control connection: %w", err))
+		}
 	}
+	return errors.Join(failures...)
 }
 
 // HasClients reports whether the control plane has at least one connected
@@ -1047,9 +1163,9 @@ func (s *ControlServer) handleConn(c *connState) {
 const maxInflightAsksPerConn = 8
 
 // maxAskTimeoutMS is the server-side cap on a request's timeout_ms. It sits
-// below the broker's DefaultAskTimeout so a clamped value expires on the
+// below the ask store's DefaultAskTimeout so a clamped value expires on the
 // server (with structured error data) instead of racing the broker's 504.
-const maxAskTimeoutMS = int64(broker.DefaultAskTimeout-5*time.Second) / int64(time.Millisecond)
+const maxAskTimeoutMS = int64(askstore.DefaultAskTimeout-5*time.Second) / int64(time.Millisecond)
 
 // codeWaitTurnTimeout marks a wait_turn request whose timeout_ms elapsed
 // before the runtime's turn settled. Clients match this code to a typed
@@ -1069,6 +1185,8 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 	switch req.Method {
 	case "identity":
 		return success(req.ID, map[string]any{"token": s.identityToken})
+	case "authenticate_owner":
+		return s.authenticateOwner(c, req)
 	case "result":
 		runtimeID := runtimeIDFromParams(req.Params)
 		if runtimeID == "" {
@@ -1821,25 +1939,74 @@ func (s *ControlServer) dispatchWorkflowController(c *connState, req Request) Re
 	}
 }
 
-// ensureOwner implements first-come-first-served ownership: the first connected
-// client to issue a mutating command becomes the owner. When the owner
-// disconnects, ownership is released and the next client to call a mutating
-// method inherits it. This relies on Unix socket permissions (0600) for
-// process-level isolation.
+// authenticateOwner compares the presented capability against the immutable
+// construction principal and sets only this connection's owner bit. A failed
+// attempt clears that bit and never touches another connection, admitted work
+// or the principal.
+func (s *ControlServer) authenticateOwner(c *connState, req Request) Response {
+	var params OwnerAuthRequest
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return ownerAuthFailure(req.ID, CodeUnsupportedOwnerAuth, "malformed-params")
+		}
+	}
+	if params.Version != OwnerAuthVersion {
+		reason := "version-" + strconv.Itoa(params.Version)
+		s.setConnectionOwner(c, false)
+		return ownerAuthFailure(req.ID, CodeUnsupportedOwnerAuth, reason)
+	}
+	if !s.matchesOwnerCapability(params.CapabilityID, params.Secret) {
+		s.setConnectionOwner(c, false)
+		return ownerAuthFailure(req.ID, CodeOwnerUnauthenticated, "capability-mismatch")
+	}
+	s.setConnectionOwner(c, true)
+	return success(req.ID, OwnerAuthResult{Version: OwnerAuthVersion, Authenticated: true, CapabilityID: s.owner.ID})
+}
+
+// matchesOwnerCapability compares both halves in constant time. A length
+// mismatch is a plain rejection; nothing reports which half matched.
+func (s *ControlServer) matchesOwnerCapability(capabilityID, secret string) bool {
+	if s.owner.ID == "" || s.owner.Secret == "" {
+		return false
+	}
+	idOK := subtle.ConstantTimeCompare([]byte(capabilityID), []byte(s.owner.ID))
+	secretOK := subtle.ConstantTimeCompare([]byte(secret), []byte(s.owner.Secret))
+	return idOK&secretOK == 1
+}
+
+func (s *ControlServer) setConnectionOwner(c *connState, owner bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.isOwner = owner
+}
+
+func ownerAuthFailure(id any, code int, reason string) Response {
+	return failure(id, code, ownerAuthMessage(code), OwnerAuthErrorData{Version: OwnerAuthVersion, Reason: reason})
+}
+
+func ownerAuthMessage(code int) string {
+	switch code {
+	case CodeOwnerUnauthenticated:
+		return "unauthenticated"
+	case CodeOwnerAuthTimeout:
+		return "owner authentication timed out"
+	default:
+		return "unsupported owner authentication"
+	}
+}
+
+// ensureOwner reports whether this connection authenticated as the
+// construction owner. Disconnection discards only that connection's bit.
 func (s *ControlServer) ensureOwner(c *connState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.owner == nil {
-		s.owner = c
-		c.isOwner = true
-		return true
-	}
-	return s.owner == c
+	return c.isOwner
 }
 
 func (s *ControlServer) disconnect(c *connState) {
 	s.mu.Lock()
 	delete(s.conns, c)
+	c.isOwner = false
 	for sub := range s.subs {
 		if sub.conn == c {
 			delete(s.subs, sub)
@@ -1847,9 +2014,6 @@ func (s *ControlServer) disconnect(c *connState) {
 			sub.closeLocked()
 			sub.mu.Unlock()
 		}
-	}
-	if s.owner == c {
-		s.owner = nil
 	}
 	allGone := len(s.conns) == 0
 	s.mu.Unlock()

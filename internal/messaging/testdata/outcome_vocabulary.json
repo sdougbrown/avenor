@@ -1,0 +1,13 @@
+{
+  "outcomes": [
+    {"outcome": "sent", "mayHaveBeenTransmitted": true, "terminal": false, "reuseMessageId": false},
+    {"outcome": "replied", "mayHaveBeenTransmitted": true, "terminal": true, "reuseMessageId": false},
+    {"outcome": "timed-out", "mayHaveBeenTransmitted": true, "terminal": true, "reuseMessageId": false},
+    {"outcome": "withdrawn", "mayHaveBeenTransmitted": true, "terminal": true, "reuseMessageId": false},
+    {"outcome": "edge-absent", "mayHaveBeenTransmitted": true, "terminal": true, "reuseMessageId": false},
+    {"outcome": "auth-rejected", "mayHaveBeenTransmitted": false, "terminal": true, "reuseMessageId": false},
+    {"outcome": "not-sent", "mayHaveBeenTransmitted": false, "terminal": true, "reuseMessageId": false},
+    {"outcome": "possibly-pending", "mayHaveBeenTransmitted": true, "terminal": true, "reuseMessageId": false},
+    {"outcome": "lost", "mayHaveBeenTransmitted": true, "terminal": true, "reuseMessageId": false}
+  ]
+}

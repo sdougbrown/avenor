@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -12,10 +14,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 func TestStartSupervisorLeavesStaleSocketForChild(t *testing.T) {
@@ -76,6 +81,31 @@ func TestStartSupervisorOmitsLaunchWrapperPolicyByDefault(t *testing.T) {
 	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
 	if strings.Contains(strings.Join(capturedArgs, " "), "mcp-launch-wrapper-policy") {
 		t.Fatalf("args = %v, want no policy flag", capturedArgs)
+	}
+}
+
+// TestStartSupervisorScrubsTestHookEnv proves the autostarted supervisor child
+// never inherits the control test hooks.
+func TestStartSupervisorScrubsTestHookEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(runtime.EnvTestHooks, "1")
+	t.Setenv(runtime.EnvTestOwnerPublishDelay, "5s")
+	var child *exec.Cmd
+	origExec := execCommand
+	execCommand = func(string, ...string) *exec.Cmd {
+		child = exec.Command("/nonexistent/avenor-test-stub")
+		return child
+	}
+	defer func() { execCommand = origExec }()
+
+	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+	if child == nil {
+		t.Fatal("startSupervisor never built a child command")
+	}
+	for _, entry := range child.Env {
+		if strings.HasPrefix(entry, runtime.EnvTestHooks+"=") || strings.HasPrefix(entry, runtime.EnvTestOwnerPublishDelay+"=") {
+			t.Fatalf("test hook %q reached the supervisor child environment", entry)
+		}
 	}
 }
 
@@ -323,6 +353,7 @@ func TestStartSupervisorReuseExistingSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
+	cap := publishOwnerRecordForStub(t, socketPath)
 
 	// Accept multiple connections; each connection handles multiple
 	// requests (the Client maintains a persistent connection).
@@ -341,8 +372,11 @@ func TestStartSupervisorReuseExistingSocket(t *testing.T) {
 						continue
 					}
 					resp := client.Response{JSONRPC: "2.0", ID: req.ID}
-					snap := map[string]any{"session_id": "ses_test", "phase": "working"}
-					resp.Result, _ = json.Marshal(snap)
+					if req.Method == "authenticate_owner" {
+						resp = ownerAuthResponse(req, cap)
+					} else {
+						resp.Result, _ = json.Marshal(map[string]any{"session_id": "ses_test", "phase": "working"})
+					}
 					data, _ := json.Marshal(resp)
 					data = append(data, '\n')
 					c.Write(data)
@@ -406,11 +440,22 @@ func TestMCPSupervisorChild(t *testing.T) {
 	path := os.Getenv("AVENOR_MCP_SUPERVISOR_SOCKET")
 	identityToken := os.Getenv(controlIdentityTokenEnv)
 	_ = os.Unsetenv(controlIdentityTokenEnv)
+	// A real child removes a proven-stale path under the control lock before
+	// binding; the stub does the same so a predecessor's leftover socket does
+	// not block it.
+	if _, err := os.Stat(path); err == nil {
+		if c, dialErr := net.DialTimeout("unix", path, 250*time.Millisecond); dialErr == nil {
+			_ = c.Close()
+			t.Fatalf("child socket %s is live", path)
+		}
+		_ = os.Remove(path)
+	}
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatalf("child listen: %v", err)
 	}
 	defer ln.Close()
+	cap := publishOwnerRecordForStub(t, path)
 	signalMCPStartupReady()
 	for {
 		conn, err := ln.Accept()
@@ -426,7 +471,9 @@ func TestMCPSupervisorChild(t *testing.T) {
 					continue
 				}
 				resp := client.Response{JSONRPC: "2.0", ID: req.ID}
-				if req.Method == "identity" {
+				if req.Method == "authenticate_owner" {
+					resp = ownerAuthResponse(req, cap)
+				} else if req.Method == "identity" {
 					resp.Result, _ = json.Marshal(map[string]any{"token": identityToken})
 				} else {
 					resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
@@ -458,7 +505,7 @@ func TestPreReadyWinnerIsSharedAndSurvivesLoserClose(t *testing.T) {
 		if err != nil {
 			t.Fatalf("start competing winner: %v", err)
 		}
-		go serveHealthySupervisor(winner)
+		go serveHealthySupervisor(winner, publishOwnerRecordForStub(t, socketPath))
 		// The child has not bound the socket and therefore cannot send the
 		// readiness acknowledgement. It exits after the winner is healthy.
 		return exec.Command("sleep", "0.1")
@@ -480,8 +527,8 @@ func TestPreReadyWinnerIsSharedAndSurvivesLoserClose(t *testing.T) {
 	if err := lifecycle.Close(); err != nil {
 		t.Fatalf("close loser lifecycle: %v", err)
 	}
-	if cl, ok := dialHealthySupervisor(socketPath); !ok {
-		t.Fatal("loser close shut down or removed the competing winner")
+	if cl, state, err := attachSupervisor(socketPath); state != supervisorLive {
+		t.Fatalf("loser close shut down or removed the competing winner: %v", err)
 	} else {
 		_ = cl.Close()
 	}
@@ -615,7 +662,8 @@ func TestPostReadyReplacementIsShared(t *testing.T) {
 		t.Fatalf("start replacement supervisor: %v", err)
 	}
 	defer winner.Close()
-	go serveHealthySupervisor(winner) // Its identity response has an empty token.
+	// Its identity response has an empty token.
+	go serveHealthySupervisor(winner, publishOwnerRecordForStub(t, socketPath))
 
 	// The replacement is bound before the parent can make its first probe.
 	release()
@@ -643,7 +691,7 @@ func TestPostReadyReplacementIsShared(t *testing.T) {
 	}
 }
 
-func serveHealthySupervisor(ln net.Listener) {
+func serveHealthySupervisor(ln net.Listener, cap control.OwnerCapability) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -658,7 +706,11 @@ func serveHealthySupervisor(ln net.Listener) {
 					continue
 				}
 				resp := client.Response{JSONRPC: "2.0", ID: req.ID}
-				resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
+				if req.Method == "authenticate_owner" {
+					resp = ownerAuthResponse(req, cap)
+				} else {
+					resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
+				}
 				data, _ := json.Marshal(resp)
 				_, _ = c.Write(append(data, '\n'))
 			}
@@ -729,8 +781,8 @@ func TestCompetingLifecycleStartersConvergeOnWinner(t *testing.T) {
 	if err := shared.Close(); err != nil {
 		t.Fatalf("close shared lifecycle: %v", err)
 	}
-	if winnerClient, ok := dialHealthySupervisor(socketPath); !ok {
-		t.Fatal("shared cleanup removed the winner socket")
+	if winnerClient, state, err := attachSupervisor(socketPath); state != supervisorLive {
+		t.Fatalf("shared cleanup removed the winner socket: %v", err)
 	} else {
 		_ = winnerClient.Close()
 	}
@@ -751,6 +803,7 @@ func TestCompetingLifecycleAttachmentsDoNotRemoveWinner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
+	cap := publishOwnerRecordForStub(t, socketPath)
 
 	go func() {
 		for {
@@ -767,7 +820,11 @@ func TestCompetingLifecycleAttachmentsDoNotRemoveWinner(t *testing.T) {
 						continue
 					}
 					resp := client.Response{JSONRPC: "2.0", ID: req.ID}
-					resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
+					if req.Method == "authenticate_owner" {
+						resp = ownerAuthResponse(req, cap)
+					} else {
+						resp.Result, _ = json.Marshal(map[string]any{"phase": "working"})
+					}
 					data, _ := json.Marshal(resp)
 					_, _ = c.Write(append(data, '\n'))
 				}
@@ -795,8 +852,8 @@ func TestCompetingLifecycleAttachmentsDoNotRemoveWinner(t *testing.T) {
 	if _, err := os.Stat(socketPath); err != nil {
 		t.Fatalf("winner socket removed by competing cleanup: %v", err)
 	}
-	if winnerClient, ok := dialHealthySupervisor(socketPath); !ok {
-		t.Fatal("winner supervisor is no longer healthy")
+	if winnerClient, state, err := attachSupervisor(socketPath); state != supervisorLive {
+		t.Fatalf("winner supervisor is no longer healthy: %v", err)
 	} else {
 		_ = winnerClient.Close()
 	}
@@ -826,6 +883,33 @@ func TestLifecycleShutdownIsIdempotentAfterChildExit(t *testing.T) {
 	}
 }
 
+// TestAuthenticateOwnChildRefusesAnotherOwnerRecord proves another owner's
+// record never reaches the capability handshake: the mismatch stays in the
+// retryable replacement window, so the peer that would accept that capability
+// receives nothing.
+func TestAuthenticateOwnChildRefusesAnotherOwnerRecord(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "own.sock")
+	_, authCount, _, stop := startStubSupervisorListener(t, socket)
+	defer stop()
+	record, err := control.LoadOwnerRecord(socket)
+	if err != nil {
+		t.Fatalf("load record: %v", err)
+	}
+	writeOwnerRecord(t, socket, control.OwnerCapability{ID: record.CapabilityID, Secret: record.Secret}, os.Getpid()+1)
+
+	cl, err := client.Dial(socket)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cl.Close()
+	if err := authenticateOwnChild(cl, socket, os.Getpid()); !isOwnerRecordError(err) {
+		t.Fatalf("authenticateOwnChild = %v, want a retryable record error", err)
+	}
+	if n := authCount(); n != 0 {
+		t.Fatalf("the peer that holds the socket answered %d authenticate_owner requests, want 0", n)
+	}
+}
+
 func TestStartSupervisorExitsDuringStartup(t *testing.T) {
 	tmpDir := t.TempDir()
 	socketPath := filepath.Join(tmpDir, "exit-test.sock")
@@ -844,4 +928,302 @@ func TestStartSupervisorExitsDuringStartup(t *testing.T) {
 	if !strings.Contains(err.Error(), "exited during startup") {
 		t.Errorf("expected error to contain 'exited during startup', got: %v", err)
 	}
+}
+
+// TestMCPAttachAfterSIGKILLUsesTypedOutcomes proves the launcher's replacement
+// decision is driven by the probe outcome, not by a boolean health check: only
+// ECONNREFUSED or an absent path authorizes a replacement.
+func TestMCPAttachAfterSIGKILLUsesTypedOutcomes(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "mcp-typed-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	t.Run("absent path is dead", func(t *testing.T) {
+		if _, state, err := attachSupervisor(filepath.Join(dir, "absent.sock")); state != supervisorDead || err == nil {
+			t.Fatalf("state = %v err = %v, want dead", state, err)
+		}
+	})
+
+	t.Run("leftover socket is dead", func(t *testing.T) {
+		socket := filepath.Join(dir, "leftover.sock")
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ln.(*net.UnixListener).SetUnlinkOnClose(false)
+		_ = ln.Close()
+		if _, state, _ := attachSupervisor(socket); state != supervisorDead {
+			t.Fatalf("state = %v, want dead", state)
+		}
+	})
+
+	t.Run("live socket without a record rejects attachment", func(t *testing.T) {
+		socket := filepath.Join(dir, "norecord.sock")
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go func(c net.Conn) { _ = c.Close() }(conn)
+			}
+		}()
+		if _, state, err := attachSupervisor(socket); state != supervisorAuthRejected || !errors.Is(err, control.ErrOwnerRecordMissing) {
+			t.Fatalf("state = %v err = %v, want auth-rejected on the missing record", state, err)
+		}
+	})
+
+	t.Run("rejected capability is auth-rejected", func(t *testing.T) {
+		socket := filepath.Join(dir, "wrongcap.sock")
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		publishOwnerRecordForStub(t, socket)
+		other, err := control.GenerateOwnerCapability()
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go serveOwnerAuthOnly(conn, other, nil)
+			}
+		}()
+		if _, state, err := attachSupervisor(socket); state != supervisorAuthRejected || !errors.Is(err, client.ErrOwnerUnauthenticated) {
+			t.Fatalf("state = %v err = %v, want auth-rejected on the rejected capability", state, err)
+		}
+	})
+
+	t.Run("uncertain probe never spawns a replacement", func(t *testing.T) {
+		origDial := supervisorProbeDial
+		supervisorProbeDial = func(string) (net.Conn, error) {
+			return nil, &net.OpError{Op: "dial", Err: syscall.ETIMEDOUT}
+		}
+		t.Cleanup(func() { supervisorProbeDial = origDial })
+
+		origExec := execCommand
+		execCalled := false
+		execCommand = func(string, ...string) *exec.Cmd {
+			execCalled = true
+			return exec.Command("true")
+		}
+		t.Cleanup(func() { execCommand = origExec })
+
+		_, err := startSupervisor(filepath.Join(dir, "uncertain.sock"), 0, "")
+		if err == nil {
+			t.Fatal("uncertain probe started a replacement")
+		}
+		if execCalled {
+			t.Fatal("uncertain probe reached the child spawn")
+		}
+	})
+}
+
+// TestReplacementNotBlockedByMissingTombstone proves the tombstone neither
+// authorizes nor blocks a replacement: its absence and presence both produce
+// the same decision and the launcher never touches it.
+func TestReplacementNotBlockedByMissingTombstone(t *testing.T) {
+	cases := []struct {
+		name     string
+		tombston string
+	}{
+		{"absent", ""},
+		{"present", "STOPPED reason=signal pid=2 at=2026-10-19T00:00:00Z\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, err := os.MkdirTemp("/tmp", "mcp-tomb-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			socket := filepath.Join(dir, "tomb.sock")
+			// A SIGKILLed predecessor leaves the socket path behind with no
+			// listener, and no tombstone was written for it.
+			ln, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ln.(*net.UnixListener).SetUnlinkOnClose(false)
+			_ = ln.Close()
+			tombstone := socket + ".dead"
+			if tc.tombston != "" {
+				if err := os.WriteFile(tombstone, []byte(tc.tombston), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			origExec := execCommand
+			t.Cleanup(func() { execCommand = origExec })
+			execCommand = func(string, ...string) *exec.Cmd {
+				cmd := exec.Command(os.Args[0], "-test.run=TestMCPSupervisorChild")
+				cmd.Env = append(os.Environ(),
+					"AVENOR_MCP_SUPERVISOR_CHILD=1",
+					"AVENOR_MCP_SUPERVISOR_SOCKET="+socket,
+				)
+				return cmd
+			}
+
+			lifecycle, err := startSupervisor(socket, 0, "")
+			if err != nil {
+				t.Fatalf("startSupervisor: %v", err)
+			}
+			if lifecycle.shared {
+				t.Fatal("dead owner was attached instead of replaced")
+			}
+			if err := lifecycle.Close(); err != nil {
+				t.Fatalf("close replacement: %v", err)
+			}
+			got, err := os.ReadFile(tombstone)
+			if tc.tombston == "" {
+				if err == nil {
+					t.Fatalf("launcher created a tombstone: %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read tombstone: %v", err)
+			}
+			if string(got) != tc.tombston {
+				t.Fatalf("tombstone = %q, want %q", got, tc.tombston)
+			}
+		})
+	}
+}
+
+// TestNoLauncherUnlinksOwnerArtifacts proves no launcher failure path removes
+// the socket, its owner record, its control lock or its tombstone.
+func TestNoLauncherUnlinksOwnerArtifacts(t *testing.T) {
+	type scenario struct {
+		name  string
+		setup func(t *testing.T, socket string)
+	}
+	// leftovers models a dead owner's artifacts: a bound-then-closed socket, a
+	// published record, a control lock and a tombstone.
+	leftovers := func(t *testing.T, socket string) {
+		t.Helper()
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ln.(*net.UnixListener).SetUnlinkOnClose(false)
+		_ = ln.Close()
+		publishOwnerRecordForStub(t, socket)
+		if err := os.WriteFile(socket+".control.lock", []byte("lock"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(socket+".dead", []byte("STOPPED reason=signal pid=1 at=2026-10-19T00:00:00Z\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// liveRejectingOwner models a live supervisor this process cannot
+	// authenticate to.
+	liveRejectingOwner := func(t *testing.T, socket string) {
+		t.Helper()
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		publishOwnerRecordForStub(t, socket)
+		other, err := control.GenerateOwnerCapability()
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go serveOwnerAuthOnly(conn, other, nil)
+			}
+		}()
+		if err := os.WriteFile(socket+".control.lock", []byte("lock"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(socket+".dead", []byte("STOPPED reason=signal pid=1 at=2026-10-19T00:00:00Z\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []scenario{
+		{"spawn failure", leftovers},
+		{"child exits during startup", leftovers},
+		{"startup timeout", leftovers},
+		{"auth rejected", liveRejectingOwner},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, err := os.MkdirTemp("/tmp", "mcp-keep-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			socket := filepath.Join(dir, "keep.sock")
+			tc.setup(t, socket)
+			before := snapshotLauncherArtifacts(t, socket)
+
+			origExec := execCommand
+			origTimeout := startupTimeout
+			t.Cleanup(func() {
+				execCommand = origExec
+				startupTimeout = origTimeout
+			})
+			switch tc.name {
+			case "spawn failure":
+				execCommand = func(string, ...string) *exec.Cmd {
+					return exec.Command("/nonexistent/avenor-test-stub")
+				}
+			case "child exits during startup":
+				execCommand = func(string, ...string) *exec.Cmd { return exec.Command("true") }
+			case "startup timeout":
+				startupTimeout = 100 * time.Millisecond
+				execCommand = func(string, ...string) *exec.Cmd { return exec.Command("sleep", "10") }
+			}
+
+			if _, err := startSupervisor(socket, 0, ""); err == nil {
+				t.Fatal("startSupervisor succeeded, want a failure")
+			}
+			after := snapshotLauncherArtifacts(t, socket)
+			for path, want := range before {
+				if got, ok := after[path]; !ok {
+					t.Fatalf("%s was removed by a failing launcher", path)
+				} else if got != want {
+					t.Fatalf("%s changed: %q -> %q", path, want, got)
+				}
+			}
+		})
+	}
+}
+
+// snapshotLauncherArtifacts captures the artifacts a launcher must never
+// mutate: the socket's identity, the record, the control lock and the
+// tombstone.
+func snapshotLauncherArtifacts(t *testing.T, socket string) map[string]string {
+	t.Helper()
+	info, err := os.Lstat(socket)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	snapshot := map[string]string{socket: fmt.Sprintf("%v:%v", info.Mode(), info.Size())}
+	for _, path := range []string{socket + ".owner.json", socket + ".control.lock", socket + ".dead"} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		snapshot[path] = string(body)
+	}
+	return snapshot
 }
