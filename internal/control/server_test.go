@@ -1434,6 +1434,100 @@ func TestSubscriberBuffersLiveSequenceUntilReplayIsQueued(t *testing.T) {
 	}
 }
 
+// TestStopFlushesQueuedSubscriberEvents requires Stop to deliver the events
+// already queued for a subscriber before it closes the connection. The reader
+// starts only once Stop begins flushing, so a shutdown that closes the
+// connection first drops them.
+func TestStopFlushesQueuedSubscriberEvents(t *testing.T) {
+	origHook := beforeSubscriberFlush
+	defer func() { beforeSubscriberFlush = origHook }()
+	flushStarted := make(chan struct{})
+	beforeSubscriberFlush = func() { close(flushStarted) }
+
+	s, _ := NewTestServer(NewState("run_1", "", 0))
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	cs := &connState{server: s, conn: serverConn}
+	cs.ctx, cs.cancel = context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.conns[cs] = struct{}{}
+	s.mu.Unlock()
+	if resp := s.dispatch(cs, Request{JSONRPC: "2.0", ID: 1, Method: "subscribe"}); resp.Error != nil {
+		t.Fatalf("subscribe: %+v", resp.Error)
+	}
+
+	// Nothing reads the connection yet, so the writer loop blocks on the first
+	// event and the rest stay queued when Stop runs.
+	const queued = 200
+	for i := 0; i < queued-1; i++ {
+		s.PublishEvent(events.Event{Event: "agent.message_chunk", Fields: map[string]any{"i": i}})
+	}
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "end_turn"}})
+
+	readDone := make(chan []string, 1)
+	go func() {
+		<-flushStarted
+		var names []string
+		_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		scanner := bufio.NewScanner(clientConn)
+		for scanner.Scan() {
+			var n Notification
+			if err := json.Unmarshal(scanner.Bytes(), &n); err != nil || n.Method != "event" {
+				continue
+			}
+			m, _ := n.Params.(map[string]any)
+			name, _ := m["event"].(string)
+			names = append(names, name)
+		}
+		readDone <- names
+	}()
+
+	if err := s.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	select {
+	case <-flushStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop closed the subscriber without flushing its queued events")
+	}
+
+	got := <-readDone
+	if len(got) != queued {
+		t.Fatalf("delivered %d of %d queued events", len(got), queued)
+	}
+	if last := got[len(got)-1]; last != "session.end" {
+		t.Fatalf("last delivered event = %q, want session.end", last)
+	}
+}
+
+// TestStopBoundsStuckSubscriberFlush requires a subscriber that never reads its
+// queue to delay Stop by no more than the flush bound.
+func TestStopBoundsStuckSubscriberFlush(t *testing.T) {
+	s, _ := NewTestServer(NewState("run_1", "", 0))
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	cs := &connState{server: s, conn: serverConn}
+	cs.ctx, cs.cancel = context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.conns[cs] = struct{}{}
+	s.mu.Unlock()
+	if resp := s.dispatch(cs, Request{JSONRPC: "2.0", ID: 1, Method: "subscribe"}); resp.Error != nil {
+		t.Fatalf("subscribe: %+v", resp.Error)
+	}
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "end_turn"}})
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- s.Stop() }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop waited on a subscriber that never reads")
+	}
+}
+
 func TestSubscriberDisconnectCleansUp(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s, _ := NewTestServer(state)

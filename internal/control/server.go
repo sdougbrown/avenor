@@ -27,6 +27,11 @@ import (
 )
 
 const subscriberBuffer = 256
+
+// subscriberFlushTimeout bounds how long Stop spends delivering events a
+// subscriber already had queued, so a stuck reader cannot hold up shutdown.
+const subscriberFlushTimeout = 250 * time.Millisecond
+
 const maxSendToParentMessageBytes = 64 * 1024
 
 const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
@@ -40,6 +45,7 @@ var errControlStopped = errors.New("control server stopped")
 var beforeControlSocketLock = func() {}
 var beforeControlSocketCleanup = func() {}
 var beforeDirectPermissionClaimWait = func() {}
+var beforeSubscriberFlush = func() {}
 
 type PermissionAnswer struct {
 	RequestID string `json:"request_id"`
@@ -182,6 +188,7 @@ type connState struct {
 type subscriber struct {
 	conn      *connState
 	ch        chan events.Event
+	done      chan struct{}
 	runtimeID string
 	pending   []events.Event
 	dropped   int
@@ -534,6 +541,7 @@ func (s *ControlServer) Stop() error {
 			failures = append(failures, fmt.Errorf("close control listener: %w", err))
 		}
 	}
+	s.flushSubscribers()
 	for _, c := range conns {
 		c.cancel()
 		if err := c.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -541,6 +549,39 @@ func (s *ControlServer) Stop() error {
 		}
 	}
 	return errors.Join(failures...)
+}
+
+func (s *ControlServer) flushSubscribers() {
+	beforeSubscriberFlush()
+	deadline := time.Now().Add(subscriberFlushTimeout)
+
+	s.mu.Lock()
+	subs := make([]*subscriber, 0, len(s.subs))
+	for sub := range s.subs {
+		subs = append(subs, sub)
+	}
+	s.mu.Unlock()
+
+	// Bound each write first: a subscriber whose reader is gone must fail its
+	// pending write instead of blocking the drain until then.
+	for _, sub := range subs {
+		_ = sub.conn.conn.SetWriteDeadline(deadline)
+	}
+	for _, sub := range subs {
+		sub.mu.Lock()
+		sub.ready = true
+		for _, ev := range sub.pending {
+			if sub.recordSeqLocked(ev) {
+				sub.enqueueLocked(ev)
+			}
+		}
+		sub.pending = nil
+		sub.closeLocked()
+		sub.mu.Unlock()
+	}
+	for _, sub := range subs {
+		sub.waitDrained(deadline)
+	}
 }
 
 // HasClients reports whether the control plane has at least one connected
@@ -2051,6 +2092,7 @@ func newSubscriber(conn *connState, runtimeID string, afterSeq int64) *subscribe
 	sub := &subscriber{
 		conn:      conn,
 		ch:        make(chan events.Event, subscriberBuffer),
+		done:      make(chan struct{}),
 		runtimeID: runtimeID,
 		seenSeq:   map[string]int64{},
 	}
@@ -2058,6 +2100,20 @@ func newSubscriber(conn *connState, runtimeID string, afterSeq int64) *subscribe
 		sub.seenSeq[runtimeID] = afterSeq
 	}
 	return sub
+}
+
+// waitDrained blocks until the writer loop has written everything queued at
+// close, or until deadline passes.
+func (s *subscriber) waitDrained(deadline time.Time) {
+	if s.done == nil {
+		return
+	}
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-s.done:
+	case <-timer.C:
+	}
 }
 
 func (s *subscriber) closeLocked() {
@@ -2178,6 +2234,11 @@ func (s *subscriber) start(replay []events.Event) {
 }
 
 func (s *subscriber) loop() {
+	defer func() {
+		if s.done != nil {
+			close(s.done)
+		}
+	}()
 	pendingLag := 0
 	for ev := range s.ch {
 		s.mu.Lock()

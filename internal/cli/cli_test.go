@@ -3780,6 +3780,59 @@ func TestRunResultFileControlPromptTurn(t *testing.T) {
 	}
 }
 
+// TestControlStreamDeliversDirectRunSessionEnd covers the subscriber's side of
+// a direct run: a client subscribed while the run is live still receives the
+// final session.end, even though the run exits and stops its control server
+// immediately after publishing it.
+func TestControlStreamDeliversDirectRunSessionEnd(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	released := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(released)
+	provider := newScriptedProvider()
+	provider.turns = []scriptedTurn{{chunk: "answer", stopReason: "end_turn"}}
+	provider.promptStarted, provider.release = started, release
+	stubProvider(t, provider)
+
+	socketPath := shortControlSocketPath(t)
+	done := runAsync("--prompt", "hi", "--backend", "pi", "--control-socket", socketPath)
+	waitForTest(t, "the first turn", started)
+
+	c, err := client.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial control socket: %v", err)
+	}
+	defer c.Close()
+	// Registering the subscription also waits for the server's subscribe
+	// reply, so the run cannot settle before this client is in its subscriber
+	// set.
+	eventCh := c.Events()
+
+	released()
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev, ok := <-eventCh:
+			if !ok {
+				t.Fatal("event stream closed before session.end was delivered")
+			}
+			if ev.Event != "session.end" {
+				continue
+			}
+			if got, _ := ev.Raw["stop_reason"].(string); got != "end_turn" {
+				t.Fatalf("session.end stop_reason = %q, want end_turn", got)
+			}
+			if got := awaitRun(t, done, "the direct run"); got.code != 0 {
+				t.Fatalf("run() = %d, want 0; stderr=%s", got.code, got.stderr)
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for the direct run's session.end")
+		}
+	}
+}
+
 // TestControlPermissionResolution verifies that a control socket owner can
 // answer a permission.request via answer_permission, which flows through
 // resolvePermission and calls AnswerPermission on the provider.
