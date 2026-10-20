@@ -799,28 +799,7 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 		return err
 	}
 	dir := s.controllerDir(controllerID)
-	tmp, err := os.CreateTemp(dir, "controller.json.tmp*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, s.snapshotPath(controllerID)); err != nil {
+	if err := durablefile.WriteFileAtomic(s.snapshotPath(controllerID), "controller.json.tmp-*", data, 0o644); err != nil {
 		return err
 	}
 	if err := durablefile.FsyncDir(dir); err != nil {

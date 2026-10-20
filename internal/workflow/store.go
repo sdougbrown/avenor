@@ -242,31 +242,11 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(s.instanceDir(workflowID), "workflow.json.tmp*")
-	if err != nil {
+	dir := s.instanceDir(workflowID)
+	if err := durablefile.WriteFileAtomic(s.workflowPath(workflowID), "workflow.json.tmp-*", data, 0o644); err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, s.workflowPath(workflowID)); err != nil {
-		return err
-	}
-	return durablefile.FsyncDir(s.instanceDir(workflowID))
+	return durablefile.FsyncDir(dir)
 }
 
 // StoreTemplate atomically persists a versioned template under
@@ -330,28 +310,8 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, string(templateVersion)+".json.tmp*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := os.Chmod(tmpName, 0o644); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
+	pattern := string(templateVersion) + ".json.tmp-*"
+	if err := durablefile.WriteFileAtomic(path, pattern, data, 0o644); err != nil {
 		return err
 	}
 	return durablefile.FsyncDir(dir)
