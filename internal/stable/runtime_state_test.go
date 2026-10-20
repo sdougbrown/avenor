@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -270,6 +271,19 @@ func TestPruneArtifactDirsKeepsLiveRunDirectory(t *testing.T) {
 	}
 }
 
+// TestArtifactRootIsPerUser pins the root's location and name: one directory
+// per euid under the temporary directory, so two users of a shared temporary
+// directory never share an artifact tree.
+func TestArtifactRootIsPerUser(t *testing.T) {
+	root := artifactRoot()
+	if got, want := filepath.Dir(root), os.TempDir(); got != want {
+		t.Fatalf("artifact root parent = %q, want %q", got, want)
+	}
+	if got, want := filepath.Base(root), "avenor-stable-"+strconv.Itoa(os.Geteuid()); got != want {
+		t.Fatalf("artifact root base = %q, want %q", got, want)
+	}
+}
+
 // TestArtifactRootRefusal pins the roots retention refuses: one another user
 // pre-created as a symlink, one left group-writable, and one that grants group
 // or other permissions. None is read or pruned, the refusal is reported once
@@ -311,6 +325,21 @@ func TestArtifactRootRefusal(t *testing.T) {
 				}
 				if err := os.Chmod(root, 0o755); err != nil {
 					t.Fatal(err)
+				}
+				return root
+			},
+		},
+		{
+			name: "root owned by another uid",
+			prepare: func(t *testing.T, root string) string {
+				if err := os.Mkdir(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if os.Geteuid() != 0 {
+					t.Skip("giving the root another owner requires root")
+				}
+				if err := os.Chown(root, 1, 1); err != nil {
+					t.Skipf("chown the root: %v", err)
 				}
 				return root
 			},
@@ -382,19 +411,32 @@ func TestArtifactRootRefusal(t *testing.T) {
 	}
 }
 
-// TestArtifactPermissionDenialReportedOncePerPath proves the suppression is
-// keyed on the denied path: after the first path has been collapsed, a second
-// path still reports its own denial once.
-func TestArtifactPermissionDenialReportedOncePerPath(t *testing.T) {
-	var stderr bytes.Buffer
-	sup := newTestSupervisor(t, Config{Stderr: &stderr, MaxRuntimes: 1})
-	for _, path := range []string{"/artifact-a", "/artifact-a", "/artifact-b", "/artifact-b"} {
-		sup.reportArtifactError(path, fs.ErrPermission, "read artifact dir %s: permission denied", path)
+// TestReportArtifactError covers the diagnostic policy: a permission denial is
+// collapsed to its first occurrence per path, because the prune runs hourly
+// and one denied directory fails identically on every pass, while any other
+// error is reported every time.
+func TestReportArtifactError(t *testing.T) {
+	cases := []struct {
+		name      string
+		err       error
+		wantCount int
+	}{
+		{name: "permission denial collapses per path", err: fs.ErrPermission, wantCount: 1},
+		{name: "other errors repeat", err: fs.ErrNotExist, wantCount: 2},
 	}
-	for _, path := range []string{"/artifact-a", "/artifact-b"} {
-		if got := strings.Count(stderr.String(), "read artifact dir "+path); got != 1 {
-			t.Fatalf("%s reported %d times, want 1: %q", path, got, stderr.String())
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			sup := newTestSupervisor(t, Config{Stderr: &stderr, MaxRuntimes: 1})
+			for _, path := range []string{"/artifact-a", "/artifact-a", "/artifact-b", "/artifact-b"} {
+				sup.reportArtifactError(path, tc.err, "read artifact dir %s: %v", path, tc.err)
+			}
+			for _, path := range []string{"/artifact-a", "/artifact-b"} {
+				if got := strings.Count(stderr.String(), "read artifact dir "+path+":"); got != tc.wantCount {
+					t.Fatalf("%s reported %d times, want %d: %q", path, got, tc.wantCount, stderr.String())
+				}
+			}
+		})
 	}
 }
 
