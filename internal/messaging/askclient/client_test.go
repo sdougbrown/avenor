@@ -373,7 +373,10 @@ func TestFailureRendersNonRepliedOutcomes(t *testing.T) {
 		pending bool
 	}{
 		{messaging.OutcomeTimedOut, "(timeout: no reply received)", nil, false},
+		{messaging.OutcomeWithdrawn, "(cancelled)", nil, false},
+		{messaging.OutcomeEdgeAbsent, "(no pending ask)", nil, false},
 		{messaging.OutcomePossiblyPending, "(possibly pending: no terminal reply)", messaging.ErrUnsupportedProtocol, true},
+		{messaging.OutcomeLost, "(ask lost)", nil, false},
 	}
 	for _, tc := range cases {
 		res := AskResult{MessageID: msgID, Outcome: tc.outcome}
