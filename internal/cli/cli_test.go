@@ -3780,10 +3780,10 @@ func TestRunResultFileControlPromptTurn(t *testing.T) {
 	}
 }
 
-// TestControlStreamDeliversDirectRunSessionEnd covers the subscriber's side of
-// a direct run: a client subscribed while the run is live still receives the
-// final session.end, even though the run exits and stops its control server
-// immediately after publishing it.
+// TestControlStreamDeliversDirectRunSessionEnd wires a direct run's event
+// fanout to a subscribed control client: a run started without a supervisor
+// still publishes through the control socket, and the client's event channel
+// carries its session.end and stop reason.
 func TestControlStreamDeliversDirectRunSessionEnd(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
