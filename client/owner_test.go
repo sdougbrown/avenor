@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"net"
@@ -299,6 +300,76 @@ func TestClassifyOwnerAuthErrorMapsResponseTimeout(t *testing.T) {
 	mapped := classifyOwnerAuthError(ErrResponseTimeout)
 	if !errors.Is(mapped, ErrOwnerAuthTimeout) {
 		t.Fatalf("classifyOwnerAuthError(ErrResponseTimeout) = %v, want ErrOwnerAuthTimeout", mapped)
+	}
+}
+
+// TestOwnerAuthenticateRejectsUnexpectedResult pins the success-envelope guard:
+// a reply that is not authenticated, or that names another version or
+// capability, is never accepted as a successful attach.
+func TestOwnerAuthenticateRejectsUnexpectedResult(t *testing.T) {
+	const capabilityID = "cap_1"
+	cases := []struct {
+		name   string
+		result control.OwnerAuthResult
+		accept bool
+	}{
+		{
+			name:   "unauthenticated",
+			result: control.OwnerAuthResult{Version: control.OwnerAuthVersion, Authenticated: false, CapabilityID: capabilityID},
+		},
+		{
+			name:   "wrong version",
+			result: control.OwnerAuthResult{Version: control.OwnerAuthVersion - 1, Authenticated: true, CapabilityID: capabilityID},
+		},
+		{
+			name:   "wrong capability",
+			result: control.OwnerAuthResult{Version: control.OwnerAuthVersion, Authenticated: true, CapabilityID: "cap_other"},
+		},
+		{
+			name:   "matching result",
+			result: control.OwnerAuthResult{Version: control.OwnerAuthVersion, Authenticated: true, CapabilityID: capabilityID},
+			accept: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			serverConn, clientConn := net.Pipe()
+			defer serverConn.Close()
+			responded := make(chan struct{})
+			go func() {
+				defer close(responded)
+				line, err := bufio.NewReader(serverConn).ReadBytes('\n')
+				if err != nil {
+					return
+				}
+				var req Request
+				if err := json.Unmarshal(line, &req); err != nil || req.Method != "authenticate_owner" {
+					return
+				}
+				result, _ := json.Marshal(tc.result)
+				resp, _ := json.Marshal(Response{JSONRPC: "2.0", ID: req.ID, Result: result})
+				_, _ = serverConn.Write(append(resp, '\n'))
+			}()
+
+			c := newClient(clientConn)
+			defer c.Close()
+			err := c.authenticateOwnerUntil(control.OwnerCapability{ID: capabilityID, Secret: "secret"}, time.Now().Add(time.Second))
+			<-responded
+
+			if tc.accept {
+				if err != nil {
+					t.Fatalf("authenticateOwnerUntil: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrUnsupportedOwnerAuth) {
+				t.Fatalf("authenticateOwnerUntil = %v, want ErrUnsupportedOwnerAuth", err)
+			}
+			var authErr *OwnerAuthError
+			if !errors.As(err, &authErr) || authErr.Reason != "unexpected-result" {
+				t.Fatalf("mapped error = %v, want OwnerAuthError reason unexpected-result", err)
+			}
+		})
 	}
 }
 
