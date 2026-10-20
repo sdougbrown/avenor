@@ -209,7 +209,7 @@ func (s *Store) loadSnapshot(workflowID WorkflowID) (Snapshot, bool, error) {
 
 // appendEvents durably appends complete JSON events to the NDJSON log.
 func (s *Store) appendEvents(workflowID WorkflowID, events []Event) error {
-	f, err := os.OpenFile(s.eventsPath(workflowID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(s.eventsPath(workflowID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -244,7 +244,7 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	}
 	dir := s.instanceDir(workflowID)
 	path := s.workflowPath(workflowID)
-	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o644); err != nil {
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o600); err != nil {
 		return err
 	}
 	return durablefile.FsyncDir(dir)
@@ -311,7 +311,7 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o644); err != nil {
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o600); err != nil {
 		return err
 	}
 	return durablefile.FsyncDir(dir)
