@@ -127,6 +127,9 @@ func TestSessionRenameThenSendDelivers(t *testing.T) {
 	if _, err := sup.broker.CreateRun("rt_b", "peer-b"); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
+	if _, err := sup.broker.CreateRun("rt_c", "peer-c"); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
 	if _, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: "rt_a"}, "", "new-name"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -163,6 +166,37 @@ func TestSessionRenameThenSendDelivers(t *testing.T) {
 	queued := brokertest.WaitForAgentMessage(t, sup.broker, "rt_b")
 	if queued.Sender != "new-name" {
 		t.Fatalf("sender = %q, want the new display name", queued.Sender)
+	}
+
+	// The control message_send path uses the supervisor's in-process transport,
+	// so the same rename must reach the peer through it too.
+	if _, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, "", "main"); err != nil {
+		t.Fatalf("rename supervisor: %v", err)
+	}
+	inproc, err := sup.MessageTransport()
+	if err != nil {
+		t.Fatalf("in-process transport: %v", err)
+	}
+	pre, err = inproc.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("in-process preflight: %v", err)
+	}
+	msgID, err = messaging.NewMsgID(time.Now(), time.Time{})
+	if err != nil {
+		t.Fatalf("message id: %v", err)
+	}
+	if _, err := inproc.Send(ctx, messaging.SendRequest{
+		From:       messaging.Identity{RunID: "supervisor"},
+		To:         messaging.Identity{RunID: "rt_c"},
+		MessageID:  msgID,
+		Generation: pre.Generation,
+		Body:       string(body),
+		NoReply:    true,
+	}); err != nil {
+		t.Fatalf("in-process send after rename: %v", err)
+	}
+	if queued := brokertest.WaitForAgentMessage(t, sup.broker, "rt_c"); queued.Sender != "main" {
+		t.Fatalf("in-process sender = %q, want the new display name", queued.Sender)
 	}
 }
 

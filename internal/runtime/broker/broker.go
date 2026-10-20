@@ -1576,7 +1576,10 @@ func (x brokerBackend) Publish(target string, msg messaging.InboundMessage) (fun
 		Type:      msg.Kind,
 		RunID:     target,
 		FromRunID: msg.FromRunID,
-		Sender:    msg.Sender,
+		// Stamp the sender's current display name here, server side, so the
+		// in-process and HTTP transports agree and a rename always reaches the
+		// peer. A surface sends an empty Sender by contract.
+		Sender:    x.broker.DisplayName(msg.FromRunID),
 		Payload:   msg.Payload,
 		CreatedAt: time.Now(),
 	}
