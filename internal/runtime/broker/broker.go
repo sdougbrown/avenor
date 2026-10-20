@@ -1452,13 +1452,8 @@ func (b *Broker) SetLastAgentMessage(runID, text, stopReason string, truncated b
 	}
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
-	label := runID
-	if st.Info != nil && st.Info.Label != "" {
-		label = st.Info.Label
-	}
 	st.LastMessage = &LastAgentMessage{
 		RunID:      runID,
-		Label:      label,
 		Text:       events.BoundedFinalOutput(text),
 		StopReason: stopReason,
 		Truncated:  truncated,
@@ -1469,7 +1464,9 @@ func (b *Broker) SetLastAgentMessage(runID, text, stopReason string, truncated b
 
 // LastAgentMessage returns runID's recorded last turn. ok is false when no turn
 // was ever recorded; the returned record still carries the run's real identity
-// so a caller never renders an empty id.
+// so a caller never renders an empty id. Label is the run's current display
+// name, read here rather than snapshotted at write time, so a rename is always
+// reflected.
 func (b *Broker) LastAgentMessage(runID string) (LastAgentMessage, bool) {
 	st := b.GetRun(runID)
 	if st == nil {
@@ -1477,14 +1474,15 @@ func (b *Broker) LastAgentMessage(runID string) (LastAgentMessage, bool) {
 	}
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
+	label := runID
+	if st.Info != nil && st.Info.Label != "" {
+		label = st.Info.Label
+	}
 	if st.LastMessage == nil {
-		label := runID
-		if st.Info != nil && st.Info.Label != "" {
-			label = st.Info.Label
-		}
 		return LastAgentMessage{RunID: runID, Label: label}, false
 	}
 	record := *st.LastMessage
+	record.Label = label
 	return record, true
 }
 

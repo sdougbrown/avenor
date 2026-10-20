@@ -382,7 +382,7 @@ Resolution runs before permission: an exact runtime id first, then the exact dis
 
 #### `session_last`
 
-`session_last` reads a run's recorded last agent turn. Params: `{runtime_id}`. It is read-only and ungated, like `result` and `status`, so any connected client may read any known run. The result is `{run_id, label, has_record, final_output, stop_reason, final_output_truncated, at}`; a known run with no completed turn answers `has_record: false` with empty text and a real `run_id`/`label`, while an unknown runtime is an `-32000` error. The text is bounded; `final_output_truncated` is carried from the producer.
+`session_last` reads a run's recorded last agent turn. Params: `{runtime_id}`. It is read-only and ungated, like `result` and `status`, so any connected client may read any known run. The result is `{run_id, label, has_record, final_output, stop_reason, final_output_truncated, at}`; `label` is the target's current display name, so a rename is reflected. A known run with no completed turn answers `has_record: false` with empty text and a real `run_id`/`label`, while an unknown runtime is an `-32000` error. The text is bounded; `final_output_truncated` is carried from the producer.
 
 #### `session_last_set`
 

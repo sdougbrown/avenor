@@ -366,3 +366,32 @@ func TestMatchLabelIsStableAndAmbiguous(t *testing.T) {
 		t.Fatalf("MatchLabel = %v, want %v", got, want)
 	}
 }
+
+func TestLastAgentMessageReportsCurrentLabelAfterRename(t *testing.T) {
+	b := New("")
+	if _, err := b.CreateRun("rt_1", "old-name"); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if err := b.SetLastAgentMessage("rt_1", "the answer", "done", false); err != nil {
+		t.Fatalf("set last: %v", err)
+	}
+	if _, err := b.CreateRun("rt_2", "old-peer"); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if err := b.RenameRun("rt_1", "new-name"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := b.RenameRun("rt_2", "new-peer"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	record, ok := b.LastAgentMessage("rt_1")
+	if !ok || record.Label != "new-name" {
+		t.Fatalf("record label = %q ok=%v, want the current display name", record.Label, ok)
+	}
+	// The no-record branch must read the same current name.
+	record, ok = b.LastAgentMessage("rt_2")
+	if ok || record.Label != "new-peer" {
+		t.Fatalf("no-record label = %q ok=%v, want the current display name", record.Label, ok)
+	}
+}
