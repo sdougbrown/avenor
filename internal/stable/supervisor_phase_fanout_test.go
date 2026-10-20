@@ -15,6 +15,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runstate"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/claudechannel"
 )
 
@@ -374,14 +375,22 @@ func TestFallbackFanoutWriterCarriesRecorderAndWorkflowMetadata(t *testing.T) {
 		nodeID:      "node_fallback",
 	}
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{id: child.id, exec: execIdle, class: workflowAttemptClass})
+	sup.ensureChildBrokerRun(child)
 	writer := sup.fanoutWriterLocked(child)
-	if writer.recorder == nil {
-		t.Fatal("fallback writer has no broker recorder")
-	}
 	if err := writer.writeRunEnd(events.Event{Event: "session.end", SessionID: "ses_fallback", Fields: map[string]any{
 		"stop_reason": "cancelled", "end_kind": "run",
 	}}); err != nil {
 		t.Fatalf("writeRunEnd: %v", err)
+	}
+	state := sup.broker.GetRun(child.id)
+	if state == nil {
+		t.Fatalf("broker has no run for %s", child.id)
+	}
+	state.Mu.Lock()
+	reports := append([]broker.Report(nil), state.Reports...)
+	state.Mu.Unlock()
+	if len(reports) == 0 || reports[len(reports)-1].State != "cancelled" {
+		t.Fatalf("broker reports = %v, want the run end's cancelled record", reports)
 	}
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
