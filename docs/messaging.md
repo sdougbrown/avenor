@@ -42,13 +42,15 @@ a public spawn ID or a label first. A child asking its supervisor therefore has
 to use `supervisor`. Asking `rt_N` addresses that child, not the supervisor. A
 child asking a sibling uses the sibling's `rt_N`.
 
-A direct child's run stays registered for the supervisor's lifetime. Only a loop
-or team teardown deletes a spawned child's run; a spawn that ends on its own is
-never removed. An ask addressed to a child that has already ended is therefore
-still admitted and queued against that run, where nothing reads it. The asker
-waits out its own timeout instead of being told the target is gone.
-`target-unavailable` means the run was never registered on that broker, never
-that its process has exited.
+A direct child — one the supervisor runs through `runChild` — keeps its broker
+run registered for the supervisor's lifetime: a spawn that ends on its own
+removes nothing. An ask addressed to that child after it has ended is therefore
+still admitted and queued against its run, where nothing reads it, so the asker
+waits out its own timeout instead of being told the target is gone. Other
+children do remove their runs. A loop or team teardown deletes its children's
+runs, and the claudechannel provider deletes its own run when its session ends.
+For those runs `target-unavailable` can mean the run ended; for a run nothing
+removed, it means the run was never registered on that broker.
 
 The OpenCode plugin is the surface that supplies `parent_run_id` on
 `avenor_spawn`, a fresh UUID per plugin instance. The control `spawn` method
@@ -147,6 +149,11 @@ Host endpoints authenticate with the `X-Avenor-Capability` and
 run ID and token, exactly as the rest of the local router does: in the JSON
 body of a POST, and in the `X-Avenor-Run-Id` and `X-Avenor-Run-Token` headers
 of a GET. The router never reads credentials from the URL.
+
+The table is the v1 host contract. The local broker router answers
+`target-unavailable` with 404 rather than 503, for both an ask naming an
+unregistered run and an undeliverable message; a local caller reads the code and
+never the status digit.
 
 ## Local adapter
 
