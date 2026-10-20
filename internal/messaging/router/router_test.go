@@ -25,22 +25,25 @@ type fakeProvider struct {
 	resolution messaging.Resolution
 	runFacts   messaging.RunFacts
 
-	outcome       messaging.Outcome
-	reply         string
-	fenceFull     bool
-	peers         []messaging.Peer
-	peerErr       error
-	last          messaging.PeerLast
-	lastErr       error
-	resumed       messaging.ResumeResult
-	resumeErr     error
-	renamed       messaging.RenameResult
-	renameErr     error
-	control       json.RawMessage
-	controlErr    error
-	withdrawErr   error
-	generation    string
-	preflightCall int
+	outcome         messaging.Outcome
+	reply           string
+	fenceFull       bool
+	peers           []messaging.Peer
+	peerErr         error
+	last            messaging.PeerLast
+	lastErr         error
+	resumed         messaging.ResumeResult
+	resumeErr       error
+	renamed         messaging.RenameResult
+	renameErr       error
+	control         json.RawMessage
+	controlErr      error
+	withdrawErr     error
+	generation      string
+	emptyGeneration bool
+	preflightCall   int
+	runStateErr     error
+	runStateCalls   int
 
 	resolveRef string
 	sent       messaging.SendRequest
@@ -106,6 +109,9 @@ func (p *fakeProvider) Preflight(context.Context) (messaging.PreflightResult, er
 }
 
 func (p *fakeProvider) Generation() string {
+	if p.emptyGeneration {
+		return ""
+	}
 	if p.generation == "" {
 		return "gen-7"
 	}
@@ -126,6 +132,10 @@ func (p *fakeProvider) Surface() messaging.Surface { return p.surface }
 func (p *fakeProvider) Role() string { return "agent" }
 
 func (p *fakeProvider) RunState(_ context.Context, runID string) (messaging.RunFacts, error) {
+	p.runStateCalls++
+	if p.runStateErr != nil {
+		return messaging.RunFacts{}, p.runStateErr
+	}
 	facts := p.runFacts
 	facts.RunID = runID
 	return facts, nil
@@ -319,6 +329,41 @@ func substituteMessageID(text, messageID string) string {
 	return strings.ReplaceAll(text, "{message_id}", messageID)
 }
 
+func newTestRouter(t *testing.T, provider Provider) *Router {
+	t.Helper()
+	router, err := NewRouter(provider)
+	if err != nil {
+		t.Fatalf("new router: %v", err)
+	}
+	return router
+}
+
+// TestRouterRequiresBoundGeneration makes the generation a construction
+// invariant: a provider that cannot name its bound generation is rejected, so
+// no request can reach askclient with an empty generation and trigger its
+// per-message preflight fallback.
+func TestRouterRequiresBoundGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		empty   bool
+		wantErr error
+	}{
+		{"a bound generation constructs", false, nil},
+		{"an empty generation fails construction", true, ErrNoGeneration},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &fakeProvider{emptyGeneration: tc.empty}
+			router, err := NewRouter(provider)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+			if (router == nil) != (tc.wantErr != nil) {
+				t.Fatalf("router = %v with error %v", router, err)
+			}
+		})
+	}
+}
+
 func TestConformanceCases(t *testing.T) {
 	cases, err := messaging.LoadConformanceCases(conformancePath)
 	if err != nil {
@@ -336,7 +381,7 @@ func TestConformanceCases(t *testing.T) {
 				t.Fatalf("decode case input: %v", err)
 			}
 			provider := newFake(t, c)
-			router := NewRouter(providerFor(provider, c))
+			router := newTestRouter(t, providerFor(provider, c))
 
 			result, err := router.Execute(t.Context(), c.Input)
 			messageID := firstNonEmpty(provider.sent.MessageID, provider.replied.MessageID, provider.withdrew.MessageID)
@@ -409,11 +454,14 @@ func TestConformanceCases(t *testing.T) {
 }
 
 // assertNoTransport proves a rejected call never reached the provider's
-// transport methods.
+// transport or runtime write methods.
 func assertNoTransport(t *testing.T, provider *fakeProvider) {
 	t.Helper()
-	if provider.sent.MessageID != "" || provider.replied.MessageID != "" || provider.withdrew.MessageID != "" || provider.peered.Generation != "" {
-		t.Fatal("a rejected request reached the transport")
+	if provider.sent.MessageID != "" || provider.replied.MessageID != "" || provider.withdrew.MessageID != "" ||
+		provider.peered.Generation != "" || provider.resumeReq != (messaging.ResumeRequest{}) ||
+		provider.renameReq != (messaging.RenameRequest{}) || provider.lastRunID != "" ||
+		provider.controlTo != "" || len(provider.control) != 0 || provider.preflightCall != 0 {
+		t.Fatal("a rejected request reached the provider")
 	}
 }
 
@@ -586,7 +634,7 @@ func TestOutcomeOutsideVocabularyFallsBackToPossiblyPending(t *testing.T) {
 		runFacts:   messaging.RunFacts{Status: runstate.StatusRunning, Live: true},
 		outcome:    messaging.Outcome("mystery"),
 	}
-	result, err := NewRouter(provider).Execute(t.Context(), json.RawMessage(`{"action": "tell", "target": "rt_7", "message": "hi"}`))
+	result, err := newTestRouter(t, provider).Execute(t.Context(), json.RawMessage(`{"action": "tell", "target": "rt_7", "message": "hi"}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -656,7 +704,7 @@ func TestReplyClaimRestoredUnlessDelivered(t *testing.T) {
 				outcome: tc.outcome,
 			}
 			claimed := map[string]string{"av1.reply.1": "run-asker"}
-			router := NewRouter(claimProvider{fakeProvider: provider, claimed: claimed})
+			router := newTestRouter(t, claimProvider{fakeProvider: provider, claimed: claimed})
 			if _, err := router.Execute(t.Context(), json.RawMessage(`{"action": "reply", "reply_to": "av1.reply.1", "message": "OK"}`)); err != nil {
 				t.Fatalf("execute: %v", err)
 			}
@@ -665,6 +713,33 @@ func TestReplyClaimRestoredUnlessDelivered(t *testing.T) {
 				t.Fatalf("claim restored = %v, want %v", restored, tc.restored)
 			}
 		})
+	}
+}
+
+// TestResumePermissionPrecedesStateRead pins the phase order: a broker resume
+// is denied at the permission phase, before the router reads the target's run
+// state, so an unreadable sentinel cannot turn not_permitted into a refusal for
+// the caller the rule exists to stop.
+func TestResumePermissionPrecedesStateRead(t *testing.T) {
+	provider := &fakeProvider{
+		caller:     messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+		resolution: messaging.Resolution{RunID: "rt_9", Label: "mesh-b", Match: messaging.MatchUnique},
+		runStateErr: &fs.PathError{
+			Op:   "open",
+			Path: "/home/u/.avenor/runs/run-9/sentinel.done",
+			Err:  fs.ErrNotExist,
+		},
+	}
+	_, err := newTestRouter(t, provider).Execute(t.Context(), json.RawMessage(`{"action": "resume", "target": "rt_9", "message": "again"}`))
+	var toolErr *ToolError
+	if !errors.As(err, &toolErr) {
+		t.Fatalf("error = %v, want a tool error", err)
+	}
+	if toolErr.Code != "not_permitted" {
+		t.Fatalf("code = %q, want not_permitted", toolErr.Code)
+	}
+	if provider.runStateCalls != 0 {
+		t.Fatalf("RunState was called %d times before permission", provider.runStateCalls)
 	}
 }
 
@@ -677,7 +752,7 @@ func TestWithdrawFenceCapacityReportsPossiblyPending(t *testing.T) {
 		outcome:     messaging.OutcomeEdgeAbsent,
 		withdrawErr: messaging.ErrFenceCapacity,
 	}
-	result, err := NewRouter(provider).Execute(t.Context(), json.RawMessage(`{"action": "withdraw", "message_id": "av1.w.1"}`))
+	result, err := newTestRouter(t, provider).Execute(t.Context(), json.RawMessage(`{"action": "withdraw", "message_id": "av1.w.1"}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -723,7 +798,7 @@ func TestRouterUsesBoundGeneration(t *testing.T) {
 				reply:      "OK",
 				generation: "bound-9",
 			}
-			if _, err := NewRouter(provider).Execute(t.Context(), json.RawMessage(tc.input)); err != nil {
+			if _, err := newTestRouter(t, provider).Execute(t.Context(), json.RawMessage(tc.input)); err != nil {
 				t.Fatalf("execute: %v", err)
 			}
 			if provider.preflightCall != 0 {

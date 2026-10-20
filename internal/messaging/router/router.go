@@ -116,10 +116,21 @@ type Router struct {
 	client   *askclient.Client
 }
 
+// ErrNoGeneration reports a provider whose construction-time generation binding
+// is empty. A provider that cannot name the generation it is bound to cannot
+// build any request, so it fails at construction instead of falling back to a
+// per-message preflight.
+var ErrNoGeneration = errors.New("router: provider has no bound generation")
+
 // NewRouter builds a router over p. The ask client is bound to the same
-// provider and to one options value for the router's lifetime.
-func NewRouter(p Provider) *Router {
-	return &Router{provider: p, client: askclient.New(p, askclient.Options{})}
+// provider and to one options value for the router's lifetime. A provider with
+// no bound generation is rejected here, so every later request carries a
+// non-empty generation and the router never preflights per message.
+func NewRouter(p Provider) (*Router, error) {
+	if p.Generation() == "" {
+		return nil, ErrNoGeneration
+	}
+	return &Router{provider: p, client: askclient.New(p, askclient.Options{})}, nil
 }
 
 // Execute routes one avenor_message call. Every call runs four phases and
@@ -155,7 +166,16 @@ func (r *Router) Execute(ctx context.Context, input json.RawMessage) (Result, er
 	if action == actionWithdraw {
 		return r.withdraw(ctx, typed)
 	}
+
+	conditions := messaging.MessageRouteConditions{
+		CallerKind:            string(r.provider.Caller().Kind),
+		Surface:               string(r.provider.Surface()),
+		ControlReplySupported: r.provider.Surface() == messaging.SurfaceSidecar,
+	}
 	if action == actionControlReply {
+		if denial := permissionDenial(action, conditions); denial != nil {
+			return Result{}, denial
+		}
 		return r.controlReply(ctx, typed)
 	}
 
@@ -163,21 +183,16 @@ func (r *Router) Execute(ctx context.Context, input json.RawMessage) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
+	conditions.TargetMatch = string(res.Match)
+	if denial := permissionDenial(action, conditions); denial != nil {
+		return Result{}, denial
+	}
 	facts, err := r.provider.RunState(ctx, res.RunID)
 	if err != nil {
 		return Result{}, refused(err)
 	}
-	conditions := messaging.MessageRouteConditions{
-		CallerKind:            string(r.provider.Caller().Kind),
-		Surface:               string(r.provider.Surface()),
-		TargetLive:            facts.Live,
-		TargetResumable:       facts.Resumable,
-		TargetMatch:           string(res.Match),
-		ControlReplySupported: r.provider.Surface() == messaging.SurfaceSidecar,
-	}
-	if denial := permissionDenial(action, conditions); denial != nil {
-		return Result{}, denial
-	}
+	conditions.TargetLive = facts.Live
+	conditions.TargetResumable = facts.Resumable
 	if denial := stateDenial(action, conditions, res.RunID, string(facts.Status)); denial != nil {
 		return Result{}, denial
 	}
@@ -427,14 +442,9 @@ func (r *Router) resume(ctx context.Context, input messageInput, res messaging.R
 }
 
 func (r *Router) controlReply(ctx context.Context, input messageInput) (Result, error) {
-	conditions := messaging.MessageRouteConditions{
-		CallerKind:            string(r.provider.Caller().Kind),
-		Surface:               string(r.provider.Surface()),
-		ControlReplySupported: r.provider.Surface() == messaging.SurfaceSidecar,
-	}
-	if !conditions.ControlReplySupported {
-		return Result{}, permissionError(actionControlReply, conditions, "unsupported_action")
-	}
+	// Execute has already applied the generated control_reply support rule at
+	// the permission phase, so the only remaining case is a sidecar provider
+	// that still cannot deliver the reply.
 	replier, ok := r.provider.(ControlReplier)
 	if !ok {
 		// The support rule is satisfied on the sidecar, so it names no reason
