@@ -997,6 +997,17 @@ func (c *Client) SendToParent(runtimeID, message string) error {
 	return c.Call("send_to_parent", params, nil)
 }
 
+// messageResponseWait bounds how long the client waits for a blocking message
+// verb's response. The server answers a zero timeout after up to
+// messaging.MaxWait, so a client-side timer shorter than that would abandon a
+// request the server can still satisfy.
+func messageResponseWait(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		timeout = messaging.MaxWait
+	}
+	return timeout + 10*time.Second
+}
+
 // MessageSend sends one message over the supervisor's own transport.
 func (c *Client) MessageSend(req messaging.SendRequest) (messaging.SendResult, error) {
 	var result control.MessageSendResult
@@ -1009,14 +1020,7 @@ func (c *Client) MessageSend(req messaging.SendRequest) (messaging.SendResult, e
 // MessageWait waits for the terminal state of one ask.
 func (c *Client) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
 	var result control.MessageWaitResult
-	// The server honours a zero timeout for messaging.MaxWait, so the client
-	// must wait at least that long before giving up on the response.
-	wait := req.Timeout
-	if wait <= 0 {
-		wait = messaging.MaxWait
-	}
-	wait += 10 * time.Second
-	if err := c.call("message_wait", control.NewMessageWaitParams(req), &result, wait); err != nil {
+	if err := c.call("message_wait", control.NewMessageWaitParams(req), &result, messageResponseWait(req.Timeout)); err != nil {
 		return messaging.WaitResult{}, err
 	}
 	return result.WaitResult(), nil
@@ -1043,11 +1047,7 @@ func (c *Client) MessageWithdraw(req messaging.WithdrawRequest) (messaging.Withd
 // MessageReceive drains inbound messages.
 func (c *Client) MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
 	var result control.MessageReceiveResult
-	wait := time.Duration(0)
-	if req.Timeout > 0 {
-		wait = req.Timeout + 10*time.Second
-	}
-	if err := c.call("message_receive", control.NewMessageReceiveParams(req), &result, wait); err != nil {
+	if err := c.call("message_receive", control.NewMessageReceiveParams(req), &result, messageResponseWait(req.Timeout)); err != nil {
 		return messaging.ReceiveResult{}, err
 	}
 	return result.ReceiveResult(), nil
