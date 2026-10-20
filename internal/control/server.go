@@ -1242,6 +1242,15 @@ const maxInflightAsksPerConn = 8
 // server (with structured error data) instead of racing the broker's 504.
 const maxAskTimeoutMS = int64(askstore.DefaultAskTimeout-5*time.Second) / int64(time.Millisecond)
 
+// clampAskTimeout caps a blocking verb's timeout_ms at maxAskTimeoutMS so every
+// blocking verb enforces the same ceiling.
+func clampAskTimeout(ms int64) int64 {
+	if ms > maxAskTimeoutMS {
+		return maxAskTimeoutMS
+	}
+	return ms
+}
+
 // codeWaitTurnTimeout marks a wait_turn request whose timeout_ms elapsed
 // before the runtime's turn settled. Clients match this code to a typed
 // timeout error (client.ErrWaitTurnTimeout).
@@ -1717,11 +1726,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.TimeoutMS < 0 {
 			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
 		}
-		// The broker long-poll itself expires at its 10-minute ask timeout, so
-		// a larger server-side budget cannot be honored.
-		if p.TimeoutMS > maxAskTimeoutMS {
-			p.TimeoutMS = maxAskTimeoutMS
-		}
+		p.TimeoutMS = clampAskTimeout(p.TimeoutMS)
 		// Bound concurrent in-flight asks per connection so one owner cannot
 		// accumulate unbounded parked goroutines and broker edges.
 		select {
@@ -1831,11 +1836,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.TimeoutMS < 0 {
 			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
 		}
-		// Match broker_ask's ceiling: an ask store wait must expire before the
-		// broker's own ask timeout, not race it.
-		if p.TimeoutMS > maxAskTimeoutMS {
-			p.TimeoutMS = maxAskTimeoutMS
-		}
+		p.TimeoutMS = clampAskTimeout(p.TimeoutMS)
 		return c.runMessageAsync(req, p.MessageID, transport, func(ctx context.Context, tr messaging.Transport) (messageAsyncResult, error) {
 			res, err := tr.Wait(ctx, p.request(messaging.Identity{RunID: "supervisor"}))
 			return messageAsyncResult{outcome: res.Outcome, payload: newMessageWaitResult(res)}, err
@@ -1879,11 +1880,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.TimeoutMS < 0 {
 			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
 		}
-		// The receive shares message_wait's ceiling and slot budget: both are
-		// blocking verbs whose transport may park until its own deadline.
-		if p.TimeoutMS > maxAskTimeoutMS {
-			p.TimeoutMS = maxAskTimeoutMS
-		}
+		p.TimeoutMS = clampAskTimeout(p.TimeoutMS)
 		return c.runMessageAsync(req, "", transport, func(ctx context.Context, tr messaging.Transport) (messageAsyncResult, error) {
 			res, err := tr.Receive(ctx, p.request(messaging.Identity{RunID: "supervisor"}))
 			return messageAsyncResult{payload: newMessageReceiveResult(res)}, err
