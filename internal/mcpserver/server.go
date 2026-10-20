@@ -677,7 +677,7 @@ func (s *Server) reapStaleLabel(supervisorPath string, liveEntries []map[string]
 	}
 	runtimeID, _ := entry["runtime_id"].(string)
 	sentinelFile, _ := entry["sentinel_file"].(string)
-	newRunID := runIDFromSentinel(sentinelFile)
+	newRunID := runstate.RunIDFromSentinel(sentinelFile)
 	if newRunID == "" {
 		newRunID = runtimeID
 	}
@@ -738,19 +738,13 @@ func (s *Server) checkLabelAvailable(cl ControlClient, supervisorPath, label str
 	return nil
 }
 
-// runIDFromSentinel extracts the MCP run UUID from a sentinel basename shaped
-// avenor-run-<uuid>.done, or returns empty for any other name.
-func runIDFromSentinel(sentinelFile string) string {
-	return runstate.RunIDFromSentinel(sentinelFile)
-}
-
 // runInfoFromListEntry converts a stable supervisor list entry into a registry
 // entry scoped to supervisorPath. The supervisor-wide run_id is never used as
 // the MCP run ID.
 func (s *Server) runInfoFromListEntry(entry map[string]any, supervisorPath string) (*RunInfo, error) {
 	runtimeID, _ := entry["runtime_id"].(string)
 	sentinelFile, _ := entry["sentinel_file"].(string)
-	runID := runIDFromSentinel(sentinelFile)
+	runID := runstate.RunIDFromSentinel(sentinelFile)
 	if runID == "" {
 		runID = runtimeID
 	}
@@ -1185,7 +1179,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	if args.IdempotencyKey != "" {
 		if sent, ok := result["sentinel_file"].(string); ok && sent != "" {
 			sentinelPath = sent
-			if id := runIDFromSentinel(sent); id != "" {
+			if id := runstate.RunIDFromSentinel(sent); id != "" {
 				runID = id
 			}
 		}
@@ -1651,7 +1645,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	if args.IdempotencyKey != "" {
 		if sent, ok := result["sentinel_file"].(string); ok && sent != "" {
 			sentinelPath = sent
-			if id := runIDFromSentinel(sent); id != "" {
+			if id := runstate.RunIDFromSentinel(sent); id != "" {
 				runID = id
 			}
 		}
