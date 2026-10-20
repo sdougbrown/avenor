@@ -13,9 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sdougbrown/avenor/internal/messaging"
-	"github.com/sdougbrown/avenor/internal/messaging/askstore"
-	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
@@ -178,26 +175,6 @@ func TestCloseNotStarted(t *testing.T) {
 	p := NewWithOptions(runtime.StartOptions{})
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close on nil client: %v", err)
-	}
-}
-
-// TestCloseKeepsInheritedMessaging pins transport ownership: the supervisor
-// creates the shared transport and is its only closer, so a provider stopping
-// must leave it usable for its siblings. The provider carries a live client so
-// Close runs its full teardown rather than returning early.
-func TestCloseKeepsInheritedMessaging(t *testing.T) {
-	transport := inprocess.New(askstore.New(askstore.Options{}))
-	p := NewWithOptions(runtime.StartOptions{Messaging: transport})
-	p.client, _, _ = fakeClient()
-	if err := p.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	pre, err := transport.Preflight(context.Background())
-	if err != nil || pre.Protocol != messaging.ProtocolVersion {
-		t.Fatalf("inherited transport after provider Close = (%+v, %v)", pre, err)
-	}
-	if err := transport.Close(); err != nil {
-		t.Fatalf("transport Close: %v", err)
 	}
 }
 

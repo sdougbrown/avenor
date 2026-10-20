@@ -1770,7 +1770,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		RuntimeID:     rtID,
 		Broker:        s.broker,
 		BrokerToken:   child.brokerToken,
-		Messaging:     s.messaging,
 		Provenance:    runtime.DirectLaunchProvenance(rtID, params.Label, 1),
 	}
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
@@ -2661,7 +2660,6 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				RuntimeID:     child.id,
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
-				Messaging:     s.messaging,
 				LaunchWrapper: child.launchWrapper,
 				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindLoop, phase.Name, child.label, &iteration, attemptNum),
 			}
@@ -2948,7 +2946,6 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				RuntimeID:     child.id,
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
-				Messaging:     s.messaging,
 				LaunchWrapper: child.launchWrapper,
 				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindTeam, phase.Name, child.label, nil, attemptNum),
 			}
@@ -3760,7 +3757,6 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		RuntimeID:    child.id,
 		Broker:       s.broker,
 		BrokerToken:  brokerToken,
-		Messaging:    s.messaging,
 		Provenance:   runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
 	}, resumeID)
 }

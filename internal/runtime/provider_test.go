@@ -4,13 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
-
-// fakeTransport satisfies messaging.Transport for option plumbing tests that
-// only compare the identity of the value they pass around.
-type fakeTransport struct{ messaging.Transport }
 
 func TestValidatePermissionMessageEmpty(t *testing.T) {
 	if err := ValidatePermissionMessage(""); err != nil {
@@ -88,12 +83,11 @@ func TestDecodePermissionMessageJSONRejectsMalformedText(t *testing.T) {
 
 func TestMergeStartOptionsBrokerFields(t *testing.T) {
 	b := broker.New("merge-test-token")
-	transport := &fakeTransport{}
-	base := StartOptions{RuntimeID: "rt_base", BrokerToken: "tok_base", Messaging: transport}
+	base := StartOptions{RuntimeID: "rt_base", BrokerToken: "tok_base"}
 
 	// Empty overrides keep the base broker identity.
 	merged := MergeStartOptions(base, StartOptions{})
-	if merged.RuntimeID != "rt_base" || merged.BrokerToken != "tok_base" || merged.Messaging != transport {
+	if merged.RuntimeID != "rt_base" || merged.BrokerToken != "tok_base" {
 		t.Fatalf("base broker fields lost: %+v", merged)
 	}
 
@@ -103,16 +97,6 @@ func TestMergeStartOptionsBrokerFields(t *testing.T) {
 	merged = MergeStartOptions(StartOptions{}, override)
 	if merged.RuntimeID != "rt_child" || merged.Broker != b || merged.BrokerToken != "tok_child" {
 		t.Fatalf("override broker fields lost: %+v", merged)
-	}
-
-	// A provider-scoped transport is inherited by every start, and an explicit
-	// start transport replaces it.
-	if got := MergeStartOptions(base, override).Messaging; got != transport {
-		t.Fatalf("inherited transport = %v, want the provider-scoped one", got)
-	}
-	other := &fakeTransport{}
-	if got := MergeStartOptions(base, StartOptions{Messaging: other}).Messaging; got != other {
-		t.Fatalf("override transport = %v, want the start-scoped one", got)
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/events"
-	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
@@ -39,10 +38,6 @@ type StartOptions struct {
 	RuntimeID     string         // supervisor-assigned runtime ID (rt_N), for parent-child routing
 	Broker        *broker.Broker // optional shared broker instance; backends may create their own if nil
 	BrokerToken   string         // broker token for RuntimeID, so the child can poll/reply as itself
-	// Messaging is the supervisor's own messaging transport, shared with every
-	// provider it starts. The supervisor creates it and is its only closer;
-	// a provider must never close an inherited transport.
-	Messaging messaging.Transport
 	// Provenance is the informational launch identity exported to the child
 	// process. It never carries broker routing or credential meaning.
 	Provenance *LaunchProvenance
@@ -215,9 +210,6 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	}
 	if override.BrokerToken != "" {
 		merged.BrokerToken = override.BrokerToken
-	}
-	if override.Messaging != nil {
-		merged.Messaging = override.Messaging
 	}
 	// An explicit provenance replaces the whole previous identity so cleared
 	// phase, iteration or label never survive a merge. The stored value is a
