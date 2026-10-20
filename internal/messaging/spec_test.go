@@ -43,6 +43,61 @@ func TestRepairTemplates(t *testing.T) {
 			facts: map[string]string{"action": `"tell"`, "detail": `unknown property "bogus"`},
 			want:  `invalid input for action "tell": unknown property "bogus"`,
 		},
+		{
+			code:  "unknown_property",
+			facts: map[string]string{"name": `"bogus"`},
+			want:  `unknown property "bogus"`,
+		},
+		{
+			code:  "missing_required_property",
+			facts: map[string]string{"name": `"target"`},
+			want:  `missing required property "target"`,
+		},
+		{
+			code:  "wrong_type_string",
+			facts: map[string]string{"name": `"target"`},
+			want:  `property "target" must be a string`,
+		},
+		{
+			code:  "wrong_type_integer",
+			facts: map[string]string{"name": `"timeout_ms"`},
+			want:  `property "timeout_ms" must be an integer`,
+		},
+		{
+			code:  "wrong_type_object",
+			facts: map[string]string{"name": `"payload"`},
+			want:  `property "payload" must be an object`,
+		},
+		{
+			code:  "string_too_short",
+			facts: map[string]string{"name": `"name"`, "min": "1"},
+			want:  `property "name" must be at least 1 characters`,
+		},
+		{
+			code:  "string_too_long",
+			facts: map[string]string{"name": `"name"`, "max": "64"},
+			want:  `property "name" must be at most 64 characters`,
+		},
+		{
+			code:  "string_pattern",
+			facts: map[string]string{"name": `"name"`},
+			want:  `property "name" contains characters that are not allowed`,
+		},
+		{
+			code:  "peers_invalid_action",
+			facts: map[string]string{},
+			want:  `not a known action (list, rename, last)`,
+		},
+		{
+			code:  "control_reply_unsupported",
+			facts: map[string]string{},
+			want:  `control replies are not available on this surface: its provider cannot deliver them`,
+		},
+		{
+			code:  "refused_io",
+			facts: map[string]string{},
+			want:  `the provider could not read the requested run's state`,
+		},
 	}
 	covered := map[string]bool{}
 	for _, c := range cases {
@@ -183,21 +238,4 @@ func matrixFixture(t *testing.T) map[string][]string {
 		t.Fatalf("decode outcome fixture: %v", err)
 	}
 	return fixture.Matrix
-}
-
-// TestApplicabilityTypesAreDeclared keeps the per-action type table total: every
-// permitted property must declare a wire type the routers and the schema can
-// both enforce.
-func TestApplicabilityTypesAreDeclared(t *testing.T) {
-	for _, table := range []map[string]ActionApplicability{ApplicabilityTable(), PeersApplicabilityTable()} {
-		for action, entry := range table {
-			for _, name := range entry.Permitted {
-				switch entry.Types[name] {
-				case "string", "integer", "object":
-				default:
-					t.Fatalf("%s: property %q declares type %q", action, name, entry.Types[name])
-				}
-			}
-		}
-	}
 }

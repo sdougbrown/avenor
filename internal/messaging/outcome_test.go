@@ -24,30 +24,6 @@ type admissionFixture struct {
 }
 
 func TestOutcomeFixtures(t *testing.T) {
-	vocabulary := readJSON[outcomeFixture](t, "testdata/outcome_vocabulary.json")
-	known := map[Outcome]bool{
-		OutcomeSent: true, OutcomeReplied: true, OutcomeTimedOut: true,
-		OutcomeWithdrawn: true, OutcomeEdgeAbsent: true, OutcomeAuthRejected: true,
-		OutcomeNotSent: true, OutcomePossiblyPending: true, OutcomeLost: true,
-	}
-	if len(vocabulary.Outcomes) != len(known) {
-		t.Fatalf("fixture lists %d outcomes, want %d", len(vocabulary.Outcomes), len(known))
-	}
-	for _, row := range vocabulary.Outcomes {
-		outcome := Outcome(row.Outcome)
-		if !known[outcome] {
-			t.Errorf("fixture outcome %q has no constant", row.Outcome)
-			continue
-		}
-		delete(known, outcome)
-		if row.ReuseMessageID {
-			t.Errorf("outcome %q claims message ID reuse", row.Outcome)
-		}
-	}
-	if len(known) != 0 {
-		t.Errorf("constants missing from fixture: %v", known)
-	}
-
 	admission := readJSON[admissionFixture](t, "testdata/outcome_admission.json")
 	want := map[string]Outcome{
 		"admission-rejected":                           OutcomeNotSent,
@@ -119,6 +95,28 @@ type outcomeColumns struct {
 // rows are resumed and renamed.
 func TestOutcomeSpecMatchesVocabulary(t *testing.T) {
 	vocabulary := readJSON[outcomeFixture](t, "testdata/outcome_vocabulary.json")
+	known := map[Outcome]bool{
+		OutcomeSent: true, OutcomeReplied: true, OutcomeTimedOut: true,
+		OutcomeWithdrawn: true, OutcomeEdgeAbsent: true, OutcomeAuthRejected: true,
+		OutcomeNotSent: true, OutcomePossiblyPending: true, OutcomeLost: true,
+	}
+	if len(vocabulary.Outcomes) != len(known) {
+		t.Fatalf("fixture lists %d outcomes, want %d", len(vocabulary.Outcomes), len(known))
+	}
+	for _, row := range vocabulary.Outcomes {
+		outcome := Outcome(row.Outcome)
+		if !known[outcome] {
+			t.Errorf("fixture outcome %q has no constant", row.Outcome)
+			continue
+		}
+		delete(known, outcome)
+		if row.ReuseMessageID {
+			t.Errorf("outcome %q claims message ID reuse", row.Outcome)
+		}
+	}
+	if len(known) != 0 {
+		t.Errorf("constants missing from fixture: %v", known)
+	}
 	file := loadOutcomeSpec(t)
 
 	var fromFile []outcomeColumns

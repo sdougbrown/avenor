@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -30,6 +31,11 @@ func TestPeersConformanceCases(t *testing.T) {
 				}
 				if toolErr.Code != c.Expect.Code || toolErr.Message != c.Expect.Message {
 					t.Fatalf("error = %s: %q, want %s: %q", toolErr.Code, toolErr.Message, c.Expect.Code, c.Expect.Message)
+				}
+				if c.Expect.Code == "invalid_request" || c.Expect.Code == "invalid_action" {
+					if provider.peered.Generation != "" || provider.renameReq.Name != "" || provider.resolveRef != "" {
+						t.Fatal("a rejected request reached the provider")
+					}
 				}
 				return
 			}
@@ -58,7 +64,7 @@ func assertPeersResult(t *testing.T, c messaging.ConformanceCase, provider *fake
 		}
 		for index, raw := range peers {
 			record := objectOf(raw)
-			if got, want := result.Peers[index].RunID, stringOf(record["run_id"]); got != want {
+			if got, want := result.Peers[index].RunID, firstNonEmpty(stringOf(record["peer_run_id"]), stringOf(record["run_id"])); got != want {
 				t.Fatalf("peer %d run_id = %q, want %q", index, got, want)
 			}
 			if got, want := result.Peers[index].Label, stringOf(record["label"]); got != want {
@@ -69,6 +75,15 @@ func assertPeersResult(t *testing.T, c messaging.ConformanceCase, provider *fake
 			}
 			if got, want := result.Peers[index].Kind, stringOf(record["kind"]); got != want {
 				t.Fatalf("peer %d kind = %q, want %q", index, got, want)
+			}
+			if got, want := result.Peers[index].Backend, stringOf(record["backend"]); got != want {
+				t.Fatalf("peer %d backend = %q, want %q", index, got, want)
+			}
+			if got, want := result.Peers[index].Model, stringOf(record["model"]); got != want {
+				t.Fatalf("peer %d model = %q, want %q", index, got, want)
+			}
+			if got, want := result.Peers[index].Dir, stringOf(record["dir"]); got != want {
+				t.Fatalf("peer %d dir = %q, want %q", index, got, want)
 			}
 		}
 		if provider.peered.Generation != "gen-7" {
@@ -93,8 +108,9 @@ func assertPeersResult(t *testing.T, c messaging.ConformanceCase, provider *fake
 		}
 	}
 	if last := objectOf(c.Provider["last"]); last != nil {
-		if got, want := result.Label, stringOf(last["label"]); got != want {
-			t.Fatalf("label = %q, want %q", got, want)
+		wantLabel := firstNonEmpty(stringOf(last["label"]), provider.resolution.Label, stringOf(inputTarget(c.Input)))
+		if got := result.Label; got != wantLabel {
+			t.Fatalf("label = %q, want %q", got, wantLabel)
 		}
 		if got, want := result.FinalOutput, stringOf(last["final_output"]); got != want {
 			t.Fatalf("final_output = %q, want %q", got, want)
@@ -113,40 +129,6 @@ func assertPeersResult(t *testing.T, c messaging.ConformanceCase, provider *fake
 		}
 		if provider.lastRunID != provider.resolution.RunID {
 			t.Fatalf("last read %q, want the resolved %q", provider.lastRunID, provider.resolution.RunID)
-		}
-	}
-}
-
-func TestPeersInvalidRequestMatrix(t *testing.T) {
-	inputs := map[string]map[string]string{
-		"list": {
-			"unknown property \"target\"":          `{"action": "list", "target": "x"}`,
-			"missing required property \"action\"": `{}`,
-			"property \"action\" must be a string": `{"action": 5}`,
-		},
-		"rename": {
-			"unknown property \"target\"":              `{"action": "rename", "name": "x", "target": "y"}`,
-			"missing required property \"name\"":       `{"action": "rename"}`,
-			"property \"session_id\" must be a string": `{"action": "rename", "name": "x", "session_id": 5}`,
-		},
-		"last": {
-			"unknown property \"name\"":            `{"action": "last", "target": "x", "name": "y"}`,
-			"missing required property \"target\"": `{"action": "last"}`,
-			"property \"target\" must be a string": `{"action": "last", "target": 5}`,
-		},
-	}
-	for action, cases := range inputs {
-		for detail, input := range cases {
-			t.Run(action+"/"+detail, func(t *testing.T) {
-				_, err := ExecutePeers(t.Context(), &fakeProvider{caller: messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"}}, json.RawMessage(input))
-				var toolErr *ToolError
-				if !errors.As(err, &toolErr) || toolErr.Code != "invalid_request" {
-					t.Fatalf("error = %v, want invalid_request", err)
-				}
-				if got, want := toolErr.Facts["detail"], detail; got != want {
-					t.Fatalf("detail = %q, want %q", got, want)
-				}
-			})
 		}
 	}
 }
@@ -207,5 +189,43 @@ func TestPeersActionVocabulary(t *testing.T) {
 		if _, ok := messaging.ApplicabilityTable()[action]; ok {
 			t.Fatalf("message applicability table lists the peers action %q", action)
 		}
+	}
+}
+
+// inputTarget returns the case's addressed target, the last rung of the peers
+// `last` label fallback chain.
+func inputTarget(input json.RawMessage) string {
+	var decoded struct {
+		Target string `json:"target"`
+	}
+	if err := json.Unmarshal(input, &decoded); err != nil {
+		return ""
+	}
+	return decoded.Target
+}
+
+// TestPeersLastEscapesStopReason keeps a producer-controlled stop reason from
+// injecting bidi or zero-width characters into the peers `last` text.
+func TestPeersLastEscapesStopReason(t *testing.T) {
+	provider := &fakeProvider{
+		caller:     messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+		resolution: messaging.Resolution{RunID: "rt_7", Label: "mesh-a", Match: messaging.MatchUnique},
+		last: messaging.PeerLast{
+			RunID:      "rt_7",
+			Label:      "mesh-a",
+			HasRecord:  true,
+			Text:       "OK",
+			StopReason: "end\u202eturn",
+		},
+	}
+	result, err := ExecutePeers(t.Context(), provider, json.RawMessage(`{"action": "last", "target": "rt_7"}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if strings.Contains(result.Text, "\u202e") {
+		t.Fatalf("text carries a raw bidi override: %q", result.Text)
+	}
+	if !strings.Contains(result.Text, `\u202e`) {
+		t.Fatalf("text does not carry the escaped stop reason: %q", result.Text)
 	}
 }

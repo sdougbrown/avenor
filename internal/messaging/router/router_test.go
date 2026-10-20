@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"reflect"
 	"strings"
 	"testing"
@@ -24,18 +25,22 @@ type fakeProvider struct {
 	resolution messaging.Resolution
 	runFacts   messaging.RunFacts
 
-	outcome    messaging.Outcome
-	reply      string
-	peers      []messaging.Peer
-	peerErr    error
-	last       messaging.PeerLast
-	lastErr    error
-	resumed    messaging.ResumeResult
-	resumeErr  error
-	renamed    messaging.RenameResult
-	renameErr  error
-	control    json.RawMessage
-	controlErr error
+	outcome       messaging.Outcome
+	reply         string
+	fenceFull     bool
+	peers         []messaging.Peer
+	peerErr       error
+	last          messaging.PeerLast
+	lastErr       error
+	resumed       messaging.ResumeResult
+	resumeErr     error
+	renamed       messaging.RenameResult
+	renameErr     error
+	control       json.RawMessage
+	controlErr    error
+	withdrawErr   error
+	generation    string
+	preflightCall int
 
 	resolveRef string
 	sent       messaging.SendRequest
@@ -51,6 +56,9 @@ type fakeProvider struct {
 
 func (p *fakeProvider) Send(_ context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	p.sent = req
+	if p.fenceFull {
+		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID}, nil
+	}
 	if req.NoReply {
 		return messaging.SendResult{Outcome: p.outcome, MessageID: req.MessageID}, nil
 	}
@@ -80,7 +88,7 @@ func (p *fakeProvider) Reply(_ context.Context, req messaging.ReplyRequest) (mes
 
 func (p *fakeProvider) Withdraw(_ context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	p.withdrew = req
-	return messaging.WithdrawResult{Outcome: p.outcome}, nil
+	return messaging.WithdrawResult{Outcome: p.outcome}, p.withdrawErr
 }
 
 func (p *fakeProvider) Receive(context.Context, messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
@@ -93,7 +101,15 @@ func (p *fakeProvider) Peers(_ context.Context, req messaging.PeersRequest) (mes
 }
 
 func (p *fakeProvider) Preflight(context.Context) (messaging.PreflightResult, error) {
-	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}, nil
+	p.preflightCall++
+	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "preflight-2"}, nil
+}
+
+func (p *fakeProvider) Generation() string {
+	if p.generation == "" {
+		return "gen-7"
+	}
+	return p.generation
 }
 
 func (p *fakeProvider) Close() error { return nil }
@@ -139,6 +155,9 @@ type claimProvider struct {
 
 func (p claimProvider) ClaimAsk(messageID string) (string, bool) {
 	asker, ok := p.claimed[messageID]
+	if ok {
+		delete(p.claimed, messageID)
+	}
 	return asker, ok
 }
 
@@ -200,8 +219,9 @@ func newFake(t *testing.T, c messaging.ConformanceCase) *fakeProvider {
 			Live:      boolOf(c.Conditions["targetLive"]),
 			Resumable: boolOf(c.Conditions["targetResumable"]),
 		},
-		outcome: messaging.Outcome(stringOf(c.Provider["outcome"])),
-		reply:   stringOf(c.Provider["reply"]),
+		outcome:   messaging.Outcome(stringOf(c.Provider["outcome"])),
+		reply:     stringOf(c.Provider["reply"]),
+		fenceFull: boolOf(c.Provider["fence_full"]),
 	}
 	if resolved := objectOf(c.Provider["resolved"]); resolved != nil {
 		provider.resolution = messaging.Resolution{
@@ -257,7 +277,8 @@ func newFake(t *testing.T, c messaging.ConformanceCase) *fakeProvider {
 		if err != nil {
 			t.Fatalf("encode peer: %v", err)
 		}
-		provider.peers = append(provider.peers, messaging.Peer{RunID: stringOf(peer["run_id"]), Session: session})
+		envelopeRunID := firstNonEmpty(stringOf(peer["peer_run_id"]), stringOf(peer["run_id"]))
+		provider.peers = append(provider.peers, messaging.Peer{RunID: envelopeRunID, Session: session})
 	}
 	return provider
 }
@@ -308,6 +329,12 @@ func TestConformanceCases(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
+			var input struct {
+				Action string `json:"action"`
+			}
+			if err := json.Unmarshal(c.Input, &input); err != nil {
+				t.Fatalf("decode case input: %v", err)
+			}
 			provider := newFake(t, c)
 			router := NewRouter(providerFor(provider, c))
 
@@ -329,11 +356,13 @@ func TestConformanceCases(t *testing.T) {
 					if len(toolErr.Facts) != 0 {
 						t.Fatalf("facts = %v, want none", toolErr.Facts)
 					}
+					assertNoTransport(t, provider)
 					return
 				}
 				if !reflect.DeepEqual(toolErr.Facts, c.Expect.Facts) {
 					t.Fatalf("facts = %v, want %v", toolErr.Facts, c.Expect.Facts)
 				}
+				assertNoTransport(t, provider)
 				return
 			}
 			if err != nil {
@@ -345,11 +374,46 @@ func TestConformanceCases(t *testing.T) {
 			if got, want := result.Text, substituteMessageID(c.Expect.Message, messageID); got != want {
 				t.Fatalf("text = %q, want %q", got, want)
 			}
-			if c.Expect.Outcome != "" && result.Action == "" {
-				t.Fatal("result carries no action")
+			if got, want := result.Action, input.Action; got != want {
+				t.Fatalf("action = %q, want %q", got, want)
+			}
+			if messageID != "" && result.MessageID != messageID {
+				t.Fatalf("message id = %q, want %q", result.MessageID, messageID)
+			}
+			if want := c.Expect.Facts["message_id"]; want != "" {
+				if got := quote(result.MessageID); got != substituteMessageID(want, messageID) {
+					t.Fatalf("message_id fact = %q, want %q", got, substituteMessageID(want, messageID))
+				}
+			}
+			if want := c.Expect.Facts["target"]; want != "" && quote(result.Label) != want {
+				t.Fatalf("target fact = %q, want %q", quote(result.Label), want)
+			}
+			if provider.resumed.Label != "" && input.Action == "resume" && result.Label != provider.resumed.Label {
+				t.Fatalf("label = %q, want %q", result.Label, provider.resumed.Label)
+			}
+			if input.Action == "ask" && result.Outcome == messaging.OutcomeReplied {
+				if result.Reply != provider.reply {
+					t.Fatalf("reply = %q, want %q", result.Reply, provider.reply)
+				}
+			} else if result.Reply != "" {
+				t.Fatalf("reply = %q, want empty", result.Reply)
+			}
+			if input.Action == "resume" {
+				if result.SentinelFile != provider.resumed.SentinelFile || result.OnEvent != provider.resumed.OnEvent {
+					t.Fatalf("resume paths = %q/%q, want %q/%q", result.SentinelFile, result.OnEvent, provider.resumed.SentinelFile, provider.resumed.OnEvent)
+				}
 			}
 			assertRequest(t, c, provider, messageID)
 		})
+	}
+}
+
+// assertNoTransport proves a rejected call never reached the provider's
+// transport methods.
+func assertNoTransport(t *testing.T, provider *fakeProvider) {
+	t.Helper()
+	if provider.sent.MessageID != "" || provider.replied.MessageID != "" || provider.withdrew.MessageID != "" || provider.peered.Generation != "" {
+		t.Fatal("a rejected request reached the transport")
 	}
 }
 
@@ -436,6 +500,26 @@ func assertRequest(t *testing.T, c messaging.ConformanceCase, provider *fakeProv
 		if provider.withdrew.Generation != "gen-7" {
 			t.Fatalf("withdraw generation = %q, want gen-7", provider.withdrew.Generation)
 		}
+	case "control_reply":
+		if want := stringOf(request["target"]); want != "" && provider.controlTo != want {
+			t.Fatalf("control_reply target = %q, want %q", provider.controlTo, want)
+		}
+		if expected := objectOf(c.Provider["control_reply"]); expected != nil {
+			wantRaw, err := json.Marshal(expected["payload"])
+			if err != nil {
+				t.Fatalf("encode expected payload: %v", err)
+			}
+			var got, want any
+			if err := json.Unmarshal(provider.control, &got); err != nil {
+				t.Fatalf("decode control payload %s: %v", provider.control, err)
+			}
+			if err := json.Unmarshal(wantRaw, &want); err != nil {
+				t.Fatalf("decode expected payload %s: %v", wantRaw, err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("control_reply payload = %s, want %s", provider.control, wantRaw)
+			}
+		}
 	case "resume":
 		if want := stringOf(request["target"]); want != "" && provider.resumeReq.Target != want {
 			t.Fatalf("resume target = %q, want %q", provider.resumeReq.Target, want)
@@ -451,120 +535,6 @@ func assertRequest(t *testing.T, c messaging.ConformanceCase, provider *fakeProv
 		}
 		if provider.resumeReq.RunID != "" || provider.resumeReq.SentinelFile != "" || provider.resumeReq.EventLog != "" {
 			t.Fatalf("resume minted provider paths: %+v", provider.resumeReq)
-		}
-	}
-}
-
-// TestInvalidRequestMatrix is the Go twin of the TypeScript router's
-// assertMessageInput test: for each action, an unknown property, a missing
-// required property and a wrong-typed property each produce invalid_request
-// with the exact fixed detail sentence and no provider call.
-func TestInvalidRequestMatrix(t *testing.T) {
-	required := map[string][]string{
-		"tell":          {"target", "message"},
-		"ask":           {"target", "message"},
-		"reply":         {"reply_to", "message"},
-		"resume":        {"target", "message"},
-		"withdraw":      {"message_id"},
-		"control_reply": {"target"},
-	}
-	wrongType := map[string]struct {
-		property string
-		value    any
-		detail   string
-	}{
-		"tell":          {"target", 5, `property "target" must be a string`},
-		"ask":           {"timeout_ms", 1.5, `property "timeout_ms" must be an integer`},
-		"reply":         {"reply_to", true, `property "reply_to" must be a string`},
-		"resume":        {"label", 5, `property "label" must be a string`},
-		"withdraw":      {"message_id", []any{"x"}, `property "message_id" must be a string`},
-		"control_reply": {"payload", "x", `property "payload" must be an object`},
-	}
-	for action, keys := range required {
-		valid := map[string]any{"action": action}
-		if action == "reply" {
-			valid["reply_to"] = "av1.r.1"
-		} else if action == "withdraw" {
-			valid["message_id"] = "av1.w.1"
-		} else {
-			valid["target"] = "rt_7"
-		}
-		if action != "withdraw" && action != "control_reply" {
-			valid["message"] = "hi"
-		}
-
-		unknown := map[string]any{}
-		for key, value := range valid {
-			unknown[key] = value
-		}
-		unknown["bogus"] = 1
-
-		missing := map[string]any{}
-		for key, value := range valid {
-			missing[key] = value
-		}
-		delete(missing, keys[0])
-
-		wrong := map[string]any{}
-		for key, value := range valid {
-			wrong[key] = value
-		}
-		wrong[wrongType[action].property] = wrongType[action].value
-
-		for detail, input := range map[string]map[string]any{
-			`unknown property "bogus"`:                    unknown,
-			`missing required property "` + keys[0] + `"`: missing,
-			wrongType[action].detail:                      wrong,
-		} {
-			t.Run(action+"/"+detail, func(t *testing.T) {
-				raw, err := json.Marshal(input)
-				if err != nil {
-					t.Fatalf("encode input: %v", err)
-				}
-				provider := &fakeProvider{caller: messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"}}
-				_, execErr := NewRouter(provider).Execute(t.Context(), raw)
-				var toolErr *ToolError
-				if !errors.As(execErr, &toolErr) || toolErr.Code != "invalid_request" {
-					t.Fatalf("error = %v, want invalid_request", execErr)
-				}
-				if got := toolErr.Facts["detail"]; got != detail {
-					t.Fatalf("detail = %q, want %q", got, detail)
-				}
-				if want := `invalid input for action "` + action + `": ` + detail; toolErr.Message != want {
-					t.Fatalf("message = %q, want %q", toolErr.Message, want)
-				}
-				if provider.sent.MessageID != "" || provider.replied.MessageID != "" || provider.withdrew.MessageID != "" {
-					t.Fatal("a rejected request reached the transport")
-				}
-			})
-		}
-	}
-}
-
-// TestInvalidActionMatchesFixture pins the invalid_action reason the router
-// reads out of the generated route table to the conformance fixture's text.
-func TestInvalidActionMatchesFixture(t *testing.T) {
-	cases, err := messaging.LoadConformanceCases(conformancePath)
-	if err != nil {
-		t.Fatalf("load conformance fixture: %v", err)
-	}
-	want := ""
-	for _, c := range cases {
-		if c.Expect.Code == "invalid_action" {
-			want = c.Expect.Message
-		}
-	}
-	if want == "" {
-		t.Fatal("fixture carries no invalid_action case")
-	}
-	for _, input := range []string{`{"target": "rt_7", "message": "hi"}`, `{"action": "forward"}`} {
-		_, err := NewRouter(&fakeProvider{}).Execute(t.Context(), json.RawMessage(input))
-		var toolErr *ToolError
-		if !errors.As(err, &toolErr) || toolErr.Code != "invalid_action" {
-			t.Fatalf("%s: error = %v, want invalid_action", input, err)
-		}
-		if toolErr.Message != want {
-			t.Fatalf("%s: message = %q, want %q", input, toolErr.Message, want)
 		}
 	}
 }
@@ -604,17 +574,17 @@ func TestPermissionReasonsMatchFixture(t *testing.T) {
 	}
 }
 
-// TestUnlistedOutcomeFallsBackToPossiblyPending guards the "text on every
-// result" rule: a transport that reports an outcome the action's matrix does not
-// list is a transport bug, and is reported as possibly-pending with text rather
-// than as an outcome with no sentence.
-func TestUnlistedOutcomeFallsBackToPossiblyPending(t *testing.T) {
+// TestOutcomeOutsideVocabularyFallsBackToPossiblyPending guards the "text on
+// every result" rule for an outcome that is not in the vocabulary at all: it is
+// reported as possibly-pending with text rather than as an outcome with no
+// sentence.
+func TestOutcomeOutsideVocabularyFallsBackToPossiblyPending(t *testing.T) {
 	provider := &fakeProvider{
 		caller:     messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
 		surface:    messaging.SurfaceChanneltools,
 		resolution: messaging.Resolution{RunID: "rt_7", Label: "mesh-a", Match: messaging.MatchUnique},
 		runFacts:   messaging.RunFacts{Status: runstate.StatusRunning, Live: true},
-		outcome:    messaging.OutcomeWithdrawn,
+		outcome:    messaging.Outcome("mystery"),
 	}
 	result, err := NewRouter(provider).Execute(t.Context(), json.RawMessage(`{"action": "tell", "target": "rt_7", "message": "hi"}`))
 	if err != nil {
@@ -625,5 +595,188 @@ func TestUnlistedOutcomeFallsBackToPossiblyPending(t *testing.T) {
 	}
 	if !strings.Contains(result.Text, "may still be pending") || result.MessageID == "" {
 		t.Fatalf("text = %q, message id = %q", result.Text, result.MessageID)
+	}
+}
+
+// TestInVocabularyUnlistedOutcomeIsNotRewritten makes a missing matrix row a
+// visible gap: an outcome the vocabulary defines but the action does not list is
+// returned as-is with no text, never silently rewritten to possibly-pending.
+func TestInVocabularyUnlistedOutcomeIsNotRewritten(t *testing.T) {
+	outcome, text := outcomeText(actionTell, messaging.OutcomeLost, map[string]string{
+		"message_id": quote("av1.t.1"),
+		"target":     quote("mesh-a"),
+	})
+	if outcome != messaging.OutcomeLost {
+		t.Fatalf("outcome = %q, want lost", outcome)
+	}
+	if text != "" {
+		t.Fatalf("text = %q, want empty for an unlisted pair", text)
+	}
+}
+
+// TestReachableOutcomesAreRenderable is the matrix totality check the router
+// itself relies on: every outcome a transport can return for an action has a
+// render template, so the fallback in outcomeText never fires for a
+// vocabulary outcome.
+func TestReachableOutcomesAreRenderable(t *testing.T) {
+	reachable := map[string][]messaging.Outcome{
+		actionTell:         {messaging.OutcomeSent, messaging.OutcomeNotSent, messaging.OutcomeAuthRejected, messaging.OutcomePossiblyPending, messaging.OutcomeWithdrawn},
+		actionAsk:          {messaging.OutcomeReplied, messaging.OutcomeTimedOut, messaging.OutcomeWithdrawn, messaging.OutcomeEdgeAbsent, messaging.OutcomePossiblyPending, messaging.OutcomeLost, messaging.OutcomeNotSent, messaging.OutcomeAuthRejected},
+		actionReply:        {messaging.OutcomeReplied, messaging.OutcomeSent, messaging.OutcomeEdgeAbsent, messaging.OutcomePossiblyPending, messaging.OutcomeNotSent, messaging.OutcomeAuthRejected, messaging.OutcomeWithdrawn, messaging.OutcomeTimedOut, messaging.OutcomeLost},
+		actionWithdraw:     {messaging.OutcomeWithdrawn, messaging.OutcomeEdgeAbsent, messaging.OutcomeReplied, messaging.OutcomeLost, messaging.OutcomePossiblyPending, messaging.OutcomeNotSent, messaging.OutcomeAuthRejected, messaging.OutcomeTimedOut},
+		actionResume:       {outcomeResumed},
+		actionControlReply: {messaging.OutcomeSent},
+	}
+	for action, outcomes := range reachable {
+		for _, outcome := range outcomes {
+			if !rendersOutcome(action, outcome) {
+				t.Fatalf("%s:%s has no render template", action, outcome)
+			}
+		}
+	}
+}
+
+// TestReplyClaimRestoredUnlessDelivered pins the claim rule: only a replied
+// outcome proves the asker received the answer, so every other outcome leaves
+// the ask claimable.
+func TestReplyClaimRestoredUnlessDelivered(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		outcome  messaging.Outcome
+		restored bool
+	}{
+		{"replied consumes the claim", messaging.OutcomeReplied, false},
+		{"not-sent restores the claim", messaging.OutcomeNotSent, true},
+		{"possibly-pending restores the claim", messaging.OutcomePossiblyPending, true},
+		{"edge-absent restores the claim", messaging.OutcomeEdgeAbsent, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &fakeProvider{
+				caller:  messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+				outcome: tc.outcome,
+			}
+			claimed := map[string]string{"av1.reply.1": "run-asker"}
+			router := NewRouter(claimProvider{fakeProvider: provider, claimed: claimed})
+			if _, err := router.Execute(t.Context(), json.RawMessage(`{"action": "reply", "reply_to": "av1.reply.1", "message": "OK"}`)); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			_, restored := claimed["av1.reply.1"]
+			if restored != tc.restored {
+				t.Fatalf("claim restored = %v, want %v", restored, tc.restored)
+			}
+		})
+	}
+}
+
+// TestWithdrawFenceCapacityReportsPossiblyPending keeps the router from claiming
+// "nothing is pending" when the absence fence could not be installed and a
+// delayed send can still be admitted.
+func TestWithdrawFenceCapacityReportsPossiblyPending(t *testing.T) {
+	provider := &fakeProvider{
+		caller:      messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+		outcome:     messaging.OutcomeEdgeAbsent,
+		withdrawErr: messaging.ErrFenceCapacity,
+	}
+	result, err := NewRouter(provider).Execute(t.Context(), json.RawMessage(`{"action": "withdraw", "message_id": "av1.w.1"}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if result.Outcome != messaging.OutcomePossiblyPending {
+		t.Fatalf("outcome = %q, want possibly-pending", result.Outcome)
+	}
+	if !strings.Contains(result.Text, "may still be pending") {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
+// TestRefusedClassifiesPathErrors keeps an absolute provider path out of tool
+// text.
+func TestRefusedClassifiesPathErrors(t *testing.T) {
+	toolErr := refused(&fs.PathError{Op: "open", Path: "/home/u/.avenor/runs/run-1/sentinel.done", Err: fs.ErrNotExist})
+	if want := messaging.Repair("refused_io", nil); toolErr.Message != want {
+		t.Fatalf("message = %q, want %q", toolErr.Message, want)
+	}
+	if strings.Contains(toolErr.Message, "/home/u") {
+		t.Fatalf("message leaks a path: %q", toolErr.Message)
+	}
+}
+
+// TestRouterUsesBoundGeneration proves the router never re-reads the generation
+// per call: every request carries the provider's construction-time binding.
+func TestRouterUsesBoundGeneration(t *testing.T) {
+	live := messaging.RunFacts{Status: runstate.StatusRunning, Live: true}
+	for _, tc := range []struct {
+		name       string
+		input      string
+		generation func(*fakeProvider) string
+	}{
+		{"tell", `{"action": "tell", "target": "rt_7", "message": "hi"}`, func(p *fakeProvider) string { return p.sent.Generation }},
+		{"ask", `{"action": "ask", "target": "rt_7", "message": "hi"}`, func(p *fakeProvider) string { return p.sent.Generation }},
+		{"withdraw", `{"action": "withdraw", "message_id": "av1.w.1"}`, func(p *fakeProvider) string { return p.withdrew.Generation }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &fakeProvider{
+				caller:     messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+				resolution: messaging.Resolution{RunID: "rt_7", Label: "mesh-a", Match: messaging.MatchUnique},
+				runFacts:   live,
+				outcome:    messaging.OutcomeReplied,
+				reply:      "OK",
+				generation: "bound-9",
+			}
+			if _, err := NewRouter(provider).Execute(t.Context(), json.RawMessage(tc.input)); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if provider.preflightCall != 0 {
+				t.Fatalf("router called Preflight %d times", provider.preflightCall)
+			}
+			if got := tc.generation(provider); got != "bound-9" {
+				t.Fatalf("generation = %q, want bound-9", got)
+			}
+		})
+	}
+
+	provider := &fakeProvider{
+		caller:     messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+		generation: "bound-9",
+	}
+	if _, err := ExecutePeers(t.Context(), provider, json.RawMessage(`{"action": "list"}`)); err != nil {
+		t.Fatalf("execute peers: %v", err)
+	}
+	if provider.preflightCall != 0 || provider.peered.Generation != "bound-9" {
+		t.Fatalf("peers preflight=%d generation=%q", provider.preflightCall, provider.peered.Generation)
+	}
+}
+
+// TestQuoteEscapesNonPrintable pins the label-safety rule: a producer-controlled
+// label must not be able to smuggle a bidi override or a zero-width character
+// into tool text.
+func TestQuoteEscapesNonPrintable(t *testing.T) {
+	const raw = "a\u200bb\u202ec\u0085d\"e\\f\ng"
+	const want = "\"a\\u200bb\\u202ec\\u0085d\\\"e\\\\f\\ng\""
+	if got := quote(raw); got != want {
+		t.Fatalf("quote = %q, want %q", got, want)
+	}
+	if got := sanitize(raw); got != want[1:len(want)-1] {
+		t.Fatalf("sanitize = %q, want %q", got, want[1:len(want)-1])
+	}
+	for _, forbidden := range []string{"\u200b", "\u202e", "\u0085"} {
+		if strings.Contains(quote(raw), forbidden) || strings.Contains(sanitize(raw), forbidden) {
+			t.Fatalf("escaped value still carries %q", forbidden)
+		}
+	}
+}
+
+// TestIntegerWireTypeAcceptsMathematicalIntegers pins the integer verdict the
+// schema and the table now share: 1.0 and 1e3 are integers, 1.5 is not.
+func TestIntegerWireTypeAcceptsMathematicalIntegers(t *testing.T) {
+	for _, raw := range []string{"1", "1.0", "1e3", "-2.0"} {
+		if !hasWireType(json.RawMessage(raw), "integer") {
+			t.Fatalf("%s should be an integer", raw)
+		}
+	}
+	for _, raw := range []string{"1.5", "1e-1", `"1"`, "999999999999999999999"} {
+		if hasWireType(json.RawMessage(raw), "integer") {
+			t.Fatalf("%s should not be an integer", raw)
+		}
 	}
 }

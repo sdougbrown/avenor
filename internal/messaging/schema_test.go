@@ -5,6 +5,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -45,8 +46,8 @@ func validateAgainst(t *testing.T, schema map[string]any, input json.RawMessage)
 }
 
 // TestConformanceSchemaCases asserts that the JSON Schema rejects every case
-// the fixture marks as a schema violation, so the schema and the applicability
-// table reject the same cross-variant fields.
+// the fixture marks as a schema violation and accepts every valid case, so a
+// type typo cannot make the schema reject the whole contract silently.
 func TestConformanceSchemaCases(t *testing.T) {
 	for _, fixture := range []struct {
 		path   string
@@ -75,21 +76,55 @@ func TestConformanceSchemaCases(t *testing.T) {
 		if checked == 0 {
 			t.Fatal("fixture marks no case as a schema violation")
 		}
+		valid := 0
+		for _, c := range cases {
+			if c.Schema || c.Expect.Code != "" {
+				continue
+			}
+			valid++
+			t.Run("valid/"+c.Name, func(t *testing.T) {
+				if err := validateAgainst(t, fixture.schema(), c.Input); err != nil {
+					t.Fatalf("schema rejected the valid input %s: %v", c.Input, err)
+				}
+			})
+		}
+		if valid == 0 {
+			t.Fatal("fixture carries no valid case")
+		}
 	}
 }
 
 // TestSchemaMatchesRouteTable proves each schema variant and its applicability
-// entry admit the same set: same properties, same required keys, and no
-// additional properties. Both schemas are covered.
+// entry admit the same set: same properties, same required keys, same declared
+// types and the same string constraints. The checked-in fixture maps are
+// compared with the compiled tables too, so a fixture edit that is not
+// regenerated fails here.
 func TestSchemaMatchesRouteTable(t *testing.T) {
+	fixtureMessages, fixturePeers, err := LoadApplicabilityTables("../../schemas/message_route.conformance.json")
+	if err != nil {
+		t.Fatalf("load applicability fixture: %v", err)
+	}
 	for _, fixture := range []struct {
-		name   string
-		schema map[string]any
-		table  map[string]ActionApplicability
+		name    string
+		schema  map[string]any
+		table   map[string]ActionApplicability
+		fixture map[string]ActionApplicability
 	}{
-		{"message", MessageInputSchema(), ApplicabilityTable()},
-		{"peers", PeersInputSchema(), PeersApplicabilityTable()},
+		{"message", MessageInputSchema(), ApplicabilityTable(), fixtureMessages},
+		{"peers", PeersInputSchema(), PeersApplicabilityTable(), fixturePeers},
 	} {
+		if len(fixture.fixture) != len(fixture.table) {
+			t.Fatalf("%s: fixture has %d applicability entries, table has %d", fixture.name, len(fixture.fixture), len(fixture.table))
+		}
+		for action, want := range fixture.fixture {
+			got, ok := fixture.table[action]
+			if !ok {
+				t.Fatalf("%s: fixture action %q has no table entry", fixture.name, action)
+			}
+			if !reflect.DeepEqual(want.Permitted, got.Permitted) || !reflect.DeepEqual(want.Required, got.Required) || !reflect.DeepEqual(want.Types, got.Types) {
+				t.Fatalf("%s/%s: fixture = %+v, table = %+v; run go generate", fixture.name, action, want, got)
+			}
+		}
 		variants, ok := fixture.schema["oneOf"].([]any)
 		if !ok || len(variants) != len(fixture.table) {
 			t.Fatalf("%s: %d variants, %d applicability entries", fixture.name, len(variants), len(fixture.table))
@@ -135,9 +170,29 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 			if additional, ok := variant["additionalProperties"].(bool); !ok || additional {
 				t.Fatalf("%s/%s: additionalProperties must be false", fixture.name, action)
 			}
-			for name := range properties {
-				if entry.Types[name] == "" {
-					t.Fatalf("%s/%s: property %q declares no wire type", fixture.name, action, name)
+			for name, rawProperty := range properties {
+				property, _ := rawProperty.(map[string]any)
+				kind := entry.Types[name]
+				switch kind {
+				case "string", "integer", "object":
+				default:
+					t.Fatalf("%s/%s: property %q declares type %q", fixture.name, action, name, kind)
+				}
+				if _, discriminator := property["const"]; discriminator {
+					continue
+				}
+				if schemaType, _ := property["type"].(string); schemaType != kind {
+					t.Fatalf("%s/%s: property %q schema type = %q, table type = %q", fixture.name, action, name, schemaType, kind)
+				}
+				constraint := entry.Constraints[name]
+				if got := schemaInt(property["minLength"]); got != constraint.MinLength {
+					t.Fatalf("%s/%s: property %q schema minLength = %d, table = %d", fixture.name, action, name, got, constraint.MinLength)
+				}
+				if got := schemaInt(property["maxLength"]); got != constraint.MaxLength {
+					t.Fatalf("%s/%s: property %q schema maxLength = %d, table = %d", fixture.name, action, name, got, constraint.MaxLength)
+				}
+				if got, _ := property["pattern"].(string); got != constraint.Pattern {
+					t.Fatalf("%s/%s: property %q schema pattern = %q, table = %q", fixture.name, action, name, got, constraint.Pattern)
 				}
 			}
 		}
@@ -147,6 +202,11 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 			}
 		}
 	}
+}
+
+func schemaInt(value any) int {
+	number, _ := value.(float64)
+	return int(number)
 }
 
 // TestSchemaFilesCompiled catches a stale schema.gen.go without running go
@@ -195,4 +255,61 @@ func TestSurfaceVocabulary(t *testing.T) {
 			t.Fatalf("surface %q appears in no conformance case", surface)
 		}
 	}
+}
+
+// TestRuleMetaMatchesUmpireSpec pins the generated rule metadata to the Umpire
+// spec, and enforces the one-slot-per-rule-kind invariant the generator silently
+// violates by overwriting a second rule on the same field and kind.
+func TestRuleMetaMatchesUmpireSpec(t *testing.T) {
+	var spec struct {
+		Rules []struct {
+			Type   string `json:"type"`
+			Field  string `json:"field"`
+			Reason string `json:"reason"`
+		} `json:"rules"`
+	}
+	if err := decodeFixture("../../schemas/message_route.umpire.json", &spec); err != nil {
+		t.Fatalf("decode umpire spec: %v", err)
+	}
+	type ruleKey struct {
+		Field    string
+		RuleType string
+		Reason   string
+	}
+	seen := map[string]bool{}
+	want := make([]ruleKey, 0, len(spec.Rules))
+	for _, rule := range spec.Rules {
+		key := rule.Field + "\x00" + rule.Type
+		if seen[key] {
+			t.Fatalf("field %q carries two %q rules; the generator keeps only one", rule.Field, rule.Type)
+		}
+		seen[key] = true
+		want = append(want, ruleKey{Field: capitalize(rule.Field), RuleType: rule.Type, Reason: rule.Reason})
+	}
+	sort.Slice(want, func(i, j int) bool {
+		if want[i].Field != want[j].Field {
+			return want[i].Field < want[j].Field
+		}
+		return want[i].RuleType < want[j].RuleType
+	})
+	got := make([]ruleKey, 0, len(ruleMeta))
+	for _, entry := range ruleMeta {
+		got = append(got, ruleKey{Field: entry.Field, RuleType: entry.RuleType, Reason: entry.Reason})
+	}
+	sort.Slice(got, func(i, j int) bool {
+		if got[i].Field != got[j].Field {
+			return got[i].Field < got[j].Field
+		}
+		return got[i].RuleType < got[j].RuleType
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("generated ruleMeta = %+v, spec = %+v; run go generate", got, want)
+	}
+}
+
+func capitalize(value string) string {
+	if value == "" {
+		return value
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
 }
