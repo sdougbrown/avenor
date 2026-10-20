@@ -298,8 +298,8 @@ Creates and starts a new child runtime. Returns:
 {
   "runtime_id": "rt_1",
   "session_id": "ses_xyz",
-  "on_event": "/tmp/avenor-stable/abc123/rt_1/events.ndjson",
-  "sentinel_file": "/tmp/avenor-stable/abc123/rt_1/sentinel.env"
+  "on_event": "/tmp/avenor-stable-1000/run_692b628b/rt_1/events.ndjson",
+  "sentinel_file": "/tmp/avenor-stable-1000/run_692b628b/rt_1/sentinel.env"
 }
 ```
 
@@ -311,8 +311,8 @@ Params:
 - `model` (string) — model name override.
 - `server_url` (string) — backend server URL (e.g. OpenCode HTTP endpoint).
 - `backend` (string) — backend class. Defaults to `"opencode-acp"`.
-- `on_event` (string) — path to write event NDJSON. If omitted, created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/`.
-- `sentinel_file` (string) — path to write exit status. If omitted, created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/`.
+- `on_event` (string) — path to write event NDJSON. If omitted, created under `$TMPDIR/avenor-stable-<euid>/run_<supervisor_run_id>/<runtime_id>/`.
+- `sentinel_file` (string) — path to write exit status. If omitted, created under `$TMPDIR/avenor-stable-<euid>/run_<supervisor_run_id>/<runtime_id>/`.
 - `permission_handler` (string) — how to handle permission requests (e.g. `"file:/path"` to poll files, or omit to use `auto_approve`).
 - `auto_approve` (bool) — auto-resolve all permission requests. Overrides file handler if both are set.
 - `timeout` (string) — total run timeout as a Go duration (`30s`, `5m`, etc.).
@@ -356,9 +356,9 @@ Returns all active and recently-completed child runtimes with status summaries. 
     "latest_seq": 42,
     "usage": {"total_tokens": 1200},
     "exit_code": 0,
-    "on_event": "/tmp/avenor-stable/abc123/rt_1/events.ndjson",
-    "event_path": "/tmp/avenor-stable/abc123/rt_1/events.ndjson",
-    "sentinel_file": "/tmp/avenor-stable/abc123/rt_1/sentinel.env"
+    "on_event": "/tmp/avenor-stable-1000/run_692b628b/rt_1/events.ndjson",
+    "event_path": "/tmp/avenor-stable-1000/run_692b628b/rt_1/events.ndjson",
+    "sentinel_file": "/tmp/avenor-stable-1000/run_692b628b/rt_1/sentinel.env"
   }
 ]
 ```

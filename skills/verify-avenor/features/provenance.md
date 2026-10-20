@@ -329,8 +329,8 @@ The drive passes when all of these are captured:
 - `--timeout 180s` on the CLI run and the 240s sentinel wait bound
   a wedged backend. The supervisor PID must come from `$!`; never kill by
   process name.
-- The supervisor writes child state under `/tmp/avenor-stable/`. Copy evidence
-  out before cleanup.
+- The supervisor writes child state under
+  `${TMPDIR:-/tmp}/avenor-stable-$(id -u)/`. Copy evidence out before cleanup.
 - `opencode-http` attaches to an external server and `pony` runs in-process, so
   neither can produce this proof. See
   [backends.md](../../../docs/backends.md#launch-identity).

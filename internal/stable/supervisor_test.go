@@ -6152,7 +6152,7 @@ func withFakeExec(t *testing.T, fake func(name string, arg ...string) *exec.Cmd)
 // parent context, send a message from a child to the parent, and verify the
 // child.question event is emitted.
 func TestSpawnAndSendToParent(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
+	socketPath := newStableSocketPath(t, "spawn-parent-child")
 
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   socketPath,
@@ -8143,7 +8143,9 @@ func waitControlSessionEnd(t *testing.T, eventCh <-chan client.Event, runtimeID 
 // before prompting the next turn. Returns the delivered session.end seqs.
 func runControlTurnsTest(t *testing.T, turns int, betweenTurn func(turn int, sup *Supervisor, c *client.Client, runtimeID string)) []int64 {
 	t.Helper()
-	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
+	// A short socket path keeps the control socket under the unix socket path
+	// limit; the test temporary directory is longer than it.
+	socketPath := newStableSocketPath(t, "ctrl-turns")
 
 	provider := &turnEndProvider{}
 
@@ -8248,7 +8250,7 @@ func TestControlStampedEventsBetweenTurnsKeepSeqMonotonic(t *testing.T) {
 // for the runtime it prompts. Before the client-side auto-subscribe, this
 // scenario hung waiting for events that were never delivered.
 func TestSubscribeRuntimeOnlyReceivesSessionEnd(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "ctrl.sock")
+	socketPath := newStableSocketPath(t, "subscribe-runtime")
 
 	provider := &turnEndProvider{}
 

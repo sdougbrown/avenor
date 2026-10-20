@@ -665,6 +665,18 @@ type Supervisor struct {
 	reaperStop     chan struct{}
 	reaperDone     chan struct{}
 	reaperInterval time.Duration
+	// Artifact retention keeps this supervisor's run directory fresh and prunes
+	// stale ones. artifactPruneInterval is the tick, shortened by tests;
+	// artifactRetentionStop and artifactRetentionDone join the goroutine Run
+	// starts and stops.
+	artifactPruneInterval time.Duration
+	artifactRetentionStop chan struct{}
+	artifactRetentionDone chan struct{}
+	// Retention reports a broken root once and a denied path once: the prune runs
+	// hourly, so the same failure would otherwise repeat forever.
+	artifactRootWarn       sync.Once
+	artifactPermissionMu   sync.Mutex
+	artifactPermissionWarn map[string]struct{}
 	// capacityMu guards capacityCh, a broadcast channel closed (and replaced) on
 	// every tree-budget release so callers waiting for capacity can retry. It
 	// does not schedule or prioritize work.
@@ -701,6 +713,8 @@ func NewSupervisor(cfg Config) *Supervisor {
 		handledQuestions:        map[string]handledChildQuestion{},
 		childQuestionTimeout:    cfg.ChildQuestionTimeout,
 		reaperInterval:          5 * time.Second,
+		artifactPruneInterval:   time.Hour,
+		artifactPermissionWarn:  map[string]struct{}{},
 		httpServers:             map[string]*managedHTTPServer{},
 		httpStarting:            map[string]struct{}{},
 		fileSnapshots:           map[string][]string{},
@@ -813,6 +827,12 @@ func (s *Supervisor) Run() (exitCode int) {
 	s.startReaper()
 	defer s.stopReaper()
 	defer s.stopControllerLoops()
+
+	// Artifact retention keeps this supervisor's run directory fresh and prunes
+	// the run directories of supervisors that are gone. The first pass runs off
+	// the startup path so a large tree never delays the control socket.
+	s.startArtifactRetention()
+	defer s.stopArtifactRetention()
 
 	// Exactly-once startup barrier: when durable workflow or controller state
 	// already exists, recover it before any leader activity; otherwise the
@@ -1439,7 +1459,7 @@ func (s *Supervisor) labelHolderLocked(label string) string {
 // runtimeArtifactDir is the per-runtime directory that a spawn's default event
 // and sentinel files live in.
 func (s *Supervisor) runtimeArtifactDir(rtID string) string {
-	return filepath.Join(os.TempDir(), "avenor-stable", s.runID, rtID)
+	return filepath.Join(artifactRunDir(s.runID), rtID)
 }
 
 // spawnReserved starts a runtime using a pre-reserved admission. It never
@@ -1672,8 +1692,8 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}
 
 	if createArtifactDir {
-		if err := os.MkdirAll(artifactDir, 0o700); err != nil {
-			return SpawnResult{}, fmt.Errorf("create artifact dir: %w", err)
+		if _, err := createArtifactRunDir(s.runID, rtID); err != nil {
+			return SpawnResult{}, err
 		}
 	}
 

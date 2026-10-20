@@ -58,8 +58,10 @@ func startRealSupervisorServer(t *testing.T, socketPath string) *Server {
 	return s
 }
 
-// shortHome returns a short-lived HOME whose socket paths stay inside the unix
-// socket pathname limit.
+// shortHome returns a short-lived HOME and TMPDIR whose socket and artifact
+// paths stay inside the unix socket pathname limit and out of a developer's
+// real tree. The autostarted supervisor inherits both, so its artifact
+// retention never reads or prunes a real $TMPDIR/avenor-stable-<euid> root.
 func shortHome(t *testing.T) string {
 	t.Helper()
 	home, err := os.MkdirTemp("/tmp", "mcp-home-")
@@ -67,7 +69,12 @@ func shortHome(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	tmp := filepath.Join(home, "tmp")
+	if err := os.Mkdir(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
+	t.Setenv("TMPDIR", tmp)
 	return home
 }
 
