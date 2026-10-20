@@ -367,9 +367,9 @@ Returns all active and recently-completed child runtimes with status summaries. 
 
 #### `resume`
 
-`resume` continues a prior run in a new one. Params: `{run_id, target, message, label?, idempotency_key?, sentinel_file?, on_event?}`. `target` is the prior broker runtime id (`rt_N` or `supervisor`), or an exact display name; a host surface resolves its public run id to a runtime id before calling. It is owner-gated.
+`resume` continues a prior run in a new one. Params: `{run_id, target, message, label?, idempotency_key?, sentinel_file?, on_event?}`. `target` is the prior child broker runtime id (`rt_N`), or an exact display name; the supervisor session is not a resume target. A host surface resolves its public run id to a runtime id before calling. It is owner-gated.
 
-`resume` refuses a target whose completion sentinel says `TIMEOUT` or `KILLED` with `not_resumable` (the sentinel's status word is the fact); `DONE` and `FAILED` sentinels continue. It carries the prior run's agent/model/backend, thinking, directory, agent profile, auto-approve, roster file and roster entry, then starts the new runtime with the prior session id. A keyed call replays the first run: the stored result's `run_id`, `sentinel_file` and `on_event` win over the freshly minted ones.
+`resume` refuses a target whose completion sentinel says `TIMEOUT` or `KILLED` with `not_resumable` (the sentinel's status word is the fact); `DONE`, `FAILED` and `BLOCKED` sentinels continue. It carries the prior run's agent/model/backend, thinking, directory, agent profile, auto-approve, roster file and roster entry, then starts the new runtime with the prior session id. The result reports the `sentinel_file` and `on_event` the spawned run actually writes, including when the request left them empty. A keyed call replays the first run: the stored result's `run_id`, `sentinel_file` and `on_event` win over the freshly minted ones.
 
 #### `session_rename`
 

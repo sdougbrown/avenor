@@ -28,6 +28,14 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 	if err != nil {
 		return messaging.ResumeResult{}, err
 	}
+	// The supervisor session is not a child runtime this supervisor resumed; it
+	// has no prior session to continue.
+	if runID == "supervisor" {
+		return messaging.ResumeResult{}, &router.ToolError{
+			Code:    "refused",
+			Message: "the supervisor session is not a resume target; resume continues a child runtime",
+		}
+	}
 	prior := s.runtimeByID(runID)
 	if prior == nil {
 		return messaging.ResumeResult{}, &router.ToolError{
@@ -102,6 +110,10 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 		RosterEntry:    rosterEntry,
 		SessionID:      sessionID,
 		IdempotencyKey: idempotencyKey,
+		// The surface mints the public run id; carrying it through the spawn
+		// result is what lets a keyed replay report the first run's id instead
+		// of the retry's.
+		resumeRunID: req.RunID,
 	}
 	var spawned SpawnResult
 	if idempotencyKey != "" {
@@ -117,25 +129,26 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 		return messaging.ResumeResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
 	}
 
+	// The spawn defaults the artifact paths when the request leaves them empty,
+	// so the result reports where the run actually writes on both paths.
 	result := messaging.ResumeResult{
 		RunID:        req.RunID,
 		Label:        newLabel,
 		RuntimeID:    spawned.RuntimeID,
 		SessionID:    spawned.SessionID,
-		SentinelFile: req.SentinelFile,
-		OnEvent:      req.EventLog,
+		SentinelFile: spawned.SentinelFile,
+		OnEvent:      spawned.OnEvent,
 	}
-	if idempotencyKey != "" {
-		// A keyed call replays the first run, so the first run's ids win.
-		if spawned.SentinelFile != "" {
-			result.SentinelFile = spawned.SentinelFile
-			if id := runstate.RunIDFromSentinel(spawned.SentinelFile); id != "" {
-				result.RunID = id
-			}
-		}
-		if spawned.OnEvent != "" {
-			result.OnEvent = spawned.OnEvent
-		}
+	if result.SentinelFile == "" {
+		result.SentinelFile = req.SentinelFile
+	}
+	if result.OnEvent == "" {
+		result.OnEvent = req.EventLog
+	}
+	// A keyed call replays the first run, so the first run's id wins over the
+	// freshly minted one.
+	if spawned.RunID != "" {
+		result.RunID = spawned.RunID
 	}
 	return result, nil
 }

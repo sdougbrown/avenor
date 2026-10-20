@@ -157,8 +157,14 @@ func TestResumeKeyedReplayAdoptsFirstRun(t *testing.T) {
 	}
 	writeSentinel(t, sentinel, "DONE", "ses_resumed")
 
-	first := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
-	firstLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")
+	// The TS host mints <home>/runs/<run_id>/sentinel.done, which no sentinel
+	// basename parser can recover the run id from: the run id must round-trip
+	// through the spawn result instead.
+	first := filepath.Join(dir, "runs", resumeUUID1, "sentinel.done")
+	firstLog := filepath.Join(dir, "runs", resumeUUID1, "events.ndjson")
+	if err := os.MkdirAll(filepath.Dir(first), 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
 	second := filepath.Join(dir, "avenor-run-"+resumeUUID2+".done")
 	secondLog := filepath.Join(dir, "avenor-run-"+resumeUUID2+".log")
 
@@ -206,5 +212,63 @@ func TestResumeRejectsLiveLabel(t *testing.T) {
 	assertToolCode(t, err, "refused")
 	if !strings.Contains(err.Error(), "label already in use: taken") {
 		t.Fatalf("label text = %q", err)
+	}
+}
+
+func TestResumeReportsSpawnedPaths(t *testing.T) {
+	sup, _ := newStage2Supervisor(t, 4)
+	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: t.TempDir(), Label: "prior"})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	writeSentinel(t, prior.SentinelFile, "DONE", "ses_resumed")
+
+	result, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+	})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	resumed := sup.runtimeByID(result.RuntimeID)
+	if resumed == nil {
+		t.Fatalf("resumed runtime %q is not registered", result.RuntimeID)
+	}
+	resumed.mu.Lock()
+	wantSentinel, wantEvent := resumed.sentinelFile, resumed.onEvent
+	resumed.mu.Unlock()
+	if result.SentinelFile != wantSentinel || result.OnEvent != wantEvent {
+		t.Fatalf("result paths = %q/%q, want the spawned paths %q/%q", result.SentinelFile, result.OnEvent, wantSentinel, wantEvent)
+	}
+	if result.SentinelFile == "" || result.OnEvent == "" {
+		t.Fatalf("result paths are empty: %+v", result)
+	}
+}
+
+func TestResumeRefusesSupervisorTarget(t *testing.T) {
+	sup, _ := newStage2Supervisor(t, 4)
+	owner := messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}
+	if _, err := sup.SessionRename(owner, "", "main"); err != nil {
+		t.Fatalf("rename supervisor: %v", err)
+	}
+	for _, target := range []string{"supervisor", "main"} {
+		_, err := sup.Resume(owner, messaging.ResumeRequest{Target: target, Message: "again"})
+		assertToolCode(t, err, "refused")
+		if !strings.Contains(err.Error(), "not a resume target") {
+			t.Fatalf("target %q refusal = %q", target, err)
+		}
+	}
+}
+
+func TestResumeRefusesUnownedRuntime(t *testing.T) {
+	sup, _ := newStage2Supervisor(t, 4)
+	if _, err := sup.broker.CreateRun("rt_orphan", "orphan-label"); err != nil {
+		t.Fatalf("create broker-only run: %v", err)
+	}
+	_, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		Target: "orphan-label", Message: "again",
+	})
+	assertToolCode(t, err, "refused")
+	if !strings.Contains(err.Error(), `runtime "rt_orphan" is not owned by this supervisor`) {
+		t.Fatalf("unowned refusal = %q", err)
 	}
 }

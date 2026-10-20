@@ -189,10 +189,17 @@ type SpawnParams struct {
 	// so teardown releases the run's own slot even if another runtime wears
 	// the same label.
 	permissionDeciderSlotKey string
+	// resumeRunID is the public run id a resume's surface minted. It carries no
+	// JSON tag so it never affects the idempotency parameter hash; the spawn
+	// result echoes it, which is how a keyed replay reports the first run's id.
+	resumeRunID string
 }
 
 type SpawnResult struct {
-	RuntimeID        string `json:"runtime_id"`
+	RuntimeID string `json:"runtime_id"`
+	// RunID is the public run id the surface supplied, internal to the resume
+	// path; it is not part of the spawn wire shape.
+	RunID            string `json:"-"`
 	SessionID        string `json:"session_id"`
 	OnEvent          string `json:"on_event"`
 	SentinelFile     string `json:"sentinel_file"`
@@ -1752,6 +1759,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		// SpawnResult.SessionID is empty — phase session IDs are in events.
 		result := SpawnResult{
 			RuntimeID:    rtID,
+			RunID:        params.resumeRunID,
 			OnEvent:      onEvent,
 			SentinelFile: sentinelFile,
 			BrokerURL:    s.brokerURL(),
@@ -1793,6 +1801,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 
 		result := SpawnResult{
 			RuntimeID:    rtID,
+			RunID:        params.resumeRunID,
 			OnEvent:      onEvent,
 			SentinelFile: sentinelFile,
 			BrokerURL:    s.brokerURL(),
@@ -1897,6 +1906,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	brokerURL := s.brokerURL()
 	return SpawnResult{
 		RuntimeID:        rtID,
+		RunID:            params.resumeRunID,
 		SessionID:        session.SessionID,
 		OnEvent:          onEvent,
 		SentinelFile:     sentinelFile,
