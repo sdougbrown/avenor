@@ -81,6 +81,7 @@ func mintID(t *testing.T, ttl time.Duration) string {
 	return id
 }
 
+// The shared contract and failure matrix run in TestMessagingImplementations.
 func TestLocalAdapterPeerFaultRacingClose(t *testing.T) {
 	messagetest.RunPeerFaultCloseSuite(t, brokerFactory(t, newBroker(t)))
 }
@@ -278,6 +279,9 @@ func TestLocalAdapterPausesSendAdmission(t *testing.T) {
 	target.Mu.Unlock()
 	if delivered != 0 {
 		t.Fatalf("withdrawn ask was delivered %d time(s)", delivered)
+	}
+	if live := b.Store().ActiveCount(); live != 0 {
+		t.Fatalf("withdrawn ask left %d live edge(s)", live)
 	}
 }
 
