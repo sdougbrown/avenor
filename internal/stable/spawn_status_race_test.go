@@ -119,11 +119,13 @@ func TestSpawnSurvivesConcurrentStatusReaders(t *testing.T) {
 // defaults into it; one that supplies both paths has nothing to put there.
 func TestSpawnCreatesArtifactDirOnlyForDefaults(t *testing.T) {
 	t.Parallel()
+	// Created before the harness so it outlives the harness's shutdown, which
+	// writes the supplied sentinel during cleanup.
+	suppliedDir := t.TempDir()
 	h := newItestHarness(t, Config{}, func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
 		sessionID := "ses_" + opts.RuntimeID
 		return newItestProvider(itestAttempt(sessionID, itestSessionEnd(sessionID, "end_turn", "done"))), nil
 	})
-	suppliedDir := t.TempDir()
 	defaulted := h.spawn(map[string]any{"label": "artdir-default"})
 	supplied := h.spawn(map[string]any{
 		"label":         "artdir-supplied",
