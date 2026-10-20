@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://avenor.dev/schemas/peers.input.json",
   "title": "avenor_peers input",
-  "description": "Discriminated-union input for the avenor_peers tool: list, rename and last. Each action is one complete object with additionalProperties false, so a field belonging to another action is a schema error. The same admission rules are published as PeersApplicabilityTable in internal/messaging (Go) and assertPeersInput (TypeScript); TestSchemaMatchesRouteTable proves the schema and the table agree, and TestPeersActionVocabulary pins the action union.",
+  "description": "Discriminated-union input for the avenor_peers tool: list (the default action), rename and last. Each action is one complete object with additionalProperties false, so a field belonging to another action is a schema error. The same admission rules are published as PeersApplicabilityTable in internal/messaging (Go) and assertPeersInput (TypeScript); TestSchemaMatchesRouteTable proves the schema and the table agree, and TestPeersActionVocabulary pins the action union.",
   "type": "object",
   "oneOf": [
     {
@@ -10,6 +10,7 @@
       "properties": {
         "action": {
           "const": "list",
+          "default": "list",
           "description": "List the sessions visible to the caller."
         }
       },

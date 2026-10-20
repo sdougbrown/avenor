@@ -14,6 +14,12 @@ import (
 // appears in any of them.
 var peersActionVocabulary = []string{"list", "rename", "last"}
 
+// peersDefaultAction is what an omitted action means. The schema publishes it
+// as the list variant's default, and the executor applies it before admission,
+// so {} lists peers instead of failing; a present action that is not a string
+// stays an invalid action.
+const peersDefaultAction = "list"
+
 // peersInput is the decoded avenor_peers call. Admission has already been
 // decided against the peers applicability table.
 type peersInput struct {
@@ -25,18 +31,22 @@ type peersInput struct {
 
 // ExecutePeers routes one avenor_peers call. It is the one peers executor the
 // three Go surfaces share, so `last` cannot behave differently on the host and
-// on the children. `list` and `last` make no transport write and publish no
-// event; `rename`'s single write belongs to SessionRename.
+// on the children. An omitted action is list; a present but non-string or
+// unknown action is one invalid action, the code and text the message router
+// uses for an invalid action. `list` and `last` make no transport write and
+// publish no event; `rename`'s single write belongs to SessionRename.
 func ExecutePeers(ctx context.Context, p Provider, input json.RawMessage) (Result, error) {
 	fields, err := decodeObject(input)
 	if err != nil {
 		return Result{}, peersInvalidAction()
 	}
-	// A missing, non-string or unknown action is one invalid action, the same
-	// code and text the message router uses for the same input.
 	action, ok := fieldString(fields, "action")
 	if !ok {
-		return Result{}, peersInvalidAction()
+		if _, present := fields["action"]; present {
+			return Result{}, peersInvalidAction()
+		}
+		action = peersDefaultAction
+		fields["action"] = json.RawMessage(`"` + peersDefaultAction + `"`)
 	}
 	table := messaging.PeersApplicabilityTable()
 	entry, known := table[action]
