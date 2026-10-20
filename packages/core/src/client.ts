@@ -229,8 +229,16 @@ export class OwnerAuthError extends Error {
   }
 }
 
-/** Map authenticate_owner wire codes onto the three client-side classes. */
+/**
+ * Map authenticate_owner failures onto the three client-side classes. A peer
+ * that never answered the handshake call timed the capability out, which is an
+ * authentication verdict; a dial that never connected rejects before this
+ * mapping runs.
+ */
 function classifyOwnerAuthError(err: unknown): unknown {
+  if (err instanceof CallTimeoutError) {
+    return new OwnerAuthError('timeout')
+  }
   if (err instanceof RpcError) {
     const reason = ownerAuthReason(err.data)
     switch (err.code) {

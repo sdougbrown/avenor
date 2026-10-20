@@ -3,7 +3,7 @@ import * as net from 'node:net'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { PassThrough } from 'node:stream'
-import { CallTimeoutError, Client, dial, OwnerAuthError, RpcError, type Event } from './client.js'
+import { Client, dial, OwnerAuthError, RpcError, type Event } from './client.js'
 import type {
   ExecutionIdentity,
   WorkflowCompleteParams,
@@ -933,13 +933,14 @@ describe('Client.authenticateOwner', () => {
       },
     },
     {
-      name: 'no answer at all',
+      name: 'no answer to the handshake',
       reply: () => {},
       callTimeoutMs: 100,
       assert: failure => {
-        // A silent peer is a transport outcome, not an authentication verdict.
-        expect(failure).toBeInstanceOf(CallTimeoutError)
-        expect(failure).not.toBeInstanceOf(OwnerAuthError)
+        // The handshake call itself timed out, so the peer never answered the
+        // capability.
+        expect(failure).toBeInstanceOf(OwnerAuthError)
+        expect(failure).toMatchObject({ kind: 'timeout' })
       },
     },
   ]
