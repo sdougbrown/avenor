@@ -706,13 +706,19 @@ func (s *ControlServer) preparePermissionClaimLocked(scope, requestID string, st
 	return true
 }
 
+// SetPermissionResolverState records resolver ownership on a claim that no
+// answer owns yet. A claim a direct answer has taken (DirectDelivery) or one
+// that already resolved is left alone: a resolver stamping its own fallback
+// state after the answer landed must not erase the resolution it recorded.
 func (s *ControlServer) SetPermissionResolverState(scope, requestID string, state PermissionResolverState) {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
 	key := permissionClaimKey{scope: scope, requestID: requestID}
-	if claim := s.pendingClaims[key]; claim != nil {
-		claim.state = state
+	claim := s.pendingClaims[key]
+	if claim == nil || claim.state == PermissionResolverResolved || claim.state == PermissionResolverDirectDelivery {
+		return
 	}
+	claim.state = state
 }
 
 // MarkPermissionClaimResolved changes claim.state to PermissionResolverResolved
