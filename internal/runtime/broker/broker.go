@@ -1339,8 +1339,8 @@ func partitionAgentMessages(queue []*ControlMessage) (agent, other []*ControlMes
 }
 
 // UpdateSessionInfo patches the metadata for a registered run field by field:
-// every non-empty incoming field wins, an empty field never clears, and
-// RunID/LastSeen are always stamped. Label is deliberately not patchable: it
+// every non-empty incoming field wins, an empty field never clears, and RunID
+// is always stamped. Label is deliberately not patchable: it
 // is owned by CreateRun/EnsureRun/RenameRun, so a later metadata write can
 // never undo a rename.
 func (b *Broker) UpdateSessionInfo(runID string, info *SessionInfo) {
@@ -1371,7 +1371,6 @@ func (b *Broker) UpdateSessionInfo(runID string, info *SessionInfo) {
 		}
 	}
 	st.Info.RunID = runID
-	st.Info.LastSeen = time.Now().Unix()
 }
 
 // --- accessors ---

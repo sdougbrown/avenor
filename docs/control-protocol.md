@@ -390,7 +390,7 @@ Resolution runs before permission: an exact runtime id first, then the exact dis
 
 #### `message_send`, `message_wait`, `message_reply`, `message_withdraw`
 
-These typed messaging methods delegate to the supervisor's in-process transport and require the owner grant. Their params and results are the snake_case DTOs in `internal/control/message_dto.go` (`from_run_id`/`to_run_id`/`message_id`/`generation`/`body`/`no_reply` for a send; `sender_run_id`/`message_id`/`generation`/`timeout_ms` for a wait). A failure returns `-32000` with structured `error.data` (`code`, `outcome`, `message_id`, `wire_code`) so clients classify it without parsing text. `message_send` forwards `no_reply` for a fire-and-forget `tell`.
+These typed messaging methods delegate to the supervisor's in-process transport and require the owner grant. Their params and results are the snake_case DTOs in `internal/control/message_dto.go` (`to_run_id`/`message_id`/`generation`/`body`/`no_reply` for a send; `message_id`/`generation`/`timeout_ms` for a wait). The owner connection always acts as the supervisor session, so the wire carries no sender or from-run field. A failure returns `-32000` with structured `error.data` (`code`, `outcome`, `message_id`, `wire_code`) so clients classify it without parsing text. `message_send` forwards `no_reply` for a fire-and-forget `tell`.
 
 #### `message_receive`, `message_peers`, `message_preflight`
 

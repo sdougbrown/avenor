@@ -15,9 +15,9 @@ import (
 // has exactly one conversion here, so no handler and no adapter re-implements
 // a mapping.
 
-// MessageSendParams is the message_send request.
+// MessageSendParams is the message_send request. The control owner always
+// sends as the supervisor session, so the request carries no from_run_id.
 type MessageSendParams struct {
-	FromRunID  string `json:"from_run_id"`
 	ToRunID    string `json:"to_run_id"`
 	MessageID  string `json:"message_id"`
 	Generation string `json:"generation"`
@@ -34,7 +34,6 @@ type MessageSendResult struct {
 
 // MessageWaitParams is the message_wait request.
 type MessageWaitParams struct {
-	SenderRunID string `json:"sender_run_id"`
 	MessageID   string `json:"message_id"`
 	Generation  string `json:"generation"`
 	TimeoutMS   int64  `json:"timeout_ms,omitempty"`
@@ -58,7 +57,6 @@ type MessageWaitResult struct {
 
 // MessageReplyParams is the message_reply request.
 type MessageReplyParams struct {
-	FromRunID     string `json:"from_run_id"`
 	ToRunID       string `json:"to_run_id"`
 	MessageID     string `json:"message_id"`
 	CorrelationID string `json:"correlation_id,omitempty"`
@@ -67,7 +65,6 @@ type MessageReplyParams struct {
 
 // MessageWithdrawParams is the message_withdraw request.
 type MessageWithdrawParams struct {
-	SenderRunID string `json:"sender_run_id"`
 	MessageID   string `json:"message_id"`
 	Generation  string `json:"generation"`
 }
@@ -89,7 +86,6 @@ type MessageWithdrawResult struct {
 
 // MessageReceiveParams is the message_receive request.
 type MessageReceiveParams struct {
-	SenderRunID string `json:"sender_run_id"`
 	Generation  string `json:"generation"`
 	TimeoutMS   int64  `json:"timeout_ms,omitempty"`
 	Limit       int    `json:"limit,omitempty"`
@@ -103,8 +99,7 @@ type MessageReceiveResult struct {
 
 // MessagePeersParams is the message_peers request.
 type MessagePeersParams struct {
-	SenderRunID string `json:"sender_run_id"`
-	Generation  string `json:"generation"`
+	Generation string `json:"generation"`
 }
 
 // MessagePeer is one visible peer on the control wire.
@@ -199,7 +194,6 @@ type MessageErrorData struct {
 // NewMessageSendParams projects a send request onto the wire shape.
 func NewMessageSendParams(req messaging.SendRequest) MessageSendParams {
 	return MessageSendParams{
-		FromRunID:  req.From.RunID,
 		ToRunID:    req.To.RunID,
 		MessageID:  req.MessageID,
 		Generation: req.Generation,
@@ -209,11 +203,8 @@ func NewMessageSendParams(req messaging.SendRequest) MessageSendParams {
 }
 
 // request builds the transport request. from is the authenticated identity the
-// control socket acts as; a caller-supplied from_run_id only fills an empty one.
+// control socket acts as; the wire has no second source for it.
 func (p MessageSendParams) request(from messaging.Identity) messaging.SendRequest {
-	if from.RunID == "" {
-		from.RunID = p.FromRunID
-	}
 	return messaging.SendRequest{
 		From:       from,
 		To:         messaging.Identity{RunID: p.ToRunID},
@@ -227,7 +218,6 @@ func (p MessageSendParams) request(from messaging.Identity) messaging.SendReques
 // NewMessageWaitParams projects a wait request onto the wire shape.
 func NewMessageWaitParams(req messaging.WaitRequest) MessageWaitParams {
 	return MessageWaitParams{
-		SenderRunID: req.Sender.RunID,
 		MessageID:   req.MessageID,
 		Generation:  req.Generation,
 		TimeoutMS:   req.Timeout.Milliseconds(),
@@ -235,9 +225,6 @@ func NewMessageWaitParams(req messaging.WaitRequest) MessageWaitParams {
 }
 
 func (p MessageWaitParams) request(from messaging.Identity) messaging.WaitRequest {
-	if from.RunID == "" {
-		from.RunID = p.SenderRunID
-	}
 	return messaging.WaitRequest{
 		Sender:     from,
 		MessageID:  p.MessageID,
@@ -249,7 +236,6 @@ func (p MessageWaitParams) request(from messaging.Identity) messaging.WaitReques
 // NewMessageReplyParams projects a reply request onto the wire shape.
 func NewMessageReplyParams(req messaging.ReplyRequest) MessageReplyParams {
 	return MessageReplyParams{
-		FromRunID:     req.From.RunID,
 		ToRunID:       req.ToRunID,
 		MessageID:     req.MessageID,
 		CorrelationID: req.CorrelationID,
@@ -258,9 +244,6 @@ func NewMessageReplyParams(req messaging.ReplyRequest) MessageReplyParams {
 }
 
 func (p MessageReplyParams) request(from messaging.Identity) messaging.ReplyRequest {
-	if from.RunID == "" {
-		from.RunID = p.FromRunID
-	}
 	return messaging.ReplyRequest{
 		From:          from,
 		ToRunID:       p.ToRunID,
@@ -273,23 +256,18 @@ func (p MessageReplyParams) request(from messaging.Identity) messaging.ReplyRequ
 // NewMessageWithdrawParams projects a withdraw request onto the wire shape.
 func NewMessageWithdrawParams(req messaging.WithdrawRequest) MessageWithdrawParams {
 	return MessageWithdrawParams{
-		SenderRunID: req.Sender.RunID,
 		MessageID:   req.MessageID,
 		Generation:  req.Generation,
 	}
 }
 
 func (p MessageWithdrawParams) request(from messaging.Identity) messaging.WithdrawRequest {
-	if from.RunID == "" {
-		from.RunID = p.SenderRunID
-	}
 	return messaging.WithdrawRequest{Sender: from, MessageID: p.MessageID, Generation: p.Generation}
 }
 
 // NewMessageReceiveParams projects a receive request onto the wire shape.
 func NewMessageReceiveParams(req messaging.ReceiveRequest) MessageReceiveParams {
 	return MessageReceiveParams{
-		SenderRunID: req.Sender.RunID,
 		Generation:  req.Generation,
 		TimeoutMS:   req.Timeout.Milliseconds(),
 		Limit:       req.Limit,
@@ -297,9 +275,6 @@ func NewMessageReceiveParams(req messaging.ReceiveRequest) MessageReceiveParams 
 }
 
 func (p MessageReceiveParams) request(from messaging.Identity) messaging.ReceiveRequest {
-	if from.RunID == "" {
-		from.RunID = p.SenderRunID
-	}
 	return messaging.ReceiveRequest{
 		Sender:     from,
 		Generation: p.Generation,
@@ -310,13 +285,10 @@ func (p MessageReceiveParams) request(from messaging.Identity) messaging.Receive
 
 // NewMessagePeersParams projects a peers request onto the wire shape.
 func NewMessagePeersParams(req messaging.PeersRequest) MessagePeersParams {
-	return MessagePeersParams{SenderRunID: req.Sender.RunID, Generation: req.Generation}
+	return MessagePeersParams{Generation: req.Generation}
 }
 
 func (p MessagePeersParams) request(from messaging.Identity) messaging.PeersRequest {
-	if from.RunID == "" {
-		from.RunID = p.SenderRunID
-	}
 	return messaging.PeersRequest{Sender: from, Generation: p.Generation}
 }
 
