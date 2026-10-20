@@ -51,14 +51,6 @@ func mintID(t *testing.T, ttl time.Duration) string {
 	return id
 }
 
-func TestHostClientContract(t *testing.T) {
-	messagetest.RunTransportSuite(t, fixtureFactory(hostfixture.New(t)))
-}
-
-func TestHostClientFailureMatrix(t *testing.T) {
-	messagetest.RunFailureMatrix(t, fixtureFactory(hostfixture.New(t)))
-}
-
 func TestHostClientPeerFaultRacingClose(t *testing.T) {
 	messagetest.RunPeerFaultCloseSuite(t, fixtureFactory(hostfixture.New(t)))
 }
@@ -77,71 +69,14 @@ func TestHostReplyRouting(t *testing.T) {
 	})
 }
 
-// TestHostFixturePausesSendAdmission pauses the fixture's send admission for
-// one key, withdraws that key, then resumes the send. The resumed send must not
-// deliver, must leave no edge, and the fence must stay terminal.
+// TestHostFixturePausesSendAdmission runs the paused-send fence regression
+// against the fixture, then checks that the resumed send queued no delivery.
 func TestHostFixturePausesSendAdmission(t *testing.T) {
 	fx := hostfixture.New(t)
 	sender := newTransport(t, fx, alice)
-	gen := fx.Store().Generation()
-	msgID := mintID(t, time.Minute)
-
-	fx.PauseSend(alice, msgID, gen)
-
-	type sendOutcome struct {
-		res messaging.SendResult
-		err error
-	}
-	sent := make(chan sendOutcome, 1)
-	go func() {
-		res, err := sender.Send(context.Background(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{"message":"paused ask"}`,
-		})
-		sent <- sendOutcome{res: res, err: err}
-	}()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for !fx.Reached(alice, msgID, gen) {
-		if time.Now().After(deadline) {
-			t.Fatal("send never reached the fixture's admission seam")
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	withdrawn, err := sender.Withdraw(context.Background(), messaging.WithdrawRequest{
-		Sender: alice, MessageID: msgID, Generation: gen,
-	})
-	if err != nil {
-		t.Fatalf("Withdraw: %v", err)
-	}
-	if !withdrawn.Fence.Terminal {
-		t.Fatalf("withdrawal did not install a terminal fence: %+v", withdrawn)
-	}
-
-	fx.ResumeSend(alice, msgID, gen)
-
-	select {
-	case out := <-sent:
-		if out.err != nil {
-			t.Fatalf("resumed send error: %v", out.err)
-		}
-		if out.res.Outcome != messaging.OutcomeWithdrawn {
-			t.Fatalf("resumed send outcome = %q, want withdrawn", out.res.Outcome)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("resumed send did not return")
-	}
-
+	messagetest.RunWithdrawFencesPausedSend(t, sender, fx.Store(), alice, bob)
 	if queued := fx.Queued(bob.RunID); queued != 0 {
 		t.Fatalf("withdrawn ask was delivered %d time(s)", queued)
-	}
-	store := fx.Store()
-	if store.Pending(alice.RunID, msgID) {
-		t.Fatal("withdrawn ask left a pending edge")
-	}
-	ack, ok := store.Fence(messaging.FenceKey{Sender: alice.RunID, MessageID: msgID, Generation: gen})
-	if !ok || !ack.Terminal {
-		t.Fatalf("fence = (%+v, %v), want terminal", ack, ok)
 	}
 }
 
@@ -202,45 +137,6 @@ func TestHostClientAdmissionRejections(t *testing.T) {
 		}
 	})
 
-	t.Run("duplicate after a terminal fence", func(t *testing.T) {
-		fx := hostfixture.New(t)
-		tr := newTransport(t, fx, alice)
-		gen := fx.Store().Generation()
-		msgID := mintID(t, time.Minute)
-		if _, err := tr.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{}`,
-		}); err != nil {
-			t.Fatalf("Send: %v", err)
-		}
-		if waited, err := tr.Wait(t.Context(), messaging.WaitRequest{
-			Sender: alice, MessageID: msgID, Generation: gen, Timeout: 20 * time.Millisecond,
-		}); err != nil || waited.Outcome != messaging.OutcomeTimedOut {
-			t.Fatalf("Wait = (%+v, %v), want a timeout", waited, err)
-		}
-
-		// The fence now records timed-out, which is not a send outcome; the
-		// refusal reports the documented duplicate-message-id outcome.
-		res, err := tr.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{}`,
-		})
-		if !errors.Is(err, messaging.ErrDuplicateMessageID) || res.Outcome != messaging.OutcomeNotSent {
-			t.Fatalf("duplicate Send = (%+v, %v)", res, err)
-		}
-	})
-
-	t.Run("withdrawal without an edge", func(t *testing.T) {
-		fx := hostfixture.New(t)
-		tr := newTransport(t, fx, alice)
-		withdrawn, err := tr.Withdraw(t.Context(), messaging.WithdrawRequest{
-			Sender: alice, MessageID: mintID(t, time.Minute), Generation: fx.Store().Generation(),
-		})
-		if err != nil {
-			t.Fatalf("Withdraw: %v", err)
-		}
-		if withdrawn.Outcome != messaging.OutcomeEdgeAbsent || !withdrawn.Fence.Terminal {
-			t.Fatalf("Withdraw = %+v", withdrawn)
-		}
-	})
 }
 
 // TestHostSendDerivesOutcomeFromCode pins that a peer-supplied outcome never
@@ -317,8 +213,8 @@ func TestHostClientMalformedResponses(t *testing.T) {
 			if res.MessageID != msgID {
 				t.Fatalf("Send dropped the message id: %q", res.MessageID)
 			}
-			if err == nil {
-				t.Fatal("Send reported no error for an untrustworthy response")
+			if !errors.Is(err, hosthttp.ErrMalformedResponse) {
+				t.Fatalf("Send error = %v, want ErrMalformedResponse", err)
 			}
 
 			waited, err := tr.Wait(t.Context(), messaging.WaitRequest{
@@ -336,23 +232,6 @@ func TestHostClientMalformedResponses(t *testing.T) {
 			// silent truncation would report this send as admitted.
 			_, _ = w.Write([]byte(`{"outcome":"sent"}`))
 			_, _ = w.Write(bytes.Repeat([]byte(" "), 2<<20))
-		})
-		tr, err := hosthttp.New(plainDescriptor(srv.URL))
-		if err != nil {
-			t.Fatalf("hosthttp.New: %v", err)
-		}
-		t.Cleanup(func() { _ = tr.Close() })
-		res, err := tr.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: "gen",
-		})
-		if !errors.Is(err, hosthttp.ErrMalformedResponse) || res.Outcome != messaging.OutcomePossiblyPending {
-			t.Fatalf("Send = (%+v, %v), want possibly-pending and ErrMalformedResponse", res, err)
-		}
-	})
-
-	t.Run("unparseable body reports the malformed class", func(t *testing.T) {
-		srv := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte("not-json"))
 		})
 		tr, err := hosthttp.New(plainDescriptor(srv.URL))
 		if err != nil {

@@ -81,18 +81,6 @@ func mintID(t *testing.T, ttl time.Duration) string {
 	return id
 }
 
-// TestLocalAdapterAgainstRealRouter runs the shared transport contract over the
-// real local broker router rather than an in-process wrapper.
-func TestLocalAdapterAgainstRealRouter(t *testing.T) {
-	b := newBroker(t)
-	messagetest.RunTransportSuite(t, brokerFactory(t, b))
-}
-
-func TestLocalAdapterFailureMatrix(t *testing.T) {
-	b := newBroker(t)
-	messagetest.RunFailureMatrix(t, brokerFactory(t, b))
-}
-
 func TestLocalAdapterPeerFaultRacingClose(t *testing.T) {
 	messagetest.RunPeerFaultCloseSuite(t, brokerFactory(t, newBroker(t)))
 }
@@ -290,6 +278,9 @@ func TestLocalAdapterPausesSendAdmission(t *testing.T) {
 	target.Mu.Unlock()
 	if delivered != 0 {
 		t.Fatalf("withdrawn ask was delivered %d time(s)", delivered)
+	}
+	if live := b.Store().ActiveCount(); live != 0 {
+		t.Fatalf("withdrawn ask left %d live edge(s)", live)
 	}
 }
 

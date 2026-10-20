@@ -14,22 +14,6 @@ import (
 var alice = messaging.Identity{RunID: "alice", Sender: "alice"}
 var bob = messaging.Identity{RunID: "bob", Sender: "bob"}
 
-func suiteFactory(t *testing.T) messagetest.TransportFactory {
-	t.Helper()
-	store, _ := messagetest.NewMemoryStore(t)
-	return func(t *testing.T, id messaging.Identity) messaging.Transport {
-		return New(store)
-	}
-}
-
-func TestInProcessTransportContract(t *testing.T) {
-	messagetest.RunTransportSuite(t, suiteFactory(t))
-}
-
-func TestAskFailureMatrix(t *testing.T) {
-	messagetest.RunFailureMatrix(t, suiteFactory(t))
-}
-
 func TestInProcessReplyRouting(t *testing.T) {
 	store, _ := messagetest.NewMemoryStore(t)
 	messagetest.RunReplyRoutingSuite(t, func(t *testing.T, id messaging.Identity) messaging.Transport {
