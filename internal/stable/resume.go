@@ -86,8 +86,9 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 	if req.IdempotencyKey != "" {
 		idempotencyKey = runstate.FollowUpIdempotencyKeyPrefix + req.IdempotencyKey
 	} else if holder := s.liveLabelHolder(newLabel); holder != "" {
-		// The keyed-spawn gate is the authority; this pre-check only fast-fails
-		// the common case with the existing text.
+		// Only an unkeyed spawn reaches a taken label: a keyed resume is gated
+		// by idempotentSpawn, which rejects the label itself. This pre-check
+		// only fast-fails the plain case with the same text.
 		return messaging.ResumeResult{}, &router.ToolError{
 			Code:    "refused",
 			Message: fmt.Sprintf("label already in use: %s (runtime %s)", newLabel, holder),
@@ -115,18 +116,19 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 		// of the retry's.
 		resumeRunID: req.RunID,
 	}
-	var spawned SpawnResult
-	if idempotencyKey != "" {
-		hash, hashErr := IdempotencyHash(params)
-		if hashErr != nil {
-			return messaging.ResumeResult{}, &router.ToolError{Code: "refused", Message: hashErr.Error()}
-		}
-		spawned, err = s.idempotentSpawn(params, hash)
-	} else {
-		spawned, err = s.spawn(params)
-	}
+	// finishSpawn is the control-socket spawn gate: it hashes and gates a keyed
+	// spawn and replays a stored result, so a keyed resume cannot diverge from a
+	// keyed spawn.
+	res, err := s.finishSpawn(params)
 	if err != nil {
 		return messaging.ResumeResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
+	}
+	spawned, ok := res.(SpawnResult)
+	if !ok {
+		return messaging.ResumeResult{}, &router.ToolError{
+			Code:    "refused",
+			Message: fmt.Sprintf("spawn returned %T, not a spawn result", res),
+		}
 	}
 
 	// The spawn defaults the artifact paths when the request leaves them empty,
