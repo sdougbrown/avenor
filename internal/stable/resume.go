@@ -78,13 +78,13 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 	newLabel := req.Label
 	if newLabel == "" {
 		// label falls back to the prior runtime id when the broker has no
-		// display name, so this is never just "-followup".
-		newLabel = label + "-followup"
+		// display name, so this is never just the suffix.
+		newLabel = label + runstate.FollowUpLabelSuffix
 	}
 
 	idempotencyKey := ""
 	if req.IdempotencyKey != "" {
-		idempotencyKey = "follow_up:" + req.IdempotencyKey
+		idempotencyKey = runstate.FollowUpIdempotencyKeyPrefix + req.IdempotencyKey
 	} else if holder := s.liveLabelHolder(newLabel); holder != "" {
 		// The keyed-spawn gate is the authority; this pre-check only fast-fails
 		// the common case with the existing text.

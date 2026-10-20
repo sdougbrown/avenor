@@ -1564,7 +1564,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	runID := uuid.New().String()
 	followupLabel := args.Label
 	if followupLabel == "" {
-		followupLabel = ri.Label + "-followup"
+		followupLabel = ri.Label + runstate.FollowUpLabelSuffix
 	}
 
 	sentinelPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
@@ -1615,7 +1615,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		"on_event":      eventLogPath,
 	}
 	if args.IdempotencyKey != "" {
-		params["idempotency_key"] = "follow_up:" + args.IdempotencyKey
+		params["idempotency_key"] = runstate.FollowUpIdempotencyKeyPrefix + args.IdempotencyKey
 	}
 	if effectiveAgent != "" {
 		params["agent"] = effectiveAgent
