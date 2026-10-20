@@ -162,6 +162,8 @@ For example, with a supervisor run ID of `run_abc123` and a spawned runtime `rt_
 
 This keeps artifacts isolated and lets you inspect multiple runtime outputs without manual path management.
 
+A supervisor removes these directories when it shuts down, once every runtime using them has ended, and then removes `$TMPDIR/avenor-stable/<supervisor_run_id>` when it is empty. While the supervisor is running, a finished runtime's sentinel and event log stay in place, so a status, result, or follow-up read after the turn ends still sees them. Paths you passed with `--on-event` or `--sentinel-file` are never removed.
+
 ### Loop File Spawns
 
 If you pass `--loop-file` alongside spawn, the supervisor routes the spawn through the loop runner instead of a single provider/session. This is identical to running `avenor run --loop-file`, except the runtime is managed by the supervisor.
