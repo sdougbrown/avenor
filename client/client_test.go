@@ -633,6 +633,48 @@ func TestSubscribeRuntimeIgnoresOtherSessionIDs(t *testing.T) {
 	}
 }
 
+// TestSubscribeRuntimeCancelDuringPublish cancels a runtime subscription while
+// events are still arriving: the fanout must not close the subscription
+// channel under a send, so the producer never sends on a closed channel.
+func TestSubscribeRuntimeCancelDuringPublish(t *testing.T) {
+	for round := 0; round < 100; round++ {
+		serverConn, clientConn := net.Pipe()
+		c := &Client{
+			conn:        clientConn,
+			reader:      bufio.NewReader(clientConn),
+			pending:     map[int]chan Response{},
+			eventCh:     make(chan Event, 8),
+			runtimeSubs: map[string]map[chan Event]struct{}{},
+			closedCh:    make(chan struct{}),
+		}
+		serveOneSubscribe(serverConn)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		ch := c.SubscribeRuntime(ctx, "rt_1")
+		drained := make(chan struct{})
+		go func() {
+			for range ch {
+			}
+			close(drained)
+		}()
+
+		var producer sync.WaitGroup
+		producer.Add(1)
+		go func() {
+			defer producer.Done()
+			for i := 0; i < 64; i++ {
+				c.publishRuntimeEvent(Event{Event: "agent.message_chunk", RuntimeID: "rt_1"})
+			}
+		}()
+
+		cancel()
+		producer.Wait()
+		<-drained
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	}
+}
+
 // TestClientWorkflowCommandHelpers pins the typed workflow command helpers:
 // each emits method "workflow.command" whose params carry the workflow id and
 // a command object with the right op discriminator and the caller's fields.

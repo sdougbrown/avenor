@@ -705,6 +705,8 @@ func (c *Client) SubscribeRuntime(ctx context.Context, runtimeID string) <-chan 
 	c.subsMu.Unlock()
 	go func() {
 		<-ctx.Done()
+		// Removing the subscription and closing its channel under subsMu keeps
+		// them atomic with respect to the fanout, which sends under that lock.
 		c.subsMu.Lock()
 		if subs := c.runtimeSubs[runtimeID]; subs != nil {
 			delete(subs, out)
@@ -724,19 +726,18 @@ func (c *Client) publishRuntimeEvent(ev Event) {
 		keys = append(keys, ev.SessionID)
 	}
 
+	// Hold subsMu across the sends: SubscribeRuntime removes a subscription
+	// from the map and closes its channel under the same lock, so a send can
+	// never follow a close. Sends are non-blocking, so a full subscriber never
+	// holds the lock.
 	c.subsMu.Lock()
-	targets := make([]chan Event, 0)
+	defer c.subsMu.Unlock()
 	for _, key := range keys {
 		for ch := range c.runtimeSubs[key] {
-			targets = append(targets, ch)
-		}
-	}
-	c.subsMu.Unlock()
-
-	for _, ch := range targets {
-		select {
-		case ch <- ev:
-		default:
+			select {
+			case ch <- ev:
+			default:
+			}
 		}
 	}
 }
