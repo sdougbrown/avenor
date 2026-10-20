@@ -18,11 +18,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/channelwrap"
+	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 )
@@ -89,11 +91,23 @@ type AskReply struct {
 type SessionInfo struct {
 	RunID    string `json:"run_id"`
 	Label    string `json:"label,omitempty"`
+	Kind     string `json:"kind,omitempty"`
 	Backend  string `json:"backend,omitempty"`
 	Model    string `json:"model,omitempty"`
 	Dir      string `json:"dir,omitempty"`
 	Status   string `json:"status,omitempty"`
 	LastSeen int64  `json:"last_seen"`
+}
+
+// LastAgentMessage is one run's most recent completed turn. Text is bounded
+// and Truncated is carried from the producer, never re-derived here.
+type LastAgentMessage struct {
+	RunID      string `json:"run_id"`
+	Label      string `json:"label,omitempty"`
+	Text       string `json:"final_output"`
+	StopReason string `json:"stop_reason,omitempty"`
+	Truncated  bool   `json:"final_output_truncated,omitempty"`
+	At         int64  `json:"at,omitempty"`
 }
 
 // RunState holds all per-run broker state.
@@ -115,6 +129,9 @@ type RunState struct {
 	// single source: Info.Label is the name the run was launched with or
 	// last renamed to.
 	Info *SessionInfo
+	// LastMessage is the run's most recent completed turn, written by the
+	// recorder and the host turn producer. Nil means no turn was recorded.
+	LastMessage *LastAgentMessage
 }
 
 func (st *RunState) Lock()   { st.Mu.Lock() }
@@ -270,6 +287,11 @@ type Broker struct {
 	store    *askstore.Store
 	askRoute messaging.AskRoute
 
+	// renameMu guards renameHandler, the supervisor-installed authority the
+	// authenticated /rename endpoint delegates to.
+	renameMu      sync.RWMutex
+	renameHandler RenameHandler
+
 	pruneMu   sync.Mutex
 	pruneStop context.CancelFunc
 }
@@ -301,6 +323,25 @@ func (b *Broker) SetAskRoute(route messaging.AskRoute) {
 		route = localAskRoute{broker: b}
 	}
 	b.askRoute = route
+}
+
+// RenameHandler is the authority a rename delegates to. It persists the name
+// and returns the resolved run and the label before and after the write. The
+// broker installs one only when a supervisor owns it; a broker without one
+// falls back to the caller's own record.
+type RenameHandler func(callerRunID, sessionID, name string) (messaging.RenameResult, error)
+
+// SetRenameHandler installs the authority POST /rename delegates to.
+func (b *Broker) SetRenameHandler(fn RenameHandler) {
+	b.renameMu.Lock()
+	defer b.renameMu.Unlock()
+	b.renameHandler = fn
+}
+
+func (b *Broker) renameAuthority() RenameHandler {
+	b.renameMu.RLock()
+	defer b.renameMu.RUnlock()
+	return b.renameHandler
 }
 
 func (b *Broker) route() messaging.AskRoute {
@@ -341,6 +382,8 @@ func (b *Broker) Start() error {
 	router.HandleFunc("/wait_reply", b.withMethod("POST", b.withAuth(b.handleWaitReply)))
 	router.HandleFunc("/cancel_message", b.withMethod("POST", b.withAuth(b.handleCancelMessage)))
 	router.HandleFunc("/sessions", b.withMethod("GET", b.withAuth(b.handleSessions)))
+	router.HandleFunc("/rename", b.withMethod("POST", b.withAuth(b.handleRename)))
+	router.HandleFunc("/last_message", b.withMethod("GET", b.withAuth(b.handleLastMessage)))
 	router.HandleFunc("/permission_request", b.withMethod("POST", b.withAuth(b.handlePermissionRequest)))
 	router.HandleFunc("/permission", b.withMethod("POST", b.withAuth(b.handlePermission)))
 
@@ -1054,6 +1097,102 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRename renames one run's display name. It authenticates, rejects a
+// malformed request, and delegates the decision: with a handler installed the
+// supervisor's SessionRename decides every row; without one the broker can only
+// rename the authenticated caller's own record.
+func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeCodedError(w, http.StatusBadRequest, "request body is unreadable", "invalid-request")
+		return
+	}
+	var body struct {
+		RunID     string `json:"run_id"`
+		Token     string `json:"token"`
+		Name      string `json:"name"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		writeCodedError(w, http.StatusBadRequest, "request body is not a rename request", "invalid-request")
+		return
+	}
+	if body.RunID == "" {
+		writeCodedError(w, http.StatusBadRequest, "run_id is required", "invalid-request")
+		return
+	}
+	if body.Name == "" {
+		writeCodedError(w, http.StatusBadRequest, "name is required", "invalid-request")
+		return
+	}
+
+	handler := b.renameAuthority()
+	if handler == nil {
+		// Broker-only fallback: the authority is the broker's own registry, so
+		// this path can never grant more than the caller's own record.
+		previous := b.DisplayName(body.RunID)
+		if err := b.RenameRun(body.RunID, body.Name); err != nil {
+			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
+			return
+		}
+		writeJSONBody(w, http.StatusOK, map[string]any{
+			"run_id":         body.RunID,
+			"label":          b.DisplayName(body.RunID),
+			"previous_label": previous,
+		})
+		return
+	}
+
+	result, err := handler(body.RunID, body.SessionID, body.Name)
+	if err != nil {
+		type toolCoder interface{ ToolCode() string }
+		var coded toolCoder
+		switch {
+		case errors.As(err, &coded) && coded.ToolCode() == "not_permitted":
+			writeCodedError(w, http.StatusForbidden, err.Error(), "not-permitted")
+		case errors.As(err, &coded) && coded.ToolCode() == "invalid_name":
+			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-name")
+		case errors.As(err, &coded) && coded.ToolCode() == "unknown_target":
+			writeCodedError(w, http.StatusNotFound, err.Error(), "unknown-target")
+		case errors.As(err, &coded) && coded.ToolCode() == "ambiguous_name":
+			writeCodedError(w, http.StatusConflict, err.Error(), "ambiguous-name")
+		default:
+			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
+		}
+		return
+	}
+	writeJSONBody(w, http.StatusOK, map[string]any{
+		"run_id":         result.RunID,
+		"label":          result.Label,
+		"previous_label": result.PreviousLabel,
+	})
+}
+
+// handleLastMessage reports any known run's recorded last turn. The target is
+// not required to be the authenticated caller: this read is universally
+// visible and side-effect free.
+func (b *Broker) handleLastMessage(w http.ResponseWriter, r *http.Request) {
+	target := r.URL.Query().Get("target")
+	if target == "" {
+		writeCodedError(w, http.StatusBadRequest, "target is required", "invalid-request")
+		return
+	}
+	if b.GetRun(target) == nil {
+		writeCodedError(w, http.StatusNotFound, "run not found: "+target, "target-unavailable")
+		return
+	}
+	record, hasRecord := b.LastAgentMessage(target)
+	writeJSONBody(w, http.StatusOK, map[string]any{
+		"run_id":                 record.RunID,
+		"label":                  record.Label,
+		"has_record":             hasRecord,
+		"final_output":           record.Text,
+		"stop_reason":            record.StopReason,
+		"final_output_truncated": record.Truncated,
+		"at":                     record.At,
+	})
+}
+
 // sessions returns a snapshot of the registered runs.
 func (b *Broker) sessions() []SessionInfo {
 	b.mu.RLock()
@@ -1065,6 +1204,7 @@ func (b *Broker) sessions() []SessionInfo {
 		info := SessionInfo{RunID: st.RunID}
 		if st.Info != nil {
 			info.Label = st.Info.Label
+			info.Kind = st.Info.Kind
 			info.Backend = st.Info.Backend
 			info.Model = st.Info.Model
 			info.Dir = st.Info.Dir
@@ -1192,19 +1332,40 @@ func partitionAgentMessages(queue []*ControlMessage) (agent, other []*ControlMes
 	return agent, other
 }
 
-// UpdateSessionInfo sets or updates the metadata for a registered run.
+// UpdateSessionInfo patches the metadata for a registered run field by field:
+// every non-empty incoming field wins, an empty field never clears, and
+// RunID/LastSeen are always stamped. Label is deliberately not patchable: it
+// is owned by CreateRun/EnsureRun/RenameRun, so a later metadata write can
+// never undo a rename.
 func (b *Broker) UpdateSessionInfo(runID string, info *SessionInfo) {
 	st := b.GetRun(runID)
 	if st == nil {
 		return
 	}
 	st.Mu.Lock()
-	if info != nil {
-		info.LastSeen = time.Now().Unix()
-		info.RunID = runID
+	defer st.Mu.Unlock()
+	if st.Info == nil {
+		st.Info = &SessionInfo{RunID: runID}
 	}
-	st.Info = info
-	st.Mu.Unlock()
+	if info != nil {
+		if info.Kind != "" {
+			st.Info.Kind = info.Kind
+		}
+		if info.Backend != "" {
+			st.Info.Backend = info.Backend
+		}
+		if info.Model != "" {
+			st.Info.Model = info.Model
+		}
+		if info.Dir != "" {
+			st.Info.Dir = info.Dir
+		}
+		if info.Status != "" {
+			st.Info.Status = info.Status
+		}
+	}
+	st.Info.RunID = runID
+	st.Info.LastSeen = time.Now().Unix()
 }
 
 // --- accessors ---
@@ -1257,6 +1418,74 @@ func newRunState(runID, name string) *RunState {
 		PermissionDecisions: make(map[string]string),
 		Info:                &SessionInfo{RunID: runID, Label: name},
 	}
+}
+
+// DisplayName reports the name peers see for runID: SessionInfo.Label, or the
+// run ID when the run was never labelled. This is the one reader of the one
+// display-name field.
+func (b *Broker) DisplayName(runID string) string { return b.displayName(runID) }
+
+// MatchLabel returns every run whose display name is exactly label, sorted by
+// run ID so the caller can tell an ambiguous label from a unique one instead of
+// the broker guessing.
+func (b *Broker) MatchLabel(label string) []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	matches := make([]string, 0, 1)
+	for runID, st := range b.runs {
+		if st.displayName() == label {
+			matches = append(matches, runID)
+		}
+	}
+	sort.Strings(matches)
+	return matches
+}
+
+// SetLastAgentMessage records runID's most recent completed turn. It always
+// writes a record, even for empty text, so "no completed turn" stays distinct
+// from "a turn with no final text". Truncated is the producer's fact; the
+// bounding here is a safety net, not the source of the flag.
+func (b *Broker) SetLastAgentMessage(runID, text, stopReason string, truncated bool) error {
+	st := b.GetRun(runID)
+	if st == nil {
+		return fmt.Errorf("run not found: %s", runID)
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	label := runID
+	if st.Info != nil && st.Info.Label != "" {
+		label = st.Info.Label
+	}
+	st.LastMessage = &LastAgentMessage{
+		RunID:      runID,
+		Label:      label,
+		Text:       events.BoundedFinalOutput(text),
+		StopReason: stopReason,
+		Truncated:  truncated,
+		At:         time.Now().UnixMilli(),
+	}
+	return nil
+}
+
+// LastAgentMessage returns runID's recorded last turn. ok is false when no turn
+// was ever recorded; the returned record still carries the run's real identity
+// so a caller never renders an empty id.
+func (b *Broker) LastAgentMessage(runID string) (LastAgentMessage, bool) {
+	st := b.GetRun(runID)
+	if st == nil {
+		return LastAgentMessage{RunID: runID, Label: b.DisplayName(runID)}, false
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	if st.LastMessage == nil {
+		label := runID
+		if st.Info != nil && st.Info.Label != "" {
+			label = st.Info.Label
+		}
+		return LastAgentMessage{RunID: runID, Label: label}, false
+	}
+	record := *st.LastMessage
+	return record, true
 }
 
 // RenameRun changes the display name peers see for runID. An empty name resets
