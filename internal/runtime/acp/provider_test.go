@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -606,6 +608,152 @@ func TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize(t *testing.T) 
 	}
 	if _, err := os.Stat(config); !os.IsNotExist(err) {
 		t.Fatalf("cancelled launch config not cleaned up: %v", err)
+	}
+}
+
+// TestCloseDuringLaunchLeavesNoClient covers the launch-versus-Close race: a
+// launch still starting when Close runs must neither install a client nor its
+// config cleanup after Close, and must tear down the child it started.
+func TestCloseDuringLaunchLeavesNoClient(t *testing.T) {
+	tests := []struct {
+		name string
+		// spawnFirst starts the child before the launch settles, which models a
+		// launch held up in the handshake rather than in process startup.
+		spawnFirst bool
+		// stuck leaves the launch unsettled while Close runs, so the launch only
+		// finishes after Close has returned.
+		stuck bool
+	}{
+		{name: "close during client start"},
+		{name: "close during initialize", spawnFirst: true},
+		{name: "close while the launch never settles", stuck: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "silent.sh")
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat > /dev/null\n"), 0o755); err != nil {
+				t.Fatalf("write stub: %v", err)
+			}
+			config := filepath.Join(dir, "candidate.json")
+			if err := os.WriteFile(config, []byte(`{}`), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			childPID := 0
+			p := &Provider{
+				backendID: "test-acp",
+				bin:       bin,
+				sessions:  map[string]*Session{},
+				buildClientEnv: func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
+					return map[string]string{"OPENCODE_CONFIG": config}, func() error { return os.Remove(config) }
+				},
+			}
+			spawn := func(ctx context.Context, cfg ClientConfig) (*Client, error) {
+				client, err := NewClient(ctx, cfg)
+				if err != nil {
+					return nil, err
+				}
+				childPID = client.PID()
+				return client, nil
+			}
+			p.startClient = func(ctx context.Context, cfg ClientConfig) (*Client, error) {
+				var pending *Client
+				if tt.spawnFirst {
+					client, err := spawn(ctx, cfg)
+					if err != nil {
+						return nil, err
+					}
+					pending = client
+				}
+				close(entered)
+				<-release
+				if pending != nil {
+					return pending, nil
+				}
+				return spawn(ctx, cfg)
+			}
+
+			started := make(chan error, 1)
+			go func() {
+				_, err := p.Start(context.Background(), runtime.StartOptions{})
+				started <- err
+			}()
+			<-entered
+
+			closed := make(chan error, 1)
+			go func() { closed <- p.Close() }()
+			if tt.stuck {
+				// Close must not hang on a launch its caller's context cannot stop.
+				select {
+				case err := <-closed:
+					if err != nil {
+						t.Fatalf("Close: %v", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("Close blocked on an unsettled launch")
+				}
+				close(release)
+			} else {
+				waitForProviderClosing(t, p)
+				close(release)
+				select {
+				case err := <-closed:
+					if err != nil {
+						t.Fatalf("Close: %v", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("Close did not return after the launch settled")
+				}
+			}
+
+			select {
+			case err := <-started:
+				if !errors.Is(err, errProviderClosed) {
+					t.Fatalf("Start error = %v, want %v", err, errProviderClosed)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("Start did not return after Close")
+			}
+
+			p.mu.Lock()
+			client, cleanup := p.client, p.clientEnvCleanup
+			p.mu.Unlock()
+			if client != nil {
+				t.Fatal("launch installed a client after Close")
+			}
+			if cleanup != nil {
+				t.Fatal("launch installed its config cleanup after Close")
+			}
+			if _, err := os.Stat(config); !os.IsNotExist(err) {
+				t.Fatalf("launch config not cleaned up: %v", err)
+			}
+			if childPID == 0 {
+				t.Fatal("launch did not start a child process")
+			}
+			if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
+				t.Fatalf("child process %d outlived the abandoned launch: %v", childPID, err)
+			}
+		})
+	}
+}
+
+func waitForProviderClosing(t *testing.T, p *Provider) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		p.mu.Lock()
+		closing := p.closing
+		p.mu.Unlock()
+		if closing {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the provider to start closing")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
