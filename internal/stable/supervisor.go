@@ -2122,8 +2122,12 @@ func (s *Supervisor) BrokerReceive() (any, error) {
 // given ask. replyTo is the original ask message id; toRunID the asker run.
 func (s *Supervisor) BrokerReply(toRunID, replyTo, message string) error {
 	runID, _ := s.registerBrokerRun()
+	msgID, err := messaging.NewMsgID(time.Now(), time.Time{})
+	if err != nil {
+		return err
+	}
 	payload := map[string]any{
-		"id":          broker.MakeToken()[:16],
+		"id":          msgID,
 		"from":        runID,
 		"from_run_id": runID,
 		"to_run_id":   toRunID,
@@ -2131,7 +2135,7 @@ func (s *Supervisor) BrokerReply(toRunID, replyTo, message string) error {
 		"role":        "supervisor",
 		"reply_to":    replyTo,
 	}
-	_, err := s.brokerPost("/send", map[string]any{
+	_, err = s.brokerPost("/send", map[string]any{
 		"from_run_id": runID,
 		"to_run_id":   toRunID,
 		"type":        "agent_message",
