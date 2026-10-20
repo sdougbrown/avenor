@@ -32,6 +32,11 @@ func TestClassify(t *testing.T) {
 			want: TagMilestone,
 		},
 		{
+			name: "session.renamed is MILESTONE",
+			raw:  `{"event":"session.renamed","run_id":"rt_1","runtime_id":"rt_1","label":"main","previous_label":"supervisor"}`,
+			want: TagMilestone,
+		},
+		{
 			name: "permission.request is always MILESTONE",
 			raw:  `{"event":"permission.request","session_id":"s1","question":"Allow exec?","tool":"exec"}`,
 			want: TagMilestone,

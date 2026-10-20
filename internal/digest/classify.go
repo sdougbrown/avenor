@@ -25,9 +25,9 @@ var confidenceRe = regexp.MustCompile(`(?i)confidence:\s*(\d+)(?:%|\b)`)
 //
 // Rules (in priority order):
 //
-//  1. MILESTONE: session.end, permission.request, and tool.call / tool.call_update
-//     where kind=="commit" or kind=="task" with status=="completed", or where the
-//     title/command contains "git commit".
+//  1. MILESTONE: session.end, session.renamed, permission.request, and tool.call /
+//     tool.call_update where kind=="commit" or kind=="task" with
+//     status=="completed", or where the title/command contains "git commit".
 //
 //  2. FINDING: agent.message_chunk, agent.thought_chunk, user.message_chunk where
 //     the content text contains a deliberate finding signal (confidence ≥60,
@@ -39,6 +39,8 @@ func Classify(event map[string]any) string {
 	name := stringField(event, "event")
 	switch name {
 	case "session.end":
+		return TagMilestone
+	case "session.renamed":
 		return TagMilestone
 	case "permission.request":
 		return TagMilestone
