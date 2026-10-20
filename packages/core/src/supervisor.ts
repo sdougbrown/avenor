@@ -387,11 +387,23 @@ export class Supervisor {
       child.on('exit', (code, signal) => {
         if (ignoreChildExit) return
         if (!settled) {
-          settleFailure(
-            new Error(
-              `avenor exited with code ${code}${signal ? ' signal ' + signal : ''} during startup`,
-            ),
+          // A competing starter may have won the bind, so re-check before
+          // declaring this attempt failed: probe the path through its published
+          // record, attach the winner when it is live, and never unlink it.
+          const exitError = new Error(
+            `avenor exited with code ${code}${signal ? ' signal ' + signal : ''} during startup`,
           )
+          settled = true
+          ignoreChildExit = true
+          void (async () => {
+            if (this.childProcess === child) this.childProcess = null
+            try {
+              this.client = await attachOwner(this.socketPath)
+              resolve()
+            } catch {
+              reject(exitError)
+            }
+          })()
           return
         }
         // A clean supervisor exit still invalidates the cached client (for

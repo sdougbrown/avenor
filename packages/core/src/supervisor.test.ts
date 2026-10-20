@@ -564,6 +564,35 @@ describe.skipIf(process.env.AVENOR_REAL_INTEGRATION === '1')('Owned start agains
     }
   })
 
+  it('attaches the winner when the child exits during startup', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-exit-startup-'))
+    const launcher = path.join(tmpDir, 'exit-during-startup.sh')
+    const socketPath = path.join(socketsRoot(), `avenor-mcp-${process.pid}.sock`)
+    // The attempt's child starts a competing supervisor that outlives it, waits
+    // until that supervisor has published, then exits during startup.
+    fs.writeFileSync(launcher, [
+      '#!/bin/sh',
+      `"${process.execPath}" "${process.env.AVENOR_BIN}" "$@" >/dev/null 2>&1 &`,
+      'i=0',
+      'while [ "$i" -lt 400 ]; do',
+      '  [ -f "$3.owner.json" ] && break',
+      '  sleep 0.025',
+      '  i=$((i+1))',
+      'done',
+      'exit 1',
+    ].join('\n'), { mode: 0o755 })
+    try {
+      const sup = await Supervisor.get({ binaryPath: launcher })
+      // The winner answers, not the exited child: the launcher attached it
+      // through the record it published and left the socket in place.
+      expect(await sup.getClient().status()).toBeObject()
+      expect(fs.existsSync(socketPath)).toBe(true)
+    } finally {
+      await Supervisor.currentInstance()?.close().catch(() => {})
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it('retries a predecessor record until the child publishes its own', async () => {
     const socketPath = path.join(socketsRoot(), `avenor-mcp-${process.pid}.sock`)
     fs.mkdirSync(socketsRoot(), { recursive: true, mode: 0o700 })
