@@ -1392,13 +1392,20 @@ func (s *Supervisor) reserveAdmission() (*admissionReservation, error) {
 	return res, nil
 }
 
+// activeRuntimeCountLocked counts the runtimes that hold a MaxRuntimes slot.
+// Parked runtimes await an optional follow-up prompt with no turn in flight, so
+// they are excluded.
 func (s *Supervisor) activeRuntimeCountLocked() int {
+	return s.countRuntimesLocked(false)
+}
+
+// countRuntimesLocked counts registered runtimes that have not completed,
+// counting parked runtimes only when includeParked is set.
+func (s *Supervisor) countRuntimesLocked(includeParked bool) int {
 	n := 0
 	for _, rt := range s.runtimes {
 		rt.mu.Lock()
-		// Parked runtimes await an optional follow-up prompt; they hold no
-		// turn in flight, so they must not consume a MaxRuntimes slot.
-		if !rt.lc.isCompleted() && !rt.lc.isParked() {
+		if !rt.lc.isCompleted() && (includeParked || !rt.lc.isParked()) {
 			n++
 		}
 		rt.mu.Unlock()
@@ -4040,15 +4047,7 @@ func (s *Supervisor) shutdown(mode string) int {
 func (s *Supervisor) liveRuntimeCount() int {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
-	n := 0
-	for _, rt := range s.runtimes {
-		rt.mu.Lock()
-		if !rt.lc.isCompleted() {
-			n++
-		}
-		rt.mu.Unlock()
-	}
-	return n
+	return s.countRuntimesLocked(true)
 }
 
 func (s *Supervisor) listRuntimes() []map[string]any {
