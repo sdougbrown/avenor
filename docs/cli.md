@@ -336,6 +336,8 @@ Subscribe to and tail all events from all runtimes. Outputs NDJSON.
 avenor control --socket /tmp/avenor.sock tail
 ```
 
+The stream ends when the control server shuts down, including when the server refuses the subscription because shutdown has already begun. A connection that drops before the subscription is answered exits 1.
+
 #### spawn [flags]
 
 Spawn a new runtime under the supervisor with the given parameters. Outputs JSON result with assigned runtime-id.

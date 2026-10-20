@@ -134,6 +134,11 @@ var ErrResponseTimeout = errors.New("read response: timeout")
 // server answered: the socket dropped, the server stopped, or Close was called.
 var ErrConnectionClosed = errors.New("connection closed")
 
+// ErrControlStopped reports that the control server refused a subscription
+// because it is shutting down. It wraps ErrConnectionClosed, since the server
+// closes every connection once shutdown begins.
+var ErrControlStopped = fmt.Errorf("control server stopped: %w", ErrConnectionClosed)
+
 // Owner-authentication rejections, classified from the wire codes so every
 // client reports the same four classes.
 var (
@@ -441,12 +446,6 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	}
 
 	if resp.Error != nil {
-		// A server that is shutting down refuses new subscriptions and then
-		// closes every connection, so the refusal is the connection closing.
-		if resp.Error.Code == control.CodeControlStopped {
-			c.markClosed()
-			return fmt.Errorf("call %s: %w", method, ErrConnectionClosed)
-		}
 		return &RPCError{Code: resp.Error.Code, Message: resp.Error.Message, Data: resp.Error.Data}
 	}
 	if result != nil && len(resp.Result) > 0 {
@@ -457,11 +456,20 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	return nil
 }
 
-func (c *Client) subscribe() error {
+// Subscribe registers this connection for the event stream so notifications
+// arrive on it. Nil params sends the global subscription; params scope it to a
+// runtime. A server that is shutting down refuses the subscription and then
+// closes every connection, so that refusal is reported as ErrControlStopped.
+func (c *Client) Subscribe(params any) error {
 	var result struct {
 		Subscribed bool `json:"subscribed"`
 	}
-	return c.Call("subscribe", nil, &result)
+	err := c.Call("subscribe", params, &result)
+	if rpcErr, ok := err.(*RPCError); ok && rpcErr.Code == control.CodeControlStopped {
+		c.markClosed()
+		return ErrControlStopped
+	}
+	return err
 }
 
 // ensureSubscribed issues the global "subscribe" call at most once so the
@@ -470,7 +478,7 @@ func (c *Client) subscribe() error {
 // the auto-subscribe is skipped so its subscription mode is preserved. An
 // auto-subscribe failure is never retried and is not reported here; it
 // surfaces as no event delivery. Callers that need the subscribe error must
-// call subscribe themselves (via Call) and check it.
+// call Subscribe themselves and check it.
 func (c *Client) ensureSubscribed() {
 	c.subMu.Lock()
 	if c.subscribed {
@@ -479,7 +487,7 @@ func (c *Client) ensureSubscribed() {
 	}
 	c.subscribed = true
 	c.subMu.Unlock()
-	_ = c.subscribe()
+	_ = c.Subscribe(nil)
 }
 
 // Events returns a channel of server-sent events. Only one subscriber is

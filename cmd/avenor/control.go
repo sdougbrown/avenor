@@ -91,9 +91,10 @@ func cmdList(c *client.Client) int {
 }
 
 func cmdTail(c *client.Client) int {
-	// A connection that closes before the subscribe is answered ends the stream
-	// the caller asked to tail, so it is not a failure to report.
-	if err := c.Call("subscribe", nil, nil); err != nil && !errors.Is(err, client.ErrConnectionClosed) {
+	// A subscribe the server refuses because it is shutting down ends the stream
+	// the caller asked to tail, since no event can follow. Any other failure,
+	// including a connection that drops before the answer, is reported.
+	if err := c.Subscribe(nil); err != nil && !errors.Is(err, client.ErrControlStopped) {
 		fmt.Fprintf(os.Stderr, "avenor control: subscribe: %v\n", err)
 		return 1
 	}
