@@ -509,10 +509,6 @@ func (s *ControlServer) Stop() error {
 	path := s.path
 	socketInfo := s.socketInfo
 	identity := s.recordID
-	conns := make([]*connState, 0, len(s.conns))
-	for c := range s.conns {
-		conns = append(conns, c)
-	}
 	s.mu.Unlock()
 
 	var failures []error
@@ -542,6 +538,17 @@ func (s *ControlServer) Stop() error {
 		}
 	}
 	s.flushSubscribers()
+	// Take the close set after the flush: connections accepted before the
+	// listener closed may have registered since Stop began, and every live
+	// connection has to be closed or its client waits on a listener-less socket
+	// for the rest of its deadline. Subscribe is refused once stopped, so no new
+	// subscriber can appear behind the flush either.
+	s.mu.Lock()
+	conns := make([]*connState, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
 	for _, c := range conns {
 		c.cancel()
 		if err := c.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -568,14 +575,10 @@ func (s *ControlServer) flushSubscribers() {
 		_ = sub.conn.conn.SetWriteDeadline(deadline)
 	}
 	for _, sub := range subs {
+		// flushPending skips a subscriber that a concurrent disconnect has
+		// already closed, so the drain never sends on a closed channel.
+		sub.flushPending()
 		sub.mu.Lock()
-		sub.ready = true
-		for _, ev := range sub.pending {
-			if sub.recordSeqLocked(ev) {
-				sub.enqueueLocked(ev)
-			}
-		}
-		sub.pending = nil
 		sub.closeLocked()
 		sub.mu.Unlock()
 	}
@@ -1170,6 +1173,14 @@ func (s *ControlServer) acceptLoop() {
 		cs := &connState{id: seq, server: s, conn: conn, askSlots: make(chan struct{}, maxInflightAsksPerConn), waitSlots: make(chan struct{}, maxInflightAsksPerConn)}
 		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
+		// Stop sets stopped before it closes the listener, so registering under
+		// the same lock either lands in Stop's close set or is refused here.
+		if s.stopped {
+			s.mu.Unlock()
+			cs.cancel()
+			_ = conn.Close()
+			return
+		}
 		s.conns[cs] = struct{}{}
 		s.mu.Unlock()
 		go s.handleConn(cs)
@@ -1276,17 +1287,17 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"runtime_id"}})
 		}
 		sub := newSubscriber(c, p.RuntimeID, p.AfterSeq)
+		s.mu.Lock()
+		if s.stopped {
+			s.mu.Unlock()
+			return failure(req.ID, -32000, errControlStopped.Error(), nil)
+		}
+		s.subs[sub] = struct{}{}
 		var replay []events.Event
 		if p.Replay {
-			s.mu.Lock()
-			s.subs[sub] = struct{}{}
 			replay, _ = s.runtimeHistoryLocked(p.RuntimeID, p.AfterSeq, p.Limit)
-			s.mu.Unlock()
-		} else {
-			s.mu.Lock()
-			s.subs[sub] = struct{}{}
-			s.mu.Unlock()
 		}
+		s.mu.Unlock()
 		go sub.start(replay)
 		return success(req.ID, map[string]any{"subscribed": true})
 	case "history":
@@ -2105,9 +2116,6 @@ func newSubscriber(conn *connState, runtimeID string, afterSeq int64) *subscribe
 // waitDrained blocks until the writer loop has written everything queued at
 // close, or until deadline passes.
 func (s *subscriber) waitDrained(deadline time.Time) {
-	if s.done == nil {
-		return
-	}
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	select {
@@ -2144,11 +2152,11 @@ func (s *subscriber) recordSeqLocked(ev events.Event) bool {
 	return true
 }
 
-// enqueueLocked offers ev to the subscriber channel while the caller holds s.mu.
-// Every send happens under that lock and only loop receives, so a channel this
-// call has just drained always accepts the retry. Blocking on the channel here
-// would deadlock against a loop that has already taken the buffered event and is
-// waiting for s.mu.
+// enqueueLocked offers ev to the subscriber channel while the caller holds the
+// subscriber lock. Every send and the close in closeLocked happen under that
+// lock, so a send can never follow a close, and only loop receives. Blocking on
+// the channel here would deadlock against a loop that has already taken the
+// buffered event and is waiting for the same lock.
 func (s *subscriber) enqueueLocked(ev events.Event) {
 	select {
 	case s.ch <- ev:
@@ -2234,11 +2242,7 @@ func (s *subscriber) start(replay []events.Event) {
 }
 
 func (s *subscriber) loop() {
-	defer func() {
-		if s.done != nil {
-			close(s.done)
-		}
-	}()
+	defer close(s.done)
 	pendingLag := 0
 	for ev := range s.ch {
 		s.mu.Lock()
