@@ -51,7 +51,6 @@ func mintID(t *testing.T, ttl time.Duration) string {
 	return id
 }
 
-// The shared contract and failure matrix run in TestMessagingImplementations.
 func TestHostClientPeerFaultRacingClose(t *testing.T) {
 	messagetest.RunPeerFaultCloseSuite(t, fixtureFactory(hostfixture.New(t)))
 }
@@ -70,71 +69,14 @@ func TestHostReplyRouting(t *testing.T) {
 	})
 }
 
-// TestHostFixturePausesSendAdmission pauses the fixture's send admission for
-// one key, withdraws that key, then resumes the send. The resumed send must not
-// deliver, must leave no edge, and the fence must stay terminal.
+// TestHostFixturePausesSendAdmission runs the paused-send fence regression
+// against the fixture, then checks that the resumed send queued no delivery.
 func TestHostFixturePausesSendAdmission(t *testing.T) {
 	fx := hostfixture.New(t)
 	sender := newTransport(t, fx, alice)
-	gen := fx.Store().Generation()
-	msgID := mintID(t, time.Minute)
-
-	fx.PauseSend(alice, msgID, gen)
-
-	type sendOutcome struct {
-		res messaging.SendResult
-		err error
-	}
-	sent := make(chan sendOutcome, 1)
-	go func() {
-		res, err := sender.Send(context.Background(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{"message":"paused ask"}`,
-		})
-		sent <- sendOutcome{res: res, err: err}
-	}()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for !fx.Reached(alice, msgID, gen) {
-		if time.Now().After(deadline) {
-			t.Fatal("send never reached the fixture's admission seam")
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-	withdrawn, err := sender.Withdraw(context.Background(), messaging.WithdrawRequest{
-		Sender: alice, MessageID: msgID, Generation: gen,
-	})
-	if err != nil {
-		t.Fatalf("Withdraw: %v", err)
-	}
-	if !withdrawn.Fence.Terminal {
-		t.Fatalf("withdrawal did not install a terminal fence: %+v", withdrawn)
-	}
-
-	fx.ResumeSend(alice, msgID, gen)
-
-	select {
-	case out := <-sent:
-		if out.err != nil {
-			t.Fatalf("resumed send error: %v", out.err)
-		}
-		if out.res.Outcome != messaging.OutcomeWithdrawn {
-			t.Fatalf("resumed send outcome = %q, want withdrawn", out.res.Outcome)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("resumed send did not return")
-	}
-
+	messagetest.RunWithdrawFencesPausedSend(t, sender, fx.Store(), alice, bob)
 	if queued := fx.Queued(bob.RunID); queued != 0 {
 		t.Fatalf("withdrawn ask was delivered %d time(s)", queued)
-	}
-	store := fx.Store()
-	if store.Pending(alice.RunID, msgID) {
-		t.Fatal("withdrawn ask left a pending edge")
-	}
-	ack, ok := store.Fence(messaging.FenceKey{Sender: alice.RunID, MessageID: msgID, Generation: gen})
-	if !ok || !ack.Terminal {
-		t.Fatalf("fence = (%+v, %v), want terminal", ack, ok)
 	}
 }
 
