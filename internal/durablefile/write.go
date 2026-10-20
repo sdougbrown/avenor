@@ -1,10 +1,38 @@
 package durablefile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// ErrTempNotRemoved reports a commit that published its payload at the target
+// path but could not remove the staged temp file it published from. The target
+// holds the complete payload, so the write itself succeeded; the leftover temp
+// file is a second copy of the same bytes that the caller may want to remove.
+var ErrTempNotRemoved = errors.New("temp file not removed after commit")
+
+// TempNotRemovedError is the commit error for a published payload whose temp
+// file survived the commit. It matches ErrTempNotRemoved and carries the path
+// of the leftover temp file, so a caller reporting the warning can name it.
+type TempNotRemovedError struct {
+	Path string
+	Err  error
+}
+
+func (e *TempNotRemovedError) Error() string {
+	return fmt.Sprintf("remove temp %s: %v", e.Path, e.Err)
+}
+
+// Unwrap matches both the sentinel and the underlying removal error.
+func (e *TempNotRemovedError) Unwrap() []error {
+	return []error{ErrTempNotRemoved, e.Err}
+}
+
+// removeTemp removes a temp file that has served its purpose. Tests replace it
+// to exercise a commit whose payload is published but whose temp survives.
+var removeTemp = os.Remove
 
 // TempPattern returns the CreateTemp pattern for a staged replacement of path:
 // the target's base name plus ".tmp-*", so the temp file sorts beside its target
@@ -30,8 +58,9 @@ func WriteFileAtomic(path, pattern string, data []byte, perm os.FileMode) error 
 // WriteFileAtomicExclusive is WriteFileAtomic with an exclusive commit: the temp
 // file is hard linked into place instead of renamed, so an existing path is left
 // untouched and the write fails with an error matching fs.ErrExist. The temp name
-// is removed after the link; a removal that fails is reported, because it leaves
-// a second copy of the payload on disk.
+// is removed after the link; a removal that fails returns an error matching
+// ErrTempNotRemoved, since the payload is already published and only the temp
+// copy survives.
 func WriteFileAtomicExclusive(path, pattern string, data []byte, perm os.FileMode) error {
 	return writeAtomic(path, pattern, data, perm, "link", linkCommit)
 }
@@ -52,8 +81,8 @@ func linkCommit(tmpPath, path string) error {
 		discardTemp(tmpPath)
 		return err
 	}
-	if err := os.Remove(tmpPath); err != nil {
-		return fmt.Errorf("remove temp: %w", err)
+	if err := removeTemp(tmpPath); err != nil {
+		return &TempNotRemovedError{Path: tmpPath, Err: err}
 	}
 	return nil
 }

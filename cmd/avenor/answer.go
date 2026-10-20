@@ -220,6 +220,13 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 		write = durablefile.WriteFileAtomicExclusive
 	}
 	if err := write(responsePath, durablefile.TempPattern(responsePath), data, 0o600); err != nil {
+		var leftover *durablefile.TempNotRemovedError
+		if errors.As(err, &leftover) {
+			// The response is published; only the staged temp file survived it.
+			fmt.Fprintf(errOut, "avenor answer: wrote %s, but could not remove the temp file %s: %v\n",
+				responsePath, leftover.Path, leftover.Err)
+			return 0
+		}
 		if !flags.force && errors.Is(err, os.ErrExist) {
 			fmt.Fprintf(errOut, "avenor answer: response already exists at %s; pass --force to overwrite\n", responsePath)
 			return 2

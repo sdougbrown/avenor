@@ -128,6 +128,36 @@ func TestWriteFileAtomicExclusiveAdmitsOneRacer(t *testing.T) {
 	assertOnlyTarget(t, dir)
 }
 
+func TestWriteFileAtomicExclusiveReportsPublishedTemp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "target")
+	removeErr := errors.New("temp is busy")
+	restore := removeTemp
+	removeTemp = func(string) error { return removeErr }
+	t.Cleanup(func() { removeTemp = restore })
+
+	err := WriteFileAtomicExclusive(path, TempPattern(path), []byte("payload"), 0o600)
+	if !errors.Is(err, ErrTempNotRemoved) {
+		t.Fatalf("WriteFileAtomicExclusive error = %v, want ErrTempNotRemoved", err)
+	}
+	if errors.Is(err, fs.ErrExist) {
+		t.Fatalf("error = %v, want no fs.ErrExist match: the payload was published", err)
+	}
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("error = %v, want the removal error wrapped", err)
+	}
+	if got, readErr := os.ReadFile(path); readErr != nil || string(got) != "payload" {
+		t.Fatalf("content = %q (err %v), want the published payload", got, readErr)
+	}
+	var leftover *TempNotRemovedError
+	if !errors.As(err, &leftover) {
+		t.Fatalf("error = %v, want a *TempNotRemovedError naming the leftover temp", err)
+	}
+	if _, statErr := os.Stat(leftover.Path); statErr != nil {
+		t.Fatalf("leftover temp %s: %v", leftover.Path, statErr)
+	}
+}
+
 func TestWriteFileAtomicCommitFailureRemovesTemp(t *testing.T) {
 	dir := t.TempDir()
 	// A directory at the target path makes the rename fail.
