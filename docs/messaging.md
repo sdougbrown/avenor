@@ -55,8 +55,8 @@ messages.
 
 ## Outcomes
 
-`Outcome` values are a wire contract shared with the JavaScript clients, so the
-strings never change meaning.
+`Outcome` values travel in the transport responses and in a failed ask's
+`data.outcome`, so the strings never change meaning.
 
 | Outcome | Meaning |
 |---|---|

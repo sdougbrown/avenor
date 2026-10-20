@@ -1,8 +1,8 @@
 package messaging
 
-// Outcome is the result of an ask operation. The string values are a wire
-// contract shared by every transport and by the JavaScript clients, so they
-// must never be renamed or reused for a different meaning.
+// Outcome is the result of an ask operation. The string values travel in every
+// transport's responses and in a failed ask's control error, so they must never
+// be renamed or reused for a different meaning.
 type Outcome string
 
 const (
