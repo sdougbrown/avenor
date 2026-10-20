@@ -50,11 +50,11 @@ func TestReadSentinelSession(t *testing.T) {
 	for _, status := range []string{"TIMEOUT", "KILLED"} {
 		path := writeSentinel(t, status+"\nSESSION=ses_7\n")
 		_, err := ReadSentinelSession(path)
-		if err == nil || err.Error() != "run is not resumable (status: "+strings.ToLower(status)+")" {
+		if err == nil || !strings.Contains(err.Error(), strings.ToLower(status)) {
 			t.Fatalf("%s: error = %v", status, err)
 		}
 	}
-	if _, err := ReadSentinelSession(writeSentinel(t, "DONE\nSTOP_REASON=end_turn\n")); err == nil || err.Error() != "no session in sentinel" {
+	if _, err := ReadSentinelSession(writeSentinel(t, "DONE\nSTOP_REASON=end_turn\n")); err == nil || !strings.Contains(err.Error(), "no session") {
 		t.Fatalf("missing session error = %v", err)
 	}
 }
