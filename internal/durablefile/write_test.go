@@ -1,0 +1,147 @@
+package durablefile
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+)
+
+// assertOnlyTarget reports whether dir holds the target file and nothing else,
+// so a staged temp file that survived the write fails the test by its presence.
+func assertOnlyTarget(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if !slices.Equal(names, []string{"target"}) {
+		t.Fatalf("dir holds %v, want only the target", names)
+	}
+}
+
+func seedFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("seed %s: %v", path, err)
+	}
+}
+
+func TestWriteFileAtomicReplacesTarget(t *testing.T) {
+	tests := []struct {
+		name string
+		perm os.FileMode
+	}{
+		{name: "0600", perm: 0o600},
+		{name: "0644", perm: 0o644},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "target")
+			seedFile(t, path, "old")
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat before: %v", err)
+			}
+
+			if err := WriteFileAtomic(path, TempPattern(path), []byte("new"), tt.perm); err != nil {
+				t.Fatalf("WriteFileAtomic: %v", err)
+			}
+
+			if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
+				t.Fatalf("content = %q (err %v), want %q", got, err, "new")
+			}
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat after: %v", err)
+			}
+			if os.SameFile(before, after) {
+				t.Fatal("target was written in place; the commit must replace it")
+			}
+			if perm := after.Mode().Perm(); perm != tt.perm {
+				t.Fatalf("mode = %04o, want %04o", perm, tt.perm)
+			}
+			assertOnlyTarget(t, dir)
+		})
+	}
+}
+
+func TestWriteFileAtomicExclusiveKeepsExistingTarget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "target")
+	seedFile(t, path, "sentinel")
+
+	err := WriteFileAtomicExclusive(path, TempPattern(path), []byte("new"), 0o600)
+	if !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("WriteFileAtomicExclusive error = %v, want fs.ErrExist", err)
+	}
+	if got, readErr := os.ReadFile(path); readErr != nil || string(got) != "sentinel" {
+		t.Fatalf("content = %q (err %v), want the untouched sentinel", got, readErr)
+	}
+	assertOnlyTarget(t, dir)
+}
+
+func TestWriteFileAtomicExclusiveAdmitsOneRacer(t *testing.T) {
+	const writers = 16
+	dir := t.TempDir()
+	path := filepath.Join(dir, "target")
+
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			data := fmt.Appendf(nil, "writer-%d", i)
+			errs[i] = WriteFileAtomicExclusive(path, TempPattern(path), data, 0o600)
+		}(i)
+	}
+	wg.Wait()
+
+	var published, existing int
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			published++
+		case errors.Is(err, fs.ErrExist):
+			existing++
+		default:
+			t.Errorf("writer %d: unexpected error %v", i, err)
+		}
+	}
+	if published != 1 || existing != writers-1 {
+		t.Fatalf("published = %d, fs.ErrExist = %d; want 1 and %d", published, existing, writers-1)
+	}
+	if got, err := os.ReadFile(path); err != nil || !strings.HasPrefix(string(got), "writer-") {
+		t.Fatalf("content = %q (err %v), want one writer's whole payload", got, err)
+	}
+	assertOnlyTarget(t, dir)
+}
+
+func TestWriteFileAtomicCommitFailureRemovesTemp(t *testing.T) {
+	dir := t.TempDir()
+	// A directory at the target path makes the rename fail.
+	path := filepath.Join(dir, "target")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+
+	if err := WriteFileAtomic(path, TempPattern(path), []byte("new"), 0o600); err == nil {
+		t.Fatal("WriteFileAtomic: expected an error when the target is a directory")
+	}
+
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("target is no longer the directory that made the commit fail (err %v)", err)
+	}
+	assertOnlyTarget(t, dir)
+}
