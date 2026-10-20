@@ -2,6 +2,7 @@ package stable
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -228,8 +229,8 @@ func assertToolCode(t *testing.T, err error, want string) {
 	if err == nil {
 		t.Fatalf("err = nil, want tool code %s", want)
 	}
-	coded, ok := err.(*router.ToolError)
-	if !ok {
+	var coded *router.ToolError
+	if !errors.As(err, &coded) {
 		t.Fatalf("err = %T %v, want *router.ToolError", err, err)
 	}
 	if coded.Code != want {
