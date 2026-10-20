@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avenor.dev/schemas/peers.input.json",
+  "title": "avenor_peers input",
+  "description": "Discriminated-union input for the avenor_peers tool: list (the default action), rename and last. Each action is one complete object with additionalProperties false, so a field belonging to another action is a schema error. The same admission rules are published as PeersApplicabilityTable in internal/messaging (Go) and assertPeersInput (TypeScript); TestSchemaMatchesRouteTable proves the schema and the table agree, and TestPeersActionVocabulary pins the action union.",
+  "type": "object",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "list",
+          "default": "list",
+          "description": "List the sessions visible to the caller."
+        }
+      },
+      "required": ["action"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "rename",
+          "description": "Rename a run's display name."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\x00-\\x1f\\x7f]+$",
+          "description": "New display name, 1-64 bytes with no control characters. The schema is permissive about the byte/character distinction; the rename authority rejects a name that is too long in bytes."
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Run to rename. Omitted renames the caller's own run for a broker caller and the supervisor session for the owner."
+        }
+      },
+      "required": ["action", "name"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "last",
+          "description": "Read a peer's last agent message, the final text of its latest turn."
+        },
+        "target": {
+          "type": "string",
+          "description": "Peer: a reserved self alias, a broker/runtime id, a host-surface public run id, or a peer label."
+        }
+      },
+      "required": ["action", "target"],
+      "additionalProperties": false
+    }
+  ]
+}
