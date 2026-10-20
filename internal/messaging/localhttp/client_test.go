@@ -81,7 +81,6 @@ func mintID(t *testing.T, ttl time.Duration) string {
 	return id
 }
 
-// The shared contract and failure matrix run in TestMessagingImplementations.
 func TestLocalAdapterPeerFaultRacingClose(t *testing.T) {
 	messagetest.RunPeerFaultCloseSuite(t, brokerFactory(t, newBroker(t)))
 }

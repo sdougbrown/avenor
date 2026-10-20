@@ -14,7 +14,6 @@ import (
 var alice = messaging.Identity{RunID: "alice", Sender: "alice"}
 var bob = messaging.Identity{RunID: "bob", Sender: "bob"}
 
-// The shared contract and failure matrix run in TestMessagingImplementations.
 func TestInProcessReplyRouting(t *testing.T) {
 	store, _ := messagetest.NewMemoryStore(t)
 	messagetest.RunReplyRoutingSuite(t, func(t *testing.T, id messaging.Identity) messaging.Transport {
