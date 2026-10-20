@@ -115,6 +115,20 @@ func TestMessageRPCDispatch(t *testing.T) {
 		t.Fatalf("send request = %+v", tr.sendReq)
 	}
 
+	// A send that fails on the transport still reports what the transport
+	// knows: the outcome it reached and the message id it carried.
+	tr.sendErr = messaging.ErrTransportClosed
+	_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: 20, Method: "message_send", Params: json.RawMessage(`{"from_run_id":"rt_child","to_run_id":"rt_2","message_id":"m2","generation":"g","body":"{}","no_reply":true}`)})
+	r = readRespForID(t, owner, 20)
+	if r.Error == nil || r.Error.Code != -32000 {
+		t.Fatalf("message_send transport error = %+v", r)
+	}
+	sendData, ok := r.Error.Data.(map[string]any)
+	if !ok || sendData["wire_code"] != "transport-closed" || sendData["outcome"] != "not-sent" || sendData["message_id"] != "m2" {
+		t.Fatalf("send error data = %#v", r.Error.Data)
+	}
+	tr.sendErr = nil
+
 	// A failed wait carries structured error data a client classifies without
 	// parsing text.
 	tr.waitErr = messaging.ErrTransportClosed
