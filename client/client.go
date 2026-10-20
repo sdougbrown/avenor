@@ -714,8 +714,8 @@ func (c *Client) SubscribeRuntime(ctx context.Context, runtimeID string) <-chan 
 				delete(c.runtimeSubs, runtimeID)
 			}
 		}
-		c.subsMu.Unlock()
 		close(out)
+		c.subsMu.Unlock()
 	}()
 	return out
 }
