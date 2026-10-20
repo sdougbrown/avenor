@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/control/controltest"
 	"github.com/sdougbrown/avenor/internal/events"
@@ -476,41 +477,29 @@ func shortControlSocketPath(t *testing.T) string {
 }
 
 // promptOverControl queues a prompt through a run's control socket and waits
-// for the reply.
+// promptOverControl queues a prompt through the run's control socket, attached
+// as owner, and waits for the reply.
 func promptOverControl(t *testing.T, path, text string) {
 	t.Helper()
-	params, _ := json.Marshal(map[string]string{"text": text})
-	body, _ := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "prompt", Params: params})
-	conn, err := net.Dial("unix", path)
-	if err != nil {
-		t.Fatalf("dial control socket: %v", err)
-	}
-	defer conn.Close()
-	if _, err := conn.Write(append(body, '\n')); err != nil {
-		t.Fatalf("write prompt: %v", err)
-	}
-	var resp control.Response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil || resp.Error != nil {
-		t.Fatalf("prompt response = %+v, %v", resp, err)
-	}
+	callOwnerOverControl(t, path, "prompt", map[string]string{"text": text})
 }
 
-// cancelOverControl cancels a run through its control socket and waits for the
-// reply. The first client to connect owns the socket, so this client owns it.
+// cancelOverControl cancels a run through its control socket, attached as
+// owner, and waits for the reply.
 func cancelOverControl(t *testing.T, path string) {
 	t.Helper()
-	body, _ := json.Marshal(control.Request{JSONRPC: "2.0", ID: 1, Method: "cancel"})
-	conn, err := net.Dial("unix", path)
+	callOwnerOverControl(t, path, "cancel", nil)
+}
+
+func callOwnerOverControl(t *testing.T, path, method string, params any) {
+	t.Helper()
+	c, err := client.AttachOwner(path)
 	if err != nil {
-		t.Fatalf("dial control socket: %v", err)
+		t.Fatalf("attach owner to control socket: %v", err)
 	}
-	defer conn.Close()
-	if _, err := conn.Write(append(body, '\n')); err != nil {
-		t.Fatalf("write cancel: %v", err)
-	}
-	var resp control.Response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil || resp.Error != nil {
-		t.Fatalf("cancel response = %+v, %v", resp, err)
+	defer c.Close()
+	if err := c.Call(method, params, nil); err != nil {
+		t.Fatalf("%s over control: %v", method, err)
 	}
 }
 
