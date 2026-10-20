@@ -3,7 +3,9 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
@@ -258,5 +260,65 @@ func TestMessageRPCTransportUnavailable(t *testing.T) {
 	data, ok := r.Error.Data.(map[string]any)
 	if !ok || data["wire_code"] != "invalid-request" {
 		t.Fatalf("missing transport data = %#v", r.Error.Data)
+	}
+}
+
+// blockingWaitTransport parks message_wait until the test releases it, so the
+// connection's ability to serve other requests is observable.
+type blockingWaitTransport struct {
+	recordingTransport
+	entered     chan struct{}
+	enteredOnce sync.Once
+	release     chan struct{}
+}
+
+func (b *blockingWaitTransport) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	b.enteredOnce.Do(func() { close(b.entered) })
+	select {
+	case <-b.release:
+		return messaging.WaitResult{Outcome: messaging.OutcomeTimedOut}, nil
+	case <-ctx.Done():
+		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, ctx.Err()
+	}
+}
+
+// TestMessageWaitDoesNotBlockConnection pins the async message_wait shape: an
+// outstanding wait must not stop the owner connection from serving a second
+// request, because the MCP host reuses that connection for permission answers
+// and cancellation.
+func TestMessageWaitDoesNotBlockConnection(t *testing.T) {
+	tr := &blockingWaitTransport{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s, cap := NewTestServer(state)
+	s.SetStableHandler(&mockStableHandler{messageTransport: tr})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := dialOwner(t, s, cap)
+	defer c.Close()
+
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 1, Method: "message_wait", Params: json.RawMessage(`{"sender_run_id":"supervisor","message_id":"m1","generation":"g","timeout_ms":5}`)})
+	select {
+	case <-tr.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("message_wait never reached the transport")
+	}
+
+	// A second request on the same connection must be served while the wait is
+	// still outstanding.
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 2, Method: "message_preflight"})
+	if resp := readRespForID(t, c, 2); resp.Error != nil {
+		t.Fatalf("message_preflight while wait in flight: %+v", resp.Error)
+	}
+
+	close(tr.release)
+	if resp := readRespForID(t, c, 1); resp.Error != nil {
+		t.Fatalf("message_wait response after release: %+v", resp.Error)
 	}
 }

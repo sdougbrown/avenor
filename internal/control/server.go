@@ -194,6 +194,10 @@ type connState struct {
 
 	// askSlots bounds concurrent in-flight broker asks on this connection.
 	askSlots chan struct{}
+
+	// messageWaitSlots bounds concurrent in-flight message_wait requests on
+	// this connection, matching the broker_ask and wait_turn bounds.
+	messageWaitSlots chan struct{}
 }
 
 type subscriber struct {
@@ -1177,7 +1181,12 @@ func (s *ControlServer) acceptLoop() {
 			continue
 		}
 		seq++
-		cs := &connState{id: seq, server: s, conn: conn, askSlots: make(chan struct{}, maxInflightAsksPerConn), waitSlots: make(chan struct{}, maxInflightAsksPerConn)}
+		cs := &connState{
+			id: seq, server: s, conn: conn,
+			askSlots:         make(chan struct{}, maxInflightAsksPerConn),
+			waitSlots:        make(chan struct{}, maxInflightAsksPerConn),
+			messageWaitSlots: make(chan struct{}, maxInflightAsksPerConn),
+		}
 		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
 		// Stop sets stopped before it closes the listener, so registering under
@@ -1763,15 +1772,42 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
+		if p.TimeoutMS < 0 {
+			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
+		}
+		// Match broker_ask's ceiling: an ask store wait must expire before the
+		// broker's own ask timeout, not race it.
+		if p.TimeoutMS > maxAskTimeoutMS {
+			p.TimeoutMS = maxAskTimeoutMS
+		}
+		// Bound concurrent in-flight waits per connection so one owner cannot
+		// accumulate unbounded parked goroutines and edges.
+		select {
+		case c.messageWaitSlots <- struct{}{}:
+		default:
+			return failure(req.ID, -32000, "too many in-flight message waits on this connection", nil)
+		}
 		tr, err := s.stableHandler.MessageTransport()
 		if err != nil {
+			<-c.messageWaitSlots
 			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
 		}
-		res, err := tr.Wait(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, p.MessageID))
-		}
-		return success(req.ID, newMessageWaitResult(res))
+		// Run the wait on a background goroutine bound to the connection
+		// context: an unanswered wait must not stall subsequent requests on
+		// this connection, and a disconnect cancels the pending wait.
+		go func() {
+			defer func() { <-c.messageWaitSlots }()
+			res, err := tr.Wait(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+			if req.ID == nil || c.ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				_ = c.writeJSON(failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, p.MessageID)))
+				return
+			}
+			_ = c.writeJSON(success(req.ID, newMessageWaitResult(res)))
+		}()
+		return asyncResponse
 	case "message_reply":
 		if s.stableHandler == nil {
 			return failure(req.ID, -32601, "method not found", nil)

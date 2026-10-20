@@ -1009,11 +1009,13 @@ func (c *Client) MessageSend(req messaging.SendRequest) (messaging.SendResult, e
 // MessageWait waits for the terminal state of one ask.
 func (c *Client) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
 	var result control.MessageWaitResult
-	wait := time.Duration(0)
-	if req.Timeout > 0 {
-		// The server ends the wait at the timeout; allow delivery margin.
-		wait = req.Timeout + 10*time.Second
+	// The server honours a zero timeout for messaging.MaxWait, so the client
+	// must wait at least that long before giving up on the response.
+	wait := req.Timeout
+	if wait <= 0 {
+		wait = messaging.MaxWait
 	}
+	wait += 10 * time.Second
 	if err := c.call("message_wait", control.NewMessageWaitParams(req), &result, wait); err != nil {
 		return messaging.WaitResult{}, err
 	}
