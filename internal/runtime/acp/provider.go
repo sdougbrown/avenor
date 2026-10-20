@@ -60,7 +60,8 @@ type Provider struct {
 	launchIdle chan struct{}
 
 	// lifetimeCtx ends when Close runs, so a launch Close abandoned cannot
-	// outlive the provider. It is created by the first launch.
+	// outlive the provider. The first admitted launch creates it under the same
+	// lock Close latches closing under, so Close can always cancel it.
 	lifetimeCtx    context.Context
 	lifetimeCancel context.CancelFunc
 
@@ -117,11 +118,11 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	session, err := client.NewSessionWithOptions(ctx, SessionOpenOptions{})
 	if err != nil {
-		return runtime.Session{}, p.abandonedError(err)
+		return runtime.Session{}, p.abandonedError(client, err)
 	}
 	if p.configureSession != nil {
 		if err := p.configureSession(ctx, session, merged); err != nil {
-			return runtime.Session{}, p.abandonedError(err)
+			return runtime.Session{}, p.abandonedError(client, err)
 		}
 	}
 
@@ -206,11 +207,11 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 
 	session, err := client.ResumeSession(ctx, sessionID)
 	if err != nil {
-		return runtime.Session{}, p.abandonedError(err)
+		return runtime.Session{}, p.abandonedError(client, err)
 	}
 	if p.configureSession != nil {
 		if err := p.configureSession(ctx, session, opts); err != nil {
-			return runtime.Session{}, p.abandonedError(err)
+			return runtime.Session{}, p.abandonedError(client, err)
 		}
 	}
 
@@ -230,13 +231,21 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	}, nil
 }
 
-// abandonedError reports the provider's own closure when it ended a launch or
-// session that was still starting, keeping the underlying cause attached.
-func (p *Provider) abandonedError(err error) error {
+// abandonedError reports the provider's own closure when Close ended the work in
+// progress, keeping the underlying cause attached: Close cancelled the context
+// a launch runs under, or closed the client the work was using. A failure that
+// merely overlapped shutdown keeps its own error.
+func (p *Provider) abandonedError(client *Client, err error) error {
+	if err == nil {
+		return nil
+	}
 	p.mu.Lock()
 	closing := p.closing
 	p.mu.Unlock()
 	if !closing {
+		return err
+	}
+	if !errors.Is(err, context.Canceled) && (client == nil || !client.ended()) {
 		return err
 	}
 	return fmt.Errorf("%s: %w: %w", p.backendID, errProviderClosed, err)
@@ -437,12 +446,18 @@ func (p *Provider) Close() error {
 	return client.Close()
 }
 
-// beginLaunch admits one launch attempt, rejecting it once Close has run.
+// beginLaunch admits one launch attempt, rejecting it once Close has run. It
+// also creates the provider lifetime if this is the first attempt, inside the
+// same critical section, so a launch admitted here always has a lifetime Close
+// cancels instead of building one Close has already passed.
 func (p *Provider) beginLaunch() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closing {
 		return fmt.Errorf("%s: %w", p.backendID, errProviderClosed)
+	}
+	if p.lifetimeCtx == nil {
+		p.lifetimeCtx, p.lifetimeCancel = context.WithCancel(context.Background())
 	}
 	if p.launching == 0 {
 		p.launchIdle = make(chan struct{})
@@ -466,17 +481,15 @@ func (p *Provider) settleLaunch() {
 	p.launchIdle = nil
 }
 
-// launchContext derives the context for one launch attempt. It ends when the
-// caller's context ends or when Close cancels the provider lifetime, so a
-// launch nobody is waiting for cannot leave its child behind. keepAlive detaches
-// the attempt from the lifetime once it has handed its client over, which lets
-// Close close that client normally; abandon also ends the context, killing a
-// process that is still starting.
+// launchContext derives the context for one launch attempt admitted by
+// beginLaunch. It ends when the caller's context ends or when Close cancels the
+// provider lifetime, so a launch nobody is waiting for cannot leave its child
+// behind. keepAlive detaches the attempt from the lifetime once it has handed
+// its client over, which lets Close close that client normally; abandon also
+// ends the context, killing a process that is still starting. The lifetime is
+// created at admission, so a launch cannot outrun Close by building its own.
 func (p *Provider) launchContext(ctx context.Context) (launchCtx context.Context, keepAlive, abandon func()) {
 	p.mu.Lock()
-	if p.lifetimeCtx == nil {
-		p.lifetimeCtx, p.lifetimeCancel = context.WithCancel(context.Background())
-	}
 	lifetime := p.lifetimeCtx
 	p.mu.Unlock()
 
@@ -489,12 +502,14 @@ func (p *Provider) launchContext(ctx context.Context) (launchCtx context.Context
 // retained yet. buildEnv, when non-nil, builds the environment for that new
 // client only, so a retained client never pays for a launch it will not use.
 // The returned release ends the launch attempt and must be called exactly once,
-// after the caller is done with the client: until then the launch counts as in
-// flight, so Close neither finishes early nor closes the client under the
-// caller. A launch that does not become the provider's client — because a
-// client is already live, another launch won the install, Close ran first, or
-// startup failed — cleans up its own generated config before returning. A
-// retained client takes ownership of its config until Close.
+// after the caller is done with the client: until then that launch counts as in
+// flight, so Close waits for it and cancels it instead of finishing early. A
+// client that was already installed when Close ran is not covered by that count,
+// so a call on it can still see the client closed underneath. A launch that does
+// not become the provider's client — because a client is already live, another
+// launch won the install, Close ran first, or startup failed — cleans up its own
+// generated config before returning. A retained client takes ownership of its
+// config until Close.
 func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, buildEnv func() (map[string]string, func() error)) (*Client, func(), error) {
 	p.mu.Lock()
 	client := p.client
@@ -544,7 +559,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 	})
 	if err != nil {
 		runCleanup(cleanup)
-		return nil, nil, p.abandonedError(err)
+		return nil, nil, p.abandonedError(nil, err)
 	}
 
 	p.mu.Lock()
