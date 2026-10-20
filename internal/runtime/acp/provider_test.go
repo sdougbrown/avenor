@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -612,16 +613,41 @@ func TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize(t *testing.T) 
 	}
 }
 
+// errLaunchStopped stands in for a launch that fails on its own while Close is
+// in progress.
+var errLaunchStopped = errors.New("launch stopped")
+
+// TestAbandonedLaunchStillEndsWhenCloseGaveUp covers a launch Close admitted but
+// gave up waiting for: the launch must run under the lifetime Close already
+// cancelled instead of building a lifetime of its own after Close returned.
+func TestAbandonedLaunchStillEndsWhenCloseGaveUp(t *testing.T) {
+	p := &Provider{backendID: "test-acp"}
+	if err := p.beginLaunch(); err != nil {
+		t.Fatalf("beginLaunch: %v", err)
+	}
+	// This launch never settles, so Close waits out its bound and returns first.
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	launchCtx, _, abandon := p.launchContext(context.Background())
+	defer abandon()
+	awaitSignal(t, launchCtx.Done(), "the abandoned launch context to end")
+	p.settleLaunch()
+}
+
 // TestCloseDuringLaunchLeavesNoClient covers the launch-versus-Close race: a
 // launch still in flight when Close starts keeps Close waiting, never installs
 // a client, its config cleanup, or a session afterwards, and does not leave the
 // child it started behind.
 func TestCloseDuringLaunchLeavesNoClient(t *testing.T) {
 	t.Run("close waits for a real launch", func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "child.pid")
 		// The stub answers the handshake so the launch reaches configureSession,
 		// and exits cleanly on SIGTERM the way a well-behaved backend does.
 		p, config := newLaunchRaceProvider(t, `#!/bin/sh
 trap 'exit 0' TERM
+echo $$ > `+shellQuotePath(pidFile)+`
 read -r line
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
 read -r line
@@ -636,12 +662,12 @@ cat > /dev/null
 		entered, gate := make(chan struct{}), make(chan struct{})
 		p.configureSession = func(context.Context, *Session, runtime.StartOptions) error {
 			close(entered)
-			<-gate
+			awaitSignal(t, gate, "the configureSession gate")
 			return nil
 		}
 
 		started := startInBackground(p)
-		<-entered
+		awaitSignal(t, entered, "configureSession")
 		closed := make(chan error, 1)
 		began := time.Now()
 		go func() { closed <- p.Close() }()
@@ -649,7 +675,8 @@ cat > /dev/null
 		close(gate)
 		awaitClose(t, closed, began, 0, 10*time.Second)
 
-		assertLaunchAbandoned(t, p, started, config)
+		assertLaunchAbandoned(t, p, started, config, errProviderClosed)
+		assertRecordedChildGone(t, pidFile)
 	})
 
 	t.Run("close waits for every launch", func(t *testing.T) {
@@ -661,27 +688,33 @@ cat > /dev/null
 		childPID := 0
 		var calls atomic.Int32
 		p.startClient = func(ctx context.Context, cfg ClientConfig) (*Client, error) {
-			release := settled
-			if calls.Add(1) > 1 {
-				// The second launch starts a real child and never returns on its
-				// own, so only the provider lifetime can kill it.
-				client, err := NewClient(ctx, cfg)
-				if err != nil {
-					return nil, err
-				}
-				childPID = client.PID()
-				close(childStarted)
-				release = wedged
+			if calls.Add(1) == 1 {
+				// The first launch fails on its own while Close is running, so its
+				// failure is its own and not the provider's.
+				entered <- struct{}{}
+				awaitSignal(t, settled, "the first launch's release")
+				return nil, errLaunchStopped
 			}
+			// The second launch starts a real child and waits for its context, so
+			// only the provider lifetime can end it.
+			client, err := NewClient(ctx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			childPID = client.PID()
+			close(childStarted)
 			entered <- struct{}{}
-			<-release
-			return nil, errors.New("launch stopped")
+			awaitSignal(t, wedged, "the wedged launch's release")
+			return nil, ctx.Err()
 		}
 
-		first, second := startInBackground(p), startInBackground(p)
-		<-entered
-		<-entered
-		<-childStarted
+		// The first launch is admitted and in startClient before the second
+		// begins, so the call order matches the order the launches are started.
+		first := startInBackground(p)
+		awaitSignal(t, entered, "the first launch")
+		second := startInBackground(p)
+		awaitSignal(t, entered, "the second launch")
+		awaitSignal(t, childStarted, "the wedged child")
 
 		closed := make(chan error, 1)
 		began := time.Now()
@@ -690,10 +723,8 @@ cat > /dev/null
 		settled <- struct{}{}
 		// The second launch is still in flight, so Close stays blocked.
 		assertCloseBlocked(t, closed)
-		awaitClose(t, closed, began, launchSettleTimeout, launchSettleTimeout+time.Second)
-		if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
-			t.Fatalf("child process %d outlived Close: %v", childPID, err)
-		}
+		awaitClose(t, closed, began, launchSettleTimeout, launchSettleTimeout+5*time.Second)
+		assertPIDGone(t, childPID)
 		// The launch Close gave up on is no longer counted, so it does not wait
 		// the bound again.
 		closed = make(chan error, 1)
@@ -702,8 +733,70 @@ cat > /dev/null
 		awaitClose(t, closed, began, 0, time.Second)
 
 		close(wedged)
-		assertLaunchAbandoned(t, p, first, config)
-		assertLaunchAbandoned(t, p, second, config)
+		assertLaunchAbandoned(t, p, first, config, errLaunchStopped)
+		assertLaunchAbandoned(t, p, second, config, errProviderClosed)
+	})
+
+	t.Run("a client that starts after close is torn down", func(t *testing.T) {
+		// The launch refuses the context derived from the provider lifetime, so
+		// only the closing check at install can tear its client down.
+		p, config := newLaunchRaceProvider(t, "#!/bin/sh\nexec cat > /dev/null\n")
+		childStarted, release := make(chan struct{}), make(chan struct{})
+		childPID := 0
+		p.startClient = func(_ context.Context, cfg ClientConfig) (*Client, error) {
+			client, err := NewClient(context.Background(), cfg)
+			if err != nil {
+				return nil, err
+			}
+			childPID = client.PID()
+			close(childStarted)
+			awaitSignal(t, release, "the install gate")
+			return client, nil
+		}
+
+		started := startInBackground(p)
+		awaitSignal(t, childStarted, "the started client")
+		closed := make(chan error, 1)
+		began := time.Now()
+		go func() { closed <- p.Close() }()
+		awaitClosing(t, p)
+		close(release)
+		awaitClose(t, closed, began, 0, 10*time.Second)
+
+		assertLaunchAbandoned(t, p, started, config, errProviderClosed)
+		assertPIDGone(t, childPID)
+	})
+
+	t.Run("close abandons a resume in flight", func(t *testing.T) {
+		// The stub answers the handshake, notes the resume request and then
+		// holds it open, so Close closes the client the resume is waiting on.
+		dir := t.TempDir()
+		pidFile := filepath.Join(dir, "child.pid")
+		resumeReady := filepath.Join(dir, "resume")
+		p, config := newLaunchRaceProvider(t, `#!/bin/sh
+trap 'exit 0' TERM
+echo $$ > `+shellQuotePath(pidFile)+`
+read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+read -r line
+touch `+shellQuotePath(resumeReady)+`
+cat > /dev/null
+`)
+
+		resumed := make(chan error, 1)
+		go func() {
+			_, err := p.ResumeWithOptions(context.Background(), "stub-session", runtime.StartOptions{})
+			resumed <- err
+		}()
+		waitForPath(t, resumeReady)
+
+		closed := make(chan error, 1)
+		began := time.Now()
+		go func() { closed <- p.Close() }()
+		awaitClose(t, closed, began, launchSettleTimeout, launchSettleTimeout+5*time.Second)
+
+		assertLaunchAbandoned(t, p, resumed, config, errProviderClosed)
+		assertRecordedChildGone(t, pidFile)
 	})
 }
 
@@ -749,6 +842,36 @@ func assertCloseBlocked(t *testing.T, closed <-chan error) {
 	}
 }
 
+// awaitClosing waits for Close to latch its closing flag, which it sets before
+// it waits for the launches it owes.
+func awaitClosing(t *testing.T, p *Provider) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		p.mu.Lock()
+		closing := p.closing
+		p.mu.Unlock()
+		if closing {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for Close to latch")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// awaitSignal fails the test when ch stays silent past a bound, so a stuck race
+// reports instead of hanging the run.
+func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
 // awaitClose waits for Close and pins how long it took: a lower bound for a wait
 // that must still be running, an upper bound for the bounded launch wait.
 func awaitClose(t *testing.T, closed <-chan error, began time.Time, min, max time.Duration) {
@@ -766,14 +889,18 @@ func awaitClose(t *testing.T, closed <-chan error, began time.Time, min, max tim
 	}
 }
 
-// assertLaunchAbandoned proves an abandoned launch failed with the provider
-// closed, installed nothing, and removed the generated config at config.
-func assertLaunchAbandoned(t *testing.T, p *Provider, started <-chan error, config string) {
+// assertLaunchAbandoned proves an abandoned launch failed with wantErr without
+// being relabelled as the provider's closure — or, when wantErr is that closure,
+// that it was — installed nothing, and removed the generated config at config.
+func assertLaunchAbandoned(t *testing.T, p *Provider, started <-chan error, config string, wantErr error) {
 	t.Helper()
 	select {
 	case err := <-started:
-		if !errors.Is(err, errProviderClosed) {
-			t.Fatalf("Start error = %v, want %v", err, errProviderClosed)
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("Start error = %v, want %v", err, wantErr)
+		}
+		if wantErr != errProviderClosed && errors.Is(err, errProviderClosed) {
+			t.Fatalf("Start error = %v, want %v alone", err, wantErr)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Start did not return after Close")
@@ -786,6 +913,28 @@ func assertLaunchAbandoned(t *testing.T, p *Provider, started <-chan error, conf
 	}
 	if _, err := os.Stat(config); config != "" && !os.IsNotExist(err) {
 		t.Fatalf("launch config not cleaned up: %v", err)
+	}
+}
+
+// assertRecordedChildGone reads the pid the stub wrote and proves it exited.
+func assertRecordedChildGone(t *testing.T, pidFile string) {
+	t.Helper()
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read recorded child pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parse recorded child pid %q: %v", data, err)
+	}
+	assertPIDGone(t, pid)
+}
+
+// assertPIDGone proves the process pid has exited.
+func assertPIDGone(t *testing.T, pid int) {
+	t.Helper()
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("child process %d outlived Close: %v", pid, err)
 	}
 }
 
