@@ -1896,8 +1896,13 @@ func newFanoutWriter(base EventSink, cs *control.ControlServer, metadata *EventM
 // per runtime and subscriber dedup, replay cursors, and persistence can never
 // disagree about event order. Without a control server, the EventMetadata
 // stamps the seq itself; with neither, the event only carries its runtime
-// identity. The returned event is the lossless durable form.
+// identity. The returned event is the lossless durable form. A session.end
+// leaves here without an end_kind: only the run-level writer tags that, after
+// stamping, so a backend's own turn end cannot claim the run's terminal record.
 func StampFanoutEvent(ev events.Event, runtimeID string, metadata *EventMetadata, cs *control.ControlServer) events.Event {
+	if ev.Event == "session.end" {
+		delete(ev.Fields, "end_kind")
+	}
 	if cs != nil {
 		if metadata != nil {
 			ev = metadata.Tag(ev)

@@ -1569,6 +1569,7 @@ func TestFanoutWriterWithoutControlStampsEventLogOnce(t *testing.T) {
 		{Event: "agent.status", SessionID: "ses_1", Fields: map[string]any{"phase": "working", "custom": "keep"}},
 		{Event: "tool.call", SessionID: "ses_1", Fields: map[string]any{"seq": int64(99), "ts": int64(123), "title": "build"}},
 		{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"stop_reason": "end_turn"}},
+		{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{"stop_reason": "cancelled", "end_kind": "run"}},
 	} {
 		if err := writer.Write(ev); err != nil {
 			t.Fatalf("Write(%s): %v", ev.Event, err)
@@ -1579,8 +1580,8 @@ func TestFanoutWriterWithoutControlStampsEventLogOnce(t *testing.T) {
 	}
 
 	got := readEventLogForTest(t, path)
-	if len(got) != 3 {
-		t.Fatalf("event count = %d, want 3", len(got))
+	if len(got) != 4 {
+		t.Fatalf("event count = %d, want 4", len(got))
 	}
 	if got[0].Fields["run_id"] != "run_1" {
 		t.Fatalf("run_id = %v, want run_1", got[0].Fields["run_id"])
@@ -1605,6 +1606,9 @@ func TestFanoutWriterWithoutControlStampsEventLogOnce(t *testing.T) {
 	}
 	if seq := got[2].Fields["seq"]; seq != float64(100) {
 		t.Fatalf("third seq = %v, want 100", seq)
+	}
+	if kind, ok := got[3].Fields["end_kind"]; ok {
+		t.Fatalf("direct-run end_kind = %v, want it stripped by the fanout stamping", kind)
 	}
 }
 

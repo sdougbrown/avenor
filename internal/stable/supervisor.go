@@ -4819,23 +4819,22 @@ func (w *runtimeFanoutWriter) writeLockedTerminal(ev events.Event, diagnostics *
 	// Every session.end carries the exit code its stop reason maps to. The
 	// stop reason is the classification the run reports through its sentinel
 	// and status, so it owns the code; a backend-supplied number never
-	// overrides it. Only the run-level writer tags end_kind, so a backend's own
-	// turn end cannot masquerade as the run's terminal record.
+	// overrides it.
 	if ev.Event == "session.end" {
 		stopReason, _ := ev.Fields["stop_reason"].(string)
 		if ev.Fields == nil {
 			ev.Fields = map[string]any{}
 		}
 		ev.Fields["exit_code"] = runtime.ExitCodeForStopReason(stopReason)
-		if runEnd {
-			ev.Fields["end_kind"] = "run"
-		} else {
-			delete(ev.Fields, "end_kind")
-		}
 	}
 	// stamped is the lossless durable event (written to file/broker);
 	// presentation is the bounded copy for control/status surfaces.
 	stamped := cli.StampFanoutEvent(ev, w.runtimeID, w.metadata, w.control)
+	if runEnd && stamped.Event == "session.end" {
+		// Stamping strips a backend-supplied end_kind, so the run-level writer
+		// tags its end afterwards.
+		stamped.Fields["end_kind"] = "run"
+	}
 	presentation := events.BoundFinalOutput(stamped)
 	if presentation.Event == "permission.request" && w.onPermissionReq != nil {
 		if requestID, _ := presentation.Fields["request_id"].(string); requestID != "" {
