@@ -1508,6 +1508,25 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			return SpawnResult{}, fmt.Errorf("label already in use: %s (runtime %s)", params.Label, holder)
 		}
 	}
+	// The per-runtime artifact directory is created before the child is
+	// published, so a failure here never leaves a registered row to roll back.
+	// The event and sentinel paths default into it and derive from the run ID
+	// and runtime ID, which are known here.
+	artifactDir := filepath.Join(os.TempDir(), "avenor-stable", s.runID, rtID)
+	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+		childCancel()
+		s.controlMu.Unlock()
+		return SpawnResult{}, fmt.Errorf("create artifact dir: %w", err)
+	}
+	onEvent := params.OnEvent
+	if onEvent == "" {
+		onEvent = filepath.Join(artifactDir, "events.ndjson")
+	}
+	sentinelFile := params.SentinelFile
+	if sentinelFile == "" {
+		sentinelFile = filepath.Join(artifactDir, "sentinel.env")
+	}
+
 	// Every field the spawn parameters already determine is set here, before
 	// the child is published into s.runtimes: status and list readers reach a
 	// child the moment it is registered, and the values they read must not be
@@ -1531,6 +1550,8 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		permClaimTimeout:         s.config.PermissionClaimTimeout,
 		runID:                    s.runID,
 		dir:                      params.Dir,
+		onEvent:                  onEvent,
+		sentinelFile:             sentinelFile,
 		startedAt:                time.Now().UnixMilli(),
 		lifecycleCtx:             childCtx,
 		cancelFn:                 childCancel,
@@ -1647,21 +1668,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		return SpawnResult{}, fmt.Errorf("prompt, prompt_file, loop_file, or team_file is required")
 	}
 
-	// Per-runtime artifact directory.
-	artifactDir := filepath.Join(os.TempDir(), "avenor-stable", s.runID, rtID)
-	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
-		return SpawnResult{}, fmt.Errorf("create artifact dir: %w", err)
-	}
-
-	onEvent := params.OnEvent
-	if onEvent == "" {
-		onEvent = filepath.Join(artifactDir, "events.ndjson")
-	}
-	sentinelFile := params.SentinelFile
-	if sentinelFile == "" {
-		sentinelFile = filepath.Join(artifactDir, "sentinel.env")
-	}
-
 	// Create event writer for this runtime.
 	writer, err := cli.NewEventWriter(onEvent)
 	if err != nil {
@@ -1718,11 +1724,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			AgentProfile: params.AgentProfile,
 		}
 
-		child.mu.Lock()
-		child.rosterFile = rosterMetadataPath
-		child.roster = rootRoster
-		child.mu.Unlock()
-		s.installSpawnResources(child, writer, fileHandler, onEvent, sentinelFile)
+		s.installSpawnResources(child, writer, fileHandler, rootRoster, rosterMetadataPath)
 		// provider and session remain zero-valued for loop children
 
 		s.signalRuntimeActivity()
@@ -1762,11 +1764,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			AgentProfile: params.AgentProfile,
 		}
 
-		child.mu.Lock()
-		child.rosterFile = rosterMetadataPath
-		child.roster = rootRoster
-		child.mu.Unlock()
-		s.installSpawnResources(child, writer, fileHandler, onEvent, sentinelFile)
+		s.installSpawnResources(child, writer, fileHandler, rootRoster, rosterMetadataPath)
 
 		s.signalRuntimeActivity()
 
@@ -1830,7 +1828,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}
 
 	providerLifecycle := s.installChildProvider(child, provider, session)
-	s.installSpawnResources(child, writer, fileHandler, onEvent, sentinelFile)
+	s.installSpawnResources(child, writer, fileHandler, nil, params.RosterFile)
 	attempt, err := s.registerSessionAttempt(session.SessionID, effectiveIdentity{
 		Backend:       backend,
 		Agent:         params.Agent,
@@ -4234,18 +4232,19 @@ func newPermissionProviderLifecycle(child *childRuntime, provider runtime.Provid
 	}
 }
 
-// installSpawnResources records the spawn resources that are created after the
-// child is registered: its durable event sink, file permission handler, and
-// event and sentinel paths. Status and list readers reach a registered child
-// immediately, so the presentation fields are written under child.mu, and the
-// sink under writeMu as well because the writer teardown path reads it there.
-func (s *Supervisor) installSpawnResources(child *childRuntime, writer cli.EventSink, fileHandler *permission.FileHandler, onEvent, sentinelFile string) {
+// installSpawnResources records the spawn resources that only exist after the
+// child is registered: its durable event sink, file permission handler, and the
+// roster snapshot a workflow config resolves. Status and list readers reach a
+// registered child immediately, so the roster fields are written under
+// child.mu, and the sink under writeMu as well because the writer teardown path
+// reads it there.
+func (s *Supervisor) installSpawnResources(child *childRuntime, writer cli.EventSink, fileHandler *permission.FileHandler, roster *rosterconfig.Config, rosterFile string) {
 	child.writeMu.Lock()
 	child.mu.Lock()
 	child.eventWriter = writer
 	child.fileHandler = fileHandler
-	child.onEvent = onEvent
-	child.sentinelFile = sentinelFile
+	child.roster = roster
+	child.rosterFile = rosterFile
 	child.mu.Unlock()
 	child.writeMu.Unlock()
 }
