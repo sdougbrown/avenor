@@ -1171,7 +1171,7 @@ func startErrorAndHangServer(t *testing.T) (string, func()) {
 					_, _ = c.Write(append(respData, '\n'))
 				}
 				if req.Method == "subscribe" {
-					resp := Response{JSONRPC: "2.0", ID: req.ID, Error: &RespError{Code: -32000, Message: "control server stopped"}}
+					resp := Response{JSONRPC: "2.0", ID: req.ID, Error: &RespError{Code: -32014, Message: "control server stopped"}}
 					respData, _ := json.Marshal(resp)
 					_, _ = c.Write(append(respData, '\n'))
 				}

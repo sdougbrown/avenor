@@ -39,8 +39,7 @@ const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
 var dialControlSocket = net.DialTimeout
 
 // ErrControlStopped reports that a control server refused work because it is
-// shutting down. A request refused over the wire carries CodeControlStopped and
-// this message.
+// shutting down. A request refused over the wire carries CodeControlStopped.
 var ErrControlStopped = errors.New("control server stopped")
 
 // These no-op hooks let lifecycle tests coordinate at lock and transition

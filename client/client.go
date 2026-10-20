@@ -443,7 +443,7 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	if resp.Error != nil {
 		// A server that is shutting down refuses new subscriptions and then
 		// closes every connection, so the refusal is the connection closing.
-		if resp.Error.Code == control.CodeControlStopped && resp.Error.Message == control.ErrControlStopped.Error() {
+		if resp.Error.Code == control.CodeControlStopped {
 			c.markClosed()
 			return fmt.Errorf("call %s: %w", method, ErrConnectionClosed)
 		}
@@ -604,8 +604,8 @@ func (c *Client) Identity() (string, error) {
 // runtime's turn settled (control.codeWaitTurnTimeout).
 var ErrWaitTurnTimeout = errors.New("wait_turn: timeout before the runtime's turn settled")
 
-// codeWaitTurnTimeout mirrors control.codeWaitTurnTimeout; the client cannot
-// import the control package without an import cycle.
+// codeWaitTurnTimeout mirrors control's unexported codeWaitTurnTimeout, which
+// marks a wait_turn whose timeout elapsed before the runtime's turn settled.
 const codeWaitTurnTimeout = -32020
 
 // WaitTurn blocks until the runtime's next running→idle transition settles:

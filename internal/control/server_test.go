@@ -1769,8 +1769,12 @@ func TestSubscribeAfterStopIsRejected(t *testing.T) {
 		t.Fatalf("stop: %v", err)
 	}
 
-	if resp := s.dispatch(cs, Request{JSONRPC: "2.0", ID: 1, Method: "subscribe"}); resp.Error == nil {
+	resp := s.dispatch(cs, Request{JSONRPC: "2.0", ID: 1, Method: "subscribe"})
+	if resp.Error == nil {
 		t.Fatal("subscribe after Stop was accepted")
+	}
+	if resp.Error.Code != CodeControlStopped {
+		t.Fatalf("subscribe after Stop = %+v, want code %d", resp.Error, CodeControlStopped)
 	}
 	s.mu.Lock()
 	subs := len(s.subs)
