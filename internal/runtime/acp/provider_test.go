@@ -956,3 +956,15 @@ func waitForPath(t *testing.T, path string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestStartAfterCloseIsRefused pins the closing check in beginLaunch: a closed
+// provider refuses to launch, so the missing binary is never reached.
+func TestStartAfterCloseIsRefused(t *testing.T) {
+	p := NewProvider(ProviderConfig{BackendID: "test", Bin: filepath.Join(t.TempDir(), "absent")}).(*Provider)
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := p.Start(context.Background(), runtime.StartOptions{}); !errors.Is(err, errProviderClosed) {
+		t.Fatalf("Start after Close = %v, want errProviderClosed", err)
+	}
+}
