@@ -3,8 +3,6 @@ package router
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"strings"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
@@ -34,13 +32,11 @@ func ExecutePeers(ctx context.Context, p Provider, input json.RawMessage) (Resul
 	if err != nil {
 		return Result{}, peersInvalidAction()
 	}
-	// A missing action defaults to list for the table lookup; the entry still
-	// requires it, so an absent action is a typed invalid_request naming list.
-	// An action that is present but not a string keeps the default and is then
-	// rejected by the type check, which is the property-level error it is.
-	action := peersActionVocabulary[0]
-	if value, ok := fieldString(fields, "action"); ok {
-		action = value
+	// A missing, non-string or unknown action is one invalid action, the same
+	// code and text the message router uses for the same input.
+	action, ok := fieldString(fields, "action")
+	if !ok {
+		return Result{}, peersInvalidAction()
 	}
 	table := messaging.PeersApplicabilityTable()
 	entry, known := table[action]
@@ -69,7 +65,7 @@ func ExecutePeers(ctx context.Context, p Provider, input json.RawMessage) (Resul
 func peersInvalidAction() *ToolError {
 	return &ToolError{
 		Code:    "invalid_action",
-		Message: fmt.Sprintf("not a known action (%s)", strings.Join(peersActionVocabulary, ", ")),
+		Message: messaging.Repair("peers_invalid_action", nil),
 		Facts:   map[string]string{},
 	}
 }
@@ -78,20 +74,16 @@ func peersInvalidAction() *ToolError {
 // display name, so the list is the rename's read path. The list carries no
 // text, because it stays small.
 func peersList(ctx context.Context, p Provider, action string) (Result, error) {
-	pre, err := p.Preflight(ctx)
-	if err != nil {
-		return Result{}, refused(err)
-	}
 	peers, err := p.Peers(ctx, messaging.PeersRequest{
 		Sender:     messaging.Identity{RunID: p.Caller().RunID},
-		Generation: pre.Generation,
+		Generation: p.Generation(),
 	})
 	if err != nil && len(peers.Peers) == 0 {
 		return Result{}, refused(err)
 	}
-	records := make([]PeerRecord, 0, len(peers.Peers))
+	records := make([]messaging.PeerRecord, 0, len(peers.Peers))
 	for _, peer := range peers.Peers {
-		var record PeerRecord
+		var record messaging.PeerRecord
 		if len(peer.Session) > 0 {
 			if err := json.Unmarshal(peer.Session, &record); err != nil {
 				return Result{}, refused(err)
@@ -153,7 +145,7 @@ func peersLast(ctx context.Context, p Provider, action string, input peersInput)
 	facts := map[string]string{
 		"run_id":      quote(result.RunID),
 		"label":       quote(label),
-		"stop_reason": last.StopReason,
+		"stop_reason": sanitize(last.StopReason),
 	}
 	switch {
 	case !last.HasRecord:

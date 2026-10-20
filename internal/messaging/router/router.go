@@ -16,10 +16,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"math/big"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askclient"
@@ -42,6 +48,10 @@ type Provider interface {
 	// Last reads the target's recorded last agent message. It is the peers
 	// `last` action's only provider call and performs no write.
 	Last(ctx context.Context, runID string) (messaging.PeerLast, error)
+	// Generation is the bound generation the provider read once at
+	// construction. Every request carries it, so a provider is never retargeted
+	// to a different generation mid-call.
+	Generation() string
 }
 
 // AskClaimer is implemented only by the surfaces that keep a pending-ask map
@@ -73,26 +83,17 @@ type Result struct {
 	// Peers is the peers `list` action's output: one record per visible peer,
 	// already decoded from the broker's peer listing. It is empty for every
 	// other action, and `list` sets no text.
-	Peers []PeerRecord
+	Peers []messaging.PeerRecord
 	// PreviousLabel is the label before a peers `rename`, which the
 	// peers_rename:renamed template and the surface's result object report.
 	PreviousLabel string
+	// resume only: the paths a ResumeResult minted for the new run.
+	SentinelFile string
+	OnEvent      string
 	// peers `last` only; zero values everywhere else.
 	FinalOutput string
 	StopReason  string
 	Truncated   bool
-}
-
-// PeerRecord is one peers `list` entry. There is no name key: Label is the
-// display name, so the list is also the rename's read path.
-type PeerRecord struct {
-	RunID   string `json:"run_id"`
-	Label   string `json:"label,omitempty"`
-	Status  string `json:"status,omitempty"`
-	Backend string `json:"backend,omitempty"`
-	Model   string `json:"model,omitempty"`
-	Dir     string `json:"dir,omitempty"`
-	Kind    string `json:"kind,omitempty"`
 }
 
 // ToolError is a typed tool denial. Code is one of the fixed error codes; the
@@ -195,11 +196,19 @@ func (r *Router) Execute(ctx context.Context, input json.RawMessage) (Result, er
 // permissionDenial reports the phase-3 rows: control_reply support and the
 // resume caller rule. Both reasons are read from the generated route table.
 func permissionDenial(action string, conditions messaging.MessageRouteConditions) *ToolError {
-	if action == actionControlReply && !conditions.ControlReplySupported {
-		return permissionError(action, conditions, "unsupported_action")
-	}
-	if action == actionResume && conditions.CallerKind == string(messaging.CallerBroker) {
-		return permissionError(action, conditions, "not_permitted")
+	switch action {
+	case actionControlReply:
+		if !conditions.ControlReplySupported {
+			return permissionError(action, conditions, "unsupported_action")
+		}
+	case actionResume:
+		// The generated fairWhen slot is the allowlist: a resume is fair only
+		// when the caller is the owner, so an empty or future caller kind is
+		// denied here rather than reaching the provider unchecked.
+		availability := messaging.Check(messaging.MessageRouteFields{Action: &action}, conditions, messaging.MessageRouteFields{})
+		if !availability.Target.Fair {
+			return &ToolError{Code: "not_permitted", Message: firstReason(availability.Target), Facts: map[string]string{}}
+		}
 	}
 	return nil
 }
@@ -209,17 +218,19 @@ func permissionError(action string, conditions messaging.MessageRouteConditions,
 	return &ToolError{Code: code, Message: firstReason(availability.Target), Facts: map[string]string{}}
 }
 
-// stateDenial reports the phase-4 state rows. Their text is template-rendered,
-// not read from the route table, whose reasons for these rows are static and
-// never user-visible.
+// stateDenial reports the phase-4 state rows. The tell/ask live rule and the
+// resume resumable rule are read from the generated route table, so editing the
+// Umpire spec changes what the router enforces. Their text is template-rendered
+// because the generated reasons are static and never user-visible.
 func stateDenial(action string, conditions messaging.MessageRouteConditions, runID, status string) *ToolError {
 	if action != actionTell && action != actionAsk && action != actionResume {
 		return nil
 	}
-	facts := map[string]string{"run_id": quote(runID), "status": status}
+	availability := messaging.Check(messaging.MessageRouteFields{Action: &action}, conditions, messaging.MessageRouteFields{})
+	facts := map[string]string{"run_id": quote(runID), "status": sanitize(status)}
 	switch action {
 	case actionTell, actionAsk:
-		if conditions.TargetLive {
+		if availability.Message.Enabled {
 			return nil
 		}
 		if conditions.TargetResumable {
@@ -232,7 +243,7 @@ func stateDenial(action string, conditions messaging.MessageRouteConditions, run
 		if conditions.TargetLive {
 			return &ToolError{Code: "target_not_terminal", Message: messaging.Repair("target_not_terminal", facts), Facts: facts}
 		}
-		if !conditions.TargetResumable {
+		if !availability.Message.Fair {
 			return &ToolError{Code: "not_resumable", Message: messaging.Repair("not_resumable", facts), Facts: facts}
 		}
 	}
@@ -242,10 +253,6 @@ func stateDenial(action string, conditions messaging.MessageRouteConditions, run
 func (r *Router) tell(ctx context.Context, input messageInput, res messaging.Resolution) (Result, error) {
 	label := resolutionLabel(res, input.Target)
 	result := Result{Action: actionTell, Outcome: messaging.OutcomeNotSent, Label: label}
-	pre, err := r.provider.Preflight(ctx)
-	if err != nil {
-		return Result{}, refused(err)
-	}
 	msgID, err := messaging.NewMsgID(time.Now(), time.Time{})
 	if err != nil {
 		result.Text = messaging.RenderOutcome(actionTell, result.Outcome, map[string]string{
@@ -267,7 +274,7 @@ func (r *Router) tell(ctx context.Context, input messageInput, res messaging.Res
 		From:       messaging.Identity{RunID: r.provider.Caller().RunID},
 		To:         messaging.Identity{RunID: res.RunID},
 		MessageID:  msgID,
-		Generation: pre.Generation,
+		Generation: r.provider.Generation(),
 		Body:       string(body),
 		NoReply:    true,
 	})
@@ -285,10 +292,6 @@ func (r *Router) tell(ctx context.Context, input messageInput, res messaging.Res
 func (r *Router) ask(ctx context.Context, input messageInput, res messaging.Resolution) (Result, error) {
 	label := resolutionLabel(res, input.Target)
 	result := Result{Action: actionAsk, Label: label}
-	pre, err := r.provider.Preflight(ctx)
-	if err != nil {
-		return Result{}, refused(err)
-	}
 	from := messaging.Identity{RunID: r.provider.Caller().RunID}
 	send, wait, err := r.client.AskRequest(from, from.RunID, res.RunID, input.Message, r.provider.Role())
 	if err != nil {
@@ -300,9 +303,9 @@ func (r *Router) ask(ctx context.Context, input messageInput, res messaging.Reso
 		})
 		return result, nil
 	}
-	send.Generation = pre.Generation
-	wait.Generation = pre.Generation
-	wait.Timeout = time.Duration(input.TimeoutMS) * time.Millisecond
+	send.Generation = r.provider.Generation()
+	wait.Generation = send.Generation
+	wait.Timeout = time.Duration(input.timeoutMS()) * time.Millisecond
 
 	answered, askErr := r.client.Ask(ctx, send, wait)
 	if askErr != nil {
@@ -363,7 +366,12 @@ func (r *Router) reply(ctx context.Context, input messageInput) (Result, error) 
 		CorrelationID: input.ReplyTo,
 		Body:          string(body),
 	})
-	if err != nil {
+	// The claim is restored unless the outcome proves delivery. An outcome that
+	// is not replied — including a nil-error not-sent, edge-absent or
+	// possibly-pending — never proves the asker received the answer, and a
+	// possibly-pending reply must leave the ask answerable rather than consume
+	// the claim.
+	if sent.Outcome != messaging.OutcomeReplied {
 		claimer.RestoreAsk(input.ReplyTo, asker)
 	}
 	result.Outcome, result.Text = outcomeText(actionReply, sent.Outcome, facts)
@@ -373,17 +381,19 @@ func (r *Router) reply(ctx context.Context, input messageInput) (Result, error) 
 func (r *Router) withdraw(ctx context.Context, input messageInput) (Result, error) {
 	result := Result{Action: actionWithdraw, MessageID: input.MessageID}
 	facts := map[string]string{"message_id": quote(input.MessageID)}
-	pre, err := r.provider.Preflight(ctx)
-	if err != nil {
-		return Result{}, refused(err)
-	}
 	withdrawn, err := r.provider.Withdraw(ctx, messaging.WithdrawRequest{
 		Sender:     messaging.Identity{RunID: r.provider.Caller().RunID},
 		MessageID:  input.MessageID,
-		Generation: pre.Generation,
+		Generation: r.provider.Generation(),
 	})
 	if err != nil && withdrawn.Outcome == "" {
 		return Result{}, refused(err)
+	}
+	if errors.Is(err, messaging.ErrFenceCapacity) && withdrawn.Outcome == messaging.OutcomeEdgeAbsent {
+		// The absence fence could not be installed, so a delayed send can still
+		// be admitted: reporting "nothing is pending" would be a lie.
+		result.Outcome, result.Text = outcomeText(actionWithdraw, messaging.OutcomePossiblyPending, facts)
+		return result, nil
 	}
 	result.Outcome, result.Text = outcomeText(actionWithdraw, withdrawn.Outcome, facts)
 	return result, nil
@@ -402,10 +412,12 @@ func (r *Router) resume(ctx context.Context, input messageInput, res messaging.R
 		return Result{}, asToolError(err)
 	}
 	result := Result{
-		Action:  actionResume,
-		Outcome: outcomeResumed,
-		RunID:   resumed.RunID,
-		Label:   resumed.Label,
+		Action:       actionResume,
+		Outcome:      outcomeResumed,
+		RunID:        resumed.RunID,
+		Label:        resumed.Label,
+		SentinelFile: resumed.SentinelFile,
+		OnEvent:      resumed.OnEvent,
 	}
 	result.Text = messaging.RenderOutcome(actionResume, result.Outcome, map[string]string{
 		"run_id": quote(result.RunID),
@@ -425,7 +437,14 @@ func (r *Router) controlReply(ctx context.Context, input messageInput) (Result, 
 	}
 	replier, ok := r.provider.(ControlReplier)
 	if !ok {
-		return Result{}, permissionError(actionControlReply, conditions, "unsupported_action")
+		// The support rule is satisfied on the sidecar, so it names no reason
+		// for a provider that still cannot deliver a control reply. This row
+		// has its own shared template.
+		return Result{}, &ToolError{
+			Code:    "unsupported_action",
+			Message: messaging.Repair("control_reply_unsupported", nil),
+			Facts:   map[string]string{},
+		}
 	}
 	payload := input.Payload
 	if len(bytes.TrimSpace(payload)) == 0 {
@@ -488,15 +507,32 @@ func resolutionLabel(res messaging.Resolution, ref string) string {
 	return ref
 }
 
-// outcomeText keeps every reported outcome inside the contract. An outcome the
-// matrix does not list for this action is a transport bug rather than a design
-// case, and is reported as possibly-pending: the conservative reading, which
-// still carries the message id, so a result's text is never empty.
+// outcomeText renders the contract's (action, outcome) text. An outcome outside
+// the vocabulary entirely is a transport bug with no meaningful text, so it is
+// reported as possibly-pending: the conservative reading, which still carries
+// the message id. An in-vocabulary outcome the matrix does not list is a
+// contract gap, not a transport bug: it is returned unrendered so the gap is
+// visible (and a conformance test fails) instead of being silently rewritten.
 func outcomeText(action string, outcome messaging.Outcome, facts map[string]string) (messaging.Outcome, string) {
-	if !rendersOutcome(action, outcome) {
-		outcome = messaging.OutcomePossiblyPending
+	if rendersOutcome(action, outcome) {
+		return outcome, messaging.RenderOutcome(action, outcome, facts)
 	}
-	return outcome, messaging.RenderOutcome(action, outcome, facts)
+	if isVocabularyOutcome(outcome) {
+		return outcome, ""
+	}
+	return messaging.OutcomePossiblyPending, messaging.RenderOutcome(action, messaging.OutcomePossiblyPending, facts)
+}
+
+// isVocabularyOutcome reports whether outcome is one of the contract's nine
+// outcome strings. Anything else came from outside the transport contract.
+func isVocabularyOutcome(outcome messaging.Outcome) bool {
+	switch outcome {
+	case messaging.OutcomeSent, messaging.OutcomeReplied, messaging.OutcomeTimedOut,
+		messaging.OutcomeWithdrawn, messaging.OutcomeEdgeAbsent, messaging.OutcomeAuthRejected,
+		messaging.OutcomeNotSent, messaging.OutcomePossiblyPending, messaging.OutcomeLost:
+		return true
+	}
+	return false
 }
 
 // rendersOutcome reports whether the outcome contract has a template for the
@@ -538,6 +574,12 @@ func invalidRequest(action, detail string) *ToolError {
 }
 
 func refused(err error) *ToolError {
+	// A filesystem error names an absolute path that must not reach a model or a
+	// peer, so it is classified to a shared sentence instead of passed through.
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+		return &ToolError{Code: "refused", Message: messaging.Repair("refused_io", nil), Facts: map[string]string{}}
+	}
 	return &ToolError{Code: "refused", Message: err.Error(), Facts: map[string]string{}}
 }
 
@@ -549,12 +591,48 @@ func asToolError(err error) *ToolError {
 	return refused(err)
 }
 
+// quote renders value as one JSON string literal. Control, format, line- and
+// paragraph-separator characters are escaped, so a label a producer controls
+// cannot carry a bidi override or a zero-width character into tool text.
 func quote(value string) string {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return value
+	return `"` + escapeNonPrintable(value) + `"`
+}
+
+// sanitize escapes the same characters as quote without adding the surrounding
+// literal quotes, for a fact the templates render bare.
+func sanitize(value string) string { return escapeNonPrintable(value) }
+
+func escapeNonPrintable(value string) string {
+	var out strings.Builder
+	out.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r == '"':
+			out.WriteString(`\"`)
+		case r == '\\':
+			out.WriteString(`\\`)
+		case r == '\b':
+			out.WriteString(`\b`)
+		case r == '\f':
+			out.WriteString(`\f`)
+		case r == '\n':
+			out.WriteString(`\n`)
+		case r == '\r':
+			out.WriteString(`\r`)
+		case r == '\t':
+			out.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
+			if r > 0xffff {
+				high, low := utf16.EncodeRune(r)
+				fmt.Fprintf(&out, `\u%04x\u%04x`, high, low)
+			} else {
+				fmt.Fprintf(&out, `\u%04x`, r)
+			}
+		default:
+			out.WriteRune(r)
+		}
 	}
-	return string(encoded)
+	return out.String()
 }
 
 func quoteList(values []string) string {
@@ -589,7 +667,7 @@ type messageInput struct {
 	Message        string          `json:"message"`
 	ReplyTo        string          `json:"reply_to"`
 	MessageID      string          `json:"message_id"`
-	TimeoutMS      int             `json:"timeout_ms"`
+	TimeoutMS      json.Number     `json:"timeout_ms"`
 	Label          string          `json:"label"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	Payload        json.RawMessage `json:"payload"`
@@ -622,8 +700,9 @@ func fieldString(fields map[string]json.RawMessage, name string) (string, bool) 
 
 // validateFields applies one action's applicability entry in the fixed order
 // phase 1 uses: a property outside Permitted, then a missing Required property,
-// then a value whose wire type is not the declared one. The returned sentence is
-// the invalid_request template's {detail} fact.
+// then a value whose wire type or declared constraint is not met. The returned
+// sentence is the invalid_request template's {detail} fact, rendered from the
+// shared repairs table so no failure sentence is composed here.
 func validateFields(fields map[string]json.RawMessage, entry messaging.ActionApplicability) string {
 	permitted := make(map[string]bool, len(entry.Permitted))
 	for _, name := range entry.Permitted {
@@ -636,12 +715,12 @@ func validateFields(fields map[string]json.RawMessage, entry messaging.ActionApp
 	sort.Strings(names)
 	for _, name := range names {
 		if !permitted[name] {
-			return fmt.Sprintf("unknown property %q", name)
+			return messaging.Repair("unknown_property", map[string]string{"name": quote(name)})
 		}
 	}
 	for _, name := range entry.Required {
 		if _, ok := fields[name]; !ok {
-			return fmt.Sprintf("missing required property %q", name)
+			return messaging.Repair("missing_required_property", map[string]string{"name": quote(name)})
 		}
 	}
 	for _, name := range entry.Permitted {
@@ -650,24 +729,75 @@ func validateFields(fields map[string]json.RawMessage, entry messaging.ActionApp
 			continue
 		}
 		kind := entry.Types[name]
-		if hasWireType(raw, kind) {
+		if !hasWireType(raw, kind) {
+			switch kind {
+			case "integer":
+				return messaging.Repair("wrong_type_integer", map[string]string{"name": quote(name)})
+			case "object":
+				return messaging.Repair("wrong_type_object", map[string]string{"name": quote(name)})
+			default:
+				return messaging.Repair("wrong_type_string", map[string]string{"name": quote(name)})
+			}
+		}
+		if kind != "string" {
 			continue
 		}
-		switch kind {
-		case "integer":
-			return fmt.Sprintf("property %q must be an integer", name)
-		case "object":
-			return fmt.Sprintf("property %q must be an object", name)
-		default:
-			return fmt.Sprintf("property %q must be a string", name)
+		value, _ := fieldString(fields, name)
+		if detail := validateStringConstraint(name, value, entry.Constraints[name]); detail != "" {
+			return detail
 		}
 	}
 	return ""
 }
 
+// validateStringConstraint applies the string limits the published JSON Schema
+// declares. It reads the compiled constraints, so the schema and the router
+// cannot disagree about length or allowed characters.
+func validateStringConstraint(name, value string, constraint messaging.PropertyConstraints) string {
+	length := utf8.RuneCountInString(value)
+	if constraint.MinLength > 0 && length < constraint.MinLength {
+		return messaging.Repair("string_too_short", map[string]string{
+			"name": quote(name),
+			"min":  fmt.Sprint(constraint.MinLength),
+		})
+	}
+	if constraint.MaxLength > 0 && length > constraint.MaxLength {
+		return messaging.Repair("string_too_long", map[string]string{
+			"name": quote(name),
+			"max":  fmt.Sprint(constraint.MaxLength),
+		})
+	}
+	if constraint.Pattern != "" {
+		matched, err := regexp.MatchString(constraint.Pattern, value)
+		if err != nil || !matched {
+			return messaging.Repair("string_pattern", map[string]string{"name": quote(name)})
+		}
+	}
+	return ""
+}
+
+// timeoutMS converts the validated integer-valued timeout_ms into whole
+// milliseconds. Validation admits 1.0 and 1e3, which do not unmarshal into an
+// int directly, so the conversion goes through the exact rational value.
+func (input messageInput) timeoutMS() int {
+	if input.TimeoutMS == "" {
+		return 0
+	}
+	rational, ok := new(big.Rat).SetString(input.TimeoutMS.String())
+	if !ok || !rational.IsInt() {
+		return 0
+	}
+	numerator := rational.Num()
+	if !numerator.IsInt64() {
+		return 0
+	}
+	return int(numerator.Int64())
+}
+
 // hasWireType reports whether raw carries the declared wire type. An integer
-// means an integer, not merely a JSON number: a non-integral value such as 1.5
-// is rejected by the table and by the JSON Schema alike.
+// means a mathematical integer, matching the JSON Schema: 1.0 and 1e3 are
+// accepted and a non-integral value such as 1.5 is rejected by both layers. The
+// value must still fit the router's int field.
 func hasWireType(raw json.RawMessage, kind string) bool {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
@@ -684,8 +814,8 @@ func hasWireType(raw json.RawMessage, kind string) bool {
 		if !ok {
 			return false
 		}
-		_, err := number.Int64()
-		return err == nil
+		rational, ok := new(big.Rat).SetString(number.String())
+		return ok && rational.IsInt() && rational.Num().IsInt64()
 	case "object":
 		_, ok := value.(map[string]any)
 		return ok
