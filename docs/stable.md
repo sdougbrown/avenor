@@ -162,7 +162,7 @@ For example, with a supervisor run ID of `run_abc123` and a spawned runtime `rt_
 
 This keeps artifacts isolated and lets you inspect multiple runtime outputs without manual path management.
 
-A supervisor removes these directories when it shuts down, once every runtime using them has ended, and then removes `$TMPDIR/avenor-stable/<supervisor_run_id>` when it is empty. While the supervisor is running, a finished runtime's sentinel and event log stay in place, so a status, result, or follow-up read after the turn ends still sees them. Paths you passed with `--on-event` or `--sentinel-file` are never removed.
+A supervisor prunes these directories by age: when it starts, it removes a `$TMPDIR/avenor-stable/<supervisor_run_id>` directory whose newest entry is older than 24 hours and keeps a newer one, so a finished runtime's sentinel and event log stay readable for a status, result, or follow-up read after the turn ends. Pruning is best-effort, never follows a symlink out of the tree, and never removes paths you passed with `--on-event` or `--sentinel-file`.
 
 ### Loop File Spawns
 
