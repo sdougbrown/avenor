@@ -238,7 +238,6 @@ func newFake(t *testing.T, c messaging.ConformanceCase) *fakeProvider {
 			RunID:       stringOf(resolved["run_id"]),
 			PublicRunID: stringOf(resolved["public_run_id"]),
 			Label:       stringOf(resolved["label"]),
-			Kind:        stringOf(resolved["kind"]),
 			Candidates:  stringsOf(resolved["candidates"]),
 			Match:       messaging.ResolutionMatch(stringOf(c.Conditions["targetMatch"])),
 		}

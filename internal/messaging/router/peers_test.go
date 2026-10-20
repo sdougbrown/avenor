@@ -73,9 +73,6 @@ func assertPeersResult(t *testing.T, c messaging.ConformanceCase, provider *fake
 			if got, want := result.Peers[index].Status, stringOf(record["status"]); got != want {
 				t.Fatalf("peer %d status = %q, want %q", index, got, want)
 			}
-			if got, want := result.Peers[index].Kind, stringOf(record["kind"]); got != want {
-				t.Fatalf("peer %d kind = %q, want %q", index, got, want)
-			}
 			if got, want := result.Peers[index].Backend, stringOf(record["backend"]); got != want {
 				t.Fatalf("peer %d backend = %q, want %q", index, got, want)
 			}

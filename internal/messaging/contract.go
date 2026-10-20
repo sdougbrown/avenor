@@ -49,7 +49,6 @@ type Resolution struct {
 	PublicRunID string          // host-surface run id; empty on child surfaces
 	Match       ResolutionMatch // unique | ambiguous | none
 	Label       string          // the target's display name: SessionInfo.Label, else its run id
-	Kind        string          // SessionInfo.Kind: "supervisor" | "agent" | ""
 	Candidates  []string        // run ids for an ambiguous label; empty when unique or none
 }
 
@@ -112,7 +111,6 @@ type PeerRecord struct {
 	Backend string `json:"backend,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Dir     string `json:"dir,omitempty"`
-	Kind    string `json:"kind,omitempty"`
 }
 
 // PeerLast is one peer's most recent completed turn, as the peers `last` action
