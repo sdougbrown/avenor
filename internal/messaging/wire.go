@@ -13,6 +13,13 @@ const (
 	HeaderSecret     = "X-Avenor-Secret"
 )
 
+// Local broker credential headers. A GET carries the run identity here so its
+// credentials never appear in the request URL.
+const (
+	HeaderRunID    = "X-Avenor-Run-Id"
+	HeaderRunToken = "X-Avenor-Run-Token"
+)
+
 // WireErrorClass is one class of protocol failure: the code that names it on
 // the wire, the typed error it classifies on this side, and the HTTP status and
 // outcome a server reports with it.

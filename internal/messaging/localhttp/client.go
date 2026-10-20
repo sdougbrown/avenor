@@ -431,9 +431,7 @@ func (t *Transport) sessions(ctx context.Context) (envelope, error) {
 func (t *Transport) roundTrip(ctx context.Context, method, path string, timeout time.Duration, payload map[string]any) (int, []byte, error) {
 	target := t.baseURL + path
 	var body io.Reader
-	if method == http.MethodGet {
-		target += "?run_id=" + url.QueryEscape(t.creds.RunID) + "&token=" + url.QueryEscape(t.creds.Token)
-	} else {
+	if method != http.MethodGet {
 		request := make(map[string]any, len(payload)+2)
 		for key, value := range payload {
 			request[key] = value
@@ -452,6 +450,10 @@ func (t *Transport) roundTrip(ctx context.Context, method, path string, timeout 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if method == http.MethodGet {
+		req.Header.Set(messaging.HeaderRunID, t.creds.RunID)
+		req.Header.Set(messaging.HeaderRunToken, t.creds.Token)
+	}
 	return t.Do(ctx, req, timeout)
 }
 

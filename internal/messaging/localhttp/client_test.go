@@ -328,6 +328,34 @@ func newStubAdapter(t *testing.T, url string) messaging.Transport {
 	return tr
 }
 
+// TestLocalAdapterGetSendsCredentialsAsHeaders pins that a GET keeps the run
+// credentials out of its URL.
+func TestLocalAdapterGetSendsCredentialsAsHeaders(t *testing.T) {
+	var gotURL, gotRunID, gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		gotURL = r.URL.String()
+		gotRunID = r.Header.Get(messaging.HeaderRunID)
+		gotToken = r.Header.Get(messaging.HeaderRunToken)
+		_, _ = io.WriteString(w, `{"sessions":[],"generation":"gen-1","messaging_protocol":1}`)
+	}))
+	defer srv.Close()
+
+	tr := newStubAdapter(t, srv.URL)
+	if _, err := tr.Preflight(t.Context()); err != nil {
+		t.Fatalf("Preflight: %v", err)
+	}
+	if strings.Contains(gotURL, "run_id=") || strings.Contains(gotURL, "token=") {
+		t.Fatalf("GET URL carries credentials: %s", gotURL)
+	}
+	if gotRunID != alice.RunID || gotToken != "stub-token" {
+		t.Fatalf("GET credential headers = %q/%q", gotRunID, gotToken)
+	}
+}
+
 // wireDoc is the local messaging wire contract recorded in
 // testdata/local_wire.json. The adapter and the router are checked against it
 // so a path, field or code cannot drift silently.
