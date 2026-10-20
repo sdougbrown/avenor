@@ -39,12 +39,23 @@ display label.
 A spawned `pi` child asks through its inherited broker credentials. That path
 sends `to_run_id` unchanged: unlike the host's `avenor_ask`, it does not resolve
 a public spawn ID or a label first. A child asking its supervisor therefore has
-to use `supervisor`. Asking `rt_N` addresses that child, not the supervisor, and
-fails with `target-unavailable` once that child's run is gone. A child asking a
-sibling uses the sibling's `rt_N`.
+to use `supervisor`. Asking `rt_N` addresses that child, not the supervisor. A
+child asking a sibling uses the sibling's `rt_N`.
 
-A spawn that supplies `parent_run_id` registers that parent run and prepends its
-broker run ID to the child's prompt.
+A direct child's run stays registered for the supervisor's lifetime. Only a loop
+or team teardown deletes a spawned child's run; a spawn that ends on its own is
+never removed. An ask addressed to a child that has already ended is therefore
+still admitted and queued against that run, where nothing reads it. The asker
+waits out its own timeout instead of being told the target is gone.
+`target-unavailable` means the run was never registered on that broker, never
+that its process has exited.
+
+The OpenCode plugin is the surface that supplies `parent_run_id` on
+`avenor_spawn`, a fresh UUID per plugin instance. The control `spawn` method
+accepts the field directly. The supervisor registers that parent run and
+prepends its broker run ID to the child's prompt. The `pi` extension does not
+set it, so a child learns its parent's broker run ID only when the spawner puts
+it in the child's prompt.
 
 ## Transport contract
 
