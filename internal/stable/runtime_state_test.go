@@ -1,9 +1,13 @@
 package stable
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 // TestMain keeps root-budget runtime state out of a developer's real home
@@ -42,6 +46,57 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.RemoveAll(root)
 	os.Exit(code)
+}
+
+// TestShutdownRemovesCreatedArtifactDirectories proves the lifetime of the
+// default artifact paths: they survive a finished turn (callers read the
+// sentinel after it ends), they are removed when the supervisor shuts down,
+// and a caller-supplied path is never touched.
+func TestShutdownRemovesCreatedArtifactDirectories(t *testing.T) {
+	sup := newTestSupervisor(t, Config{
+		ControlSocket: newStableSocketPath(t, "artifact-cleanup"),
+		MaxRuntimes:   2,
+	})
+	var spawnSeq int64
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return newParkedScriptedProvider(fmt.Sprintf("ses_artifact_%d", atomic.AddInt64(&spawnSeq, 1)), 1), nil
+	}
+	dir := t.TempDir()
+	callerSentinel := filepath.Join(t.TempDir(), "caller-sentinel.env")
+
+	defaultRes, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: dir})
+	if err != nil {
+		t.Fatalf("spawn with default artifact paths: %v", err)
+	}
+	callerRes, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: dir, SentinelFile: callerSentinel})
+	if err != nil {
+		t.Fatalf("spawn with a caller-supplied sentinel: %v", err)
+	}
+	waitForActiveRuntimeCount(t, sup, 0)
+	for _, id := range []string{defaultRes.RuntimeID, callerRes.RuntimeID} {
+		if !childParked(fetchChild(t, sup, id)) {
+			t.Fatalf("runtime %s did not park after its turn ended", id)
+		}
+	}
+
+	if _, err := os.Stat(defaultRes.SentinelFile); err != nil {
+		t.Fatalf("default sentinel after the turn ended: %v", err)
+	}
+	artifactDir := filepath.Dir(defaultRes.SentinelFile)
+	runDir := filepath.Dir(artifactDir)
+
+	if code := sup.shutdown("graceful"); code != 0 {
+		t.Fatalf("shutdown() = %d, want 0", code)
+	}
+	if _, err := os.Stat(artifactDir); !os.IsNotExist(err) {
+		t.Fatalf("artifact directory %s survived shutdown: %v", artifactDir, err)
+	}
+	if _, err := os.Stat(runDir); !os.IsNotExist(err) {
+		t.Fatalf("run artifact directory %s survived shutdown: %v", runDir, err)
+	}
+	if _, err := os.Stat(callerSentinel); err != nil {
+		t.Fatalf("caller-supplied sentinel after shutdown: %v", err)
+	}
 }
 
 func TestRootTreeBudgetUsesAvenorRuntimeStateAndCleansUp(t *testing.T) {

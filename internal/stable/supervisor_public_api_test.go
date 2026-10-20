@@ -364,6 +364,28 @@ func (h *itestHarness) requireIdleEnd(rtID, status, stopReason string, exitCode 
 	return v
 }
 
+// requireShutdownEnd proves a runtime ended because the supervisor shut down.
+// Shutdown removes the run's artifact directory, so the completion sentinel a
+// translated view reads is gone by the time the caller observes the end. The
+// raw lifecycle status, the recorded exit code, and the run-level session.end
+// remain the authoritative end facts.
+func (h *itestHarness) requireShutdownEnd(rtID string) {
+	h.t.Helper()
+	h.awaitCondition("runtime "+rtID+" ended", func() bool {
+		out, err := h.sup.RuntimeStatus(rtID)
+		if err != nil {
+			return false
+		}
+		raw, _ := out.(map[string]any)
+		status, _ := raw["status"].(string)
+		return status == string(runstate.StatusEnded)
+	})
+	if code := h.rawExitCode(rtID); code != 130 {
+		h.t.Fatalf("RuntimeStatus exit_code = %d, want 130", code)
+	}
+	h.requireSessionEnd(rtID, "cancelled", 130)
+}
+
 // awaitStatus polls RuntimeStatus, as consumer await loops do, until the
 // translated status equals want. Status transitions that follow a turn
 // settling have no wake-up channel of their own.
@@ -1031,10 +1053,7 @@ func TestSupervisorPublicAPIShutdownWithActiveRuntimes(t *testing.T) {
 	}
 	h.shutdown("graceful")
 	for _, rt := range []string{rt1, rt2} {
-		v := h.awaitStatus(rt, "killed")
-		if v.StopReason != "cancelled" {
-			t.Fatalf("runtime %s stop reason = %q, want cancelled", rt, v.StopReason)
-		}
+		h.requireShutdownEnd(rt)
 	}
 	// Shutdown cancels the mid-turn runtimes, so their rows carry the ended
 	// status and the 130 exit code a cancelled turn records.
@@ -1075,13 +1094,7 @@ func TestSupervisorPublicAPIShutdownKillEndsActiveRuntime(t *testing.T) {
 		t.Fatalf("view before kill shutdown = %+v, want running in the working phase", v)
 	}
 	h.shutdown("kill")
-	v := h.awaitStatus(rt, "killed")
-	if v.StopReason != "cancelled" {
-		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
-	}
-	if v.ExitCode != 130 {
-		t.Fatalf("killed view exit code = %d, want 130", v.ExitCode)
-	}
+	h.requireShutdownEnd(rt)
 	if got := h.result(rt); got == "never reached" {
 		t.Fatal("shutdown runtime produced the output of a turn it never finished")
 	}
@@ -1103,14 +1116,11 @@ func TestSupervisorPublicAPIShutdownGracefulEndsParkedRuntime(t *testing.T) {
 	// The runtime is parked waiting for a follow-up prompt. Graceful
 	// shutdown ends it instead of leaving it idle.
 	h.shutdown("graceful")
-	v := h.requireIdleEnd(rt, "killed", "cancelled", 130)
-	if v.ExitCode != 130 {
-		t.Fatalf("killed view exit code = %d, want 130", v.ExitCode)
-	}
-	// The turn ended successfully before shutdown, so Translate passes the
-	// done phase through to the killed view.
-	if v.Phase != "done" {
-		t.Fatalf("killed view phase = %q, want done", v.Phase)
+	h.requireShutdownEnd(rt)
+	// The turn ended successfully before shutdown, so the raw phase the
+	// supervisor keeps stays done.
+	if v := h.view(rt); v.Phase != "done" {
+		t.Fatalf("phase after shutdown = %q, want done", v.Phase)
 	}
 }
 
