@@ -1,13 +1,12 @@
-// Package router is the one Go implementation of the merged messaging tools'
-// routing: input validation, target resolution, the permission and state rules,
-// the provider call, and the outcome text.
+// Package router implements routing for the merged messaging tools: input
+// validation, target resolution, the permission and state rules, the provider
+// call, and the outcome text.
 //
-// Every Go model-facing surface calls Router.Execute for avenor_message and
-// ExecutePeers for avenor_peers, so the branch logic exists once and the host
-// and the children cannot disagree. The input contract, the repair templates
-// and the render templates come from schemas/ (through internal/messaging); the
-// two permission reasons and the invalid-action reason come from the generated
-// route table. No surface composes a failure sentence of its own.
+// Router.Execute routes avenor_message and ExecutePeers routes avenor_peers, so
+// the branch logic exists once. The input contract, the repair templates and
+// the render templates come from schemas/ (through internal/messaging); the two
+// permission reasons and the invalid-action reason come from the generated
+// route table. Failure sentences are composed here from those templates.
 package router
 
 import (

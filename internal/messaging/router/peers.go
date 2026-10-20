@@ -29,12 +29,11 @@ type peersInput struct {
 	Target    string `json:"target"`
 }
 
-// ExecutePeers routes one avenor_peers call. It is the one peers executor the
-// three Go surfaces share, so `last` cannot behave differently on the host and
-// on the children. An omitted action is list; a present but non-string or
-// unknown action is one invalid action, the code and text the message router
-// uses for an invalid action. `list` and `last` make no transport write and
-// publish no event; `rename`'s single write belongs to SessionRename.
+// ExecutePeers routes one avenor_peers call. An omitted action is list; a
+// present but non-string or unknown action is one invalid action, the code and
+// text the message router uses for an invalid action. `list` and `last` make no
+// transport write and publish no event; `rename`'s single write belongs to
+// SessionRename.
 func ExecutePeers(ctx context.Context, p Provider, input json.RawMessage) (Result, error) {
 	fields, err := decodeObject(input)
 	if err != nil {
