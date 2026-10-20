@@ -25,6 +25,27 @@ transport carries it.
 transport that needs the store takes it as a parameter, and nothing outside
 `_test.go` files imports `hostfixture`.
 
+## Addressing runs
+
+A broker message is addressed to a **broker run ID**, the key the broker
+registered for the participant. It is not the public spawn run ID and not the
+display label.
+
+| Participant | Broker run ID | Registration |
+|---|---|---|
+| Supervisor | `supervisor` | Eagerly at supervisor start, before any child exists. |
+| Spawned child | its runtime ID (`rt_N`) | Before the child's backend starts, so it can poll and reply. |
+
+A spawned `pi` child asks through its inherited broker credentials. That path
+sends `to_run_id` unchanged: unlike the host's `avenor_ask`, it does not resolve
+a public spawn ID or a label first. A child asking its supervisor therefore has
+to use `supervisor`. Asking `rt_N` addresses that child, not the supervisor, and
+fails with `target-unavailable` once that child's run is gone. A child asking a
+sibling uses the sibling's `rt_N`.
+
+A spawn that supplies `parent_run_id` registers that parent run and prepends its
+broker run ID to the child's prompt.
+
 ## Transport contract
 
 ```go
