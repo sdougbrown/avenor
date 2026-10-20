@@ -1074,15 +1074,7 @@ func (c *Client) MessagePreflight() (messaging.PreflightResult, error) {
 // Resume continues a prior run in a new one.
 func (c *Client) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
 	var result control.ResumeResult
-	if err := c.Call("resume", control.ResumeParams{
-		RunID:          req.RunID,
-		Target:         req.Target,
-		Message:        req.Message,
-		Label:          req.Label,
-		IdempotencyKey: req.IdempotencyKey,
-		SentinelFile:   req.SentinelFile,
-		OnEvent:        req.EventLog,
-	}, &result); err != nil {
+	if err := c.Call("resume", control.NewResumeParams(req), &result); err != nil {
 		return messaging.ResumeResult{}, err
 	}
 	return result.ResumeResult(), nil

@@ -1928,15 +1928,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
-		res, err := s.stableHandler.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
-			RunID:          p.RunID,
-			Target:         p.Target,
-			Message:        p.Message,
-			Label:          p.Label,
-			IdempotencyKey: p.IdempotencyKey,
-			SentinelFile:   p.SentinelFile,
-			EventLog:       p.OnEvent,
-		})
+		res, err := s.stableHandler.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.request())
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
 		}

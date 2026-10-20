@@ -292,6 +292,31 @@ func (p MessagePeersParams) request(from messaging.Identity) messaging.PeersRequ
 	return messaging.PeersRequest{Sender: from, Generation: p.Generation}
 }
 
+// NewResumeParams projects a resume request onto the wire shape.
+func NewResumeParams(req messaging.ResumeRequest) ResumeParams {
+	return ResumeParams{
+		RunID:          req.RunID,
+		Target:         req.Target,
+		Message:        req.Message,
+		Label:          req.Label,
+		IdempotencyKey: req.IdempotencyKey,
+		SentinelFile:   req.SentinelFile,
+		OnEvent:        req.EventLog,
+	}
+}
+
+func (p ResumeParams) request() messaging.ResumeRequest {
+	return messaging.ResumeRequest{
+		RunID:          p.RunID,
+		Target:         p.Target,
+		Message:        p.Message,
+		Label:          p.Label,
+		IdempotencyKey: p.IdempotencyKey,
+		SentinelFile:   p.SentinelFile,
+		EventLog:       p.OnEvent,
+	}
+}
+
 // boundedTimeout converts a wire duration, clamped to the shared wait cap so a
 // large integer cannot overflow time.Duration.
 func boundedTimeout(ms int64) time.Duration {
