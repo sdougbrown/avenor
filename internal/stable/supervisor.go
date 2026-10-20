@@ -4815,16 +4815,12 @@ func (w *runtimeFanoutWriter) writeLockedRunEnd(ev events.Event, diagnostics *[]
 }
 
 func (w *runtimeFanoutWriter) writeLockedTerminal(ev events.Event, diagnostics *[]error, runEnd bool) error {
-	// Every session.end carries the exit code its stop reason maps to. The
-	// stop reason is the classification the run reports through its sentinel
-	// and status, so it owns the code; a backend-supplied number never
-	// overrides it.
 	if ev.Event == "session.end" {
 		stopReason, _ := ev.Fields["stop_reason"].(string)
 		if ev.Fields == nil {
 			ev.Fields = map[string]any{}
 		}
-		ev.Fields["exit_code"] = runtime.ExitCodeForStopReason(stopReason)
+		runtime.SetSessionEndExitCode(ev.Fields, stopReason)
 	}
 	// stamped is the lossless durable event (written to file/broker);
 	// presentation is the bounded copy for control/status surfaces.

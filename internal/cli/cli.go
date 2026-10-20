@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1346,10 +1347,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		if text, ok := event.Fields["final_output"].(string); ok {
 			sessionEndFinalOutput, sessionEndFinalOutputSet = text, true
 		}
-		// The terminal event always carries the code its settled stop reason
-		// maps to; a backend-supplied number never wins, so the published
-		// record, the sentinel and the reported status agree.
-		event.Fields["exit_code"] = runtime.ExitCodeForStopReason(finalStopReason)
+		runtime.SetSessionEndExitCode(event.Fields, finalStopReason)
 		if err := deps.Writer.Write(event); err != nil {
 			fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
 			return sessionResult{ExitCode: 1}
@@ -1742,11 +1740,8 @@ func failureText(fields map[string]any) string {
 }
 
 func endSession(writer EventSink, sessionID, runID, runLabel, stopReason string, retryAfter int64, stderr io.Writer, usage map[string]any, fullFinalOutput, lastBlockFinalReply string) sessionResult {
-	exitCode := runtime.ExitCodeForStopReason(stopReason)
-	fields := map[string]any{
-		"stop_reason": stopReason,
-		"exit_code":   exitCode,
-	}
+	fields := map[string]any{"stop_reason": stopReason}
+	exitCode := runtime.SetSessionEndExitCode(fields, stopReason)
 	if retryAfter > 0 {
 		fields["retry_after"] = retryAfter
 	}
@@ -1900,7 +1895,8 @@ func newFanoutWriter(base EventSink, cs *control.ControlServer, metadata *EventM
 // leaves here without an end_kind: only the run-level writer tags that, after
 // stamping, so a backend's own turn end cannot claim the run's terminal record.
 func StampFanoutEvent(ev events.Event, runtimeID string, metadata *EventMetadata, cs *control.ControlServer) events.Event {
-	if ev.Event == "session.end" {
+	if _, tagged := ev.Fields["end_kind"]; tagged && ev.Event == "session.end" {
+		ev.Fields = maps.Clone(ev.Fields)
 		delete(ev.Fields, "end_kind")
 	}
 	if cs != nil {

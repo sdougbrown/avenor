@@ -27,6 +27,16 @@ func IsRetryableFailure(exitCode int, stopReason string) bool {
 	return exitCode == 1 || stopReason == RateLimitedStopReason
 }
 
+// SetSessionEndExitCode sets a session.end's exit_code to the code its stop
+// reason maps to and returns that code. The stop reason is the classification
+// the run reports through its sentinel and status, so it owns the code; a
+// backend-supplied number never overrides it. fields must be non-nil.
+func SetSessionEndExitCode(fields map[string]any, stopReason string) int {
+	code := ExitCodeForStopReason(stopReason)
+	fields["exit_code"] = code
+	return code
+}
+
 // ExitCodeForStopReason returns Avenor's locked process exit code for a
 // terminal ACP stop reason.
 func ExitCodeForStopReason(stopReason string) int {
