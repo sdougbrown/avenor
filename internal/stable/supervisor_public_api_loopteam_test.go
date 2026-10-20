@@ -1162,7 +1162,13 @@ func TestSupervisorPublicAPILoopShutdownGracefulEndsActiveChild(t *testing.T) {
 		t.Fatalf("view before shutdown = %+v, want running in the working phase", v)
 	}
 	h.shutdown("graceful")
-	h.requireShutdownEnd(rt)
+	h.awaitStatus(rt, "killed")
+	if v := h.view(rt); v.StopReason != "cancelled" {
+		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 130 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
+	}
 	if got := h.result(rt); got == "never reached" {
 		t.Fatal("shutdown loop child produced the output of a phase it never finished")
 	}
@@ -1189,7 +1195,13 @@ func TestSupervisorPublicAPITeamShutdownKillEndsActiveChild(t *testing.T) {
 		t.Fatalf("view before shutdown = %+v, want running in the working phase", v)
 	}
 	h.shutdown("kill")
-	h.requireShutdownEnd(rt)
+	h.awaitStatus(rt, "killed")
+	if v := h.view(rt); v.StopReason != "cancelled" {
+		t.Fatalf("killed view stop reason = %q, want cancelled", v.StopReason)
+	}
+	if code := h.rawExitCode(rt); code != 130 {
+		t.Fatalf("raw RuntimeStatus exit_code = %d, want 130", code)
+	}
 }
 
 // TestSupervisorPublicAPILoopAndTeamListRows proves List rows for loop and

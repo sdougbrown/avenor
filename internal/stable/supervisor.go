@@ -537,14 +537,6 @@ type testHooks struct {
 	directCleanupPost func()
 }
 
-// createdArtifactDir is a default per-runtime artifact directory Spawn
-// created under os.TempDir()/avenor-stable/<runID>. child owns it; shutdown
-// removes the directory once that runtime has ended.
-type createdArtifactDir struct {
-	dir   string
-	child *childRuntime
-}
-
 type Supervisor struct {
 	config  Config
 	runID   string
@@ -646,13 +638,7 @@ type Supervisor struct {
 	httpServerCond      *sync.Cond
 	fileSnapshots       map[string][]string // runtimeID → pre-run file list for output detection
 	fileSnapMu          sync.Mutex
-	// artifactMu guards artifactDirs, the default per-runtime artifact
-	// directories Spawn created. Shutdown removes each one once its runtime has
-	// ended, so the directories have a bounded lifetime without cutting short
-	// the reads a caller makes after a turn ends.
-	artifactMu   sync.Mutex
-	artifactDirs []createdArtifactDir
-	broker       *broker.Broker
+	broker              *broker.Broker
 	// messaging is the supervisor's own transport over the broker's ask store.
 	// It is the only transport the supervisor closes, and it never outlives
 	// the broker.
@@ -1653,7 +1639,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return SpawnResult{}, fmt.Errorf("create artifact dir: %w", err)
 	}
-	s.trackArtifactDir(artifactDir, child)
 
 	onEvent := params.OnEvent
 	if onEvent == "" {
@@ -3976,49 +3961,9 @@ func (s *Supervisor) emitChildError(child *childRuntime, message, source string)
 	})
 }
 
-// trackArtifactDir records a default per-runtime artifact directory for
-// shutdown to remove. Paths a caller supplied are never recorded.
-func (s *Supervisor) trackArtifactDir(dir string, child *childRuntime) {
-	s.artifactMu.Lock()
-	s.artifactDirs = append(s.artifactDirs, createdArtifactDir{dir: dir, child: child})
-	s.artifactMu.Unlock()
-}
-
-// removeArtifactDirs removes the default artifact directory of every runtime
-// that has ended, then the run's directory under avenor-stable when it is
-// empty. A runtime that has not ended keeps its directory: its backend may
-// still write the sentinel there. Caller-supplied paths are left alone
-// because they were never recorded.
-func (s *Supervisor) removeArtifactDirs() {
-	s.artifactMu.Lock()
-	dirs := make([]createdArtifactDir, len(s.artifactDirs))
-	copy(dirs, s.artifactDirs)
-	s.artifactMu.Unlock()
-	runDir := ""
-	for _, d := range dirs {
-		select {
-		case <-d.child.done:
-		default:
-			continue
-		}
-		if err := os.RemoveAll(d.dir); err != nil {
-			fmt.Fprintf(s.stderrWriter(), "avenor stable: remove artifact dir %s: %v\n", d.dir, err)
-			continue
-		}
-		runDir = filepath.Dir(d.dir)
-	}
-	if runDir != "" {
-		// Still holding a live runtime's artifacts leaves the directory in
-		// place; remove only when the run's last artifact directory is gone.
-		_ = os.Remove(runDir)
-	}
-}
-
 func (s *Supervisor) shutdown(mode string) int {
 	// Always release the root-owned budget file, including the zero-timeout and
 	// kill paths below. Nested supervisors only close their inherited handle.
-	// The artifact cleanup runs after the runtime waits, so it can remove the
-	// directories of the runtimes that ended.
 	defer func() {
 		if s.broker != nil {
 			_ = s.broker.Stop()
@@ -4027,7 +3972,6 @@ func (s *Supervisor) shutdown(mode string) int {
 			_ = s.messaging.Close()
 		}
 		s.closeTreeBudget()
-		s.removeArtifactDirs()
 	}()
 
 	// This lock is the reservation boundary: a spawn either registers before
