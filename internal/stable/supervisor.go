@@ -4723,11 +4723,10 @@ func (w *runtimeFanoutWriter) writeHoldingWriteLock(ev events.Event, diagnostics
 
 // writeRunEnd publishes a run-level terminal end. A session gets at most one,
 // and a child that never established a session publishes none: an empty
-// session_id identifies no session to end.
+// session_id identifies no session to end. The writer must bear a child: the
+// write lock it publishes under and the record of already-published ends both
+// live on it.
 func (w *runtimeFanoutWriter) writeRunEnd(ev events.Event) error {
-	if w.child == nil {
-		return w.Write(ev)
-	}
 	if w.beforeWriteLock != nil {
 		w.beforeWriteLock()
 	}
