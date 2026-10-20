@@ -483,18 +483,14 @@ func TestCursorFollowPeriodicRewrite(t *testing.T) {
 	}
 }
 
-// TestCursorRewriteReplacesFile verifies a cursor rewrite lands as a whole new
-// file: the staged temp file is renamed over the cursor path, the content is the
-// decimal offset and newline the reader parses, and nothing is left beside it.
-func TestCursorRewriteReplacesFile(t *testing.T) {
+// TestCursorRewriteTightensMode verifies a cursor rewrite writes the decimal
+// offset and newline the reader parses, and leaves a cursor seeded
+// world-readable at 0600.
+func TestCursorRewriteTightensMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cursor")
-	if err := os.WriteFile(path, []byte("7\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("7\n"), 0o644); err != nil {
 		t.Fatalf("seed cursor: %v", err)
-	}
-	before, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat before: %v", err)
 	}
 
 	if err := writeCursor(path, 12345); err != nil {
@@ -508,22 +504,38 @@ func TestCursorRewriteReplacesFile(t *testing.T) {
 	if string(got) != "12345\n" {
 		t.Fatalf("cursor content = %q, want %q", got, "12345\n")
 	}
-	after, err := os.Stat(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat after: %v", err)
 	}
-	if os.SameFile(before, after) {
-		t.Fatal("cursor was rewritten in place; the rewrite must replace the file")
-	}
-	if perm := after.Mode().Perm(); perm != 0o600 {
+	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("cursor mode = %04o, want 0600", perm)
+	}
+}
+
+// TestCursorWriteFailureLeavesTargetIntact verifies a cursor write that cannot
+// commit reports an error, leaves the directory's lone entry in place, and
+// stages no temp file behind.
+func TestCursorWriteFailureLeavesTargetIntact(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cursor")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("mkdir cursor: %v", err)
+	}
+
+	if err := writeCursor(path, 42); err == nil {
+		t.Fatal("writeCursor: expected an error when the cursor path is a directory")
+	}
+
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("cursor path is no longer the directory that made the write fail (err %v)", err)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read dir: %v", err)
 	}
 	if len(entries) != 1 {
-		t.Fatalf("cursor directory holds %d entries after a rewrite, want only the cursor", len(entries))
+		t.Fatalf("cursor directory holds %d entries, want only the cursor", len(entries))
 	}
 }
 
