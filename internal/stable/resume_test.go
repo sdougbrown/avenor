@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 const resumeUUID1 = "6f9619ff-8b86-d011-b42d-00cf4fc964ff"
@@ -75,6 +76,49 @@ func TestResumeRefusesNonResumableSentinel(t *testing.T) {
 				t.Fatalf("not-resumable text = %q", err)
 			}
 		})
+	}
+}
+
+// TestResumeRefusesWithoutResolvableSession pins the ladder's last rung: with
+// no sentinel SESSION and no live session there is nothing to continue, so the
+// resume is a typed not_resumable denial instead of a fresh session behind a
+// run the caller was told was resumed.
+func TestResumeRefusesWithoutResolvableSession(t *testing.T) {
+	sup, provider := newStage2Supervisor(t, 4)
+	dir := t.TempDir()
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		SentinelFile: filepath.Join(dir, "never-written.env"),
+		OnEvent:      filepath.Join(dir, "events.log"),
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	// A registered runtime whose live session is gone and whose sentinel was
+	// never written: neither rung of the ladder can name a session. The
+	// attempt adopts its session asynchronously, so wait for that write before
+	// clearing it; the parked attempt writes nothing afterwards.
+	child := sup.runtimeByID(prior.RuntimeID)
+	if child == nil {
+		t.Fatalf("runtime %q is not registered", prior.RuntimeID)
+	}
+	waitFor(t, "the prior attempt to adopt its session", func() bool { return child.sessionID() != "" })
+	child.mu.Lock()
+	child.session = runtime.Session{}
+	child.mu.Unlock()
+
+	_, err = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "again",
+	})
+	assertToolCode(t, err, "not_resumable")
+	if !strings.Contains(err.Error(), "(status: unknown)") {
+		t.Fatalf("not-resumable text = %q", err)
+	}
+	if starts := provider.startsRecorded(); len(starts) != 1 {
+		t.Fatalf("provider starts = %d, want only the prior spawn", len(starts))
+	}
+	if resumes := provider.resumesRecorded(); len(resumes) != 0 {
+		t.Fatalf("provider resumes = %v, want none", resumes)
 	}
 }
 

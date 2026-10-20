@@ -157,12 +157,16 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 
 // resumeSessionID reads the session ladder: the sentinel's SESSION, then the
 // runtime's live session id, then a sentinel re-read. A non-resumable sentinel
-// status is the one denial, rendered from the shared repair template.
+// status is one denial; a ladder that reaches the end with nothing to continue
+// is the other, because an empty session id would make the spawn open a fresh
+// session behind a run the caller was told was resumed. Both render the shared
+// not_resumable repair template.
 func (s *Supervisor) resumeSessionID(prior *childRuntime, runID string) (string, error) {
 	prior.mu.Lock()
 	sentinelPath := prior.sentinelFile
 	prior.mu.Unlock()
 
+	status := ""
 	sessionID, err := runstate.ReadSentinelSession(sentinelPath)
 	switch {
 	case err == nil:
@@ -175,16 +179,9 @@ func (s *Supervisor) resumeSessionID(prior *childRuntime, runID string) (string,
 			return "", err
 		}
 		if !runstate.IsResumableStatus(sentinel.Status) {
-			facts := map[string]string{
-				"run_id": messaging.Quote(runID),
-				"status": messaging.Sanitize(strings.ToLower(sentinel.Status)),
-			}
-			return "", &router.ToolError{
-				Code:    "not_resumable",
-				Message: messaging.Repair("not_resumable", facts),
-				Facts:   facts,
-			}
+			return "", notResumableError(runID, sentinel.Status)
 		}
+		status = sentinel.Status
 		// A resumable sentinel with no SESSION: fall through to the live value.
 	}
 
@@ -194,7 +191,24 @@ func (s *Supervisor) resumeSessionID(prior *childRuntime, runID string) (string,
 	if sessionID, err := runstate.ReadSentinelSession(sentinelPath); err == nil {
 		return sessionID, nil
 	}
-	return "", nil
+	if status == "" {
+		status = string(runstate.StatusUnknown)
+	}
+	return "", notResumableError(runID, status)
+}
+
+// notResumableError renders the one denial the session ladder and the sentinel
+// status produce.
+func notResumableError(runID, status string) *router.ToolError {
+	facts := map[string]string{
+		"run_id": messaging.Quote(runID),
+		"status": messaging.Sanitize(strings.ToLower(status)),
+	}
+	return &router.ToolError{
+		Code:    "not_resumable",
+		Message: messaging.Repair("not_resumable", facts),
+		Facts:   facts,
+	}
 }
 
 // runtimeByID returns a registered runtime without holding controlMu across the
