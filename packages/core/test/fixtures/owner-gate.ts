@@ -98,12 +98,13 @@ export function createOwnerGate(options: OwnerGateOptions): OwnerGate {
           }
           if (request.method !== 'authenticate_owner') return false
           const params = request.params ?? {}
-          if (params.version !== 1) {
-            write(fail(request.id, -32012, 'unsupported owner authentication', { version: 1, reason: 'unsupported-version' }))
+          const version = params.version ?? 0
+          if (version !== 1) {
+            write(fail(request.id, -32012, 'unsupported owner authentication', { version: 1, reason: `version-${String(version)}` }))
             return true
           }
           if (params.capability_id !== capabilityId || params.secret !== secret) {
-            write(fail(request.id, -32011, 'unauthenticated', { version: 1, reason: 'capability-rejected' }))
+            write(fail(request.id, -32011, 'unauthenticated', { version: 1, reason: 'capability-mismatch' }))
             return true
           }
           authenticated = true
