@@ -562,7 +562,7 @@ func terminalStatusFromRunInfo(info *RunInfo) (map[string]any, bool) {
 	if info == nil || info.SentinelPath == "" {
 		return nil, false
 	}
-	sd, err := readSentinel(info.SentinelPath)
+	sd, err := runstate.ReadSentinel(info.SentinelPath)
 	if err != nil {
 		return nil, false
 	}
@@ -1515,7 +1515,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		return nil, nil, fmt.Errorf("run not found in registry")
 	}
 
-	sessionID, err := readSentinelSession(ri.SentinelPath)
+	sessionID, err := runstate.ReadSentinelSession(ri.SentinelPath)
 	if err != nil {
 		// Return errors for failed or non-resumable sentinel files unchanged. A
 		// missing file may mean the run is not terminal. Query supervisor status for
@@ -1534,7 +1534,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		if sessionID == "" {
 			// If status yields no session ID, retry the sentinel because the
 			// supervisor may have written it since the initial read.
-			retryID, retryErr := readSentinelSession(ri.SentinelPath)
+			retryID, retryErr := runstate.ReadSentinelSession(ri.SentinelPath)
 			if retryErr == nil {
 				sessionID = retryID
 			} else if !errors.Is(retryErr, os.ErrNotExist) {

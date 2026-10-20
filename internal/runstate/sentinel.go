@@ -51,13 +51,23 @@ func ReadSentinelSession(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	switch strings.ToUpper(sentinel.Status) {
-	case "DONE", "FAILED", "BLOCKED":
-	default:
+	if !isResumableSentinel(sentinel.Status) {
 		return "", fmt.Errorf("run is not resumable (status: %s)", strings.ToLower(sentinel.Status))
 	}
 	if sentinel.SessionID == "" {
 		return "", fmt.Errorf("no session in sentinel")
 	}
 	return sentinel.SessionID, nil
+}
+
+// isResumableSentinel reports whether a sentinel status word names a status a
+// resume may continue. It reads the SentinelStatus mapping rather than
+// re-spelling the status words, so a status added to that vocabulary is
+// classified once.
+func isResumableSentinel(raw string) bool {
+	switch SentinelStatus(strings.ToUpper(raw)) {
+	case StatusDone, StatusFailed:
+		return true
+	}
+	return false
 }
