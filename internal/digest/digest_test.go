@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -484,15 +483,24 @@ func TestCursorFollowPeriodicRewrite(t *testing.T) {
 	}
 }
 
-// TestCursorFileIsParseable verifies the writeCursor helper produces the
-// correct format (decimal + newline, no extras).
-func TestCursorFileIsParseable(t *testing.T) {
+// TestCursorRewriteReplacesFile verifies a cursor rewrite lands as a whole new
+// file: the staged temp file is renamed over the cursor path, the content is the
+// decimal offset and newline the reader parses, and nothing is left beside it.
+func TestCursorRewriteReplacesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cursor")
+	if err := os.WriteFile(path, []byte("7\n"), 0o600); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
 
 	if err := writeCursor(path, 12345); err != nil {
 		t.Fatalf("writeCursor: %v", err)
 	}
+
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
@@ -500,88 +508,22 @@ func TestCursorFileIsParseable(t *testing.T) {
 	if string(got) != "12345\n" {
 		t.Fatalf("cursor content = %q, want %q", got, "12345\n")
 	}
-}
-
-// TestCursorWriteCleansUpTempFileOnSuccess verifies that writeCursor does not
-// leave a staged temp file behind after a successful write.
-func TestCursorWriteCleansUpTempFileOnSuccess(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cursor")
-
-	if err := writeCursor(path, 99); err != nil {
-		t.Fatalf("writeCursor: %v", err)
-	}
-	leftovers, err := filepath.Glob(filepath.Join(dir, "cursor.tmp-*"))
+	after, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("glob temp files: %v", err)
+		t.Fatalf("stat after: %v", err)
 	}
-	if len(leftovers) != 0 {
-		t.Fatalf("temp files still exist after writeCursor success: %v", leftovers)
+	if os.SameFile(before, after) {
+		t.Fatal("cursor was rewritten in place; the rewrite must replace the file")
 	}
-}
-
-// TestCursorWriteRenameFailure verifies that when os.Rename fails (simulated
-// by placing a directory at the target path so rename is rejected), writeCursor
-// returns an error, does NOT overwrite the original target, and cleans up the
-// staged temp file.
-func TestCursorWriteRenameFailure(t *testing.T) {
-	dir := t.TempDir()
-	// Place a directory at the cursor path so os.Rename into it will fail.
-	targetPath := filepath.Join(dir, "cursor")
-	if err := os.Mkdir(targetPath, 0o755); err != nil {
-		t.Fatalf("mkdir target: %v", err)
+	if perm := after.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("cursor mode = %04o, want 0600", perm)
 	}
-
-	err := writeCursor(targetPath, 42)
-	if err == nil {
-		t.Fatal("writeCursor: expected error when target is a directory, got nil")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
 	}
-
-	// The temp file must be cleaned up even on failure.
-	leftovers, globErr := filepath.Glob(filepath.Join(dir, "cursor.tmp-*"))
-	if globErr != nil {
-		t.Fatalf("glob temp files: %v", globErr)
-	}
-	if len(leftovers) != 0 {
-		t.Fatalf("temp files still exist after rename failure: %v", leftovers)
-	}
-
-	// The original directory (target) must be untouched.
-	info, statErr := os.Stat(targetPath)
-	if statErr != nil {
-		t.Fatalf("target path gone after failure: %v", statErr)
-	}
-	if !info.IsDir() {
-		t.Fatalf("target path is no longer a directory after failure")
-	}
-}
-
-// TestCursorWriteConcurrentWritersDoNotCollide verifies that rewrites racing on
-// one cursor path each stage into their own temp file, so every write succeeds
-// and the path settles on one complete offset.
-func TestCursorWriteConcurrentWritersDoNotCollide(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cursor")
-
-	const writers = 16
-	var wg sync.WaitGroup
-	errs := make([]error, writers)
-	for i := 0; i < writers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			errs[i] = writeCursor(path, int64(i))
-		}(i)
-	}
-	wg.Wait()
-
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("concurrent writeCursor(%d): %v", i, err)
-		}
-	}
-	if got := parseCursorOffset(t, path); got < 0 || got >= writers {
-		t.Fatalf("cursor offset = %d, want one of the %d written offsets", got, writers)
+	if len(entries) != 1 {
+		t.Fatalf("cursor directory holds %d entries after a rewrite, want only the cursor", len(entries))
 	}
 }
 

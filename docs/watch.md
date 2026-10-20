@@ -125,9 +125,9 @@ avenor watch --since-cursor /tmp/watch.cursor /tmp/run.ndjson
 
 **On subsequent runs:** `watch` reads the saved offset from the cursor file, seeks to that position in the log, and processes only new lines.
 
-**On exit:** `watch` writes the current byte offset to the cursor file atomically (write to `.tmp`, then rename). If the log file was rotated (cursor offset exceeds file size), `watch` will fail at startup with an error message.
+**On exit:** `watch` writes the current byte offset to the cursor file atomically: a uniquely named `<cursor>.tmp-*` file in the same directory is synced and renamed over the cursor path, so a reader never sees a partial offset and concurrent watchers sharing one cursor path cannot collide. If the log file was rotated (cursor offset exceeds file size), `watch` will fail at startup with an error message.
 
-The cursor file is plain text, containing a single decimal byte offset and a newline:
+The cursor file is plain text, containing a single decimal byte offset and a newline. It is created `0600`, since a cursor is per-user state:
 
 ```
 12345

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -70,11 +69,11 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// writeCursor atomically rewrites the cursor file at path with offset.
+// writeCursor atomically rewrites the cursor file at path with offset. The
+// cursor is per-user state, so it is created 0600: owner read and write only.
 func writeCursor(path string, offset int64) error {
 	content := fmt.Sprintf("%d\n", offset)
-	pattern := filepath.Base(path) + ".tmp-*"
-	if err := durablefile.WriteFileAtomic(path, pattern, []byte(content), 0o644); err != nil {
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), []byte(content), 0o600); err != nil {
 		return fmt.Errorf("write cursor %s: %w", path, err)
 	}
 	return nil
