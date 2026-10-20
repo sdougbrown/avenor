@@ -24,7 +24,7 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 	if req.Target == "" {
 		return messaging.ResumeResult{}, unknownTargetError(req.Target)
 	}
-	runID, err := s.resolveResumeTarget(req.Target)
+	runID, err := s.resolveRunReference(req.Target)
 	if err != nil {
 		return messaging.ResumeResult{}, err
 	}
@@ -151,43 +151,6 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 		result.RunID = spawned.RunID
 	}
 	return result, nil
-}
-
-// resolveResumeTarget resolves a resume target through the shared ladder: an
-// exact broker runtime id, then the one display name. A public run id never
-// resolves here; the host surface resolves it by ID before calling.
-func (s *Supervisor) resolveResumeTarget(ref string) (string, error) {
-	if s.broker == nil {
-		return "", unknownTargetError(ref)
-	}
-	if s.broker.GetRun(ref) != nil {
-		return ref, nil
-	}
-	matches := s.broker.MatchLabel(ref)
-	switch len(matches) {
-	case 1:
-		return matches[0], nil
-	case 0:
-		return "", unknownTargetError(ref)
-	default:
-		facts := map[string]string{
-			"target":     messaging.Quote(ref),
-			"count":      fmt.Sprint(len(matches)),
-			"candidates": messaging.QuoteList(matches),
-		}
-		return "", &router.ToolError{
-			Code:    "ambiguous_name",
-			Message: messaging.Repair("ambiguous_name", facts),
-			Facts:   facts,
-		}
-	}
-}
-
-func unknownTargetError(ref string) error {
-	return &router.ToolError{
-		Code:    "unknown_target",
-		Message: messaging.Repair("unknown_target", map[string]string{"target": messaging.Quote(ref)}),
-	}
 }
 
 // resumeSessionID reads the session ladder: the sentinel's SESSION, then the

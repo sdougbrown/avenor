@@ -1,7 +1,6 @@
 package stable
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -76,36 +75,7 @@ func (s *Supervisor) resolveRenameTarget(caller messaging.Caller, sessionID stri
 	case sessionID == "supervisor":
 		return "supervisor", nil
 	}
-	if s.broker == nil {
-		return "", &router.ToolError{
-			Code:    "unknown_target",
-			Message: messaging.Repair("unknown_target", map[string]string{"target": messaging.Quote(sessionID)}),
-		}
-	}
-	if s.broker.GetRun(sessionID) != nil {
-		return sessionID, nil
-	}
-	matches := s.broker.MatchLabel(sessionID)
-	switch len(matches) {
-	case 1:
-		return matches[0], nil
-	case 0:
-		return "", &router.ToolError{
-			Code:    "unknown_target",
-			Message: messaging.Repair("unknown_target", map[string]string{"target": messaging.Quote(sessionID)}),
-		}
-	default:
-		facts := map[string]string{
-			"target":     messaging.Quote(sessionID),
-			"count":      fmt.Sprint(len(matches)),
-			"candidates": messaging.QuoteList(matches),
-		}
-		return "", &router.ToolError{
-			Code:    "ambiguous_name",
-			Message: messaging.Repair("ambiguous_name", facts),
-			Facts:   facts,
-		}
-	}
+	return s.resolveRunReference(sessionID)
 }
 
 // publishSessionRenamed publishes the rename to the control stream. runtime_id
