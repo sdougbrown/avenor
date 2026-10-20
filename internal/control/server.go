@@ -1916,7 +1916,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			EventLog:       p.OnEvent,
 		})
 		if err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
 		}
 		return success(req.ID, newResumeResult(res))
 	case "session_rename":
@@ -1932,7 +1932,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		res, err := s.stableHandler.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.SessionID, p.Name)
 		if err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
 		}
 		return success(req.ID, newSessionRenameResult(res))
 	case "session_last":
@@ -1945,7 +1945,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		record, ok, err := s.stableHandler.SessionLast(p.RuntimeID)
 		if err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
 		}
 		return success(req.ID, newSessionLastResult(record, ok))
 	case "session_last_set":
@@ -1960,7 +1960,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
 		if err := s.stableHandler.SessionLastSet(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.RuntimeID, p.FinalOutput, p.StopReason, p.Truncated); err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
 		}
 		return success(req.ID, map[string]any{"ok": true})
 	case "shutdown":

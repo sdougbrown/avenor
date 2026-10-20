@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
@@ -237,6 +238,28 @@ func TestResumeAndSessionRPCDispatch(t *testing.T) {
 	}
 	if handler.lastSetCalls != 1 {
 		t.Fatalf("session_last_set calls = %d, want 1", handler.lastSetCalls)
+	}
+
+	// The rename and resume authorities' typed codes survive the wire, so a
+	// surface classifies the failure without parsing text.
+	handler.resumeErr = &router.ToolError{Code: "not_resumable", Message: "run is not resumable"}
+	_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: 9, Method: "resume", Params: json.RawMessage(`{"run_id":"run_3","target":"rt_1","message":"again"}`)})
+	r = readRespForID(t, owner, 9)
+	if r.Error == nil {
+		t.Fatalf("resume failure = %+v", r)
+	}
+	if data, _ := r.Error.Data.(map[string]any); data["code"] != "not_resumable" {
+		t.Fatalf("resume error data = %#v", r.Error.Data)
+	}
+
+	handler.renameErr = &router.ToolError{Code: "invalid_name", Message: "bad name"}
+	_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: 10, Method: "session_rename", Params: json.RawMessage(`{"session_id":"supervisor","name":"bad"}`)})
+	r = readRespForID(t, owner, 10)
+	if r.Error == nil {
+		t.Fatalf("rename failure = %+v", r)
+	}
+	if data, _ := r.Error.Data.(map[string]any); data["code"] != "invalid_name" {
+		t.Fatalf("rename error data = %#v", r.Error.Data)
 	}
 }
 

@@ -3,6 +3,7 @@ package control
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -179,5 +180,10 @@ func TestMessageErrorDataClassifies(t *testing.T) {
 	data = messageErrorData(errors.New("boom"), "", "")
 	if data.Code != "invalid-request" || data.WireCode != "invalid-request" {
 		t.Fatalf("unclassified data = %+v", data)
+	}
+	// A wrapped tool error still classifies, matching the broker's errors.As.
+	data = messageErrorData(fmt.Errorf("rename: %w", &router.ToolError{Code: "not_permitted"}), "", "")
+	if data.Code != "not_permitted" {
+		t.Fatalf("wrapped tool error data = %+v", data)
 	}
 }

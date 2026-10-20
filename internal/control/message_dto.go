@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -424,7 +425,8 @@ func messageErrorData(err error, outcome messaging.Outcome, messageID string) Me
 		outcome = messaging.WireOutcomeFor(wireCode)
 	}
 	code := wireCode
-	if coded, ok := err.(interface{ ToolCode() string }); ok && coded.ToolCode() != "" {
+	var coded interface{ ToolCode() string }
+	if errors.As(err, &coded) && coded.ToolCode() != "" {
 		code = coded.ToolCode()
 	}
 	return MessageErrorData{
