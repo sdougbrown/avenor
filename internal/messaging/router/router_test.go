@@ -412,6 +412,9 @@ func TestConformanceCases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("execute: %v", err)
 			}
+			if result.Text == "" {
+				t.Fatal("a successful call produced no text")
+			}
 			if got, want := result.Outcome, messaging.Outcome(c.Expect.Outcome); got != want {
 				t.Fatalf("outcome = %q, want %q", got, want)
 			}
@@ -666,13 +669,37 @@ func TestInVocabularyUnlistedOutcomeIsNotRewritten(t *testing.T) {
 // TestReachableOutcomesAreRenderable is the matrix totality check the router
 // itself relies on: every outcome a transport can return for an action has a
 // render template, so the fallback in outcomeText never fires for a
-// vocabulary outcome.
+// vocabulary outcome. The sets follow the transports: tell is limited to the
+// send outcomes IsSendOutcome declares, while ask, reply and withdraw pass
+// their provider's outcome through unfiltered and so may see the whole
+// vocabulary.
 func TestReachableOutcomesAreRenderable(t *testing.T) {
+	vocabulary := []messaging.Outcome{
+		messaging.OutcomeSent, messaging.OutcomeReplied, messaging.OutcomeTimedOut,
+		messaging.OutcomeWithdrawn, messaging.OutcomeEdgeAbsent, messaging.OutcomeAuthRejected,
+		messaging.OutcomeNotSent, messaging.OutcomePossiblyPending, messaging.OutcomeLost,
+	}
+	send := make([]messaging.Outcome, 0, len(vocabulary))
+	for _, outcome := range vocabulary {
+		if messaging.IsSendOutcome(outcome) {
+			send = append(send, outcome)
+		}
+	}
+	wait := []messaging.Outcome{
+		messaging.OutcomeReplied, messaging.OutcomeTimedOut, messaging.OutcomeWithdrawn,
+		messaging.OutcomeEdgeAbsent, messaging.OutcomePossiblyPending, messaging.OutcomeLost,
+	}
+	ask := append([]messaging.Outcome(nil), wait...)
+	for _, outcome := range send {
+		if outcome != messaging.OutcomeSent {
+			ask = append(ask, outcome)
+		}
+	}
 	reachable := map[string][]messaging.Outcome{
-		actionTell:         {messaging.OutcomeSent, messaging.OutcomeNotSent, messaging.OutcomeAuthRejected, messaging.OutcomePossiblyPending, messaging.OutcomeWithdrawn},
-		actionAsk:          {messaging.OutcomeReplied, messaging.OutcomeTimedOut, messaging.OutcomeWithdrawn, messaging.OutcomeEdgeAbsent, messaging.OutcomePossiblyPending, messaging.OutcomeLost, messaging.OutcomeNotSent, messaging.OutcomeAuthRejected},
-		actionReply:        {messaging.OutcomeReplied, messaging.OutcomeSent, messaging.OutcomeEdgeAbsent, messaging.OutcomePossiblyPending, messaging.OutcomeNotSent, messaging.OutcomeAuthRejected, messaging.OutcomeWithdrawn, messaging.OutcomeTimedOut, messaging.OutcomeLost},
-		actionWithdraw:     {messaging.OutcomeWithdrawn, messaging.OutcomeEdgeAbsent, messaging.OutcomeReplied, messaging.OutcomeLost, messaging.OutcomePossiblyPending, messaging.OutcomeNotSent, messaging.OutcomeAuthRejected, messaging.OutcomeTimedOut},
+		actionTell:         send,
+		actionAsk:          ask,
+		actionReply:        vocabulary,
+		actionWithdraw:     vocabulary,
 		actionResume:       {outcomeResumed},
 		actionControlReply: {messaging.OutcomeSent},
 	}
