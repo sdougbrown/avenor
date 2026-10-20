@@ -101,6 +101,20 @@ type RenameResult struct {
 	PreviousLabel string // the label before the rename (the launch label if never renamed)
 }
 
+// PeerRecord is one peers `list` entry: the tool's projection of the broker's
+// SessionInfo. There is no name key — Label is the display name, so the list is
+// also the rename's read path — and last_seen is deliberately not part of the
+// tool contract.
+type PeerRecord struct {
+	RunID   string `json:"run_id"`
+	Label   string `json:"label,omitempty"`
+	Status  string `json:"status,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Dir     string `json:"dir,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+}
+
 // PeerLast is one peer's most recent completed turn, as the peers `last` action
 // reports it. Text is already bounded by the producer.
 type PeerLast struct {

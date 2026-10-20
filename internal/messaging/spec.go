@@ -10,9 +10,19 @@ import (
 // both the Go and the TypeScript router validate against; the JSON Schema
 // variants are proven equal to it by TestSchemaMatchesRouteTable.
 type ActionApplicability struct {
-	Permitted []string          // every property the action accepts, including "action"
-	Required  []string          // the subset that must be present
-	Types     map[string]string // declared wire type per permitted property: string, integer or object
+	Permitted   []string                       // every property the action accepts, including "action"
+	Required    []string                       // the subset that must be present
+	Types       map[string]string              // declared wire type per permitted property: string, integer or object
+	Constraints map[string]PropertyConstraints // string limits the JSON Schema declares
+}
+
+// PropertyConstraints is one string property's declared length and pattern
+// limits, compiled from the published JSON Schema so the router and the schema
+// enforce the same rule from one declaration. A zero length means no limit.
+type PropertyConstraints struct {
+	MinLength int
+	MaxLength int
+	Pattern   string
 }
 
 // ConformanceCase is one language-neutral conformance case from
@@ -86,10 +96,15 @@ func cloneApplicability(table map[string]ActionApplicability) map[string]ActionA
 		for name, kind := range entry.Types {
 			types[name] = kind
 		}
+		constraints := make(map[string]PropertyConstraints, len(entry.Constraints))
+		for name, constraint := range entry.Constraints {
+			constraints[name] = constraint
+		}
 		out[action] = ActionApplicability{
-			Permitted: append([]string(nil), entry.Permitted...),
-			Required:  append([]string(nil), entry.Required...),
-			Types:     types,
+			Permitted:   append([]string(nil), entry.Permitted...),
+			Required:    append([]string(nil), entry.Required...),
+			Types:       types,
+			Constraints: constraints,
 		}
 	}
 	return out
@@ -144,6 +159,20 @@ func LoadPeersConformanceCases(path string) ([]ConformanceCase, error) {
 		return nil, err
 	}
 	return fixture.Cases, nil
+}
+
+// LoadApplicabilityTables reads the fixture's applicability maps, which are the
+// source of the permitted/required/type contract the routers validate against,
+// so a test can compare the checked-in fixture with the compiled artifact.
+func LoadApplicabilityTables(path string) (messages, peers map[string]ActionApplicability, err error) {
+	fixture := struct {
+		Applicability      map[string]ActionApplicability `json:"applicability"`
+		PeersApplicability map[string]ActionApplicability `json:"peers_applicability"`
+	}{}
+	if err := decodeFixture(path, &fixture); err != nil {
+		return nil, nil, err
+	}
+	return fixture.Applicability, fixture.PeersApplicability, nil
 }
 
 func decodeFixture(path string, fixture any) error {
