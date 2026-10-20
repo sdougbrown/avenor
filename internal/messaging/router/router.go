@@ -20,11 +20,8 @@ import (
 	"math/big"
 	"regexp"
 	"sort"
-	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -601,57 +598,14 @@ func asToolError(err error) *ToolError {
 	return refused(err)
 }
 
-// quote renders value as one JSON string literal. Control, format, line- and
-// paragraph-separator characters are escaped, so a label a producer controls
-// cannot carry a bidi override or a zero-width character into tool text.
-func quote(value string) string {
-	return `"` + escapeNonPrintable(value) + `"`
-}
+// quote renders value for a template fact through the shared escaping rule, so
+// the router and the rename authority cannot disagree on how an id is quoted.
+func quote(value string) string { return messaging.Quote(value) }
 
-// sanitize escapes the same characters as quote without adding the surrounding
-// literal quotes, for a fact the templates render bare.
-func sanitize(value string) string { return escapeNonPrintable(value) }
+// sanitize renders a bare template fact through the shared escaping rule.
+func sanitize(value string) string { return messaging.Sanitize(value) }
 
-func escapeNonPrintable(value string) string {
-	var out strings.Builder
-	out.Grow(len(value))
-	for _, r := range value {
-		switch {
-		case r == '"':
-			out.WriteString(`\"`)
-		case r == '\\':
-			out.WriteString(`\\`)
-		case r == '\b':
-			out.WriteString(`\b`)
-		case r == '\f':
-			out.WriteString(`\f`)
-		case r == '\n':
-			out.WriteString(`\n`)
-		case r == '\r':
-			out.WriteString(`\r`)
-		case r == '\t':
-			out.WriteString(`\t`)
-		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp):
-			if r > 0xffff {
-				high, low := utf16.EncodeRune(r)
-				fmt.Fprintf(&out, `\u%04x\u%04x`, high, low)
-			} else {
-				fmt.Fprintf(&out, `\u%04x`, r)
-			}
-		default:
-			out.WriteRune(r)
-		}
-	}
-	return out.String()
-}
-
-func quoteList(values []string) string {
-	quoted := make([]string, 0, len(values))
-	for _, value := range values {
-		quoted = append(quoted, quote(value))
-	}
-	return strings.Join(quoted, ", ")
-}
+func quoteList(values []string) string { return messaging.QuoteList(values) }
 
 // The six message actions, the reserved self alias, and the two tool-level
 // outcomes. The action spellings are the schema's action enum.
