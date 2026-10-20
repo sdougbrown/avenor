@@ -70,8 +70,8 @@ and work with no record at all.
 
 After `shutdown graceful` the socket and the record are gone, the lock file and
 the tombstone remain, and the supervisor has exited. The child's default
-artifact directory under `/tmp/avenor-stable/` survives all of this, so its
-sentinel and event log are still readable evidence:
+artifact directory under `${TMPDIR:-/tmp}/avenor-stable-$(id -u)/` survives all
+of this, so its sentinel and event log are still readable evidence:
 
 ```sh
 test -e "$SOCK" || echo "socket removed"
@@ -93,11 +93,14 @@ cat "$SOCK.dead"    # STOPPED reason=shutdown pid=<pid> at=<timestamp>
 - `spawn` returns JSON including `runtime_id`, `on_event`, and
   `sentinel_file` — use those paths for evidence rather than guessing.
 - The child runs against a real backend; same cheap-prompt rule as single runs.
-- The supervisor writes child state under `/tmp/avenor-stable/`. A child's
-  default artifact directory outlives the supervisor — its sentinel and event
-  log stay readable after shutdown — and a later supervisor start prunes the
-  run directory once nothing in it has been written for 24 hours. Clean your
-  run's subdir yourself after copying evidence rather than waiting for that
-  prune.
+- The supervisor writes child state under
+  `${TMPDIR:-/tmp}/avenor-stable-$(id -u)/run_<supervisor_run_id>/`. The root
+  is created `0700` and refused if it is a symlink, owned by another euid, or
+  group- or other-writable. A child's default artifact directory outlives the
+  supervisor — its sentinel and event log stay readable after shutdown — and
+  prune only considers `run_*` directories, hourly, removing one only once
+  nothing in it has been written for 24 hours while its supervisor kept
+  refreshing a live run directory. Clean your run's subdir yourself after
+  copying evidence rather than waiting for that prune.
 - If `spawn` hangs, the backend is the suspect — run the doctor
   (`SKILL.md`) before assuming a control-plane bug.

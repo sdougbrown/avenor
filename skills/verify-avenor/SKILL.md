@@ -121,8 +121,8 @@ cost; that is a budget choice, not a mock.
   the PID you recorded at launch:
   `avenor control --socket <sock> shutdown graceful; kill <recorded-pid>`.
   Never kill by process name.
-- Remove socket files and `/tmp/avenor-stable/` child dirs created by your
-  runs. Never delete the evidence dir.
+- Remove socket files and child dirs you created under
+  `${TMPDIR:-/tmp}/avenor-stable-$(id -u)/`. Never delete the evidence dir.
 
 ## Maintaining this skill
 

@@ -95,8 +95,8 @@ Spawn parameters (all optional except one prompt source):
 | `--roster-file` | string | Roster map for direct selection, or root workflow fallback |
 | `--roster-entry` | string | Entry key for direct selection; invalid with `--loop-file` or `--team-file` |
 | `--server-url` | string | External ACP server endpoint for opencode-http backend |
-| `--on-event` | string | Path to write NDJSON events. Auto-created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/events.ndjson` if not set |
-| `--sentinel-file` | string | Path to write completion sentinel (exit code, session ID, stop reason). Auto-created under `$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/sentinel.env` if not set |
+| `--on-event` | string | Path to write NDJSON events. Auto-created under `$TMPDIR/avenor-stable-<euid>/run_<supervisor_run_id>/<runtime_id>/events.ndjson` if not set |
+| `--sentinel-file` | string | Path to write completion sentinel (exit code, session ID, stop reason). Auto-created under `$TMPDIR/avenor-stable-<euid>/run_<supervisor_run_id>/<runtime_id>/sentinel.env` if not set |
 | `--permission-handler` | string | Permission handler (supports `file:<path>`). Auto-derived from sentinel-file if unset. Use `--auto-approve` to skip file-based handlers |
 | `--auto-approve` | bool | Automatically approve ordinary permission requests without file-based handlers. Questions that require user input still wait for an answer |
 | `--timeout` | int | Overall session timeout in seconds. Bounds direct, loop, and team spawns alike: every attempt, retry, and nudge stops at the shared wall-clock deadline and the runtime records `timeout` |
@@ -147,22 +147,22 @@ At least one of `--prompt`, `--prompt-file`, or `--loop-file` is required (see b
 
 ### Auto-Created Artifact Directories
 
-If you don't specify `--on-event` or `--sentinel-file`, the supervisor creates them automatically under:
+If you don't specify `--on-event` or `--sentinel-file`, the supervisor creates them automatically under its per-user artifact root:
 
 ```
-$TMPDIR/avenor-stable/<supervisor_run_id>/<runtime_id>/
+$TMPDIR/avenor-stable-<euid>/run_<supervisor_run_id>/<runtime_id>/
 ```
 
-For example, with a supervisor run ID of `run_abc123` and a spawned runtime `rt_2`:
+For example, for uid `1000`, supervisor run `692b628b253261f0` and spawned runtime `rt_2`:
 
 ```
-/var/tmp/avenor-stable/run_abc123/rt_2/events.ndjson
-/var/tmp/avenor-stable/run_abc123/rt_2/sentinel.env
+/var/tmp/avenor-stable-1000/run_692b628b253261f0/rt_2/events.ndjson
+/var/tmp/avenor-stable-1000/run_692b628b253261f0/rt_2/sentinel.env
 ```
 
-This keeps artifacts isolated and lets you inspect multiple runtime outputs without manual path management.
+The euid in the root keeps two users of a shared temporary directory in separate trees, and the root is created mode `0700`. Before writing into it or pruning it, a supervisor checks that the root is a real directory — not a symlink — owned by its own euid and not group- or other-writable. A root that fails the check is never used: a spawn that needs a default path fails with an error naming the root, and pruning is skipped with one diagnostic.
 
-A supervisor prunes these directories by age: when it starts, it removes a `$TMPDIR/avenor-stable/<supervisor_run_id>` directory whose newest entry is older than 24 hours and keeps a newer one, so a finished runtime's sentinel and event log stay readable for a status, result, or follow-up read after the turn ends. Pruning is best-effort, never follows a symlink out of the tree, and never removes paths you passed with `--on-event` or `--sentinel-file`.
+A supervisor prunes only entries named `run_*`. When it starts, and then hourly while it runs, it removes a `run_<id>` directory whose newest entry is older than 24 hours and keeps a newer one. Each supervisor refreshes its own run directory before every prune, so a live supervisor's directory stays out of the candidate set even when its runtimes wrote nothing for a day, and anything under the root that is not named `run_*` is left alone. A finished runtime's sentinel and event log therefore stay readable for a status, result, or follow-up read after the turn ends. Pruning is best-effort, never follows a symlink out of the tree, and never touches a path you passed with `--on-event` or `--sentinel-file`: paths outside the artifact root are never touched.
 
 ### Loop File Spawns
 
