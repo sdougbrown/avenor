@@ -8,13 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
-	"github.com/sdougbrown/avenor/internal/messaging/askclient"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/broker/brokertest"
 	"github.com/sdougbrown/avenor/internal/tooltest"
@@ -122,27 +120,6 @@ func TestRenderControlMessageIncludesStructuredPayload(t *testing.T) {
 	} {
 		if !bytes.Contains([]byte(got), []byte(want)) {
 			t.Fatalf("rendered message missing %q:\n%s", want, got)
-		}
-	}
-}
-
-// TestAskFailureOnlyOffersCancelForAnOutstandingAsk pins the failed-ask text:
-// a timed-out or cancelled ask was already withdrawn by the client, so cancel
-// guidance is only honest when the retraction could not be confirmed.
-func TestAskFailureOnlyOffersCancelForAnOutstandingAsk(t *testing.T) {
-	result := askclient.AskResult{MessageID: "msg-1"}
-	cases := []struct {
-		name string
-		err  *askclient.Error
-		want bool
-	}{
-		{"timed-out ask", &askclient.Error{MessageID: "msg-1", Outcome: messaging.OutcomeTimedOut}, false},
-		{"unconfirmed retraction", &askclient.Error{MessageID: "msg-1", Outcome: messaging.OutcomePossiblyPending}, true},
-	}
-	for _, tc := range cases {
-		got := askFailure(result, tc.err).Error()
-		if strings.Contains(got, "avenor_cancel") != tc.want {
-			t.Errorf("%s failure = %q, want cancel guidance %v", tc.name, got, tc.want)
 		}
 	}
 }

@@ -389,12 +389,13 @@ func TestExtractReplyMessageOutcomes(t *testing.T) {
 			outcome messaging.Outcome
 			text    string
 			cause   error
+			pending bool
 		}{
-			{messaging.OutcomeTimedOut, "(timeout: no reply received)", nil},
-			{messaging.OutcomeWithdrawn, "(cancelled)", nil},
-			{messaging.OutcomeEdgeAbsent, "(no pending ask)", nil},
-			{messaging.OutcomePossiblyPending, "(possibly pending: no terminal reply)", messaging.ErrUnsupportedProtocol},
-			{messaging.OutcomeLost, "(ask lost)", nil},
+			{messaging.OutcomeTimedOut, "(timeout: no reply received)", nil, false},
+			{messaging.OutcomeWithdrawn, "(cancelled)", nil, false},
+			{messaging.OutcomeEdgeAbsent, "(no pending ask)", nil, false},
+			{messaging.OutcomePossiblyPending, "(possibly pending: no terminal reply)", messaging.ErrUnsupportedProtocol, true},
+			{messaging.OutcomeLost, "(ask lost)", nil, false},
 		}
 		for _, tc := range cases {
 			res := AskResult{MessageID: msgID, Outcome: tc.outcome}
@@ -404,6 +405,9 @@ func TestExtractReplyMessageOutcomes(t *testing.T) {
 			}
 			if tc.cause != nil && !errors.Is(err, tc.cause) {
 				t.Errorf("Failure(%q) lost its cause: %v", tc.outcome, err)
+			}
+			if got := strings.Contains(err.Error(), "avenor_cancel"); got != tc.pending {
+				t.Errorf("Failure(%q) = %v, want cancel guidance %v", tc.outcome, err, tc.pending)
 			}
 		}
 	})
