@@ -735,6 +735,11 @@ func NewSupervisor(cfg Config) *Supervisor {
 		// so an ask the supervisor makes is the same ask a child can answer
 		// over HTTP.
 		sup.messaging = inprocess.New(sup.broker.Store())
+		// POST /rename decides nothing itself: it forwards the authenticated
+		// caller and the optional target to the one authority.
+		sup.broker.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
+			return sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: callerRunID}, sessionID, name)
+		})
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	sup.capacityCh = make(chan struct{})
@@ -1934,6 +1939,9 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 	if token == "" {
 		return "", ""
 	}
+	// Metadata only: the label was fixed by EnsureRun and only RenameRun
+	// changes it, so this write can never undo a rename.
+	s.broker.UpdateSessionInfo("supervisor", &broker.SessionInfo{Kind: "supervisor", Status: "running"})
 	s.brokerRunID = "supervisor"
 	s.brokerToken = token
 	return s.brokerRunID, token
@@ -1947,11 +1955,33 @@ func (s *Supervisor) ensureChildBrokerRun(child *childRuntime) string {
 	if s.broker == nil {
 		return ""
 	}
-	token, _ := s.broker.EnsureRun(child.id, child.label)
+	child.mu.Lock()
+	label := child.label
+	child.mu.Unlock()
+	token, _ := s.broker.EnsureRun(child.id, label)
 	child.mu.Lock()
 	child.brokerToken = token
+	backend, model, dir := child.effectiveBackend, child.effectiveModel, child.dir
 	child.mu.Unlock()
+	// Metadata only: EnsureRun already recorded the launch label.
+	s.broker.UpdateSessionInfo(child.id, &broker.SessionInfo{
+		Kind:    "agent",
+		Backend: backend,
+		Model:   model,
+		Dir:     dir,
+		Status:  "running",
+	})
 	return token
+}
+
+// MessageTransport is the supervisor's own transport over the broker's ask
+// store. It is the one transport the control message_* methods delegate to and
+// it never leaves the supervisor.
+func (s *Supervisor) MessageTransport() (messaging.Transport, error) {
+	if s.messaging == nil {
+		return nil, fmt.Errorf("broker not available")
+	}
+	return s.messaging, nil
 }
 
 // brokerPost sends an authenticated POST to the broker HTTP endpoint.
@@ -3884,6 +3914,9 @@ func (s *Supervisor) emitSessionEnd(child *childRuntime, stopReason string) {
 	outputFiles := s.computeOutputFiles(child.id)
 	if len(outputFiles) > 0 {
 		fields["output_files"] = outputFiles
+	}
+	if s.broker != nil {
+		s.broker.UpdateSessionInfo(child.id, &broker.SessionInfo{Status: "ended"})
 	}
 	if err := s.fanoutWriterLocked(child).writeRunEnd(events.Event{
 		Event:     "session.end",
