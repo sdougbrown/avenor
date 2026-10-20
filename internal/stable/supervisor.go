@@ -4930,14 +4930,16 @@ func (w *runtimeFanoutWriter) writeLockedTerminal(ev events.Event, diagnostics *
 		}
 		w.child.mu.Unlock()
 	}
-	rec := w.recorder
-	if rec != nil {
-		rec.Feed(presentation)
-	}
+	// The recorder is fed only once the durable write succeeded, so a failed
+	// write cannot leave the broker holding a terminal record for a run whose
+	// end the durable log rejected.
 	if w.base != nil {
 		if err := w.base.Write(stamped); err != nil {
 			return err
 		}
+	}
+	if w.recorder != nil {
+		w.recorder.Feed(presentation)
 	}
 	if w.control != nil {
 		w.control.PublishCanonicalEvent(stamped)

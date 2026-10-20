@@ -7,6 +7,7 @@ package stable
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -403,6 +404,45 @@ func TestFallbackFanoutWriterCarriesRecorderAndWorkflowMetadata(t *testing.T) {
 	}
 	if got, _ := stamped["node_id"].(string); got != "node_fallback" {
 		t.Fatalf("stamped node_id = %v, want node_fallback", stamped["node_id"])
+	}
+	finishSyntheticChildLifecycle(sup, child)
+}
+
+// failingWriteSink rejects every durable write.
+type failingWriteSink struct{}
+
+func (failingWriteSink) Write(events.Event) error { return errors.New("intentional durable write failure") }
+func (failingWriteSink) Close() error             { return nil }
+
+// TestRecorderFeedsOnlyAfterTheDurableWrite proves a failed durable write
+// leaves no terminal record in the broker for a run that did not end.
+func TestRecorderFeedsOnlyAfterTheDurableWrite(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-recorder-order.sock"})
+	child := &childRuntime{
+		id:          "rt_recorder_order",
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		eventWriter: failingWriteSink{},
+	}
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{id: child.id, exec: execIdle, class: directAttemptClass})
+	sup.ensureChildBrokerRun(child)
+	writer := sup.fanoutWriterLocked(child)
+
+	err := writer.writeRunEnd(events.Event{Event: "session.end", SessionID: "ses_recorder_order", Fields: map[string]any{
+		"stop_reason": "cancelled",
+	}})
+	if err == nil {
+		t.Fatal("writeRunEnd error = nil, want the durable write failure")
+	}
+	state := sup.broker.GetRun(child.id)
+	if state == nil {
+		t.Fatalf("broker has no run for %s", child.id)
+	}
+	state.Mu.Lock()
+	reports := append([]broker.Report(nil), state.Reports...)
+	state.Mu.Unlock()
+	if len(reports) != 0 {
+		t.Fatalf("broker reports = %v, want none after a failed durable write", reports)
 	}
 	finishSyntheticChildLifecycle(sup, child)
 }
