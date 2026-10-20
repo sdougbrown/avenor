@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // OwnerCapability is the bearer credential of the process that owns a control
@@ -110,37 +112,11 @@ func (s *ControlServer) publishOwnerRecord(socketPath string, identity SocketIde
 		return fmt.Errorf("encode owner record: %w", err)
 	}
 
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		return fmt.Errorf("generate owner record suffix: %w", err)
-	}
-	tempPath := recordPath + "." + hex.EncodeToString(suffix[:])
-	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("create owner record: %w", err)
-	}
-	discardTemp := func() { _ = os.Remove(tempPath) }
-	if _, err := file.Write(body); err != nil {
-		_ = file.Close()
-		discardTemp()
-		return fmt.Errorf("write owner record: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		discardTemp()
-		return fmt.Errorf("sync owner record: %w", err)
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		discardTemp()
-		return fmt.Errorf("chmod owner record: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		discardTemp()
-		return fmt.Errorf("close owner record: %w", err)
-	}
-	if err := os.Rename(tempPath, recordPath); err != nil {
-		discardTemp()
+	// The temp file is created exclusively in recordPath's directory, so it
+	// cannot land on a symlink or a pre-existing entry, and the record only
+	// becomes visible once its contents are synced.
+	pattern := filepath.Base(recordPath) + ".tmp-*"
+	if err := durablefile.WriteFileAtomic(recordPath, pattern, body, 0o600); err != nil {
 		return fmt.Errorf("publish owner record: %w", err)
 	}
 	if _, err := inspectRecord(recordPath); err != nil {
