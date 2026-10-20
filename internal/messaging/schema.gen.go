@@ -33,7 +33,7 @@ var repairsTemplates = map[string]string{
 
 // messageApplicability is schemas/message_route.conformance.json's applicability map.
 var messageApplicability = map[string]ActionApplicability{
-	"ask":           {Permitted: []string{"action", "target", "message", "timeout_ms"}, Required: []string{"action", "target", "message"}, Types: map[string]string{"action": "string", "message": "string", "target": "string", "timeout_ms": "integer"}, Constraints: map[string]PropertyConstraints{"timeout_ms": {Minimum: 0, HasMinimum: true, Maximum: 600000}}},
+	"ask":           {Permitted: []string{"action", "target", "message", "timeout_ms"}, Required: []string{"action", "target", "message"}, Types: map[string]string{"action": "string", "message": "string", "target": "string", "timeout_ms": "integer"}, Constraints: map[string]PropertyConstraints{"timeout_ms": {Minimum: 0, HasMinimum: true, Maximum: 600000, HasMaximum: true}}},
 	"control_reply": {Permitted: []string{"action", "target", "payload"}, Required: []string{"action", "target"}, Types: map[string]string{"action": "string", "payload": "object", "target": "string"}},
 	"reply":         {Permitted: []string{"action", "reply_to", "message"}, Required: []string{"action", "reply_to", "message"}, Types: map[string]string{"action": "string", "message": "string", "reply_to": "string"}},
 	"resume":        {Permitted: []string{"action", "target", "message", "label", "idempotency_key"}, Required: []string{"action", "target", "message"}, Types: map[string]string{"action": "string", "idempotency_key": "string", "label": "string", "message": "string", "target": "string"}},

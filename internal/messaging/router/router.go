@@ -747,9 +747,11 @@ func validateStringConstraint(name, value string, constraint messaging.PropertyC
 // validateIntegerConstraint applies the integer limits the published JSON
 // Schema declares. timeout_ms has an inclusive floor so a negative wait cannot
 // fall through to the ask store's "absent or zero" maximum, and an inclusive
-// ceiling that keeps the later duration conversion inside its range.
+// ceiling that keeps the later duration conversion inside its range. Both
+// bounds are read from their declared-presence flags, so a bound of zero is a
+// limit and not an omission.
 func validateIntegerConstraint(name string, raw json.RawMessage, constraint messaging.PropertyConstraints) string {
-	if !constraint.HasMinimum && constraint.Maximum == 0 {
+	if !constraint.HasMinimum && !constraint.HasMaximum {
 		return ""
 	}
 	value, ok := exactInteger(raw)
@@ -765,7 +767,7 @@ func validateIntegerConstraint(name string, raw json.RawMessage, constraint mess
 			})
 		}
 	}
-	if constraint.Maximum != 0 {
+	if constraint.HasMaximum {
 		maximum := new(big.Rat).SetInt64(constraint.Maximum)
 		if value.Cmp(maximum) > 0 {
 			return messaging.Repair("integer_too_large", map[string]string{

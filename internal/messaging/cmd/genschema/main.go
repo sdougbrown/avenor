@@ -32,7 +32,7 @@ type schemaProperty struct {
 	MaxLength int    `json:"maxLength"`
 	Pattern   string `json:"pattern"`
 	Minimum   *int64 `json:"minimum"`
-	Maximum   int64  `json:"maximum"`
+	Maximum   *int64 `json:"maximum"`
 }
 
 type inputSchema struct {
@@ -48,6 +48,7 @@ type propertyConstraints struct {
 	Minimum    int64
 	HasMinimum bool
 	Maximum    int64
+	HasMaximum bool
 }
 
 type conformanceFixture struct {
@@ -248,8 +249,8 @@ func writeApplicability(b *strings.Builder, name, description string, table map[
 				if constraint.HasMinimum {
 					fmt.Fprintf(b, "Minimum: %d, HasMinimum: true, ", constraint.Minimum)
 				}
-				if constraint.Maximum != 0 {
-					fmt.Fprintf(b, "Maximum: %d, ", constraint.Maximum)
+				if constraint.HasMaximum {
+					fmt.Fprintf(b, "Maximum: %d, HasMaximum: true, ", constraint.Maximum)
 				}
 				b.WriteString("}, ")
 			}
@@ -275,16 +276,20 @@ func constraintsFromSchema(raw []byte) (map[string]map[string]propertyConstraint
 			continue
 		}
 		for property, spec := range variant.Properties {
-			if property == "action" || (spec.MinLength == 0 && spec.MaxLength == 0 && spec.Pattern == "" && spec.Minimum == nil && spec.Maximum == 0) {
+			if property == "action" || (spec.MinLength == 0 && spec.MaxLength == 0 && spec.Pattern == "" && spec.Minimum == nil && spec.Maximum == nil) {
 				continue
 			}
 			if out[action] == nil {
 				out[action] = map[string]propertyConstraints{}
 			}
-			constraint := propertyConstraints{MinLength: spec.MinLength, MaxLength: spec.MaxLength, Pattern: spec.Pattern, Maximum: spec.Maximum}
+			constraint := propertyConstraints{MinLength: spec.MinLength, MaxLength: spec.MaxLength, Pattern: spec.Pattern}
 			if spec.Minimum != nil {
 				constraint.Minimum = *spec.Minimum
 				constraint.HasMinimum = true
+			}
+			if spec.Maximum != nil {
+				constraint.Maximum = *spec.Maximum
+				constraint.HasMaximum = true
 			}
 			out[action][property] = constraint
 		}

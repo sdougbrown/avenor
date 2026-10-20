@@ -883,3 +883,16 @@ func TestIntegerWireTypeAcceptsMathematicalIntegers(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateIntegerConstraintEnforcesAZeroMaximum pins the declared bound's
+// presence, not its truthiness: a schema may legally cap an integer at zero,
+// and the table must still refuse everything above it.
+func TestValidateIntegerConstraintEnforcesAZeroMaximum(t *testing.T) {
+	constraint := messaging.PropertyConstraints{Maximum: 0, HasMaximum: true}
+	if detail := validateIntegerConstraint("timeout_ms", json.RawMessage(`1`), constraint); detail != `property "timeout_ms" must be at most 0` {
+		t.Fatalf("detail = %q, want the zero maximum to refuse 1", detail)
+	}
+	if detail := validateIntegerConstraint("timeout_ms", json.RawMessage(`0`), constraint); detail != "" {
+		t.Fatalf("detail = %q, want the zero maximum to accept 0", detail)
+	}
+}
