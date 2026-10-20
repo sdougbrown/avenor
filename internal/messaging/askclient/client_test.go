@@ -418,7 +418,7 @@ func TestRenderReply(t *testing.T) {
 			t.Errorf("RenderReply(%q) error = %v", tc.outcome, err)
 			continue
 		}
-		if !strings.EqualFold(got, tc.want) {
+		if got != tc.want {
 			t.Errorf("RenderReply(%q) = %q, want %q", tc.outcome, got, tc.want)
 		}
 	}
