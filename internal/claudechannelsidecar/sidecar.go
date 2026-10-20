@@ -243,13 +243,21 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if role == "" {
 			role = "agent"
 		}
-		if err := s.brokerPost(ctx, "/send", map[string]any{
-			"from_run_id": s.opts.RunID,
-			"to_run_id":   p.ToRunID,
-			"type":        "agent_message",
-			"payload":     map[string]any{"from": s.opts.RunID, "from_run_id": s.opts.RunID, "message": p.Message, "role": role},
-		}); err != nil {
+		body, err := messaging.SendBody(s.opts.RunID, p.ToRunID, p.Message, role)
+		if err != nil {
 			return nil, err
+		}
+		sent, err := s.ask.Send(ctx, messaging.SendRequest{
+			From:    messaging.Identity{RunID: s.opts.RunID, Sender: s.opts.Sender},
+			To:      messaging.Identity{RunID: p.ToRunID, Sender: p.ToRunID},
+			Body:    string(body),
+			NoReply: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("send to %s: %w", p.ToRunID, err)
+		}
+		if sent.Outcome != messaging.OutcomeSent {
+			return nil, fmt.Errorf("send to %s: %s", p.ToRunID, sent.Outcome)
 		}
 		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("sent message to run %q", p.ToRunID)}}}, nil
 	case "avenor_ask":

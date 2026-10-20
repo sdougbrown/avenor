@@ -185,6 +185,24 @@ func (c *Client) Ask(ctx context.Context, send messaging.SendRequest, wait messa
 	return result, nil
 }
 
+// Send admits one fire-and-forget message. A request that pins no generation
+// takes the one Preflight reports, and a transport that reports no outcome is
+// classified from its error.
+func (c *Client) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	if req.Generation == "" {
+		pre, err := c.transport.Preflight(ctx)
+		if err != nil {
+			return messaging.SendResult{Outcome: classifySendError(err)}, err
+		}
+		req.Generation = pre.Generation
+	}
+	sent, err := c.transport.Send(ctx, req)
+	if sent.Outcome == "" {
+		sent.Outcome = classifySendError(err)
+	}
+	return sent, err
+}
+
 // AskRequest builds the send and wait requests for one agent ask: it mints the
 // message id and builds the body the target reads. from is the identity the
 // transport authenticates, and bodyFrom is the run id the payload names, which

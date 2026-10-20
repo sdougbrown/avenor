@@ -148,13 +148,21 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if role == "" {
 			role = "agent"
 		}
-		if err := s.brokerPost(ctx, "/send", map[string]any{
-			"from_run_id": s.opts.RunID,
-			"to_run_id":   p.ToRunID,
-			"type":        "agent_message",
-			"payload":     map[string]any{"from": s.opts.RunID, "from_run_id": s.opts.RunID, "message": p.Message, "role": role},
-		}); err != nil {
+		body, err := messaging.SendBody(s.opts.RunID, p.ToRunID, p.Message, role)
+		if err != nil {
 			return nil, err
+		}
+		sent, err := s.ask.Send(ctx, messaging.SendRequest{
+			From:    messaging.Identity{RunID: s.opts.RunID, Sender: s.opts.Sender},
+			To:      messaging.Identity{RunID: p.ToRunID, Sender: p.ToRunID},
+			Body:    string(body),
+			NoReply: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("send to %s: %w", p.ToRunID, err)
+		}
+		if sent.Outcome != messaging.OutcomeSent {
+			return nil, fmt.Errorf("send to %s: %s", p.ToRunID, sent.Outcome)
 		}
 		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("sent message to run %q", p.ToRunID)}}}, nil
 	case "avenor_ask":
@@ -306,41 +314,6 @@ func (s *Server) brokerGet(ctx context.Context, path string, out any) error {
 	}
 	req.Header.Set(messaging.HeaderRunID, s.opts.RunID)
 	req.Header.Set(messaging.HeaderRunToken, s.opts.Token)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		text, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return brokerError(path, resp.Status, text)
-	}
-	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
-	}
-	return nil
-}
-
-func (s *Server) brokerPost(ctx context.Context, path string, body map[string]any) error {
-	return s.brokerPostDecode(ctx, path, body, nil)
-}
-
-func (s *Server) brokerPostDecode(ctx context.Context, path string, body map[string]any, out any) error {
-	requestBody := make(map[string]any, len(body)+2)
-	for key, value := range body {
-		requestBody[key] = value
-	}
-	requestBody["run_id"] = s.opts.RunID
-	requestBody["token"] = s.opts.Token
-	payload, err := json.Marshal(requestBody)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.opts.BrokerURL+path, bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return err

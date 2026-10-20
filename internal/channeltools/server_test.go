@@ -76,13 +76,15 @@ func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
 	var sentBody map[string]any
 	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
 		case "/send":
 			if err := json.NewDecoder(r.Body).Decode(&sentBody); err != nil {
 				t.Errorf("decode send: %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "outcome": "sent"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -124,6 +126,9 @@ func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
 	if sentBody["to_run_id"] != "parent_run" {
 		t.Fatalf("to_run_id = %v, want parent_run", sentBody["to_run_id"])
 	}
+	if sentBody["expects_reply"] != false {
+		t.Fatalf("expects_reply = %v, want false for a fire-and-forget send", sentBody["expects_reply"])
+	}
 }
 
 func TestAvenorSendMissingArgs(t *testing.T) {
@@ -155,29 +160,51 @@ func TestAvenorSendMissingArgs(t *testing.T) {
 
 func TestAvenorSendBrokerFailure(t *testing.T) {
 	cases := []struct {
-		name   string
-		status int
-		body   string
-		want   string
+		name           string
+		sessionsStatus int
+		sessionsBody   string
+		sendStatus     int
+		sendBody       string
+		want           string
 	}{
 		{
-			name:   "plain text body",
-			status: http.StatusInternalServerError,
-			body:   "boom",
-			want:   "broker /send: 500 Internal Server Error: boom",
+			name:           "target not available",
+			sessionsStatus: http.StatusOK,
+			sessionsBody:   `{"messaging_protocol":1,"generation":"gen-1"}`,
+			sendStatus:     http.StatusNotFound,
+			sendBody:       `{"error":"to run not found","code":"target-unavailable","outcome":"not-sent"}`,
+			want:           "send to target_run: messaging: target unavailable",
 		},
 		{
-			name:   "json error body",
-			status: http.StatusNotFound,
-			body:   `{"error":"to run not found","code":"target-unavailable","outcome":"not-sent"}`,
-			want:   "broker /send: 404 Not Found: to run not found",
+			name:           "run token rejected",
+			sessionsStatus: http.StatusUnauthorized,
+			sessionsBody:   "unauthorized",
+			sendStatus:     http.StatusUnauthorized,
+			sendBody:       "unauthorized",
+			want:           "send to target_run: messaging: credentials rejected: local broker rejected the run token",
+		},
+		{
+			name:           "admission uncertain",
+			sessionsStatus: http.StatusOK,
+			sessionsBody:   `{"messaging_protocol":1,"generation":"gen-1"}`,
+			sendStatus:     http.StatusInternalServerError,
+			sendBody:       `{"error":"boom","outcome":"possibly-pending"}`,
+			want:           "send to target_run: possibly-pending",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.status)
-				_, _ = io.WriteString(w, tc.body)
+				switch r.URL.Path {
+				case "/sessions":
+					w.WriteHeader(tc.sessionsStatus)
+					_, _ = io.WriteString(w, tc.sessionsBody)
+				case "/send":
+					w.WriteHeader(tc.sendStatus)
+					_, _ = io.WriteString(w, tc.sendBody)
+				default:
+					http.NotFound(w, r)
+				}
 			}))
 			defer brokerSrv.Close()
 

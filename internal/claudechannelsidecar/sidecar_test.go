@@ -425,13 +425,15 @@ func TestAvenorSendToolCall(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/poll-control":
 			_ = json.NewEncoder(w).Encode([]any{})
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
 		case "/send":
 			if err := json.NewDecoder(r.Body).Decode(&sentBody); err != nil {
 				t.Errorf("decode send: %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "outcome": "sent"})
 		default:
 			t.Errorf("unexpected broker path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -492,13 +494,15 @@ func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/poll-control":
 			_ = json.NewEncoder(w).Encode([]any{})
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
 		case "/send":
 			if err := json.NewDecoder(r.Body).Decode(&sentBody); err != nil {
 				t.Errorf("decode send: %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "outcome": "sent"})
 		default:
 			t.Errorf("unexpected broker path %s", r.URL.Path)
 			http.NotFound(w, r)

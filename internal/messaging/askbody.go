@@ -17,3 +17,16 @@ func AskBody(messageID, fromRunID, toRunID, message, role string) ([]byte, error
 		"expects_reply": true,
 	})
 }
+
+// SendBody builds the agent_message payload for a fire-and-forget message: both
+// run identities, the text the receiver renders and the role it displays. It
+// carries no reply expectation, so the broker allocates no edge.
+func SendBody(fromRunID, toRunID, message, role string) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"from":        fromRunID,
+		"from_run_id": fromRunID,
+		"to_run_id":   toRunID,
+		"message":     message,
+		"role":        role,
+	})
+}
