@@ -1178,3 +1178,18 @@ func TestStoreTemplateCrossProcessRaceHasOneWinner(t *testing.T) {
 		t.Fatalf("stored template holds node name %q, want the winner's %q", loaded.Nodes[0].Name, want)
 	}
 }
+
+func TestStore_StateFilesAreOwnerOnly(t *testing.T) {
+	s := newStore(t)
+	wf := WorkflowID("wf_perm")
+	mustInstantiate(t, s, wf)
+	for _, path := range []string{s.workflowPath(wf), s.eventsPath(wf)} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("%s mode = %o, want 600", path, perm)
+		}
+	}
+}
