@@ -263,7 +263,10 @@ func TestCachePermissionOptionsNoOptions(t *testing.T) {
 	}
 }
 
-func TestCloseClearsPermissionOptions(t *testing.T) {
+// TestCloseClearsCachedState pins what a closed provider stops answering for:
+// the sessions, runs and pending permissions it held before Close are gone
+// rather than left to fail against a client Close already closed.
+func TestCloseClearsCachedState(t *testing.T) {
 	p := &Provider{}
 	p.mu.Lock()
 	p.pendingOptions = map[string]map[string][]any{
@@ -273,16 +276,18 @@ func TestCloseClearsPermissionOptions(t *testing.T) {
 			},
 		},
 	}
+	p.sessions = map[string]*Session{"ses_pending": {}}
+	p.runIDs = map[string]string{"ses_pending": "run_pending"}
 	p.mu.Unlock()
 
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	p.mu.Lock()
-	gotLen := len(p.pendingOptions)
+	pending, sessions, runIDs := len(p.pendingOptions), len(p.sessions), len(p.runIDs)
 	p.mu.Unlock()
-	if gotLen != 0 {
-		t.Fatalf("Close should clear pending options, got %d entries", gotLen)
+	if pending != 0 || sessions != 0 || runIDs != 0 {
+		t.Fatalf("Close left %d pending options, %d sessions and %d run ids", pending, sessions, runIDs)
 	}
 }
 
@@ -897,13 +902,13 @@ func assertLaunchAbandoned(t *testing.T, p *Provider, started <-chan error, conf
 	select {
 	case err := <-started:
 		if !errors.Is(err, wantErr) {
-			t.Fatalf("Start error = %v, want %v", err, wantErr)
+			t.Fatalf("abandoned call error = %v, want %v", err, wantErr)
 		}
 		if wantErr != errProviderClosed && errors.Is(err, errProviderClosed) {
-			t.Fatalf("Start error = %v, want %v alone", err, wantErr)
+			t.Fatalf("abandoned call error = %v, want %v alone", err, wantErr)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("Start did not return after Close")
+		t.Fatal("abandoned call did not return after Close")
 	}
 	p.mu.Lock()
 	installed := p.client != nil || p.clientEnvCleanup != nil || len(p.sessions) != 0

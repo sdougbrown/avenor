@@ -129,22 +129,21 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	session.RunID = runID
 	session.BrokerToken = brokerToken
 
-	// Start the broker message polling goroutine if we have a broker and runID.
-	pollCtx, cancel := sessionPollContext(ctx, runID)
-
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
 		return runtime.Session{}, fmt.Errorf("%s: %w", p.backendID, errProviderClosed)
 	}
+	// A session with a run polls the broker for messages until Close or its
+	// caller is done; without a run there is nothing to poll.
+	pollCtx, cancel := context.WithCancel(ctx)
 	p.sessions[session.SessionID] = session
 	if runID != "" {
 		p.runIDs[session.SessionID] = runID
 		p.pollContexts[session.SessionID] = pollCtx
 		p.pollCancels[session.SessionID] = cancel
+	} else {
+		cancel()
 	}
 	p.mu.Unlock()
 
@@ -162,15 +161,6 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		Dir:       merged.Dir,
 		PID:       client.PID(),
 	}, nil
-}
-
-// sessionPollContext returns the context for a new session's broker poll, or a
-// nil pair when the session has no run to poll for.
-func sessionPollContext(ctx context.Context, runID string) (context.Context, context.CancelFunc) {
-	if runID == "" {
-		return nil, nil
-	}
-	return context.WithCancel(ctx)
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
@@ -426,10 +416,10 @@ func (p *Provider) Close() error {
 		select {
 		case <-idle:
 		case <-time.After(launchSettleTimeout):
-			// Drop the launch from the count instead of waiting the bound again
-			// on a later Close.
+			// Closing is latched, so no launch is admitted any more and the count
+			// never has to wake Close again: forgetting the idle channel is enough
+			// to keep a later Close from waiting out the bound once more.
 			p.mu.Lock()
-			p.launching = 0
 			p.launchIdle = nil
 			p.mu.Unlock()
 		}
