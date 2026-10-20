@@ -2091,7 +2091,10 @@ func (s *Supervisor) BrokerCancel(messageID string) error {
 
 // BrokerReceive drains inbound agent_message control messages (asks from
 // sub-agents) queued for the supervisor run, returning them structured so the
-// top-level Pi host can surface them in the session and reply.
+// top-level Pi host can surface them in the session and reply. It drains the
+// broker queue directly because that control method returns every queued agent
+// message in one call; Transport.Receive caps the batch at
+// messaging.DefaultReceiveLimit and requires a generation.
 func (s *Supervisor) BrokerReceive() (any, error) {
 	if s.broker == nil {
 		return nil, fmt.Errorf("broker not available")
