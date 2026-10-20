@@ -469,9 +469,8 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		// Auth: accept credentials in the JSON body (POST) or, for GET, in
-		// request headers. Query parameters remain for the channeltools,
-		// claude-channel sidecar and stable supervisor /sessions clients.
+		// Auth: credentials travel in the JSON body (POST) or, for GET, in
+		// request headers, never in the URL.
 		var cred struct {
 			RunID string `json:"run_id"`
 			Token string `json:"token"`
@@ -479,10 +478,6 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if r.Method == http.MethodGet {
 			cred.RunID = r.Header.Get(messaging.HeaderRunID)
 			cred.Token = r.Header.Get(messaging.HeaderRunToken)
-			if cred.RunID == "" || cred.Token == "" {
-				cred.RunID = r.URL.Query().Get("run_id")
-				cred.Token = r.URL.Query().Get("token")
-			}
 		} else {
 			const maxBody = 1 << 20 // 1 MiB
 			limited := io.LimitReader(r.Body, maxBody+1)

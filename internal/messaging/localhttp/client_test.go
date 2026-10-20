@@ -396,8 +396,13 @@ func assertFields(t *testing.T, label string, want []string, body map[string]any
 
 func rawGet(t *testing.T, addr, path string, creds messaging.LocalCredentials) (int, map[string]any) {
 	t.Helper()
-	url := "http://" + addr + path + "?run_id=" + creds.RunID + "&token=" + creds.Token
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+path, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	req.Header.Set(messaging.HeaderRunID, creds.RunID)
+	req.Header.Set(messaging.HeaderRunToken, creds.Token)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}

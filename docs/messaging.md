@@ -112,7 +112,9 @@ caller reports.
 
 Host endpoints authenticate with the `X-Avenor-Capability` and
 `X-Avenor-Secret` headers. Local endpoints authenticate with the caller's own
-run token, exactly as the rest of the local router does.
+run ID and token, exactly as the rest of the local router does: in the JSON
+body of a POST, and in the `X-Avenor-Run-Id` and `X-Avenor-Run-Token` headers
+of a GET. The router never reads credentials from the URL.
 
 ## Local adapter
 

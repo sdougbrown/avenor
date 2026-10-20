@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -301,10 +300,12 @@ func toolSchemas() []map[string]any {
 }
 
 func (s *Server) brokerGet(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.opts.BrokerURL+path+"?run_id="+url.QueryEscape(s.opts.RunID)+"&token="+url.QueryEscape(s.opts.Token), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.opts.BrokerURL+path, nil)
 	if err != nil {
 		return err
 	}
+	req.Header.Set(messaging.HeaderRunID, s.opts.RunID)
+	req.Header.Set(messaging.HeaderRunToken, s.opts.Token)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return err

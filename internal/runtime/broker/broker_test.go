@@ -1675,7 +1675,7 @@ func TestBrokerSessionsAdvertisesGeneration(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 
-	resp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=gen_reader&token=%s", b.Addr(), token))
+	resp, err := getSessions(b.Addr(), "gen_reader", token)
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
 	}
@@ -2032,8 +2032,18 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 		t.Fatalf("create run: %v", err)
 	}
 
+	// Credentials in the URL are not accepted: a GET authenticates by header.
+	queryResp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=sessions_user&token=%s", b.Addr(), token))
+	if err != nil {
+		t.Fatalf("sessions with query credentials: %v", err)
+	}
+	queryResp.Body.Close()
+	if queryResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("sessions with query credentials status = %d, want 401", queryResp.StatusCode)
+	}
+
 	// No sessions metadata set yet
-	resp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=sessions_user&token=%s", b.Addr(), token))
+	resp, err := getSessions(b.Addr(), "sessions_user", token)
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
 	}
@@ -2068,7 +2078,7 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 		Status:  "thinking",
 	})
 
-	resp2, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=sessions_user&token=%s", b.Addr(), token))
+	resp2, err := getSessions(b.Addr(), "sessions_user", token)
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
 	}
@@ -2378,7 +2388,7 @@ func TestBrokerSessionsLaunchName(t *testing.T) {
 	}
 
 	// A run registered without a label reports its run ID as its display name.
-	resp, err := http.Get(fmt.Sprintf("http://%s/sessions?run_id=no_info_run&token=%s", b.Addr(), token))
+	resp, err := getSessions(b.Addr(), "no_info_run", token)
 	if err != nil {
 		t.Fatalf("sessions: %v", err)
 	}
@@ -3249,4 +3259,15 @@ func pollControl(t *testing.T, addr, body string) []map[string]any {
 		t.Fatalf("decode poll-control: %v", err)
 	}
 	return msgs
+}
+
+// getSessions reads /sessions with the run's credentials in request headers.
+func getSessions(addr, runID, token string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/sessions", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(messaging.HeaderRunID, runID)
+	req.Header.Set(messaging.HeaderRunToken, token)
+	return http.DefaultClient.Do(req)
 }

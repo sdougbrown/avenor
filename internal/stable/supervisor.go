@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1980,11 +1979,12 @@ func (s *Supervisor) brokerGet(path string) ([]byte, error) {
 	if runID == "" {
 		return nil, fmt.Errorf("broker not available")
 	}
-	url := fmt.Sprintf("%s%s?run_id=%s&token=%s", s.brokerURL(), path, url.QueryEscape(runID), url.QueryEscape(token))
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequest(http.MethodGet, s.brokerURL()+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("broker %s: %w", path, err)
 	}
+	req.Header.Set(messaging.HeaderRunID, runID)
+	req.Header.Set(messaging.HeaderRunToken, token)
 	resp, err := s.brokerHTTPClientDo(req)
 	if err != nil {
 		return nil, fmt.Errorf("broker %s: %w", path, err)
