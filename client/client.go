@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 const maxSendToParentMessageBytes = 64 * 1024
@@ -994,6 +995,123 @@ func (c *Client) SendToParent(runtimeID, message string) error {
 		"message":    message,
 	}
 	return c.Call("send_to_parent", params, nil)
+}
+
+// MessageSend sends one message over the supervisor's own transport.
+func (c *Client) MessageSend(req messaging.SendRequest) (messaging.SendResult, error) {
+	var result control.MessageSendResult
+	if err := c.Call("message_send", control.NewMessageSendParams(req), &result); err != nil {
+		return messaging.SendResult{}, err
+	}
+	return result.SendResult(), nil
+}
+
+// MessageWait waits for the terminal state of one ask.
+func (c *Client) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
+	var result control.MessageWaitResult
+	wait := time.Duration(0)
+	if req.Timeout > 0 {
+		// The server ends the wait at the timeout; allow delivery margin.
+		wait = req.Timeout + 10*time.Second
+	}
+	if err := c.call("message_wait", control.NewMessageWaitParams(req), &result, wait); err != nil {
+		return messaging.WaitResult{}, err
+	}
+	return result.WaitResult(), nil
+}
+
+// MessageReply answers an ask.
+func (c *Client) MessageReply(req messaging.ReplyRequest) (messaging.SendResult, error) {
+	var result control.MessageSendResult
+	if err := c.Call("message_reply", control.NewMessageReplyParams(req), &result); err != nil {
+		return messaging.SendResult{}, err
+	}
+	return result.SendResult(), nil
+}
+
+// MessageWithdraw withdraws an outstanding ask.
+func (c *Client) MessageWithdraw(req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	var result control.MessageWithdrawResult
+	if err := c.Call("message_withdraw", control.NewMessageWithdrawParams(req), &result); err != nil {
+		return messaging.WithdrawResult{}, err
+	}
+	return result.WithdrawResult(), nil
+}
+
+// MessageReceive drains inbound messages.
+func (c *Client) MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	var result control.MessageReceiveResult
+	wait := time.Duration(0)
+	if req.Timeout > 0 {
+		wait = req.Timeout + 10*time.Second
+	}
+	if err := c.call("message_receive", control.NewMessageReceiveParams(req), &result, wait); err != nil {
+		return messaging.ReceiveResult{}, err
+	}
+	return result.ReceiveResult(), nil
+}
+
+// MessagePeers lists the peers visible to the supervisor session.
+func (c *Client) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult, error) {
+	var result control.MessagePeersResult
+	if err := c.Call("message_peers", control.NewMessagePeersParams(req), &result); err != nil {
+		return messaging.PeersResult{}, err
+	}
+	return result.PeersResult(), nil
+}
+
+// MessagePreflight reports the supervisor transport's protocol and generation.
+func (c *Client) MessagePreflight() (messaging.PreflightResult, error) {
+	var result control.MessagePreflightResult
+	if err := c.Call("message_preflight", nil, &result); err != nil {
+		return messaging.PreflightResult{}, err
+	}
+	return result.PreflightResult(), nil
+}
+
+// Resume continues a prior run in a new one.
+func (c *Client) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	var result control.ResumeResult
+	if err := c.Call("resume", control.ResumeParams{
+		RunID:          req.RunID,
+		Target:         req.Target,
+		Message:        req.Message,
+		Label:          req.Label,
+		IdempotencyKey: req.IdempotencyKey,
+		SentinelFile:   req.SentinelFile,
+		OnEvent:        req.EventLog,
+	}, &result); err != nil {
+		return messaging.ResumeResult{}, err
+	}
+	return result.ResumeResult(), nil
+}
+
+// SessionRename renames one run's display name.
+func (c *Client) SessionRename(sessionID, name string) (messaging.RenameResult, error) {
+	var result control.SessionRenameResult
+	if err := c.Call("session_rename", control.SessionRenameParams{SessionID: sessionID, Name: name}, &result); err != nil {
+		return messaging.RenameResult{}, err
+	}
+	return result.RenameResult(), nil
+}
+
+// SessionLast reads a run's recorded last turn.
+func (c *Client) SessionLast(runtimeID string) (messaging.PeerLast, error) {
+	var result control.SessionLastResult
+	if err := c.Call("session_last", control.SessionLastParams{RuntimeID: runtimeID}, &result); err != nil {
+		return messaging.PeerLast{}, err
+	}
+	return result.PeerLast(), nil
+}
+
+// SessionLastSet publishes the supervisor session's last turn.
+func (c *Client) SessionLastSet(runtimeID, finalOutput, stopReason string, truncated bool) error {
+	return c.Call("session_last_set", control.SessionLastSetParams{
+		RuntimeID:   runtimeID,
+		FinalOutput: finalOutput,
+		StopReason:  stopReason,
+		Truncated:   truncated,
+	}, nil)
 }
 
 // ValidateOwnerRecord requires socketPath to be the socket record names, so an

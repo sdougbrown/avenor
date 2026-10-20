@@ -23,6 +23,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
@@ -129,6 +130,13 @@ type StableHandler interface {
 	BrokerCancel(messageID string) error
 	BrokerReceive() (any, error)
 	BrokerReply(toRunID, replyTo, message string) error
+
+	// The typed messaging methods delegate to the supervisor's own transport.
+	MessageTransport() (messaging.Transport, error)
+	Resume(caller messaging.Caller, req messaging.ResumeRequest) (messaging.ResumeResult, error)
+	SessionRename(caller messaging.Caller, sessionID, name string) (messaging.RenameResult, error)
+	SessionLast(runtimeID string) (broker.LastAgentMessage, bool, error)
+	SessionLastSet(caller messaging.Caller, runtimeID, finalOutput, stopReason string, truncated bool) error
 
 	// TreeBudgetStatus reports tree-budget diagnostics. A supervisor without an
 	// active budget returns a degraded status map with its reason.
@@ -1721,6 +1729,201 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
 		if err := s.stableHandler.BrokerReply(p.ToRunID, p.ReplyTo, p.Message); err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, map[string]any{"ok": true})
+	case "message_send":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p MessageSendParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		tr, err := s.stableHandler.MessageTransport()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		res, err := tr.Send(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, res.MessageID))
+		}
+		return success(req.ID, newMessageSendResult(res))
+	case "message_wait":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p MessageWaitParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		tr, err := s.stableHandler.MessageTransport()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		res, err := tr.Wait(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, p.MessageID))
+		}
+		return success(req.ID, newMessageWaitResult(res))
+	case "message_reply":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p MessageReplyParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		tr, err := s.stableHandler.MessageTransport()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		res, err := tr.Reply(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, res.MessageID))
+		}
+		return success(req.ID, newMessageSendResult(res))
+	case "message_withdraw":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p MessageWithdrawParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		tr, err := s.stableHandler.MessageTransport()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		res, err := tr.Withdraw(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, p.MessageID))
+		}
+		return success(req.ID, newMessageWithdrawResult(res))
+	case "message_receive":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		var p MessageReceiveParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		tr, err := s.stableHandler.MessageTransport()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		res, err := tr.Receive(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		return success(req.ID, newMessageReceiveResult(res))
+	case "message_peers":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		var p MessagePeersParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		tr, err := s.stableHandler.MessageTransport()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		res, err := tr.Peers(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		return success(req.ID, newMessagePeersResult(res))
+	case "message_preflight":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		tr, err := s.stableHandler.MessageTransport()
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		res, err := tr.Preflight(c.ctx)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		return success(req.ID, newMessagePreflightResult(res))
+	case "resume":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p ResumeParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		res, err := s.stableHandler.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+			RunID:          p.RunID,
+			Target:         p.Target,
+			Message:        p.Message,
+			Label:          p.Label,
+			IdempotencyKey: p.IdempotencyKey,
+			SentinelFile:   p.SentinelFile,
+			EventLog:       p.OnEvent,
+		})
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, newResumeResult(res))
+	case "session_rename":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p SessionRenameParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		res, err := s.stableHandler.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.SessionID, p.Name)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, newSessionRenameResult(res))
+	case "session_last":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		var p SessionLastParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		record, ok, err := s.stableHandler.SessionLast(p.RuntimeID)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, newSessionLastResult(record, ok))
+	case "session_last_set":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p SessionLastSetParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		if err := s.stableHandler.SessionLastSet(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.RuntimeID, p.FinalOutput, p.StopReason, p.Truncated); err != nil {
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
 		return success(req.ID, map[string]any{"ok": true})
