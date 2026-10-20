@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -293,14 +294,21 @@ type blockingWaitTransport struct {
 	entered     chan struct{}
 	enteredOnce sync.Once
 	release     chan struct{}
+	// canceled is closed when the parked wait ends through its context
+	// instead of the release, which is how a disconnect is observed.
+	canceled chan struct{}
 }
 
 func (b *blockingWaitTransport) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	b.waitReq = req
 	b.enteredOnce.Do(func() { close(b.entered) })
 	select {
 	case <-b.release:
 		return messaging.WaitResult{Outcome: messaging.OutcomeTimedOut}, nil
 	case <-ctx.Done():
+		if b.canceled != nil {
+			close(b.canceled)
+		}
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, ctx.Err()
 	}
 }
@@ -346,55 +354,109 @@ func TestMessageWaitDoesNotBlockConnection(t *testing.T) {
 	}
 }
 
-// TestMessageRPCNonMessagingErrorData pins the authority verbs' error.data:
-// outcome and wire_code describe an ask transport, so these verbs report the
-// typed code and nothing that would claim a send happened.
-func TestMessageRPCNonMessagingErrorData(t *testing.T) {
+// TestMessageWaitClampsTimeout pins the server-side ceiling: a wire timeout
+// above maxAskTimeoutMS reaches the transport as the ceiling, so the wait
+// expires on the server with structured data instead of racing the ask store's
+// own timeout.
+func TestMessageWaitClampsTimeout(t *testing.T) {
+	tr := &recordingTransport{waitRes: messaging.WaitResult{Outcome: messaging.OutcomeTimedOut}}
 	state := NewState("run_1", "", 0)
 	s, cap := NewTestServer(state)
-	s.SetStableHandler(&mockStableHandler{
-		resumeErr:  &router.ToolError{Code: "not_resumable", Message: "run is not resumable"},
-		renameErr:  &router.ToolError{Code: "invalid_name", Message: "bad name"},
-		lastErr:    &router.ToolError{Code: "unknown_target", Message: `no run matches "rt_ghost"`},
-		lastSetErr: &router.ToolError{Code: "not_permitted", Message: "denied"},
-	})
+	s.SetStableHandler(&mockStableHandler{messageTransport: tr})
 	path := testSocketPath(t)
 	if err := s.Start(path); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer s.Stop()
 
-	owner := dialOwner(t, s, cap)
-	defer owner.Close()
+	c := dialOwner(t, s, cap)
+	defer c.Close()
 
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 2, Method: "message_wait", Params: json.RawMessage(`{"message_id":"m1","generation":"g","timeout_ms":100000000}`)})
+	if resp := readRespForID(t, c, 2); resp.Error != nil {
+		t.Fatalf("message_wait: %+v", resp.Error)
+	}
+	if want := time.Duration(maxAskTimeoutMS) * time.Millisecond; tr.waitReq.Timeout != want {
+		t.Fatalf("transport timeout = %v, want the server ceiling %v", tr.waitReq.Timeout, want)
+	}
+}
+
+// TestMessageWaitDisconnectCancels pins the wait's lifetime: it is bound to the
+// connection context, so a client that goes away must not leave a parked
+// transport wait behind.
+func TestMessageWaitDisconnectCancels(t *testing.T) {
+	tr := &blockingWaitTransport{
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s, cap := NewTestServer(state)
+	s.SetStableHandler(&mockStableHandler{messageTransport: tr})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := dialOwner(t, s, cap)
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 2, Method: "message_wait", Params: json.RawMessage(`{"message_id":"m1","generation":"g"}`)})
+	select {
+	case <-tr.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("message_wait never reached the transport")
+	}
+
+	c.Close()
+	select {
+	case <-tr.canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the parked wait outlived the connection")
+	}
+}
+
+// TestMessageWaitSlotRelease pins the per-connection slot accounting: every
+// completed wait returns its slot on both the answer and the failure path, so a
+// connection is never wedged by its own history.
+func TestMessageWaitSlotRelease(t *testing.T) {
 	for _, tc := range []struct {
-		id     uint64
-		method string
-		params string
-		code   string
+		name    string
+		waitErr error
 	}{
-		{id: 2, method: "resume", params: `{"run_id":"run_3","target":"rt_1","message":"again"}`, code: "not_resumable"},
-		{id: 3, method: "session_rename", params: `{"session_id":"supervisor","name":"main"}`, code: "invalid_name"},
-		{id: 4, method: "session_last", params: `{"runtime_id":"rt_ghost"}`, code: "unknown_target"},
-		{id: 5, method: "session_last_set", params: `{"runtime_id":"supervisor","final_output":"x"}`, code: "not_permitted"},
+		{name: "answered"},
+		{name: "failed", waitErr: messaging.ErrTransportClosed},
 	} {
-		_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: tc.id, Method: tc.method, Params: json.RawMessage(tc.params)})
-		resp := readRespForID(t, owner, tc.id)
-		if resp.Error == nil {
-			t.Fatalf("%s: no error", tc.method)
-		}
-		data, ok := resp.Error.Data.(map[string]any)
-		if !ok {
-			t.Fatalf("%s error.data = %#v", tc.method, resp.Error.Data)
-		}
-		if data["code"] != tc.code {
-			t.Errorf("%s code = %v, want %s", tc.method, data["code"], tc.code)
-		}
-		for _, field := range []string{"outcome", "wire_code", "message_id"} {
-			if value, ok := data[field]; ok {
-				t.Errorf("%s error.data carries %s=%v", tc.method, field, value)
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &recordingTransport{
+				waitRes: messaging.WaitResult{Outcome: messaging.OutcomeTimedOut},
+				waitErr: tc.waitErr,
 			}
-		}
+			state := NewState("run_1", "", 0)
+			s, cap := NewTestServer(state)
+			s.SetStableHandler(&mockStableHandler{messageTransport: tr})
+			path := testSocketPath(t)
+			if err := s.Start(path); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			defer s.Stop()
+
+			c := dialOwner(t, s, cap)
+			defer c.Close()
+
+			// One more than the connection allows in flight: sequential waits
+			// must never hit the slot refusal if each releases its slot.
+			for i := 0; i <= maxInflightAsksPerConn; i++ {
+				id := uint64(i + 2)
+				_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: id, Method: "message_wait", Params: json.RawMessage(`{"message_id":"m1","generation":"g","timeout_ms":1}`)})
+				resp := readRespForID(t, c, id)
+				if resp.Error != nil && strings.Contains(resp.Error.Message, "too many in-flight") {
+					t.Fatalf("wait %d hit the slot refusal; a completed wait leaked its slot", i+1)
+				}
+				if tc.waitErr != nil && resp.Error == nil {
+					t.Fatalf("wait %d = %+v, want the transport error", i+1, resp)
+				}
+			}
+		})
 	}
 }
 
@@ -487,5 +549,57 @@ func TestMessageReceiveTimeoutContract(t *testing.T) {
 	}
 	if len(tr.calls) != 1 {
 		t.Fatalf("negative timeout reached the transport: calls = %v", tr.calls)
+	}
+}
+
+// TestMessageRPCNonMessagingErrorData pins the authority verbs' error.data:
+// outcome and wire_code describe an ask transport, so these verbs report the
+// typed code and nothing that would claim a send happened.
+func TestMessageRPCNonMessagingErrorData(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s, cap := NewTestServer(state)
+	s.SetStableHandler(&mockStableHandler{
+		resumeErr:  &router.ToolError{Code: "not_resumable", Message: "run is not resumable"},
+		renameErr:  &router.ToolError{Code: "invalid_name", Message: "bad name"},
+		lastErr:    &router.ToolError{Code: "unknown_target", Message: `no run matches "rt_ghost"`},
+		lastSetErr: &router.ToolError{Code: "not_permitted", Message: "denied"},
+	})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	owner := dialOwner(t, s, cap)
+	defer owner.Close()
+
+	for _, tc := range []struct {
+		id     uint64
+		method string
+		params string
+		code   string
+	}{
+		{id: 2, method: "resume", params: `{"run_id":"run_3","target":"rt_1","message":"again"}`, code: "not_resumable"},
+		{id: 3, method: "session_rename", params: `{"session_id":"supervisor","name":"main"}`, code: "invalid_name"},
+		{id: 4, method: "session_last", params: `{"runtime_id":"rt_ghost"}`, code: "unknown_target"},
+		{id: 5, method: "session_last_set", params: `{"runtime_id":"supervisor","final_output":"x"}`, code: "not_permitted"},
+	} {
+		_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: tc.id, Method: tc.method, Params: json.RawMessage(tc.params)})
+		resp := readRespForID(t, owner, tc.id)
+		if resp.Error == nil {
+			t.Fatalf("%s: no error", tc.method)
+		}
+		data, ok := resp.Error.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("%s error.data = %#v", tc.method, resp.Error.Data)
+		}
+		if data["code"] != tc.code {
+			t.Errorf("%s code = %v, want %s", tc.method, data["code"], tc.code)
+		}
+		for _, field := range []string{"outcome", "wire_code", "message_id"} {
+			if value, ok := data[field]; ok {
+				t.Errorf("%s error.data carries %s=%v", tc.method, field, value)
+			}
+		}
 	}
 }
