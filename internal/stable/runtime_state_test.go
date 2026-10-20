@@ -1,9 +1,11 @@
 package stable
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,55 +48,141 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// TestSupervisorStartupPrunesStaleArtifactDirectories proves the retention
-// policy of the default artifact tree: startup removes a run directory whose
-// newest entry is older than the retention window, keeps a fresh one, and
-// never follows a symlink out of the tree.
-func TestSupervisorStartupPrunesStaleArtifactDirectories(t *testing.T) {
-	root := artifactRoot()
-	if err := os.MkdirAll(root, 0o700); err != nil {
+// TestPruneArtifactDirs covers the retention policy of the per-user artifact
+// root: a stale run directory is removed, a fresh one is kept, and an entry
+// that is not a run directory is never a candidate.
+func TestPruneArtifactDirs(t *testing.T) {
+	root, err := ensureArtifactRoot()
+	if err != nil {
 		t.Fatal(err)
 	}
-	staleRun := filepath.Join(root, "run_stale")
-	freshRun := filepath.Join(root, "run_fresh")
-	outside := filepath.Join(t.TempDir(), "outside")
-	for _, dir := range []string{staleRun, freshRun, outside} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(freshRun) })
-	staleSentinel := filepath.Join(staleRun, "sentinel.env")
-	if err := os.WriteFile(staleSentinel, []byte("status=DONE\n"), 0o600); err != nil {
+	if info, err := os.Stat(root); err != nil {
 		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(freshRun, "sentinel.env"), []byte("status=DONE\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	outsideFile := filepath.Join(outside, "keep.env")
-	if err := os.WriteFile(outsideFile, []byte("keep\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(staleRun, "linked-run")); err != nil {
-		t.Fatal(err)
-	}
-	stale := time.Now().Add(-artifactRetention - time.Hour)
-	for _, path := range []string{staleSentinel, staleRun} {
-		if err := os.Chtimes(path, stale, stale); err != nil {
-			t.Fatal(err)
-		}
+	} else if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("artifact root mode = %04o, want 0700", got)
 	}
 
-	newTestSupervisor(t, Config{Stderr: io.Discard, MaxRuntimes: 1})
+	cases := []struct {
+		name     string
+		entry    string
+		modTime  time.Time
+		wantKept bool
+	}{
+		{"stale run directory", "run_stale", time.Now().Add(-artifactRetention - time.Hour), false},
+		{"fresh run directory", "run_fresh", time.Now(), true},
+		{"not a run directory", "stale_elsewhere", time.Now().Add(-artifactRetention - time.Hour), true},
+	}
+	for _, tc := range cases {
+		dir := filepath.Join(root, tc.entry)
+		writeArtifactRun(t, dir, tc.modTime)
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	}
 
-	if _, err := os.Stat(staleRun); !os.IsNotExist(err) {
-		t.Fatalf("stale run directory after startup: %v", err)
+	sup := newTestSupervisor(t, Config{Stderr: io.Discard, MaxRuntimes: 1})
+	sup.pruneArtifactDirs()
+
+	for _, tc := range cases {
+		_, err := os.Stat(filepath.Join(root, tc.entry))
+		if kept := err == nil; kept != tc.wantKept {
+			t.Fatalf("%s: kept = %v, want %v (err %v)", tc.name, kept, tc.wantKept, err)
+		}
 	}
-	if _, err := os.Stat(filepath.Join(freshRun, "sentinel.env")); err != nil {
-		t.Fatalf("fresh run directory after startup: %v", err)
+}
+
+// TestPruneArtifactDirsKeepsLiveRunDirectory proves the liveness signal: a run
+// directory whose modification time alone says stale survives because its
+// supervisor refreshes it before pruning.
+func TestPruneArtifactDirsKeepsLiveRunDirectory(t *testing.T) {
+	sup := newTestSupervisor(t, Config{Stderr: io.Discard, MaxRuntimes: 1})
+	dir := artifactRunDir(sup.runID)
+	writeArtifactRun(t, dir, time.Now().Add(-artifactRetention-time.Hour))
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	sup.touchArtifactRunDir()
+	sup.pruneArtifactDirs()
+
+	if _, err := os.Stat(filepath.Join(dir, "sentinel.env")); err != nil {
+		t.Fatalf("live run directory after prune: %v", err)
 	}
-	if _, err := os.Stat(outsideFile); err != nil {
-		t.Fatalf("artifacts outside the tree after startup: %v", err)
+}
+
+// TestArtifactRootRefusal pins the roots retention refuses: one another user
+// pre-created as a symlink, and one left group-writable. Neither is read or
+// pruned, a spawn that needs the default paths fails naming the root, and the
+// refusal is reported once instead of on every hourly pass.
+func TestArtifactRootRefusal(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, root string) string
+	}{
+		{
+			name: "symlinked root",
+			prepare: func(t *testing.T, root string) string {
+				target := t.TempDir()
+				if err := os.Symlink(target, root); err != nil {
+					t.Fatal(err)
+				}
+				return target
+			},
+		},
+		{
+			name: "group writable root",
+			prepare: func(t *testing.T, root string) string {
+				if err := os.Mkdir(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(root, 0o770); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := artifactRoot()
+			if err := os.RemoveAll(root); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(root) })
+			victim := filepath.Join(tc.prepare(t, root), "run_victim")
+			writeArtifactRun(t, victim, time.Now().Add(-artifactRetention-time.Hour))
+
+			if _, err := ensureArtifactRoot(); err == nil || !strings.Contains(err.Error(), root) {
+				t.Fatalf("ensureArtifactRoot error = %v, want one naming %s", err, root)
+			}
+
+			var stderr bytes.Buffer
+			sup := newTestSupervisor(t, Config{Stderr: &stderr, MaxRuntimes: 1})
+			sup.touchArtifactRunDir()
+			sup.pruneArtifactDirs()
+			sup.pruneArtifactDirs()
+
+			if _, err := os.Stat(filepath.Join(victim, "sentinel.env")); err != nil {
+				t.Fatalf("run directory under a refused root was touched: %v", err)
+			}
+			if got := strings.Count(stderr.String(), "artifact retention disabled"); got != 1 {
+				t.Fatalf("refusal diagnostics = %d, want 1: %q", got, stderr.String())
+			}
+		})
+	}
+}
+
+// writeArtifactRun creates a run directory holding one artifact and sets the
+// modification times the retention policy reads.
+func writeArtifactRun(t *testing.T, dir string, modTime time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(dir, "sentinel.env")
+	if err := os.WriteFile(sentinel, []byte("status=DONE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{sentinel, dir} {
+		if err := os.Chtimes(path, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

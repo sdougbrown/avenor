@@ -665,6 +665,10 @@ type Supervisor struct {
 	reaperStop     chan struct{}
 	reaperDone     chan struct{}
 	reaperInterval time.Duration
+	// Artifact retention reports a broken root and a denied path once each: the
+	// prune runs hourly, so the same failure would otherwise repeat forever.
+	artifactRootWarn       sync.Once
+	artifactPermissionWarn sync.Once
 	// capacityMu guards capacityCh, a broadcast channel closed (and replaced) on
 	// every tree-budget release so callers waiting for capacity can retry. It
 	// does not schedule or prioritize work.
@@ -734,7 +738,6 @@ func NewSupervisor(cfg Config) *Supervisor {
 	sup.newProviderFunc = factory.NewProvider
 	sup.permissions = newPermissionRouter(supervisorPermissionHost{sup: sup}, sup.control, &sup.testHooks)
 	sup.initTreeBudget()
-	sup.pruneArtifactDirs()
 	return sup
 }
 
@@ -814,6 +817,13 @@ func (s *Supervisor) Run() (exitCode int) {
 	s.startReaper()
 	defer s.stopReaper()
 	defer s.stopControllerLoops()
+
+	// Artifact retention keeps this supervisor's run directory fresh and prunes
+	// the run directories of supervisors that are gone. The first pass runs off
+	// the startup path so a large tree never delays the control socket.
+	stopArtifactRetention := make(chan struct{})
+	go s.runArtifactRetention(stopArtifactRetention)
+	defer close(stopArtifactRetention)
 
 	// Exactly-once startup barrier: when durable workflow or controller state
 	// already exists, recover it before any leader activity; otherwise the
@@ -1635,19 +1645,21 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		return SpawnResult{}, fmt.Errorf("prompt, prompt_file, loop_file, or team_file is required")
 	}
 
-	// Per-runtime artifact directory.
-	artifactDir := filepath.Join(artifactRoot(), s.runID, rtID)
-	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
-		return SpawnResult{}, fmt.Errorf("create artifact dir: %w", err)
-	}
-
+	// Per-runtime artifact directory. Only a spawn that relies on a default
+	// path needs the artifact root; a caller-supplied pair never touches it.
 	onEvent := params.OnEvent
-	if onEvent == "" {
-		onEvent = filepath.Join(artifactDir, "events.ndjson")
-	}
 	sentinelFile := params.SentinelFile
-	if sentinelFile == "" {
-		sentinelFile = filepath.Join(artifactDir, "sentinel.env")
+	if onEvent == "" || sentinelFile == "" {
+		artifactDir, err := createArtifactRunDir(s.runID, rtID)
+		if err != nil {
+			return SpawnResult{}, err
+		}
+		if onEvent == "" {
+			onEvent = filepath.Join(artifactDir, "events.ndjson")
+		}
+		if sentinelFile == "" {
+			sentinelFile = filepath.Join(artifactDir, "sentinel.env")
+		}
 	}
 
 	// Create event writer for this runtime.
