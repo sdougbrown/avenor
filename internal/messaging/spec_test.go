@@ -89,6 +89,11 @@ func TestRepairTemplates(t *testing.T) {
 			want:  `property "timeout_ms" must be at most 600000`,
 		},
 		{
+			code:  "integer_too_small",
+			facts: map[string]string{"name": `"timeout_ms"`, "min": "0"},
+			want:  `property "timeout_ms" must be at least 0`,
+		},
+		{
 			code:  "peers_invalid_action",
 			facts: map[string]string{},
 			want:  `not a known action (list, rename, last)`,

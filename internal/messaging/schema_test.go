@@ -195,6 +195,11 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 				if got, _ := property["pattern"].(string); got != constraint.Pattern {
 					t.Fatalf("%s/%s: property %q schema pattern = %q, table = %q", fixture.name, action, name, got, constraint.Pattern)
 				}
+				if got, declared := schemaInt(property["minimum"]), property["minimum"] != nil; declared != constraint.HasMinimum {
+					t.Fatalf("%s/%s: property %q schema minimum present = %t, table = %t", fixture.name, action, name, declared, constraint.HasMinimum)
+				} else if int64(got) != constraint.Minimum {
+					t.Fatalf("%s/%s: property %q schema minimum = %d, table = %d", fixture.name, action, name, got, constraint.Minimum)
+				}
 				if got := schemaInt(property["maximum"]); int64(got) != constraint.Maximum {
 					t.Fatalf("%s/%s: property %q schema maximum = %d, table = %d", fixture.name, action, name, got, constraint.Maximum)
 				}

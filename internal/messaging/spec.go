@@ -18,12 +18,15 @@ type ActionApplicability struct {
 
 // PropertyConstraints is one property's declared limits, compiled from the
 // published JSON Schema so the router and the schema enforce the same rule from
-// one declaration. A zero length or maximum means no limit.
+// one declaration. A zero length or maximum means no limit; HasMinimum keeps a
+// declared minimum of zero distinct from an absent one.
 type PropertyConstraints struct {
-	MinLength int
-	MaxLength int
-	Pattern   string
-	Maximum   int64 // inclusive upper bound for an integer property
+	MinLength  int
+	MaxLength  int
+	Pattern    string
+	Minimum    int64 // inclusive lower bound for an integer property
+	HasMinimum bool
+	Maximum    int64 // inclusive upper bound for an integer property
 }
 
 // ConformanceCase is one language-neutral conformance case from

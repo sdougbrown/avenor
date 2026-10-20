@@ -41,8 +41,9 @@
         },
         "timeout_ms": {
           "type": "integer",
+          "minimum": 0,
           "maximum": 600000,
-          "description": "Bounded wait in whole milliseconds, at most the shared wait cap (600000); absent or zero uses the shared wait cap."
+          "description": "Bounded wait in whole milliseconds, at least zero and at most the shared wait cap (600000); absent or zero uses the shared wait cap."
         }
       },
       "required": ["action", "target", "message"],
