@@ -247,8 +247,16 @@ type directPermissionReservation struct {
 }
 
 type childRuntime struct {
-	id               string
-	label            string
+	id string
+	// label is the display name the run was launched under. It is written
+	// before the runtime is published and never rewritten: event metadata,
+	// provider label environment and launch provenance describe the launch.
+	label string
+	// displayName is the run's current display name, the one messaging peers
+	// see. A spawn sets it and applySessionName rewrites it under
+	// s.controlMu -> child.mu, the locks List, RuntimeStatus and
+	// labelHolderLocked read it under.
+	displayName      string
 	agent            string
 	agentProfile     string
 	model            string
@@ -1459,7 +1467,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 func (s *Supervisor) labelHolderLocked(label string) string {
 	for _, child := range s.runtimes {
 		child.mu.Lock()
-		holding := child.label == label && !child.lc.isCompleted()
+		holding := child.displayName == label && !child.lc.isCompleted()
 		child.mu.Unlock()
 		if holding {
 			return child.id
@@ -1568,9 +1576,10 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// written without child.mu afterwards.
 	child := &childRuntime{
 		id: rtID,
-		// The label is visible under s.controlMu at the moment the child
+		// The labels are visible under s.controlMu at the moment the child
 		// becomes visible to the label scans.
 		label:                    params.Label,
+		displayName:              params.Label,
 		agent:                    params.Agent,
 		agentProfile:             params.AgentProfile,
 		model:                    params.Model,
@@ -4108,7 +4117,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"runtime_id":         rt.id,
 			"session_id":         rt.session.SessionID,
 			"run_id":             rt.runID,
-			"label":              rt.label,
+			"label":              rt.displayName,
 			"agent":              identity.Agent,
 			"agent_profile":      identity.AgentProfile,
 			"model":              identity.Model,
@@ -5214,7 +5223,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"runtime_id":         rt.id,
 		"session_id":         rt.session.SessionID,
 		"run_id":             rt.runID,
-		"label":              rt.label,
+		"label":              rt.displayName,
 		"agent":              identity.Agent,
 		"agent_profile":      identity.AgentProfile,
 		"model":              identity.Model,

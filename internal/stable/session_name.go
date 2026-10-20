@@ -17,8 +17,8 @@ const (
 
 // SessionRename is the only place a rename is authorized. It validates the
 // name, resolves the target, applies the caller's level, persists through
-// Broker.RenameRun (the one display-name writer), and publishes
-// session.renamed after the write.
+// Broker.RenameRun (the one display-name writer) together with the runtime
+// registry's copy, and publishes session.renamed after the write.
 func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name string) (messaging.RenameResult, error) {
 	if !messaging.ValidSessionName(name) {
 		return messaging.RenameResult{}, &router.ToolError{
@@ -49,13 +49,36 @@ func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name stri
 	}
 
 	previous := s.broker.DisplayName(runID)
-	if err := s.broker.RenameRun(runID, name); err != nil {
+	renamed, err := s.applySessionName(runID, name)
+	if err != nil {
 		return messaging.RenameResult{}, err
 	}
 	// Persist then event: an event failure never rolls the name back, and a
 	// persist failure above publishes nothing.
-	s.publishSessionRenamed(runID, name, previous, actor)
-	return messaging.RenameResult{RunID: runID, Label: s.broker.DisplayName(runID), PreviousLabel: previous}, nil
+	s.publishSessionRenamed(runID, renamed, previous, actor)
+	return messaging.RenameResult{RunID: runID, Label: renamed, PreviousLabel: previous}, nil
+}
+
+// applySessionName writes one display name to both stores that carry it: the
+// broker's SessionInfo.Label and, for a locally owned run, the child runtime's
+// displayName. Both writes happen under s.controlMu, which labelHolderLocked,
+// List and RuntimeStatus also hold while they read displayName, so a reader
+// never sees the new broker name beside the old runtime name and a concurrent
+// keyed spawn sees the old name held or the new name held, never both free. The
+// supervisor session is broker-only: it has no child runtime to update.
+func (s *Supervisor) applySessionName(runID, name string) (string, error) {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	if err := s.broker.RenameRun(runID, name); err != nil {
+		return "", err
+	}
+	renamed := s.broker.DisplayName(runID)
+	if child := s.runtimes[runID]; child != nil {
+		child.mu.Lock()
+		child.displayName = renamed
+		child.mu.Unlock()
+	}
+	return renamed, nil
 }
 
 // resolveRenameTarget resolves a rename target through the one resolution

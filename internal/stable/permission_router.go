@@ -141,7 +141,7 @@ func (h supervisorPermissionHost) routeTarget(runtimeID, requestID string) (*per
 		decider:  rt.permissionDecider,
 		model:    rt.modelDecider,
 		modelKey: rt.modelDeciderKey,
-		label:    rt.label,
+		label:    rt.displayName,
 		ctx:      rt.lifecycleCtx,
 	}, routed
 }

@@ -2,6 +2,7 @@ package stable
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -195,6 +196,104 @@ func TestSessionRenameThenSendDelivers(t *testing.T) {
 	if queued := brokertest.WaitForAgentMessage(t, sup.broker, "rt_c"); queued.Sender != "main" {
 		t.Fatalf("in-process sender = %q, want the new display name", queued.Sender)
 	}
+}
+
+// TestSessionRenameUpdatesRuntimeLabel pins that a rename reaches every surface
+// that reports or reserves a run's name: status, list, MCP label resolution, the
+// messaging plane, and the label reservation a keyed spawn checks.
+func TestSessionRenameUpdatesRuntimeLabel(t *testing.T) {
+	const spawnLabel, renamedLabel = "spawn-name", "renamed-name"
+	sup, _ := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	child, err := renameTestSpawn(t, sup, dir, spawnLabel, "rename-child")
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if _, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: child.RuntimeID}, "", renamedLabel); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	status, err := sup.RuntimeStatus(child.RuntimeID)
+	if err != nil {
+		t.Fatalf("RuntimeStatus: %v", err)
+	}
+	if got := status.(map[string]any)["label"]; got != renamedLabel {
+		t.Fatalf("status label = %v, want %q", got, renamedLabel)
+	}
+
+	list := sup.List()
+	entries, ok := list.([]map[string]any)
+	if !ok {
+		t.Fatalf("List = %T, want entries", list)
+	}
+	listed := ""
+	for _, entry := range entries {
+		if entry["runtime_id"] == child.RuntimeID {
+			listed, _ = entry["label"].(string)
+		}
+	}
+	if listed != renamedLabel {
+		t.Fatalf("list label = %q, want %q", listed, renamedLabel)
+	}
+	// The control list's label field is what an MCP tool call by name resolves
+	// against, and the messaging plane resolves the same name.
+	if got := listLabelMatch(entries, renamedLabel); got != child.RuntimeID {
+		t.Fatalf("label resolution for %q = %q, want %q", renamedLabel, got, child.RuntimeID)
+	}
+	if got := listLabelMatch(entries, spawnLabel); got != "" {
+		t.Fatalf("label resolution for the old name %q = %q, want none", spawnLabel, got)
+	}
+	if got := sup.broker.MatchLabel(renamedLabel); len(got) != 1 || got[0] != child.RuntimeID {
+		t.Fatalf("broker match for %q = %v", renamedLabel, got)
+	}
+	if got := sup.broker.MatchLabel(spawnLabel); len(got) != 0 {
+		t.Fatalf("broker match for the old name %q = %v, want none", spawnLabel, got)
+	}
+
+	// The rename releases the old name and reserves the new one: a keyed spawn
+	// may take the old name, and one asking for the new name is rejected.
+	if _, err := renameTestSpawn(t, sup, dir, spawnLabel, "rename-reuse-old"); err != nil {
+		t.Fatalf("spawn under the released name: %v", err)
+	}
+	_, err = renameTestSpawn(t, sup, dir, renamedLabel, "rename-reuse-new")
+	if err == nil || !strings.Contains(err.Error(), "label already in use: "+renamedLabel) {
+		t.Fatalf("spawn under the renamed runtime's name = %v, want label already in use", err)
+	}
+}
+
+// renameTestSpawn starts one keyed runtime, the path that reserves a label.
+func renameTestSpawn(t *testing.T, sup *Supervisor, dir, label, key string) (SpawnResult, error) {
+	t.Helper()
+	raw, err := json.Marshal(SpawnParams{Prompt: "go", Dir: dir, Agent: "claude", Label: label, IdempotencyKey: key})
+	if err != nil {
+		t.Fatalf("marshal spawn params: %v", err)
+	}
+	out, err := sup.Spawn(raw)
+	if err != nil {
+		return SpawnResult{}, err
+	}
+	res, ok := out.(SpawnResult)
+	if !ok {
+		t.Fatalf("Spawn result = %#v, want SpawnResult", out)
+	}
+	return res, nil
+}
+
+// listLabelMatch mirrors the label rung of the MCP run lookup: a control list
+// entry's label field is what a tool call by name resolves against, and only a
+// unique match resolves.
+func listLabelMatch(entries []map[string]any, label string) string {
+	matched := ""
+	for _, entry := range entries {
+		if entry["label"] != label {
+			continue
+		}
+		if matched != "" {
+			return ""
+		}
+		matched, _ = entry["runtime_id"].(string)
+	}
+	return matched
 }
 
 func TestSessionLastRecordsSupervisorOnly(t *testing.T) {
