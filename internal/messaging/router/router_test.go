@@ -549,10 +549,12 @@ func assertRequest(t *testing.T, c messaging.ConformanceCase, provider *fakeProv
 			t.Fatalf("withdraw generation = %q, want gen-7", provider.withdrew.Generation)
 		}
 	case "control_reply":
-		if want := stringOf(request["target"]); want != "" && provider.controlTo != want {
+		expected := objectOf(c.Provider["control_reply"])
+		controlRequest := objectOf(expected["request"])
+		if want := stringOf(controlRequest["target"]); want != "" && provider.controlTo != want {
 			t.Fatalf("control_reply target = %q, want %q", provider.controlTo, want)
 		}
-		if expected := objectOf(c.Provider["control_reply"]); expected != nil {
+		if expected != nil {
 			wantRaw, err := json.Marshal(expected["payload"])
 			if err != nil {
 				t.Fatalf("encode expected payload: %v", err)
