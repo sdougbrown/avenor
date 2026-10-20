@@ -1074,7 +1074,7 @@ func TestSubscriberBackpressureLaggedEvent(t *testing.T) {
 	defer client.Close()
 	defer srv.Close()
 	cs := &connState{server: s, conn: srv}
-	sub := &subscriber{conn: cs, ch: make(chan events.Event, 1)}
+	sub := &subscriber{conn: cs, ch: make(chan events.Event, 1), done: make(chan struct{}), seenSeq: map[string]int64{}, ready: true}
 	go sub.loop()
 
 	for i := 0; i < 5; i++ {
@@ -1134,7 +1134,7 @@ func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
 		s, _ := NewTestServer(NewState("run_1", "", 0))
 		client, srv := net.Pipe()
 		cs := &connState{server: s, conn: srv}
-		sub := &subscriber{conn: cs, ch: make(chan events.Event, 1)}
+		sub := &subscriber{conn: cs, ch: make(chan events.Event, 1), done: make(chan struct{}), seenSeq: map[string]int64{}, ready: true}
 
 		readerDone := make(chan struct{})
 		go func() {
@@ -1318,6 +1318,64 @@ func TestPublishCanonicalEventKeepsHistoryAndNextSeqAligned(t *testing.T) {
 	}
 }
 
+// TestPublishCanonicalEventSurvivesWatchCancel cancels watch subscriptions
+// while events are being published: the fanout must never send on a channel
+// that SubscribeEvents has closed, and a subscription that outlives the
+// cancellations must keep receiving events.
+func TestPublishCanonicalEventSurvivesWatchCancel(t *testing.T) {
+	s, _ := NewTestServer(NewState("run_1", "", 0))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	keeper := s.SubscribeEvents(ctx)
+
+	stop := make(chan struct{})
+	var publisher sync.WaitGroup
+	publisher.Add(1)
+	go func() {
+		defer publisher.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			s.PublishCanonicalEvent(events.Event{Event: "agent.message_chunk"})
+		}
+	}()
+
+	var readers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		ch := s.SubscribeEvents(ctx)
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for range ch {
+			}
+		}()
+		cancel()
+	}
+	readers.Wait()
+	close(stop)
+	publisher.Wait()
+
+	// Drop whatever the publisher left in the long-lived subscription, then
+	// require one more publish to reach it.
+	for len(keeper) > 0 {
+		<-keeper
+	}
+	s.PublishEvent(events.Event{Event: "agent.message_chunk", Fields: map[string]any{"marker": "after-cancel"}})
+	select {
+	case ev := <-keeper:
+		if got, _ := ev.Fields["marker"].(string); got != "after-cancel" {
+			t.Fatalf("watch subscription received %#v, want the post-cancel publish", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the long-lived watch subscription received nothing after the cancellations")
+	}
+}
+
 func TestSubscribeHistoryReplayFiltersByRuntimeAndAfterSeq(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s, _ := NewTestServer(state)
@@ -1422,7 +1480,7 @@ func TestSubscriberBuffersLiveSequenceUntilReplayIsQueued(t *testing.T) {
 	}
 	sub.enqueueLocked(replay)
 	sub.mu.Unlock()
-	sub.flushPending()
+	sub.flushPending(time.Time{})
 
 	first := <-sub.ch
 	second := <-sub.ch
@@ -1431,6 +1489,298 @@ func TestSubscriberBuffersLiveSequenceUntilReplayIsQueued(t *testing.T) {
 	}
 	if seq, _ := int64Field(second.Fields["seq"]); seq != 2 {
 		t.Fatalf("second seq = %d, want live seq 2", seq)
+	}
+}
+
+// TestStopFlushesQueuedSubscriberEvents requires Stop to deliver the events
+// already queued for a subscriber before it closes the connection. The reader
+// starts only once Stop begins flushing, so a shutdown that closes the
+// connection first drops them.
+func TestStopFlushesQueuedSubscriberEvents(t *testing.T) {
+	const queued = 8
+	cases := []struct {
+		name      string
+		wantChan  bool
+		subscribe func(t *testing.T, s *ControlServer, cs *connState) *subscriber
+	}{
+		{
+			// The subscriber is past replay setup, so live events go straight to
+			// the delivery channel, where the blocked writer leaves them.
+			name:     "queued on the delivery channel",
+			wantChan: true,
+			subscribe: func(t *testing.T, s *ControlServer, cs *connState) *subscriber {
+				sub := newSubscriber(cs, "rt_1", 0)
+				sub.mu.Lock()
+				sub.ready = true
+				sub.mu.Unlock()
+				go sub.loop()
+				s.mu.Lock()
+				s.subs[sub] = struct{}{}
+				s.mu.Unlock()
+				return sub
+			},
+		},
+		{
+			// Subscribers buffer live events until replay setup marks them
+			// ready, so the backlog has not reached the delivery channel yet.
+			name: "buffered before replay setup finishes",
+			subscribe: func(t *testing.T, s *ControlServer, cs *connState) *subscriber {
+				sub := newSubscriber(cs, "rt_1", 0)
+				go sub.loop()
+				s.mu.Lock()
+				s.subs[sub] = struct{}{}
+				s.mu.Unlock()
+				return sub
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origHook := beforeSubscriberFlush
+			defer func() { beforeSubscriberFlush = origHook }()
+			flushStarted := make(chan struct{})
+			var (
+				sub       *subscriber
+				inPending int
+				onChan    int
+			)
+			beforeSubscriberFlush = func() {
+				sub.mu.Lock()
+				inPending = len(sub.pending)
+				sub.mu.Unlock()
+				onChan = len(sub.ch)
+				close(flushStarted)
+			}
+
+			s, _ := NewTestServer(NewState("run_1", "", 0))
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			cs := &connState{server: s, conn: serverConn}
+			cs.ctx, cs.cancel = context.WithCancel(context.Background())
+			s.mu.Lock()
+			s.conns[cs] = struct{}{}
+			s.mu.Unlock()
+			sub = tc.subscribe(t, s, cs)
+
+			// Nothing reads the connection yet, so the writer loop blocks on the
+			// first event and the rest stay queued when Stop runs.
+			for i := 0; i < queued; i++ {
+				s.PublishEvent(events.Event{Event: "agent.message_chunk", Fields: map[string]any{"runtime_id": "rt_1", "i": i}})
+			}
+			s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"runtime_id": "rt_1", "stop_reason": "end_turn"}})
+
+			readDone := make(chan []map[string]any, 1)
+			go func() {
+				<-flushStarted
+				var delivered []map[string]any
+				_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				scanner := bufio.NewScanner(clientConn)
+				for scanner.Scan() {
+					var n Notification
+					if err := json.Unmarshal(scanner.Bytes(), &n); err != nil || n.Method != "event" {
+						continue
+					}
+					m, _ := n.Params.(map[string]any)
+					delivered = append(delivered, m)
+				}
+				readDone <- delivered
+			}()
+
+			if err := s.Stop(); err != nil {
+				t.Fatalf("stop: %v", err)
+			}
+			select {
+			case <-flushStarted:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Stop closed the subscriber without flushing its queued events")
+			}
+
+			if tc.wantChan {
+				if inPending != 0 || onChan == 0 {
+					t.Fatalf("backlog at flush = %d pending, %d on the delivery channel; want the backlog on the channel", inPending, onChan)
+				}
+			} else if inPending != queued+1 || onChan != 0 {
+				t.Fatalf("backlog at flush = %d pending, %d on the delivery channel; want %d pending", inPending, onChan, queued+1)
+			}
+
+			got := <-readDone
+			if len(got) != queued+1 {
+				t.Fatalf("delivered %d of %d queued events", len(got), queued+1)
+			}
+			for i := 0; i < queued; i++ {
+				if name, _ := got[i]["event"].(string); name != "agent.message_chunk" {
+					t.Fatalf("event %d = %q, want agent.message_chunk", i, name)
+				}
+				if idx, _ := got[i]["i"].(float64); int(idx) != i {
+					t.Fatalf("event %d carried i=%v, want %d", i, got[i]["i"], i)
+				}
+			}
+			if last, _ := got[queued]["event"].(string); last != "session.end" {
+				t.Fatalf("last delivered event = %q, want session.end", last)
+			}
+		})
+	}
+}
+
+// flushGate holds Stop inside its write-deadline pass, which runs after the
+// subscriber snapshot and before the drain, so a test can disconnect a
+// subscriber in between.
+type flushGate struct {
+	net.Conn
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (g *flushGate) SetWriteDeadline(t time.Time) error {
+	g.once.Do(func() {
+		close(g.entered)
+		<-g.release
+	})
+	return g.Conn.SetWriteDeadline(t)
+}
+
+// TestStopSurvivesSubscriberDisconnectDuringFlush disconnects a subscriber
+// while Stop is flushing. The disconnect closes the subscriber's channel, so
+// the drain must skip it instead of sending on a closed channel.
+func TestStopSurvivesSubscriberDisconnectDuringFlush(t *testing.T) {
+	s, _ := NewTestServer(NewState("run_1", "", 0))
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	gate := &flushGate{Conn: serverConn, entered: make(chan struct{}), release: make(chan struct{})}
+	cs := &connState{server: s, conn: gate}
+	cs.ctx, cs.cancel = context.WithCancel(context.Background())
+	sub := newSubscriber(cs, "rt_1", 0)
+	go sub.loop()
+	s.mu.Lock()
+	s.conns[cs] = struct{}{}
+	s.subs[sub] = struct{}{}
+	s.mu.Unlock()
+	s.PublishEvent(events.Event{Event: "agent.message_chunk", Fields: map[string]any{"runtime_id": "rt_1", "i": 0}})
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- s.Stop() }()
+	select {
+	case <-gate.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop never reached the subscriber flush")
+	}
+	s.disconnect(cs)
+	close(gate.release)
+	if err := <-stopped; err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+// TestFlushPendingStopsOnMidBatchClose closes a subscriber after the first
+// event of a drained batch: the rest of the batch must not be sent on the
+// subscriber's closed channel.
+func TestFlushPendingStopsOnMidBatchClose(t *testing.T) {
+	sub := newSubscriber(&connState{}, "rt_1", 0)
+	sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"runtime_id": "rt_1", "i": 0}})
+	sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"runtime_id": "rt_1", "i": 1}})
+	if len(sub.pending) != 2 {
+		t.Fatalf("pending len = %d, want 2", len(sub.pending))
+	}
+
+	origHook := afterSubscriberFlushEvent
+	defer func() { afterSubscriberFlushEvent = origHook }()
+	drained := 0
+	afterSubscriberFlushEvent = func() {
+		drained++
+		sub.mu.Lock()
+		sub.closeLocked()
+		sub.mu.Unlock()
+	}
+
+	sub.flushPending(time.Time{})
+
+	if drained != 1 {
+		t.Fatalf("drained %d events after the subscriber closed, want 1", drained)
+	}
+	if got := len(sub.ch); got != 1 {
+		t.Fatalf("delivery channel holds %d events, want only the pre-close event", got)
+	}
+}
+
+// TestFlushPendingStopsAtDeadline requires the drain to end at its deadline even
+// when events keep arriving: each drained event is replaced by a fresh one, so
+// the buffer never empties on its own.
+func TestFlushPendingStopsAtDeadline(t *testing.T) {
+	sub := newSubscriber(&connState{}, "rt_1", 0)
+	sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"runtime_id": "rt_1"}})
+
+	origHook := afterSubscriberFlushEvent
+	defer func() { afterSubscriberFlushEvent = origHook }()
+	afterSubscriberFlushEvent = func() {
+		sub.enqueue(events.Event{Event: "e", Fields: map[string]any{"runtime_id": "rt_1"}})
+	}
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		sub.flushPending(time.Now().Add(25 * time.Millisecond))
+	}()
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flushPending never ended while events kept arriving")
+	}
+}
+
+// TestStopBoundsStuckSubscriberFlush requires a subscriber that never reads its
+// queue to delay Stop by no more than the flush bound.
+func TestStopBoundsStuckSubscriberFlush(t *testing.T) {
+	s, _ := NewTestServer(NewState("run_1", "", 0))
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	cs := &connState{server: s, conn: serverConn}
+	cs.ctx, cs.cancel = context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.conns[cs] = struct{}{}
+	s.mu.Unlock()
+	if resp := s.dispatch(cs, Request{JSONRPC: "2.0", ID: 1, Method: "subscribe"}); resp.Error != nil {
+		t.Fatalf("subscribe: %+v", resp.Error)
+	}
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "end_turn"}})
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- s.Stop() }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+	case <-time.After(4 * subscriberFlushTimeout):
+		t.Fatal("Stop waited on a subscriber that never reads")
+	}
+}
+
+// TestSubscribeAfterStopIsRejected keeps a subscriber from registering behind
+// Stop's flush, where nothing would ever drain it.
+func TestSubscribeAfterStopIsRejected(t *testing.T) {
+	s, _ := NewTestServer(NewState("run_1", "", 0))
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	cs := &connState{server: s, conn: serverConn}
+	cs.ctx, cs.cancel = context.WithCancel(context.Background())
+	if err := s.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	resp := s.dispatch(cs, Request{JSONRPC: "2.0", ID: 1, Method: "subscribe"})
+	if resp.Error == nil {
+		t.Fatal("subscribe after Stop was accepted")
+	}
+	if resp.Error.Code != CodeControlStopped {
+		t.Fatalf("subscribe after Stop = %+v, want code %d", resp.Error, CodeControlStopped)
+	}
+	s.mu.Lock()
+	subs := len(s.subs)
+	s.mu.Unlock()
+	if subs != 0 {
+		t.Fatalf("%d subscribers registered after Stop", subs)
 	}
 }
 

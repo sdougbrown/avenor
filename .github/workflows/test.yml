@@ -63,8 +63,8 @@ jobs:
 
       # Two passes under the race detector on the concurrency-heavy packages,
       # so an intermittent race or ordering bug fails here rather than later.
-      - name: Race-test supervisor, control and CLI packages
-        run: go test -race -count=2 ./internal/stable ./internal/control ./internal/cli
+      - name: Race-test client, supervisor, control and CLI packages
+        run: go test -race -count=2 ./client ./internal/stable ./internal/control ./internal/cli
 
   python:
     runs-on: ubuntu-latest

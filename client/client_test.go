@@ -633,6 +633,48 @@ func TestSubscribeRuntimeIgnoresOtherSessionIDs(t *testing.T) {
 	}
 }
 
+// TestSubscribeRuntimeCancelDuringPublish cancels a runtime subscription while
+// events are still arriving: the fanout must not close the subscription
+// channel under a send, so the producer never sends on a closed channel.
+func TestSubscribeRuntimeCancelDuringPublish(t *testing.T) {
+	for round := 0; round < 100; round++ {
+		serverConn, clientConn := net.Pipe()
+		c := &Client{
+			conn:        clientConn,
+			reader:      bufio.NewReader(clientConn),
+			pending:     map[int]chan Response{},
+			eventCh:     make(chan Event, 8),
+			runtimeSubs: map[string]map[chan Event]struct{}{},
+			closedCh:    make(chan struct{}),
+		}
+		serveOneSubscribe(serverConn)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		ch := c.SubscribeRuntime(ctx, "rt_1")
+		drained := make(chan struct{})
+		go func() {
+			for range ch {
+			}
+			close(drained)
+		}()
+
+		var producer sync.WaitGroup
+		producer.Add(1)
+		go func() {
+			defer producer.Done()
+			for i := 0; i < 64; i++ {
+				c.publishRuntimeEvent(Event{Event: "agent.message_chunk", RuntimeID: "rt_1"})
+			}
+		}()
+
+		cancel()
+		producer.Wait()
+		<-drained
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	}
+}
+
 // TestClientWorkflowCommandHelpers pins the typed workflow command helpers:
 // each emits method "workflow.command" whose params carry the workflow id and
 // a command object with the right op discriminator and the caller's fields.
@@ -1097,8 +1139,9 @@ func TestClientClosedOnServerDisconnect(t *testing.T) {
 }
 
 // startErrorAndHangServer returns a stub supervisor that replies with a
-// JSON-RPC error frame for the "rpc_error" method and accepts but never
-// replies (keeping the connection open) for any other method.
+// JSON-RPC error frame for the "rpc_error" method, refuses the "subscribe"
+// method the way a stopping server does, and accepts but never replies
+// (keeping the connection open) for any other method.
 func startErrorAndHangServer(t *testing.T) (string, func()) {
 	t.Helper()
 	path := filepath.Join(os.TempDir(), "avc-client-err-hang-"+time.Now().Format("150405.000000")+".sock")
@@ -1128,6 +1171,11 @@ func startErrorAndHangServer(t *testing.T) (string, func()) {
 					respData, _ := json.Marshal(resp)
 					_, _ = c.Write(append(respData, '\n'))
 				}
+				if req.Method == "subscribe" {
+					resp := Response{JSONRPC: "2.0", ID: req.ID, Error: &RespError{Code: -32014, Message: "control server stopped"}}
+					respData, _ := json.Marshal(resp)
+					_, _ = c.Write(append(respData, '\n'))
+				}
 				// Keep the connection open until cleanup so the client's readLoop
 				// does not observe an EOF.
 				<-done
@@ -1137,7 +1185,10 @@ func startErrorAndHangServer(t *testing.T) (string, func()) {
 	return path, func() { close(done); ln.Close(); os.Remove(path) }
 }
 
-func TestClientClosedFalseOnRPCErrorAndTimeout(t *testing.T) {
+// TestClientClosedStateByFailureKind pins which failures leave the connection
+// usable: an RPC error and a response timeout do not, while Subscribe reports a
+// refusal during server shutdown as ErrControlStopped and closes the client.
+func TestClientClosedStateByFailureKind(t *testing.T) {
 	path, cleanup := startErrorAndHangServer(t)
 	defer cleanup()
 
@@ -1163,6 +1214,44 @@ func TestClientClosedFalseOnRPCErrorAndTimeout(t *testing.T) {
 		}
 		if c.Closed() {
 			t.Fatal("Closed() = true after an RPC error, want false")
+		}
+	})
+
+	t.Run("stopped subscribe refusal closes", func(t *testing.T) {
+		c, err := Dial(path)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer c.Close()
+		// The server refuses a subscribe once shutdown begins and closes the
+		// connection right after, so the caller sees a stopped connection.
+		err = c.Subscribe(nil)
+		if !errors.Is(err, ErrControlStopped) {
+			t.Fatalf("error = %v, want ErrControlStopped", err)
+		}
+		if !errors.Is(err, ErrConnectionClosed) {
+			t.Fatalf("error = %v, want it to wrap ErrConnectionClosed", err)
+		}
+		if !c.Closed() {
+			t.Fatal("Closed() = false after a stopped subscribe refusal, want true")
+		}
+	})
+
+	t.Run("stopped refusal is an rpc error for a raw call", func(t *testing.T) {
+		c, err := Dial(path)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer c.Close()
+		// Only the subscribe call site classifies the refusal; every other
+		// request path keeps the structured RPC error.
+		err = c.Call("subscribe", nil, nil)
+		var rpcErr *RPCError
+		if !errors.As(err, &rpcErr) {
+			t.Fatalf("error = %v (%T), want an *RPCError", err, err)
+		}
+		if rpcErr.Code != -32014 {
+			t.Fatalf("rpcErr.Code = %d, want -32014", rpcErr.Code)
 		}
 	})
 

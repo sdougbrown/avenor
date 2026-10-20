@@ -184,16 +184,11 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 	for sub := range s.subs {
 		subs = append(subs, sub)
 	}
-	watch := make([]chan events.Event, 0, len(s.watch))
+	// Fan out to the watch channels while still holding s.mu: SubscribeEvents
+	// removes and closes a watch channel under the same lock, so a send can
+	// never follow a close. The sends are non-blocking — the retry follows a
+	// drain that made room — so a full watcher never holds the lock.
 	for ch := range s.watch {
-		watch = append(watch, ch)
-	}
-	s.mu.Unlock()
-
-	for _, sub := range subs {
-		sub.enqueue(event)
-	}
-	for _, ch := range watch {
 		select {
 		case ch <- event:
 		default:
@@ -206,6 +201,11 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 			default:
 			}
 		}
+	}
+	s.mu.Unlock()
+
+	for _, sub := range subs {
+		sub.enqueue(event)
 	}
 }
 
@@ -246,10 +246,12 @@ func (s *ControlServer) SubscribeEvents(ctx context.Context) <-chan events.Event
 	s.mu.Unlock()
 	go func() {
 		<-ctx.Done()
+		// Close under s.mu so the fanout cannot send between the removal and the
+		// close.
 		s.mu.Lock()
 		delete(s.watch, ch)
-		s.mu.Unlock()
 		close(ch)
+		s.mu.Unlock()
 	}()
 	return ch
 }

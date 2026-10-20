@@ -11,6 +11,7 @@ const (
 	CodeOwnerUnauthenticated = -32011
 	CodeUnsupportedOwnerAuth = -32012
 	CodeOwnerAuthTimeout     = -32013
+	CodeControlStopped       = -32014
 )
 
 // OwnerAuthVersion is the authenticate_owner protocol version.

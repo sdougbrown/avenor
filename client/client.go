@@ -130,6 +130,15 @@ func Dial(socketPath string) (*Client, error) {
 // its wait budget.
 var ErrResponseTimeout = errors.New("read response: timeout")
 
+// ErrConnectionClosed reports that the control connection ended before the
+// server answered: the socket dropped, the server stopped, or Close was called.
+var ErrConnectionClosed = errors.New("connection closed")
+
+// ErrControlStopped reports that the control server refused a subscription
+// because it is shutting down. It wraps ErrConnectionClosed, since the server
+// closes every connection once shutdown begins.
+var ErrControlStopped = fmt.Errorf("control server stopped: %w", ErrConnectionClosed)
+
 // Owner-authentication rejections, classified from the wire codes so every
 // client reports the same four classes.
 var (
@@ -389,7 +398,7 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	}
 	if c.closed.Load() {
 		c.mu.Unlock()
-		return fmt.Errorf("call %s: connection closed", method)
+		return fmt.Errorf("call %s: %w", method, ErrConnectionClosed)
 	}
 	// Register the response waiter before writing so an already-running
 	// readLoop cannot receive and discard a fast response.
@@ -426,7 +435,7 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	select {
 	case r, ok := <-respCh:
 		if !ok {
-			return fmt.Errorf("read response: connection closed")
+			return fmt.Errorf("read response: %w", ErrConnectionClosed)
 		}
 		resp = r
 	case <-timerC:
@@ -447,11 +456,20 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 	return nil
 }
 
-func (c *Client) subscribe() error {
+// Subscribe registers this connection for the event stream so notifications
+// arrive on it. Nil params sends the global subscription; params scope it to a
+// runtime. A server that is shutting down refuses the subscription and then
+// closes every connection, so that refusal is reported as ErrControlStopped.
+func (c *Client) Subscribe(params any) error {
 	var result struct {
 		Subscribed bool `json:"subscribed"`
 	}
-	return c.Call("subscribe", nil, &result)
+	err := c.Call("subscribe", params, &result)
+	if rpcErr, ok := err.(*RPCError); ok && rpcErr.Code == control.CodeControlStopped {
+		c.markClosed()
+		return ErrControlStopped
+	}
+	return err
 }
 
 // ensureSubscribed issues the global "subscribe" call at most once so the
@@ -460,7 +478,7 @@ func (c *Client) subscribe() error {
 // the auto-subscribe is skipped so its subscription mode is preserved. An
 // auto-subscribe failure is never retried and is not reported here; it
 // surfaces as no event delivery. Callers that need the subscribe error must
-// call subscribe themselves (via Call) and check it.
+// call Subscribe themselves and check it.
 func (c *Client) ensureSubscribed() {
 	c.subMu.Lock()
 	if c.subscribed {
@@ -469,7 +487,7 @@ func (c *Client) ensureSubscribed() {
 	}
 	c.subscribed = true
 	c.subMu.Unlock()
-	_ = c.subscribe()
+	_ = c.Subscribe(nil)
 }
 
 // Events returns a channel of server-sent events. Only one subscriber is
@@ -594,8 +612,8 @@ func (c *Client) Identity() (string, error) {
 // runtime's turn settled (control.codeWaitTurnTimeout).
 var ErrWaitTurnTimeout = errors.New("wait_turn: timeout before the runtime's turn settled")
 
-// codeWaitTurnTimeout mirrors control.codeWaitTurnTimeout; the client cannot
-// import the control package without an import cycle.
+// codeWaitTurnTimeout mirrors control's unexported codeWaitTurnTimeout, which
+// marks a wait_turn whose timeout elapsed before the runtime's turn settled.
 const codeWaitTurnTimeout = -32020
 
 // WaitTurn blocks until the runtime's next running→idle transition settles:
@@ -705,6 +723,8 @@ func (c *Client) SubscribeRuntime(ctx context.Context, runtimeID string) <-chan 
 	c.subsMu.Unlock()
 	go func() {
 		<-ctx.Done()
+		// Removing the subscription and closing its channel under subsMu keeps
+		// them atomic with respect to the fanout, which sends under that lock.
 		c.subsMu.Lock()
 		if subs := c.runtimeSubs[runtimeID]; subs != nil {
 			delete(subs, out)
@@ -712,8 +732,8 @@ func (c *Client) SubscribeRuntime(ctx context.Context, runtimeID string) <-chan 
 				delete(c.runtimeSubs, runtimeID)
 			}
 		}
-		c.subsMu.Unlock()
 		close(out)
+		c.subsMu.Unlock()
 	}()
 	return out
 }
@@ -724,19 +744,18 @@ func (c *Client) publishRuntimeEvent(ev Event) {
 		keys = append(keys, ev.SessionID)
 	}
 
+	// Hold subsMu across the sends: SubscribeRuntime removes a subscription
+	// from the map and closes its channel under the same lock, so a send can
+	// never follow a close. Sends are non-blocking, so a full subscriber never
+	// holds the lock.
 	c.subsMu.Lock()
-	targets := make([]chan Event, 0)
+	defer c.subsMu.Unlock()
 	for _, key := range keys {
 		for ch := range c.runtimeSubs[key] {
-			targets = append(targets, ch)
-		}
-	}
-	c.subsMu.Unlock()
-
-	for _, ch := range targets {
-		select {
-		case ch <- ev:
-		default:
+			select {
+			case ch <- ev:
+			default:
+			}
 		}
 	}
 }
