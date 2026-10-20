@@ -19,6 +19,13 @@ import (
 
 const maxSendToParentMessageBytes = 64 * 1024
 
+// OwnerCapability and OwnerRecord name the control-plane owner values this
+// package's API accepts.
+type (
+	OwnerCapability = control.OwnerCapability
+	OwnerRecord     = control.OwnerRecord
+)
+
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      any             `json:"id,omitempty"`
@@ -174,7 +181,7 @@ const OwnerAttachTimeout = 5 * time.Second
 // AuthenticateOwner presents cap on an existing connection. It is the only
 // place a credential is written to the wire, so it binds the connected peer to
 // this euid first.
-func (c *Client) AuthenticateOwner(cap control.OwnerCapability) error {
+func (c *Client) AuthenticateOwner(cap OwnerCapability) error {
 	unixConn, ok := c.conn.(*net.UnixConn)
 	if !ok {
 		return errors.New("owner authentication requires a unix control socket")
@@ -189,7 +196,7 @@ func (c *Client) AuthenticateOwner(cap control.OwnerCapability) error {
 	return c.authenticateOwnerUntil(cap, time.Now().Add(OwnerAttachTimeout))
 }
 
-func (c *Client) authenticateOwnerUntil(cap control.OwnerCapability, deadline time.Time) error {
+func (c *Client) authenticateOwnerUntil(cap OwnerCapability, deadline time.Time) error {
 	var res control.OwnerAuthResult
 	params := control.OwnerAuthRequest{Version: control.OwnerAuthVersion, CapabilityID: cap.ID, Secret: cap.Secret}
 	if err := c.call("authenticate_owner", params, &res, remainingUntil(deadline)); err != nil {
@@ -248,7 +255,7 @@ func AttachOwner(socketPath string) (*Client, error) {
 }
 
 // requireRecordSocket requires the live socket to be the one the record names.
-func requireRecordSocket(socketPath string, record control.OwnerRecord) error {
+func requireRecordSocket(socketPath string, record OwnerRecord) error {
 	info, err := os.Lstat(socketPath)
 	if err != nil {
 		return fmt.Errorf("%w: stat %s: %v", control.ErrStaleOwnerRecord, socketPath, err)
@@ -972,6 +979,6 @@ func (c *Client) SendToParent(runtimeID, message string) error {
 
 // ValidateOwnerRecord requires socketPath to be the socket record names, so an
 // attach can bind a connection to the record it loaded.
-func ValidateOwnerRecord(socketPath string, record control.OwnerRecord) error {
+func ValidateOwnerRecord(socketPath string, record OwnerRecord) error {
 	return requireRecordSocket(socketPath, record)
 }
