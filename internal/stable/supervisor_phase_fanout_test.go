@@ -411,8 +411,10 @@ func TestFallbackFanoutWriterCarriesRecorderAndWorkflowMetadata(t *testing.T) {
 // failingWriteSink rejects every durable write.
 type failingWriteSink struct{}
 
-func (failingWriteSink) Write(events.Event) error { return errors.New("intentional durable write failure") }
-func (failingWriteSink) Close() error             { return nil }
+func (failingWriteSink) Write(events.Event) error {
+	return errors.New("intentional durable write failure")
+}
+func (failingWriteSink) Close() error { return nil }
 
 // TestRecorderFeedsOnlyAfterTheDurableWrite proves a failed durable write
 // leaves no terminal record in the broker for a run that did not end.

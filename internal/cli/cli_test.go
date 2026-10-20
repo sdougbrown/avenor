@@ -2363,6 +2363,9 @@ func TestWaitForSessionClassifiesSettledTurnRegardlessOfOrder(t *testing.T) {
 			if !ok || last.Event != "session.end" || last.Fields["stop_reason"] != runtime.RateLimitedStopReason {
 				t.Fatalf("last event = %#v, want the durable rate_limited session.end", last)
 			}
+			if code, _ := events.Int64(last.Fields["exit_code"]); code != 7 {
+				t.Fatalf("published exit_code = %v, want 7", last.Fields["exit_code"])
+			}
 		})
 	}
 }
