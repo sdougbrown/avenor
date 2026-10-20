@@ -10,9 +10,19 @@ import (
 	"github.com/sdougbrown/avenor/internal/stable"
 )
 
+// stableTestEnv isolates HOME (runtime state and sockets) and TMPDIR (the
+// supervisor's artifact root) for a test that runs a real supervisor in
+// process, and returns the scratch directory.
+func stableTestEnv(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("TMPDIR", dir)
+	return dir
+}
+
 func TestRunStableJoinsInheritedTreeBudget(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := stableTestEnv(t)
 	root, err := admission.CreateRootInRuntimeState(2)
 	if err != nil {
 		t.Fatalf("create root tree budget: %v", err)
@@ -32,8 +42,7 @@ func TestRunStableJoinsInheritedTreeBudget(t *testing.T) {
 }
 
 func TestRunStableWritesTombstoneOnStartFailure(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := stableTestEnv(t)
 	socketPath := filepath.Join(tmpDir, "socket-path-is-dir")
 	if err := os.Mkdir(socketPath, 0o700); err != nil {
 		t.Fatal(err)
@@ -74,8 +83,7 @@ func TestRunStableWritesTombstoneOnStartFailure(t *testing.T) {
 }
 
 func TestRunStableWorkflowRootFlagParses(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := stableTestEnv(t)
 	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200)) // fails fast in Listen
 	dir := filepath.Join(tmpDir, "wfroot")
 	if code := runStable([]string{"--control-socket", socketPath, "--workflow-root", dir}); code != 1 {
@@ -98,8 +106,7 @@ func TestRunStableWorkflowRootFlagParses(t *testing.T) {
 }
 
 func TestRunStableIdempotencyCapacityGuard(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := stableTestEnv(t)
 	// An overlong Unix-socket path fails fast in Listen, so a valid capacity
 	// proceeds past flag validation into Run and fails at the socket rather
 	// than the guard.
@@ -144,8 +151,7 @@ func TestRunStableIdempotencyCapacityGuard(t *testing.T) {
 // propagates to Config.IdempotencyCapacity at the point the supervisor is
 // constructed.
 func TestRunStableIdempotencyCapacityFlagPropagation(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	tmpDir := stableTestEnv(t)
 	// An overlong Unix-socket path makes Run fail fast, so the constructor
 	// seam is hit and the config captured before Run's side effects matter.
 	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
