@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 const (
@@ -68,18 +71,11 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 // writeCursor atomically rewrites the cursor file at path with offset.
-// It writes to path+".tmp" then renames into place.
 func writeCursor(path string, offset int64) error {
-	tmp := path + ".tmp"
 	content := fmt.Sprintf("%d\n", offset)
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
-		// Clean up the temp file if it was partially written.
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write cursor tmp %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename cursor %s -> %s: %w", tmp, path, err)
+	pattern := filepath.Base(path) + ".tmp-*"
+	if err := durablefile.WriteFileAtomic(path, pattern, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write cursor %s: %w", path, err)
 	}
 	return nil
 }

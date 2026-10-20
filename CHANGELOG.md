@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- `avenor watch --since-cursor` stages each cursor rewrite in a uniquely named temp file, so two watchers sharing one cursor path no longer lose writes to each other: both used `<cursor>.tmp`, and the writer that renamed second failed on the temp file the first had already moved away.
 - The local broker no longer accepts run credentials in a URL. GET requests such as `/sessions` authenticate with the `X-Avenor-Run-Id` and `X-Avenor-Run-Token` headers, so a run token no longer lands in access logs or error reports that print the request URL.
 - The ACP and codex app-server providers' agent-message poll no longer discards the run's other control messages. It drained the whole control queue, so a status request or shutdown queued for the same run was lost. Non-agent messages now stay queued, the way the agent-only control poll already keeps them.
 - A permission request answered directly, for example by a model decider, no longer reads as unanswered. The run's resolver goroutine could stamp its fallback state onto the claim after the answer had landed, which erased the resolution. A resolved claim, or one a direct answer has taken, now keeps its state.

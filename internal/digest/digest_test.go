@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -502,7 +503,7 @@ func TestCursorFileIsParseable(t *testing.T) {
 }
 
 // TestCursorWriteCleansUpTempFileOnSuccess verifies that writeCursor does not
-// leave a .tmp file behind after a successful write.
+// leave a staged temp file behind after a successful write.
 func TestCursorWriteCleansUpTempFileOnSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cursor")
@@ -510,16 +511,19 @@ func TestCursorWriteCleansUpTempFileOnSuccess(t *testing.T) {
 	if err := writeCursor(path, 99); err != nil {
 		t.Fatalf("writeCursor: %v", err)
 	}
-	tmpPath := path + ".tmp"
-	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
-		t.Fatalf(".tmp file still exists after writeCursor success")
+	leftovers, err := filepath.Glob(filepath.Join(dir, "cursor.tmp-*"))
+	if err != nil {
+		t.Fatalf("glob temp files: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("temp files still exist after writeCursor success: %v", leftovers)
 	}
 }
 
 // TestCursorWriteRenameFailure verifies that when os.Rename fails (simulated
 // by placing a directory at the target path so rename is rejected), writeCursor
 // returns an error, does NOT overwrite the original target, and cleans up the
-// .tmp file.
+// staged temp file.
 func TestCursorWriteRenameFailure(t *testing.T) {
 	dir := t.TempDir()
 	// Place a directory at the cursor path so os.Rename into it will fail.
@@ -533,10 +537,13 @@ func TestCursorWriteRenameFailure(t *testing.T) {
 		t.Fatal("writeCursor: expected error when target is a directory, got nil")
 	}
 
-	// The .tmp file must be cleaned up even on failure.
-	tmpPath := targetPath + ".tmp"
-	if _, statErr := os.Stat(tmpPath); !os.IsNotExist(statErr) {
-		t.Fatalf(".tmp file still exists after rename failure")
+	// The temp file must be cleaned up even on failure.
+	leftovers, globErr := filepath.Glob(filepath.Join(dir, "cursor.tmp-*"))
+	if globErr != nil {
+		t.Fatalf("glob temp files: %v", globErr)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("temp files still exist after rename failure: %v", leftovers)
 	}
 
 	// The original directory (target) must be untouched.
@@ -546,6 +553,35 @@ func TestCursorWriteRenameFailure(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Fatalf("target path is no longer a directory after failure")
+	}
+}
+
+// TestCursorWriteConcurrentWritersDoNotCollide verifies that rewrites racing on
+// one cursor path each stage into their own temp file, so every write succeeds
+// and the path settles on one complete offset.
+func TestCursorWriteConcurrentWritersDoNotCollide(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cursor")
+
+	const writers = 16
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = writeCursor(path, int64(i))
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent writeCursor(%d): %v", i, err)
+		}
+	}
+	if got := parseCursorOffset(t, path); got < 0 || got >= writers {
+		t.Fatalf("cursor offset = %d, want one of the %d written offsets", got, writers)
 	}
 }
 
