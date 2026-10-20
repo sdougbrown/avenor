@@ -292,6 +292,16 @@ func ownerAuthFixtureClass(t *testing.T, name string) error {
 	}
 }
 
+// TestClassifyOwnerAuthErrorMapsResponseTimeout proves a handshake that never
+// answered inside its budget is an authentication timeout, not a bare transport
+// error the caller has to interpret.
+func TestClassifyOwnerAuthErrorMapsResponseTimeout(t *testing.T) {
+	mapped := classifyOwnerAuthError(ErrResponseTimeout)
+	if !errors.Is(mapped, ErrOwnerAuthTimeout) {
+		t.Fatalf("classifyOwnerAuthError(ErrResponseTimeout) = %v, want ErrOwnerAuthTimeout", mapped)
+	}
+}
+
 // TestOwnerRecordPublishesUnderWorldWritableDir proves a record published
 // beside a socket in a world-writable, non-euid-owned directory still
 // attaches.
