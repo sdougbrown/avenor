@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptrace"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,14 +24,19 @@ import (
 func newConstructedSupervisor(t *testing.T) *Supervisor {
 	t.Helper()
 	budget := filepath.Join(t.TempDir(), "tree-budget")
-	if _, err := admission.CreateRoot(budget, 1); err != nil {
+	root, err := admission.CreateRoot(budget, 1)
+	if err != nil {
 		t.Fatalf("create tree budget: %v", err)
 	}
+	t.Cleanup(func() { _ = root.Close() })
 	sup := NewSupervisor(Config{MaxRuntimes: 1, TreeBudgetFile: budget})
 	t.Cleanup(func() {
 		sup.closeTreeBudget()
 		_ = sup.broker.Stop()
 	})
+	if sup.broker.Addr() == "" {
+		t.Fatal("NewSupervisor did not start the broker")
+	}
 	if sup.broker.GetRun("supervisor") == nil {
 		t.Fatal("NewSupervisor did not register the supervisor's broker run")
 	}
@@ -37,92 +44,149 @@ func newConstructedSupervisor(t *testing.T) *Supervisor {
 }
 
 // brokerAsker is the registered broker run that asks the supervisor a question
-// and waits for the answer.
+// and waits for the answer. A generation marks an ask admitted under a store
+// generation, which only the Go ask client pins; a spawned pi child sends none.
 type brokerAsker struct {
 	runID      string
 	token      string
 	generation string
 }
 
-// askSupervisor drives one ask and reply over the broker's HTTP endpoints as a
-// registered run: it posts the ask to the supervisor's own run, lets onSent
-// inspect the queued ask, parks the reply long-poll, answers it as the
-// supervisor, and returns the /wait_reply body.
-func askSupervisor(t *testing.T, sup *Supervisor, asker brokerAsker, msgID, question, answer string, onSent func()) map[string]any {
+// sendAsk posts one ask from a registered run to toRunID, with the envelope and
+// payload a spawned pi child builds, and pins that the broker admitted it.
+func sendAsk(t *testing.T, sup *Supervisor, asker brokerAsker, toRunID, msgID, question string) {
 	t.Helper()
-	payload := fmt.Sprintf(`{"id":%q,"from":%q,"from_run_id":%q,"to_run_id":"supervisor","message":%q,"expects_reply":true}`,
-		msgID, asker.runID, asker.runID, question)
-	gen := ""
+	payload, err := messaging.AskBody(msgID, asker.runID, toRunID, question, "agent")
+	if err != nil {
+		t.Fatalf("AskBody: %v", err)
+	}
+	ask := map[string]any{
+		"run_id":      asker.runID,
+		"token":       asker.token,
+		"from_run_id": asker.runID,
+		"to_run_id":   toRunID,
+		"type":        "agent_message",
+		"payload":     json.RawMessage(payload),
+	}
 	if asker.generation != "" {
-		gen = fmt.Sprintf(`,"generation":%q`, asker.generation)
+		ask["generation"] = asker.generation
 	}
-	ask := fmt.Sprintf(`{"run_id":%q,"token":%q,"from_run_id":%q,"to_run_id":"supervisor","type":"agent_message","payload":%s%s}`,
-		asker.runID, asker.token, asker.runID, payload, gen)
-	if status, body := brokerPost(t, sup.broker.Addr(), "send", ask); status != http.StatusOK {
-		t.Fatalf("send = (%d, %v)", status, body)
+	body, err := json.Marshal(ask)
+	if err != nil {
+		t.Fatalf("marshal ask: %v", err)
 	}
-	if onSent != nil {
-		onSent()
+	status, sent := brokerPost(t, sup, "send", body)
+	if status != http.StatusOK || sent["queued"] != true {
+		t.Fatalf("send = (%d, %v), want the ask queued", status, sent)
 	}
+}
 
-	wait := fmt.Sprintf(`{"run_id":%q,"token":%q,"waiting_for":%q%s}`, asker.runID, asker.token, msgID, gen)
+// waitReply posts the asker's long-poll for the answer. It reports the
+// transport error instead of failing the test, so a goroutine may park on it.
+func waitReply(sup *Supervisor, asker brokerAsker, msgID string, timeoutMS int64, trace *httptrace.ClientTrace) (int, map[string]any, error) {
+	wait := map[string]any{
+		"run_id":      asker.runID,
+		"token":       asker.token,
+		"waiting_for": msgID,
+	}
+	if timeoutMS > 0 {
+		wait["timeout_ms"] = timeoutMS
+	}
+	if asker.generation != "" {
+		wait["generation"] = asker.generation
+	}
+	body, err := json.Marshal(wait)
+	if err != nil {
+		return 0, nil, fmt.Errorf("marshal wait_reply: %w", err)
+	}
+	return brokerPOST(sup, "wait_reply", body, trace)
+}
+
+// replyThenWait answers the ask before any wait runs: the store keeps a replied
+// edge until a wait consumes it, so the later wait still reads the answer.
+func replyThenWait(t *testing.T, sup *Supervisor, asker brokerAsker, msgID, answer string) (int, map[string]any) {
+	t.Helper()
+	if err := sup.BrokerReply(asker.runID, msgID, answer); err != nil {
+		t.Fatalf("BrokerReply: %v", err)
+	}
+	status, body, err := waitReply(sup, asker, msgID, 0, nil)
+	if err != nil {
+		t.Fatalf("wait_reply: %v", err)
+	}
+	return status, body
+}
+
+// waitThenReply sends the wait first and answers once the request is on the
+// wire, so the reply reaches the broker after the wait rather than before it.
+func waitThenReply(t *testing.T, sup *Supervisor, asker brokerAsker, msgID, answer string) (int, map[string]any) {
+	t.Helper()
 	type waitOutcome struct {
 		status int
 		body   map[string]any
 		err    error
 	}
+	sent := make(chan struct{})
+	var once sync.Once
 	waited := make(chan waitOutcome, 1)
 	go func() {
-		status, body, err := brokerPostWithin(context.Background(), sup.broker.Addr(), "wait_reply", wait)
+		status, body, err := waitReply(sup, asker, msgID, 0, &httptrace.ClientTrace{
+			WroteRequest: func(httptrace.WroteRequestInfo) { once.Do(func() { close(sent) }) },
+		})
 		waited <- waitOutcome{status: status, body: body, err: err}
 	}()
-	// Let the long-poll park so the reply wakes it instead of finding an
-	// already-completed edge.
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-sent:
+	case got := <-waited:
+		t.Fatalf("wait_reply finished before the reply was sent: %v", got.err)
+	}
 	if err := sup.BrokerReply(asker.runID, msgID, answer); err != nil {
 		t.Fatalf("BrokerReply: %v", err)
 	}
-
-	var got waitOutcome
-	select {
-	case got = <-waited:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the parked wait_reply never saw the supervisor's answer")
-	}
+	got := <-waited
 	if got.err != nil {
 		t.Fatalf("wait_reply: %v", got.err)
 	}
-	if got.status != http.StatusOK {
-		t.Fatalf("wait_reply = (%d, %v), want the supervisor's answer", got.status, got.body)
-	}
-	if got.body["message_id"] != msgID {
-		t.Fatalf("wait_reply message_id = %v, want %s", got.body["message_id"], msgID)
-	}
-	if payload := fmt.Sprint(got.body["payload"]); !strings.Contains(payload, answer) {
-		t.Fatalf("wait_reply = %v, want a payload carrying the answer text", got.body)
-	}
-	return got.body
+	return got.status, got.body
 }
 
 // TestSupervisorBrokerReplyAnswersVersionedAsk pins the supervisor's reply
 // sender against a versioned ask: BrokerReply posts no generation, yet it must
-// answer the edge admitted in the broker store's current generation.
+// answer the edge admitted in the broker store's current generation, whichever
+// side reaches the broker first.
 func TestSupervisorBrokerReplyAnswersVersionedAsk(t *testing.T) {
-	sup := newConstructedSupervisor(t)
-	askerToken, err := sup.broker.CreateRun("asker", "")
-	if err != nil {
-		t.Fatalf("create asker: %v", err)
-	}
-	gen := sup.broker.Store().Generation()
-	now := time.Now().UTC()
-	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
-	if err != nil {
-		t.Fatalf("NewMsgID: %v", err)
-	}
+	for _, order := range []struct {
+		name  string
+		drive func(t *testing.T, sup *Supervisor, asker brokerAsker, msgID, answer string) (int, map[string]any)
+	}{
+		{name: "reply before wait_reply", drive: replyThenWait},
+		{name: "wait_reply parked before reply", drive: waitThenReply},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			sup := newConstructedSupervisor(t)
+			askerToken, err := sup.broker.CreateRun("asker", "")
+			if err != nil {
+				t.Fatalf("create asker: %v", err)
+			}
+			now := time.Now().UTC()
+			msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+			if err != nil {
+				t.Fatalf("NewMsgID: %v", err)
+			}
+			asker := brokerAsker{runID: "asker", token: askerToken, generation: sup.broker.Store().Generation()}
 
-	body := askSupervisor(t, sup, brokerAsker{runID: "asker", token: askerToken, generation: gen}, msgID, "status?", "the answer", nil)
-	if body["from_run_id"] != "supervisor" {
-		t.Fatalf("wait_reply from_run_id = %v, want supervisor", body["from_run_id"])
+			sendAsk(t, sup, asker, "supervisor", msgID, "status?")
+			status, body := order.drive(t, sup, asker, msgID, "the answer")
+
+			if status != http.StatusOK {
+				t.Fatalf("wait_reply = (%d, %v), want the supervisor's answer", status, body)
+			}
+			if body["from_run_id"] != "supervisor" {
+				t.Fatalf("wait_reply from_run_id = %v, want supervisor", body["from_run_id"])
+			}
+			if body["message_id"] != msgID {
+				t.Fatalf("wait_reply message_id = %v, want %s", body["message_id"], msgID)
+			}
+		})
 	}
 }
 
@@ -152,7 +216,7 @@ func TestNewSupervisorAsksOverItsConstructedTransport(t *testing.T) {
 	msgID := brokertest.WaitForAgentMessage(t, sup.broker, "target").ID
 
 	reply := fmt.Sprintf(`{"run_id":"target","token":%q,"from_run_id":"target","to_run_id":"supervisor","type":"agent_message","payload":{"id":"reply-1","from":"target","from_run_id":"target","to_run_id":"supervisor","message":"all good","reply_to":%q}}`, targetToken, msgID)
-	if status, body := brokerPost(t, sup.broker.Addr(), "send", reply); status != http.StatusOK {
+	if status, body := brokerPost(t, sup, "send", []byte(reply)); status != http.StatusOK {
 		t.Fatalf("reply send = (%d, %v)", status, body)
 	}
 
@@ -196,48 +260,96 @@ func TestChildAskToSupervisorRunIsQueuedAndDrained(t *testing.T) {
 	}
 
 	const msgID = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
-	inspect := func() {
-		t.Helper()
-		drained, err := sup.BrokerReceive()
-		if err != nil {
-			t.Fatalf("BrokerReceive: %v", err)
-		}
-		asks, ok := drained.([]map[string]any)
-		if !ok || len(asks) != 1 {
-			t.Fatalf("drained = %#v, want the child's ask", drained)
-		}
-		if asks[0]["from_run_id"] != "rt_child" || asks[0]["message_id"] != msgID || asks[0]["message"] != "status?" {
-			t.Fatalf("drained ask = %v, want rt_child's status? ask", asks[0])
-		}
+	asker := brokerAsker{runID: child.id, token: childToken}
+	sendAsk(t, sup, asker, "supervisor", msgID, "status?")
+
+	drained, err := sup.BrokerReceive()
+	if err != nil {
+		t.Fatalf("BrokerReceive: %v", err)
 	}
-	body := askSupervisor(t, sup, brokerAsker{runID: "rt_child", token: childToken}, msgID, "status?", "all good", inspect)
-	if body["from_run_id"] != "supervisor" {
-		t.Fatalf("child wait_reply = %v, want the supervisor's answer", body)
+	asks, ok := drained.([]map[string]any)
+	if !ok || len(asks) != 1 {
+		t.Fatalf("drained = %#v, want the child's ask", drained)
+	}
+	if asks[0]["from_run_id"] != "rt_child" || asks[0]["message_id"] != msgID || asks[0]["message"] != "status?" || asks[0]["role"] != "agent" {
+		t.Fatalf("drained ask = %v, want rt_child's status? ask from an agent", asks[0])
+	}
+
+	status, body := replyThenWait(t, sup, asker, msgID, "all good")
+	if status != http.StatusOK || body["from_run_id"] != "supervisor" {
+		t.Fatalf("child wait_reply = (%d, %v), want the supervisor's answer", status, body)
 	}
 }
 
-// brokerPost posts a body to a broker endpoint under a bounded context, so a
-// never-completing wait fails the test instead of hanging it.
-func brokerPost(t *testing.T, addr, path, body string) (int, map[string]any) {
+// TestAskToEndedChildRunIsQueuedAndTimesOut pins what an ended direct child
+// leaves behind: its broker run stays registered, so an ask to its rt_N is
+// admitted and queued with a 200, and the asker waits out its own bounded
+// timeout instead of being told the target is gone.
+func TestAskToEndedChildRunIsQueuedAndTimesOut(t *testing.T) {
+	sup := newConstructedSupervisor(t)
+	child := &childRuntime{id: "rt_child", label: "worker"}
+	sup.controlMu.Lock()
+	sup.runtimes[child.id] = child
+	sup.controlMu.Unlock()
+	if sup.ensureChildBrokerRun(child) == "" {
+		t.Fatal("child broker run was not registered")
+	}
+	// The runtime ends and is reaped; runChild's teardown removes no broker run.
+	sup.controlMu.Lock()
+	delete(sup.runtimes, child.id)
+	sup.controlMu.Unlock()
+	if sup.broker.GetRun(child.id) == nil {
+		t.Fatal("the child's broker run went away with its runtime")
+	}
+
+	askerToken, err := sup.broker.CreateRun("asker", "")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	// A sibling asks with the same random, unversioned message id a pi child
+	// mints, so no store generation is pinned on the ask.
+	const msgID = "1f6c1a1e-3a1f-4a1e-9d0f-2b3c4d5e6f70"
+	asker := brokerAsker{runID: "asker", token: askerToken}
+	sendAsk(t, sup, asker, child.id, msgID, "status?")
+
+	status, body, err := waitReply(sup, asker, msgID, 100, nil)
+	if err != nil {
+		t.Fatalf("wait_reply: %v", err)
+	}
+	if status != http.StatusGatewayTimeout {
+		t.Fatalf("wait_reply = (%d, %v), want the bounded wait to time out", status, body)
+	}
+	if body["outcome"] != string(messaging.OutcomeTimedOut) {
+		t.Fatalf("wait_reply outcome = %v, want %s", body["outcome"], messaging.OutcomeTimedOut)
+	}
+}
+
+// brokerPost posts a body to a broker endpoint and fails the test on a
+// transport error, so only the test goroutine itself uses it.
+func brokerPost(t *testing.T, sup *Supervisor, path string, body []byte) (int, map[string]any) {
 	t.Helper()
-	status, result, err := brokerPostWithin(context.Background(), addr, path, body)
+	status, result, err := brokerPOST(sup, path, body, nil)
 	if err != nil {
 		t.Fatalf("POST /%s: %v", path, err)
 	}
 	return status, result
 }
 
-// brokerPostWithin is brokerPost for callers that cannot fail the test, such
-// as a goroutine parked on the long-poll.
-func brokerPostWithin(parent context.Context, addr, path, body string) (int, map[string]any, error) {
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+// brokerPOST posts a broker endpoint body through the supervisor's own broker
+// HTTP client under a bounded context, so a never-completing wait fails the
+// caller instead of hanging it.
+func brokerPOST(sup *Supervisor, path string, body []byte, trace *httptrace.ClientTrace) (int, map[string]any, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/%s", addr, path), bytes.NewReader([]byte(body)))
+	if trace != nil {
+		ctx = httptrace.WithClientTrace(ctx, trace)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/%s", sup.broker.Addr(), path), bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, fmt.Errorf("new /%s request: %w", path, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := sup.brokerHTTPClientDo(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("POST /%s: %w", path, err)
 	}
