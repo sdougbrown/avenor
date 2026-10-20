@@ -185,6 +185,30 @@ func (c *Client) Ask(ctx context.Context, send messaging.SendRequest, wait messa
 	return result, nil
 }
 
+// AskRequest builds the send and wait requests for one agent ask: it mints the
+// message id and builds the body the target reads. from is the identity the
+// transport authenticates, and bodyFrom is the run id the payload names, which
+// is the asker's own name on surfaces that speak as a named role. The returned
+// request carries the minted id even when body construction fails, so the
+// caller can still name the ask it reports.
+func (c *Client) AskRequest(from messaging.Identity, bodyFrom, toRunID, message, role string) (messaging.SendRequest, messaging.WaitRequest, error) {
+	msgID, err := messaging.NewMsgID(c.now(), time.Time{})
+	if err != nil {
+		return messaging.SendRequest{}, messaging.WaitRequest{}, err
+	}
+	send := messaging.SendRequest{
+		From:      from,
+		To:        messaging.Identity{RunID: toRunID, Sender: toRunID},
+		MessageID: msgID,
+	}
+	body, err := messaging.AskBody(msgID, bodyFrom, toRunID, message, role)
+	if err != nil {
+		return send, messaging.WaitRequest{}, err
+	}
+	send.Body = string(body)
+	return send, messaging.WaitRequest{Sender: from}, nil
+}
+
 // withdrawFailedWait retracts an ask whose wait ended without a reply and
 // reports whether a terminal fence now covers it. The wait may have ended
 // because its context was cancelled, so the withdrawal gets its own cleanup

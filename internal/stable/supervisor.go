@@ -2030,23 +2030,12 @@ func (s *Supervisor) BrokerAsk(ctx context.Context, toRunID, message, role strin
 	}
 	runID, _ := s.registerBrokerRun()
 	sender := messaging.Identity{RunID: runID, Sender: "supervisor"}
-	msgID, err := messaging.NewMsgID(time.Now(), time.Time{})
+	client := askclient.New(s.messaging, askclient.Options{})
+	send, wait, err := client.AskRequest(sender, "supervisor", toRunID, message, role)
 	if err != nil {
-		return nil, &control.AskError{Outcome: messaging.OutcomeNotSent, Err: err}
+		return nil, &control.AskError{MessageID: send.MessageID, Outcome: messaging.OutcomeNotSent, Err: err}
 	}
-	payload, err := messaging.AskBody(msgID, "supervisor", toRunID, message, role)
-	if err != nil {
-		return nil, &control.AskError{MessageID: msgID, Outcome: messaging.OutcomeNotSent, Err: err}
-	}
-	result, err := askclient.New(s.messaging, askclient.Options{}).Ask(ctx,
-		messaging.SendRequest{
-			From:      sender,
-			To:        messaging.Identity{RunID: toRunID, Sender: toRunID},
-			MessageID: msgID,
-			Body:      string(payload),
-		},
-		messaging.WaitRequest{Sender: sender},
-	)
+	result, err := client.Ask(ctx, send, wait)
 	if err != nil {
 		pending := false
 		var askErr *askclient.Error

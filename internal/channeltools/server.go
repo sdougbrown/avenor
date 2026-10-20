@@ -175,20 +175,11 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 			role = "agent"
 		}
 		sender := messaging.Identity{RunID: s.opts.RunID, Sender: s.opts.Sender}
-		msgID, err := messaging.NewMsgID(time.Now(), time.Time{})
+		send, wait, err := s.ask.AskRequest(sender, s.opts.RunID, p.ToRunID, p.Message, role)
 		if err != nil {
 			return nil, err
 		}
-		body, err := messaging.AskBody(msgID, s.opts.RunID, p.ToRunID, p.Message, role)
-		if err != nil {
-			return nil, err
-		}
-		result, err := s.ask.Ask(ctx, messaging.SendRequest{
-			From:      sender,
-			To:        messaging.Identity{RunID: p.ToRunID, Sender: p.ToRunID},
-			MessageID: msgID,
-			Body:      string(body),
-		}, messaging.WaitRequest{Sender: sender})
+		result, err := s.ask.Ask(ctx, send, wait)
 		if err != nil {
 			return nil, result.Failure(err)
 		}
