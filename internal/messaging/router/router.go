@@ -749,12 +749,17 @@ func validateFields(fields map[string]json.RawMessage, entry messaging.ActionApp
 				return messaging.Repair("wrong_type_string", map[string]string{"name": quote(name)})
 			}
 		}
-		if kind != "string" {
-			continue
-		}
-		value, _ := fieldString(fields, name)
-		if detail := validateStringConstraint(name, value, entry.Constraints[name]); detail != "" {
-			return detail
+		constraint := entry.Constraints[name]
+		switch kind {
+		case "string":
+			value, _ := fieldString(fields, name)
+			if detail := validateStringConstraint(name, value, constraint); detail != "" {
+				return detail
+			}
+		case "integer":
+			if detail := validateIntegerConstraint(name, raw, constraint); detail != "" {
+				return detail
+			}
 		}
 	}
 	return ""
@@ -786,9 +791,31 @@ func validateStringConstraint(name, value string, constraint messaging.PropertyC
 	return ""
 }
 
+// validateIntegerConstraint applies the integer limits the published JSON
+// Schema declares. The only one today is timeout_ms's inclusive maximum, which
+// keeps the later duration conversion inside its range.
+func validateIntegerConstraint(name string, raw json.RawMessage, constraint messaging.PropertyConstraints) string {
+	if constraint.Maximum == 0 {
+		return ""
+	}
+	value, ok := exactInteger(raw)
+	if !ok {
+		return ""
+	}
+	maximum := new(big.Rat).SetInt64(constraint.Maximum)
+	if value.Cmp(maximum) > 0 {
+		return messaging.Repair("integer_too_large", map[string]string{
+			"name": quote(name),
+			"max":  fmt.Sprint(constraint.Maximum),
+		})
+	}
+	return ""
+}
+
 // timeoutMS converts the validated integer-valued timeout_ms into whole
 // milliseconds. Validation admits 1.0 and 1e3, which do not unmarshal into an
-// int directly, so the conversion goes through the exact rational value.
+// int directly, so the conversion goes through the exact rational value. The
+// schema's maximum keeps the result inside time.Duration's range.
 func (input messageInput) timeoutMS() int {
 	if input.TimeoutMS == "" {
 		return 0
@@ -820,17 +847,33 @@ func hasWireType(raw json.RawMessage, kind string) bool {
 		_, ok := value.(string)
 		return ok
 	case "integer":
-		number, ok := value.(json.Number)
-		if !ok {
-			return false
-		}
-		rational, ok := new(big.Rat).SetString(number.String())
-		return ok && rational.IsInt() && rational.Num().IsInt64()
+		rational, ok := exactInteger(raw)
+		return ok && rational.Num().IsInt64()
 	case "object":
 		_, ok := value.(map[string]any)
 		return ok
 	}
 	return false
+}
+
+// exactInteger returns raw's exact rational value when it is a mathematical
+// integer.
+func exactInteger(raw json.RawMessage) (*big.Rat, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false
+	}
+	number, ok := value.(json.Number)
+	if !ok {
+		return nil, false
+	}
+	rational, ok := new(big.Rat).SetString(number.String())
+	if !ok || !rational.IsInt() {
+		return nil, false
+	}
+	return rational, true
 }
 
 func firstNonEmpty(values ...string) string {

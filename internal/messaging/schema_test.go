@@ -194,6 +194,9 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 				if got, _ := property["pattern"].(string); got != constraint.Pattern {
 					t.Fatalf("%s/%s: property %q schema pattern = %q, table = %q", fixture.name, action, name, got, constraint.Pattern)
 				}
+				if got := schemaInt(property["maximum"]); int64(got) != constraint.Maximum {
+					t.Fatalf("%s/%s: property %q schema maximum = %d, table = %d", fixture.name, action, name, got, constraint.Maximum)
+				}
 			}
 		}
 		for action := range fixture.table {
@@ -218,6 +221,28 @@ func TestSchemaFilesCompiled(t *testing.T) {
 	if got, want := PeersInputSchema(), readSchemaFile(t, "../../schemas/peers.input.json"); !reflect.DeepEqual(got, want) {
 		t.Fatal("peers.input.json and schema.gen.go disagree; run go generate ./internal/messaging/...")
 	}
+}
+
+// TestTimeoutMaximumMatchesWaitCap pins the schema's timeout_ms upper bound to
+// the wait cap askclient enforces, which also keeps the duration conversion in
+// range.
+func TestTimeoutMaximumMatchesWaitCap(t *testing.T) {
+	schema := MessageInputSchema()
+	variants, _ := schema["oneOf"].([]any)
+	for _, rawVariant := range variants {
+		variant, _ := rawVariant.(map[string]any)
+		properties, _ := variant["properties"].(map[string]any)
+		action, _ := properties["action"].(map[string]any)
+		if action["const"] != "ask" {
+			continue
+		}
+		timeout, _ := properties["timeout_ms"].(map[string]any)
+		if got, want := schemaInt(timeout["maximum"]), int(MaxWait.Milliseconds()); got != want {
+			t.Fatalf("timeout_ms maximum = %d, want the wait cap %d", got, want)
+		}
+		return
+	}
+	t.Fatal("ask variant has no timeout_ms property")
 }
 
 // TestSurfaceVocabulary pins the two declarations of the surface vocabulary: the

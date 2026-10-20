@@ -13,16 +13,17 @@ type ActionApplicability struct {
 	Permitted   []string                       // every property the action accepts, including "action"
 	Required    []string                       // the subset that must be present
 	Types       map[string]string              // declared wire type per permitted property: string, integer or object
-	Constraints map[string]PropertyConstraints // string limits the JSON Schema declares
+	Constraints map[string]PropertyConstraints // declared limits per property
 }
 
-// PropertyConstraints is one string property's declared length and pattern
-// limits, compiled from the published JSON Schema so the router and the schema
-// enforce the same rule from one declaration. A zero length means no limit.
+// PropertyConstraints is one property's declared limits, compiled from the
+// published JSON Schema so the router and the schema enforce the same rule from
+// one declaration. A zero length or maximum means no limit.
 type PropertyConstraints struct {
 	MinLength int
 	MaxLength int
 	Pattern   string
+	Maximum   int64 // inclusive upper bound for an integer property
 }
 
 // ConformanceCase is one language-neutral conformance case from

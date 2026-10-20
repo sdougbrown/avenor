@@ -84,6 +84,11 @@ func TestRepairTemplates(t *testing.T) {
 			want:  `property "name" contains characters that are not allowed`,
 		},
 		{
+			code:  "integer_too_large",
+			facts: map[string]string{"name": `"timeout_ms"`, "max": "600000"},
+			want:  `property "timeout_ms" must be at most 600000`,
+		},
+		{
 			code:  "peers_invalid_action",
 			facts: map[string]string{},
 			want:  `not a known action (list, rename, last)`,
