@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -97,33 +96,68 @@ func TestWriteFileAtomicExclusiveAdmitsOneRacer(t *testing.T) {
 	path := filepath.Join(dir, "target")
 
 	var wg sync.WaitGroup
+	payloads := make([]string, writers)
 	errs := make([]error, writers)
 	for i := range writers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			data := fmt.Appendf(nil, "writer-%d", i)
-			errs[i] = WriteFileAtomicExclusive(path, TempPattern(path), data, 0o600)
+			payloads[i] = fmt.Sprintf("writer-%d", i)
+			errs[i] = WriteFileAtomicExclusive(path, TempPattern(path), []byte(payloads[i]), 0o600)
 		}(i)
 	}
 	wg.Wait()
 
-	var published, existing int
+	published := -1
+	var existing int
 	for i, err := range errs {
 		switch {
 		case err == nil:
-			published++
+			published = i
 		case errors.Is(err, fs.ErrExist):
 			existing++
 		default:
 			t.Errorf("writer %d: unexpected error %v", i, err)
 		}
 	}
-	if published != 1 || existing != writers-1 {
-		t.Fatalf("published = %d, fs.ErrExist = %d; want 1 and %d", published, existing, writers-1)
+	if published < 0 || existing != writers-1 {
+		t.Fatalf("published writer = %d, fs.ErrExist = %d; want one publisher and %d", published, existing, writers-1)
 	}
-	if got, err := os.ReadFile(path); err != nil || !strings.HasPrefix(string(got), "writer-") {
-		t.Fatalf("content = %q (err %v), want one writer's whole payload", got, err)
+	if got, err := os.ReadFile(path); err != nil || string(got) != payloads[published] {
+		t.Fatalf("content = %q (err %v), want writer %d's whole payload", got, err, published)
+	}
+	assertOnlyTarget(t, dir)
+}
+
+func TestWriteFileAtomicAdmitsEveryRacer(t *testing.T) {
+	const writers = 16
+	dir := t.TempDir()
+	path := filepath.Join(dir, "target")
+
+	var wg sync.WaitGroup
+	payloads := make([]string, writers)
+	errs := make([]error, writers)
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			payloads[i] = fmt.Sprintf("writer-%d", i)
+			errs[i] = WriteFileAtomic(path, TempPattern(path), []byte(payloads[i]), 0o600)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d: %v", i, err)
+		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if !slices.Contains(payloads, string(got)) {
+		t.Fatalf("content = %q, want exactly one writer's payload", got)
 	}
 	assertOnlyTarget(t, dir)
 }
