@@ -1480,6 +1480,9 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	if err != nil {
 		return SpawnResult{}, err
 	}
+	if params.Dir == "" {
+		params.Dir = "."
+	}
 
 	// The admission reservation already holds the tree slot and one local
 	// slot; convert it into this child instead of acquiring again.
@@ -1505,12 +1508,29 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			return SpawnResult{}, fmt.Errorf("label already in use: %s (runtime %s)", params.Label, holder)
 		}
 	}
+	// Every field the spawn parameters already determine is set here, before
+	// the child is published into s.runtimes: status and list readers reach a
+	// child the moment it is registered, and the values they read must not be
+	// written without child.mu afterwards.
 	child := &childRuntime{
 		id: rtID,
-		// Set before publication into s.runtimes so the label is visible
-		// under s.controlMu at the moment the child becomes visible to the
-		// label scans, instead of being written unlocked after publication.
+		// The label is visible under s.controlMu at the moment the child
+		// becomes visible to the label scans.
 		label:                    params.Label,
+		agent:                    params.Agent,
+		agentProfile:             params.AgentProfile,
+		model:                    params.Model,
+		thinking:                 params.Thinking,
+		backend:                  backend,
+		effectiveBackend:         backend,
+		effectiveAgent:           params.Agent,
+		effectiveModel:           params.Model,
+		rosterFile:               params.RosterFile,
+		rosterEntry:              params.RosterEntry,
+		parentID:                 params.ParentID,
+		permClaimTimeout:         s.config.PermissionClaimTimeout,
+		runID:                    s.runID,
+		dir:                      params.Dir,
 		startedAt:                time.Now().UnixMilli(),
 		lifecycleCtx:             childCtx,
 		cancelFn:                 childCancel,
@@ -1564,9 +1584,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 
 	// Track parent-child relationship.
 	if params.ParentID != "" {
-		child.mu.Lock()
-		child.parentID = params.ParentID
-		child.mu.Unlock()
 		s.controlMu.Lock()
 		if parent, ok := s.runtimes[params.ParentID]; ok {
 			parent.mu.Lock()
@@ -1604,10 +1621,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			releaseReservation()
 		}
 	}()
-
-	if params.Dir == "" {
-		params.Dir = "."
-	}
 
 	promptText := params.Prompt
 	if promptText == "" && params.PromptFile != "" {
@@ -1705,23 +1718,11 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			AgentProfile: params.AgentProfile,
 		}
 
-		child.agent = params.Agent
-		child.agentProfile = params.AgentProfile
-		child.model = params.Model
-		child.thinking = params.Thinking
-		child.backend = backend
-		child.effectiveBackend = backend
-		child.effectiveAgent = params.Agent
-		child.effectiveModel = params.Model
+		child.mu.Lock()
 		child.rosterFile = rosterMetadataPath
 		child.roster = rootRoster
-		child.permClaimTimeout = s.config.PermissionClaimTimeout
-		child.eventWriter = writer
-		child.fileHandler = fileHandler
-		child.runID = s.runID
-		child.dir = params.Dir
-		child.onEvent = onEvent
-		child.sentinelFile = sentinelFile
+		child.mu.Unlock()
+		s.installSpawnResources(child, writer, fileHandler, onEvent, sentinelFile)
 		// provider and session remain zero-valued for loop children
 
 		s.signalRuntimeActivity()
@@ -1761,23 +1762,11 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			AgentProfile: params.AgentProfile,
 		}
 
-		child.agent = params.Agent
-		child.agentProfile = params.AgentProfile
-		child.model = params.Model
-		child.thinking = params.Thinking
-		child.backend = backend
-		child.effectiveBackend = backend
-		child.effectiveAgent = params.Agent
-		child.effectiveModel = params.Model
+		child.mu.Lock()
 		child.rosterFile = rosterMetadataPath
 		child.roster = rootRoster
-		child.permClaimTimeout = s.config.PermissionClaimTimeout
-		child.eventWriter = writer
-		child.fileHandler = fileHandler
-		child.runID = s.runID
-		child.dir = params.Dir
-		child.onEvent = onEvent
-		child.sentinelFile = sentinelFile
+		child.mu.Unlock()
+		s.installSpawnResources(child, writer, fileHandler, onEvent, sentinelFile)
 
 		s.signalRuntimeActivity()
 
@@ -1840,25 +1829,8 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		return SpawnResult{}, fmt.Errorf("start session: %w", err)
 	}
 
-	// Populate child with fully-initialised state.
-	child.agent = params.Agent
-	child.agentProfile = params.AgentProfile
-	child.model = params.Model
-	child.thinking = params.Thinking
-	child.backend = backend
-	child.effectiveBackend = backend
-	child.effectiveAgent = params.Agent
-	child.effectiveModel = params.Model
-	child.rosterFile = params.RosterFile
-	child.rosterEntry = params.RosterEntry
 	providerLifecycle := s.installChildProvider(child, provider, session)
-	child.eventWriter = writer
-	child.fileHandler = fileHandler
-	child.permClaimTimeout = s.config.PermissionClaimTimeout
-	child.runID = s.runID
-	child.dir = params.Dir
-	child.onEvent = onEvent
-	child.sentinelFile = sentinelFile
+	s.installSpawnResources(child, writer, fileHandler, onEvent, sentinelFile)
 	attempt, err := s.registerSessionAttempt(session.SessionID, effectiveIdentity{
 		Backend:       backend,
 		Agent:         params.Agent,
@@ -1873,7 +1845,9 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		_ = writer.Close()
 		return SpawnResult{}, err
 	}
+	child.mu.Lock()
 	child.directAttempt = attempt
+	child.mu.Unlock()
 
 	// Take a file snapshot for output file detection.
 	s.fileSnapMu.Lock()
@@ -4258,6 +4232,22 @@ func newPermissionProviderLifecycle(child *childRuntime, provider runtime.Provid
 		providerCalls: providerCalls,
 		turn:          providerCalls.NewTurn(),
 	}
+}
+
+// installSpawnResources records the spawn resources that are created after the
+// child is registered: its durable event sink, file permission handler, and
+// event and sentinel paths. Status and list readers reach a registered child
+// immediately, so the presentation fields are written under child.mu, and the
+// sink under writeMu as well because the writer teardown path reads it there.
+func (s *Supervisor) installSpawnResources(child *childRuntime, writer cli.EventSink, fileHandler *permission.FileHandler, onEvent, sentinelFile string) {
+	child.writeMu.Lock()
+	child.mu.Lock()
+	child.eventWriter = writer
+	child.fileHandler = fileHandler
+	child.onEvent = onEvent
+	child.sentinelFile = sentinelFile
+	child.mu.Unlock()
+	child.writeMu.Unlock()
 }
 
 func (s *Supervisor) installChildProvider(child *childRuntime, provider runtime.Provider, session runtime.Session) *permissionProviderLifecycle {
