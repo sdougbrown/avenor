@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -612,148 +613,179 @@ func TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize(t *testing.T) 
 }
 
 // TestCloseDuringLaunchLeavesNoClient covers the launch-versus-Close race: a
-// launch still starting when Close runs must neither install a client nor its
-// config cleanup after Close, and must tear down the child it started.
+// launch still in flight when Close starts keeps Close waiting, never installs
+// a client, its config cleanup, or a session afterwards, and does not leave the
+// child it started behind.
 func TestCloseDuringLaunchLeavesNoClient(t *testing.T) {
-	tests := []struct {
-		name string
-		// spawnFirst starts the child before the launch settles, which models a
-		// launch held up in the handshake rather than in process startup.
-		spawnFirst bool
-		// stuck leaves the launch unsettled while Close runs, so the launch only
-		// finishes after Close has returned.
-		stuck bool
-	}{
-		{name: "close during client start"},
-		{name: "close during initialize", spawnFirst: true},
-		{name: "close while the launch never settles", stuck: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			bin := filepath.Join(dir, "silent.sh")
-			if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat > /dev/null\n"), 0o755); err != nil {
-				t.Fatalf("write stub: %v", err)
-			}
-			config := filepath.Join(dir, "candidate.json")
-			if err := os.WriteFile(config, []byte(`{}`), 0o600); err != nil {
-				t.Fatalf("write config: %v", err)
-			}
+	t.Run("close waits for a real launch", func(t *testing.T) {
+		// The stub answers the handshake so the launch reaches configureSession,
+		// and exits cleanly on SIGTERM the way a well-behaved backend does.
+		p, config := newLaunchRaceProvider(t, `#!/bin/sh
+trap 'exit 0' TERM
+read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"sessionId":"stub-session"}}'
+cat > /dev/null
+`)
+		p.authenticateID = "stub-auth"
+		// This gate has no context to cancel, so only the launch count can
+		// release Close.
+		entered, gate := make(chan struct{}), make(chan struct{})
+		p.configureSession = func(context.Context, *Session, runtime.StartOptions) error {
+			close(entered)
+			<-gate
+			return nil
+		}
 
-			entered := make(chan struct{})
-			release := make(chan struct{})
-			childPID := 0
-			p := &Provider{
-				backendID: "test-acp",
-				bin:       bin,
-				sessions:  map[string]*Session{},
-				buildClientEnv: func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
-					return map[string]string{"OPENCODE_CONFIG": config}, func() error { return os.Remove(config) }
-				},
-			}
-			spawn := func(ctx context.Context, cfg ClientConfig) (*Client, error) {
+		started := startInBackground(p)
+		<-entered
+		closed := make(chan error, 1)
+		began := time.Now()
+		go func() { closed <- p.Close() }()
+		assertCloseBlocked(t, closed)
+		close(gate)
+		awaitClose(t, closed, began, 0, 10*time.Second)
+
+		assertLaunchAbandoned(t, p, started, config)
+	})
+
+	t.Run("close waits for every launch", func(t *testing.T) {
+		// exec keeps the child a single process that dies with its stdin, so no
+		// orphan holds the client's pipe open.
+		p, config := newLaunchRaceProvider(t, "#!/bin/sh\nexec cat > /dev/null\n")
+		entered, childStarted := make(chan struct{}, 2), make(chan struct{})
+		settled, wedged := make(chan struct{}), make(chan struct{})
+		childPID := 0
+		var calls atomic.Int32
+		p.startClient = func(ctx context.Context, cfg ClientConfig) (*Client, error) {
+			release := settled
+			if calls.Add(1) > 1 {
+				// The second launch starts a real child and never returns on its
+				// own, so only the provider lifetime can kill it.
 				client, err := NewClient(ctx, cfg)
 				if err != nil {
 					return nil, err
 				}
 				childPID = client.PID()
-				return client, nil
+				close(childStarted)
+				release = wedged
 			}
-			p.startClient = func(ctx context.Context, cfg ClientConfig) (*Client, error) {
-				var pending *Client
-				if tt.spawnFirst {
-					client, err := spawn(ctx, cfg)
-					if err != nil {
-						return nil, err
-					}
-					pending = client
-				}
-				close(entered)
-				<-release
-				if pending != nil {
-					return pending, nil
-				}
-				return spawn(ctx, cfg)
-			}
+			entered <- struct{}{}
+			<-release
+			return nil, errors.New("launch stopped")
+		}
 
-			started := make(chan error, 1)
-			go func() {
-				_, err := p.Start(context.Background(), runtime.StartOptions{})
-				started <- err
-			}()
-			<-entered
+		first, second := startInBackground(p), startInBackground(p)
+		<-entered
+		<-entered
+		<-childStarted
 
-			closed := make(chan error, 1)
-			go func() { closed <- p.Close() }()
-			if tt.stuck {
-				// Close must not hang on a launch its caller's context cannot stop.
-				select {
-				case err := <-closed:
-					if err != nil {
-						t.Fatalf("Close: %v", err)
-					}
-				case <-time.After(10 * time.Second):
-					t.Fatal("Close blocked on an unsettled launch")
-				}
-				close(release)
-			} else {
-				waitForProviderClosing(t, p)
-				close(release)
-				select {
-				case err := <-closed:
-					if err != nil {
-						t.Fatalf("Close: %v", err)
-					}
-				case <-time.After(10 * time.Second):
-					t.Fatal("Close did not return after the launch settled")
-				}
-			}
+		closed := make(chan error, 1)
+		began := time.Now()
+		go func() { closed <- p.Close() }()
+		assertCloseBlocked(t, closed)
+		settled <- struct{}{}
+		// The second launch is still in flight, so Close stays blocked.
+		assertCloseBlocked(t, closed)
+		awaitClose(t, closed, began, launchSettleTimeout, launchSettleTimeout+time.Second)
+		if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("child process %d outlived Close: %v", childPID, err)
+		}
+		// The launch Close gave up on is no longer counted, so it does not wait
+		// the bound again.
+		closed = make(chan error, 1)
+		began = time.Now()
+		go func() { closed <- p.Close() }()
+		awaitClose(t, closed, began, 0, time.Second)
 
-			select {
-			case err := <-started:
-				if !errors.Is(err, errProviderClosed) {
-					t.Fatalf("Start error = %v, want %v", err, errProviderClosed)
-				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("Start did not return after Close")
-			}
+		close(wedged)
+		assertLaunchAbandoned(t, p, first, config)
+		assertLaunchAbandoned(t, p, second, config)
+	})
+}
 
-			p.mu.Lock()
-			client, cleanup := p.client, p.clientEnvCleanup
-			p.mu.Unlock()
-			if client != nil {
-				t.Fatal("launch installed a client after Close")
-			}
-			if cleanup != nil {
-				t.Fatal("launch installed its config cleanup after Close")
-			}
-			if _, err := os.Stat(config); !os.IsNotExist(err) {
-				t.Fatalf("launch config not cleaned up: %v", err)
-			}
-			if childPID == 0 {
-				t.Fatal("launch did not start a child process")
-			}
-			if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
-				t.Fatalf("child process %d outlived the abandoned launch: %v", childPID, err)
-			}
-		})
+// newLaunchRaceProvider builds a provider backed by the stub at script, whose
+// launch generates a config cleanup removes, and returns that config's path.
+func newLaunchRaceProvider(t *testing.T, script string) (*Provider, string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "stub.sh")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	config := filepath.Join(dir, "candidate.json")
+	if err := os.WriteFile(config, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return &Provider{
+		backendID: "test-acp",
+		bin:       bin,
+		sessions:  map[string]*Session{},
+		buildClientEnv: func(runtime.StartOptions, string, string, string) (map[string]string, func() error) {
+			return map[string]string{"OPENCODE_CONFIG": config}, func() error { return os.Remove(config) }
+		},
+	}, config
+}
+
+func startInBackground(p *Provider) <-chan error {
+	started := make(chan error, 1)
+	go func() {
+		_, err := p.Start(context.Background(), runtime.StartOptions{})
+		started <- err
+	}()
+	return started
+}
+
+// assertCloseBlocked fails when Close returns while a launch is still owed.
+func assertCloseBlocked(t *testing.T, closed <-chan error) {
+	t.Helper()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before the launch settled: %v", err)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
-func waitForProviderClosing(t *testing.T, p *Provider) {
+// awaitClose waits for Close and pins how long it took: a lower bound for a wait
+// that must still be running, an upper bound for the bounded launch wait.
+func awaitClose(t *testing.T, closed <-chan error, began time.Time, min, max time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		p.mu.Lock()
-		closing := p.closing
-		p.mu.Unlock()
-		if closing {
-			return
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for the provider to start closing")
+	case <-time.After(max + 5*time.Second):
+		t.Fatal("Close did not return")
+	}
+	if elapsed := time.Since(began); elapsed < min || elapsed > max {
+		t.Fatalf("Close took %s, want between %s and %s", elapsed, min, max)
+	}
+}
+
+// assertLaunchAbandoned proves an abandoned launch failed with the provider
+// closed, installed nothing, and removed the generated config at config.
+func assertLaunchAbandoned(t *testing.T, p *Provider, started <-chan error, config string) {
+	t.Helper()
+	select {
+	case err := <-started:
+		if !errors.Is(err, errProviderClosed) {
+			t.Fatalf("Start error = %v, want %v", err, errProviderClosed)
 		}
-		time.Sleep(time.Millisecond)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after Close")
+	}
+	p.mu.Lock()
+	installed := p.client != nil || p.clientEnvCleanup != nil || len(p.sessions) != 0
+	p.mu.Unlock()
+	if installed {
+		t.Fatal("launch installed a client, its cleanup or a session after Close")
+	}
+	if _, err := os.Stat(config); config != "" && !os.IsNotExist(err) {
+		t.Fatalf("launch config not cleaned up: %v", err)
 	}
 }
 
