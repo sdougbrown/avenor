@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -270,5 +271,44 @@ func TestResumeRefusesUnownedRuntime(t *testing.T) {
 	assertToolCode(t, err, "refused")
 	if !strings.Contains(err.Error(), `runtime "rt_orphan" is not owned by this supervisor`) {
 		t.Fatalf("unowned refusal = %q", err)
+	}
+}
+
+func TestResumeConcurrentKeyedSpawnsOneRuntime(t *testing.T) {
+	sup, provider := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: dir, Label: "prior"})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	writeSentinel(t, prior.SentinelFile, "DONE", "ses_resumed")
+
+	const n = 8
+	results := make([]messaging.ResumeResult, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+				RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue", IdempotencyKey: "k",
+			})
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("resume %d: %v", i, err)
+		}
+		if results[i].RuntimeID != results[0].RuntimeID || results[i].RunID != results[0].RunID {
+			t.Fatalf("resume %d got a different run: %+v vs %+v", i, results[i], results[0])
+		}
+	}
+	if got := countIdempotencyRuntimes(sup); got != 2 {
+		t.Fatalf("runtimes = %d, want the prior run plus one resumed run", got)
+	}
+	if resumes := provider.resumesRecorded(); len(resumes) != 1 {
+		t.Fatalf("provider resumes = %d, want one for the keyed first use", len(resumes))
 	}
 }
