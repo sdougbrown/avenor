@@ -119,6 +119,16 @@ func TestTransportCloseUnblocksWait(t *testing.T) {
 	if err := tr.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
+	if _, err := tr.Send(context.Background(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: gen, Body: `{}`,
+	}); !errors.Is(err, messaging.ErrTransportClosed) {
+		t.Fatalf("Send after Close = %v, want ErrTransportClosed", err)
+	}
+	if _, err := tr.Reply(context.Background(), messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{}`,
+	}); !errors.Is(err, messaging.ErrTransportClosed) {
+		t.Fatalf("Reply after Close = %v, want ErrTransportClosed", err)
+	}
 }
 
 // TestAskEpochLost pins the confirmed-generation-loss path: a replaced
