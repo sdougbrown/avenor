@@ -6,6 +6,7 @@ import * as path from 'node:path'
 
 import {
   attachOwner,
+  attachOwnerWithSeams,
   ForeignPeerError,
   OwnerSocketAbsentError,
   ownerRecordPath,
@@ -74,7 +75,7 @@ describe('owner socket binding', () => {
     const listening = await listenSocket(socketPath)
     publishRecord(socketPath)
 
-    await expect(attachOwner(socketPath, { euid: euid() + 1 })).rejects.toBeInstanceOf(ForeignPeerError)
+    await expect(attachOwnerWithSeams(socketPath, { euid: euid() + 1 })).rejects.toBeInstanceOf(ForeignPeerError)
     expect(listening.connections).toBe(0)
   })
 
@@ -111,7 +112,7 @@ describe('owner socket binding', () => {
     publishRecord(socketPath)
 
     const beforeDial = () => fs.renameSync(replacementPath, socketPath)
-    await expect(attachOwner(socketPath, { beforeDial })).rejects.toBeInstanceOf(StaleOwnerRecordError)
+    await expect(attachOwnerWithSeams(socketPath, { beforeDial })).rejects.toBeInstanceOf(StaleOwnerRecordError)
 
     expect(replacement.connections).toBe(1)
     expect(replacement.bytes).toBe(0)

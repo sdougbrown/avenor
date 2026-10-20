@@ -72,6 +72,13 @@ export type ControlSocketProbe = 'live' | 'dead' | 'uncertain'
 
 export interface OwnerAttachOptions {
   timeoutMs?: number
+}
+
+/**
+ * Seams the published attach path does not accept, reachable only from inside
+ * this package: `attachOwner` is what `index.ts` exports.
+ */
+export interface OwnerAttachSeams {
   /** Binding identity; production uses the process euid. */
   euid?: number
   /** Runs after the pre-dial checks and before the dial. */
@@ -330,6 +337,14 @@ function remainingMs(deadline: number): number {
 export async function attachOwner(
   socketPath: string,
   options: OwnerAttachOptions = {},
+): Promise<Client> {
+  return attachOwnerWithSeams(socketPath, options)
+}
+
+/** The attach itself, with the seams the package's tests inject. */
+export async function attachOwnerWithSeams(
+  socketPath: string,
+  options: OwnerAttachOptions & OwnerAttachSeams = {},
 ): Promise<Client> {
   const deadline = Date.now() + (options.timeoutMs ?? OWNER_ATTACH_TIMEOUT_MS)
   const euid = options.euid ?? processEUID()
