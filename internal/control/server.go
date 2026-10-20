@@ -1256,6 +1256,71 @@ var ErrWaitTurnTimeout = errors.New("wait_turn: timeout before the runtime's tur
 // write it a second time.
 var asyncResponse = Response{JSONRPC: "2.0"}
 
+// messageTransport resolves the shared transport for one message_* request and
+// maps a lookup failure onto the wire error the verb returns.
+type messageTransport func() (messaging.Transport, Response, bool)
+
+// messagePrelude applies the nil-handler gate, the optional owner gate and the
+// params decode every message_* verb shares. The transport lookup is deferred
+// so a blocking verb can take its slot first and release it if the lookup
+// fails, exactly like the hand-written verbs it replaces.
+func (s *ControlServer) messagePrelude(c *connState, req Request, params any, ownerOnly bool) (messageTransport, Response, bool) {
+	if s.stableHandler == nil {
+		return nil, failure(req.ID, -32601, "method not found", nil), false
+	}
+	if ownerOnly && !s.ensureOwner(c) {
+		return nil, failure(req.ID, -32010, "permission_denied", nil), false
+	}
+	if params != nil {
+		if err := json.Unmarshal(req.Params, params); err != nil {
+			return nil, failure(req.ID, -32602, "invalid params", nil), false
+		}
+	}
+	return func() (messaging.Transport, Response, bool) {
+		tr, err := s.stableHandler.MessageTransport()
+		if err != nil {
+			return nil, failure(req.ID, -32000, err.Error(), messageErrorData(err, "", "")), false
+		}
+		return tr, Response{}, true
+	}, Response{}, true
+}
+
+// messageAsyncResult is one blocking verb's outcome and wire result, so the
+// shared runner can render either message_wait or message_receive.
+type messageAsyncResult struct {
+	outcome messaging.Outcome
+	payload any
+}
+
+// runMessageAsync parks one blocking message verb on a background goroutine
+// bound to the connection context, holding one per-connection slot for the
+// call's lifetime.
+func (c *connState) runMessageAsync(req Request, messageID string, transport messageTransport, call func(context.Context, messaging.Transport) (messageAsyncResult, error)) Response {
+	select {
+	case c.messageSlots <- struct{}{}:
+	default:
+		return failure(req.ID, -32000, "too many in-flight message waits or receives on this connection", nil)
+	}
+	tr, resp, ok := transport()
+	if !ok {
+		<-c.messageSlots
+		return resp
+	}
+	go func() {
+		defer func() { <-c.messageSlots }()
+		result, err := call(c.ctx, tr)
+		if req.ID == nil || c.ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			_ = c.writeJSON(failure(req.ID, -32000, err.Error(), messageErrorData(err, result.outcome, messageID)))
+			return
+		}
+		_ = c.writeJSON(success(req.ID, result.payload))
+	}()
+	return asyncResponse
+}
+
 func (s *ControlServer) dispatch(c *connState, req Request) Response {
 	switch req.Method {
 	case "identity":
@@ -1743,19 +1808,14 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		return success(req.ID, map[string]any{"ok": true})
 	case "message_send":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		if !s.ensureOwner(c) {
-			return failure(req.ID, -32010, "permission_denied", nil)
-		}
 		var p MessageSendParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
+		transport, resp, ok := s.messagePrelude(c, req, &p, true)
+		if !ok {
+			return resp
 		}
-		tr, err := s.stableHandler.MessageTransport()
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
 		}
 		res, err := tr.Send(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
 		if err != nil {
@@ -1763,15 +1823,10 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		return success(req.ID, newMessageSendResult(res))
 	case "message_wait":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		if !s.ensureOwner(c) {
-			return failure(req.ID, -32010, "permission_denied", nil)
-		}
 		var p MessageWaitParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
+		transport, resp, ok := s.messagePrelude(c, req, &p, true)
+		if !ok {
+			return resp
 		}
 		if p.TimeoutMS < 0 {
 			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
@@ -1781,48 +1836,19 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.TimeoutMS > maxAskTimeoutMS {
 			p.TimeoutMS = maxAskTimeoutMS
 		}
-		// Bound concurrent in-flight waits per connection so one owner cannot
-		// accumulate unbounded parked goroutines and edges.
-		select {
-		case c.messageSlots <- struct{}{}:
-		default:
-			return failure(req.ID, -32000, "too many in-flight message waits or receives on this connection", nil)
-		}
-		tr, err := s.stableHandler.MessageTransport()
-		if err != nil {
-			<-c.messageSlots
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
-		}
-		// Run the wait on a background goroutine bound to the connection
-		// context: an unanswered wait must not stall subsequent requests on
-		// this connection, and a disconnect cancels the pending wait.
-		go func() {
-			defer func() { <-c.messageSlots }()
-			res, err := tr.Wait(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
-			if req.ID == nil || c.ctx.Err() != nil {
-				return
-			}
-			if err != nil {
-				_ = c.writeJSON(failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, p.MessageID)))
-				return
-			}
-			_ = c.writeJSON(success(req.ID, newMessageWaitResult(res)))
-		}()
-		return asyncResponse
+		return c.runMessageAsync(req, p.MessageID, transport, func(ctx context.Context, tr messaging.Transport) (messageAsyncResult, error) {
+			res, err := tr.Wait(ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+			return messageAsyncResult{outcome: res.Outcome, payload: newMessageWaitResult(res)}, err
+		})
 	case "message_reply":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		if !s.ensureOwner(c) {
-			return failure(req.ID, -32010, "permission_denied", nil)
-		}
 		var p MessageReplyParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
+		transport, resp, ok := s.messagePrelude(c, req, &p, true)
+		if !ok {
+			return resp
 		}
-		tr, err := s.stableHandler.MessageTransport()
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
 		}
 		res, err := tr.Reply(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
 		if err != nil {
@@ -1830,19 +1856,14 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		return success(req.ID, newMessageSendResult(res))
 	case "message_withdraw":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		if !s.ensureOwner(c) {
-			return failure(req.ID, -32010, "permission_denied", nil)
-		}
 		var p MessageWithdrawParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
+		transport, resp, ok := s.messagePrelude(c, req, &p, true)
+		if !ok {
+			return resp
 		}
-		tr, err := s.stableHandler.MessageTransport()
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
 		}
 		res, err := tr.Withdraw(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
 		if err != nil {
@@ -1850,12 +1871,10 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		return success(req.ID, newMessageWithdrawResult(res))
 	case "message_receive":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
 		var p MessageReceiveParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
+		transport, resp, ok := s.messagePrelude(c, req, &p, false)
+		if !ok {
+			return resp
 		}
 		if p.TimeoutMS < 0 {
 			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
@@ -1865,43 +1884,19 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.TimeoutMS > maxAskTimeoutMS {
 			p.TimeoutMS = maxAskTimeoutMS
 		}
-		select {
-		case c.messageSlots <- struct{}{}:
-		default:
-			return failure(req.ID, -32000, "too many in-flight message waits or receives on this connection", nil)
-		}
-		tr, err := s.stableHandler.MessageTransport()
-		if err != nil {
-			<-c.messageSlots
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
-		}
-		// Like message_wait, run the receive off the read loop and bind it to the
-		// connection context so a parked receive neither stalls the connection
-		// nor outlives it.
-		go func() {
-			defer func() { <-c.messageSlots }()
-			res, err := tr.Receive(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
-			if req.ID == nil || c.ctx.Err() != nil {
-				return
-			}
-			if err != nil {
-				_ = c.writeJSON(failure(req.ID, -32000, err.Error(), messageErrorData(err, "", "")))
-				return
-			}
-			_ = c.writeJSON(success(req.ID, newMessageReceiveResult(res)))
-		}()
-		return asyncResponse
+		return c.runMessageAsync(req, "", transport, func(ctx context.Context, tr messaging.Transport) (messageAsyncResult, error) {
+			res, err := tr.Receive(ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+			return messageAsyncResult{payload: newMessageReceiveResult(res)}, err
+		})
 	case "message_peers":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
 		var p MessagePeersParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
+		transport, resp, ok := s.messagePrelude(c, req, &p, false)
+		if !ok {
+			return resp
 		}
-		tr, err := s.stableHandler.MessageTransport()
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
 		}
 		res, err := tr.Peers(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
 		if err != nil {
@@ -1909,12 +1904,13 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		return success(req.ID, newMessagePeersResult(res))
 	case "message_preflight":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
+		transport, resp, ok := s.messagePrelude(c, req, nil, false)
+		if !ok {
+			return resp
 		}
-		tr, err := s.stableHandler.MessageTransport()
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
 		}
 		res, err := tr.Preflight(c.ctx)
 		if err != nil {
