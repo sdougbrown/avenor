@@ -86,16 +86,18 @@ func (s *TmuxSession) Capture(ctx context.Context) (string, error) {
 	return string(out), nil
 }
 
-// PasteAndEnter pastes the sanitised text as a bracketed paste (paste-buffer
-// -p adds the markers), then sends Enter. See SanitizePrompt.
+// PasteAndEnter pastes the sanitised text as a bracketed paste, then sends
+// Enter. The buffer carries its own markers: paste-buffer -p adds them only
+// once the pane has enabled bracketed paste, and an unframed multi-line prompt
+// is submitted line by line. See bracketedPaste.
 func (s *TmuxSession) PasteAndEnter(ctx context.Context, text string) error {
 	bufferName := "avenor-prompt-" + s.name
 	cmd := exec.CommandContext(ctx, "tmux", "load-buffer", "-b", bufferName, "-")
-	cmd.Stdin = strings.NewReader(SanitizePrompt(text))
+	cmd.Stdin = bytes.NewReader(bracketedPaste(text))
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	if err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-p", "-t", s.name, "-b", bufferName).Run(); err != nil {
+	if err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-t", s.name, "-b", bufferName).Run(); err != nil {
 		return err
 	}
 	return exec.CommandContext(ctx, "tmux", "send-keys", "-t", s.name, string(KeyEnter)).Run()

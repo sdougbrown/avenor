@@ -144,22 +144,11 @@ func (p *PTYSession) Capture(_ context.Context) (string, error) {
 	return p.terminal.String(), nil
 }
 
+// PasteAndEnter writes the prompt as a bracketed paste, then Enter. Text and
+// Enter go out as separate writes: an Enter in the same burst as a long prompt
+// is read as part of a paste and dropped, so the prompt never submits.
 func (p *PTYSession) PasteAndEnter(ctx context.Context, text string) error {
 	return p.submit(ctx, bracketedPaste(text), []byte{'\r'})
-}
-
-const (
-	pasteStart = "\x1b[200~"
-	pasteEnd   = "\x1b[201~"
-)
-
-// bracketedPaste wraps text in the bracketed-paste markers Claude enables with
-// ESC[?2004h. Text and Enter go out as separate writes: an Enter in the same
-// burst as a long prompt is read as part of a paste and dropped, so the prompt
-// never submits. The text is passed through SanitizePrompt first, so no ESC
-// survives and prompt content cannot end the paste early or send keys.
-func bracketedPaste(text string) []byte {
-	return []byte(pasteStart + SanitizePrompt(text) + pasteEnd)
 }
 
 func encodeKeys(keys []Key) ([]byte, error) {

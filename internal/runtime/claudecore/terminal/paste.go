@@ -5,6 +5,18 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+)
+
+// bracketedPaste wraps text in the bracketed-paste markers Claude enables with
+// ESC[?2004h. The text is passed through SanitizePrompt first, so no ESC
+// survives and prompt content cannot end the paste early or send keys.
+func bracketedPaste(text string) []byte {
+	return []byte(pasteStart + SanitizePrompt(text) + pasteEnd)
+}
+
 // SanitizePrompt returns text without the characters a terminal reads as
 // control input rather than typed text: ESC and every other C0 control except
 // tab, newline and carriage return, DEL, and the C1 controls U+0080–U+009F.
