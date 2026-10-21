@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/chubin/vt10x"
@@ -113,8 +114,27 @@ func (p *PTYSession) PasteAndEnter(_ context.Context, text string) error {
 	if ptmx == nil {
 		return fmt.Errorf("pty closed")
 	}
-	_, err := ptmx.Write([]byte(text + "\r"))
+	if _, err := ptmx.Write(bracketedPaste(text)); err != nil {
+		return err
+	}
+	_, err := ptmx.Write([]byte{'\r'})
 	return err
+}
+
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+)
+
+// bracketedPaste wraps text in the bracketed-paste markers Claude enables with
+// ESC[?2004h. Text and Enter go out as separate writes: an Enter in the same
+// burst as a long prompt is read as part of a paste and dropped, so the prompt
+// never submits. Marker sequences inside the text are removed so prompt content
+// cannot end the paste early.
+func bracketedPaste(text string) []byte {
+	text = strings.ReplaceAll(text, pasteStart, "")
+	text = strings.ReplaceAll(text, pasteEnd, "")
+	return []byte(pasteStart + text + pasteEnd)
 }
 
 func encodeKeys(keys []Key) ([]byte, error) {

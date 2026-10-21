@@ -93,7 +93,7 @@ func (s *TmuxSession) PasteAndEnter(ctx context.Context, text string) error {
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	if err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-t", s.name, "-b", bufferName).Run(); err != nil {
+	if err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-p", "-t", s.name, "-b", bufferName).Run(); err != nil {
 		return err
 	}
 	return exec.CommandContext(ctx, "tmux", "send-keys", "-t", s.name, string(KeyEnter)).Run()
