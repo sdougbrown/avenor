@@ -13,6 +13,7 @@ type Key string
 const (
 	KeyEnter Key = "Enter"
 	KeyEsc   Key = "Esc"
+	KeyDown  Key = "Down"
 )
 
 // Session represents an interactive terminal session.

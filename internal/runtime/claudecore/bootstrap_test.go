@@ -1,6 +1,12 @@
 package claudecore
 
-import "testing"
+import (
+	"context"
+	"reflect"
+	"testing"
+
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
+)
 
 const testRule = "────────────────────────────────────────"
 
@@ -99,5 +105,32 @@ func TestParseTerminalPermissionHandlesNBSPChevron(t *testing.T) {
 	perm := ParseTerminalPermission(pane)
 	if perm == nil || len(perm.Options) != 2 {
 		t.Fatalf("NBSP-chevron option not parsed: %+v", perm)
+	}
+}
+
+func TestWaitForPaneReadySelectsTrustOptionBeforeConfirming(t *testing.T) {
+	dialog := func(marker string) string {
+		lines := []string{"No, exit", "Yes, I trust this folder"}
+		out := " Quick safety check: Is this a project you created or one you trust?\n\n"
+		for _, l := range lines {
+			if l == marker {
+				out += " ❯ " + l + "\n"
+			} else {
+				out += "   " + l + "\n"
+			}
+		}
+		return out + " Enter to confirm · Esc to cancel\n"
+	}
+	term := terminal.NewFakeSessionQueue("trust", 1, []string{
+		dialog("No, exit"),
+		dialog("Yes, I trust this folder"),
+		readyPane,
+	})
+	if !WaitForPaneReady(context.Background(), term) {
+		t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+	}
+	want := [][]string{{string(terminal.KeyDown)}, {string(terminal.KeyEnter)}}
+	if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("SendCalls = %v, want %v", got, want)
 	}
 }

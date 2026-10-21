@@ -87,8 +87,12 @@ func WaitForPaneReady(ctx context.Context, term terminal.Session) bool {
 		if err != nil {
 			return false
 		}
-		if strings.Contains(out, trustDialogHeader) && strings.Contains(out, trustDialogOption) {
-			if err := term.SendKeys(ctx, terminal.KeyEnter); err != nil {
+		if norm := normalizePane(out); strings.Contains(norm, trustDialogHeader) && strings.Contains(norm, trustDialogOption) {
+			key := terminal.KeyDown
+			if trustOptionHighlighted(norm) {
+				key = terminal.KeyEnter
+			}
+			if err := term.SendKeys(ctx, key); err != nil {
 				return false
 			}
 			continue
@@ -97,6 +101,18 @@ func WaitForPaneReady(ctx context.Context, term terminal.Session) bool {
 			return true
 		}
 	}
+}
+
+// trustOptionHighlighted reports whether the `❯`-marked line of the trust
+// dialog is the trust option. The text must already be normalised.
+func trustOptionHighlighted(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "❯") {
+			return strings.Contains(trimmed, trustDialogOption)
+		}
+	}
+	return false
 }
 
 // paneIsReady reports whether the captured pane shows an input box that takes

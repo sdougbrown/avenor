@@ -125,6 +125,8 @@ func encodeKeys(keys []Key) ([]byte, error) {
 			buf = append(buf, '\r')
 		case KeyEsc:
 			buf = append(buf, '\x1b')
+		case KeyDown:
+			buf = append(buf, "\x1b[B"...)
 		default:
 			if len(k) == 1 && k[0] >= 0x20 && k[0] <= 0x7e {
 				buf = append(buf, k[0])
