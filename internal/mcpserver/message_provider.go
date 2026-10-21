@@ -166,7 +166,7 @@ func (p *mcpMessageProvider) peerResolution(runID, label string) messaging.Resol
 		Label: firstNonEmptyString(label, runID),
 		Match: messaging.MatchUnique,
 	}
-	if info := p.server.registry.LookupRuntime(runID); info != nil {
+	if info := p.server.registry.LookupRuntime(p.supervisorPath, runID); info != nil {
 		res.PublicRunID = info.RunID
 	}
 	return res

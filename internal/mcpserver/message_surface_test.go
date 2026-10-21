@@ -646,6 +646,58 @@ func TestPeersLastReportsOneIDSpace(t *testing.T) {
 	}
 }
 
+// TestTwoSupervisorsWithTheSameRuntimeIDStayDistinct proves the message surface
+// answers for the supervisor the call is bound to. Runtime ids are minted per
+// supervisor, so the first run on every supervisor is rt_1; an identity lookup
+// that scans every supervisor answers for whichever one the map iteration
+// reached first.
+func TestTwoSupervisorsWithTheSameRuntimeIDStayDistinct(t *testing.T) {
+	cl := newRecordingControlClient()
+	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range []*RunInfo{
+		{RunID: "run-a", RuntimeID: "rt_1", Label: "alpha", SupervisorID: "/sock/a"},
+		{RunID: "run-b", RuntimeID: "rt_1", Label: "beta", SupervisorID: "/sock/b"},
+	} {
+		if err := s.registry.Store(info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alpha, err := newMCPMessageProvider(s, cl, "/sock/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta, err := newMCPMessageProvider(s, cl, "/sock/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		if got := alpha.peerResolution("rt_1", "alpha").PublicRunID; got != "run-a" {
+			t.Fatalf("a's rt_1 reported run_id %q, want run-a", got)
+		}
+		if got := beta.peerResolution("rt_1", "beta").PublicRunID; got != "run-b" {
+			t.Fatalf("b's rt_1 reported run_id %q, want run-b", got)
+		}
+	}
+
+	// A runtime id one supervisor owns still binds the call to that supervisor,
+	// while an id both own resolves to neither and leaves the default binding.
+	if err := s.registry.Store(&RunInfo{RunID: "run-c", RuntimeID: "rt_9", Label: "gamma", SupervisorID: "/sock/b"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.messageSupervisorPath(json.RawMessage(`{"action":"last","target":"rt_9"}`)); got != "/sock/b" {
+		t.Fatalf("unique runtime id bound to %q, want /sock/b", got)
+	}
+	for i := 0; i < 200; i++ {
+		if got := s.messageSupervisorPath(json.RawMessage(`{"action":"last","target":"rt_1"}`)); got != "" {
+			t.Fatalf("runtime id on two supervisors bound to %q, want the default supervisor", got)
+		}
+	}
+}
+
 // TestAuthorityToolErrorMapsWireCodesToRefused proves a control failure whose
 // code is a wire class, not a router code, is published as a refusal.
 func TestAuthorityToolErrorMapsWireCodesToRefused(t *testing.T) {

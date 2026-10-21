@@ -137,23 +137,50 @@ func (r *RunRegistry) LookupUnique(key string) *RunInfo {
 	return found
 }
 
-// LookupRuntime returns the entry whose runtime id is runtimeID, or nil. It is
+// LookupRuntime returns the entry for (supervisorID, runtimeID), or nil. It is
 // an identity projection for reporting a run's public id, not a resolution
 // rung: labels and run ids are still resolved through Lookup/LookupLabel.
-func (r *RunRegistry) LookupRuntime(runtimeID string) *RunInfo {
+// Runtime ids are minted per supervisor, so every supervisor's first run is
+// rt_1; the scope keeps a projection from answering with another supervisor's
+// run.
+func (r *RunRegistry) LookupRuntime(supervisorID, runtimeID string) *RunInfo {
 	if runtimeID == "" {
 		return nil
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, sup := range r.byID {
-		for _, info := range sup {
-			if info.RuntimeID == runtimeID {
-				return info
-			}
+	for _, info := range r.byID[supervisorID] {
+		if info.RuntimeID == runtimeID {
+			return info
 		}
 	}
 	return nil
+}
+
+// LookupRuntimeUnique resolves a runtime id across all supervisors and returns
+// an entry only when exactly one run owns it. It answers a call that names a
+// runtime id without naming a supervisor: an id two supervisors both mint
+// returns nil, so the caller falls back deterministically instead of binding to
+// whichever supervisor a map iteration reached first.
+func (r *RunRegistry) LookupRuntimeUnique(runtimeID string) *RunInfo {
+	if runtimeID == "" {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var found *RunInfo
+	for _, sup := range r.byID {
+		for _, info := range sup {
+			if info.RuntimeID != runtimeID {
+				continue
+			}
+			if found != nil {
+				return nil
+			}
+			found = info
+		}
+	}
+	return found
 }
 
 // UnlinkLabel deletes the label mapping for (supervisorID, label) only when

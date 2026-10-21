@@ -95,7 +95,10 @@ func toolArguments(req *mcp.CallToolRequest) json.RawMessage {
 // messageSupervisorPath binds the merged tools to the supervisor that owns the
 // run they address. Neither tool takes a model-facing supervisor_id; the
 // binding comes from the same registry the run-addressed tools read, so a run
-// spawned on a non-default supervisor stays reachable through the provider.
+// spawned on a non-default supervisor stays reachable through the provider. A
+// key that identifies more than one run binds nothing, so the call answers on
+// the default supervisor rather than on whichever entry a map iteration
+// reached first.
 func (s *Server) messageSupervisorPath(raw json.RawMessage) string {
 	var probe struct {
 		Target    string `json:"target"`
@@ -111,7 +114,7 @@ func (s *Server) messageSupervisorPath(raw json.RawMessage) string {
 		if info := s.registry.LookupUnique(key); info != nil && info.SupervisorID != "" {
 			return info.SupervisorID
 		}
-		if info := s.registry.LookupRuntime(key); info != nil && info.SupervisorID != "" {
+		if info := s.registry.LookupRuntimeUnique(key); info != nil && info.SupervisorID != "" {
 			return info.SupervisorID
 		}
 	}
