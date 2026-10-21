@@ -134,3 +134,19 @@ func TestWaitForPaneReadySelectsTrustOptionBeforeConfirming(t *testing.T) {
 		t.Fatalf("SendCalls = %v, want %v", got, want)
 	}
 }
+
+func TestWaitForPaneReadyConfirmsTrustWhenStaleMarkerRemains(t *testing.T) {
+	stale := " Quick safety check: Is this a project you created or one you trust?\n" +
+		"   No, exit\n" +
+		"─❯─Yes, I trust this folder──────\n" +
+		" ❯ No, exit\n" +
+		"   Yes, I trust this folder\n"
+	term := terminal.NewFakeSessionQueue("trust", 1, []string{stale, readyPane})
+	if !WaitForPaneReady(context.Background(), term) {
+		t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+	}
+	want := [][]string{{string(terminal.KeyEnter)}}
+	if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("SendCalls = %v, want %v", got, want)
+	}
+}

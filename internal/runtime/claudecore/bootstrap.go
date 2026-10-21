@@ -103,13 +103,16 @@ func WaitForPaneReady(ctx context.Context, term terminal.Session) bool {
 	}
 }
 
-// trustOptionHighlighted reports whether the `❯`-marked line of the trust
-// dialog is the trust option. The text must already be normalised.
+// trustOptionHighlighted reports whether a `❯`-marked line of the trust dialog
+// is the trust option. The text must already be normalised. Any marked line
+// counts, not just the first: the PTY screen emulator can keep the previous
+// frame's marker on screen after Claude repaints the dialog with the selection
+// moved, and the repainted marker can follow a stray rule character.
 func trustOptionHighlighted(out string) bool {
 	for _, line := range strings.Split(out, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "❯") {
-			return strings.Contains(trimmed, trustDialogOption)
+		_, after, found := strings.Cut(line, "❯")
+		if found && strings.Contains(after, trustDialogOption) {
+			return true
 		}
 	}
 	return false
