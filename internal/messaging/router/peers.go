@@ -194,9 +194,11 @@ func LastFacts(runID, label, stopReason string) map[string]string {
 	}
 }
 
-// RenderPeers renders the peers list block the Go surfaces show. It is the one
-// list text for the shared records, so the three Go surfaces cannot disagree on
-// how a peer's display name, kind and status are rendered.
+// RenderPeers renders the peers list block a surface shows. It is the one list
+// text for the records a surface routes through this package, so the surfaces
+// using it cannot disagree on how a peer's display name, kind and status are
+// rendered. A surface still rendering its own list will disagree on kind, and
+// on the attribute block for a record with no status.
 func RenderPeers(records []messaging.PeerRecord) string {
 	if len(records) == 0 {
 		return "No other agent sessions connected."
@@ -227,20 +229,7 @@ func RenderPeers(records []messaging.PeerRecord) string {
 func PeersDetails(result Result) map[string]any {
 	switch result.Action {
 	case "list":
-		peers := make([]map[string]any, 0, len(result.Peers))
-		for _, peer := range result.Peers {
-			record := map[string]any{"run_id": peer.RunID}
-			for key, value := range map[string]string{
-				"label": peer.Label, "kind": peer.Kind, "status": peer.Status,
-				"backend": peer.Backend, "model": peer.Model, "dir": peer.Dir,
-			} {
-				if value != "" {
-					record[key] = value
-				}
-			}
-			peers = append(peers, record)
-		}
-		return map[string]any{"peers": peers}
+		return map[string]any{"peers": result.Peers}
 	case "rename":
 		return map[string]any{"renamed": map[string]any{
 			"run_id":         result.RunID,

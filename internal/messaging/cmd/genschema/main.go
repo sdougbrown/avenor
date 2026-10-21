@@ -394,9 +394,6 @@ func flattenInput(raw []byte, meta flatSchemaMeta) ([]byte, error) {
 		properties["action"].(map[string]any)["default"] = actionDefault
 	}
 	required = intersectRequired(required, []string{"action"})
-	if required == nil {
-		required = []string{}
-	}
 	doc := map[string]any{
 		"$schema":              "https://json-schema.org/draft/2020-12/schema",
 		"$id":                  meta.ID,

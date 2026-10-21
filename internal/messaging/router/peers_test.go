@@ -274,16 +274,49 @@ func TestPeersDetailsKeepsPeerDir(t *testing.T) {
 		{RunID: "rt_7", Label: "child-a", Dir: "/home/u/Code/child-a"},
 	}}
 	details := PeersDetails(result)
-	peers, ok := details["peers"].([]map[string]any)
-	if !ok || len(peers) != 1 {
-		t.Fatalf("peers details = %#v, want one peer record", details)
+	raw, err := json.Marshal(details)
+	if err != nil {
+		t.Fatalf("encode peers details: %v", err)
 	}
-	got, ok := peers[0]["dir"]
+	var decoded struct {
+		Peers []map[string]any `json:"peers"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode peers details: %v", err)
+	}
+	if len(decoded.Peers) != 1 {
+		t.Fatalf("peers details = %s, want one peer record", raw)
+	}
+	got, ok := decoded.Peers[0]["dir"]
 	if !ok {
-		t.Fatalf("peer record %#v carries no dir key", peers[0])
+		t.Fatalf("peer record %s carries no dir key", raw)
 	}
 	if want := "/home/u/Code/child-a"; got != want {
 		t.Fatalf("peer record dir = %v, want %q", got, want)
+	}
+}
+
+// TestPeersContentComposesTheListBlock pins the text a peers call returns: a
+// `list` result is the shared list block, under the router's incomplete-listing
+// sentence when the result carries one, and `rename`/`last` keep the router's
+// text unchanged.
+func TestPeersContentComposesTheListBlock(t *testing.T) {
+	records := []messaging.PeerRecord{
+		{RunID: "rt_7", Label: "child-a", Kind: "agent", Status: "running"},
+	}
+	list := RenderPeers(records)
+	if got := PeersContent(Result{Action: "list", Peers: records}); got != list {
+		t.Fatalf("list content = %q, want %q", got, list)
+	}
+	partial := "Listed 1 peer; the listing was incomplete."
+	if got, want := PeersContent(Result{Action: "list", Peers: records, Text: partial}), partial+"\n\n"+list; got != want {
+		t.Fatalf("incomplete list content = %q, want %q", got, want)
+	}
+	for _, action := range []string{"rename", "last"} {
+		result := Result{Action: action, Text: "router text"}
+		if got := PeersContent(result); got != result.Text {
+			t.Fatalf("%s content = %q, want the router text %q", action, got, result.Text)
+		}
 	}
 }
 
@@ -354,6 +387,22 @@ func sameJSON(t *testing.T, name string, got, want any) {
 	}
 }
 
+// jsonValue decodes a value by way of its JSON encoding: a typed struct marshals
+// its fields in declaration order while the shared fixture's maps marshal in key
+// order, so the two only compare once both are decoded into the same shape.
+func jsonValue(t *testing.T, name string, value any) any {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("%s: encode: %v", name, err)
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("%s: decode: %v", name, err)
+	}
+	return decoded
+}
+
 // TestSurfaceResultFixture pins the result objects the Go host returns to the
 // same shared fixture the TypeScript MCP host and the OpenCode plugin assert
 // against, so no surface can drift in keys, nesting or casing.
@@ -398,7 +447,7 @@ func TestSurfaceResultFixture(t *testing.T) {
 		{RunID: "rt_2", Label: "mesh-a", Kind: "agent", Status: "running"},
 		{RunID: "rt_3"},
 	}}
-	sameJSON(t, "peers list details", PeersDetails(list), fixture.Peers["list"])
+	sameJSON(t, "peers list details", jsonValue(t, "peers list details", PeersDetails(list)), fixture.Peers["list"])
 
 	rename := Result{Action: "rename", RunID: "rt_2", Label: "mesh-renamed", PreviousLabel: "mesh-a"}
 	sameJSON(t, "peers rename details", PeersDetails(rename), fixture.Peers["rename"])
