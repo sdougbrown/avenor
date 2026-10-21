@@ -231,51 +231,6 @@ func TestAvenorResultRehydratesFromSupervisorList(t *testing.T) {
 	}
 }
 
-func TestAvenorFollowUpRehydratesFromSupervisorList(t *testing.T) {
-	dir := t.TempDir()
-	sentinelPath := filepath.Join(dir, "avenor-run-"+rehydrateUUID+".done")
-	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_re_1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	fake := &fakeClient{
-		listResult: []map[string]any{rehydrateEntry(func(entry map[string]any) {
-			entry["sentinel_file"] = sentinelPath
-		})},
-		spawnResult: map[string]any{"runtime_id": "rt_followup_re", "session_id": "ses_followup_re"},
-	}
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, result, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   rehydrateUUID,
-		Message: "continue",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := fake.spawnCapturedParams
-	if p["session_id"] != "ses_re_1" {
-		t.Errorf("session_id = %v, want ses_re_1 from the rehydrated sentinel", p["session_id"])
-	}
-	if p["thinking"] != "high" {
-		t.Errorf("thinking = %v, want high restored from the rehydrated entry", p["thinking"])
-	}
-	if got, ok := p["auto_approve"].(bool); !ok || !got {
-		t.Errorf("auto_approve = %T %v, want true restored from the rehydrated entry", p["auto_approve"], p["auto_approve"])
-	}
-	if p["agent"] != "claude" || p["dir"] != "/tmp/re-repo" {
-		t.Errorf("follow-up params = %#v", p)
-	}
-	followupID, _ := result.(map[string]any)["run_id"].(string)
-	ri := s.registry.LookupUnique(followupID)
-	if ri == nil || !ri.AutoApprove || ri.Thinking != "high" {
-		t.Fatalf("follow-up registry entry = %#v", ri)
-	}
-}
-
 func TestAvenorAnswerPermissionRehydratesFromSupervisorList(t *testing.T) {
 	cases := []struct {
 		name string
@@ -465,9 +420,9 @@ func TestLookupRunNoMatchKeepsExistingBehavior(t *testing.T) {
 	}
 
 	// Unknown run keeps the not-found behavior on run-scoped tools.
-	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{RunID: "nonexistent", Message: "continue"})
+	_, _, err = s.handleAvenorEvents(context.Background(), nil, eventsArgs{RunID: "nonexistent"})
 	if err == nil || !strings.Contains(err.Error(), "run not found in registry") {
-		t.Fatalf("follow-up error = %v, want run not found in registry", err)
+		t.Fatalf("events error = %v, want run not found in registry", err)
 	}
 	_, _, err = s.handleAvenorAnswerPermission(context.Background(), nil, permissionArgs{RunID: "nonexistent", OptionID: "opt_allow"})
 	if err == nil || !strings.Contains(err.Error(), "run \"nonexistent\" not found") {
@@ -999,41 +954,6 @@ func TestSpawnReapsStaleLabelMapping(t *testing.T) {
 	}
 }
 
-func TestFollowUpRejectsLabelClaimedByLiveRun(t *testing.T) {
-	dir := t.TempDir()
-	sentinelPath := filepath.Join(dir, "avenor-run-"+rehydrateUUID+".done")
-	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_re_1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	var spawnCalls atomic.Int32
-	fake := &fakeClient{
-		listResult: []map[string]any{
-			rehydrateEntry(func(entry map[string]any) { entry["sentinel_file"] = sentinelPath }),
-			{"runtime_id": "rt-live", "label": "taken"},
-		},
-		spawnFunc: func(map[string]any) (map[string]any, error) {
-			spawnCalls.Add(1)
-			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
-		},
-	}
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   rehydrateUUID,
-		Message: "continue",
-		Label:   "taken",
-	})
-	if err == nil || !strings.Contains(err.Error(), "label already in use: taken") {
-		t.Fatalf("error = %v, want label already in use", err)
-	}
-	if n := spawnCalls.Load(); n != 0 {
-		t.Fatalf("spawn calls = %d, want 0 (no run left untracked)", n)
-	}
-}
-
 func TestSpawnReclaimsLabelFromEndedRun(t *testing.T) {
 	t.Run("ended run does not hold the label", func(t *testing.T) {
 		var spawnCalls atomic.Int32
@@ -1239,72 +1159,5 @@ func TestLookupRunResolvesCachedLabelAfterRuntimeLeavesList(t *testing.T) {
 	}
 	if ri == nil || ri.RunID != "run-x" || ri.RuntimeID != "rt-x" {
 		t.Fatalf("lookupRun = %#v, want run-x (rt-x)", ri)
-	}
-}
-func TestFollowUpSkipsLabelPrecheckForKeyedFollowUp(t *testing.T) {
-	dir := t.TempDir()
-	sentinelPath := filepath.Join(dir, "avenor-run-"+rehydrateUUID+".done")
-	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_re_1\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	var spawnCalls atomic.Int32
-	fake := &fakeClient{
-		listResult: []map[string]any{
-			rehydrateEntry(func(entry map[string]any) { entry["sentinel_file"] = sentinelPath }),
-			{"runtime_id": "rt-live", "label": "taken"},
-		},
-		spawnFunc: func(map[string]any) (map[string]any, error) {
-			spawnCalls.Add(1)
-			return map[string]any{"runtime_id": "rt-new", "session_id": "ses-new"}, nil
-		},
-	}
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// A keyed follow-up whose label is live-claimed skips the pre-check: the
-	// request reaches the supervisor's idempotency gate (modeled here as the
-	// Spawn call).
-	_, fuRes, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:          rehydrateUUID,
-		Message:        "continue",
-		Label:          "taken",
-		IdempotencyKey: "k1",
-	})
-	if err != nil {
-		t.Fatalf("keyed follow-up with live-claimed label errored: %v", err)
-	}
-	if n := spawnCalls.Load(); n != 1 {
-		t.Fatalf("spawn calls = %d, want 1 (pre-check skipped, gate consulted)", n)
-	}
-	// The no-sentinel response exercises the keyed re-derivation's false
-	// branch: the follow-up must retain the fresh identity (run_id not
-	// overwritten to empty) and the registry entry must stay intact.
-	runID, _ := fuRes.(map[string]any)["run_id"].(string)
-	if runID == "" {
-		t.Fatal("expected non-empty run_id")
-	}
-	ri := s.registry.LookupUnique(runID)
-	if ri == nil {
-		t.Fatal("expected the registry entry for the follow-up run")
-	}
-	if ri.RunID != runID {
-		t.Fatalf("registry run = %s, want %s", ri.RunID, runID)
-	}
-	if ri.Label != "taken" {
-		t.Fatalf("registry label = %s, want taken", ri.Label)
-	}
-	if ri.RuntimeID == "" {
-		t.Fatal("expected non-empty registry runtime_id")
-	}
-	// The fake spawn returns no sentinel_file/on_event, so the keyed
-	// override is a no-op and the registry retains the pre-spawn defaults
-	// computed from the fresh run ID: <tmp>/avenor-run-<runID>.done/.log.
-	if want := filepath.Join(os.TempDir(), "avenor-run-"+runID+".done"); ri.SentinelPath != want {
-		t.Fatalf("RunInfo.SentinelPath = %q, want %q", ri.SentinelPath, want)
-	}
-	if want := filepath.Join(os.TempDir(), "avenor-run-"+runID+".log"); ri.EventLogPath != want {
-		t.Fatalf("RunInfo.EventLogPath = %q, want %q", ri.EventLogPath, want)
 	}
 }
