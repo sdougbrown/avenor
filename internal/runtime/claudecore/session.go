@@ -286,6 +286,15 @@ func (s *Session) ScanTranscriptTick() {
 	}
 
 	s.MarkActive()
+	// With OSC 7501 active, status events come from report transitions. A
+	// record written before a blocked report can be read after it, and a
+	// working event then would hide the wait.
+	s.Mu.Lock()
+	oscActive := s.osc.active
+	s.Mu.Unlock()
+	if oscActive {
+		return
+	}
 	s.Emit(events.Event{
 		Event:     "agent.status",
 		SessionID: s.SessionID,

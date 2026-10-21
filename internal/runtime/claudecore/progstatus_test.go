@@ -328,6 +328,24 @@ func TestProgStatusPaneScanWaitsForTheDialogToFinishPainting(t *testing.T) {
 	}
 }
 
+func TestProgStatusTranscriptRecordsDoNotEndAWait(t *testing.T) {
+	s, term, path := newProgStatusSession(t)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	q := rootReport(terminal.ProgBlocked, terminal.ProgKindQuestion)
+	q.Msg = "answer: red or blue?"
+	term.ReportProgStatus(q)
+	s.ProgStatusTick()
+	drainSessionEvents(s.Events)
+
+	// The record written just before the blocked report is read after it.
+	appendTranscript(t, path, assistantText("asking", ""))
+	s.ScanTranscriptTick()
+	got := drainSessionEvents(s.Events)
+	if len(got) != 1 || got[0].Event != "agent.message_chunk" {
+		t.Fatalf("events = %v, want only the chunk while Claude reports blocked", eventNames(got))
+	}
+}
+
 func TestProgStatusQuestionWaitsWithoutPermissionRequest(t *testing.T) {
 	s, term, _ := newProgStatusSession(t, permissionPane)
 	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
@@ -373,7 +391,7 @@ func TestProgStatusHoldsEndTurnWhileRootWorking(t *testing.T) {
 	tickUntilFinished(t, s)
 
 	got := eventNames(drainSessionEvents(s.Events))
-	want := []string{"agent.status", "agent.message_chunk:started a subagent", "agent.message_chunk:subagent said OK", "agent.status", "agent.message_chunk:DONE", "session.end"}
+	want := []string{"agent.status", "agent.message_chunk:started a subagent", "agent.message_chunk:subagent said OK", "agent.message_chunk:DONE", "session.end"}
 	if len(got) != len(want) {
 		t.Fatalf("events = %v, want %v", got, want)
 	}

@@ -152,7 +152,7 @@ Events emitted:
 - `agent.status` — `phase=working` sourced from `"transcript"` when new JSONL records appear; `phase=waiting` sourced from `"pty"` or `"tmux"` on each pane scrape that finds Claude at its input box, until the first OSC 7501 report arrives (see below).
 - `permission.request` — emitted from pane-scrape when a permission dialog is detected.
 
-On the PTY launcher Claude Code reports its own state with OSC 7501 (Program Status Protocol) once Avenor answers its detection query. After the first report the pane heartbeat stops and `agent.status` events also come from report transitions, one per transition, tagged `signal="osc7501"` with `source="pty"`:
+On the PTY launcher Claude Code reports its own state with OSC 7501 (Program Status Protocol) once Avenor answers its detection query. After the first report the pane heartbeat and the transcript `working` events stop, and `agent.status` events come from report transitions, one per transition, tagged `signal="osc7501"` with `source="pty"`:
 
 - `phase=working` when Claude starts working on the prompt.
 - `phase=waiting` with `reason="question"` or `reason="auth"` when Claude is blocked on a question or on authentication. `label` carries Claude's message, truncated to 200 characters; it is display text only. No `permission.request` is emitted for these. A blocked report with no recognised kind gives `phase=waiting` with no `reason`.
