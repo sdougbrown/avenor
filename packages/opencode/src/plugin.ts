@@ -1011,7 +1011,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
 
       avenor_message: tool({
         description:
-          'Send a message to another agent run, answer an inbound ask, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn.',
+          'Send a message to another agent run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn. `reply` always reports edge-absent here: this session receives no inbound asks, so nothing is sent.',
         args: {
           action: tool.schema.enum(['tell', 'ask', 'reply', 'resume', 'withdraw', 'control_reply']).describe('tell | ask | reply | resume | withdraw | control_reply'),
           target: tool.schema.string().optional().describe('Recipient for tell/ask/resume (a run id, a peer label, or "self"), or the opaque control message id for control_reply'),

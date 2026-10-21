@@ -245,7 +245,7 @@ async function peersCall(args: unknown): Promise<ToolReply> {
 }
 
 server.registerTool('message', {
-  description: 'Send a message to another agent run, answer an inbound ask, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn.',
+  description: 'Send a message to another agent run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn. `reply` always reports edge-absent here: this server receives no inbound asks, so nothing is sent.',
   inputSchema: messageInputSchema,
 }, async args => messageCall(args))
 

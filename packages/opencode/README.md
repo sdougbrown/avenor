@@ -136,18 +136,20 @@ Answer a pending permission request. The `option_id` comes from the `pending_per
 
 ### `avenor_message`
 
-Send a message to another run, answer an inbound ask, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and every result states whether a failed ask can still be withdrawn.
+Send a message to another run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and every result states whether a failed ask can still be withdrawn.
 
 | `action` | Required fields | What it does |
 |---|---|---|
 | `tell` | `target`, `message` | Deliver a message without creating an ask edge |
 | `ask` | `target`, `message`, optional `timeout_ms` | Deliver a message and wait for a reply |
-| `reply` | `reply_to`, `message` | Answer an inbound ask this session received |
+| `reply` | `reply_to`, `message` | Answer an inbound ask. This session receives no inbound delivery, so the result is always `edge-absent` and nothing is sent |
 | `resume` | `target`, `message`, optional `label`, `idempotency_key` | Resume a completed run from its persisted session |
 | `withdraw` | `message_id` | Withdraw a pending ask |
 | `control_reply` | `target`, optional `payload` | Deliver a control reply where the provider supports it |
 
 `target` is a run id, a peer label, or `"self"`. `timeout_ms` must be an integer no greater than the shared ask cap. This tool does not take `supervisor_id`; it is bound to the default supervisor.
+
+The tool's structured metadata is the shared contract object in snake_case (`action`, `outcome`, `text`, and `message_id`, `run_id`, `label`, `reply`, `sentinel_file`, `on_event` when the outcome carries them), the same fields the MCP hosts return.
 
 ### `avenor_peers`
 
@@ -159,7 +161,7 @@ List the visible agent sessions, rename a run, or read a run's last agent messag
 | `rename` | `name`, optional `session_id` | Change a display name, self by default |
 | `last` | `target` | Read the target's last agent message with its stop reason |
 
-`last` is read-only and returns the shared empty result when the target has no completed turn yet. `target` accepts a run id, a label, or `"self"`.
+`last` is read-only and returns the shared empty result when the target has no completed turn yet. `target` accepts a run id, a label, or `"self"`. The structured metadata is `{peers}`, `{renamed}` or `{last}` in snake_case, the same object the MCP hosts return.
 
 ### `avenor_events`
 

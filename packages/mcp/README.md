@@ -166,18 +166,20 @@ Returns `{ ok: true }` on success. Throws if no permission request is pending fo
 
 ### `message`
 
-Send a message to another run, answer an inbound ask, withdraw a pending ask, resume a completed run, or deliver a control reply. Cross-variant argument rules are enforced by the shared router, so an argument outside the chosen action's field set is an error rather than a silent no-op.
+Send a message to another run, withdraw a pending ask, resume a completed run, or deliver a control reply. Cross-variant argument rules are enforced by the shared router, so an argument outside the chosen action's field set is an error rather than a silent no-op.
 
 | `action` | Required fields | What it does |
 |---|---|---|
 | `tell` | `target`, `message` | Deliver a message without creating an ask edge |
 | `ask` | `target`, `message`, optional `timeout_ms` | Deliver a message and wait for a reply |
-| `reply` | `reply_to`, `message` | Answer an inbound ask this server received |
+| `reply` | `reply_to`, `message` | Answer an inbound ask. This server receives no inbound delivery, so the result is always `edge-absent` and nothing is sent |
 | `resume` | `target`, `message`, optional `label`, `idempotency_key` | Resume a completed run from its persisted session |
 | `withdraw` | `message_id` | Withdraw a pending ask |
 | `control_reply` | `target`, optional `payload` | Deliver a control reply where the provider supports it |
 
 `target` is a run id, a peer label, or `"self"`. `timeout_ms` must be an integer no greater than the shared ask cap. This tool does not take `supervisor_id`; it is bound to the default supervisor. A router tool error is returned as an MCP error result carrying the contract sentence and a `code`.
+
+Every successful result is the shared contract object in snake_case (`action`, `outcome`, `text`, and `message_id`, `run_id`, `label`, `reply`, `sentinel_file`, `on_event` when the outcome carries them), returned both as the JSON text content and as the structured content, exactly like the Go MCP host.
 
 ### `peers`
 
@@ -189,7 +191,7 @@ List the visible agent sessions, rename a run, or read a run's last agent messag
 | `rename` | `name`, optional `session_id` | Change a display name, self by default |
 | `last` | `target` | Read the target's last agent message with its stop reason |
 
-`last` is read-only. This surface never publishes a turn of its own, so `last` of the server's own session returns the shared empty result.
+`last` is read-only. This surface never publishes a turn of its own, so `last` of the server's own session returns the shared empty result. The structured result is `{peers}`, `{renamed}` or `{last}` in snake_case, the same object the Go MCP host returns.
 
 ### `events`
 
