@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 // requireAvenorBinary returns the real avenor binary. Launcher evidence is a
@@ -94,9 +96,67 @@ func launcherClient(t *testing.T, cl ControlClient) *client.Client {
 	return conn
 }
 
+func controlGeneration(t *testing.T, cl *client.Client) string {
+	t.Helper()
+	pre, err := cl.MessagePreflight()
+	if err != nil {
+		t.Fatalf("message_preflight: %v", err)
+	}
+	if pre.Generation == "" {
+		t.Fatal("message_preflight reported no generation")
+	}
+	return pre.Generation
+}
+
+func receiveInbound(t *testing.T, cl *client.Client) []messaging.InboundMessage {
+	t.Helper()
+	res, err := cl.MessageReceive(messaging.ReceiveRequest{Generation: controlGeneration(t, cl)})
+	if err != nil {
+		t.Fatalf("message_receive: %v", err)
+	}
+	return res.Messages
+}
+
+func sendSupervisorMessage(t *testing.T, cl *client.Client, message string) {
+	t.Helper()
+	id, err := messaging.NewMsgID(time.Now(), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := messaging.SendBody("supervisor", "supervisor", message, "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := cl.MessageSend(messaging.SendRequest{
+		From:       messaging.Identity{RunID: "supervisor"},
+		To:         messaging.Identity{RunID: "supervisor"},
+		MessageID:  id,
+		Generation: controlGeneration(t, cl),
+		Body:       string(body),
+		NoReply:    true,
+	})
+	if err != nil {
+		t.Fatalf("message_send: %v", err)
+	}
+	if res.Outcome != messaging.OutcomeSent {
+		t.Fatalf("message_send outcome = %q, want sent", res.Outcome)
+	}
+}
+
+func inboundMessageText(t *testing.T, msg messaging.InboundMessage) string {
+	t.Helper()
+	var payload struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		t.Fatalf("decode inbound payload: %v", err)
+	}
+	return payload.Message
+}
+
 // TestMCPAutostartAuthenticatedAttachment proves MCP autostart launches a real
 // supervisor, attaches with its published capability and delivers an
-// owner-gated broker_send to the supervisor's registered run.
+// owner-gated message_send to the supervisor's registered run.
 func TestMCPAutostartAuthenticatedAttachment(t *testing.T) {
 	home := shortHome(t)
 	socketPath := supervisorSocketPath(home)
@@ -109,43 +169,28 @@ func TestMCPAutostartAuthenticatedAttachment(t *testing.T) {
 	}
 	cl := launcherClient(t, launcher)
 
-	// broker_receive registers the supervisor's own named run, so the delivery
+	// message_receive registers the supervisor's own named run, so the delivery
 	// below has a recipient.
-	var drained []map[string]any
-	if err := cl.Call("broker_receive", nil, &drained); err != nil {
-		t.Fatalf("broker_receive before send: %v", err)
-	}
-	params := map[string]any{
-		"from_run_id": "supervisor",
-		"to_run_id":   "supervisor",
-		"message":     "hello supervisor",
-	}
-	var sent map[string]any
-	if err := cl.Call("broker_send", params, &sent); err != nil {
-		t.Fatalf("broker_send: %v", err)
-	}
-	var received []map[string]any
-	if err := cl.Call("broker_receive", nil, &received); err != nil {
-		t.Fatalf("broker_receive after send: %v", err)
-	}
+	_ = receiveInbound(t, cl)
+	sendSupervisorMessage(t, cl, "hello supervisor")
+	received := receiveInbound(t, cl)
 	if len(received) != 1 {
 		t.Fatalf("received %d messages, want 1: %v", len(received), received)
 	}
-	if received[0]["message"] != "hello supervisor" || received[0]["from_run_id"] != "supervisor" {
+	if inboundMessageText(t, received[0]) != "hello supervisor" || received[0].FromRunID != "supervisor" {
 		t.Fatalf("received = %v", received[0])
 	}
 
 	// The recipient is the supervisor's run, registered under its name.
-	var peers map[string]any
-	if err := cl.Call("broker_peers", nil, &peers); err != nil {
-		t.Fatalf("broker_peers: %v", err)
+	peers, err := cl.MessagePeers(messaging.PeersRequest{Generation: controlGeneration(t, cl)})
+	if err != nil {
+		t.Fatalf("message_peers: %v", err)
 	}
-	sessions, _ := peers["sessions"].([]any)
 	found := false
-	for _, entry := range sessions {
-		session, ok := entry.(map[string]any)
-		if !ok {
-			continue
+	for _, entry := range peers.Peers {
+		var session map[string]any
+		if len(entry.Session) > 0 {
+			_ = json.Unmarshal(entry.Session, &session)
 		}
 		if session["run_id"] == "supervisor" && session["label"] == "supervisor" {
 			found = true
@@ -246,18 +291,10 @@ func TestMCPAttachReloadsRotatedOwnerRecord(t *testing.T) {
 	}
 
 	cl := launcherClient(t, launcher)
-	var received []map[string]any
-	if err := cl.Call("broker_receive", nil, &received); err != nil {
-		t.Fatalf("broker_receive: %v", err)
-	}
-	var sent map[string]any
-	if err := cl.Call("broker_send", map[string]any{"from_run_id": "supervisor", "to_run_id": "supervisor", "message": "post-rotation"}, &sent); err != nil {
-		t.Fatalf("broker_send: %v", err)
-	}
-	if err := cl.Call("broker_receive", nil, &received); err != nil {
-		t.Fatalf("broker_receive after send: %v", err)
-	}
-	if len(received) != 1 || received[0]["message"] != "post-rotation" {
+	_ = receiveInbound(t, cl)
+	sendSupervisorMessage(t, cl, "post-rotation")
+	received := receiveInbound(t, cl)
+	if len(received) != 1 || inboundMessageText(t, received[0]) != "post-rotation" {
 		t.Fatalf("received = %v, want the delivered message", received)
 	}
 }
@@ -289,18 +326,10 @@ func TestFreshLauncherRespawnsAfterSIGKILL(t *testing.T) {
 		t.Fatalf("fresh launcher attach: %v", err)
 	}
 	cl := launcherClient(t, launcher)
-	var received []map[string]any
-	if err := cl.Call("broker_receive", nil, &received); err != nil {
-		t.Fatalf("broker_receive: %v", err)
-	}
-	var sent map[string]any
-	if err := cl.Call("broker_send", map[string]any{"from_run_id": "supervisor", "to_run_id": "supervisor", "message": "after sigkill"}, &sent); err != nil {
-		t.Fatalf("broker_send: %v", err)
-	}
-	if err := cl.Call("broker_receive", nil, &received); err != nil {
-		t.Fatalf("broker_receive after send: %v", err)
-	}
-	if len(received) != 1 || received[0]["message"] != "after sigkill" {
+	_ = receiveInbound(t, cl)
+	sendSupervisorMessage(t, cl, "after sigkill")
+	received := receiveInbound(t, cl)
+	if len(received) != 1 || inboundMessageText(t, received[0]) != "after sigkill" {
 		t.Fatalf("received = %v, want the delivered message", received)
 	}
 }

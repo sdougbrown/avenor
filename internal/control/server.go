@@ -124,12 +124,6 @@ type StableHandler interface {
 	RuntimeAnswerPermission(runtimeID, requestID, optionID, message string) error
 	RuntimeInterruptAndPrompt(runtimeID, text string, keepQueue bool) error
 	RuntimeSendToParent(runtimeID, message string) error
-	BrokerSend(fromRunID, toRunID, message, role string) error
-	BrokerAsk(ctx context.Context, toRunID, message, role string) (any, error)
-	BrokerPeers() (any, error)
-	BrokerCancel(messageID string) error
-	BrokerReceive() (any, error)
-	BrokerReply(toRunID, replyTo, message string) error
 
 	// The typed messaging methods delegate to the supervisor's own transport.
 	MessageTransport() (messaging.Transport, error)
@@ -146,33 +140,6 @@ type StableHandler interface {
 	// given timeout (milliseconds) elapses. Returns nil when capacity may be
 	// available, or an error on timeout/shutdown. It does not reserve capacity.
 	WaitForCapacityMS(timeoutMS int) error
-}
-
-// AskError carries the broker message ID of a failed ask plus whether the
-// ask edge may still be pending. A failed wait is retracted by the ask client,
-// so Pending is false once that cleanup confirmed a terminal fence; callers can
-// withdraw a still-pending ask with broker_cancel instead of retrying blind.
-type AskError struct {
-	MessageID string
-	Pending   bool
-	Outcome   messaging.Outcome
-	Err       error
-}
-
-func (e *AskError) Error() string { return e.Err.Error() }
-func (e *AskError) Unwrap() error { return e.Err }
-
-// askErrorData extracts cancel-friendly error data for RPC error responses.
-func askErrorData(err error) any {
-	var ae *AskError
-	if errors.As(err, &ae) {
-		data := map[string]any{"message_id": ae.MessageID, "pending": ae.Pending}
-		if ae.Outcome != "" {
-			data["outcome"] = ae.Outcome
-		}
-		return data
-	}
-	return nil
 }
 
 type connState struct {
@@ -192,12 +159,9 @@ type connState struct {
 	// so a single owner cannot accumulate unbounded parked goroutines.
 	waitSlots chan struct{}
 
-	// askSlots bounds concurrent in-flight broker asks on this connection.
-	askSlots chan struct{}
-
 	// messageSlots bounds concurrent in-flight blocking message verbs
 	// (message_wait, message_receive) on this connection, matching the
-	// broker_ask and wait_turn bounds.
+	// wait_turn bound.
 	messageSlots chan struct{}
 }
 
@@ -1184,7 +1148,6 @@ func (s *ControlServer) acceptLoop() {
 		seq++
 		cs := &connState{
 			id: seq, server: s, conn: conn,
-			askSlots:         make(chan struct{}, maxInflightAsksPerConn),
 			waitSlots:        make(chan struct{}, maxInflightAsksPerConn),
 			messageSlots:     make(chan struct{}, maxInflightAsksPerConn),
 		}
@@ -1688,131 +1651,6 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		return success(req.ID, s.stableHandler.List())
 
-	case "broker_send":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		if !s.ensureOwner(c) {
-			return failure(req.ID, -32010, "permission_denied", nil)
-		}
-		var p struct {
-			FromRunID string `json:"from_run_id"`
-			ToRunID   string `json:"to_run_id"`
-			Message   string `json:"message"`
-			Role      string `json:"role,omitempty"`
-		}
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
-		}
-		if err := s.stableHandler.BrokerSend(p.FromRunID, p.ToRunID, p.Message, p.Role); err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
-		}
-		return success(req.ID, map[string]any{"ok": true})
-	case "broker_ask":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		if !s.ensureOwner(c) {
-			return failure(req.ID, -32010, "permission_denied", nil)
-		}
-		var p struct {
-			ToRunID   string `json:"to_run_id"`
-			Message   string `json:"message"`
-			Role      string `json:"role,omitempty"`
-			TimeoutMS int64  `json:"timeout_ms,omitempty"`
-		}
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
-		}
-		if p.TimeoutMS < 0 {
-			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
-		}
-		p.TimeoutMS = clampAskTimeout(p.TimeoutMS)
-		// Bound concurrent in-flight asks per connection so one owner cannot
-		// accumulate unbounded parked goroutines and broker edges.
-		select {
-		case c.askSlots <- struct{}{}:
-		default:
-			return failure(req.ID, -32000, "too many in-flight broker asks on this connection", nil)
-		}
-		// Run the ask on a background goroutine bound to the connection
-		// context: an unanswered ask must not block subsequent requests on
-		// this connection, and a disconnect must cancel the pending wait.
-		go func() {
-			defer func() { <-c.askSlots }()
-			ctx := c.ctx
-			if p.TimeoutMS > 0 {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, time.Duration(p.TimeoutMS)*time.Millisecond)
-				defer cancel()
-			}
-			result, err := s.stableHandler.BrokerAsk(ctx, p.ToRunID, p.Message, p.Role)
-			// The ask itself still runs fire-and-forget, but a JSON-RPC
-			// notification (no id) must not get a response frame.
-			if req.ID == nil || c.ctx.Err() != nil {
-				return
-			}
-			if err != nil {
-				_ = c.writeJSON(failure(req.ID, -32000, err.Error(), askErrorData(err)))
-				return
-			}
-			_ = c.writeJSON(success(req.ID, result))
-		}()
-		return asyncResponse
-	case "broker_peers":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		result, err := s.stableHandler.BrokerPeers()
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
-		}
-		return success(req.ID, result)
-	case "broker_cancel":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		if !s.ensureOwner(c) {
-			return failure(req.ID, -32010, "permission_denied", nil)
-		}
-		var p struct {
-			MessageID string `json:"message_id"`
-		}
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
-		}
-		if err := s.stableHandler.BrokerCancel(p.MessageID); err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
-		}
-		return success(req.ID, map[string]any{"ok": true})
-	case "broker_receive":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		result, err := s.stableHandler.BrokerReceive()
-		if err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
-		}
-		return success(req.ID, result)
-	case "broker_reply":
-		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
-		}
-		if !s.ensureOwner(c) {
-			return failure(req.ID, -32010, "permission_denied", nil)
-		}
-		var p struct {
-			ToRunID string `json:"to_run_id"`
-			ReplyTo string `json:"reply_to"`
-			Message string `json:"message"`
-		}
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			return failure(req.ID, -32602, "invalid params", nil)
-		}
-		if err := s.stableHandler.BrokerReply(p.ToRunID, p.ReplyTo, p.Message); err != nil {
-			return failure(req.ID, -32000, err.Error(), nil)
-		}
-		return success(req.ID, map[string]any{"ok": true})
 	case "message_send":
 		var p MessageSendParams
 		transport, resp, ok := s.messagePrelude(c, req, &p, true)
