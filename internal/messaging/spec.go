@@ -74,6 +74,18 @@ func MessageInputSchema() map[string]any { return decodeSchema(messageInputSchem
 // PeersInputSchema returns the avenor_peers input schema as a JSON value.
 func PeersInputSchema() map[string]any { return decodeSchema(peersInputSchemaJSON) }
 
+// MessageInputFlatSchema returns the flat object schema MCP surfaces publish for
+// avenor_message: it is compiled from the per-action union, keeps every action's
+// properties and their declared types and limits, and requires only the keys
+// every action requires — the action itself.
+func MessageInputFlatSchema() map[string]any { return decodeSchema(messageInputFlatSchemaJSON) }
+
+// PeersInputFlatSchema returns the flat object schema MCP surfaces publish for
+// avenor_peers, compiled from the per-action union the same way. Its required set
+// is the union's intersection, which is empty: the list action takes no
+// arguments, so a peers call that omits the action is valid.
+func PeersInputFlatSchema() map[string]any { return decodeSchema(peersInputFlatSchemaJSON) }
+
 func decodeSchema(raw string) map[string]any {
 	var schema map[string]any
 	if err := json.Unmarshal([]byte(raw), &schema); err != nil {

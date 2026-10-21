@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -70,6 +71,9 @@ func assertPeersResult(t *testing.T, c messaging.ConformanceCase, provider *fake
 			}
 			if got, want := result.Peers[index].Label, stringOf(record["label"]); got != want {
 				t.Fatalf("peer %d label = %q, want %q", index, got, want)
+			}
+			if got, want := result.Peers[index].Kind, stringOf(record["kind"]); got != want {
+				t.Fatalf("peer %d kind = %q, want %q", index, got, want)
 			}
 			if got, want := result.Peers[index].Status, stringOf(record["status"]); got != want {
 				t.Fatalf("peer %d status = %q, want %q", index, got, want)
@@ -259,4 +263,110 @@ func TestPeersListIncompleteListingKeepsPeers(t *testing.T) {
 	if !strings.Contains(result.Text, messaging.Repair("refused_io", nil)) {
 		t.Fatalf("text = %q, want the classified read failure", result.Text)
 	}
+}
+
+func TestRenderPeersIncludesKind(t *testing.T) {
+	got := RenderPeers([]messaging.PeerRecord{
+		{RunID: "supervisor", Label: "supervisor", Kind: "supervisor", Status: "running", Backend: "pi"},
+		{RunID: "rt_7", Label: "child-a", Kind: "agent", Status: "running"},
+	})
+	want := "**Active sessions:**\n" +
+		"  supervisor (supervisor) [supervisor, running, pi]\n" +
+		"  child-a (rt_7) [agent, running]"
+	if got != want {
+		t.Fatalf("RenderPeers = %q, want %q", got, want)
+	}
+	if got, want := RenderPeers(nil), "No other agent sessions connected."; got != want {
+		t.Fatalf("empty RenderPeers = %q, want %q", got, want)
+	}
+}
+
+func TestToolOutputObject(t *testing.T) {
+	tell := Result{Action: "tell", Outcome: messaging.OutcomeSent, MessageID: "msg_1", Label: "peer", Text: "sent"}
+	want := map[string]any{"action": "tell", "outcome": "sent", "text": "sent", "message_id": "msg_1", "label": "peer"}
+	if got := tell.Output(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("tell output = %#v, want %#v", got, want)
+	}
+	reply := Result{Action: "ask", Outcome: messaging.OutcomeReplied, MessageID: "msg_2", Text: "ok", Reply: "answer"}
+	if got := reply.Output()["reply"]; got != "answer" {
+		t.Fatalf("ask output reply = %v, want answer", got)
+	}
+	failure := (&ToolError{Code: "not_permitted", Message: "no"}).Output()
+	wantFailure := map[string]any{"code": "not_permitted", "text": "no"}
+	if !reflect.DeepEqual(failure, wantFailure) {
+		t.Fatalf("tool error output = %#v, want %#v", failure, wantFailure)
+	}
+}
+
+// sameJSON compares two result objects by their JSON encoding, so a fixture
+// decoded into []any compares with a Go-native []map[string]any.
+func sameJSON(t *testing.T, name string, got, want any) {
+	t.Helper()
+	gotRaw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("%s: encode got: %v", name, err)
+	}
+	wantRaw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("%s: encode want: %v", name, err)
+	}
+	if string(gotRaw) != string(wantRaw) {
+		t.Fatalf("%s = %s, want %s", name, gotRaw, wantRaw)
+	}
+}
+
+// TestSurfaceResultFixture pins the result objects the Go host returns to the
+// same shared fixture the TypeScript MCP host and the OpenCode plugin assert
+// against, so no surface can drift in keys, nesting or casing.
+func TestSurfaceResultFixture(t *testing.T) {
+	raw, err := os.ReadFile("../../../schemas/message_route.result.json")
+	if err != nil {
+		t.Fatalf("read shared result fixture: %v", err)
+	}
+	var fixture struct {
+		Message map[string]map[string]any `json:"message"`
+		Peers   map[string]map[string]any `json:"peers"`
+		Error   map[string]any            `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode shared result fixture: %v", err)
+	}
+
+	tell := Result{
+		Action:    "tell",
+		Outcome:   messaging.OutcomeSent,
+		MessageID: "m-1",
+		Label:     "mesh-a",
+		Text:      `message "m-1" delivered to "mesh-a"`,
+	}
+	sameJSON(t, "tell output", tell.Output(), fixture.Message["tell"])
+
+	resumed := Result{
+		Action:       "resume",
+		Outcome:      outcomeResumed,
+		RunID:        "run-2",
+		Label:        "again",
+		Text:         `resumed "again" as run "run-2"`,
+		SentinelFile: "/runs/run-2/sentinel.done",
+		OnEvent:      "/runs/run-2/events.log",
+	}
+	sameJSON(t, "resume output", resumed.Output(), fixture.Message["resume"])
+
+	refused := &ToolError{Code: "unknown_target", Message: `no run matches "ghost"`}
+	sameJSON(t, "tool error output", refused.Output(), fixture.Error)
+
+	list := Result{Action: "list", Peers: []messaging.PeerRecord{
+		{RunID: "rt_2", Label: "mesh-a", Kind: "agent", Status: "running"},
+		{RunID: "rt_3"},
+	}}
+	sameJSON(t, "peers list details", PeersDetails(list), fixture.Peers["list"])
+
+	rename := Result{Action: "rename", RunID: "rt_2", Label: "mesh-renamed", PreviousLabel: "mesh-a"}
+	sameJSON(t, "peers rename details", PeersDetails(rename), fixture.Peers["rename"])
+
+	last := Result{
+		Action: "last", RunID: "rt_7", RuntimeID: "rt_7", Label: "mesh-a",
+		FinalOutput: "OK", StopReason: "end_turn",
+	}
+	sameJSON(t, "peers last details", PeersDetails(last), fixture.Peers["last"])
 }
