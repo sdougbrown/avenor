@@ -99,10 +99,11 @@ proves the host legs:
 
 1. `Call avenor_spawn with dir "$SCRATCH/work", prompt "Reply with the single word OK and nothing else.", label "host-child-c", backend "pi", wait false.` then `Call avenor_result with run_id "host-child-c" wait true.` — the spawn result carries `run_id`, `label`, `effective_backend`; the result carries `runtime_id`, `session_id`, `stop_reason`, `output`.
 2. Spawn a second child that stays busy: `prompt "Use the bash tool to run: sleep 900. Then reply with the single word OK.", label "sleeper-pi", backend "pi", wait false.` — take its `runtime_id` from `avenor_status run_id "sleeper-pi" view "full"`.
-3. `Call avenor_message with action "resume", target "host-child-c", message "Reply with the single word AGAIN and nothing else."` — this is a **pi** child, and pi runs `--no-session`, so the answer is the documented refusal (`session not found ... cross-process resume is not supported`). Resuming an `opencode-acp` child with the same prompt returns `outcome: resumed`, a new `run_id`, the `-followup` label, and the new run's `sentinel_file`/`on_event`; the resumed sentinel keeps the same `SESSION=` as the original.
-4. `Call avenor_message with action "tell", target "host-child-c", message "ping"` after that run ends — a tool error whose repair sentence says `run "rt_1" is done; use action "resume" to continue it`. (A tool error carries no `details` on this surface; the sentence is the observable.)
-5. `Call avenor_peers with action "rename", name "host-renamed-supervisor"` then `Call avenor_peers` — the rename returns `renamed {run_id: "supervisor", label, previous_label: "supervisor"}` and the next list shows the new label with `kind: "supervisor"`.
-6. `Call avenor_workflow_cancel with workflow_id "wf-does-not-exist", actor "verify", reason "verify"` — the tool is registered on the host surface and fails with `rpc error [-32000]: workflow not found: wf-does-not-exist`.
+3. **A child's ask to the host.** Spawn a child with `prompt` = `Perform these steps in order. 1) Call avenor_message with action "ask", target "supervisor", message "ping", timeout_ms 120000. 2) Write the tool result to "$SCRATCH/child-ask.json". 3) Reply with the single word OK.`, then prompt the host: `A child will send you an inbound ask. When it appears, reply to it with the single word pong using the tool and arguments the ask instructs.` The host's inbound steer carries the ask's `reply_to`; once it answers, the child's ask returns `replied` with `reply: "pong"` (read it from the child's `events.log` `result.details` — the child's own JSON copy is whatever text its model chose to write). `not-sent` here means the child posted a versioned message id without the broker's generation.
+4. `Call avenor_message with action "resume", target "host-child-c", message "Reply with the single word AGAIN and nothing else."` — this is a **pi** child, and pi runs `--no-session`, so the answer is the documented refusal (`session not found ... cross-process resume is not supported`). Resuming an `opencode-acp` child with the same prompt returns `outcome: resumed`, a new `run_id`, the `-followup` label, and the new run's `sentinel_file`/`on_event`; the resumed sentinel keeps the same `SESSION=` as the original.
+5. `Call avenor_message with action "tell", target "host-child-c", message "ping"` after that run ends — a tool error whose repair sentence says `run "rt_1" is done; use action "resume" to continue it`. (A tool error carries no `details` on this surface; the sentence is the observable.)
+6. `Call avenor_peers with action "rename", name "host-renamed-supervisor"` then `Call avenor_peers` — the rename returns `renamed {run_id: "supervisor", label, previous_label: "supervisor"}` and the next list shows the new label with `kind: "supervisor"`.
+7. `Call avenor_workflow_cancel with workflow_id "wf-does-not-exist", actor "verify", reason "verify"` — the tool is registered on the host surface and fails with `rpc error [-32000]: workflow not found: wf-does-not-exist`.
 
 Start a control-stream tail before the rename (`./avenor control --socket
 "$AVENOR_HOME"/sockets/*.sock tail > "$EVIDENCE/control-tail.ndjson"`); the
@@ -114,6 +115,20 @@ The same host session drives an `opencode-acp` child over the Go child surface
 supervisor`, `ask` the busy sleeper with `timeout_ms` 1500, `withdraw` that
 `message_id`, `resume target "self"`, `control_reply`, `peers last supervisor`,
 then write its results to `$SCRATCH/child-d.json`.
+
+**The acceptance mesh.** Three agents in the one host session: the host plus
+`mesh-a` and `mesh-b` (both `backend "pi"`, spawned with `wait false`). Each
+child's prompt starts with a barrier ask to the host
+(`ask supervisor "<label> ready"`, `timeout_ms 600000`) and a standing rule
+that answers any inbound ask with `reply_to` as instructed. After the barrier the
+child runs `peers`, `peers last supervisor`, `tell supervisor` and `tell` its
+peer. It then makes its own asks to the host and its peer (`timeout_ms 180000`),
+with a `bash sleep 45` window separating them so the peer is idle when the other
+ask lands. The host prompt answers each ready ask with `go` and each later ask
+with its own text. Then it does `peers`, an immediate `peers last mesh-a` (the
+empty result, while mesh-a is still blocked in its barrier ask), tells to both
+children, and asks to both children. Wait for both children with
+`avenor_result`, then read `peers last` of each.
 
 **Observable end state (the proof).** All of it is structured, never transcript
 prose:
@@ -162,11 +177,14 @@ or per completed assistant `message.updated` in the OpenCode plugin.
 
 An `ask` blocks its caller, and an inbound ask reaches the target as a steer
 (`pi.sendUserMessage(..., {deliverAs: 'steer'})`), which the model can only
-answer between its own tool calls. Two agents that ask each other at the same
-moment deadlock until a timeout. Any multi-agent drive must therefore give each
+answer between its own tool calls. Any multi-agent drive must therefore give each
 asker a window in which the peer is idle: a barrier ask, or a `bash sleep` in
-the responder's own turn, and a generous `timeout_ms`. A `timed-out` mesh ask
-means the ordering rule was broken, not that the tool misbehaved.
+the responder's own turn, and a generous `timeout_ms`. Two agents that ask each
+other at the same moment deadlock until a timeout; with the generation pinned the
+broker instead refuses the second ask (`mutual-ask` → `not-sent`, also the
+symptom of a child asking the host while the host's ask to it is still pending).
+A `timed-out` or refused mesh ask means the ordering rule was broken, not that
+the tool misbehaved.
 
 ### A mesh's expected evidence
 
@@ -177,16 +195,28 @@ For three agents (host + two children) each must see the other two: every
 reads the other two with `last`, and no result reports `withdrawn` or
 `timed-out` on its own.
 
+## The bound generation
+
+The broker admits a *versioned* message id only in the generation that minted it.
+(Versioned ids are `newMsgID()`'s `av1.<stamp>.<hash>` shape; the ask store mints
+one generation.) A child therefore pins the generation `/sessions` advertises,
+once, and sends it on `/send`, `/wait_reply` and `/cancel_message`. A reply
+carries none: the broker resolves a reply's edge against its own current
+generation.
+
+Both child clients obey this rule. The Go child reads it in `Prepare`
+(`internal/childmessaging`); the Pi extension's child broker pins it on first use
+(`packages/pi/src/subagent-broker.ts`).
+
+An id posted without a generation is refused `409 generation-mismatch`, which the
+tool reports as `<id> was not sent to "<target>"; nothing is pending`. That is
+the symptom to look for when a child's `ask` fails but its `tell` works: a tell
+takes the fire-and-forget path, which never checks the generation.
+
 ## Known limits today
 
 Read these against the binary before promising the drive above works end to end.
 
-- **A pi child's `ask` is refused.** The child mints a versioned message id and
-  posts `/send` without the broker generation, so the broker answers
-  `409 generation-mismatch` and the tool reports
-  `<id> was not sent to "<target>"; nothing is pending`. `tell` still works (it
-  takes the fire-and-forget path, which does not check the generation), and the
-  Go child (`opencode-acp`) pins the generation, so its asks work.
 - **`resume` of a `pi` run is refused.** pi sessions run `--no-session`, so a
   finished pi child cannot be continued from another process; the tool says so
   explicitly. Resume of an `opencode-acp` child works and keeps the session id.
@@ -201,6 +231,14 @@ Read these against the binary before promising the drive above works end to end.
   drains the supervisor's control queue, which also carries fire-and-forget
   messages; such a message has no `message_id`, so the delivered steer instructs
   `reply_to: ""` and an answering model gets `reply ... edge-absent`.
+- **A `tell` (or a `reply`) to a child is also surfaced as an ask.** The child's
+  `/poll-control` poll reads every `agent_message` from its control queue, and a
+  tell carries its own `message_id`, so the child's steer names a real
+  `reply_to`; a model following the standing reply rule answers it, and because
+  that reply is again delivered to its target's control queue the two agents can
+  trade replies (`<id>.reply.reply…`, all `edge-absent` after the first). It is a
+  poll-shape issue, not a generation one: the mesh still completes, but a
+  child's final text is whatever the last reply attempt left.
 
 ## Gotchas
 
