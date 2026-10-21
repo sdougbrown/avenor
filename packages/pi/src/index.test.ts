@@ -112,7 +112,7 @@ describe('Avenor Pi extension', () => {
     expect(calls.at(-1)).toEqual({ action: 'ask', target: 'run-1', message: 'hello', timeout_ms: 2500 })
     expect(result).toEqual({
       content: [{ type: 'text', text: 'ok' }],
-      details: { action: 'ask', outcome: 'replied', messageId: 'msg-1', reply: 'ok', text: 'ok' },
+      details: { action: 'ask', outcome: 'replied', text: 'ok', message_id: 'msg-1', reply: 'ok' },
     })
 
     const withdrawn = await harness.registeredTools.avenor_message.execute(
@@ -892,7 +892,13 @@ describe('Avenor Pi extension', () => {
       action: 'resume', target: 'status-run', message: 'continue', label: 'follow-up worker',
     })
     expect(resumed.content[0]?.text).toBe(messagePayload.text)
-    expect(resumed.details).toEqual(messagePayload)
+    expect(resumed.details).toEqual({
+      action: 'resume',
+      outcome: 'resumed',
+      run_id: 'follow-up-run',
+      label: 'follow-up worker',
+      text: 'resumed "follow-up worker" as run "follow-up-run"',
+    })
 
     const events = await registeredTools.avenor_events.execute('tool-events', {
       run_id: 'status-run', types: ['agent.message'], limit: 10,

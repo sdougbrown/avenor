@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test'
 import conformance from '../../../schemas/message_route.conformance.json'
+import resultFixture from '../../../schemas/message_route.result.json'
 import { messageTool as realMessageTool, renderLast, type MessageProvider } from '@dougbots/avenor-core'
 import { makeMessageProvider, startExtensionHarness } from './test-fixtures.js'
 
@@ -210,6 +211,75 @@ describe('Pi peers last', () => {
       renderLast('header', { run_id: '"rt_7"', label: '"mesh-a"', stop_reason: 'end_turn' }) + '\n\nOK',
     )
     expect(result.details.last).toMatchObject({ run_id: 'rt_7', runtime_id: 'rt_7', label: 'mesh-a' })
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+})
+
+describe('Pi surface result objects', () => {
+  it('returns the shared result objects for every message and peers action', async () => {
+    const expected = resultFixture as unknown as {
+      message: Record<string, Record<string, unknown>>
+      peers: Record<string, Record<string, unknown>>
+    }
+    const liveAt = () => makeMessageProvider({
+      resolve: async () => ({ runId: 'mesh-a', label: 'mesh-a', match: 'unique' }),
+      state: async () => ({ live: true, resumable: false, status: 'running' }),
+      tell: async () => ({ outcome: 'sent', messageId: 'm-1' }),
+    })
+    const resumableAt = () => makeMessageProvider({
+      resolve: async () => ({ runId: 'mesh-a', label: 'mesh-a', match: 'unique' }),
+      state: async () => ({ live: false, resumable: true, status: 'done' }),
+      resume: async () => ({
+        outcome: 'resumed',
+        runId: 'run-2',
+        runtimeId: 'rt-2',
+        label: 'again',
+        sentinelFile: '/runs/run-2/sentinel.done',
+        onEvent: '/runs/run-2/events.log',
+      }),
+    })
+
+    let provider = liveAt()
+    const harness = await startHarness({
+      deps: { messageTool: realMessageTool, hostProviderFor: mock(async () => provider) },
+    })
+
+    const tell = await harness.registeredTools.avenor_message.execute(
+      't1', { action: 'tell', target: 'mesh-a', message: 'hi' },
+    )
+    expect(tell.details).toEqual(expected.message.tell)
+    expect(tell.content[0].text).toBe(expected.message.tell.text)
+
+    provider = resumableAt()
+    const resume = await harness.registeredTools.avenor_message.execute(
+      't2', { action: 'resume', target: 'mesh-a', message: 'again' },
+    )
+    expect(resume.details).toEqual(expected.message.resume)
+
+    provider = makeMessageProvider()
+    const reply = await harness.registeredTools.avenor_message.execute(
+      't3', { action: 'reply', reply_to: 'a-1', message: 'pong' },
+    )
+    expect(reply.details).toEqual(expected.message.reply_edge_absent)
+
+    provider = makeMessageProvider({
+      peers: async () => ({
+        peers: [
+          { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running' },
+          { run_id: 'rt_3' },
+        ],
+      }),
+      rename: async () => ({ outcome: 'renamed', runId: 'rt_2', label: 'mesh-renamed', previousLabel: 'mesh-a' }),
+      resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }),
+      last: async () => ({ outcome: 'sent', hasRecord: true, finalOutput: 'OK', stopReason: 'end_turn' }),
+    })
+    const list = await harness.registeredTools.avenor_peers.execute('p1', { action: 'list' })
+    expect(list.details).toEqual(expected.peers.list)
+    const rename = await harness.registeredTools.avenor_peers.execute('p2', { action: 'rename', name: 'mesh-renamed' })
+    expect(rename.details).toEqual(expected.peers.rename)
+    const last = await harness.registeredTools.avenor_peers.execute('p3', { action: 'last', target: 'mesh-a' })
+    expect(last.details).toEqual(expected.peers.last)
+
     await harness.eventHandlers.session_shutdown({}, {})
   })
 })

@@ -324,7 +324,7 @@ function messageLines(details: unknown, args: MessageResumeArgs): string[] | und
   if (!result) return undefined
   const action = selectedOptional(result, 'action') ?? stringValue(args.action) ?? 'tell'
   if (action === 'resume') {
-    const runId = selected(result, 'runId', result.run_id, args.target)
+    const runId = selected(result, 'run_id', args.target)
     const label = selected(result, 'label', args.label, runId)
     if (!stringValue(runId) || !stringValue(label)) return undefined
     return [
@@ -340,7 +340,7 @@ function messageLines(details: unknown, args: MessageResumeArgs): string[] | und
   const lines = [`${verb}: ${outcome}.`]
   const text = selectedOptional(result, 'text')
   if (text) lines.push(scalar(text))
-  const messageId = selectedOptional(result, 'messageId')
+  const messageId = selectedOptional(result, 'message_id')
     ?? stringValue(args.reply_to)
     ?? stringValue(args.message_id)
   if (messageId) lines.push(`Message: ${scalar(messageId)}`)

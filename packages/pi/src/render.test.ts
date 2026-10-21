@@ -124,12 +124,12 @@ describe('Avenor Pi renderers', () => {
       'Guidance: Call avenor_status with run_id "run-1" to verify the permission state.',
     ].join('\n'))
 
-    expect(text(renderMessageResumeResult(result({ runId: 'run-2', label: 'follow-up' }), collapsed, theme, {
+    expect(text(renderMessageResumeResult(result({ run_id: 'run-2', label: 'follow-up' }), collapsed, theme, {
       action: 'resume', target: 'run-1', message: 'continue',
     }))).toContain('Source run: run-1\nRun: run-2\nLabel: follow-up')
 
     const tell = text(renderMessageResumeResult(result({
-      action: 'tell', outcome: 'sent', messageId: 'av1.t.1', label: 'mesh-a',
+      action: 'tell', outcome: 'sent', message_id: 'av1.t.1', label: 'mesh-a',
       text: 'message "av1.t.1" delivered to "mesh-a"',
     }), collapsed, theme, { action: 'tell', target: 'mesh-a', message: 'hi' }))
     expect(tell).toContain('Tell: sent.')
@@ -138,7 +138,7 @@ describe('Avenor Pi renderers', () => {
     expect(tell).not.toContain('Guidance: Call avenor_status')
 
     const withdraw = text(renderMessageResumeResult(result({
-      action: 'withdraw', outcome: 'withdrawn', messageId: 'av1.w.1',
+      action: 'withdraw', outcome: 'withdrawn', message_id: 'av1.w.1',
       text: 'ask "av1.w.1" was withdrawn',
     }), collapsed, theme, { action: 'withdraw', message_id: 'av1.w.1' }))
     expect(withdraw).toContain('Withdraw: withdrawn.')

@@ -25,9 +25,11 @@ import {
   messageTool,
   normalizeTurnStopReason,
   observeRun,
+  peersDetails,
   peersTool,
   RpcError,
   renderPeerList,
+  resultOutput,
   resultTool,
   shutdownTool,
   spawnTool,
@@ -1860,7 +1862,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const result = await deps.messageTool(params, provider, { signal })
         return {
           content: [{ type: 'text', text: result.text ?? '' }],
-          details: result,
+          details: resultOutput(result),
         }
       },
       renderCall(args, theme) {
@@ -1892,12 +1894,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const text = result.action === 'list'
           ? [result.text, renderPeerList(result.peers)].filter(part => part !== '').join('\n\n')
           : result.text
-        const details: Record<string, unknown> = { peers: result.peers }
-        if (result.renamed) details.renamed = result.renamed
-        if (result.last) details.last = result.last
         return {
           content: [{ type: 'text', text }],
-          details,
+          details: peersDetails(result),
         }
       },
     })
