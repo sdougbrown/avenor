@@ -27,7 +27,6 @@ const backendID = "claude-channel"
 const (
 	startupPromptCheckInterval = 500 * time.Millisecond
 	startupPromptTimeout       = 30 * time.Second
-	promptSubmitRetryDelay     = 750 * time.Millisecond
 	paneScanInterval           = 500 * time.Millisecond
 	transcriptScanInterval     = 2 * time.Second
 )
@@ -505,7 +504,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 				"prompt_length": len(prompt),
 			},
 		})
-		go retryPromptSubmitIfIdle(s.Ctx, s.Term, prompt)
+		go claudecore.ResendEnterUntilSubmitted(s.Ctx, s.Term, prompt, nil)
 	}()
 
 	// Also push via channel for idempotence and later turns.
@@ -535,31 +534,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 func pastePromptAndSubmit(ctx context.Context, term terminal.Session, prompt string) error {
 	return term.PasteAndEnter(ctx, prompt)
-}
-
-func retryPromptSubmitIfIdle(ctx context.Context, term terminal.Session, prompt string) {
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(promptSubmitRetryDelay):
-	}
-
-	out, err := term.Capture(ctx)
-	if err != nil {
-		return
-	}
-	text := string(out)
-	if claudecore.ClassifyPane(text) != claudecore.PaneStateIdle {
-		return
-	}
-	needle := prompt
-	if len(needle) > 96 {
-		needle = needle[:96]
-	}
-	if !strings.Contains(text, needle) {
-		return
-	}
-	_ = term.SendKeys(ctx, terminal.KeyEnter)
 }
 
 // channelPolicyBlocked reports whether managed org policy stopped Claude from

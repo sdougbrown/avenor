@@ -23,7 +23,6 @@ const backendID = "claude"
 const (
 	paneScanInterval       = 500 * time.Millisecond
 	transcriptScanInterval = 2 * time.Second
-	promptSubmitRetryDelay = 750 * time.Millisecond
 	defaultCancelGrace     = 3 * time.Second
 )
 
@@ -283,35 +282,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 				"prompt_length": len(prompt),
 			},
 		})
-		go retryPromptSubmitIfIdle(s.Ctx, s.Term, prompt)
+		go claudecore.ResendEnterUntilSubmitted(s.Ctx, s.Term, prompt, nil)
 	}()
 
 	return nil
-}
-
-func retryPromptSubmitIfIdle(ctx context.Context, term terminal.Session, prompt string) {
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(promptSubmitRetryDelay):
-	}
-
-	out, err := term.Capture(ctx)
-	if err != nil {
-		return
-	}
-	text := string(out)
-	if claudecore.ClassifyPane(text) != claudecore.PaneStateIdle {
-		return
-	}
-	needle := prompt
-	if len(needle) > 96 {
-		needle = needle[:96]
-	}
-	if !strings.Contains(text, needle) {
-		return
-	}
-	_ = term.SendKeys(ctx, terminal.KeyEnter)
 }
 
 func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
