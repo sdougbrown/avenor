@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/mcpserver"
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 func TestRunMCPInvalidTransport(t *testing.T) {
@@ -217,6 +219,36 @@ func (s *stubControlClient) WorkflowControllerStatus(string) (map[string]any, er
 }
 func (s *stubControlClient) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
+}
+func (s *stubControlClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{}, nil
+}
+func (s *stubControlClient) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	return messaging.WaitResult{}, nil
+}
+func (s *stubControlClient) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{}, nil
+}
+func (s *stubControlClient) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	return messaging.WithdrawResult{}, nil
+}
+func (s *stubControlClient) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return messaging.ReceiveResult{}, nil
+}
+func (s *stubControlClient) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
+	return messaging.PeersResult{}, nil
+}
+func (s *stubControlClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
+	return messaging.PreflightResult{}, nil
+}
+func (s *stubControlClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return messaging.ResumeResult{}, nil
+}
+func (s *stubControlClient) SessionRename(sessionID, name string) (messaging.RenameResult, error) {
+	return messaging.RenameResult{}, nil
+}
+func (s *stubControlClient) SessionLast(runtimeID string) (messaging.PeerLast, error) {
+	return messaging.PeerLast{}, nil
 }
 
 func writeTokenFile(t *testing.T, content string, mode os.FileMode) string {

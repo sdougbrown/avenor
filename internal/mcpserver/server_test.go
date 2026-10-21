@@ -20,6 +20,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 // statusOutputMap flattens a typed avenor_status tool output into the map
@@ -108,6 +109,10 @@ type fakeClient struct {
 	workflowControllerListErr      error
 	workflowControllerStatusCalls  []string
 	workflowControllerListCalls    int
+	messagePreflight               *messaging.PreflightResult
+	messagePreflightErr            error
+	resumeFunc                     func(messaging.ResumeRequest) (messaging.ResumeResult, error)
+	resumeErr                      error
 }
 
 type workflowWaitCall struct {
@@ -248,6 +253,52 @@ func (f *fakeClient) WorkflowControllerList() (map[string]any, error) {
 	return f.workflowControllerListResult, f.workflowControllerListErr
 }
 
+func (f *fakeClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{Outcome: messaging.OutcomeSent, MessageID: req.MessageID, Generation: req.Generation}, nil
+}
+
+func (f *fakeClient) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	return messaging.WaitResult{Outcome: messaging.OutcomeReplied}, nil
+}
+
+func (f *fakeClient) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{Outcome: messaging.OutcomeReplied, MessageID: req.MessageID}, nil
+}
+
+func (f *fakeClient) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	return messaging.WithdrawResult{Outcome: messaging.OutcomeWithdrawn}, nil
+}
+
+func (f *fakeClient) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return messaging.ReceiveResult{}, nil
+}
+
+func (f *fakeClient) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
+	return messaging.PeersResult{}, nil
+}
+
+func (f *fakeClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
+	if f.messagePreflight != nil {
+		return *f.messagePreflight, f.messagePreflightErr
+	}
+	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-test"}, nil
+}
+
+func (f *fakeClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	if f.resumeFunc != nil {
+		return f.resumeFunc(req)
+	}
+	return messaging.ResumeResult{}, f.resumeErr
+}
+
+func (f *fakeClient) SessionRename(sessionID, name string) (messaging.RenameResult, error) {
+	return messaging.RenameResult{RunID: sessionID, Label: name}, nil
+}
+
+func (f *fakeClient) SessionLast(runtimeID string) (messaging.PeerLast, error) {
+	return messaging.PeerLast{RunID: runtimeID}, nil
+}
+
 type spawnCountingClient struct {
 	spawns atomic.Int32
 }
@@ -261,10 +312,40 @@ func (c *spawnCountingClient) Spawn(map[string]any) (map[string]any, error) {
 func (c *spawnCountingClient) SpawnMCP(params map[string]any) (map[string]any, error) {
 	return c.Spawn(params)
 }
-func (c *spawnCountingClient) Shutdown(string) error                         { return nil }
-func (c *spawnCountingClient) Cancel(string) error                           { return nil }
-func (c *spawnCountingClient) Close() error                                  { return nil }
-func (c *spawnCountingClient) Closed() bool                                  { return false }
+func (c *spawnCountingClient) Shutdown(string) error { return nil }
+func (c *spawnCountingClient) Cancel(string) error   { return nil }
+func (c *spawnCountingClient) Close() error          { return nil }
+func (c *spawnCountingClient) Closed() bool          { return false }
+func (c *spawnCountingClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{}, nil
+}
+func (c *spawnCountingClient) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	return messaging.WaitResult{}, nil
+}
+func (c *spawnCountingClient) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{}, nil
+}
+func (c *spawnCountingClient) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	return messaging.WithdrawResult{}, nil
+}
+func (c *spawnCountingClient) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return messaging.ReceiveResult{}, nil
+}
+func (c *spawnCountingClient) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
+	return messaging.PeersResult{}, nil
+}
+func (c *spawnCountingClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
+	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-test"}, nil
+}
+func (c *spawnCountingClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return messaging.ResumeResult{}, nil
+}
+func (c *spawnCountingClient) SessionRename(sessionID, name string) (messaging.RenameResult, error) {
+	return messaging.RenameResult{}, nil
+}
+func (c *spawnCountingClient) SessionLast(runtimeID string) (messaging.PeerLast, error) {
+	return messaging.PeerLast{}, nil
+}
 func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
 func (c *spawnCountingClient) WorkflowStatus(string) (map[string]any, error) { return nil, nil }
 func (c *spawnCountingClient) WorkflowWait(string, time.Duration) (map[string]any, error) {
@@ -815,7 +896,7 @@ func TestAvenorStatusListMCPShape(t *testing.T) {
 	}
 	var statusTool *mcpsdk.Tool
 	for _, tool := range tools.Tools {
-		if tool.Name == "avenor_status" {
+		if tool.Name == "status" {
 			statusTool = tool
 			break
 		}
@@ -828,7 +909,7 @@ func TestAvenorStatusListMCPShape(t *testing.T) {
 	}
 
 	res, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
-		Name:      "avenor_status",
+		Name:      "status",
 		Arguments: map[string]any{},
 	})
 	if err != nil {
@@ -856,7 +937,7 @@ func TestAvenorStatusListMCPShape(t *testing.T) {
 	// The single-run form remains a flat status record and must validate
 	// against the same output schema.
 	single, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
-		Name:      "avenor_status",
+		Name:      "status",
 		Arguments: map[string]any{"run_id": "rt_1"},
 	})
 	if err != nil {
@@ -910,7 +991,7 @@ func TestAvenorStatusListEmptyMCPShape(t *testing.T) {
 	defer clientSession.Close()
 
 	res, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{
-		Name:      "avenor_status",
+		Name:      "status",
 		Arguments: map[string]any{},
 	})
 	if err != nil {
@@ -3566,705 +3647,6 @@ func TestAvenorEventsAfterSeqFlowsToLatestSeq(t *testing.T) {
 	}
 }
 
-func TestAvenorFollowUp(t *testing.T) {
-	dir := t.TempDir()
-	sentinelPath := filepath.Join(dir, "followup-test.done")
-	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_from_prior\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	fake := &fakeClient{
-		spawnResult: map[string]any{
-			"runtime_id": "rt_followup_1",
-			"session_id": "ses_followup_1",
-		},
-	}
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: fake,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s.registry.Store(&RunInfo{
-		RunID:        "run-prior-1",
-		Label:        "prior-test",
-		RuntimeID:    "rt_prior_1",
-		SentinelPath: sentinelPath,
-		Agent:        "claude",
-		AgentProfile: "cloud",
-		Backend:      "pi",
-		Thinking:     "high",
-		Dir:          "/tmp/prior-repo",
-	})
-
-	_, result, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "run-prior-1",
-		Message: "continue working",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map[string]any, got %T", result)
-	}
-	if m["label"] != "prior-test-followup" {
-		t.Errorf("expected label prior-test-followup, got %v", m["label"])
-	}
-	runID, _ := m["run_id"].(string)
-	if runID == "" {
-		t.Fatal("expected non-empty run_id")
-	}
-
-	p := fake.spawnCapturedParams
-	if p == nil {
-		t.Fatal("expected spawn params to be captured")
-	}
-	if p["session_id"] != "ses_from_prior" {
-		t.Errorf("expected session_id ses_from_prior, got %v", p["session_id"])
-	}
-	if p["prompt"] != "continue working" {
-		t.Errorf("expected prompt 'continue working', got %v", p["prompt"])
-	}
-	if p["agent"] != "claude" {
-		t.Errorf("expected agent claude, got %v", p["agent"])
-	}
-	if p["backend"] != "pi" {
-		t.Errorf("expected backend pi, got %v", p["backend"])
-	}
-	if p["thinking"] != "high" {
-		t.Errorf("expected thinking high, got %v", p["thinking"])
-	}
-	if p["agent_profile"] != "cloud" {
-		t.Errorf("expected agent_profile cloud, got %v", p["agent_profile"])
-	}
-	if p["dir"] != "/tmp/prior-repo" {
-		t.Errorf("expected dir /tmp/prior-repo, got %v", p["dir"])
-	}
-	if p["label"] != "prior-test-followup" {
-		t.Errorf("expected label prior-test-followup, got %v", p["label"])
-	}
-
-	ri := s.registry.LookupUnique(runID)
-	if ri == nil {
-		t.Fatal("expected new registry entry for follow-up run")
-	}
-	if ri.Agent != "claude" {
-		t.Errorf("expected agent claude, got %s", ri.Agent)
-	}
-	if ri.Backend != "pi" {
-		t.Errorf("expected backend pi, got %s", ri.Backend)
-	}
-	if ri.Thinking != "high" {
-		t.Errorf("expected thinking high, got %s", ri.Thinking)
-	}
-	if ri.AgentProfile != "cloud" {
-		t.Errorf("expected agent_profile cloud, got %s", ri.AgentProfile)
-	}
-	if ri.Dir != "/tmp/prior-repo" {
-		t.Errorf("expected dir /tmp/prior-repo, got %s", ri.Dir)
-	}
-	if ri.RuntimeID != "rt_followup_1" {
-		t.Errorf("expected new runtime_id rt_followup_1, got %s", ri.RuntimeID)
-	}
-	if ri.SessionID != "ses_followup_1" {
-		t.Errorf("expected new session_id ses_followup_1, got %s", ri.SessionID)
-	}
-}
-
-func TestAvenorRosterFollowUpUsesResolvedIdentity(t *testing.T) {
-	sentinelPath := filepath.Join(t.TempDir(), "roster-followup.done")
-	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_prior\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	var captured map[string]any
-	fake := &fakeClient{
-		spawnFunc: func(params map[string]any) (map[string]any, error) {
-			captured = params
-			return map[string]any{"runtime_id": "rt_roster_followup", "session_id": "ses_roster_followup"}, nil
-		},
-	}
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.registry.Store(&RunInfo{
-		RunID:            "run-roster-prior",
-		Label:            "roster-prior",
-		RuntimeID:        "rt-roster-prior",
-		SessionID:        "ses-prior",
-		SentinelPath:     sentinelPath,
-		RosterFile:       "/tmp/mutable-roster.json",
-		RosterEntry:      "planner",
-		EffectiveAgent:   "resolved-agent",
-		EffectiveModel:   "resolved-model",
-		EffectiveBackend: "agy",
-		Agent:            "resolved-agent",
-		Model:            "resolved-model",
-		Backend:          "agy",
-		Dir:              "/tmp/roster-repo",
-	})
-
-	_, result, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID: "run-roster-prior", Message: "continue",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if captured["backend"] != "agy" || captured["agent"] != "resolved-agent" || captured["model"] != "resolved-model" {
-		t.Fatalf("follow-up identity = %#v", captured)
-	}
-	if _, ok := captured["roster_file"]; ok {
-		t.Fatalf("follow-up reread roster_file: %#v", captured)
-	}
-	if _, ok := captured["roster_entry"]; ok {
-		t.Fatalf("follow-up reread roster_entry: %#v", captured)
-	}
-	followupID := result.(map[string]any)["run_id"].(string)
-	followup := s.registry.LookupUnique(followupID)
-	if followup == nil || followup.RosterFile != "/tmp/mutable-roster.json" || followup.EffectiveBackend != "agy" {
-		t.Fatalf("follow-up metadata = %#v", followup)
-	}
-}
-
-func TestAvenorWorkflowFollowUpClearsStaleModelFromAgentOnlyFinalPhase(t *testing.T) {
-	sentinelPath := filepath.Join(t.TempDir(), "agent-only-followup.done")
-	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=final-session\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var captured map[string]any
-	fake := &fakeClient{
-		statusResult: map[string]any{
-			"session_id": "final-session", "effective_agent": "final-agent",
-			"effective_model": "", "effective_backend": "agy", "agent_profile": "cloud",
-		},
-		spawnFunc: func(params map[string]any) (map[string]any, error) {
-			captured = params
-			return map[string]any{"runtime_id": "rt-agent-only-followup"}, nil
-		},
-	}
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.registry.Store(&RunInfo{
-		RunID: "agent-only-workflow", Label: "agent-only-workflow", RuntimeID: "rt-agent-only",
-		SentinelPath: sentinelPath, EffectiveAgent: "stale-agent", EffectiveModel: "stale-model",
-		EffectiveBackend: "pi", AgentProfile: "cloud", Dir: "/tmp/repo",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, _, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID: "agent-only-workflow", Message: "continue",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if captured["agent"] != "final-agent" || captured["backend"] != "agy" || captured["agent_profile"] != "cloud" {
-		t.Fatalf("final identity not forwarded: %#v", captured)
-	}
-	if _, exists := captured["model"]; exists {
-		t.Fatalf("stale run-level model was forwarded: %#v", captured)
-	}
-}
-
-func TestAvenorFollowUpInheritsAutoApproveTransitively(t *testing.T) {
-	var spawnParams []map[string]any
-	spawnCount := 0
-	fake := &fakeClient{
-		spawnFunc: func(params map[string]any) (map[string]any, error) {
-			captured := make(map[string]any, len(params))
-			for key, value := range params {
-				captured[key] = value
-			}
-			spawnParams = append(spawnParams, captured)
-			spawnCount++
-			return map[string]any{
-				"runtime_id": fmt.Sprintf("rt_followup_%d", spawnCount),
-				"session_id": fmt.Sprintf("ses_followup_%d", spawnCount),
-			}, nil
-		},
-	}
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s.registry.Store(&RunInfo{
-		RunID:        "run-auto-prior",
-		Label:        "auto-prior",
-		RuntimeID:    "rt_auto_prior",
-		SessionID:    "ses_auto_prior",
-		SentinelPath: filepath.Join(t.TempDir(), "missing.done"),
-		Agent:        "claude",
-		Backend:      "pi",
-		Dir:          "/tmp/auto-repo",
-		AutoApprove:  true,
-	})
-
-	_, firstResult, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "run-auto-prior",
-		Message: "first follow-up",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstRunID, _ := firstResult.(map[string]any)["run_id"].(string)
-	if firstRunID == "" {
-		t.Fatal("expected first follow-up run ID")
-	}
-	if got, ok := spawnParams[0]["auto_approve"].(bool); !ok || !got {
-		t.Fatalf("first follow-up auto_approve = %T %v, want bool true", spawnParams[0]["auto_approve"], spawnParams[0]["auto_approve"])
-	}
-	if ri := s.registry.LookupUnique(firstRunID); ri == nil || !ri.AutoApprove {
-		t.Fatalf("first follow-up registry auto-approve = %#v, want true", ri)
-	}
-
-	_, secondResult, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   firstRunID,
-		Message: "second follow-up",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(spawnParams) != 2 {
-		t.Fatalf("follow-up spawns = %d, want 2", len(spawnParams))
-	}
-	if got, ok := spawnParams[1]["auto_approve"].(bool); !ok || !got {
-		t.Fatalf("second follow-up auto_approve = %T %v, want bool true", spawnParams[1]["auto_approve"], spawnParams[1]["auto_approve"])
-	}
-	secondRunID, _ := secondResult.(map[string]any)["run_id"].(string)
-	if ri := s.registry.LookupUnique(secondRunID); ri == nil || !ri.AutoApprove {
-		t.Fatalf("second follow-up registry auto-approve = %#v, want true", ri)
-	}
-}
-
-func TestAvenorFollowUpOmitsAutoApproveWhenFalseOrUnset(t *testing.T) {
-	tests := []struct {
-		name string
-		info RunInfo
-	}{
-		{
-			name: "false",
-			info: RunInfo{AutoApprove: false},
-		},
-		{
-			name: "unset",
-			info: RunInfo{},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fake := &fakeClient{
-				spawnResult: map[string]any{"runtime_id": "rt_followup", "session_id": "ses_followup"},
-			}
-			s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-			if err != nil {
-				t.Fatal(err)
-			}
-			info := test.info
-			info.RunID = "run-supervised"
-			info.Label = "supervised"
-			info.RuntimeID = "rt_supervised"
-			info.SessionID = "ses_supervised"
-			info.SentinelPath = filepath.Join(t.TempDir(), "missing.done")
-			info.Agent = "claude"
-			info.Dir = "/tmp/supervised-repo"
-			if err := s.registry.Store(&info); err != nil {
-				t.Fatal(err)
-			}
-			if _, _, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-				RunID:   info.RunID,
-				Message: "continue supervised",
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if _, ok := fake.spawnCapturedParams["auto_approve"]; ok {
-				t.Errorf("auto_approve unexpectedly forwarded: %#v", fake.spawnCapturedParams)
-			}
-		})
-	}
-}
-
-func TestAvenorFollowUpUsesCurrentSupervisorSessionWhenSentinelMissing(t *testing.T) {
-	fake := &fakeClient{
-		statusResult: map[string]any{
-			"runtime_id": "rt_live_adopted",
-			"session_id": "conv-current-real",
-			"status":     "running",
-		},
-		spawnResult: map[string]any{
-			"runtime_id": "rt_followup_live",
-			"session_id": "ses_followup_live",
-		},
-	}
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Registry carries the spawn-time provisional id; the terminal sentinel is
-	// absent because the supervisor has not written one yet.
-	s.registry.Store(&RunInfo{
-		RunID:        "run-live-adopt",
-		Label:        "live-adopt",
-		RuntimeID:    "rt_live_adopted",
-		SessionID:    "agy-pending-live",
-		SentinelPath: filepath.Join(t.TempDir(), "missing-live.done"),
-		Agent:        "agy",
-		Backend:      "agy",
-		Dir:          "/tmp/live-repo",
-	})
-
-	if _, _, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "run-live-adopt",
-		Message: "continue",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if len(fake.statusCapturedRuntimeIDs) == 0 || fake.statusCapturedRuntimeIDs[0] != "rt_live_adopted" {
-		t.Fatalf("status lookups = %#v", fake.statusCapturedRuntimeIDs)
-	}
-	p := fake.spawnCapturedParams
-	if p["session_id"] != "conv-current-real" {
-		t.Fatalf("expected adopted session conv-current-real, got %v", p["session_id"])
-	}
-	if p["backend"] != "agy" {
-		t.Fatalf("expected backend agy, got %v", p["backend"])
-	}
-}
-
-func TestAvenorFollowUpRetriesMissingSentinelAfterStatusRace(t *testing.T) {
-	tests := []struct {
-		name             string
-		statusResult     map[string]any
-		statusErr        error
-		createSentinel   bool
-		sentinelContents string
-		wantSession      string
-		wantError        string
-	}{
-		{
-			name:             "status error then valid sentinel",
-			statusErr:        errors.New("status unavailable"),
-			createSentinel:   true,
-			sentinelContents: "DONE\nSESSION=ses_after_status\n",
-			wantSession:      "ses_after_status",
-		},
-		{
-			name:             "status without session then valid sentinel",
-			statusResult:     map[string]any{"runtime_id": "rt_race", "status": "running"},
-			createSentinel:   true,
-			sentinelContents: "DONE\nSESSION=ses_after_empty_status\n",
-			wantSession:      "ses_after_empty_status",
-		},
-		{
-			name:             "status error then failed sentinel",
-			statusErr:        errors.New("status unavailable"),
-			createSentinel:   true,
-			sentinelContents: "FAILED\nSESSION=ses_failed\n",
-			wantSession:      "ses_failed",
-		},
-		{
-			name:             "status error then blocked sentinel",
-			statusErr:        errors.New("status unavailable"),
-			createSentinel:   true,
-			sentinelContents: "BLOCKED\nSESSION=ses_blocked\nSTOP_REASON=blocked\n",
-			wantSession:      "ses_blocked",
-		},
-		{
-			name:             "status error then killed sentinel",
-			statusErr:        errors.New("status unavailable"),
-			createSentinel:   true,
-			sentinelContents: "KILLED\nSESSION=ses_killed\nEXIT_CODE=130\n",
-			wantError:        "not resumable",
-		},
-		{
-			name:             "status error then timeout sentinel",
-			statusErr:        errors.New("status unavailable"),
-			createSentinel:   true,
-			sentinelContents: "TIMEOUT\nSESSION=ses_timeout\n",
-			wantError:        "not resumable",
-		},
-		{
-			name:             "status without session then invalid sentinel",
-			statusResult:     map[string]any{"runtime_id": "rt_race", "status": "running"},
-			createSentinel:   true,
-			sentinelContents: "DONE\n",
-			wantError:        "no session in sentinel",
-		},
-		{
-			name:        "status error then still missing",
-			statusErr:   errors.New("status unavailable"),
-			wantSession: "agy-pending-race",
-		},
-		{
-			name:         "status without session then still missing",
-			statusResult: map[string]any{"runtime_id": "rt_race", "status": "running"},
-			wantSession:  "agy-pending-race",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			dir := t.TempDir()
-			sentinelPath := filepath.Join(dir, "missing.done")
-			fake := &fakeClient{
-				statusResult: test.statusResult,
-				statusErr:    test.statusErr,
-				spawnResult: map[string]any{
-					"runtime_id": "rt_followup_race",
-					"session_id": "ses_followup_race",
-				},
-			}
-			fake.statusFunc = func(string) (map[string]any, error) {
-				if test.createSentinel {
-					if err := os.WriteFile(sentinelPath, []byte(test.sentinelContents), 0644); err != nil {
-						t.Fatal(err)
-					}
-				}
-				return test.statusResult, test.statusErr
-			}
-
-			s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := s.registry.Store(&RunInfo{
-				RunID:        "run-race",
-				Label:        "race",
-				RuntimeID:    "rt_race",
-				SessionID:    "agy-pending-race",
-				SentinelPath: sentinelPath,
-				Agent:        "agy",
-				Backend:      "agy",
-				Dir:          "/tmp/race-repo",
-			}); err != nil {
-				t.Fatal(err)
-			}
-
-			_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-				RunID:   "run-race",
-				Message: "continue",
-			})
-			if test.wantError != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantError) {
-					t.Fatalf("error = %v, want substring %q", err, test.wantError)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := fake.spawnCapturedParams["session_id"]; got != test.wantSession {
-				t.Fatalf("spawn session_id = %v, want %q", got, test.wantSession)
-			}
-		})
-	}
-}
-
-func TestAvenorFollowUpUsesRegistrySessionWhenSentinelMissing(t *testing.T) {
-	fake := &fakeClient{
-		spawnResult: map[string]any{
-			"runtime_id": "rt_followup_pi",
-			"session_id": "ses_followup_pi",
-		},
-	}
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: fake,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s.registry.Store(&RunInfo{
-		RunID:        "run-pi-prior",
-		Label:        "pi-prior",
-		RuntimeID:    "rt_pi_prior",
-		SessionID:    "ses_pi_prior",
-		SentinelPath: filepath.Join(t.TempDir(), "missing.done"),
-		Agent:        "explore",
-		Backend:      "pi",
-		Dir:          "/tmp/pi-repo",
-	})
-
-	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "run-pi-prior",
-		Message: "continue",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	p := fake.spawnCapturedParams
-	if p["session_id"] != "ses_pi_prior" {
-		t.Errorf("expected stored session ses_pi_prior, got %v", p["session_id"])
-	}
-	if p["backend"] != "pi" {
-		t.Errorf("expected backend pi, got %v", p["backend"])
-	}
-	if p["dir"] != "/tmp/pi-repo" {
-		t.Errorf("expected dir /tmp/pi-repo, got %v", p["dir"])
-	}
-	if v, ok := p["auto_approve"]; ok {
-		t.Errorf("auto_approve unexpectedly present on supervised follow-up: %v", v)
-	}
-}
-
-func TestAvenorFollowUpCustomLabel(t *testing.T) {
-	dir := t.TempDir()
-	sentinelPath := filepath.Join(dir, "followup-custom-label.done")
-	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_custom\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	fake := &fakeClient{
-		spawnResult: map[string]any{
-			"runtime_id": "rt_fup_custom",
-			"session_id": "ses_fup_custom",
-		},
-	}
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: fake,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s.registry.Store(&RunInfo{
-		RunID:        "run-prior-2",
-		Label:        "prior-test-2",
-		RuntimeID:    "rt_prior_2",
-		SentinelPath: sentinelPath,
-		Agent:        "codex",
-		Dir:          "/tmp/other-repo",
-	})
-
-	_, result, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "run-prior-2",
-		Message: "keep going",
-		Label:   "my-followup",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, _ := result.(map[string]any)
-	if m["label"] != "my-followup" {
-		t.Errorf("expected custom label my-followup, got %v", m["label"])
-	}
-	if fake.spawnCapturedParams["label"] != "my-followup" {
-		t.Errorf("expected spawn label my-followup, got %v", fake.spawnCapturedParams["label"])
-	}
-}
-
-func TestAvenorFollowUpNoSession(t *testing.T) {
-	dir := t.TempDir()
-	sentinelPath := filepath.Join(dir, "followup-nosession.done")
-	if err := os.WriteFile(sentinelPath, []byte("DONE\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	fake := &fakeClient{}
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: fake,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s.registry.Store(&RunInfo{
-		RunID:        "run-prior-3",
-		Label:        "prior-no-session",
-		RuntimeID:    "rt_prior_3",
-		SentinelPath: sentinelPath,
-		Agent:        "claude",
-		Dir:          "/tmp/prior-repo",
-	})
-
-	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "run-prior-3",
-		Message: "continue",
-	})
-	if err == nil {
-		t.Fatal("expected error for no session in sentinel")
-	}
-	if !strings.Contains(err.Error(), "no session in sentinel") {
-		t.Errorf("expected 'no session in sentinel', got: %v", err)
-	}
-}
-
-func TestAvenorFollowUpNotResumable(t *testing.T) {
-	dir := t.TempDir()
-	sentinelPath := filepath.Join(dir, "followup-killed.done")
-	if err := os.WriteFile(sentinelPath, []byte("KILLED\nSESSION=ses_killed\nEXIT_CODE=130\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	fake := &fakeClient{}
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: fake,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s.registry.Store(&RunInfo{
-		RunID:        "run-prior-5",
-		Label:        "prior-killed",
-		RuntimeID:    "rt_prior_5",
-		SessionID:    "ses_killed",
-		SentinelPath: sentinelPath,
-		Agent:        "claude",
-		Dir:          "/tmp/prior-repo",
-	})
-
-	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "run-prior-5",
-		Message: "continue",
-	})
-	if err == nil {
-		t.Fatal("expected error for non-resumable run")
-	}
-	if !strings.Contains(err.Error(), "not resumable") {
-		t.Errorf("expected 'not resumable', got: %v", err)
-	}
-}
-
-func TestAvenorFollowUpNotFound(t *testing.T) {
-	fake := &fakeClient{}
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: fake,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "nonexistent",
-		Message: "continue",
-	})
-	if err == nil {
-		t.Fatal("expected error for run not found in registry")
-	}
-	if !strings.Contains(err.Error(), "run not found in registry") {
-		t.Errorf("expected 'run not found in registry', got: %v", err)
-	}
-}
-
 func TestNewServerHTTPTransport(t *testing.T) {
 	s, err := NewServer(Options{
 		Transport:     "http",
@@ -4463,38 +3845,6 @@ func TestAvenorAnswerPermissionRequestIDEmpty(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "missing request_id") {
 		t.Errorf("expected 'pending_permission missing request_id', got: %v", err)
-	}
-}
-
-func TestAvenorFollowUpSentinelFileNotFound(t *testing.T) {
-	fake := &fakeClient{}
-	s, err := NewServer(Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: fake,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	s.registry.Store(&RunInfo{
-		RunID:        "run-prior-4",
-		Label:        "prior-sentinel-missing",
-		RuntimeID:    "rt_prior_4",
-		SentinelPath: "/nonexistent/sentinel.done",
-		Agent:        "claude",
-		Dir:          "/tmp/prior-repo",
-	})
-
-	_, _, err = s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "run-prior-4",
-		Message: "continue",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing sentinel file")
-	}
-	if !strings.Contains(err.Error(), "read sentinel session") {
-		t.Errorf("expected 'read sentinel session', got: %v", err)
 	}
 }
 
@@ -5066,44 +4416,5 @@ func TestNewServerWithSupervisorSocketDialsZeroTimes(t *testing.T) {
 	}
 	if got := dials.Load(); got != 0 {
 		t.Fatalf("dials during construction = %d, want 0", got)
-	}
-}
-
-func TestAvenorFollowUpDefaultsToCurrentDisplayName(t *testing.T) {
-	sentinelPath := filepath.Join(t.TempDir(), "renamed-followup.done")
-	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_prior\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	fake := &fakeClient{
-		statusResult: map[string]any{"label": "renamed-prior", "session_id": "ses_current"},
-		spawnResult:  map[string]any{"runtime_id": "rt_followup_renamed", "session_id": "ses_followup_renamed"},
-	}
-	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.registry.Store(&RunInfo{
-		RunID:        "run-prior-renamed",
-		Label:        "launch-label",
-		RuntimeID:    "rt_prior_renamed",
-		SentinelPath: sentinelPath,
-	})
-
-	_, result, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:   "run-prior-renamed",
-		Message: "continue working",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map[string]any, got %T", result)
-	}
-	if m["label"] != "renamed-prior-followup" {
-		t.Fatalf("follow-up label = %v, want the current display name", m["label"])
-	}
-	if got := fake.spawnCapturedParams["label"]; got != "renamed-prior-followup" {
-		t.Fatalf("spawn label = %v, want the current display name", got)
 	}
 }
