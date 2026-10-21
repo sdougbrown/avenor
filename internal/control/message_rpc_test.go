@@ -1,8 +1,10 @@
 package control
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -327,6 +329,98 @@ func (b *blockingWaitTransport) Wait(ctx context.Context, req messaging.WaitRequ
 	}
 }
 
+// saturatedWaitTransport blocks every wait until release, so the connection's
+// in-flight slot limit is observable.
+type saturatedWaitTransport struct {
+	recordingTransport
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *saturatedWaitTransport) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	b.entered <- struct{}{}
+	select {
+	case <-b.release:
+		return messaging.WaitResult{Outcome: messaging.OutcomeTimedOut}, nil
+	case <-ctx.Done():
+		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, ctx.Err()
+	}
+}
+
+// TestMessageWaitRefusesBeyondInflightLimit fills every blocking slot, pins the
+// synchronous -32000 refusal for the next request, then releases the waits and
+// checks the connection drains and serves again.
+func TestMessageWaitRefusesBeyondInflightLimit(t *testing.T) {
+	tr := &saturatedWaitTransport{
+		entered: make(chan struct{}, maxInflightAsksPerConn),
+		release: make(chan struct{}),
+	}
+	state := NewState("run_1", "", 0)
+	s, cap := NewTestServer(state)
+	s.SetStableHandler(&mockStableHandler{messageTransport: tr})
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	c := dialOwner(t, s, cap)
+	defer c.Close()
+
+	for i := 1; i <= maxInflightAsksPerConn; i++ {
+		params := json.RawMessage(fmt.Sprintf(`{"message_id":"m%d","generation":"g"}`, i))
+		_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: uint64(i), Method: "message_wait", Params: params})
+	}
+	for i := 0; i < maxInflightAsksPerConn; i++ {
+		select {
+		case <-tr.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d waits reached the transport", i)
+		}
+	}
+
+	overflowID := uint64(maxInflightAsksPerConn + 1)
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: overflowID, Method: "message_wait", Params: json.RawMessage(`{"message_id":"overflow","generation":"g"}`)})
+	resp := readRespForID(t, c, overflowID)
+	if resp.Error == nil || resp.Error.Code != -32000 || !strings.Contains(resp.Error.Message, "too many in-flight") {
+		t.Fatalf("overflow wait = %+v, want -32000 slot refusal", resp)
+	}
+
+	close(tr.release)
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	scanner := bufio.NewScanner(c)
+	drained := map[uint64]bool{}
+	for len(drained) < maxInflightAsksPerConn {
+		if !scanner.Scan() {
+			t.Fatalf("drained %d of %d waits: %v", len(drained), maxInflightAsksPerConn, scanner.Err())
+		}
+		var r Response
+		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+			t.Fatalf("decode drained response: %v", err)
+		}
+		id, ok := r.ID.(float64)
+		if !ok {
+			t.Fatalf("drained response has no id: %+v", r)
+		}
+		if r.Error != nil {
+			t.Fatalf("wait %v failed after release: %+v", id, r.Error)
+		}
+		drained[uint64(id)] = true
+	}
+	for i := 1; i <= maxInflightAsksPerConn; i++ {
+		if !drained[uint64(i)] {
+			t.Fatalf("missing response for wait %d", i)
+		}
+	}
+
+	// Every slot is free again, so the connection serves a fresh request.
+	probeID := uint64(maxInflightAsksPerConn + 2)
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: probeID, Method: "message_preflight"})
+	if resp := readRespForID(t, c, probeID); resp.Error != nil {
+		t.Fatalf("message_preflight after drain: %+v", resp.Error)
+	}
+}
+
 // TestMessageWaitDoesNotBlockConnection pins the async message_wait shape: an
 // outstanding wait must not stop the owner connection from serving a second
 // request, because the MCP host reuses that connection for permission answers
@@ -392,6 +486,14 @@ func TestMessageWaitClampsTimeout(t *testing.T) {
 	}
 	if want := time.Duration(maxAskTimeoutMS) * time.Millisecond; tr.waitReq.Timeout != want {
 		t.Fatalf("transport timeout = %v, want the server ceiling %v", tr.waitReq.Timeout, want)
+	}
+
+	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: 3, Method: "message_wait", Params: json.RawMessage(`{"message_id":"m1","generation":"g","timeout_ms":-5}`)})
+	if resp := readRespForID(t, c, 3); resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("negative timeout = %+v, want -32602", resp)
+	}
+	if len(tr.calls) != 1 {
+		t.Fatalf("negative timeout reached the transport: calls = %v", tr.calls)
 	}
 }
 
