@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 )
@@ -241,6 +242,38 @@ func TestSessionScanTranscriptTickEmitsIncrementalContent(t *testing.T) {
 	}
 	if got[0].Event != "agent.message_chunk" || got[1].Event != "session.end" {
 		t.Fatalf("second tick order = %+v", got)
+	}
+}
+
+func TestScanTranscriptTickWaitsForSplitEndTurnText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	thinking := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}],"stop_reason":"end_turn"}}` + "\n"
+	text := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn"}}` + "\n"
+	if err := os.WriteFile(path, []byte(thinking), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess := NewSession(context.Background(), SessionOptions{SessionID: "ses_1", Transcript: NewTranscriptReader(path), EventsBuf: 16})
+	sess.Prompted = true
+
+	go func() {
+		time.Sleep(endTurnSettle / 5)
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(text)
+	}()
+	sess.ScanTranscriptTick()
+	sess.ScanTranscriptTick()
+
+	var names []string
+	for _, ev := range drainSessionEvents(sess.Events) {
+		names = append(names, ev.Event)
+	}
+	want := "agent.thought_chunk,agent.message_chunk,session.end"
+	if got := strings.Join(names, ","); got != want {
+		t.Fatalf("events = %s, want %s", got, want)
 	}
 }
 

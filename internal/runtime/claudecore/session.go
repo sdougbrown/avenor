@@ -204,6 +204,36 @@ func (s *Session) brokerTerminalPermission(out string) bool {
 	return true
 }
 
+// endTurnSettle is how long an end_turn without OSC reports waits for the
+// transcript's trailing records. Claude Code writes a final reply as two
+// end_turn records about a millisecond apart (thinking, then text), so a
+// tick between the writes sees only the first.
+var endTurnSettle = 250 * time.Millisecond
+
+func (s *Session) emitContent(rec TranscriptRecord) {
+	for _, ev := range rec.ContentEvents {
+		ev.SessionID = s.SessionID
+		s.Emit(ev)
+	}
+}
+
+// settleEndTurn waits endTurnSettle, then emits whatever the transcript
+// gained meanwhile.
+func (s *Session) settleEndTurn() {
+	select {
+	case <-time.After(endTurnSettle):
+	case <-s.Ctx.Done():
+		return
+	}
+	recs, _, err := s.Transcript.Tick()
+	if err != nil {
+		return
+	}
+	for _, rec := range recs {
+		s.emitContent(rec)
+	}
+}
+
 func (s *Session) ScanTranscriptTick() {
 	if s.Transcript == nil {
 		return
@@ -225,17 +255,18 @@ func (s *Session) ScanTranscriptTick() {
 	}
 
 	heldEndTurn := false
-	for _, rec := range recs {
-		for _, ev := range rec.ContentEvents {
-			ev.SessionID = s.SessionID
-			s.Emit(ev)
-		}
+	for i, rec := range recs {
+		s.emitContent(rec)
 		if rec.StopReason == "end_turn" {
 			if s.holdEndTurn() {
 				// ProgStatusTick finishes the turn; keep emitting what follows.
 				heldEndTurn = true
 				continue
 			}
+			for _, rest := range recs[i+1:] {
+				s.emitContent(rest)
+			}
+			s.settleEndTurn()
 			s.finishEndTurn()
 			return
 		}

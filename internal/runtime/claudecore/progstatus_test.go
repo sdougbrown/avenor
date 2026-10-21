@@ -444,9 +444,10 @@ func TestProgStatusLateStartupIdleIsNotAWait(t *testing.T) {
 	}
 }
 
-func TestProgStatusSilentSessionFinishesOnFirstEndTurn(t *testing.T) {
+func TestProgStatusSilentSessionFinishesAfterEndTurnSettle(t *testing.T) {
 	// A session that can observe reports but never received one behaves as
-	// without OSC: the first end_turn ends the turn on the spot.
+	// without OSC: an end_turn ends the turn after the transcript settle, with
+	// the batch's content emitted first.
 	term := terminal.NewFakeSession("silent", 1, workingPane)
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	s := NewSession(context.Background(), SessionOptions{SessionID: "ses-silent", Transcript: NewTranscriptReader(path), EventsBuf: 16})
@@ -458,7 +459,7 @@ func TestProgStatusSilentSessionFinishesOnFirstEndTurn(t *testing.T) {
 	appendTranscript(t, path, assistantText("first", "end_turn"), assistantText("second", "end_turn"))
 	s.ScanTranscriptTick()
 	got := eventNames(drainSessionEvents(s.Events))
-	if len(got) != 2 || got[0] != "agent.message_chunk:first" || got[1] != "session.end" {
-		t.Fatalf("events = %v, want first chunk then session.end", got)
+	if len(got) != 3 || got[0] != "agent.message_chunk:first" || got[1] != "agent.message_chunk:second" || got[2] != "session.end" {
+		t.Fatalf("events = %v, want both chunks then session.end", got)
 	}
 }
