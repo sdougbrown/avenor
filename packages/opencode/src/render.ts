@@ -1,4 +1,4 @@
-import { extractEventText, renderPeerList } from '@dougbots/avenor-core'
+import { extractEventText, peersDetails, renderPeerList, resultOutput } from '@dougbots/avenor-core'
 import type {
   InspectResult,
   PeersRouterResult,
@@ -480,7 +480,7 @@ export function formatMessageResumeOutput(args: MessageArgs, result: ProviderRes
   return {
     title: `${label} — resumed`,
     output: output(messageResumeLines(result, args), 'message'),
-    metadata: { ...result, source_run_id: args.target },
+    metadata: resultOutput(result),
   }
 }
 
@@ -493,7 +493,7 @@ export function formatMessageOutput(args: MessageArgs, result: ProviderResult): 
   return {
     title: `Avenor ${action} — ${outcome}`,
     output: stringValue(result.text) ?? output(undefined, 'message'),
-    metadata: { ...result },
+    metadata: resultOutput(result),
   }
 }
 
@@ -504,7 +504,7 @@ export function formatPeersOutput(args: PeersArgs, result: PeersRouterResult): R
   return {
     title: `Avenor peers — ${result.action}`,
     output: text || output(undefined, 'peers'),
-    metadata: { ...result },
+    metadata: peersDetails(result),
   }
 }
 

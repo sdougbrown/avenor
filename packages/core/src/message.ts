@@ -819,3 +819,73 @@ export function renderPeerList(records: PeerRecord[]): string {
   })
   return `**Active sessions:**\n${lines.join('\n')}`
 }
+
+/**
+ * The one result object every surface returns for a routed message call.
+ * Snake_case and the contract field set, exactly like the Go router's
+ * `Result.Output()`: a fact that is absent is a key that is absent, `text` is
+ * always present, and the resume paths travel with the result that minted them.
+ */
+export function resultOutput(result: ProviderResult): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    action: result.action ?? '',
+    outcome: result.outcome,
+    text: result.text ?? '',
+  }
+  if (result.messageId) out.message_id = result.messageId
+  if (result.runId) out.run_id = result.runId
+  if (result.label) out.label = result.label
+  if (result.reply) out.reply = result.reply
+  if (result.sentinelFile) out.sentinel_file = result.sentinelFile
+  if (result.onEvent) out.on_event = result.onEvent
+  return out
+}
+
+/**
+ * The one structured result every surface returns for a peers call, matching
+ * `router.PeersDetails` field for field: `list` carries the peer records,
+ * `rename` the new and previous label, `last` the recorded turn. An optional
+ * peer field that is absent is a key that is absent.
+ */
+export function peersDetails(result: PeersRouterResult): Record<string, unknown> {
+  if (result.action === 'list') {
+    return {
+      peers: result.peers.map(peer => {
+        const record: Record<string, unknown> = { run_id: peer.run_id }
+        for (const name of ['label', 'kind', 'status', 'backend', 'model', 'dir'] as const) {
+          const value = peer[name]
+          if (value) record[name] = value
+        }
+        return record
+      }),
+    }
+  }
+  if (result.action === 'rename') {
+    const renamed = result.renamed ?? { run_id: '', label: '', previous_label: '' }
+    return {
+      renamed: {
+        run_id: renamed.run_id,
+        label: renamed.label,
+        previous_label: renamed.previous_label,
+      },
+    }
+  }
+  const last = result.last ?? {
+    run_id: '',
+    runtime_id: '',
+    label: '',
+    final_output: '',
+    stop_reason: '',
+    final_output_truncated: false,
+  }
+  return {
+    last: {
+      run_id: last.run_id,
+      runtime_id: last.runtime_id,
+      label: last.label,
+      final_output: last.final_output,
+      stop_reason: last.stop_reason,
+      final_output_truncated: last.final_output_truncated,
+    },
+  }
+}

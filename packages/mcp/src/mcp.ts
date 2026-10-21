@@ -19,8 +19,10 @@ import {
   createHostMessageProvider,
   getSupervisorClient,
   messageTool,
+  peersDetails,
   peersTool,
   renderPeerList,
+  resultOutput,
   ToolError,
   workflowCancelTool,
   workflowStatusTool,
@@ -214,9 +216,10 @@ function toolFailure(error: unknown): ToolReply {
 async function messageCall(args: unknown): Promise<ToolReply> {
   try {
     const result = await messageTool(args, await messageProvider())
+    const output = resultOutput(result)
     return {
-      content: [{ type: 'text', text: result.text ?? '' }],
-      structuredContent: { ...result },
+      content: [{ type: 'text', text: JSON.stringify(output) }],
+      structuredContent: output,
     }
   } catch (error) {
     return toolFailure(error)
@@ -234,7 +237,7 @@ async function peersCall(args: unknown): Promise<ToolReply> {
     const result = await peersTool(args, await messageProvider())
     return {
       content: [{ type: 'text', text: peersText(result) }],
-      structuredContent: { ...result },
+      structuredContent: peersDetails(result),
     }
   } catch (error) {
     return toolFailure(error)

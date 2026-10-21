@@ -108,10 +108,9 @@ describe('OpenCode Avenor result renderers', () => {
     expect(resumed.metadata).toEqual({
       action: 'resume',
       outcome: 'resumed',
-      runId: 'run-2',
-      label: 'again',
       text: 'resumed',
-      source_run_id: 'run-1',
+      run_id: 'run-2',
+      label: 'again',
     })
 
     const shutdown = formatShutdownOutput({ supervisor_id: '/tmp/sock', force: true }, { ok: false, cleaned_up: ['/tmp/one'] })
@@ -206,7 +205,7 @@ describe('OpenCode Avenor result renderers', () => {
     )).toEqual({
       title: 'again — resumed',
       output: ['Avenor message result unavailable.', retry].join('\n'),
-      metadata: { action: 'resume', outcome: 'resumed', runId: null, label: 'again', source_run_id: 'run-1' },
+      metadata: { action: 'resume', outcome: 'resumed', text: '', label: 'again' },
     })
     expect(formatEventsOutput({ run_id: 'run-1' }, malformedEvents as any)).toEqual({
       title: 'run-1 — 2 events',

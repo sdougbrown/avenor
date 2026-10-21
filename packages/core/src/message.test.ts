@@ -4,12 +4,15 @@ import messageInputSchema from '../../../schemas/message.input.json'
 import conformanceFixture from '../../../schemas/message_route.conformance.json'
 import outcomeSchema from '../../../schemas/message.outcome.json'
 import peersInputSchema from '../../../schemas/peers.input.json'
+import resultFixture from '../../../schemas/message_route.result.json'
 import {
   assertMessageInput,
   assertPeersInput,
   executeMessage,
   executePeers,
   normalizeRouteRules,
+  peersDetails,
+  resultOutput,
   ToolError,
 } from './message.js'
 import {
@@ -641,5 +644,71 @@ describe('router invariants', () => {
     await expect(executeMessage(provider, { action: 'resume', target: 'mesh-b', message: 'again', label: 'mesh-b-2' }))
       .rejects.toThrow(/resume succeeded but registration failed for run_id "run-77" runtime_id "rt_77"/)
     expect(resumedHook).toBe(0)
+  })
+})
+
+/**
+ * The shared expected objects in schemas/message_route.result.json are the
+ * cross-surface fixture: the two MCP hosts and the OpenCode plugin assert their
+ * tool results against the same file, so no surface can drift in casing or
+ * nesting.
+ */
+describe('the shared surface result objects', () => {
+  const surfaceFixture = resultFixture as unknown as {
+    message: Record<string, Record<string, unknown>>
+    peers: Record<string, Record<string, unknown>>
+  }
+
+  function surfaceProvider(overrides: Partial<MessageProvider> = {}): MessageProvider {
+    return {
+      caller: () => ({ kind: 'owner', runId: 'supervisor' }),
+      surface: () => 'mcp-ts',
+      role: () => 'host',
+      resolve: async (ref: string) => ({ runId: ref, label: ref, match: 'unique' }),
+      state: async () => ({ live: true, resumable: true, status: 'running' }),
+      tell: async () => ({ outcome: 'sent', messageId: 'm-1' }),
+      ask: async () => ({ outcome: 'sent' }),
+      reply: async () => ({ outcome: 'replied' }),
+      withdraw: async () => ({ outcome: 'withdrawn' }),
+      resume: async () => ({
+        outcome: 'resumed',
+        runId: 'run-2',
+        label: 'again',
+        sentinelFile: '/runs/run-2/sentinel.done',
+        onEvent: '/runs/run-2/events.log',
+      }),
+      rename: async () => ({ outcome: 'renamed', runId: 'rt_2', label: 'mesh-renamed', previousLabel: 'mesh-a' }),
+      last: async () => ({ outcome: 'sent', hasRecord: true, finalOutput: 'OK', stopReason: 'end_turn' }),
+      peers: async () => ({
+        peers: [
+          { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running' },
+          { run_id: 'rt_3' },
+        ],
+      }),
+      ...overrides,
+    }
+  }
+
+  it('serialises message results to the shared snake_case object', async () => {
+    expect(resultOutput(await executeMessage(
+      surfaceProvider({ state: async () => ({ live: true, resumable: false, status: 'running' }) }),
+      { action: 'tell', target: 'mesh-a', message: 'hi' },
+    ))).toEqual(surfaceFixture.message.tell)
+    expect(resultOutput(await executeMessage(
+      surfaceProvider({ state: async () => ({ live: false, resumable: true, status: 'done' }) }),
+      { action: 'resume', target: 'mesh-a', message: 'again' },
+    ))).toEqual(surfaceFixture.message.resume)
+    expect(resultOutput(await executeMessage(surfaceProvider(), { action: 'reply', reply_to: 'a-1', message: 'pong' })))
+      .toEqual(surfaceFixture.message.reply_edge_absent)
+  })
+
+  it('serialises peers results to the shared detail object', async () => {
+    expect(peersDetails(await executePeers(surfaceProvider(), {}))).toEqual(surfaceFixture.peers.list)
+    expect(peersDetails(await executePeers(surfaceProvider(), { action: 'rename', name: 'mesh-renamed' })))
+      .toEqual(surfaceFixture.peers.rename)
+    expect(peersDetails(await executePeers(
+      surfaceProvider({ resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }) }),
+      { action: 'last', target: 'mesh-a' },
+    ))).toEqual(surfaceFixture.peers.last)
   })
 })

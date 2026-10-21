@@ -348,6 +348,68 @@ describe('avenor MCP messaging tools', () => {
     })
   })
 
+  it('returns the shared result objects for every message and peers action', async () => {
+    const expected = resultFixture as unknown as {
+      message: Record<string, Record<string, unknown>>
+      peers: Record<string, Record<string, unknown>>
+      error: Record<string, unknown>
+    }
+    const liveAt = () => makeProvider({
+      resolve: async () => ({ runId: 'mesh-a', label: 'mesh-a', match: 'unique' }),
+      state: async () => ({ live: true, resumable: false, status: 'running' }),
+      tell: async () => ({ outcome: 'sent', messageId: 'm-1' }),
+    })
+    const resumableAt = () => makeProvider({
+      resolve: async () => ({ runId: 'mesh-a', label: 'mesh-a', match: 'unique' }),
+      state: async () => ({ live: false, resumable: true, status: 'done' }),
+      resume: async () => ({
+        outcome: 'resumed',
+        runId: 'run-2',
+        runtimeId: 'rt-2',
+        label: 'again',
+        sentinelFile: '/runs/run-2/sentinel.done',
+        onEvent: '/runs/run-2/events.log',
+      }),
+    })
+
+    await withClient(async (client) => {
+      providerFactory = liveAt
+      const tell: any = await client.callTool({ name: 'message', arguments: { action: 'tell', target: 'mesh-a', message: 'hi' } })
+      expect(tell.structuredContent).toEqual(expected.message.tell)
+      expect(JSON.parse(tell.content[0].text)).toEqual(expected.message.tell)
+
+      providerFactory = resumableAt
+      const resume: any = await client.callTool({ name: 'message', arguments: { action: 'resume', target: 'mesh-a', message: 'again' } })
+      expect(resume.structuredContent).toEqual(expected.message.resume)
+
+      providerFactory = () => makeProvider()
+      const reply: any = await client.callTool({ name: 'message', arguments: { action: 'reply', reply_to: 'a-1', message: 'pong' } })
+      expect(reply.structuredContent).toEqual(expected.message.reply_edge_absent)
+
+      providerFactory = () => makeProvider({
+        peers: async () => ({
+          peers: [
+            { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running' },
+            { run_id: 'rt_3' },
+          ],
+        }),
+        rename: async () => ({ outcome: 'renamed', runId: 'rt_2', label: 'mesh-renamed', previousLabel: 'mesh-a' }),
+        resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }),
+        last: async () => ({ outcome: 'sent', hasRecord: true, finalOutput: 'OK', stopReason: 'end_turn' }),
+      })
+      const list: any = await client.callTool({ name: 'peers', arguments: { action: 'list' } })
+      expect(list.structuredContent).toEqual(expected.peers.list)
+      const rename: any = await client.callTool({ name: 'peers', arguments: { action: 'rename', name: 'mesh-renamed' } })
+      expect(rename.structuredContent).toEqual(expected.peers.rename)
+      const last: any = await client.callTool({ name: 'peers', arguments: { action: 'last', target: 'mesh-a' } })
+      expect(last.structuredContent).toEqual(expected.peers.last)
+
+      providerFactory = () => makeProvider({ resolve: async () => ({ runId: '', match: 'none' }) })
+      const failure: any = await client.callTool({ name: 'peers', arguments: { action: 'last', target: 'ghost' } })
+      expect(failure.structuredContent).toEqual(expected.error)
+    })
+  })
+
   it('forwards the workflow cancel actor and reason', async () => {
     await withClient(async (client) => {
       const result: any = await client.callTool({

@@ -87,7 +87,16 @@ export {
   boundFinalOutput,
 } from './messaging-text.js'
 export type { MessageOutcome } from './messaging-text.js'
-export { ToolError, assertMessageInput, assertPeersInput, executeMessage, executePeers, renderPeerList } from './message.js'
+export {
+  ToolError,
+  assertMessageInput,
+  assertPeersInput,
+  executeMessage,
+  executePeers,
+  peersDetails,
+  renderPeerList,
+  resultOutput,
+} from './message.js'
 export type { MessageInput, PeersInput, PeersRouterResult } from './message.js'
 export { messageTool, createMessageTool } from './tools/message.js'
 export type {

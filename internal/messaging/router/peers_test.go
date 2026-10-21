@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -295,4 +296,77 @@ func TestToolOutputObject(t *testing.T) {
 	if !reflect.DeepEqual(failure, wantFailure) {
 		t.Fatalf("tool error output = %#v, want %#v", failure, wantFailure)
 	}
+}
+
+// sameJSON compares two result objects by their JSON encoding, so a fixture
+// decoded into []any compares with a Go-native []map[string]any.
+func sameJSON(t *testing.T, name string, got, want any) {
+	t.Helper()
+	gotRaw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("%s: encode got: %v", name, err)
+	}
+	wantRaw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("%s: encode want: %v", name, err)
+	}
+	if string(gotRaw) != string(wantRaw) {
+		t.Fatalf("%s = %s, want %s", name, gotRaw, wantRaw)
+	}
+}
+
+// TestSurfaceResultFixture pins the result objects the Go host returns to the
+// same shared fixture the TypeScript MCP host and the OpenCode plugin assert
+// against, so no surface can drift in keys, nesting or casing.
+func TestSurfaceResultFixture(t *testing.T) {
+	raw, err := os.ReadFile("../../../schemas/message_route.result.json")
+	if err != nil {
+		t.Fatalf("read shared result fixture: %v", err)
+	}
+	var fixture struct {
+		Message map[string]map[string]any `json:"message"`
+		Peers   map[string]map[string]any `json:"peers"`
+		Error   map[string]any            `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode shared result fixture: %v", err)
+	}
+
+	tell := Result{
+		Action:    "tell",
+		Outcome:   messaging.OutcomeSent,
+		MessageID: "m-1",
+		Label:     "mesh-a",
+		Text:      `message "m-1" delivered to "mesh-a"`,
+	}
+	sameJSON(t, "tell output", tell.Output(), fixture.Message["tell"])
+
+	resumed := Result{
+		Action:       "resume",
+		Outcome:      outcomeResumed,
+		RunID:        "run-2",
+		Label:        "again",
+		Text:         `resumed "again" as run "run-2"`,
+		SentinelFile: "/runs/run-2/sentinel.done",
+		OnEvent:      "/runs/run-2/events.log",
+	}
+	sameJSON(t, "resume output", resumed.Output(), fixture.Message["resume"])
+
+	refused := &ToolError{Code: "unknown_target", Message: `no run matches "ghost"`}
+	sameJSON(t, "tool error output", refused.Output(), fixture.Error)
+
+	list := Result{Action: "list", Peers: []messaging.PeerRecord{
+		{RunID: "rt_2", Label: "mesh-a", Kind: "agent", Status: "running"},
+		{RunID: "rt_3"},
+	}}
+	sameJSON(t, "peers list details", PeersDetails(list), fixture.Peers["list"])
+
+	rename := Result{Action: "rename", RunID: "rt_2", Label: "mesh-renamed", PreviousLabel: "mesh-a"}
+	sameJSON(t, "peers rename details", PeersDetails(rename), fixture.Peers["rename"])
+
+	last := Result{
+		Action: "last", RunID: "rt_7", RuntimeID: "rt_7", Label: "mesh-a",
+		FinalOutput: "OK", StopReason: "end_turn",
+	}
+	sameJSON(t, "peers last details", PeersDetails(last), fixture.Peers["last"])
 }

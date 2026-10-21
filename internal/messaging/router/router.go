@@ -908,6 +908,14 @@ func (r Result) Output() map[string]any {
 	if r.Reply != "" {
 		out["reply"] = r.Reply
 	}
+	// The resume paths travel with the result that minted them, so the caller
+	// can assert the sentinel and event log the resumed run actually writes.
+	if r.SentinelFile != "" {
+		out["sentinel_file"] = r.SentinelFile
+	}
+	if r.OnEvent != "" {
+		out["on_event"] = r.OnEvent
+	}
 	return out
 }
 

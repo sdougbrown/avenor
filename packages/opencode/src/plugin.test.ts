@@ -11,6 +11,8 @@ import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
 import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
 import type { MessageProvider } from '../../core/src/tools/message.js'
 import conformance from '../../../schemas/message_route.conformance.json'
+import resultFixture from '../../../schemas/message_route.result.json'
+import { peersDetails, resultOutput } from '../../core/src/message.js'
 
 const spawnToolMock = mock(async () => ({
   run_id: 'run-1',
@@ -174,6 +176,8 @@ mock.module('@dougbots/avenor-core', () => ({
   answerPermissionTool: answerPermissionToolMock,
   messageTool: realMessageTool,
   peersTool: realPeersTool,
+  peersDetails,
+  resultOutput,
   createHostMessageProvider: (options: { onResumed?: MessageProvider['onResumed'] }) => {
     const provider = providerFactory()
     if (options?.onResumed) provider.onResumed = options.onResumed
@@ -1117,6 +1121,75 @@ describe('OpenCode message tool parity', () => {
       toolContext('session-1'),
     )
     expect(output.output).toBe('message "m-1" delivered to "mesh-a"')
+  })
+
+  it('returns the shared result objects for every message and peers action', async () => {
+    const expected = resultFixture as unknown as {
+      message: Record<string, Record<string, unknown>>
+      peers: Record<string, Record<string, unknown>>
+    }
+    const hooks = await AvenorPlugin(makeCtx() as any)
+
+    providerFactory = () => makeProvider({
+      resolve: async () => ({ runId: 'mesh-a', label: 'mesh-a', match: 'unique' }),
+      state: async () => ({ live: true, resumable: false, status: 'running' }),
+      tell: async () => ({ outcome: 'sent', messageId: 'm-1' }),
+    })
+    const tell = await (hooks.tool?.avenor_message as any).execute(
+      { action: 'tell', target: 'mesh-a', message: 'hi' },
+      toolContext('session-1'),
+    )
+    expect(tell.metadata).toEqual(expected.message.tell)
+    expect(tell.output).toBe(expected.message.tell.text)
+
+    providerFactory = () => makeProvider({
+      resolve: async () => ({ runId: 'mesh-a', label: 'mesh-a', match: 'unique' }),
+      state: async () => ({ live: false, resumable: true, status: 'done' }),
+      resume: async () => ({
+        outcome: 'resumed',
+        runId: 'run-2',
+        runtimeId: 'rt-2',
+        label: 'again',
+        sentinelFile: '/runs/run-2/sentinel.done',
+        onEvent: '/runs/run-2/events.log',
+      }),
+    })
+    const resume = await (hooks.tool?.avenor_message as any).execute(
+      { action: 'resume', target: 'mesh-a', message: 'again' },
+      toolContext('session-1'),
+    )
+    expect(resume.metadata).toEqual(expected.message.resume)
+
+    providerFactory = () => makeProvider()
+    const reply = await (hooks.tool?.avenor_message as any).execute(
+      { action: 'reply', reply_to: 'a-1', message: 'pong' },
+      toolContext('session-1'),
+    )
+    expect(reply.metadata).toEqual(expected.message.reply_edge_absent)
+
+    providerFactory = () => makeProvider({
+      peers: async () => ({
+        peers: [
+          { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running' },
+          { run_id: 'rt_3' },
+        ],
+      }),
+      rename: async () => ({ outcome: 'renamed', runId: 'rt_2', label: 'mesh-renamed', previousLabel: 'mesh-a' }),
+      resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }),
+      last: async () => ({ outcome: 'sent', hasRecord: true, finalOutput: 'OK', stopReason: 'end_turn' }),
+    })
+    const list = await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    expect(list.metadata).toEqual(expected.peers.list)
+    const rename = await (hooks.tool?.avenor_peers as any).execute(
+      { action: 'rename', name: 'mesh-renamed' },
+      toolContext('session-1'),
+    )
+    expect(rename.metadata).toEqual(expected.peers.rename)
+    const last = await (hooks.tool?.avenor_peers as any).execute(
+      { action: 'last', target: 'mesh-a' },
+      toolContext('session-1'),
+    )
+    expect(last.metadata).toEqual(expected.peers.last)
   })
 
   it('tracks a resumed run through the provider callback', async () => {
