@@ -1315,7 +1315,7 @@ describe('OpenCode host turn producer', () => {
     expect(producer.message).toHaveBeenCalledWith({ path: { id: 'session-1', messageID: 'msg-1' } })
   })
 
-  it('publishes successive turns in either arrival order, once each', async () => {
+  it('publishes each settled turn once, however often its event repeats', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     providerFactory = () => makeProvider({ recordLastTurn: record })
     const producer = makeProducerClient({
@@ -1323,21 +1323,32 @@ describe('OpenCode host turn producer', () => {
       'msg-2': [{ type: 'text', text: 'two' }],
     })
 
-    const forwards = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
-    await bindSession(forwards, 'session-1')
-    await turn(forwards, assistant('msg-1', { finish: 'stop' }))
-    await turn(forwards, assistant('msg-2', { finish: 'stop' }))
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(hooks, 'session-1')
+    await turn(hooks, assistant('msg-1', { time: { created: 1, completed: 2 }, finish: 'stop' }))
+    await turn(hooks, assistant('msg-2', { time: { created: 2, completed: 3 }, finish: 'stop' }))
     expect(record.mock.calls.map(call => call[0])).toEqual(['one', 'two'])
-    await turn(forwards, assistant('msg-2', { finish: 'stop' }))
-    expect(record).toHaveBeenCalledTimes(2)
 
-    record.mockClear()
+    await turn(hooks, assistant('msg-2', { time: { created: 2, completed: 3 }, finish: 'stop' }))
+    expect(record).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the newest turn when an older message updates late', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     providerFactory = () => makeProvider({ recordLastTurn: record })
-    const backwards = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
-    await bindSession(backwards, 'session-1')
-    await turn(backwards, assistant('msg-2', { finish: 'stop' }))
-    await turn(backwards, assistant('msg-1', { finish: 'stop' }))
-    expect(record.mock.calls.map(call => call[0])).toEqual(['two', 'one'])
+    const producer = makeProducerClient({
+      'msg-1': [{ type: 'text', text: 'one' }],
+      'msg-2': [{ type: 'text', text: 'two' }],
+    })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(hooks, 'session-1')
+
+    await turn(hooks, assistant('msg-1', { time: { created: 1, completed: 2 }, finish: 'stop' }))
+    await turn(hooks, assistant('msg-2', { time: { created: 2, completed: 3 }, finish: 'stop' }))
+    // A later event than the newer turn's, but for the message before it.
+    await turn(hooks, assistant('msg-1', { time: { created: 1, completed: 4 }, finish: 'stop' }))
+
+    expect(record.mock.calls.map(call => call[0])).toEqual(['one', 'two'])
   })
 
   it('publishes nothing for an idle with no new message and never erases the record', async () => {

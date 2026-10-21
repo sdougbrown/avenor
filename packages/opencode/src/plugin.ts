@@ -683,10 +683,17 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     void monitorRun(run).catch(console.error)
   }
 
-  // The last assistant message this plugin published, so a repeated
-  // message.updated (or a later idle) never republishes a turn or erases the
-  // record with nothing.
-  let publishedMessageId: string | undefined
+  // The newest turn this plugin published, ordered by the message's own
+  // creation time. A repeated message.updated and a late update for an older
+  // message both publish nothing, so the recorded turn stays the one that came
+  // last in the session rather than the one whose event arrived last.
+  let publishedTurn: { created: number; id: string } | undefined
+
+  function isNewerTurn(created: number, id: string): boolean {
+    if (!publishedTurn) return true
+    if (created !== publishedTurn.created) return created > publishedTurn.created
+    return id > publishedTurn.id
+  }
 
   /** The raw stop reason one settled OpenCode assistant message reports. */
   function stopReasonOf(info: Record<string, unknown>): string {
@@ -742,13 +749,15 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     if (!binding) return
     if (info.role !== 'assistant') return
     if (info.sessionID !== binding.sessionId) return
-    if (typeof (info.time as Record<string, unknown> | undefined)?.completed !== 'number') return
+    const time = info.time as Record<string, unknown> | undefined
+    if (typeof time?.completed !== 'number') return
+    const created = typeof time.created === 'number' ? time.created : 0
     const messageId = typeof info.id === 'string' ? info.id : ''
-    if (messageId === '' || messageId === publishedMessageId) return
+    if (messageId === '' || !isNewerTurn(created, messageId)) return
     if (!binding.provider.recordLastTurn) return
-    // Claim the message before the first await so two updates for one message
+    // Claim the turn before the first await so two updates for one message
     // cannot both publish.
-    publishedMessageId = messageId
+    publishedTurn = { created, id: messageId }
     try {
       const content = await settledTurnText(binding.sessionId, messageId)
       const turn = extractTurnText([
