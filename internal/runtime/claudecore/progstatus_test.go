@@ -390,6 +390,21 @@ func TestProgStatusHeldEndTurnFinishesWhenRootStopsWorking(t *testing.T) {
 	}
 }
 
+func TestProgStatusHeldEndTurnReleasedAtCeiling(t *testing.T) {
+	s, term, path := newProgStatusSession(t)
+	savedCeiling := progHoldCeiling
+	progHoldCeiling = 50 * time.Millisecond
+	t.Cleanup(func() { progHoldCeiling = savedCeiling })
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	appendTranscript(t, path, assistantText("OK", "end_turn"))
+	s.ScanTranscriptTick()
+	time.Sleep(60 * time.Millisecond)
+	tickUntilFinished(t, s)
+	if n := countEvents(drainSessionEvents(s.Events), "session.end"); n != 1 {
+		t.Fatalf("session.end count = %d, want 1", n)
+	}
+}
+
 func TestProgStatusEndTurnAfterDoneFinishesOnce(t *testing.T) {
 	s, term, path := newProgStatusSession(t)
 	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))

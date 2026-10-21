@@ -42,6 +42,9 @@ var (
 	// before the turn finishes. After a background subagent the final reply's
 	// end_turn lands about 130ms after root done, behind an earlier end_turn.
 	progFinishSettle = 750 * time.Millisecond
+	// progHoldCeiling bounds how long an end_turn waits for the root to stop
+	// working; it then settles and finishes like any other held end_turn.
+	progHoldCeiling = 10 * time.Minute
 )
 
 // progTurn is the session's view of the root OSC 7501 record. Guarded by
@@ -62,9 +65,11 @@ type progTurn struct {
 
 	// endTurnHeld is a transcript end_turn waiting to finish the turn. A zero
 	// finishAt holds it until the root leaves working (done, idle, clear or
-	// error) or reports were lost.
+	// error), reports were lost, or progHoldCeiling passes since heldAt.
 	endTurnHeld bool
 	finishAt    time.Time
+	// heldAt is when the end_turn was first held.
+	heldAt time.Time
 
 	burstUntil time.Time
 
@@ -172,6 +177,9 @@ func (s *Session) ProgStatusTick() time.Duration {
 
 	now := time.Now()
 	s.Mu.Lock()
+	if s.osc.endTurnHeld && s.osc.finishAt.IsZero() && !s.osc.heldAt.IsZero() && now.Sub(s.osc.heldAt) >= progHoldCeiling {
+		s.releaseHeldEndTurnLocked(now)
+	}
 	chase := s.permissionChaseDue(now)
 	scan := s.Prompted && !s.Finished && (now.Before(s.osc.burstUntil) || s.osc.endTurnHeld && !s.osc.finishAt.IsZero())
 	s.Mu.Unlock()
@@ -255,6 +263,9 @@ func (s *Session) holdEndTurn() bool {
 		return false
 	}
 	s.osc.endTurnHeld = true
+	if s.osc.heldAt.IsZero() {
+		s.osc.heldAt = time.Now()
+	}
 	if s.osc.root.State == terminal.ProgWorking && !s.osc.doneSincePrompt {
 		s.osc.finishAt = time.Time{}
 	} else {
