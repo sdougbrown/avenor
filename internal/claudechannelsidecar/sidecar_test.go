@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -452,6 +453,102 @@ func TestSidecarPeersLastReadsPeerRecord(t *testing.T) {
 	last, _ := structured["last"].(map[string]any)
 	if last["final_output"] != "OK" || last["runtime_id"] != "rt_peer" {
 		t.Fatalf("last details = %#v", structured)
+	}
+}
+
+// sidecarSessionsBroker serves the registration, poll and session endpoints the
+// sidecar's Run loop needs, and hands /send to the caller for inspection.
+func sidecarSessionsBroker(t *testing.T, onSend func(body map[string]any)) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/register", "/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/poll-control":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"messaging_protocol": 1, "generation": "gen-1",
+				"sessions": []any{
+					map[string]any{"run_id": "child_run", "label": "child", "kind": "agent", "status": "running"},
+					map[string]any{"run_id": "parent_run", "label": "parent", "kind": "supervisor", "status": "running"},
+				},
+			})
+		case "/send":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode send: %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if onSend != nil {
+				onSend(body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"outcome": "sent"})
+		default:
+			t.Errorf("unexpected broker path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestSidecarTellRendersTheSentenceAsContentText(t *testing.T) {
+	brokerSrv := sidecarSessionsBroker(t, nil)
+
+	text, structured, isError := runSidecarTool(t, brokerSrv.URL, brokerSrv.Client(), "avenor_message", map[string]any{
+		"action": "tell", "target": "parent_run", "message": "status update",
+	})
+	if isError {
+		t.Fatalf("tell reported isError: %s", text)
+	}
+	if structured["outcome"] != "sent" {
+		t.Fatalf("tell outcome = %v, want sent; text=%s", structured["outcome"], text)
+	}
+	if text != structured["text"] {
+		t.Fatalf("tell content text = %q, want the rendered sentence %q", text, structured["text"])
+	}
+	if !strings.HasPrefix(text, `message "`) || !strings.Contains(text, `delivered to "parent"`) {
+		t.Fatalf("tell content text = %q, want the rendered outcome sentence", text)
+	}
+	if strings.HasPrefix(text, "{") {
+		t.Fatalf("tell content text is a JSON blob: %q", text)
+	}
+}
+
+func TestSidecarTellUnknownTargetIsToolError(t *testing.T) {
+	brokerSrv := sidecarSessionsBroker(t, nil)
+
+	text, structured, isError := runSidecarTool(t, brokerSrv.URL, brokerSrv.Client(), "avenor_message", map[string]any{
+		"action": "tell", "target": "ghost", "message": "hi",
+	})
+	if !isError {
+		t.Fatalf("unknown target reported isError=false; text=%q", text)
+	}
+	if text != `no run matches "ghost"` {
+		t.Fatalf("tell refusal text = %q, want the router's typed message", text)
+	}
+	if structured["code"] != "unknown_target" {
+		t.Fatalf("code = %v, want unknown_target; structured=%#v", structured["code"], structured)
+	}
+}
+
+func TestSidecarTellSendsOwnRunIDAsFrom(t *testing.T) {
+	var sentBody map[string]any
+	brokerSrv := sidecarSessionsBroker(t, func(body map[string]any) { sentBody = body })
+
+	text, _, isError := runSidecarTool(t, brokerSrv.URL, brokerSrv.Client(), "avenor_message", map[string]any{
+		"action": "tell", "target": "parent_run", "message": "status update",
+	})
+	if isError {
+		t.Fatalf("tell reported isError: %s", text)
+	}
+	if sentBody["from_run_id"] != "child_run" {
+		t.Fatalf("send from_run_id = %v, want the sidecar's own run id", sentBody["from_run_id"])
+	}
+	if sentBody["to_run_id"] != "parent_run" {
+		t.Fatalf("send to_run_id = %v, want parent_run", sentBody["to_run_id"])
 	}
 }
 

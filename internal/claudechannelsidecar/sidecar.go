@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/childmessaging"
+	"github.com/sdougbrown/avenor/internal/childsurface"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
@@ -39,6 +40,10 @@ type Server struct {
 
 // sidecarProvider is the shared child provider plus this surface's one extra
 // capability: it can post a control reply over the broker's /reply route.
+// ControlReply posts to the broker's /reply route through the server's raw
+// brokerPost, which authenticates in the body, while Reply reaches the broker
+// through the localhttp transport; the routes and their auth differ today by
+// design, not by oversight.
 type sidecarProvider struct {
 	*childmessaging.MessageProvider
 	server *Server
@@ -234,55 +239,33 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 	return map[string]any{"content": []map[string]any{{"type": "text", "text": "ok"}}}, nil
 }
 
-func (s *Server) messageRouter(ctx context.Context) (*router.Router, error) {
-	if err := s.provider.Prepare(ctx); err != nil {
-		return nil, err
-	}
-	return router.NewRouter(s.provider)
-}
-
 func (s *Server) message(ctx context.Context, args json.RawMessage) (any, error) {
-	rt, err := s.messageRouter(ctx)
-	if err != nil {
-		return nil, err
-	}
-	result, err := rt.Execute(ctx, args)
-	if err != nil {
-		var toolErr *router.ToolError
-		if errors.As(err, &toolErr) {
-			return structuredToolResult(toolErr.Output(), toolErr.Message, true), nil
-		}
-		return nil, err
-	}
-	object := result.Output()
-	text, err := json.Marshal(object)
-	if err != nil {
-		return nil, err
-	}
-	return structuredToolResult(object, string(text), false), nil
+	return childsurface.Route(
+		func() (router.Result, error) {
+			rt, err := childsurface.Router(ctx, s.provider)
+			if err != nil {
+				return router.Result{}, err
+			}
+			return rt.Execute(ctx, args)
+		},
+		func(result router.Result) (map[string]any, string) {
+			return result.Output(), result.Text
+		},
+	)
 }
 
 func (s *Server) peers(ctx context.Context, args json.RawMessage) (any, error) {
 	if err := s.provider.Prepare(ctx); err != nil {
 		return nil, err
 	}
-	result, err := router.ExecutePeers(ctx, s.provider, args)
-	if err != nil {
-		var toolErr *router.ToolError
-		if errors.As(err, &toolErr) {
-			return structuredToolResult(toolErr.Output(), toolErr.Message, true), nil
-		}
-		return nil, err
-	}
-	return structuredToolResult(router.PeersDetails(result), router.PeersContent(result), false), nil
-}
-
-func structuredToolResult(object map[string]any, text string, isError bool) map[string]any {
-	return map[string]any{
-		"content":           []map[string]any{{"type": "text", "text": text}},
-		"structuredContent": object,
-		"isError":           isError,
-	}
+	return childsurface.Route(
+		func() (router.Result, error) {
+			return router.ExecutePeers(ctx, s.provider, args)
+		},
+		func(result router.Result) (map[string]any, string) {
+			return router.PeersDetails(result), router.PeersContent(result)
+		},
+	)
 }
 
 func rawOrObject(raw json.RawMessage) any {
