@@ -6160,7 +6160,7 @@ func withFakeExec(t *testing.T, fake func(name string, arg ...string) *exec.Cmd)
 	t.Cleanup(func() { httpExecCommand = old })
 }
 
-func TestSpawnParentNoteNamesMessageTool(t *testing.T) {
+func TestSpawnParentNoteIsBackendNeutral(t *testing.T) {
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: newStableSocketPath(t, "spawn-parent-note"),
 		MaxRuntimes:   2,
@@ -6199,14 +6199,24 @@ func TestSpawnParentNoteNamesMessageTool(t *testing.T) {
 		t.Fatalf("prompts = %d, want 1", len(prompts))
 	}
 	note := prompts[0]
-	if strings.Contains(note, "avenor_send") {
-		t.Fatalf("parent note names the retired tool: %q", note)
-	}
-	if !strings.Contains(note, "message") {
-		t.Fatalf("parent note does not name the message tool: %q", note)
+	// The note is prepended to every spawn that carries a ParentRunID whatever
+	// the child's backend, so it may not name a tool id that only some surfaces
+	// register.
+	for _, token := range strings.FieldsFunc(note, func(r rune) bool {
+		return !(r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	}) {
+		switch token {
+		case "avenor_send", "avenor_message", "avenor_ask", "avenor_reply", "message":
+			t.Fatalf("parent note names the surface-specific tool id %q: %q", token, note)
+		}
 	}
 	if !strings.Contains(note, `"parent_run"`) {
 		t.Fatalf("parent note lost the quoted parent run ID: %q", note)
+	}
+	for _, want := range []string{"tell", "ask", "your surface"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("parent note is missing %q: %q", want, note)
+		}
 	}
 	if !strings.HasSuffix(note, "\n\nDo work.") {
 		t.Fatalf("parent note is not in front of the prompt: %q", note)

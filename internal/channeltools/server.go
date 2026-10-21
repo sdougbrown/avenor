@@ -189,7 +189,7 @@ func toolSchemas() []map[string]any {
 	return []map[string]any{
 		{
 			"name":        "avenor_message",
-			"description": "Send, ask, reply to, resume, withdraw or answer a control message between agent runs",
+			"description": "Tell, ask or withdraw a message between agent runs; reply, resume and control replies are not available on this surface",
 			"inputSchema": messaging.MessageInputFlatSchema(),
 		},
 		{

@@ -1701,7 +1701,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	var parentToken string
 	if params.ParentRunID != "" && s.broker != nil {
 		parentToken, _ = s.broker.EnsureRun(params.ParentRunID, "")
-		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. To send status updates, findings, or questions back to your parent, call the message tool with action \"tell\" and target %q; use action \"ask\" when you need a reply.\n\n", params.ParentRunID, params.ParentRunID)
+		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Report status updates, findings, and questions back to your parent run %q with your surface's own messaging tool: use the action your surface calls tell for a status update, and ask when you need a reply.\n\n", params.ParentRunID, params.ParentRunID)
 		promptText = parentNote + promptText
 	}
 
