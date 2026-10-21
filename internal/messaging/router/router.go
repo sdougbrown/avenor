@@ -530,34 +530,39 @@ func outcomeText(action string, outcome messaging.Outcome, facts map[string]stri
 	return messaging.OutcomePossiblyPending, messaging.RenderOutcome(action, messaging.OutcomePossiblyPending, facts)
 }
 
-// isVocabularyOutcome reports whether outcome is one of the contract's nine
-// outcome strings. Anything else came from outside the transport contract.
+// isVocabularyOutcome reports whether outcome is one the contract declares for
+// messaging. Anything else came from outside the transport contract.
 func isVocabularyOutcome(outcome messaging.Outcome) bool {
-	switch outcome {
-	case messaging.OutcomeSent, messaging.OutcomeReplied, messaging.OutcomeTimedOut,
-		messaging.OutcomeWithdrawn, messaging.OutcomeEdgeAbsent, messaging.OutcomeAuthRejected,
-		messaging.OutcomeNotSent, messaging.OutcomePossiblyPending, messaging.OutcomeLost:
-		return true
-	}
-	return false
+	return outcomeSets().vocabulary[string(outcome)]
 }
 
 // rendersOutcome reports whether the outcome contract has a template for the
 // (action, outcome) pair.
 func rendersOutcome(action string, outcome messaging.Outcome) bool {
-	return renderableOutcomes()[action+":"+string(outcome)]
+	return outcomeSets().renderable[action+":"+string(outcome)]
 }
 
-// renderableOutcomes is the contract's (action, outcome) set, read once.
-var renderableOutcomes = sync.OnceValue(func() map[string]bool {
+// outcomeSet is the outcome contract in lookup form.
+type outcomeSet struct {
+	renderable map[string]bool // action:outcome pair that has a template
+	vocabulary map[string]bool // outcome string the contract declares
+}
+
+// outcomeSets reads the contract once. The vocabulary is the messaging rows and
+// the render set adds the tool rows, so an outcome, action or template added to
+// the contract is recognized without editing the router.
+var outcomeSets = sync.OnceValue(func() outcomeSet {
 	spec := messaging.LoadOutcomeSpec()
-	renderable := map[string]bool{}
+	sets := outcomeSet{renderable: map[string]bool{}, vocabulary: map[string]bool{}}
+	for _, row := range spec.Messaging {
+		sets.vocabulary[row.Outcome] = true
+	}
 	for _, row := range append(append([]messaging.OutcomeRow(nil), spec.Messaging...), spec.Tool...) {
 		for action := range row.Render {
-			renderable[action+":"+row.Outcome] = true
+			sets.renderable[action+":"+row.Outcome] = true
 		}
 	}
-	return renderable
+	return sets
 })
 
 func firstReason(status messaging.FieldStatus) string {
@@ -741,13 +746,37 @@ func validateStringConstraint(name, value string, constraint messaging.PropertyC
 		})
 	}
 	if constraint.Pattern != "" {
-		matched, err := regexp.MatchString(constraint.Pattern, value)
-		if err != nil || !matched {
+		if pattern, ok := constraintPatterns()[constraint.Pattern]; !ok || !pattern.MatchString(value) {
 			return messaging.Repair("string_pattern", map[string]string{"name": quote(name)})
 		}
 	}
 	return ""
 }
+
+// constraintPatterns is every pattern the two applicability tables declare,
+// compiled once. The tables are the only source of a constraint's Pattern, so a
+// missing entry means the pattern did not compile and no value can match it.
+var constraintPatterns = sync.OnceValue(func() map[string]*regexp.Regexp {
+	compiled := map[string]*regexp.Regexp{}
+	for _, table := range []map[string]messaging.ActionApplicability{
+		messaging.ApplicabilityTable(),
+		messaging.PeersApplicabilityTable(),
+	} {
+		for _, entry := range table {
+			for _, constraint := range entry.Constraints {
+				if constraint.Pattern == "" {
+					continue
+				}
+				pattern, err := regexp.Compile(constraint.Pattern)
+				if err != nil {
+					continue
+				}
+				compiled[constraint.Pattern] = pattern
+			}
+		}
+	}
+	return compiled
+})
 
 // validateIntegerConstraint applies the integer limits the published JSON
 // Schema declares. timeout_ms has an inclusive floor so a negative wait cannot
