@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 import conformance from '../../../schemas/message_route.conformance.json'
-import { renderLast, type MessageProvider } from '@dougbots/avenor-core'
+import { messageTool as realMessageTool, renderLast, type MessageProvider } from '@dougbots/avenor-core'
 import { makeMessageProvider, startExtensionHarness } from './test-fixtures.js'
 
 const fixture = conformance as unknown as {
@@ -130,6 +130,40 @@ describe('Pi host turn producer', () => {
     const harness = await startExtensionHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
     harness.eventHandlers.agent_end({ type: 'agent_end', messages: [{ content: 'turn', stopReason: 'stop' }] })
     await expect(harness.eventHandlers.agent_settled({})).resolves.toBeUndefined()
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+})
+
+describe('Pi resumed-run tracking', () => {
+  it('tracks the resumed run on its supervisor and starts polling', async () => {
+    const statusTool = mock(async (args: { runId: string }) => ({
+      run_id: args.runId,
+      label: 'mesh-9',
+      status: 'done',
+      runtime_id: 'rt-9',
+    }))
+    const provider = makeMessageProvider({
+      resume: async () => ({
+        outcome: 'resumed',
+        runId: 'run-9',
+        runtimeId: 'rt-9',
+        label: 'mesh-9',
+        sentinelFile: '/runs/run-9/sentinel.done',
+        onEvent: '/runs/run-9/events.log',
+      }),
+      registerResumed: () => {},
+    })
+    const hostProviderFor = mock(async (_supervisorId?: string) => provider)
+    const harness = await startExtensionHarness({
+      deps: { hostProviderFor, statusTool, messageTool: realMessageTool },
+    })
+    const result = await harness.registeredTools.avenor_message.execute('t1', {
+      action: 'resume',
+      target: 'mesh-9',
+      message: 'again',
+    })
+    expect(result.details.outcome).toBe('resumed')
+    expect(statusTool).toHaveBeenCalledWith({ runId: 'run-9', supervisorId: undefined })
     await harness.eventHandlers.session_shutdown({}, {})
   })
 })

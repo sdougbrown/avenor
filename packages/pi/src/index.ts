@@ -1223,30 +1223,32 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         client,
         pendingAsks: hostPendingAsks,
         pollGeneration: () => hostPollGeneration,
-        onResumed: async result => {
-          const run = {
-            runId: result.runId ?? '',
-            label: result.label ?? result.runId ?? '',
-            supervisorId,
-          }
-          try {
-            const rawStatus = await deps.statusTool({ runId: run.runId, supervisorId })
-            const status = asStatusResult(rawStatus)
-            upsertTrackedRun({
-              runId: run.runId,
-              label: run.label,
-              agent: status?.agent,
-              runtimeId: status?.runtime_id,
-              supervisorId,
-            }, status, false)
-          } catch {
-            upsertTrackedRun(run, undefined, false)
-          }
-          startPolling()
-        },
+        onResumed: result => trackResumed(supervisorId, result),
       })
       hostProviders.set(key, provider)
       return provider
+    }
+
+    async function trackResumed(supervisorId: string | undefined, result: ProviderResult): Promise<void> {
+      const run = {
+        runId: result.runId ?? '',
+        label: result.label ?? result.runId ?? '',
+        supervisorId,
+      }
+      try {
+        const rawStatus = await deps.statusTool({ runId: run.runId, supervisorId })
+        const status = asStatusResult(rawStatus)
+        upsertTrackedRun({
+          runId: run.runId,
+          label: run.label,
+          agent: status?.agent,
+          runtimeId: status?.runtime_id,
+          supervisorId,
+        }, status, false)
+      } catch {
+        upsertTrackedRun(run, undefined, false)
+      }
+      startPolling()
     }
 
     const hostProviderFor: (supervisorId: string | undefined) => Promise<MessageProvider> =
@@ -1289,7 +1291,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
     async function messageProvider(supervisorId: string | undefined): Promise<MessageProvider> {
       if (childProvider) return childProvider
-      return attachPendingAsks(await hostProviderFor(supervisorId), hostPendingAsks)
+      const provider = attachPendingAsks(await hostProviderFor(supervisorId), hostPendingAsks)
+      // Resume tracking belongs to this extension, not to the provider, so an
+      // injected provider gets the same status + poll + tracked-run behaviour.
+      if (!provider.onResumed) provider.onResumed = result => trackResumed(supervisorId, result)
+      return provider
     }
 
     // The host's own last-turn producer. agent_end captures one attempt and

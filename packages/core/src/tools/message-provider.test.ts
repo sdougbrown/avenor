@@ -3,6 +3,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { createChildMessageProvider, createHostMessageProvider, type MessageClient } from './message-provider.js'
+import { forgetExternalRuns, registerExternalRun } from './run-registry.js'
 import { executeMessage, executePeers } from '../message.js'
 
 function fakeClient(overrides: Partial<MessageClient> = {}): MessageClient & {
@@ -116,6 +117,34 @@ describe('host message provider', () => {
     const host = provider(client)
     await host.recordLastTurn?.('the answer', 'end_turn', false)
     expect(client.lastSet).toHaveBeenCalledWith('supervisor', 'the answer', 'end_turn', false)
+  })
+
+  it('resolves the new label after a rename, and an old-label-shaped public id by ID only', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const client = fakeClient({
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: 'rt_1', session: { run_id: 'rt_1', label: 'new-name', status: 'done' } }],
+      })),
+    })
+    process.env.AVENOR_HOME = home
+    fs.mkdirSync(path.join(home, 'runs', 'old-name'), { recursive: true, mode: 0o700 })
+    const host = provider(client)
+    expect(await host.resolve('new-name')).toMatchObject({ runId: 'rt_1', label: 'new-name' })
+    expect((await host.resolve('old-name')).match).toBe('none')
+
+    registerExternalRun({
+      runId: 'old-name',
+      label: 'another-run',
+      supervisorId,
+      sentinelPath: path.join(home, 'runs', 'old-name', 'sentinel.done'),
+      eventLogPath: path.join(home, 'runs', 'old-name', 'events.log'),
+      runtimeId: 'rt_9',
+    })
+    try {
+      expect(await host.resolve('old-name')).toMatchObject({ runId: 'rt_9', publicRunId: 'old-name' })
+    } finally {
+      forgetExternalRuns(supervisorId)
+    }
   })
 
   it('lists the peers the broker reports', async () => {
