@@ -1,0 +1,342 @@
+package mcpserver
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"slices"
+	"testing"
+
+	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
+)
+
+const testSupervisorPath = "/tmp/avenor-test-supervisor.sock"
+
+var _ messageControlClient = (*client.Client)(nil)
+
+// fakeMessageControlClient drives the message verbs. The embedded fakeClient
+// supplies the ControlClient half, so a test configures only the verbs it
+// exercises.
+type fakeMessageControlClient struct {
+	*fakeClient
+
+	sendFunc      func(context.Context, messaging.SendRequest) (messaging.SendResult, error)
+	waitFunc      func(context.Context, messaging.WaitRequest) (messaging.WaitResult, error)
+	replyFunc     func(context.Context, messaging.ReplyRequest) (messaging.SendResult, error)
+	withdrawFunc  func(context.Context, messaging.WithdrawRequest) (messaging.WithdrawResult, error)
+	receiveFunc   func(context.Context, messaging.ReceiveRequest) (messaging.ReceiveResult, error)
+	peersFunc     func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error)
+	preflightFunc func(context.Context) (messaging.PreflightResult, error)
+
+	waitGenerations  []string
+	peersGenerations []string
+}
+
+func (f *fakeMessageControlClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	if f.sendFunc != nil {
+		return f.sendFunc(ctx, req)
+	}
+	return messaging.SendResult{}, nil
+}
+
+func (f *fakeMessageControlClient) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	f.waitGenerations = append(f.waitGenerations, req.Generation)
+	if f.waitFunc != nil {
+		return f.waitFunc(ctx, req)
+	}
+	return messaging.WaitResult{}, nil
+}
+
+func (f *fakeMessageControlClient) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
+	if f.replyFunc != nil {
+		return f.replyFunc(ctx, req)
+	}
+	return messaging.SendResult{}, nil
+}
+
+func (f *fakeMessageControlClient) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	if f.withdrawFunc != nil {
+		return f.withdrawFunc(ctx, req)
+	}
+	return messaging.WithdrawResult{}, nil
+}
+
+func (f *fakeMessageControlClient) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	if f.receiveFunc != nil {
+		return f.receiveFunc(ctx, req)
+	}
+	return messaging.ReceiveResult{}, nil
+}
+
+func (f *fakeMessageControlClient) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
+	f.peersGenerations = append(f.peersGenerations, req.Generation)
+	if f.peersFunc != nil {
+		return f.peersFunc(ctx, req)
+	}
+	return messaging.PeersResult{Generation: "gen-1"}, nil
+}
+
+func (f *fakeMessageControlClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
+	if f.preflightFunc != nil {
+		return f.preflightFunc(ctx)
+	}
+	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-1"}, nil
+}
+
+func (f *fakeMessageControlClient) Resume(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return messaging.ResumeResult{}, nil
+}
+
+func (f *fakeMessageControlClient) SessionRename(string, string) (messaging.RenameResult, error) {
+	return messaging.RenameResult{}, nil
+}
+
+func (f *fakeMessageControlClient) SessionLast(string) (messaging.PeerLast, error) {
+	return messaging.PeerLast{}, nil
+}
+
+func newTestMessageProvider(t *testing.T, cl messageControlClient) *mcpMessageProvider {
+	t.Helper()
+	p, err := newMCPMessageProvider(&Server{registry: NewRunRegistry()}, cl, testSupervisorPath)
+	if err != nil {
+		t.Fatalf("newMCPMessageProvider: %v", err)
+	}
+	return p
+}
+
+func testPeer(runID, label, status string) messaging.Peer {
+	session, err := json.Marshal(map[string]string{
+		"run_id": runID,
+		"label":  label,
+		"status": status,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return messaging.Peer{RunID: runID, Session: session}
+}
+
+// TestMCPMessageProviderGenerationRefreshesAfterMismatch proves a stale
+// cached generation is recovered instead of failing the provider for the rest
+// of the process. The store answers gen-1 once, rejects the versioned wait
+// under it, then reports gen-2; the wait is retried under gen-2 and the cache
+// follows.
+func TestMCPMessageProviderGenerationRefreshesAfterMismatch(t *testing.T) {
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{}}
+	preflights := 0
+	cl.preflightFunc = func(context.Context) (messaging.PreflightResult, error) {
+		preflights++
+		generation := "gen-1"
+		if preflights > 1 {
+			generation = "gen-2"
+		}
+		return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: generation}, nil
+	}
+	cl.waitFunc = func(_ context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+		if req.Generation != "gen-2" {
+			return messaging.WaitResult{Outcome: messaging.OutcomeNotSent}, messaging.ErrGenerationMismatch
+		}
+		return messaging.WaitResult{Outcome: messaging.OutcomeReplied}, nil
+	}
+
+	p := newTestMessageProvider(t, cl)
+	if got := p.Generation(); got != "gen-1" {
+		t.Fatalf("construction generation = %q, want gen-1", got)
+	}
+
+	res, err := p.Wait(context.Background(), messaging.WaitRequest{MessageID: "msg-1"})
+	if err != nil {
+		t.Fatalf("Wait error = %v, want retried success", err)
+	}
+	if res.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Wait outcome = %q, want %q", res.Outcome, messaging.OutcomeReplied)
+	}
+	if got := p.Generation(); got != "gen-2" {
+		t.Fatalf("Generation() = %q after recovery, want gen-2", got)
+	}
+	if want := []string{"gen-1", "gen-2"}; !slices.Equal(cl.waitGenerations, want) {
+		t.Fatalf("wait generations = %v, want %v", cl.waitGenerations, want)
+	}
+}
+
+func TestMCPMessageProviderResolveLadder(t *testing.T) {
+	registryInfo := &RunInfo{
+		SupervisorID: testSupervisorPath,
+		RunID:        "pub-registry",
+		RuntimeID:    "rt-registry",
+		Label:        "registry-label",
+	}
+	peerInfo := &RunInfo{
+		SupervisorID: testSupervisorPath,
+		RunID:        "pub-peer",
+		RuntimeID:    "rt-peer",
+		Label:        "peer-label",
+	}
+	tests := []struct {
+		name   string
+		info   []*RunInfo
+		peers  []messaging.Peer
+		ref    string
+		wanted messaging.Resolution
+	}{
+		{
+			name: "registry hit by public id",
+			info: []*RunInfo{registryInfo},
+			ref:  "pub-registry",
+			wanted: messaging.Resolution{
+				RunID:       "rt-registry",
+				PublicRunID: "pub-registry",
+				Label:       "registry-label",
+				Match:       messaging.MatchUnique,
+			},
+		},
+		{
+			name:  "peer listing hit by runtime id fills the public id",
+			info:  []*RunInfo{peerInfo},
+			peers: []messaging.Peer{testPeer("rt-peer", "peer-label", "running")},
+			ref:   "rt-peer",
+			wanted: messaging.Resolution{
+				RunID:       "rt-peer",
+				PublicRunID: "pub-peer",
+				Label:       "peer-label",
+				Match:       messaging.MatchUnique,
+			},
+		},
+		{
+			name: "bare peer row falls back to the listing run id",
+			peers: []messaging.Peer{
+				{RunID: "rt-bare"},
+			},
+			ref: "rt-bare",
+			wanted: messaging.Resolution{
+				RunID: "rt-bare",
+				Label: "rt-bare",
+				Match: messaging.MatchUnique,
+			},
+		},
+		{
+			name: "unique label",
+			peers: []messaging.Peer{
+				testPeer("rt-one", "solo", "running"),
+				testPeer("rt-two", "other", "running"),
+			},
+			ref: "solo",
+			wanted: messaging.Resolution{
+				RunID: "rt-one",
+				Label: "solo",
+				Match: messaging.MatchUnique,
+			},
+		},
+		{
+			name: "label shared by two runs is ambiguous",
+			peers: []messaging.Peer{
+				testPeer("rt-one", "dup", "running"),
+				testPeer("rt-two", "dup", "running"),
+			},
+			ref: "dup",
+			wanted: messaging.Resolution{
+				Match:      messaging.MatchAmbiguous,
+				Candidates: []string{"rt-one", "rt-two"},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := &fakeMessageControlClient{
+				fakeClient: &fakeClient{},
+				peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+					return messaging.PeersResult{Peers: tc.peers, Generation: "gen-1"}, nil
+				},
+			}
+			p := newTestMessageProvider(t, cl)
+			for _, info := range tc.info {
+				if err := p.server.registry.Store(info); err != nil {
+					t.Fatalf("registry.Store: %v", err)
+				}
+			}
+			got, err := p.Resolve(context.Background(), tc.ref)
+			if err != nil {
+				t.Fatalf("Resolve(%q) error = %v", tc.ref, err)
+			}
+			if !reflect.DeepEqual(got, tc.wanted) {
+				t.Fatalf("Resolve(%q) = %#v, want %#v", tc.ref, got, tc.wanted)
+			}
+		})
+	}
+}
+
+func TestMCPMessageProviderListedPeersReturnsDecodeError(t *testing.T) {
+	cl := &fakeMessageControlClient{
+		fakeClient: &fakeClient{},
+		peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+			return messaging.PeersResult{
+				Peers:      []messaging.Peer{{RunID: "rt-bad", Session: json.RawMessage(`{"run_id":`)}},
+				Generation: "gen-1",
+			}, nil
+		},
+	}
+	p := newTestMessageProvider(t, cl)
+	if _, err := p.Resolve(context.Background(), "rt-bad"); err == nil {
+		t.Fatal("Resolve error = nil, want the peer session decode error")
+	}
+}
+
+func TestMCPMessageProviderPeerRunStateMissIsTargetUnavailable(t *testing.T) {
+	cl := &fakeMessageControlClient{
+		fakeClient: &fakeClient{},
+		peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+			return messaging.PeersResult{
+				Peers:      []messaging.Peer{testPeer("rt-other", "other", "running")},
+				Generation: "gen-1",
+			}, nil
+		},
+	}
+	p := newTestMessageProvider(t, cl)
+	if _, err := p.peerRunState(context.Background(), "rt-missing"); !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("peerRunState miss error = %v, want ErrTargetUnavailable", err)
+	}
+}
+
+func TestAuthorityToolErrorCodeGate(t *testing.T) {
+	tests := []struct {
+		name        string
+		data        json.RawMessage
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name:        "allowlisted typed code passes through",
+			data:        json.RawMessage(`{"code":"unknown_target"}`),
+			wantCode:    "unknown_target",
+			wantMessage: "target gone",
+		},
+		{
+			name:        "hyphenated wire class is refused",
+			data:        json.RawMessage(`{"code":"generation-mismatch"}`),
+			wantCode:    "refused",
+			wantMessage: "rpc error [-32000]: target gone",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := authorityToolError(&client.RPCError{
+				Code:    -32000,
+				Message: "target gone",
+				Data:    tc.data,
+			})
+			var toolErr *router.ToolError
+			if !errors.As(err, &toolErr) {
+				t.Fatalf("authorityToolError = %T %v, want *router.ToolError", err, err)
+			}
+			if toolErr.Code != tc.wantCode {
+				t.Fatalf("tool error code = %q, want %q", toolErr.Code, tc.wantCode)
+			}
+			if toolErr.Message != tc.wantMessage {
+				t.Fatalf("tool error message = %q, want %q", toolErr.Message, tc.wantMessage)
+			}
+		})
+	}
+}

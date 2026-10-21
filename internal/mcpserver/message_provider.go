@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/client"
@@ -29,6 +30,7 @@ type mcpMessageProvider struct {
 	server         *Server
 	client         messageControlClient
 	supervisorPath string
+	generationMu   sync.RWMutex
 	generation     string
 	transport      *controlTransport
 }
@@ -55,46 +57,127 @@ func newMCPMessageProvider(server *Server, client messageControlClient, supervis
 	if err != nil {
 		return nil, err
 	}
-	return &mcpMessageProvider{
+	p := &mcpMessageProvider{
 		server:         server,
 		client:         client,
 		supervisorPath: supervisorPath,
-		generation:     pre.Generation,
 		transport:      newControlTransport(client),
-	}, nil
+	}
+	p.setGeneration(pre.Generation)
+	return p, nil
 }
 
 func (p *mcpMessageProvider) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
-	return p.transport.Send(ctx, req)
+	res, err := versionedRetry(ctx, p, &req.Generation, func(ctx context.Context) (messaging.SendResult, error) {
+		return p.transport.Send(ctx, req)
+	})
+	p.setGeneration(res.Generation)
+	return res, err
 }
 
 func (p *mcpMessageProvider) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
-	return p.transport.Wait(ctx, req)
+	return versionedRetry(ctx, p, &req.Generation, func(ctx context.Context) (messaging.WaitResult, error) {
+		return p.transport.Wait(ctx, req)
+	})
 }
 
 func (p *mcpMessageProvider) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
-	return p.transport.Reply(ctx, req)
+	return retryGenerationMismatch(ctx, p, func(ctx context.Context) (messaging.SendResult, error) {
+		return p.transport.Reply(ctx, req)
+	})
 }
 
 func (p *mcpMessageProvider) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
-	return p.transport.Withdraw(ctx, req)
+	res, err := versionedRetry(ctx, p, &req.Generation, func(ctx context.Context) (messaging.WithdrawResult, error) {
+		return p.transport.Withdraw(ctx, req)
+	})
+	p.setGeneration(res.Fence.Generation)
+	return res, err
 }
 
 func (p *mcpMessageProvider) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
-	return p.transport.Receive(ctx, req)
+	res, err := versionedRetry(ctx, p, &req.Generation, func(ctx context.Context) (messaging.ReceiveResult, error) {
+		return p.transport.Receive(ctx, req)
+	})
+	p.setGeneration(res.Generation)
+	return res, err
 }
 
 func (p *mcpMessageProvider) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
-	return p.transport.Peers(ctx, req)
+	res, err := versionedRetry(ctx, p, &req.Generation, func(ctx context.Context) (messaging.PeersResult, error) {
+		return p.transport.Peers(ctx, req)
+	})
+	p.setGeneration(res.Generation)
+	return res, err
 }
 
 func (p *mcpMessageProvider) Preflight(ctx context.Context) (messaging.PreflightResult, error) {
-	return p.transport.Preflight(ctx)
+	res, err := p.transport.Preflight(ctx)
+	p.setGeneration(res.Generation)
+	return res, err
 }
 
 func (p *mcpMessageProvider) Close() error { return nil }
 
-func (p *mcpMessageProvider) Generation() string { return p.generation }
+// Generation reports the control store generation the provider is currently
+// bound to. The store mints a new generation on every restart, so the value is
+// refreshed from every transport result that reports one.
+func (p *mcpMessageProvider) Generation() string {
+	p.generationMu.RLock()
+	defer p.generationMu.RUnlock()
+	return p.generation
+}
+
+func (p *mcpMessageProvider) setGeneration(generation string) {
+	if generation == "" {
+		return
+	}
+	p.generationMu.Lock()
+	p.generation = generation
+	p.generationMu.Unlock()
+}
+
+// refreshGeneration re-preflights the control store and caches the generation
+// it reports. A failed preflight leaves the cached generation untouched.
+func (p *mcpMessageProvider) refreshGeneration(ctx context.Context) (string, error) {
+	pre, err := p.transport.Preflight(ctx)
+	if err != nil {
+		return "", err
+	}
+	p.setGeneration(pre.Generation)
+	return pre.Generation, nil
+}
+
+// versionedRetry binds one generation-carrying request to the provider's
+// current generation and retries it once when the store reports that pin
+// stale. The retry re-preflights first, so the request carries the generation
+// the restarted store just minted instead of the dead one.
+func versionedRetry[T any](ctx context.Context, p *mcpMessageProvider, generation *string, call func(context.Context) (T, error)) (T, error) {
+	if *generation == "" {
+		*generation = p.Generation()
+	}
+	result, err := call(ctx)
+	if errors.Is(err, messaging.ErrGenerationMismatch) {
+		if fresh, preflightErr := p.refreshGeneration(ctx); preflightErr == nil {
+			*generation = fresh
+			return call(ctx)
+		}
+	}
+	return result, err
+}
+
+// retryGenerationMismatch retries one unversioned control verb once after
+// re-preflighting, so a stale cached generation does not fail the verb for the
+// rest of the process.
+func retryGenerationMismatch[T any](ctx context.Context, p *mcpMessageProvider, call func(context.Context) (T, error)) (T, error) {
+	result, err := call(ctx)
+	if errors.Is(err, messaging.ErrGenerationMismatch) {
+		if _, preflightErr := p.refreshGeneration(ctx); preflightErr == nil {
+			return call(ctx)
+		}
+	}
+	return result, err
+}
 
 func (p *mcpMessageProvider) Caller() messaging.Caller {
 	return messaging.Caller{Kind: messaging.CallerOwner, RunID: supervisorRunID}
@@ -103,6 +186,30 @@ func (p *mcpMessageProvider) Caller() messaging.Caller {
 func (p *mcpMessageProvider) Surface() messaging.Surface { return messaging.SurfaceMCP }
 
 func (p *mcpMessageProvider) Role() string { return "host" }
+
+// listedPeers lists the broker's visible peers for the supervisor session and
+// decodes each session with the router's own peer record, so Resolve and
+// peerRunState read one peer shape.
+func (p *mcpMessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerRecord, error) {
+	peers, err := p.Peers(ctx, messaging.PeersRequest{Sender: messaging.Identity{RunID: supervisorRunID}})
+	if err != nil {
+		return nil, err
+	}
+	records := make([]messaging.PeerRecord, 0, len(peers.Peers))
+	for _, peer := range peers.Peers {
+		var record messaging.PeerRecord
+		if len(peer.Session) > 0 {
+			if err := json.Unmarshal(peer.Session, &record); err != nil {
+				return nil, err
+			}
+		}
+		if record.RunID == "" {
+			record.RunID = peer.RunID
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
 
 // Resolve is the host ladder: the reserved self alias already became the
 // supervisor run id, then a public run id by ID only, then an exact broker
@@ -136,32 +243,19 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 			Match:       messaging.MatchUnique,
 		}, nil
 	}
-	peers, err := p.transport.Peers(ctx, messaging.PeersRequest{
-		Sender:     messaging.Identity{RunID: supervisorRunID},
-		Generation: p.generation,
-	})
+	peers, err := p.listedPeers(ctx)
 	if err != nil {
 		return messaging.Resolution{}, err
 	}
 	var candidates []string
 	label := ""
-	for _, peer := range peers.Peers {
-		var session struct {
-			RunID string `json:"run_id"`
-			Label string `json:"label"`
+	for _, peer := range peers {
+		if peer.RunID == ref {
+			return p.peerResolution(peer.RunID, peer.Label), nil
 		}
-		if len(peer.Session) > 0 {
-			_ = json.Unmarshal(peer.Session, &session)
-		}
-		if session.RunID == "" {
-			session.RunID = peer.RunID
-		}
-		if session.RunID == ref {
-			return p.peerResolution(session.RunID, session.Label), nil
-		}
-		if session.Label == ref {
-			candidates = append(candidates, session.RunID)
-			label = session.Label
+		if peer.Label == ref {
+			candidates = append(candidates, peer.RunID)
+			label = peer.Label
 		}
 	}
 	switch len(candidates) {
@@ -227,28 +321,15 @@ func (p *mcpMessageProvider) RunState(ctx context.Context, runID string) (messag
 // broker-only run holds no sentinel and no session, so it is never resumable
 // from here; the supervisor owns a resume.
 func (p *mcpMessageProvider) peerRunState(ctx context.Context, runID string) (messaging.RunFacts, error) {
-	peers, err := p.transport.Peers(ctx, messaging.PeersRequest{
-		Sender:     messaging.Identity{RunID: supervisorRunID},
-		Generation: p.generation,
-	})
+	peers, err := p.listedPeers(ctx)
 	if err != nil {
 		return messaging.RunFacts{}, err
 	}
-	for _, peer := range peers.Peers {
-		var session struct {
-			RunID  string `json:"run_id"`
-			Status string `json:"status"`
-		}
-		if len(peer.Session) > 0 {
-			_ = json.Unmarshal(peer.Session, &session)
-		}
-		if session.RunID == "" {
-			session.RunID = peer.RunID
-		}
-		if session.RunID != runID {
+	for _, peer := range peers {
+		if peer.RunID != runID {
 			continue
 		}
-		translation := runstate.Translate(runstate.RuntimeStatus(session.Status), runstate.PhaseNone)
+		translation := runstate.Translate(runstate.RuntimeStatus(peer.Status), runstate.PhaseNone)
 		return messaging.RunFacts{
 			RunID:     runID,
 			Status:    translation.Status,
