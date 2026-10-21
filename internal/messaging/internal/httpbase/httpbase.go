@@ -91,7 +91,9 @@ func (c *Client) UseHTTPClient(hc *http.Client) {
 	if hc == nil {
 		return
 	}
-	c.http.Transport = hc.Transport
+	if hc.Transport != nil {
+		c.http.Transport = hc.Transport
+	}
 	if hc.Timeout > 0 {
 		c.timeout = hc.Timeout
 	}

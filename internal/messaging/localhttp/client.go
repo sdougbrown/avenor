@@ -557,7 +557,9 @@ var _ messaging.Transport = (*Transport)(nil)
 // BrokerError is a non-2xx answer from one of the broker's authenticated
 // routes: the HTTP status, the wire code when the body carried one, and the
 // human text. It lets a child surface map the broker's decision to the router's
-// typed tool errors without re-implementing the request path.
+// typed tool errors without re-implementing the request path. A 401 is the
+// typed messaging.ErrAuthRejected instead, so the auth classification lives in
+// one place.
 type BrokerError struct {
 	Status  int
 	Code    string
@@ -632,7 +634,8 @@ func (t *Transport) LastMessage(ctx context.Context, target string) (messaging.P
 
 // getBrokerJSON performs one authenticated request on the shared request path
 // and decodes a successful body. A non-2xx answer is a *BrokerError carrying
-// the wire code; anything unusable is a protocol mismatch.
+// the wire code, except a 401, which is the typed rejection statusError
+// reports; anything unusable is a protocol mismatch.
 func (t *Transport) getBrokerJSON(ctx context.Context, method, path, query string, payload map[string]any, out any) error {
 	status, raw, err := t.roundTrip(ctx, method, path+query, 0, payload)
 	if err != nil {
@@ -654,8 +657,7 @@ func (t *Transport) getBrokerJSON(ctx context.Context, method, path, query strin
 			brokerErr.Message = string(trimmed)
 		}
 		if status == http.StatusUnauthorized {
-			brokerErr.Message = "local broker rejected the run token"
-			brokerErr.Code = "auth-rejected"
+			return fmt.Errorf("%w: local broker rejected the run token", messaging.ErrAuthRejected)
 		}
 		return brokerErr
 	}

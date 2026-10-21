@@ -36,8 +36,17 @@ func newTestProviderOn(t *testing.T, srv *httptest.Server, client *http.Client) 
 }
 
 func TestProviderPrepareBindsGeneration(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
 	provider, _ := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
+		mu.Lock()
+		calls++
+		generation := "gen-1"
+		if calls > 1 {
+			generation = "gen-2"
+		}
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": generation})
 	})
 	if got := provider.Generation(); got != "" {
 		t.Fatalf("generation before Prepare = %q", got)
@@ -48,11 +57,43 @@ func TestProviderPrepareBindsGeneration(t *testing.T) {
 	if got := provider.Generation(); got != "gen-1" {
 		t.Fatalf("generation = %q, want gen-1", got)
 	}
+	if err := provider.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := provider.Generation(); got != "gen-1" {
+		t.Fatalf("generation after a second Prepare = %q, want the pinned gen-1", got)
+	}
 	if provider.Caller().Kind != messaging.CallerBroker || provider.Caller().RunID != "child_run" {
 		t.Fatalf("caller = %+v", provider.Caller())
 	}
 	if provider.Surface() != messaging.SurfaceChanneltools || provider.Role() != "agent" {
 		t.Fatalf("surface/role = %q/%q", provider.Surface(), provider.Role())
+	}
+}
+
+// TestProviderCloseRefusesRenameAndLast pins that both authenticated routes
+// report the closed transport instead of reaching the broker again.
+func TestProviderCloseRefusesRenameAndLast(t *testing.T) {
+	provider, _ := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sessions" {
+			t.Errorf("post-close request reached the broker: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
+	})
+	ctx := context.Background()
+	if err := provider.Prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := provider.Rename(ctx, messaging.RenameRequest{Name: "new"}); !errors.Is(err, messaging.ErrTransportClosed) {
+		t.Fatalf("post-close Rename error = %v, want ErrTransportClosed", err)
+	}
+	if _, err := provider.Last(ctx, "rt_1"); !errors.Is(err, messaging.ErrTransportClosed) {
+		t.Fatalf("post-close Last error = %v, want ErrTransportClosed", err)
 	}
 }
 
@@ -123,6 +164,7 @@ func TestRenameMapsWireCodes(t *testing.T) {
 		{"unknown target", http.StatusNotFound, map[string]any{"error": "no run", "code": "unknown-target"}, "unknown_target"},
 		{"ambiguous", http.StatusConflict, map[string]any{"error": "two runs", "code": "ambiguous-name"}, "ambiguous_name"},
 		{"refused", http.StatusBadRequest, map[string]any{"error": "persist failed", "code": "invalid-request"}, "refused"},
+		{"rejected token", http.StatusUnauthorized, map[string]any{"error": "bad run token", "code": "invalid-request"}, "not_permitted"},
 		{"unrecognised", http.StatusTeapot, map[string]any{"error": "odd"}, "refused"},
 	}
 	for _, tc := range cases {

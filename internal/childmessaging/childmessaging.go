@@ -250,9 +250,13 @@ func (p *MessageProvider) Last(ctx context.Context, runID string) (messaging.Pee
 }
 
 // toolErrorFromBroker maps a broker refusal onto the router's typed code. A
-// failure that is not a broker answer keeps its own text and becomes a refusal
-// at the router boundary.
+// rejected run token is the not-permitted refusal the 403 sender-mismatch path
+// also reports; a failure that is not a broker answer keeps its own text and
+// becomes a refusal at the router boundary.
 func toolErrorFromBroker(err error) error {
+	if errors.Is(err, messaging.ErrAuthRejected) {
+		return &router.ToolError{Code: "not_permitted", Message: err.Error(), Facts: map[string]string{}}
+	}
 	var brokerErr *localhttp.BrokerError
 	if errors.As(err, &brokerErr) {
 		return toolErrorFor(brokerErr.Status, brokerError{Error: brokerErr.Message, Code: brokerErr.Code})
