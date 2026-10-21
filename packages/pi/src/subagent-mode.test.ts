@@ -231,7 +231,7 @@ describe('sub-agent broker mode (integration)', () => {
         reply_to: 'ask-r',
         message: 'first try',
       })
-      expect(failed.details.outcome).toBe('not-sent')
+      expect(failed.details.outcome).toBe('possibly-pending')
       fetchStub.setHandler('/send', () => Response.json({ queued: true, outcome: 'replied' }))
 
       const result = await registeredTools.avenor_message.execute('t2', {
@@ -403,7 +403,7 @@ describe('sub-agent broker mode (integration)', () => {
       await harness.eventHandlers.session_shutdown({}, {})
       await harness.eventHandlers.session_start({}, harness.ctx)
       send.resolve(new Response('broker down', { status: 503 }))
-      expect((await reply).details.outcome).toBe('not-sent')
+      expect((await reply).details.outcome).toBe('possibly-pending')
       const retry = await harness.registeredTools.avenor_message.execute('t2', {
         action: 'reply',
         reply_to: 'old-child-reply',

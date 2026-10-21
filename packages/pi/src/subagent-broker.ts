@@ -329,28 +329,67 @@ function brokerOutcome(body: unknown): MessageOutcome {
 }
 
 /**
- * Classify a broker HTTP rejection the way the Go local transport does: the
- * body's outcome wins, and a known wire code supplies the outcome when the body
- * names none. An unclassifiable failure keeps its refusal.
+ * The outcome the wire contract documents for a known code, or undefined for a
+ * code outside it. This mirrors the Go transport's wireErrorClasses table: a
+ * code whose documented outcome is a credential or edge refusal keeps it, and
+ * every other code names a request that was never admitted.
  */
-function brokerErrorOutcome(error: unknown): MessageOutcome | undefined {
-  if (!(error instanceof BrokerHttpError)) return undefined
-  try {
-    const parsed = JSON.parse(error.body) as Record<string, unknown>
-    if (typeof parsed.outcome === 'string' && parsed.outcome) return parsed.outcome as MessageOutcome
-  } catch {
-    // A non-JSON body carries no outcome.
-  }
-  switch (error.code) {
+function knownCodeOutcome(code: string): MessageOutcome | undefined {
+  switch (code) {
     case 'auth-rejected':
     case 'sender-mismatch':
       return 'auth-rejected'
     case 'not-ask-sender':
     case 'not-ask-target':
       return 'edge-absent'
-    default:
+    case 'invalid-request':
+    case 'generation-mismatch':
+    case 'unsupported-protocol':
+    case 'malformed-message-id':
+    case 'message-id-expired':
+    case 'message-id-horizon':
+    case 'duplicate-message-id':
+    case 'mutual-ask':
+    case 'fence-capacity':
+    case 'target-unavailable':
+    case 'transport-closed':
+    case 'unsupported-operation':
       return 'not-sent'
+    default:
+      return undefined
   }
+}
+
+/**
+ * The outcome of a response the messaging envelope does not describe, as the Go
+ * local transport classifies it: only a 401 there is a credential rejection, a
+ * code-less 403 is the router's not-ask-target refusal, and every other status
+ * leaves transmission uncertain.
+ */
+function unenvelopedOutcome(status: number): MessageOutcome {
+  if (status === 401) return 'auth-rejected'
+  if (status === 403) return 'edge-absent'
+  return 'possibly-pending'
+}
+
+/**
+ * Classify a broker HTTP rejection the way the Go local transport does: the
+ * body's outcome wins, then a known wire code, then the status. A rejection that
+ * names neither leaves transmission uncertain, so it is never reported
+ * `not-sent`; only a send that provably never left the surface is.
+ */
+function brokerErrorOutcome(error: unknown): MessageOutcome | undefined {
+  if (!(error instanceof BrokerHttpError)) return undefined
+  try {
+    const parsed = JSON.parse(error.body) as Record<string, unknown> | null
+    if (parsed && typeof parsed.outcome === 'string' && parsed.outcome) {
+      return parsed.outcome as MessageOutcome
+    }
+  } catch {
+    // A body that is not JSON carries no envelope of its own.
+  }
+  if (error.code) return knownCodeOutcome(error.code) ?? 'possibly-pending'
+  return unenvelopedOutcome(error.status)
 }
 
 async function brokerAsk(

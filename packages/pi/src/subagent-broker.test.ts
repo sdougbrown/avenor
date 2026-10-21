@@ -220,6 +220,35 @@ describe('child broker routes', () => {
     expect(result).toEqual({ outcome: 'edge-absent', messageId: 'av1.r.1' })
   })
 
+  it('classifies a rejection the envelope does not describe by its status', async () => {
+    const boom = stubFetch({ '/send': () => new Response('boom', { status: 500 }) })
+    expect(await createBrokerChildBroker(env, boom.fetchImpl).tell('rt_2', 'hi', 'av1.t.2')).toEqual({
+      outcome: 'possibly-pending',
+      messageId: 'av1.t.2',
+    })
+
+    const denied = stubFetch({ '/send': () => new Response('nope', { status: 401 }) })
+    expect((await createBrokerChildBroker(env, denied.fetchImpl).tell('rt_2', 'hi', 'av1.t.3')).outcome).toBe('auth-rejected')
+
+    const forbidden = stubFetch({ '/send': () => new Response('not the ask target', { status: 403 }) })
+    expect((await createBrokerChildBroker(env, forbidden.fetchImpl).reply('rt_2', 'av1.r.2', 'OK')).outcome).toBe('edge-absent')
+  })
+
+  it('reports an unknown wire code as possibly-pending', async () => {
+    const { fetchImpl } = stubFetch({
+      '/send': () => Response.json({ code: 'mystery' }, { status: 500 }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).tell('rt_2', 'hi', 'av1.t.4')
+    expect(result.outcome).toBe('possibly-pending')
+  })
+
+  it('lets an enveloped outcome win over the rejection status', async () => {
+    const { fetchImpl } = stubFetch({
+      '/send': () => Response.json({ outcome: 'auth-rejected' }, { status: 500 }),
+    })
+    expect((await createBrokerChildBroker(env, fetchImpl).tell('rt_2', 'hi', 'av1.t.5')).outcome).toBe('auth-rejected')
+  })
+
   it('maps an absent withdrawal to edge-absent and a full fence to possibly-pending', async () => {
     const absent = stubFetch({
       '/cancel_message': () => new Response('no pending ask', { status: 404 }),
