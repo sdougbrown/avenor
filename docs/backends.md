@@ -40,7 +40,7 @@ The launch wrapper does not change the control socket's trust boundary: a caller
 
 ### MCP surfaces: operator allowlist
 
-The launch wrapper on MCP-driven spawns (`avenor_spawn` tool) is **disabled by default** and gated by an operator allowlist. Start the supervisor with:
+The launch wrapper on MCP-driven spawns (`spawn` tool) is **disabled by default** and gated by an operator allowlist. Start the supervisor with:
 
 ```sh
 avenor stable --control-socket /tmp/avenor.sock --mcp-launch-wrapper-policy /etc/avenor/launch-wrapper-policy.json
@@ -194,7 +194,7 @@ Starts a full interactive Claude Code session in the background, controlled via
 3. Avenor spawns Claude Code in a detached tmux session with `--dangerously-load-development-channels server:avenor-channel-47212ef3`.
 4. Claude discovers the MCP server from `.mcp.json`, loads it, and the bidirectional channel opens.
 5. Avenor pushes control messages (continue, cancel, permission decisions) to Claude via `claude/channel` events.
-6. Claude calls `avenor_report`, `avenor_finish`, and `avenor_reply` tools to communicate back.
+6. Claude calls the `avenor_report`, `avenor_finish`, `avenor_message` (with `action="control_reply"` for a control reply) and `avenor_peers` tools to communicate back.
 7. If the channel is ignored or not yet active, Avenor falls back to tmux PTY prompt injection.
 8. On session exit, Avenor removes the `avenor-channel-*` entry from `.mcp.json`.
 

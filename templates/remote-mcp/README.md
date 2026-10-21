@@ -128,9 +128,9 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: evil.example' http://127.0.0.
 
 What a remote MCP caller should do:
 
-- send `idempotency_key` on `avenor_spawn` and `avenor_follow_up` so retries never double-spawn
-- send `request_id` on `avenor_answer_permission` (required to retry a resolved answer)
-- poll `avenor_events` with `after_seq` starting at `0`, feeding back `latest_seq`
+- send `idempotency_key` on `spawn` and on `message` with `action: "resume"` so retries never double-spawn
+- send `request_id` on `answer_permission` (required to retry a resolved answer)
+- poll `events` with `after_seq` starting at `0`, feeding back `latest_seq`
 - treat `wait_clamped: true` as "poll again"
 - on `supervisor unavailable`, back off until the supervisor is ready, then retry with the same key
 

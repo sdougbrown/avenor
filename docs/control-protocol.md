@@ -378,7 +378,7 @@ Returns all active and recently-completed child runtimes with status summaries. 
 - an owner caller may rename only the supervisor session (`session_id` omitted, `"supervisor"`, or the supervisor's current display name);
 - a broker-authenticated caller may rename only itself.
 
-Resolution runs before permission: an exact runtime id first, then the exact display name, so a rename changes what `avenor_peers`, `/sessions`, the outbound sender stamp and later resolution calls report. A stale launch label resolves nowhere. The result carries `{run_id, label, previous_label}` and the rename publishes `session.renamed` after it persists.
+Resolution runs before permission: an exact runtime id first, then the exact display name, so a rename changes what the peers tool, `/sessions`, the outbound sender stamp and later resolution calls report. A stale launch label resolves nowhere. The result carries `{run_id, label, previous_label}` and the rename publishes `session.renamed` after it persists.
 
 #### `session_last`
 

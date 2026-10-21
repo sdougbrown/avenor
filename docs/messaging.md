@@ -37,7 +37,7 @@ display label.
 | Spawned child | its runtime ID (`rt_N`) | Before the child's backend starts, so it can poll and reply. |
 
 A spawned `pi` child asks through its inherited broker credentials. That path
-sends `to_run_id` unchanged: unlike the host's `avenor_message` ask, it does not resolve
+sends `to_run_id` unchanged: unlike the host's message tool ask, it does not resolve
 a public spawn ID or a label first. A child asking its supervisor therefore has
 to use `supervisor`. Asking `rt_N` addresses that child, not the supervisor. A
 child asking a sibling uses the sibling's `rt_N`.
@@ -108,7 +108,7 @@ A failed ask reaches tool surfaces as a JSON-RPC error whose `data` carries
 `message_id`, `pending`, and — when known — `outcome`. `pending` is true exactly
 when the outcome is `possibly-pending`: a wait that failed but whose cleanup
 withdrawal confirmed a terminal fence is no longer pending, and
-`message_withdraw` (or `avenor_message action="withdraw"`) accepts the retained ID.
+`message_withdraw` (or the message tool's `withdraw` action) accepts the retained ID.
 
 Two rules follow from the table and are enforced everywhere:
 
@@ -166,6 +166,8 @@ The local adapter drives the broker's own router:
 | `/wait_reply` | Wait for the ask's terminal state. |
 | `/cancel_message` | Withdraw an ask. |
 | `/poll-control` | Drain queued control and agent messages. |
+| `/rename` | Change a display name. The body's `run_id` must be the authenticated caller, and `session_id` is forwarded to the supervisor's one rename authority, so the supervisor decides whether the caller may rename that target. Answers `{run_id, label, previous_label}`. |
+| `/last_message` | Read one run's recorded last agent turn: `{run_id, label, has_record, final_output, stop_reason, final_output_truncated, at}`. It is the one read endpoint whose target need not be the caller — any authenticated run may read any known run — and an unknown target is `target-unavailable`. |
 
 Before the first send on a connection it calls `/sessions` and requires
 `messaging_protocol: 1`. A broker that predates the marker, or answers a
