@@ -398,6 +398,17 @@ These typed messaging methods delegate to the supervisor's in-process transport 
 
 The read-only half of the typed messaging surface. They are ungated, matching `broker_receive` and `broker_peers`, and answer the same snake_case DTOs (`messages`, `peers`, `protocol`/`generation`). `message_receive` is a blocking verb with the same rules as `message_wait`: a negative `timeout_ms` is `-32602`, a value above the ceiling is clamped to it, and the receive runs off the connection's read loop under the shared per-connection slot budget.
 
+#### `broker_*` (superseded)
+
+The `broker_*` verbs are superseded by the `message_*` family and will be removed.
+
+- `broker_send` → `message_send`: the same delivery, with `body` in place of `message` and an outcome in the result.
+- `broker_ask` → `message_send` then `message_wait`: the typed pair splits the send from the bounded wait, and the wait reports the messaging outcome and the inbound reply rather than one flat reply record.
+- `broker_cancel` → `message_withdraw`: the typed verb answers the terminal fence the withdrawal installed.
+- `broker_reply` → `message_reply`: the inbound ask's id travels as `message_id` where `broker_reply` used `reply_to`, alongside an optional `correlation_id`.
+- `broker_peers` → `message_peers`: the same visible peers under `peers`, plus the generation it answered for.
+- `broker_receive` → `message_receive`: the same inbound messages under `messages`, plus the generation it answered for; the request takes an optional `limit`.
+
 #### `shutdown`
 
 ```json
