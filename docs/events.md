@@ -156,9 +156,9 @@ On the PTY launcher Claude Code reports its own state with OSC 7501 (Program Sta
 
 - `phase=working` when Claude starts working on the prompt.
 - `phase=waiting` with `reason="question"` or `reason="auth"` when Claude is blocked on a question or on authentication. `label` carries Claude's message, truncated to 200 characters; it is display text only. No `permission.request` is emitted for these. A blocked report with no recognised kind gives `phase=waiting` with no `reason`.
-- `phase=waiting` with `reason="idle"` when Claude returns to its input box mid-turn (a cancelled or denied turn).
+- `phase=waiting` with `reason="idle"` when Claude returns to its input box after it started working on the prompt (a cancelled or denied turn).
 
-A report that Claude is blocked on a permission emits no `agent.status`; Avenor brokers the dialog as a `permission.request` as soon as it is on screen. Reports from subagents never affect the turn. `session.end` stays transcript-driven: an `end_turn` record ends the turn, except that while Claude still reports the turn working (a background subagent ends an inner turn first) Avenor holds it until Claude reports `done` or `idle`, and once reports are flowing it ends the turn only after about 0.75s passes without a later `end_turn`, so the final reply is emitted first. Claude reporting `done` without a transcript `end_turn` never ends the session.
+A report that Claude is blocked on a permission emits no `agent.status`; Avenor brokers the dialog as a `permission.request` as soon as it is on screen. Reports from subagents never affect the turn. `session.end` stays transcript-driven: an `end_turn` record ends the turn, except that while Claude still reports the turn working (a background subagent ends an inner turn first) Avenor holds it until Claude reports `done`, `idle`, `clear` or `error`, the terminal resets, or reports are lost, and once reports are flowing it ends the turn only after about 0.75s passes without a later `end_turn`, so the final reply is emitted first. Claude reporting `done` without a transcript `end_turn` never ends the session.
 
 The tmux launcher and the `claude-channel` backend do not answer the query and keep the pane-scrape behaviour above. `AVENOR_CLAUDE_OSC7501=off` (or `0`, `false`) turns the reply off for the `claude` backend.
 

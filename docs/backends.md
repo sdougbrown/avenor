@@ -144,12 +144,12 @@ AVENOR_CLAUDE_TERMINAL=tmux avenor --backend claude --prompt "say hi"
 
 ### Status reports (OSC 7501)
 
-On the PTY launcher Avenor answers Claude Code's OSC 7501 (Program Status Protocol) detection query, so Claude reports its own state: `idle`, `working`, `blocked` (on a permission, question, or authentication), and `done`. Without the answer Claude reports nothing. After the first report Avenor uses the reports alongside the pane and transcript:
+On the PTY launcher Avenor answers Claude Code's OSC 7501 (Program Status Protocol) detection query, so Claude reports its own state: `idle`, `working`, `blocked` (on a permission, question, or authentication), and `done`. Without the answer Claude reports nothing, and Avenor ignores any report that arrives before it answered. After the first report Avenor uses the reports alongside the pane and transcript:
 
 - **Readiness.** The prompt waits for the input box and for Claude's startup `idle` report. If no detection query arrives within about 2s of the input box appearing, or no `idle` within about 3s, the input box alone decides. `agent.prompt_submitted` carries `ready_signal` (`osc7501` or `pane`).
 - **Status.** Each transition emits one `agent.status` with `signal=osc7501` (see [Events](events.md#claude-backend-events)); the 500ms pane heartbeat stops. A `working` report also ends the Enter resend.
-- **Permissions.** A blocked-on-permission report brokers the dialog as soon as it is on screen, without waiting for the next pane scan. The pending request survives a pane scan that shows the input box while Claude still reports blocked.
-- **Completion.** The transcript `end_turn` still ends the turn. While Claude reports the turn working, an `end_turn` (from a background subagent) is held until Claude reports `done` or `idle`.
+- **Permissions.** A blocked-on-permission report brokers the dialog as soon as two consecutive screen reads show it fully painted, without waiting for the next pane scan. Each dialog is brokered once: after it is answered, the screen still shows it until Claude moves on, and it is not brokered again while Claude reports the same blocked state. A blocked report with a new message is a new dialog. The pending request survives a pane scan that shows the input box while Claude still reports blocked.
+- **Completion.** The transcript `end_turn` still ends the turn. While Claude reports the turn working, an `end_turn` (from a background subagent) is held until Claude reports `done`, `idle`, `clear` or `error`, the terminal resets, or reports are lost.
 - **Cancel.** Claude reporting `idle` after the turn started working counts as a completed cancel, alongside the pane going idle.
 
 Reports are untrusted: they never approve anything, and report text is display-only. Set `AVENOR_CLAUDE_OSC7501=off` (or `0`, `false`) to leave the query unanswered; the session then behaves exactly as with scraping alone (`ready_signal=pane`, no `signal=osc7501` events). The tmux launcher and `claude-channel` never answer the query and keep scraping.
