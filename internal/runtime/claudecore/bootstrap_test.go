@@ -136,17 +136,32 @@ func TestWaitForPaneReadySelectsTrustOptionBeforeConfirming(t *testing.T) {
 }
 
 func TestWaitForPaneReadyConfirmsTrustWhenStaleMarkerRemains(t *testing.T) {
-	stale := " Quick safety check: Is this a project you created or one you trust?\n" +
+	header := " Quick safety check: Is this a project you created or one you trust?\n"
+	onExit := header + " ❯ No, exit\n   Yes, I trust this folder\n"
+	onTrust := header + "   No, exit\n ❯ Yes, I trust this folder\n"
+	// The repainted frame after a Down, with the old marker still on screen.
+	stale := header +
 		"   No, exit\n" +
 		"─❯─Yes, I trust this folder──────\n" +
 		" ❯ No, exit\n" +
 		"   Yes, I trust this folder\n"
-	term := terminal.NewFakeSessionQueue("trust", 1, []string{stale, readyPane})
-	if !WaitForPaneReady(context.Background(), term) {
-		t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+	cases := map[string][]string{
+		// The unchanged capture after the Down gets no second Down.
+		"stale marker after the Down": {onExit, onExit, stale, readyPane},
+		// Without a Down, a stale trust marker beside a marked "No, exit"
+		// is not taken as the selection.
+		"stale marker before any Down": {stale, stale, onTrust, readyPane},
 	}
-	want := [][]string{{string(terminal.KeyEnter)}}
-	if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("SendCalls = %v, want %v", got, want)
+	for name, captures := range cases {
+		t.Run(name, func(t *testing.T) {
+			term := terminal.NewFakeSessionQueue("trust", 1, captures)
+			if !WaitForPaneReady(context.Background(), term) {
+				t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+			}
+			want := [][]string{{string(terminal.KeyDown)}, {string(terminal.KeyEnter)}}
+			if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("SendCalls = %v, want %v", got, want)
+			}
+		})
 	}
 }
