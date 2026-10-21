@@ -26,14 +26,13 @@ func TestMessageRequestUsesAuthenticatedIdentity(t *testing.T) {
 	}
 }
 
-func TestMessageWaitParamsBoundsTimeout(t *testing.T) {
-	huge := MessageWaitParams{MessageID: "m", Generation: "g", TimeoutMS: 288230376151711745}
-	if got := huge.request(messaging.Identity{RunID: "rt_a"}).Timeout; got != messaging.MaxWait {
-		t.Fatalf("huge timeout = %v, want the shared cap %v", got, messaging.MaxWait)
-	}
-	over := MessageWaitParams{MessageID: "m", TimeoutMS: int64(messaging.MaxWait/time.Millisecond) + 1}
-	if got := over.request(messaging.Identity{RunID: "rt_a"}).Timeout; got != messaging.MaxWait {
-		t.Fatalf("over-cap timeout = %v, want %v", got, messaging.MaxWait)
+// TestMessageWaitParamsLeavesTimeoutToDispatcher pins the layering: the DTO
+// converts units only. The control dispatcher owns the one timeout ceiling, so
+// a value above it must not be clamped a second time here.
+func TestMessageWaitParamsLeavesTimeoutToDispatcher(t *testing.T) {
+	over := MessageWaitParams{MessageID: "m", TimeoutMS: int64(messaging.MaxWait/time.Millisecond) + 250}
+	if got, want := over.request(messaging.Identity{RunID: "rt_a"}).Timeout, time.Duration(over.TimeoutMS)*time.Millisecond; got != want {
+		t.Fatalf("over-cap timeout = %v, want the DTO to leave it at %v", got, want)
 	}
 	zero := MessageWaitParams{MessageID: "m", TimeoutMS: 0}
 	if got := zero.request(messaging.Identity{RunID: "rt_a"}).Timeout; got != 0 {

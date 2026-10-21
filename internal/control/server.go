@@ -1237,9 +1237,10 @@ func (s *ControlServer) handleConn(c *connState) {
 // and broker edges.
 const maxInflightAsksPerConn = 8
 
-// maxAskTimeoutMS is the server-side cap on a request's timeout_ms. It sits
+// maxAskTimeoutMS is the one server-side cap on a request's timeout_ms. It sits
 // below the ask store's DefaultAskTimeout so a clamped value expires on the
-// server (with structured error data) instead of racing the broker's 504.
+// server (with structured error data) instead of racing the broker's 504. The
+// message DTO only converts milliseconds to a duration and imposes no ceiling.
 const maxAskTimeoutMS = int64(askstore.DefaultAskTimeout-5*time.Second) / int64(time.Millisecond)
 
 // clampAskTimeout caps a blocking verb's timeout_ms at maxAskTimeoutMS so every

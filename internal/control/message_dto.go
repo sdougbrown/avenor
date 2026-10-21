@@ -229,7 +229,7 @@ func (p MessageWaitParams) request(from messaging.Identity) messaging.WaitReques
 		Sender:     from,
 		MessageID:  p.MessageID,
 		Generation: p.Generation,
-		Timeout:    boundedTimeout(p.TimeoutMS),
+		Timeout:    time.Duration(p.TimeoutMS) * time.Millisecond,
 	}
 }
 
@@ -278,7 +278,7 @@ func (p MessageReceiveParams) request(from messaging.Identity) messaging.Receive
 	return messaging.ReceiveRequest{
 		Sender:     from,
 		Generation: p.Generation,
-		Timeout:    boundedTimeout(p.TimeoutMS),
+		Timeout:    time.Duration(p.TimeoutMS) * time.Millisecond,
 		Limit:      p.Limit,
 	}
 }
@@ -315,18 +315,6 @@ func (p ResumeParams) request() messaging.ResumeRequest {
 		SentinelFile:   p.SentinelFile,
 		EventLog:       p.OnEvent,
 	}
-}
-
-// boundedTimeout converts a wire duration, clamped to the shared wait cap so a
-// large integer cannot overflow time.Duration.
-func boundedTimeout(ms int64) time.Duration {
-	if ms <= 0 {
-		return 0
-	}
-	if ms >= int64(messaging.MaxWait/time.Millisecond) {
-		return messaging.MaxWait
-	}
-	return time.Duration(ms) * time.Millisecond
 }
 
 // --- result conversion (transport → wire) ---
