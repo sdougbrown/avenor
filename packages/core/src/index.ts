@@ -61,28 +61,77 @@ export type { ThinkingOutcome } from './thinking-policy.js'
 export { statusTool } from './tools/status.js'
 export type { StatusResult, StatusListResult, StatusToolArgs, StatusView } from './tools/status.js'
 export { resultTool } from './tools/result.js'
-export type { ResultResult, ResultToolArgs } from './tools/result.js'
-export { answerPermissionTool } from './tools/answer-permission.js'
+// Temporary until 356-17: the retired tools stay exported until the last
+// surface that imports them has moved to the merged message tool.
 export { followUpTool } from './tools/follow-up.js'
 export type { FollowUpToolArgs, FollowUpToolResult } from './tools/follow-up.js'
+export { askTool } from './tools/ask.js'
+export type { AskToolArgs, AskResult } from './tools/ask.js'
+export type { PeerEntry } from './tools/peers.js'
+export { cancelTool } from './tools/cancel.js'
+export type { CancelToolArgs, CancelResult } from './tools/cancel.js'
+export { brokerReplyTool } from './tools/broker-reply.js'
+export type { BrokerReplyArgs, BrokerReplyResult } from './tools/broker-reply.js'
+
+export type { ResultResult, ResultToolArgs } from './tools/result.js'
+export { answerPermissionTool } from './tools/answer-permission.js'
 export { eventsTool } from './tools/events.js'
 export { inspectTool } from './tools/inspect.js'
 export type { InspectResult } from './tools/inspect.js'
 export { shutdownTool } from './tools/shutdown.js'
 
-export { askTool, formatAskFailure } from './tools/ask.js'
+// Temporary until 356-12: the ask-failure renderer keeps its old text until
+// the Pi child migrates to the router's renderer.
+export { formatAskFailure } from './tools/ask.js'
 export { extractReplyMessage, normalizeAskTimeoutMs } from './messaging-text.js'
-export type { AskToolArgs, AskResult } from './tools/ask.js'
-export { peersTool } from './tools/peers.js'
-export type { PeersResult, PeerEntry } from './tools/peers.js'
-export { cancelTool } from './tools/cancel.js'
-export type { CancelToolArgs, CancelResult } from './tools/cancel.js'
+export {
+  renderOutcome,
+  repair,
+  renderLast,
+  quote,
+  sanitize,
+  quoteList,
+  newMsgID,
+  MAX_WAIT_MS,
+  MAX_FINAL_OUTPUT_RUNES,
+  MESSAGE_OUTCOMES,
+  normalizeTurnStopReason,
+  extractTurnText,
+  boundFinalOutput,
+} from './messaging-text.js'
+export type { MessageOutcome } from './messaging-text.js'
+export {
+  ToolError,
+  assertMessageInput,
+  assertPeersInput,
+  executeMessage,
+  executePeers,
+  peersDetails,
+  renderPeerList,
+  resultOutput,
+} from './message.js'
+export type { MessageInput, PeersInput, PeersRouterResult } from './message.js'
+export { messageTool, createMessageTool } from './tools/message.js'
+export type {
+  MessageProvider,
+  MessageCallerKind,
+  MessageSurface,
+  ProviderResult,
+  Resolution,
+  RunFacts,
+  PeerRecord,
+  PeersProviderResult,
+} from './tools/message.js'
+export { createHostMessageProvider, createChildMessageProvider } from './tools/message-provider.js'
+export type { ChildBroker, MessageClient, PendingAsk } from './tools/message-provider.js'
+export { peersTool, createPeersTool } from './tools/peers.js'
+export type { PeersResult, PeersToolArgs } from './tools/peers.js'
+export { getSupervisorClient } from './tools/get-supervisor-client.js'
+export type { SupervisorClientOptions } from './tools/get-supervisor-client.js'
 export { killTool } from './tools/kill.js'
 export type { KillToolArgs, KillResult } from './tools/kill.js'
 export { brokerReceiveTool } from './tools/broker-receive.js'
 export type { BrokerReceiveArgs, InboundAsk, BrokerReceiveResult } from './tools/broker-receive.js'
-export { brokerReplyTool } from './tools/broker-reply.js'
-export type { BrokerReplyArgs, BrokerReplyResult } from './tools/broker-reply.js' 
 
 export type { ExecutionIdentity, WorkflowGateOperation, WorkflowCompleteParams, WorkflowGateParams, WorkflowHeartbeatParams, WorkflowControllerCreateParams } from './client.js'
 export { workflowStatusTool, createWorkflowStatusTool, type WorkflowStatusToolArgs, type WorkflowStatusResult } from './tools/workflow-status.js'
@@ -93,4 +142,6 @@ export { workflowCompleteTool, createWorkflowCompleteTool, type WorkflowComplete
 export { workflowGateTool, createWorkflowGateTool, type WorkflowGateToolArgs, type WorkflowGateResult } from './tools/workflow-gate.js'
 export { workflowControllerStatusTool, createWorkflowControllerStatusTool, type WorkflowControllerStatusToolArgs, type WorkflowControllerStatusResult } from './tools/workflow-controller-status.js'
 export { workflowReadyTool, createWorkflowReadyTool, type WorkflowReadyToolArgs, type WorkflowReadyResult } from './tools/workflow-ready.js'
+export { workflowCancelTool, createWorkflowCancelTool } from './tools/workflow-cancel.js'
+export type { WorkflowCancelArgs, WorkflowCancelResult } from './tools/workflow-cancel.js'
 
