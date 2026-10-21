@@ -54,32 +54,6 @@ func (r AskResult) Text() (string, error) {
 	return RenderReply(messaging.WaitResult{Outcome: r.Outcome, Reply: r.Reply})
 }
 
-// Failure renders a non-replied ask for a tool surface: the outcome's text, the
-// message ID a cancel tool can act on, and the typed cause when the transport
-// reported one. The client already withdrew the ask its failed wait abandoned,
-// so the retraction hint is only appended when that withdrawal could not
-// confirm a terminal fence.
-func (r AskResult) Failure(err error) error {
-	if err == nil {
-		return nil
-	}
-	text, renderErr := r.Text()
-	if renderErr != nil {
-		return err
-	}
-	var askErr *Error
-	var failure error
-	if errors.As(err, &askErr) && askErr.Err != nil {
-		failure = fmt.Errorf("%s (message_id: %s): %w", text, r.MessageID, askErr.Err)
-	} else {
-		failure = fmt.Errorf("%s (message_id: %s)", text, r.MessageID)
-	}
-	if askErr != nil && askErr.Pending() {
-		return fmt.Errorf("%w; an ask still outstanding can be retracted with avenor_cancel", failure)
-	}
-	return failure
-}
-
 // Error is a failed ask. Pending reports whether the message ID may still be
 // outstanding: a possibly-pending wait whose cleanup withdrawal confirmed a
 // terminal fence is no longer pending.
