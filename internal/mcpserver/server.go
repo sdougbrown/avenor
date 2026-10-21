@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
@@ -651,6 +652,34 @@ func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunIn
 	// run stays reachable by label for its persisted result and event log.
 	if ri := s.registry.LookupLabel(supervisorPath, key); ri != nil {
 		return ri, nil
+	}
+	return nil, nil
+}
+
+// lookupRunByPublicID rehydrates the registry from the supervisor's list on a
+// miss and resolves one public run id only. Unlike lookupRun it never matches a
+// label, a runtime id or a sentinel path fragment, so the message provider
+// keeps the two resolution planes while still resolving a public run id that
+// outlived this MCP server process.
+func (s *Server) lookupRunByPublicID(cl ControlClient, supervisorPath, runID string) (*RunInfo, error) {
+	// Public run ids are UUIDs the surface minted; anything else is a label or
+	// a runtime id and belongs to the broker listing, so no list is issued.
+	if _, err := uuid.Parse(runID); err != nil {
+		return nil, nil
+	}
+	if ri := s.registry.Lookup(supervisorPath, runID); ri != nil {
+		return ri, nil
+	}
+	entries, err := cl.List()
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	for _, entry := range entries {
+		sentinelFile, _ := entry["sentinel_file"].(string)
+		if runstate.RunIDFromSentinel(sentinelFile) != runID {
+			continue
+		}
+		return s.runInfoFromListEntry(entry, supervisorPath)
 	}
 	return nil, nil
 }
@@ -1479,6 +1508,47 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 	}
 
 	return nil, map[string]any{"events": events, "latest_seq": latestSeq}, nil
+}
+
+// registerResumed records the run a resume produced in the same registry the
+// spawn and status paths read, so the resumed run is resolvable by label and
+// its event log is readable. Identity comes from the new runtime's status, the
+// same way a follow-up read it; a status miss leaves the identity empty instead
+// of failing a resume that already succeeded. The run is never killed here.
+func (s *Server) registerResumed(cl ControlClient, supervisorPath string, req messaging.ResumeRequest, res messaging.ResumeResult) error {
+	identity := resolvedSpawnIdentity{}
+	var status map[string]any
+	if res.RuntimeID != "" {
+		if live, err := cl.Status(res.RuntimeID); err == nil {
+			status = live
+			applySpawnIdentity(live, &identity)
+		}
+	}
+	info := &RunInfo{
+		RunID:            res.RunID,
+		Label:            res.Label,
+		RuntimeID:        res.RuntimeID,
+		SessionID:        res.SessionID,
+		SupervisorID:     supervisorPath,
+		SentinelPath:     res.SentinelFile,
+		EventLogPath:     res.OnEvent,
+		Agent:            identity.EffectiveAgent,
+		Model:            identity.EffectiveModel,
+		Backend:          identity.EffectiveBackend,
+		RosterFile:       identity.RosterFile,
+		RosterEntry:      identity.RosterEntry,
+		EffectiveAgent:   identity.EffectiveAgent,
+		EffectiveModel:   identity.EffectiveModel,
+		EffectiveBackend: identity.EffectiveBackend,
+		AgentProfile:     identity.AgentProfile,
+		CreatedAt:        time.Now(),
+	}
+	if status != nil {
+		info.Thinking, _ = status["thinking"].(string)
+		info.Dir, _ = status["dir"].(string)
+		info.AutoApprove, _ = status["auto_approve"].(bool)
+	}
+	return s.registry.Store(info)
 }
 
 func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {

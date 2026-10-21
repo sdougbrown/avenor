@@ -209,7 +209,7 @@ func (c *Client) AuthenticateOwner(cap OwnerCapability) error {
 func (c *Client) authenticateOwnerUntil(cap OwnerCapability, deadline time.Time) error {
 	var res control.OwnerAuthResult
 	params := control.OwnerAuthRequest{Version: control.OwnerAuthVersion, CapabilityID: cap.ID, Secret: cap.Secret}
-	if err := c.call("authenticate_owner", params, &res, remainingUntil(deadline)); err != nil {
+	if err := c.call(context.Background(), "authenticate_owner", params, &res, remainingUntil(deadline)); err != nil {
 		return classifyOwnerAuthError(err)
 	}
 	if !res.Authenticated || res.Version != control.OwnerAuthVersion || res.CapabilityID != cap.ID {
@@ -361,13 +361,20 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) Call(method string, params any, result any) error {
-	return c.call(method, params, result, 0)
+	return c.call(context.Background(), method, params, result, 0)
+}
+
+// CallContext issues a request and stops waiting for the response when ctx is
+// done. The request itself is not withdrawn: the connection stays usable and a
+// server-side blocking verb still settles on its own timeout.
+func (c *Client) CallContext(ctx context.Context, method string, params any, result any) error {
+	return c.call(ctx, method, params, result, 0)
 }
 
 // call issues a request and waits for the response. A positive wait bounds
 // the response wait; zero uses the 30s default; a negative wait waits
 // indefinitely (for server-side long-poll methods such as wait_turn).
-func (c *Client) call(method string, params any, result any, wait time.Duration) error {
+func (c *Client) call(ctx context.Context, method string, params any, result any, wait time.Duration) error {
 	if method == "subscribe" {
 		// An explicit subscribe (global or per-runtime) satisfies the
 		// ensureSubscribed contract; auto-subscribing again would register a
@@ -439,6 +446,11 @@ func (c *Client) call(method string, params any, result any, wait time.Duration)
 			return fmt.Errorf("read response: %w", ErrConnectionClosed)
 		}
 		resp = r
+	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return fmt.Errorf("call %s: %w", method, ctx.Err())
 	case <-timerC:
 		c.mu.Lock()
 		delete(c.pending, id)
@@ -631,7 +643,7 @@ func (c *Client) WaitTurn(runtimeID string, timeout time.Duration) (map[string]a
 		wait = timeout + 10*time.Second
 	}
 	var result map[string]any
-	err := c.call("wait_turn", params, &result, wait)
+	err := c.call(context.Background(), "wait_turn", params, &result, wait)
 	if rpcErr, ok := err.(*RPCError); ok && rpcErr.Code == codeWaitTurnTimeout {
 		return result, ErrWaitTurnTimeout
 	}
@@ -1010,8 +1022,13 @@ func messageResponseWait(timeout time.Duration) time.Duration {
 
 // MessageSend sends one message over the supervisor's own transport.
 func (c *Client) MessageSend(req messaging.SendRequest) (messaging.SendResult, error) {
+	return c.MessageSendContext(context.Background(), req)
+}
+
+// MessageSendContext sends one message and stops waiting when ctx is done.
+func (c *Client) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	var result control.MessageSendResult
-	if err := c.Call("message_send", control.NewMessageSendParams(req), &result); err != nil {
+	if err := c.CallContext(ctx, "message_send", control.NewMessageSendParams(req), &result); err != nil {
 		return messaging.SendResult{}, err
 	}
 	return result.SendResult(), nil
@@ -1019,8 +1036,13 @@ func (c *Client) MessageSend(req messaging.SendRequest) (messaging.SendResult, e
 
 // MessageWait waits for the terminal state of one ask.
 func (c *Client) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
+	return c.MessageWaitContext(context.Background(), req)
+}
+
+// MessageWaitContext waits for one ask and stops waiting when ctx is done.
+func (c *Client) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
 	var result control.MessageWaitResult
-	if err := c.call("message_wait", control.NewMessageWaitParams(req), &result, messageResponseWait(req.Timeout)); err != nil {
+	if err := c.call(ctx, "message_wait", control.NewMessageWaitParams(req), &result, messageResponseWait(req.Timeout)); err != nil {
 		return messaging.WaitResult{}, err
 	}
 	return result.WaitResult(), nil
@@ -1028,8 +1050,13 @@ func (c *Client) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, e
 
 // MessageReply answers an ask.
 func (c *Client) MessageReply(req messaging.ReplyRequest) (messaging.SendResult, error) {
+	return c.MessageReplyContext(context.Background(), req)
+}
+
+// MessageReplyContext answers an ask and stops waiting when ctx is done.
+func (c *Client) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	var result control.MessageSendResult
-	if err := c.Call("message_reply", control.NewMessageReplyParams(req), &result); err != nil {
+	if err := c.CallContext(ctx, "message_reply", control.NewMessageReplyParams(req), &result); err != nil {
 		return messaging.SendResult{}, err
 	}
 	return result.SendResult(), nil
@@ -1037,8 +1064,13 @@ func (c *Client) MessageReply(req messaging.ReplyRequest) (messaging.SendResult,
 
 // MessageWithdraw withdraws an outstanding ask.
 func (c *Client) MessageWithdraw(req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	return c.MessageWithdrawContext(context.Background(), req)
+}
+
+// MessageWithdrawContext withdraws an ask and stops waiting when ctx is done.
+func (c *Client) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	var result control.MessageWithdrawResult
-	if err := c.Call("message_withdraw", control.NewMessageWithdrawParams(req), &result); err != nil {
+	if err := c.CallContext(ctx, "message_withdraw", control.NewMessageWithdrawParams(req), &result); err != nil {
 		return messaging.WithdrawResult{}, err
 	}
 	return result.WithdrawResult(), nil
@@ -1046,8 +1078,14 @@ func (c *Client) MessageWithdraw(req messaging.WithdrawRequest) (messaging.Withd
 
 // MessageReceive drains inbound messages.
 func (c *Client) MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return c.MessageReceiveContext(context.Background(), req)
+}
+
+// MessageReceiveContext drains inbound messages and stops waiting when ctx is
+// done.
+func (c *Client) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
 	var result control.MessageReceiveResult
-	if err := c.call("message_receive", control.NewMessageReceiveParams(req), &result, messageResponseWait(req.Timeout)); err != nil {
+	if err := c.call(ctx, "message_receive", control.NewMessageReceiveParams(req), &result, messageResponseWait(req.Timeout)); err != nil {
 		return messaging.ReceiveResult{}, err
 	}
 	return result.ReceiveResult(), nil
@@ -1055,8 +1093,14 @@ func (c *Client) MessageReceive(req messaging.ReceiveRequest) (messaging.Receive
 
 // MessagePeers lists the peers visible to the supervisor session.
 func (c *Client) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult, error) {
+	return c.MessagePeersContext(context.Background(), req)
+}
+
+// MessagePeersContext lists the visible peers and stops waiting when ctx is
+// done.
+func (c *Client) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	var result control.MessagePeersResult
-	if err := c.Call("message_peers", control.NewMessagePeersParams(req), &result); err != nil {
+	if err := c.CallContext(ctx, "message_peers", control.NewMessagePeersParams(req), &result); err != nil {
 		return messaging.PeersResult{}, err
 	}
 	return result.PeersResult(), nil
@@ -1064,8 +1108,14 @@ func (c *Client) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult
 
 // MessagePreflight reports the supervisor transport's protocol and generation.
 func (c *Client) MessagePreflight() (messaging.PreflightResult, error) {
+	return c.MessagePreflightContext(context.Background())
+}
+
+// MessagePreflightContext reports the supervisor transport's protocol and
+// generation, and stops waiting when ctx is done.
+func (c *Client) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
 	var result control.MessagePreflightResult
-	if err := c.Call("message_preflight", nil, &result); err != nil {
+	if err := c.CallContext(ctx, "message_preflight", nil, &result); err != nil {
 		return messaging.PreflightResult{}, err
 	}
 	return result.PreflightResult(), nil
