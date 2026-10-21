@@ -19,10 +19,6 @@ import (
 // supervisorRunID is the broker run id the Go host's owner connection acts as.
 const supervisorRunID = "supervisor"
 
-// selfAlias is the reserved target the router substitutes with the caller's
-// run id before any provider sees it.
-const selfAlias = "self"
-
 // mcpMessageProvider is the router Provider for the Go host surface. It carries
 // no broker token and implements no rename on the transport: resume and rename
 // are control verbs, and a reply has no inbound delivery to claim here.

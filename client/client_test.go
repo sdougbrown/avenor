@@ -1394,18 +1394,40 @@ func TestMessageReceiveOutlivesServerMaximumWait(t *testing.T) {
 }
 
 // TestCallContextStopsWaitingWhenCancelled proves a cancelled request releases
-// the caller instead of holding it for the server's full wait.
+// the caller instead of holding it for the server's full wait, and leaves the
+// connection usable for the next call.
 func TestCallContextStopsWaitingWhenCancelled(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
-	// Read the request so the synchronous pipe write completes, and never
-	// answer it: the caller must be released by cancellation alone.
+	// Read requests so the synchronous pipe write completes. The first one is
+	// never answered: the caller must be released by cancellation alone. Every
+	// later request is answered, which is only observable while the connection
+	// and its pending table are still intact.
 	go func() {
 		reader := bufio.NewReader(serverConn)
+		first := true
 		for {
-			if _, err := reader.ReadString('\n'); err != nil {
+			line, err := reader.ReadString('\n')
+			if err != nil {
 				return
 			}
+			if first {
+				first = false
+				continue
+			}
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(line), &raw); err != nil {
+				return
+			}
+			data, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      raw["id"],
+				"result":  map[string]any{"status": "running"},
+			})
+			if _, err := serverConn.Write(append(data, '\n')); err != nil {
+				return
+			}
+			return
 		}
 	}()
 	c := newClient(clientConn)
@@ -1419,5 +1441,33 @@ func TestCallContextStopsWaitingWhenCancelled(t *testing.T) {
 	err := c.CallContext(ctx, "message_wait", nil, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("CallContext = %v, want context.Canceled", err)
+	}
+	if c.Closed() {
+		t.Fatal("cancelling a call closed the connection")
+	}
+	c.mu.Lock()
+	pending := len(c.pending)
+	c.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending entries after cancellation = %d, want 0", pending)
+	}
+
+	// The same client must still serve a normal call: a cancellation that
+	// closed the connection or left its waiter behind fails here.
+	var result map[string]any
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Call("status", map[string]any{"runtime_id": "rt_1"}, &result)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Call after cancelled CallContext: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Call after cancelled CallContext never completed")
+	}
+	if got, _ := result["status"].(string); got != "running" {
+		t.Fatalf("result after cancelled CallContext = %#v, want status running", result)
 	}
 }
