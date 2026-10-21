@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -252,5 +253,36 @@ func drainSessionEvents(ch <-chan events.Event) []events.Event {
 		default:
 			return out
 		}
+	}
+}
+
+func TestTranscriptPathResolvesSymlinkedDir(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	want := TranscriptPath("/home/u", real, "sid")
+	if got := TranscriptPath("/home/u", link, "sid"); got != want {
+		t.Fatalf("symlinked dir: got %q, want %q", got, want)
+	}
+	if !strings.Contains(want, encodeProjectPath(real)) {
+		t.Fatalf("path %q does not use the resolved dir", want)
+	}
+}
+
+func TestTranscriptPathMissingDirUsedAsGiven(t *testing.T) {
+	got := TranscriptPath("/home/u", "/no/such/dir", "sid")
+	want := filepath.Join("/home/u", ".claude", "projects", "-no-such-dir", "sid.jsonl")
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

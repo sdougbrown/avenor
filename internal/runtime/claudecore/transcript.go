@@ -25,7 +25,14 @@ func encodeProjectPath(dir string) string {
 	return projectPathEncode.ReplaceAllString(dir, "-")
 }
 
+// TranscriptPath returns where Claude Code writes the transcript for a session
+// started in dir. Claude keys the project directory on the resolved working
+// directory (a launch in /tmp lands in "-private-tmp-..." on macOS), so dir is
+// symlink-resolved first; an unresolvable dir is used as given.
 func TranscriptPath(home, dir, sessionID string) string {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 	return filepath.Join(home, ".claude", "projects", encodeProjectPath(dir), sessionID+".jsonl")
 }
 
