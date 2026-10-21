@@ -3,6 +3,7 @@ package terminal
 
 import (
 	"context"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
@@ -22,6 +23,37 @@ const (
 // PID and signaling an ambient process.
 type InterruptSession interface {
 	Interrupt(ctx context.Context) error
+}
+
+// ProgStatusSession is the optional OSC 7501 (Program Status Protocol) seam: a
+// session that observes the hosted program's status reports. Reports come from
+// the program's output and are untrusted.
+type ProgStatusSession interface {
+	// ProgStatusAnswering reports whether the session answers the program's
+	// detection query. A program only reports after its query is answered.
+	ProgStatusAnswering() bool
+	// ProgStatusAnswered reports whether a detection query has been answered.
+	ProgStatusAnswered() bool
+	// ProgStatusRoot returns the current root record. Records survive until
+	// the program replaces or clears them, so reports sent before anyone
+	// asked are not lost.
+	ProgStatusRoot() (ProgStatus, bool)
+	// ProgStatusSince returns the retained reports with Seq greater than
+	// after, oldest first. The log is bounded; lost reports whether reports
+	// after `after` were dropped before this call.
+	ProgStatusSince(after uint64) (reports []ProgReport, lost bool)
+	// ProgStatusChanged returns a channel that receives a value after new
+	// reports are logged or the records change. The sender never blocks, so
+	// one pending value may stand for several changes.
+	ProgStatusChanged() <-chan struct{}
+}
+
+// ProgReport is one accepted report in arrival order. A terminal reset (RIS)
+// appears as a root ProgClear.
+type ProgReport struct {
+	Seq    uint64
+	At     time.Time
+	Status ProgStatus
 }
 
 type Session interface {
