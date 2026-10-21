@@ -1,0 +1,11 @@
+Trimmed PTY captures of Claude Code 2.1.303 (OSC 7501 enabled) for progstatus_test.go.
+Each file is a byte window of one scenario's raw output, aligned to an ESC byte:
+turn-startup  turn: startup chunk (ESC[>0q ESC[?u query ESC[c) then idle, working
+turn-done     turn: done, next working
+turn-clear    turn: final clear (no id)
+perm-blocked  permission prompt: blocked kind=permission with msg
+question-blocked  question prompt: blocked kind=question with msg
+subagent-start    subagent: child working id=... title=...
+subagent-clear    subagent: clear id=...
+cancel-idle   cancelled turn: working then idle
+Local paths in the original captures lie outside these windows.
