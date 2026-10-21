@@ -142,7 +142,7 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 		filtered = append(filtered, "PI_AGENT_PROFILE="+agentProfile)
 	}
 	// Broker credentials let the pi sub-process poll its own inbound asks and
-	// reply via avenor_reply as its own run.
+	// reply via avenor_message as its own run.
 	if brokerURL != "" {
 		filtered = append(filtered, "AVENOR_BROKER_URL="+brokerURL)
 	}
