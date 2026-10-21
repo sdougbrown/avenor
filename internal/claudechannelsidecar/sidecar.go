@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sdougbrown/avenor/internal/brokertools"
+	"github.com/sdougbrown/avenor/internal/childmessaging"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
@@ -40,7 +40,7 @@ type Server struct {
 // sidecarProvider is the shared child provider plus this surface's one extra
 // capability: it can post a control reply over the broker's /reply route.
 type sidecarProvider struct {
-	*brokertools.MessageProvider
+	*childmessaging.MessageProvider
 	server *Server
 }
 
@@ -64,7 +64,7 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	provider, err := brokertools.NewMessageProvider(messaging.SurfaceSidecar, brokertools.Options{
+	provider, err := childmessaging.NewMessageProvider(messaging.SurfaceSidecar, childmessaging.Options{
 		RunID:      opts.RunID,
 		Token:      opts.Token,
 		BrokerURL:  opts.BrokerURL,

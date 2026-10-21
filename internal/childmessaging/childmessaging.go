@@ -1,17 +1,15 @@
-// Package brokertools holds the shared child-side messaging seam used by the
+// Package childmessaging holds the shared child-side messaging seam used by the
 // two Go child surfaces: the channeltools server and the claude-channel
 // sidecar. It implements the router Provider over one localhttp transport, so
 // a child surface supplies credentials and a surface name and gets the same
 // resolution, state, rename and last-message behaviour on both.
-package brokertools
+package childmessaging
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
-	"net/url"
 	"sync"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -37,7 +35,7 @@ type Options struct {
 type MessageProvider struct {
 	opts      Options
 	surface   messaging.Surface
-	transport messaging.Transport
+	transport *localhttp.Transport
 
 	mu         sync.Mutex
 	generation string
@@ -232,14 +230,35 @@ func (p *MessageProvider) Resume(context.Context, messaging.ResumeRequest) (mess
 	}
 }
 
+// Rename renames one run through the transport's authenticated /rename path,
+// so it takes the same protocol gate as the ask verbs.
 func (p *MessageProvider) Rename(ctx context.Context, req messaging.RenameRequest) (messaging.RenameResult, error) {
-	creds := messaging.LocalCredentials{RunID: p.opts.RunID, Token: p.opts.Token}
-	return RenameSelf(ctx, p.opts.HTTPClient, p.opts.BrokerURL, creds, req.SessionID, req.Name)
+	result, err := p.transport.RenameSelf(ctx, req.SessionID, req.Name)
+	if err != nil {
+		return messaging.RenameResult{}, toolErrorFromBroker(err)
+	}
+	return result, nil
 }
 
+// Last reads one target's recorded last turn through the transport's
+// authenticated /last_message path.
 func (p *MessageProvider) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
-	creds := messaging.LocalCredentials{RunID: p.opts.RunID, Token: p.opts.Token}
-	return LastMessage(ctx, p.opts.HTTPClient, p.opts.BrokerURL, creds, runID)
+	last, err := p.transport.LastMessage(ctx, runID)
+	if err != nil {
+		return messaging.PeerLast{}, toolErrorFromBroker(err)
+	}
+	return last, nil
+}
+
+// toolErrorFromBroker maps a broker refusal onto the router's typed code. A
+// failure that is not a broker answer keeps its own text and becomes a refusal
+// at the router boundary.
+func toolErrorFromBroker(err error) error {
+	var brokerErr *localhttp.BrokerError
+	if errors.As(err, &brokerErr) {
+		return toolErrorFor(brokerErr.Status, brokerError{Error: brokerErr.Message, Code: brokerErr.Code})
+	}
+	return err
 }
 
 func firstNonEmpty(values ...string) string {
@@ -256,52 +275,6 @@ func firstNonEmpty(values ...string) string {
 type brokerError struct {
 	Error string `json:"error"`
 	Code  string `json:"code"`
-}
-
-// doAuthed performs one authenticated request. GET credentials travel in
-// headers, matching the broker's /sessions and /last_message routes; a POST
-// body repeats run_id/token because the rename route reads them from the body.
-func doAuthed(ctx context.Context, client *http.Client, method, url string, body map[string]any, creds messaging.LocalCredentials, out any) (int, brokerError, error) {
-	var reader io.Reader
-	if body != nil {
-		raw, err := json.Marshal(body)
-		if err != nil {
-			return 0, brokerError{}, err
-		}
-		reader = bytes.NewReader(raw)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, url, reader)
-	if err != nil {
-		return 0, brokerError{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(messaging.HeaderRunID, creds.RunID)
-	req.Header.Set(messaging.HeaderRunToken, creds.Token)
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, brokerError{}, err
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return resp.StatusCode, brokerError{}, err
-	}
-	var envelope brokerError
-	if len(bytes.TrimSpace(raw)) > 0 && bytes.TrimSpace(raw)[0] == '{' {
-		_ = json.Unmarshal(raw, &envelope)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if envelope.Error == "" {
-			envelope.Error = string(bytes.TrimSpace(raw))
-		}
-		return resp.StatusCode, envelope, nil
-	}
-	if out != nil {
-		if err := json.Unmarshal(raw, out); err != nil {
-			return resp.StatusCode, envelope, err
-		}
-	}
-	return resp.StatusCode, envelope, nil
 }
 
 // wireCode maps a broker error code to the router's typed code. An unrecognised
@@ -338,58 +311,4 @@ func toolErrorFor(status int, envelope brokerError) *router.ToolError {
 		}
 	}
 	return &router.ToolError{Code: code, Message: envelope.Error, Facts: map[string]string{}}
-}
-
-// RenameSelf renames one run through the broker's authenticated /rename route.
-// sessionID is forwarded verbatim (empty means the caller's own run), so
-// Supervisor.SessionRename decides every rule and this helper only maps the
-// wire codes to the router's typed errors.
-func RenameSelf(ctx context.Context, client *http.Client, brokerURL string, creds messaging.LocalCredentials, sessionID, name string) (messaging.RenameResult, error) {
-	body := map[string]any{"run_id": creds.RunID, "token": creds.Token, "name": name}
-	if sessionID != "" {
-		body["session_id"] = sessionID
-	}
-	var result struct {
-		RunID         string `json:"run_id"`
-		Label         string `json:"label"`
-		PreviousLabel string `json:"previous_label"`
-	}
-	status, envelope, err := doAuthed(ctx, client, http.MethodPost, brokerURL+"/rename", body, creds, &result)
-	if err != nil {
-		return messaging.RenameResult{}, err
-	}
-	if status < 200 || status >= 300 {
-		return messaging.RenameResult{}, toolErrorFor(status, envelope)
-	}
-	return messaging.RenameResult{RunID: result.RunID, Label: result.Label, PreviousLabel: result.PreviousLabel}, nil
-}
-
-// LastMessage reads one target's recorded last turn through the broker's
-// universally visible GET /last_message. has_record:false is a successful empty
-// result; a 404 target-unavailable is the unknown_target tool error.
-func LastMessage(ctx context.Context, client *http.Client, brokerURL string, creds messaging.LocalCredentials, target string) (messaging.PeerLast, error) {
-	endpoint := brokerURL + "/last_message?target=" + url.QueryEscape(target)
-	var result struct {
-		RunID       string `json:"run_id"`
-		Label       string `json:"label"`
-		HasRecord   bool   `json:"has_record"`
-		FinalOutput string `json:"final_output"`
-		StopReason  string `json:"stop_reason"`
-		Truncated   bool   `json:"final_output_truncated"`
-	}
-	status, envelope, err := doAuthed(ctx, client, http.MethodGet, endpoint, nil, creds, &result)
-	if err != nil {
-		return messaging.PeerLast{}, err
-	}
-	if status < 200 || status >= 300 {
-		return messaging.PeerLast{}, toolErrorFor(status, envelope)
-	}
-	return messaging.PeerLast{
-		RunID:      result.RunID,
-		Label:      result.Label,
-		HasRecord:  result.HasRecord,
-		Text:       result.FinalOutput,
-		StopReason: result.StopReason,
-		Truncated:  result.Truncated,
-	}, nil
 }

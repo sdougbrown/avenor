@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sdougbrown/avenor/internal/brokertools"
+	"github.com/sdougbrown/avenor/internal/childmessaging"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
@@ -30,7 +30,7 @@ type Options struct {
 
 type Server struct {
 	opts     Options
-	provider *brokertools.MessageProvider
+	provider *childmessaging.MessageProvider
 	outMu    sync.Mutex
 }
 
@@ -57,7 +57,7 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	provider, err := brokertools.NewMessageProvider(messaging.SurfaceChanneltools, brokertools.Options{
+	provider, err := childmessaging.NewMessageProvider(messaging.SurfaceChanneltools, childmessaging.Options{
 		RunID:      opts.RunID,
 		Token:      opts.Token,
 		BrokerURL:  opts.BrokerURL,

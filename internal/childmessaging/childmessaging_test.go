@@ -1,4 +1,4 @@
-package brokertools
+package childmessaging
 
 import (
 	"context"
@@ -101,7 +101,7 @@ func TestProviderResolveAndRunState(t *testing.T) {
 	}
 }
 
-func TestRenameSelfMapsWireCodes(t *testing.T) {
+func TestRenameMapsWireCodes(t *testing.T) {
 	cases := []struct {
 		name     string
 		status   int
@@ -119,22 +119,24 @@ func TestRenameSelfMapsWireCodes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var body map[string]any
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/rename" {
+			provider, _ := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/sessions":
+					_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
+				case "/rename":
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					w.WriteHeader(tc.status)
+					_ = json.NewEncoder(w).Encode(tc.body)
+				default:
 					http.NotFound(w, r)
-					return
 				}
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				w.WriteHeader(tc.status)
-				_ = json.NewEncoder(w).Encode(tc.body)
-			}))
-			defer srv.Close()
-			result, err := RenameSelf(context.Background(), srv.Client(), srv.URL, messaging.LocalCredentials{RunID: "run_1", Token: "tok"}, "run_1", "new")
+			})
+			result, err := provider.Rename(context.Background(), messaging.RenameRequest{SessionID: "run_1", Name: "new"})
 			if tc.wantCode == "" {
 				if err != nil || result.Label != "new" || result.PreviousLabel != "old" {
 					t.Fatalf("rename = %+v, %v", result, err)
 				}
-				if body["session_id"] != "run_1" || body["run_id"] != "run_1" || body["token"] != "tok" {
+				if body["session_id"] != "run_1" || body["run_id"] != "child_run" || body["token"] != "tok_1" {
 					t.Fatalf("rename body = %#v", body)
 				}
 				return
@@ -147,28 +149,51 @@ func TestRenameSelfMapsWireCodes(t *testing.T) {
 	}
 }
 
-func TestLastMessageSeparatesUnknownTargetFromEmptyRecord(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/last_message" {
+func TestLastSeparatesUnknownTargetFromEmptyRecord(t *testing.T) {
+	provider, _ := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
+		case "/last_message":
+			if r.URL.Query().Get("target") == "ghost" {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "run not found: ghost", "code": "target-unavailable"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"run_id": "rt_1", "label": "alpha", "has_record": false})
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		if r.URL.Query().Get("target") == "ghost" {
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]any{"error": "run not found: ghost", "code": "target-unavailable"})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"run_id": "rt_1", "label": "alpha", "has_record": false})
-	}))
-	defer srv.Close()
-	creds := messaging.LocalCredentials{RunID: "run_1", Token: "tok"}
-	empty, err := LastMessage(context.Background(), srv.Client(), srv.URL, creds, "rt_1")
+	})
+	ctx := context.Background()
+	empty, err := provider.Last(ctx, "rt_1")
 	if err != nil || empty.HasRecord {
 		t.Fatalf("empty record = %+v, %v", empty, err)
 	}
-	_, err = LastMessage(context.Background(), srv.Client(), srv.URL, creds, "ghost")
+	_, err = provider.Last(ctx, "ghost")
 	var toolErr *router.ToolError
 	if !errors.As(err, &toolErr) || toolErr.Code != "unknown_target" {
 		t.Fatalf("unknown target error = %v", err)
+	}
+}
+
+// TestRenameAndLastTakeTheProtocolGate proves the two authenticated routes
+// refuse on a broker that does not speak the shared protocol, instead of
+// succeeding where the ask verbs already refused.
+func TestRenameAndLastTakeTheProtocolGate(t *testing.T) {
+	provider, _ := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sessions" {
+			t.Errorf("unexpected path %s on a broker without the protocol marker", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"generation": "gen-1"})
+	})
+	ctx := context.Background()
+	if _, err := provider.Rename(ctx, messaging.RenameRequest{Name: "new"}); !errors.Is(err, messaging.ErrUnsupportedProtocol) {
+		t.Fatalf("rename error = %v, want ErrUnsupportedProtocol", err)
+	}
+	if _, err := provider.Last(ctx, "rt_1"); !errors.Is(err, messaging.ErrUnsupportedProtocol) {
+		t.Fatalf("last error = %v, want ErrUnsupportedProtocol", err)
 	}
 }

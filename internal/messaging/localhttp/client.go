@@ -29,6 +29,8 @@ const (
 	pathWait     = "/wait_reply"
 	pathWithdraw = "/cancel_message"
 	pathPoll     = "/poll-control"
+	pathRename   = "/rename"
+	pathLast     = "/last_message"
 )
 
 // ErrUnsupportedLocalProtocol reports a local broker that does not answer the
@@ -53,7 +55,7 @@ type Transport struct {
 
 // New builds a transport for one caller's existing local run credentials. The
 // address names the local broker; creds.BaseURL, when set, is used instead.
-func New(addr string, creds messaging.LocalCredentials) (messaging.Transport, error) {
+func New(addr string, creds messaging.LocalCredentials) (*Transport, error) {
 	base := strings.TrimSuffix(creds.BaseURL, "/")
 	if base == "" {
 		if addr == "" {
@@ -551,3 +553,120 @@ func (e envelope) unsolicited() error {
 }
 
 var _ messaging.Transport = (*Transport)(nil)
+
+// BrokerError is a non-2xx answer from one of the broker's authenticated
+// routes: the HTTP status, the wire code when the body carried one, and the
+// human text. It lets a child surface map the broker's decision to the router's
+// typed tool errors without re-implementing the request path.
+type BrokerError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *BrokerError) Error() string { return e.Message }
+
+// RenameSelf renames one run through the broker's authenticated /rename route.
+// sessionID is forwarded verbatim (empty means the caller's own run), so the
+// supervisor's rename authority decides every rule. The request passes the same
+// protocol gate as the ask verbs, so a broker that does not speak the shared
+// protocol refuses the rename instead of accepting it and refusing the next
+// send.
+func (t *Transport) RenameSelf(ctx context.Context, sessionID, name string) (messaging.RenameResult, error) {
+	if t.IsClosed() {
+		return messaging.RenameResult{}, messaging.ErrTransportClosed
+	}
+	if _, err := t.ensureProtocol(ctx); err != nil {
+		return messaging.RenameResult{}, err
+	}
+	payload := map[string]any{"name": name}
+	if sessionID != "" {
+		payload["session_id"] = sessionID
+	}
+	var result struct {
+		RunID         string `json:"run_id"`
+		Label         string `json:"label"`
+		PreviousLabel string `json:"previous_label"`
+	}
+	if err := t.getBrokerJSON(ctx, http.MethodPost, pathRename, "", payload, &result); err != nil {
+		return messaging.RenameResult{}, err
+	}
+	return messaging.RenameResult{
+		RunID:         result.RunID,
+		Label:         result.Label,
+		PreviousLabel: result.PreviousLabel,
+	}, nil
+}
+
+// LastMessage reads one target's recorded last turn through the broker's
+// universally visible /last_message route. It takes the same protocol gate as
+// the ask verbs.
+func (t *Transport) LastMessage(ctx context.Context, target string) (messaging.PeerLast, error) {
+	if t.IsClosed() {
+		return messaging.PeerLast{}, messaging.ErrTransportClosed
+	}
+	if _, err := t.ensureProtocol(ctx); err != nil {
+		return messaging.PeerLast{}, err
+	}
+	var result struct {
+		RunID       string `json:"run_id"`
+		Label       string `json:"label"`
+		HasRecord   bool   `json:"has_record"`
+		FinalOutput string `json:"final_output"`
+		StopReason  string `json:"stop_reason"`
+		Truncated   bool   `json:"final_output_truncated"`
+	}
+	query := "?" + url.Values{"target": {target}}.Encode()
+	if err := t.getBrokerJSON(ctx, http.MethodGet, pathLast, query, nil, &result); err != nil {
+		return messaging.PeerLast{}, err
+	}
+	return messaging.PeerLast{
+		RunID:      result.RunID,
+		Label:      result.Label,
+		HasRecord:  result.HasRecord,
+		Text:       result.FinalOutput,
+		StopReason: result.StopReason,
+		Truncated:  result.Truncated,
+	}, nil
+}
+
+// getBrokerJSON performs one authenticated request on the shared request path
+// and decodes a successful body. A non-2xx answer is a *BrokerError carrying
+// the wire code; anything unusable is a protocol mismatch.
+func (t *Transport) getBrokerJSON(ctx context.Context, method, path, query string, payload map[string]any, out any) error {
+	status, raw, err := t.roundTrip(ctx, method, path+query, 0, payload)
+	if err != nil {
+		return err
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if status < 200 || status >= 300 {
+		brokerErr := &BrokerError{Status: status}
+		if len(trimmed) > 0 && trimmed[0] == '{' {
+			var body struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			_ = json.Unmarshal(trimmed, &body)
+			brokerErr.Code = body.Code
+			brokerErr.Message = body.Error
+		}
+		if brokerErr.Message == "" {
+			brokerErr.Message = string(trimmed)
+		}
+		if status == http.StatusUnauthorized {
+			brokerErr.Message = "local broker rejected the run token"
+			brokerErr.Code = "auth-rejected"
+		}
+		return brokerErr
+	}
+	if out == nil {
+		return nil
+	}
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(trimmed, out); err != nil {
+		return fmt.Errorf("%w: %v", ErrUnsupportedLocalProtocol, err)
+	}
+	return nil
+}
