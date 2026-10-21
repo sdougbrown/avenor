@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 )
@@ -245,25 +244,44 @@ func TestSessionScanTranscriptTickEmitsIncrementalContent(t *testing.T) {
 	}
 }
 
+// stubEndTurnSettle replaces the end_turn settle wait with during, run in
+// place of the wait.
+func stubEndTurnSettle(t *testing.T, during func()) {
+	t.Helper()
+	saved := endTurnSettleWait
+	endTurnSettleWait = func(context.Context) bool {
+		during()
+		return true
+	}
+	t.Cleanup(func() { endTurnSettleWait = saved })
+}
+
+func appendFile(t *testing.T, path, text string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const (
+	splitThinking = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}],"stop_reason":"end_turn"}}` + "\n"
+	splitText     = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn"}}` + "\n"
+)
+
 func TestScanTranscriptTickWaitsForSplitEndTurnText(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	thinking := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}],"stop_reason":"end_turn"}}` + "\n"
-	text := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn"}}` + "\n"
-	if err := os.WriteFile(path, []byte(thinking), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(splitThinking), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sess := NewSession(context.Background(), SessionOptions{SessionID: "ses_1", Transcript: NewTranscriptReader(path), EventsBuf: 16})
 	sess.Prompted = true
+	stubEndTurnSettle(t, func() { appendFile(t, path, splitText) })
 
-	go func() {
-		time.Sleep(endTurnSettle / 5)
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		_, _ = f.WriteString(text)
-	}()
 	sess.ScanTranscriptTick()
 	sess.ScanTranscriptTick()
 
@@ -274,6 +292,30 @@ func TestScanTranscriptTickWaitsForSplitEndTurnText(t *testing.T) {
 	want := "agent.thought_chunk,agent.message_chunk,session.end"
 	if got := strings.Join(names, ","); got != want {
 		t.Fatalf("events = %s, want %s", got, want)
+	}
+}
+
+func TestScanTranscriptTickCancelDuringSettleEmitsNothingMore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(splitThinking), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess := NewSession(context.Background(), SessionOptions{SessionID: "ses_1", Transcript: NewTranscriptReader(path), EventsBuf: 16})
+	sess.Prompted = true
+	// A cancel finishes the session while the end_turn settles.
+	stubEndTurnSettle(t, func() {
+		appendFile(t, path, splitText)
+		sess.MarkFinished()
+	})
+
+	sess.ScanTranscriptTick()
+
+	var names []string
+	for _, ev := range drainSessionEvents(sess.Events) {
+		names = append(names, ev.Event)
+	}
+	if got := strings.Join(names, ","); got != "agent.thought_chunk" {
+		t.Fatalf("events = %s, want only the chunk read before the cancel", got)
 	}
 }
 

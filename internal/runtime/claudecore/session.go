@@ -220,6 +220,17 @@ func (s *Session) brokerTerminalPermission(out string) bool {
 // tick between the writes sees only the first.
 var endTurnSettle = 250 * time.Millisecond
 
+// endTurnSettleWait waits out endTurnSettle and reports whether the session's
+// context is still live.
+var endTurnSettleWait = func(ctx context.Context) bool {
+	select {
+	case <-time.After(endTurnSettle):
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (s *Session) emitContent(rec TranscriptRecord) {
 	for _, ev := range rec.ContentEvents {
 		ev.SessionID = s.SessionID
@@ -228,15 +239,19 @@ func (s *Session) emitContent(rec TranscriptRecord) {
 }
 
 // settleEndTurn waits endTurnSettle, then emits whatever the transcript
-// gained meanwhile.
+// gained meanwhile, unless the session finished during the wait (a cancel).
 func (s *Session) settleEndTurn() {
-	select {
-	case <-time.After(endTurnSettle):
-	case <-s.Ctx.Done():
+	if !endTurnSettleWait(s.Ctx) {
 		return
 	}
 	recs, _, err := s.Transcript.Tick()
 	if err != nil {
+		return
+	}
+	s.Mu.Lock()
+	finished := s.Finished
+	s.Mu.Unlock()
+	if finished {
 		return
 	}
 	for _, rec := range recs {
