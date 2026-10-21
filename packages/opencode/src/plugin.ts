@@ -753,6 +753,9 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     if (!binding) return
     if (info.role !== 'assistant') return
     if (info.sessionID !== binding.sessionId) return
+    // A compaction summary is an assistant message on the same session that
+    // also completes; it is the context OpenCode folded away, not an answer.
+    if (info.summary === true) return
     const time = info.time as Record<string, unknown> | undefined
     if (typeof time?.completed !== 'number') return
     const created = typeof time.created === 'number' ? time.created : 0

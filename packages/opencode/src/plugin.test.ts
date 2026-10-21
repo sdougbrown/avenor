@@ -1381,6 +1381,24 @@ describe('OpenCode host turn producer', () => {
     expect(producer.message).not.toHaveBeenCalled()
   })
 
+  it('publishes nothing for an assistant compaction summary', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({
+      'msg-1': [{ type: 'text', text: 'summary of the folded context' }],
+      'msg-2': [{ type: 'text', text: 'the answer' }],
+    })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(hooks, 'session-1')
+
+    await turn(hooks, assistant('msg-1', { time: { created: 1, completed: 2 }, finish: 'stop', summary: true }))
+    expect(record).not.toHaveBeenCalled()
+    expect(producer.message).not.toHaveBeenCalled()
+
+    await turn(hooks, assistant('msg-2', { time: { created: 2, completed: 3 }, finish: 'stop' }))
+    expect(record.mock.calls.map(call => call[0])).toEqual(['the answer'])
+  })
+
   it('publishes nothing before any host tool binds the session', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     providerFactory = () => makeProvider({ recordLastTurn: record })
