@@ -696,11 +696,12 @@ When starting a `claude-channel` backend session, Avenor:
 
 If the session crashes or is forcibly killed, the entry may remain. Use `avenor claude-channel-cleanup --dir <project-dir>` as a recovery command to remove stale entries manually after crash cleanup did not run.
 
-The sidecar speaks JSON-RPC 2.0 over stdio, declares `claude/channel` and `claude/channel/permission` capabilities, and exposes the three tools Claude uses to communicate back:
+The sidecar speaks JSON-RPC 2.0 over stdio, declares `claude/channel` and `claude/channel/permission` capabilities, and exposes the four tools Claude uses to communicate back:
 
 - `avenor_report` — progress update
 - `avenor_finish` — session completion with status and summary
-- `avenor_reply` — directed reply to a named recipient
+- `avenor_message` — reply to a control message with `action="control_reply"`, plus the shared tell/ask/reply/resume/withdraw actions
+- `avenor_peers` — list sessions, rename a session, or read a peer's last message
 
 See [backends.md](backends.md#claude-channel-experimental) for architecture and security notes.
 

@@ -234,7 +234,7 @@ ones are omitted.
 
 A node opts into automatic dispatch with a `dispatch` object in its node
 definition. A node without a `dispatch` object is manual: it is claimed and
-started explicitly, and ordinary `avenor_spawn` behavior is unaffected.
+started explicitly, and ordinary spawn behavior is unaffected.
 
 | Field | Description |
 |---|---|
@@ -273,7 +273,7 @@ approved blindly), and the supervisor spawns the decider run for the
 pending request. The decider agent — for example a static-plus-model gate
 like [pi-rm-guard](https://github.com/sdougbrown/pi-rm-guard) — decides
 allow or reject against the node's declared task and answers through the
-ordinary control plane (`avenor_status`, `avenor_answer_permission`);
+ordinary control plane (the status and answer_permission tools);
 anything it cannot clearly allow or deny it defers, and a deferral is a
 visible pending state: the request stays pending in runtime status for a
 human to answer, never a silent allow. A decider that fails to spawn also
@@ -362,7 +362,7 @@ Trade-offs between the three policies:
 
 | Policy | Judgment | Cost | Best for |
 |---|---|---|---|
-| `permission_policy.decider` | Full agent with tools, verifies via `avenor_status` | One runtime spawn per pending request | Requests that need inspection, multi-step reasoning, or tools |
+| `permission_policy.decider` | Full agent with tools, verifies via the status tool | One runtime spawn per pending request | Requests that need inspection, multi-step reasoning, or tools |
 | `permission_policy.decider_model` | One direct model call against the request mirror | One HTTP call per pending request | Cheap, bounded per-request classification on chatty backends |
 | `auto_approve` | None — everything is allowed | None | Nodes whose requests are known-safe |
 
@@ -514,7 +514,7 @@ Workflow status is one of `active`, `blocked`, `awaiting_gate`, `completed`,
 ### Canceling a workflow
 
 `workflow cancel` (CLI), the `workflow.cancel` control method, and the
-`avenor_workflow_cancel` MCP tool cancel a whole instance with one attributed
+`workflow_cancel` MCP tool cancel a whole instance with one attributed
 decision. `actor` and `reason` are required — the reason is the durable audit
 trail recorded on the `workflow.canceled` event. The kernel transition is
 deterministic: the instance becomes terminal `canceled`, every live lease is
@@ -819,7 +819,7 @@ driving, and reconciling it.
 
 - [CLI reference](cli.md) — `avenor workflow` subcommands
 - [Control protocol](control-protocol.md) — `workflow.*` control methods
-- [MCP](mcp.md) — `avenor_workflow_*` tools
+- [MCP](mcp.md) — `workflow_*` tools
 - [Loop](loop.md) — `loop` action configs
 - [Team](team.md) — `team` action configs
 - [Stable](stable.md) — the supervisor that hosts the workflow manager

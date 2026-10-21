@@ -56,7 +56,7 @@ type Finish struct {
 	Payload      json.RawMessage `json:"payload,omitempty"`
 }
 
-// Reply is the payload from an avenor_reply tool call.
+// Reply is the payload from an avenor_message control_reply call.
 type Reply struct {
 	RunID   string          `json:"run_id"`
 	To      string          `json:"to"`

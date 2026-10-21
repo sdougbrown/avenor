@@ -7,13 +7,15 @@ description: Select an available backend, then delegate and supervise independen
 
 Use the Avenor MCP tools for the full run lifecycle. Do not replace them with shell commands while the tools are available.
 
+These are the MCP server's tool names — `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown` and `workflow_*` — because that server registers them without a prefix. Agent extensions register the same tools with an `avenor_` prefix (`avenor_spawn`, `avenor_message`, and so on), and `inspect` exists only on Pi and OpenCode.
+
 ## Start a run
 
 1. Confirm that delegation is explicit in the request. Do not dispatch ordinary tasks merely because they could be delegated.
 2. Resolve `repo_dir` to the absolute path of the repository the user placed in scope.
 3. Select the backend using the workflow below.
 4. Preserve any requested agent, model, label, and timeout. Omit optional overrides rather than guessing them.
-5. Call `avenor_spawn` with a complete, self-contained prompt and the selected `backend`. Retain the returned `run_id`, `label`, and `supervisor_id`.
+5. Call `spawn` with a complete, self-contained prompt and the selected `backend`. Retain the returned `run_id`, `label`, and `supervisor_id`.
 
 ## Select a backend
 
@@ -43,47 +45,47 @@ must distinguish them because each requires a different action.
 |---|---|---|
 | `running` | Agent is actively working (reading, thinking, running tools). | Keep waiting. Do not treat unchanged `running` as a failure. |
 | `done` (with output) | Agent finished its turn and produced a result (`final_output` present, files changed). | Report the outcome. Verified changed files against the workspace. |
-| `done` (no output) | Agent ended its turn without writing anything. It is likely asking a clarifying question or needs direction. | Inspect output with the host-specific tools below. If the agent asked a question, call `avenor_follow_up`. |
+| `done` (no output) | Agent ended its turn without writing anything. It is likely asking a clarifying question or needs direction. | Inspect output with the host-specific tools below. If the agent asked a question, answer it with `message` and `action: "resume"`. |
 | `failed` | Agent encountered an error mid-run. | Report the failure and any partial artifacts. |
 | `timeout` | Run exceeded its configured timeout. | Report the timeout and any partial artifacts. |
 | `killed` | Run was forcefully terminated. | Report the kill. |
-| `waiting` (`pending_permission`) | Agent hit a tool approval gate. It is blocked mid-task, not finished. | Inspect the offered options. Call `avenor_answer_permission` with an offered `option_id`, then resume monitoring. |
+| `waiting` (`pending_permission`) | Agent hit a tool approval gate. It is blocked mid-task, not finished. | Inspect the offered options. Call `answer_permission` with an offered `option_id`, then resume monitoring. |
 | `unknown` | Supervisor reported a status this client does not recognize. | Keep waiting; report it if it persists. |
 
 ### Two supervision patterns
 
-**Blocking pattern** — call `avenor_result` and let it handle the lifecycle:
+**Blocking pattern** — call `result` and let it handle the lifecycle:
 
-- `avenor_result` waits until the run reaches a terminal state (`done`, `failed`,
+- `result` waits until the run reaches a terminal state (`done`, `failed`,
   `timeout`, `killed`) or a waiting state (`pending_permission`). It handles the
   polling internally and returns the first meaningful state change.
 - This is the simplest pattern: one call, no loop. Use this when you can afford
   to wait rather than parallelize other work.
-- After `pending_permission`, answer it with `avenor_answer_permission` and call
-  `avenor_result` again.
+- After `pending_permission`, answer it with `answer_permission` and call
+  `result` again.
 
-**Polling pattern** — call `avenor_status` periodically and dispatch on the
+**Polling pattern** — call `status` periodically and dispatch on the
 returned state:
 
 ```
 loop:
-  status = avenor_status(run_id, view="lifecycle")
+  s = status(run_id, view="lifecycle")
 
-  if status.status == "running":
+  if s.status == "running":
     wait a few seconds, repeat the loop
 
-  if status.status == "waiting" and status.pending_permission:
+  if s.status == "waiting" and s.pending_permission:
     answer permission, then repeat the loop
 
-  if status.status == "done":
-    full_status = avenor_status(run_id, view="full")
-    check full_status.final_output and changed files
+  if s.status == "done":
+    full = status(run_id, view="full")
+    check full.final_output and changed files
     if output is a question or empty:
-      call avenor_follow_up with your answer
+      call message with action="resume" and your answer
     else:
       report results, exit loop
 
-  if status.status in ("failed", "timeout", "killed"):
+  if s.status in ("failed", "timeout", "killed"):
     report failure, exit loop
 ```
 
@@ -91,7 +93,7 @@ loop:
 
 - **Watching only for file changes.** An agent that finishes its turn without
   writing anything has still finished its turn. Do not treat an empty working
-  tree as "still running." Check `avenor_status` to see if the run is done and
+  tree as "still running." Check `status` to see if the run is done and
   inspect its output.
 - **Watching only for `session.end`.** A permission-blocked run never reaches
   `session.end`. Use the polling pattern above, which checks both terminal
@@ -109,24 +111,24 @@ loop:
 
 ### When to inspect or follow up
 
-- For the complete terminal output, call `avenor_result`. It waits for the
+- For the complete terminal output, call `result`. It waits for the
   run to finish (or hit a permission gate) and returns the full `final_output`
   on every host, including Claude Code.
-- `avenor_status` with `view: "full"` returns lifecycle detail and may include
+- `status` with `view: "full"` returns lifecycle detail and may include
   a bounded `final_output` preview, flagged `final_output_truncated` when cut.
-  For the authoritative, unbounded reply use `avenor_result` instead.
+  For the authoritative, unbounded reply use `result` instead.
 - Do not look for `final_output` in `view: "lifecycle"`; that compact polling
   view omits it.
 - On Pi and OpenCode, call `avenor_inspect` after a `done` run for a bounded
   transcript, tool calls, and final output. Claude Code does not expose this
   tool.
-- On every host, use `avenor_events` only when you need raw event history, such
+- On every host, use `events` only when you need raw event history, such
   as permission history or detailed timing.
-- Call `avenor_follow_up` when a `done` run needs more direction. It spawns a
-  new session continuing from the prior one. Supervise the follow-up run
-  through the same lifecycle: watch for permission gates, terminal states,
-  and clarifying questions.
+- Call `message` with `action: "resume"` when a `done` run needs more direction. It spawns a
+  new session continuing from the prior one, and reports the new `run_id` and
+  `label`. Supervise the resumed run through the same lifecycle: watch for
+  permission gates, terminal states, and clarifying questions.
 
 ## Clean up
 
-Call `avenor_shutdown` only when the user asks to stop Avenor or when all relevant runs are terminal and no follow-up is expected. Do not shut down a supervisor that may own unrelated active runs.
+Call `shutdown` only when the user asks to stop Avenor or when all relevant runs are terminal and no follow-up is expected. Do not shut down a supervisor that may own unrelated active runs.

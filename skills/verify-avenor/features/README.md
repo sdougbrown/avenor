@@ -11,6 +11,7 @@ state named in each file is the acceptance bar for that feature.
 | Event stream reader | [watch.md](watch.md) | `avenor watch` |
 | Permission answering | [permissions.md](permissions.md) | `avenor answer` + permission handler files |
 | Broker messages | [broker-messaging.md](broker-messaging.md) | spawned child ↔ supervisor ask/reply over the broker |
+| Messaging tools | [messaging.md](messaging.md) | `avenor_message` (six actions) + `avenor_peers` (list/rename/last) from a host session and its children |
 | Config validation | [verify-command.md](verify-command.md) | `avenor verify` |
 | Launch identity | [provenance.md](provenance.md) | `avenor run --team-file` → MCP env + phase/team events |
 | Workflow launch wrappers | [workflow-launch-wrappers.md](workflow-launch-wrappers.md) | `avenor stable` + `avenor workflow` → wrapper argv + marker completion |
@@ -22,5 +23,8 @@ Known secondary surfaces not yet mapped: embedded board web UI (built with
 when one of these needs verification coverage.
 
 The backend for all drives is `pi` (the only agent runtime guaranteed on this
-machine); the default `opencode-acp` backend requires `opencode`, which is not
-installed here.
+machine). `opencode` is installed at `/usr/local/bin/opencode`, so the
+`opencode-acp` backend is driveable too — but the installed
+`~/.config/opencode/opencode.json` is rejected by opencode 1.15.5, so a drive
+must point `XDG_CONFIG_HOME` at a scratch config (see
+[messaging.md](messaging.md#gotchas)).
