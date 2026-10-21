@@ -112,7 +112,10 @@ func (s *Server) messageSupervisorPath(raw json.RawMessage) string {
 		_ = json.Unmarshal(raw, &probe)
 	}
 	for _, key := range []string{probe.Target, probe.SessionID} {
-		if key == "" || key == messaging.SupervisorRunID || key == selfAlias {
+		// The router substitutes its reserved self alias with the caller's run
+		// id before a provider sees it, so neither that alias nor the
+		// supervisor's own run id names a supervisor to bind to.
+		if key == "" || key == messaging.SupervisorRunID || key == "self" {
 			continue
 		}
 		if info := s.registry.LookupUnique(key); info != nil && info.SupervisorID != "" {

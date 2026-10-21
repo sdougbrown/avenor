@@ -39,3 +39,12 @@ func (f *fakeIdempotentSupervisor) SessionRename(sessionID, name string) (messag
 func (f *fakeIdempotentSupervisor) SessionLast(runtimeID string) (messaging.PeerLast, error) {
 	return messaging.PeerLast{}, nil
 }
+func (f *fakeIdempotentSupervisor) ResumeContext(_ context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return f.Resume(req)
+}
+func (f *fakeIdempotentSupervisor) SessionRenameContext(_ context.Context, sessionID, name string) (messaging.RenameResult, error) {
+	return f.SessionRename(sessionID, name)
+}
+func (f *fakeIdempotentSupervisor) SessionLastContext(_ context.Context, runtimeID string) (messaging.PeerLast, error) {
+	return f.SessionLast(runtimeID)
+}

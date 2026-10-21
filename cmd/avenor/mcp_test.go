@@ -250,6 +250,15 @@ func (s *stubControlClient) SessionRename(sessionID, name string) (messaging.Ren
 func (s *stubControlClient) SessionLast(runtimeID string) (messaging.PeerLast, error) {
 	return messaging.PeerLast{}, nil
 }
+func (s *stubControlClient) ResumeContext(_ context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return s.Resume(req)
+}
+func (s *stubControlClient) SessionRenameContext(_ context.Context, sessionID, name string) (messaging.RenameResult, error) {
+	return s.SessionRename(sessionID, name)
+}
+func (s *stubControlClient) SessionLastContext(_ context.Context, runtimeID string) (messaging.PeerLast, error) {
+	return s.SessionLast(runtimeID)
+}
 
 func writeTokenFile(t *testing.T, content string, mode os.FileMode) string {
 	t.Helper()

@@ -299,6 +299,18 @@ func (f *fakeClient) SessionLast(runtimeID string) (messaging.PeerLast, error) {
 	return messaging.PeerLast{RunID: runtimeID}, nil
 }
 
+func (f *fakeClient) ResumeContext(_ context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return f.Resume(req)
+}
+
+func (f *fakeClient) SessionRenameContext(_ context.Context, sessionID, name string) (messaging.RenameResult, error) {
+	return f.SessionRename(sessionID, name)
+}
+
+func (f *fakeClient) SessionLastContext(_ context.Context, runtimeID string) (messaging.PeerLast, error) {
+	return f.SessionLast(runtimeID)
+}
+
 type spawnCountingClient struct {
 	spawns atomic.Int32
 }
@@ -345,6 +357,18 @@ func (c *spawnCountingClient) SessionRename(sessionID, name string) (messaging.R
 }
 func (c *spawnCountingClient) SessionLast(runtimeID string) (messaging.PeerLast, error) {
 	return messaging.PeerLast{}, nil
+}
+
+func (c *spawnCountingClient) ResumeContext(_ context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return c.Resume(req)
+}
+
+func (c *spawnCountingClient) SessionRenameContext(_ context.Context, sessionID, name string) (messaging.RenameResult, error) {
+	return c.SessionRename(sessionID, name)
+}
+
+func (c *spawnCountingClient) SessionLastContext(_ context.Context, runtimeID string) (messaging.PeerLast, error) {
+	return c.SessionLast(runtimeID)
 }
 func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
 func (c *spawnCountingClient) WorkflowStatus(string) (map[string]any, error) { return nil, nil }
