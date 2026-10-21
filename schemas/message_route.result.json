@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "The one result object the message and peers tools return on every surface: snake_case keys, the contract field set, and the same nesting for peers list, rename and last. Each surface's test builds the same provider outcome and asserts its structured result equals the entry here, so the Go MCP host, the TypeScript MCP host and the OpenCode plugin cannot drift. 'error' is the shared tool-error object. Keys are absent exactly when the corresponding fact is absent, matching internal/messaging/router Result.Output and ToolError.Output.",
+  "description": "The one result object the message and peers tools return when a surface routes through the shared router: snake_case keys, the contract field set, and the same nesting for peers list, rename and last. A consumer's test builds the same provider outcome and asserts its structured result equals the entry here, so two surfaces cannot return different shapes for one result. 'error' is the shared tool-error object. Keys are absent exactly when the corresponding fact is absent, matching internal/messaging/router Result.Output and ToolError.Output.",
   "message": {
     "tell": {
       "action": "tell",

@@ -32,8 +32,8 @@
 //     repair sentence, an outcome's flags or rendered text. The conformance
 //     fixture is also read at run time by the two case loaders, so a test can
 //     hold the checked-in file and the compiled artifact against each other. The
-//     per-action union is the contract source; every MCP surface publishes the
-//     flat object schema compiled from it, because a `oneOf` union loses the
+//     per-action union is the contract source, and this package compiles the flat
+//     object schema a surface publishes, because a `oneOf` union loses the
 //     integer and object types in at least one real client.
 //
 // Nothing in this package imports a surface package: the router lives in
