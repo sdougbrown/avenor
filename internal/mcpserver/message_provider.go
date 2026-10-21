@@ -18,6 +18,10 @@ import (
 // supervisorRunID is the broker run id the Go host's owner connection acts as.
 const supervisorRunID = "supervisor"
 
+// selfAlias is the reserved target the router substitutes with the caller's
+// run id before any provider sees it.
+const selfAlias = "self"
+
 // mcpMessageProvider is the router Provider for the Go host surface. It carries
 // no broker token and implements no rename on the transport: resume and rename
 // are control verbs, and a reply has no inbound delivery to claim here.
@@ -30,7 +34,7 @@ type mcpMessageProvider struct {
 }
 
 func newMCPMessageProvider(server *Server, client ControlClient, supervisorPath string) (*mcpMessageProvider, error) {
-	pre, err := client.MessagePreflight()
+	pre, err := client.MessagePreflightContext(context.Background())
 	if err != nil {
 		return nil, err
 	}
@@ -102,6 +106,19 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 			Match:       messaging.MatchUnique,
 		}, nil
 	}
+	// A public run id outlives the MCP server process, so the id-only rung
+	// rehydrates it from the supervisor's list. Labels and runtime ids stay
+	// with the broker listing below, keeping the two resolution planes.
+	if info, err := p.server.lookupRunByPublicID(p.client, p.supervisorPath, ref); err != nil {
+		return messaging.Resolution{}, err
+	} else if info != nil && info.RuntimeID != "" {
+		return messaging.Resolution{
+			RunID:       info.RuntimeID,
+			PublicRunID: info.RunID,
+			Label:       firstNonEmptyString(info.Label, info.RunID),
+			Match:       messaging.MatchUnique,
+		}, nil
+	}
 	peers, err := p.transport.Peers(ctx, messaging.PeersRequest{
 		Sender:     messaging.Identity{RunID: supervisorRunID},
 		Generation: p.generation,
@@ -123,7 +140,7 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 			session.RunID = peer.RunID
 		}
 		if session.RunID == ref {
-			return messaging.Resolution{RunID: session.RunID, Label: firstNonEmptyString(session.Label, session.RunID), Match: messaging.MatchUnique}, nil
+			return p.peerResolution(session.RunID, session.Label), nil
 		}
 		if session.Label == ref {
 			candidates = append(candidates, session.RunID)
@@ -132,7 +149,7 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 	}
 	switch len(candidates) {
 	case 1:
-		return messaging.Resolution{RunID: candidates[0], Label: label, Match: messaging.MatchUnique}, nil
+		return p.peerResolution(candidates[0], label), nil
 	case 0:
 		return messaging.Resolution{Match: messaging.MatchNone}, nil
 	default:
@@ -140,11 +157,30 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 	}
 }
 
+// peerResolution projects one broker-listing match into a resolution. The
+// public run id is filled from the registry when this server already knows the
+// run, so peers `last` reports one id space whichever address resolved it.
+func (p *mcpMessageProvider) peerResolution(runID, label string) messaging.Resolution {
+	res := messaging.Resolution{
+		RunID: runID,
+		Label: firstNonEmptyString(label, runID),
+		Match: messaging.MatchUnique,
+	}
+	if info := p.server.registry.LookupRuntime(runID); info != nil {
+		res.PublicRunID = info.RunID
+	}
+	return res
+}
+
 // RunState reads the supervisor's status for the target and classifies the
 // turn and resume facts. Resumable is a resumable sentinel or a live session
-// id; a missing sentinel is simply not resumable from the sentinel.
+// id; a missing sentinel is simply not resumable from the sentinel. The
+// supervisor session is broker-only (it has no runtime), so its state comes
+// from the peer listing the same surface already reads.
 func (p *mcpMessageProvider) RunState(ctx context.Context, runID string) (messaging.RunFacts, error) {
-	_ = ctx
+	if runID == supervisorRunID {
+		return p.peerRunState(ctx, runID)
+	}
 	status, err := p.client.Status(runID)
 	if err != nil {
 		return messaging.RunFacts{}, err
@@ -168,6 +204,43 @@ func (p *mcpMessageProvider) RunState(ctx context.Context, runID string) (messag
 		Live:      !translation.TurnComplete,
 		Resumable: resumable,
 	}, nil
+}
+
+// peerRunState reads one broker-only target's state from the peer listing. A
+// broker-only run holds no sentinel and no session, so it is never resumable
+// from here; the supervisor owns a resume.
+func (p *mcpMessageProvider) peerRunState(ctx context.Context, runID string) (messaging.RunFacts, error) {
+	peers, err := p.transport.Peers(ctx, messaging.PeersRequest{
+		Sender:     messaging.Identity{RunID: supervisorRunID},
+		Generation: p.generation,
+	})
+	if err != nil {
+		return messaging.RunFacts{}, err
+	}
+	for _, peer := range peers.Peers {
+		var session struct {
+			RunID  string `json:"run_id"`
+			Status string `json:"status"`
+		}
+		if len(peer.Session) > 0 {
+			_ = json.Unmarshal(peer.Session, &session)
+		}
+		if session.RunID == "" {
+			session.RunID = peer.RunID
+		}
+		if session.RunID != runID {
+			continue
+		}
+		translation := runstate.Translate(runstate.RuntimeStatus(session.Status), runstate.PhaseNone)
+		return messaging.RunFacts{
+			RunID:     runID,
+			Status:    translation.Status,
+			Phase:     runstate.PhaseNone,
+			Live:      !translation.TurnComplete,
+			Resumable: false,
+		}, nil
+	}
+	return messaging.RunFacts{}, messaging.ErrTargetUnavailable
 }
 
 // Resume forwards every router-supplied field to the control verb and mints
@@ -218,19 +291,39 @@ func (p *mcpMessageProvider) Last(ctx context.Context, runID string) (messaging.
 	return last, nil
 }
 
-// authorityToolError turns a control failure that carries a typed code into the
-// router's tool error, and falls back to a refusal with the control text.
+// authorityToolError turns a control failure that carries a typed router code
+// into the router's tool error, and reports everything else as a refusal with
+// the control text. The control plane also fills the code with the ask
+// transport's wire class (a hyphenated "invalid-request"), which names no
+// router code, so that case is a refusal rather than an unknown code published
+// to the model.
 func authorityToolError(err error) error {
 	var rpcErr *client.RPCError
 	if errors.As(err, &rpcErr) && len(rpcErr.Data) > 0 {
 		var data struct {
 			Code string `json:"code"`
 		}
-		if json.Unmarshal(rpcErr.Data, &data) == nil && data.Code != "" {
+		if json.Unmarshal(rpcErr.Data, &data) == nil && routerToolCodes[data.Code] {
 			return &router.ToolError{Code: data.Code, Message: rpcErr.Message, Facts: map[string]string{}}
 		}
 	}
 	return &router.ToolError{Code: "refused", Message: err.Error(), Facts: map[string]string{}}
+}
+
+// routerToolCodes is the tool-error vocabulary a result may publish. A code
+// outside it came from the wire contract, not from a router decision.
+var routerToolCodes = map[string]bool{
+	"ambiguous_name":         true,
+	"invalid_action":         true,
+	"invalid_name":           true,
+	"invalid_request":        true,
+	"not_permitted":          true,
+	"not_resumable":          true,
+	"refused":                true,
+	"target_not_terminal":    true,
+	"unknown_target":         true,
+	"unsupported_action":     true,
+	"wrong_action_for_state": true,
 }
 
 func firstNonEmptyString(values ...string) string {

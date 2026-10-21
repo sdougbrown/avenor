@@ -137,6 +137,25 @@ func (r *RunRegistry) LookupUnique(key string) *RunInfo {
 	return found
 }
 
+// LookupRuntime returns the entry whose runtime id is runtimeID, or nil. It is
+// an identity projection for reporting a run's public id, not a resolution
+// rung: labels and run ids are still resolved through Lookup/LookupLabel.
+func (r *RunRegistry) LookupRuntime(runtimeID string) *RunInfo {
+	if runtimeID == "" {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, sup := range r.byID {
+		for _, info := range sup {
+			if info.RuntimeID == runtimeID {
+				return info
+			}
+		}
+	}
+	return nil
+}
+
 // UnlinkLabel deletes the label mapping for (supervisorID, label) only when
 // the label currently maps to an entry of that supervisor. The byID entry is
 // left untouched so the dead run remains discoverable by run ID.

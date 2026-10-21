@@ -253,31 +253,31 @@ func (f *fakeClient) WorkflowControllerList() (map[string]any, error) {
 	return f.workflowControllerListResult, f.workflowControllerListErr
 }
 
-func (f *fakeClient) MessageSend(req messaging.SendRequest) (messaging.SendResult, error) {
+func (f *fakeClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{Outcome: messaging.OutcomeSent, MessageID: req.MessageID, Generation: req.Generation}, nil
 }
 
-func (f *fakeClient) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
+func (f *fakeClient) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
 	return messaging.WaitResult{Outcome: messaging.OutcomeReplied}, nil
 }
 
-func (f *fakeClient) MessageReply(req messaging.ReplyRequest) (messaging.SendResult, error) {
+func (f *fakeClient) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{Outcome: messaging.OutcomeReplied, MessageID: req.MessageID}, nil
 }
 
-func (f *fakeClient) MessageWithdraw(req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+func (f *fakeClient) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	return messaging.WithdrawResult{Outcome: messaging.OutcomeWithdrawn}, nil
 }
 
-func (f *fakeClient) MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+func (f *fakeClient) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
 	return messaging.ReceiveResult{}, nil
 }
 
-func (f *fakeClient) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult, error) {
+func (f *fakeClient) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	return messaging.PeersResult{}, nil
 }
 
-func (f *fakeClient) MessagePreflight() (messaging.PreflightResult, error) {
+func (f *fakeClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
 	if f.messagePreflight != nil {
 		return *f.messagePreflight, f.messagePreflightErr
 	}
@@ -316,25 +316,25 @@ func (c *spawnCountingClient) Shutdown(string) error { return nil }
 func (c *spawnCountingClient) Cancel(string) error   { return nil }
 func (c *spawnCountingClient) Close() error          { return nil }
 func (c *spawnCountingClient) Closed() bool          { return false }
-func (c *spawnCountingClient) MessageSend(req messaging.SendRequest) (messaging.SendResult, error) {
+func (c *spawnCountingClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{}, nil
 }
-func (c *spawnCountingClient) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
+func (c *spawnCountingClient) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
 	return messaging.WaitResult{}, nil
 }
-func (c *spawnCountingClient) MessageReply(req messaging.ReplyRequest) (messaging.SendResult, error) {
+func (c *spawnCountingClient) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{}, nil
 }
-func (c *spawnCountingClient) MessageWithdraw(req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+func (c *spawnCountingClient) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	return messaging.WithdrawResult{}, nil
 }
-func (c *spawnCountingClient) MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+func (c *spawnCountingClient) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
 	return messaging.ReceiveResult{}, nil
 }
-func (c *spawnCountingClient) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult, error) {
+func (c *spawnCountingClient) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	return messaging.PeersResult{}, nil
 }
-func (c *spawnCountingClient) MessagePreflight() (messaging.PreflightResult, error) {
+func (c *spawnCountingClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
 	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-test"}, nil
 }
 func (c *spawnCountingClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {

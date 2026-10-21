@@ -250,25 +250,25 @@ func (f *fakeIdempotentSupervisor) WorkflowCancel(workflowID, actor, reason stri
 func (f *fakeIdempotentSupervisor) WorkflowControllerStatus(controllerID string) (map[string]any, error) {
 	return nil, nil
 }
-func (f *fakeIdempotentSupervisor) MessageSend(req messaging.SendRequest) (messaging.SendResult, error) {
+func (f *fakeIdempotentSupervisor) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{}, nil
 }
-func (f *fakeIdempotentSupervisor) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
+func (f *fakeIdempotentSupervisor) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
 	return messaging.WaitResult{}, nil
 }
-func (f *fakeIdempotentSupervisor) MessageReply(req messaging.ReplyRequest) (messaging.SendResult, error) {
+func (f *fakeIdempotentSupervisor) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{}, nil
 }
-func (f *fakeIdempotentSupervisor) MessageWithdraw(req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+func (f *fakeIdempotentSupervisor) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	return messaging.WithdrawResult{}, nil
 }
-func (f *fakeIdempotentSupervisor) MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+func (f *fakeIdempotentSupervisor) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
 	return messaging.ReceiveResult{}, nil
 }
-func (f *fakeIdempotentSupervisor) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult, error) {
+func (f *fakeIdempotentSupervisor) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	return messaging.PeersResult{}, nil
 }
-func (f *fakeIdempotentSupervisor) MessagePreflight() (messaging.PreflightResult, error) {
+func (f *fakeIdempotentSupervisor) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
 	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-test"}, nil
 }
 func (f *fakeIdempotentSupervisor) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {

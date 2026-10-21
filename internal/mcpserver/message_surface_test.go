@@ -1,16 +1,20 @@
 package mcpserver
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
@@ -51,43 +55,51 @@ type recordingControlClient struct {
 	lastID    string
 	lastRes   messaging.PeerLast
 	lastErr   error
+	ctxs      []context.Context
 }
 
 func newRecordingControlClient() *recordingControlClient {
 	return &recordingControlClient{fakeClient: &fakeClient{}}
 }
 
-func (c *recordingControlClient) MessageSend(req messaging.SendRequest) (messaging.SendResult, error) {
+func (c *recordingControlClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	c.ctxs = append(c.ctxs, ctx)
 	c.sent = req
 	return c.sentRes, c.sentErr
 }
 
-func (c *recordingControlClient) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
+func (c *recordingControlClient) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	c.ctxs = append(c.ctxs, ctx)
 	c.waited = req
 	return c.waitRes, c.waitErr
 }
 
-func (c *recordingControlClient) MessageReply(req messaging.ReplyRequest) (messaging.SendResult, error) {
+func (c *recordingControlClient) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
+	c.ctxs = append(c.ctxs, ctx)
 	c.replied = req
 	return c.replyRes, c.replyErr
 }
 
-func (c *recordingControlClient) MessageWithdraw(req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+func (c *recordingControlClient) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	c.ctxs = append(c.ctxs, ctx)
 	c.withdrew = req
 	return c.withdrawR, c.withdrawE
 }
 
-func (c *recordingControlClient) MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+func (c *recordingControlClient) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	c.ctxs = append(c.ctxs, ctx)
 	c.received = req
 	return c.receiveR, c.receiveE
 }
 
-func (c *recordingControlClient) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult, error) {
+func (c *recordingControlClient) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
+	c.ctxs = append(c.ctxs, ctx)
 	c.peered = req
 	return c.peerRes, c.peerErr
 }
 
-func (c *recordingControlClient) MessagePreflight() (messaging.PreflightResult, error) {
+func (c *recordingControlClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
+	c.ctxs = append(c.ctxs, ctx)
 	return c.preflight, c.preflErr
 }
 
@@ -363,7 +375,7 @@ func TestAvenorPeersLastTextIsTheRouterText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, out, err := s.handleAvenorPeers(context.Background(), nil, map[string]any{"action": "last", "target": "rt_7"})
+	res, err := s.handleAvenorPeers(context.Background(), toolRequest(t, map[string]any{"action": "last", "target": "rt_7"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,13 +384,509 @@ func TestAvenorPeersLastTextIsTheRouterText(t *testing.T) {
 	}
 	content, _ := res.Content[0].(*mcpsdk.TextContent)
 	text := content.Text
-	wantText := `**Last message from "mesh-a"** (run "rt_7", stop reason: end_turn)` + "\n\nOK"
+	wantText := lastRenderText(t, "rt_7", "mesh-a", "end_turn") + "\n\nOK"
 	if text != wantText {
 		t.Fatalf("last content = %q, want %q", text, wantText)
 	}
-	details, _ := out.(map[string]any)
+	details, _ := res.StructuredContent.(map[string]any)
 	last, _ := details["last"].(map[string]any)
 	if last["run_id"] != "rt_7" || last["runtime_id"] != "rt_7" || last["label"] != "mesh-a" || last["final_output"] != "OK" || last["stop_reason"] != "end_turn" {
 		t.Fatalf("last details = %#v", details)
+	}
+}
+
+// toolRequest builds the raw-arguments call request the low-level MCP handler
+// receives, so a test drives exactly the arguments the wire carries.
+func toolRequest(t *testing.T, args map[string]any) *mcpsdk.CallToolRequest {
+	t.Helper()
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &mcpsdk.CallToolRequest{Params: &mcpsdk.CallToolParamsRaw{Arguments: raw}}
+}
+
+// lastRenderText renders the peers `last` header from the shared contract
+// fixture instead of restating the template in the test.
+func lastRenderText(t *testing.T, runID, label, stopReason string) string {
+	t.Helper()
+	return messaging.LastRender("header", map[string]string{
+		"run_id":      messaging.Quote(runID),
+		"label":       messaging.Quote(label),
+		"stop_reason": messaging.Sanitize(stopReason),
+	})
+}
+
+// TestMCPMessageProviderRunStateReadsBrokerOnlySupervisor proves the one run
+// the host cannot read through the runtime status verb is read through the
+// peer listing the surface already uses.
+func TestMCPMessageProviderRunStateReadsBrokerOnlySupervisor(t *testing.T) {
+	cl := newRecordingControlClient()
+	cl.statusFunc = func(runtimeID string) (map[string]any, error) {
+		return nil, errors.New(`runtime "supervisor" not found`)
+	}
+	cl.peerRes = messaging.PeersResult{Generation: "gen-7", Peers: []messaging.Peer{
+		{RunID: "supervisor", Session: json.RawMessage(`{"run_id":"supervisor","label":"supervisor","kind":"supervisor","status":"running"}`)},
+	}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := newMCPMessageProvider(s, cl, "sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := p.RunState(context.Background(), supervisorRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !facts.Live || facts.Resumable || facts.Status != "running" {
+		t.Fatalf("supervisor facts = %+v, want live and not resumable", facts)
+	}
+}
+
+// TestAvenorMessageTargetSelfReachesTheSupervisor proves the published `self`
+// alias works on this surface: the tell resolves to the supervisor session and
+// its state comes from the peer listing, not the runtime status verb.
+func TestAvenorMessageTargetSelfReachesTheSupervisor(t *testing.T) {
+	cl := newRecordingControlClient()
+	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
+	cl.statusFunc = func(runtimeID string) (map[string]any, error) {
+		return nil, errors.New(`runtime "supervisor" not found`)
+	}
+	cl.peerRes = messaging.PeersResult{Generation: "gen-7", Peers: []messaging.Peer{
+		{RunID: "supervisor", Session: json.RawMessage(`{"run_id":"supervisor","label":"supervisor","kind":"supervisor","status":"running"}`)},
+	}}
+	cl.sentRes = messaging.SendResult{Outcome: messaging.OutcomeSent}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.handleAvenorMessage(context.Background(), toolRequest(t, map[string]any{
+		"action": "tell", "target": "self", "message": "hi",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("tell to self reported isError: %#v", res.StructuredContent)
+	}
+	if cl.sent.To.RunID != supervisorRunID {
+		t.Fatalf("tell target = %q, want supervisor", cl.sent.To.RunID)
+	}
+	object, _ := res.StructuredContent.(map[string]any)
+	if object["outcome"] != "sent" {
+		t.Fatalf("tell result = %#v", object)
+	}
+}
+
+// TestMCPMessageRouterOwnsAdmission drives the two merged tools over the MCP
+// wire and proves the router, not the SDK's schema validation, answers an
+// inadmissible call with the contract's typed error on this surface too.
+func TestMCPMessageRouterOwnsAdmission(t *testing.T) {
+	cl := newRecordingControlClient()
+	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	clientSession := connectTestClient(t, s)
+	defer clientSession.Close()
+	ctx := context.Background()
+
+	cases := []struct {
+		tool string
+		args map[string]any
+		code string
+		text string
+	}{
+		{
+			tool: "message",
+			args: map[string]any{"action": "bogus"},
+			code: "invalid_action",
+		},
+		{
+			tool: "message",
+			args: map[string]any{"action": "tell", "target": "x", "message": "m", "extra": "field"},
+			code: "invalid_request",
+			text: messaging.Repair("invalid_request", map[string]string{
+				"action": messaging.Quote("tell"),
+				"detail": messaging.Repair("unknown_property", map[string]string{"name": messaging.Quote("extra")}),
+			}),
+		},
+		{
+			tool: "peers",
+			args: map[string]any{"action": "list", "name": "x"},
+			code: "invalid_request",
+			text: messaging.Repair("invalid_request", map[string]string{
+				"action": messaging.Quote("list"),
+				"detail": messaging.Repair("unknown_property", map[string]string{"name": messaging.Quote("name")}),
+			}),
+		},
+	}
+	for _, tc := range cases {
+		result, err := clientSession.CallTool(ctx, &mcpsdk.CallToolParams{Name: tc.tool, Arguments: tc.args})
+		if err != nil {
+			t.Fatalf("%s %v: call: %v", tc.tool, tc.args, err)
+		}
+		if !result.IsError {
+			t.Fatalf("%s %v: IsError = false, want a tool error", tc.tool, tc.args)
+		}
+		structured, _ := result.StructuredContent.(map[string]any)
+		if structured["code"] != tc.code {
+			t.Fatalf("%s %v: code = %v, want %s (%#v)", tc.tool, tc.args, structured["code"], tc.code, structured)
+		}
+		if tc.text != "" && structured["text"] != tc.text {
+			t.Fatalf("%s %v: text = %v, want %q", tc.tool, tc.args, structured["text"], tc.text)
+		}
+		content, _ := result.Content[0].(*mcpsdk.TextContent)
+		if strings.Contains(content.Text, "validating") || strings.Contains(content.Text, "schemas/message.input.json") {
+			t.Fatalf("%s %v: SDK schema validation answered first: %q", tc.tool, tc.args, content.Text)
+		}
+	}
+}
+
+// TestMCPMessageToolErrorIsAnErrorResult proves a router refusal is flagged the
+// way the child surfaces flag it, with the same structured payload.
+func TestMCPMessageToolErrorIsAnErrorResult(t *testing.T) {
+	cl := newRecordingControlClient()
+	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.handleAvenorMessage(context.Background(), toolRequest(t, map[string]any{
+		"action": "tell", "target": "ghost", "message": "hi",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Fatalf("tool error IsError = false, want true (result %#v)", res)
+	}
+	object, _ := res.StructuredContent.(map[string]any)
+	wantText := messaging.Repair("unknown_target", map[string]string{"target": messaging.Quote("ghost")})
+	if object["code"] != "unknown_target" || object["text"] != wantText {
+		t.Fatalf("tool error object = %#v, want unknown_target and %q", object, wantText)
+	}
+	content, _ := res.Content[0].(*mcpsdk.TextContent)
+	if content.Text != wantText {
+		t.Fatalf("tool error content = %q, want %q", content.Text, wantText)
+	}
+}
+
+// TestMCPMessageProviderResolvesPublicRunIDAfterRestart proves the id-only
+// rehydrating rung still resolves a host public run id when the MCP server's
+// in-process registry is empty, without turning labels into a registry plane.
+func TestMCPMessageProviderResolvesPublicRunIDAfterRestart(t *testing.T) {
+	cl := newRecordingControlClient()
+	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
+	cl.listResult = []map[string]any{{
+		"runtime_id":    "rt_restored",
+		"sentinel_file": filepath.Join(t.TempDir(), "avenor-run-11111111-1111-1111-1111-111111111111.done"),
+		"label":         "watched",
+		"status":        "ended",
+	}}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := newMCPMessageProvider(s, cl, "sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := p.Resolve(context.Background(), "11111111-1111-1111-1111-111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Match != messaging.MatchUnique || res.RunID != "rt_restored" || res.PublicRunID != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("public run id after restart = %+v", res)
+	}
+	// The rehydrating rung resolves public ids only: a label still needs the
+	// broker's listing.
+	label, err := p.Resolve(context.Background(), "watched")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if label.Match != messaging.MatchNone {
+		t.Fatalf("label resolved through the id rung: %+v", label)
+	}
+}
+
+// TestPeersLastReportsOneIDSpace proves the same run reports one run_id no
+// matter which address resolved it, so the Stage 8 mesh can compare it with the
+// public ids spawn and status report.
+func TestPeersLastReportsOneIDSpace(t *testing.T) {
+	cl := newRecordingControlClient()
+	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
+	cl.peerRes = messaging.PeersResult{Generation: "gen-7", Peers: []messaging.Peer{
+		{RunID: "rt_a", Session: json.RawMessage(`{"run_id":"rt_a","label":"alpha"}`)},
+	}}
+	cl.lastRes = messaging.PeerLast{RunID: "rt_a", Label: "alpha", HasRecord: true, Text: "OK", StopReason: "end_turn"}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.registry.Store(&RunInfo{RunID: "run-a", RuntimeID: "rt_a", Label: "alpha", SupervisorID: "sock"}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := newMCPMessageProvider(s, cl, "sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"run-a", "rt_a", "alpha"} {
+		result, err := router.ExecutePeers(context.Background(), p, json.RawMessage(`{"action":"last","target":"`+target+`"}`))
+		if err != nil {
+			t.Fatalf("last %s: %v", target, err)
+		}
+		if result.RunID != "run-a" || result.RuntimeID != "rt_a" {
+			t.Fatalf("last %s run ids = %q/%q, want run-a/rt_a", target, result.RunID, result.RuntimeID)
+		}
+	}
+}
+
+// TestAuthorityToolErrorMapsWireCodesToRefused proves a control failure whose
+// code is a wire class, not a router code, is published as a refusal.
+func TestAuthorityToolErrorMapsWireCodesToRefused(t *testing.T) {
+	cases := []struct {
+		data string
+		want string
+	}{
+		{`{"code":"invalid-request"}`, "refused"},
+		{`{"code":"auth-rejected"}`, "refused"},
+		{`{"code":"not_permitted"}`, "not_permitted"},
+		{`{}`, "refused"},
+	}
+	for _, tc := range cases {
+		err := authorityToolError(&client.RPCError{Code: -32000, Message: "broker not available", Data: json.RawMessage(tc.data)})
+		var toolErr *router.ToolError
+		if !errors.As(err, &toolErr) || toolErr.Code != tc.want {
+			t.Fatalf("authorityToolError(%s) = %v, want code %s", tc.data, err, tc.want)
+		}
+	}
+}
+
+// connectTestClient connects an in-memory MCP client to the server, so a test
+// can call a tool over the real wire instead of the handler directly.
+func connectTestClient(t *testing.T, s *Server) *mcpsdk.ClientSession {
+	t.Helper()
+	ctx := context.Background()
+	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
+	serverSession, err := s.mcpServer.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("connect server: %v", err)
+	}
+	t.Cleanup(func() { serverSession.Close() })
+	mcpClient := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "dev"}, nil)
+	clientSession, err := mcpClient.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect client: %v", err)
+	}
+	return clientSession
+}
+
+// controlCall is one request a recording supervisor received.
+type controlCall struct {
+	method string
+	params map[string]any
+}
+
+// startRecordingSupervisor serves the control verbs a resume needs and records
+// every request, so a test can prove which supervisor received it.
+func startRecordingSupervisor(t *testing.T, name, eventLog string) (string, func() []controlCall, func()) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ext")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cap := publishOwnerRecordForStub(t, path)
+
+	var mu sync.Mutex
+	var calls []controlCall
+	resoOne := func(req client.Request) controlCall {
+		var params map[string]any
+		if len(req.Params) > 0 {
+			_ = json.Unmarshal(req.Params, &params)
+		}
+		call := controlCall{method: req.Method, params: params}
+		mu.Lock()
+		calls = append(calls, call)
+		mu.Unlock()
+		return call
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				scanner := bufio.NewScanner(c)
+				for scanner.Scan() {
+					var req client.Request
+					if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+						continue
+					}
+					call := resoOne(req)
+					resp := client.Response{JSONRPC: "2.0", ID: req.ID}
+					switch call.method {
+					case "authenticate_owner":
+						resp = ownerAuthResponse(req, cap)
+					case "message_preflight":
+						resp.Result, _ = json.Marshal(map[string]any{
+							"messaging_protocol": messaging.ProtocolVersion, "generation": "gen-ext",
+						})
+					case "status":
+						if call.params["runtime_id"] == "rt_ext" {
+							resp.Result, _ = json.Marshal(map[string]any{
+								"status": "ended", "phase": "done", "session_id": "ses_ext",
+							})
+						} else {
+							resp.Result, _ = json.Marshal(map[string]any{"status": "running", "agent": "worker"})
+						}
+					case "list":
+						resp.Result, _ = json.Marshal([]map[string]any{{
+							"runtime_id": "rt_ext", "label": "watched", "status": "ended",
+						}})
+					case "message_peers":
+						resp.Result, _ = json.Marshal(map[string]any{
+							"generation": "gen-ext",
+							"peers": []map[string]any{{
+								"run_id": "rt_ext",
+								"session": map[string]any{
+									"run_id": "rt_ext", "label": "watched", "kind": "agent", "status": "ended",
+								},
+							}},
+						})
+					case "resume":
+						runID, _ := call.params["run_id"].(string)
+						resp.Result, _ = json.Marshal(map[string]any{
+							"run_id": runID, "label": "resumed", "runtime_id": "rt_new",
+							"session_id": "ses_new", "on_event": eventLog,
+						})
+					default:
+						resp.Error = &client.RespError{Code: -32601, Message: "method not found"}
+					}
+					data, _ := json.Marshal(resp)
+					_, _ = c.Write(append(data, '\n'))
+				}
+			}(conn)
+		}
+	}()
+	recorder := func() []controlCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]controlCall(nil), calls...)
+	}
+	cleanup := func() {
+		ln.Close()
+		os.Remove(path)
+		os.Remove(control.OwnerRecordPath(path))
+		os.RemoveAll(dir)
+	}
+	return path, recorder, cleanup
+}
+
+// TestAvenorMessageResumesRunOnExternallyWatchedSupervisor is the plan's
+// "resume an externally watched run" regression for this surface: the run's
+// owning supervisor receives the resume, the default supervisor does not, and
+// the resumed run is resolvable and its events readable.
+func TestAvenorMessageResumesRunOnExternallyWatchedSupervisor(t *testing.T) {
+	eventLog := filepath.Join(t.TempDir(), "events.log")
+	if err := os.WriteFile(eventLog, []byte(`{"event":"session.end","ts":1}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	supervisorPath, calls, cleanup := startRecordingSupervisor(t, "avenor-mcp-extern.sock", eventLog)
+	defer cleanup()
+	stubSocketsRoot(t, filepath.Dir(supervisorPath))
+
+	cl := newRecordingControlClient()
+	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		t.Error("the default supervisor received a resume addressed to another supervisor")
+		return messaging.ResumeResult{}, errors.New("wrong supervisor")
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.registry.Store(&RunInfo{
+		RunID: "run-ext", Label: "watched", RuntimeID: "rt_ext", SupervisorID: supervisorPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.handleAvenorMessage(context.Background(), toolRequest(t, map[string]any{
+		"action": "resume", "target": "watched", "message": "go",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("resume reported isError: %#v", res.StructuredContent)
+	}
+	var resumed controlCall
+	found := false
+	for _, call := range calls() {
+		if call.method == "resume" {
+			resumed, found = call, true
+		}
+	}
+	if !found {
+		t.Fatalf("external supervisor received no resume: %v", calls())
+	}
+	if resumed.params["target"] != "rt_ext" || resumed.params["message"] != "go" {
+		t.Fatalf("external resume = %#v", resumed.params)
+	}
+	object, _ := res.StructuredContent.(map[string]any)
+	runID, _ := object["run_id"].(string)
+	info := s.registry.LookupUnique(runID)
+	if info == nil || info.SupervisorID != supervisorPath || info.Label != "resumed" {
+		t.Fatalf("resumed registry entry = %+v, want label resumed on %s", info, supervisorPath)
+	}
+
+	_, out, err := s.handleAvenorEvents(context.Background(), nil, eventsArgs{RunID: runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, _ := out.(map[string]any)["events"].([]map[string]any)
+	if len(events) != 1 || events[0]["event"] != "session.end" {
+		t.Fatalf("resumed run events = %#v", out)
+	}
+}
+
+// TestControlTransportForwardsContext proves every transport verb hands the
+// caller's context to the control client, so a cancelled tool call stops the
+// transport instead of waiting out the server's timeout.
+func TestControlTransportForwardsContext(t *testing.T) {
+	cl := newRecordingControlClient()
+	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
+	tr := newControlTransport(cl)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _ = tr.Send(ctx, messaging.SendRequest{Generation: "gen-7"})
+	_, _ = tr.Wait(ctx, messaging.WaitRequest{Generation: "gen-7"})
+	_, _ = tr.Reply(ctx, messaging.ReplyRequest{})
+	_, _ = tr.Withdraw(ctx, messaging.WithdrawRequest{Generation: "gen-7"})
+	_, _ = tr.Receive(ctx, messaging.ReceiveRequest{Generation: "gen-7"})
+	_, _ = tr.Peers(ctx, messaging.PeersRequest{Generation: "gen-7"})
+	_, _ = tr.Preflight(ctx)
+
+	if len(cl.ctxs) != 7 {
+		t.Fatalf("recorded %d contexts, want 7", len(cl.ctxs))
+	}
+	for i, seen := range cl.ctxs {
+		if seen != ctx {
+			t.Fatalf("verb %d received a different context", i)
+		}
 	}
 }

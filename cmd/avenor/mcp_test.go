@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -219,25 +220,25 @@ func (s *stubControlClient) WorkflowControllerStatus(string) (map[string]any, er
 func (s *stubControlClient) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
 }
-func (s *stubControlClient) MessageSend(req messaging.SendRequest) (messaging.SendResult, error) {
+func (s *stubControlClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{}, nil
 }
-func (s *stubControlClient) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
+func (s *stubControlClient) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
 	return messaging.WaitResult{}, nil
 }
-func (s *stubControlClient) MessageReply(req messaging.ReplyRequest) (messaging.SendResult, error) {
+func (s *stubControlClient) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{}, nil
 }
-func (s *stubControlClient) MessageWithdraw(req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+func (s *stubControlClient) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	return messaging.WithdrawResult{}, nil
 }
-func (s *stubControlClient) MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+func (s *stubControlClient) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
 	return messaging.ReceiveResult{}, nil
 }
-func (s *stubControlClient) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult, error) {
+func (s *stubControlClient) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	return messaging.PeersResult{}, nil
 }
-func (s *stubControlClient) MessagePreflight() (messaging.PreflightResult, error) {
+func (s *stubControlClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
 	return messaging.PreflightResult{}, nil
 }
 func (s *stubControlClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {

@@ -48,13 +48,13 @@ type ControlClient interface {
 	WorkflowControllerStatus(controllerID string) (map[string]any, error)
 	WorkflowControllerList() (map[string]any, error)
 
-	MessageSend(req messaging.SendRequest) (messaging.SendResult, error)
-	MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error)
-	MessageReply(req messaging.ReplyRequest) (messaging.SendResult, error)
-	MessageWithdraw(req messaging.WithdrawRequest) (messaging.WithdrawResult, error)
-	MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error)
-	MessagePeers(req messaging.PeersRequest) (messaging.PeersResult, error)
-	MessagePreflight() (messaging.PreflightResult, error)
+	MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error)
+	MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error)
+	MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error)
+	MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error)
+	MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error)
+	MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error)
+	MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error)
 	Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error)
 	SessionRename(sessionID, name string) (messaging.RenameResult, error)
 	SessionLast(runtimeID string) (messaging.PeerLast, error)
@@ -370,13 +370,17 @@ func NewServer(opts Options) (*Server, error) {
 		Description: "Read recent events from a run's event log",
 	}, s.handleAvenorEvents)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	// The merged tools publish the shared contract schemas but register through
+	// the raw-arguments handler: admission belongs to the router on every
+	// surface, so the SDK's own schema validation must not answer first with an
+	// error shape the other surfaces never produce.
+	mcpServer.AddTool(&mcp.Tool{
 		Name:        "message",
 		Description: "Send, ask, reply to, resume, withdraw or answer a control message between agent runs",
 		InputSchema: messaging.MessageInputSchema(),
 	}, s.handleAvenorMessage)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
+	mcpServer.AddTool(&mcp.Tool{
 		Name:        "peers",
 		Description: "List connected agent sessions, rename a run's display name, or read a peer's last agent message",
 		InputSchema: messaging.PeersInputSchema(),
@@ -663,6 +667,34 @@ func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunIn
 	// run stays reachable by label for its persisted result and event log.
 	if ri := s.registry.LookupLabel(supervisorPath, key); ri != nil {
 		return ri, nil
+	}
+	return nil, nil
+}
+
+// lookupRunByPublicID rehydrates the registry from the supervisor's list on a
+// miss and resolves one public run id only. Unlike lookupRun it never matches a
+// label, a runtime id or a sentinel path fragment, so the message provider
+// keeps the two resolution planes while still resolving a public run id that
+// outlived this MCP server process.
+func (s *Server) lookupRunByPublicID(cl ControlClient, supervisorPath, runID string) (*RunInfo, error) {
+	// Public run ids are UUIDs the surface minted; anything else is a label or
+	// a runtime id and belongs to the broker listing, so no list is issued.
+	if _, err := uuid.Parse(runID); err != nil {
+		return nil, nil
+	}
+	if ri := s.registry.Lookup(supervisorPath, runID); ri != nil {
+		return ri, nil
+	}
+	entries, err := cl.List()
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	for _, entry := range entries {
+		sentinelFile, _ := entry["sentinel_file"].(string)
+		if runstate.RunIDFromSentinel(sentinelFile) != runID {
+			continue
+		}
+		return s.runInfoFromListEntry(entry, supervisorPath)
 	}
 	return nil, nil
 }

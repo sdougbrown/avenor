@@ -1266,7 +1266,7 @@ func TestClientClosedStateByFailureKind(t *testing.T) {
 		defer c.Close()
 		// A short wait bounds the response wait so the test stays fast; the
 		// timeout path must not mark the connection closed.
-		err = c.call("hang", nil, nil, 200*time.Millisecond)
+		err = c.call(context.Background(), "hang", nil, nil, 200*time.Millisecond)
 		if err == nil {
 			t.Fatal("expected a timeout error")
 		}
@@ -1391,4 +1391,33 @@ func TestMessageReceiveOutlivesServerMaximumWait(t *testing.T) {
 			t.Fatal("the receive never observed the late response")
 		}
 	})
+}
+
+// TestCallContextStopsWaitingWhenCancelled proves a cancelled request releases
+// the caller instead of holding it for the server's full wait.
+func TestCallContextStopsWaitingWhenCancelled(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	// Read the request so the synchronous pipe write completes, and never
+	// answer it: the caller must be released by cancellation alone.
+	go func() {
+		reader := bufio.NewReader(serverConn)
+		for {
+			if _, err := reader.ReadString('\n'); err != nil {
+				return
+			}
+		}
+	}()
+	c := newClient(clientConn)
+	defer c.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	err := c.CallContext(ctx, "message_wait", nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CallContext = %v, want context.Canceled", err)
+	}
 }
