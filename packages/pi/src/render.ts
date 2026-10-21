@@ -24,7 +24,15 @@ type StatusArgs = { run_id?: string; view?: string; supervisor_id?: string }
 type ResultArgs = { run_id?: string; wait?: boolean; timeout?: string; supervisor_id?: string }
 type InspectArgs = { run_id?: string; limit?: number; after_seq?: number; supervisor_id?: string }
 type PermissionArgs = { run_id?: string; option_id?: string; request_id?: string; message?: string; supervisor_id?: string }
-type FollowUpArgs = { run_id?: string; message?: string; label?: string; supervisor_id?: string }
+type MessageResumeArgs = {
+  action?: string
+  target?: string
+  message?: string
+  label?: string
+  reply_to?: string
+  message_id?: string
+  payload?: unknown
+}
 type EventsArgs = { run_id?: string; types?: string[]; limit?: number; supervisor_id?: string }
 type ShutdownArgs = { supervisor_id?: string; force?: boolean }
 type WorkflowControllerStatusArgs = { controller_id?: string; supervisor_id?: string }
@@ -199,7 +207,7 @@ function guidance(status: string, pending: RecordValue | undefined, runId: strin
     if (pending) {
       return `Guidance: Permission input is required, but no options are available; call avenor_inspect with run_id "${runId}".`
     }
-    return `Guidance: Call avenor_follow_up or avenor_status with run_id "${runId}".`
+    return `Guidance: Call avenor_message with action "resume" or avenor_status with run_id "${runId}".`
   }
   if (isTerminal(status)) return `Guidance: Call avenor_result or avenor_events with run_id "${runId}".`
   return `Guidance: Call avenor_result with run_id "${runId}".`
@@ -311,18 +319,36 @@ function permissionLines(details: unknown, args: PermissionArgs): string[] | und
   ]
 }
 
-function followUpLines(details: unknown, args: FollowUpArgs): string[] | undefined {
+function messageLines(details: unknown, args: MessageResumeArgs): string[] | undefined {
   const result = asRecord(details)
-  if (!result || !stringValue(result.run_id) || !stringValue(result.label)) return undefined
-  const runId = selected(result, 'run_id', args.run_id)
-  const label = selected(result, 'label', args.label, runId)
-  return [
-    `Follow-up: ${label} — dispatched.`,
-    `Source run: ${scalar(args.run_id)}`,
-    `Run: ${runId}`,
-    `Label: ${label}`,
-    `Guidance: Call avenor_status with run_id "${runId}".`,
-  ]
+  if (!result) return undefined
+  const action = selectedOptional(result, 'action') ?? stringValue(args.action) ?? 'tell'
+  if (action === 'resume') {
+    const runId = selected(result, 'run_id', args.target)
+    const label = selected(result, 'label', args.label, runId)
+    if (!stringValue(runId) || !stringValue(label)) return undefined
+    return [
+      `Resume: ${label} — dispatched.`,
+      `Source run: ${scalar(args.target)}`,
+      `Run: ${runId}`,
+      `Label: ${label}`,
+      `Guidance: Call avenor_status with run_id "${runId}".`,
+    ]
+  }
+  const outcome = selectedOptional(result, 'outcome') ?? 'done'
+  const verb = action.charAt(0).toUpperCase() + action.slice(1)
+  const lines = [`${verb}: ${outcome}.`]
+  const text = selectedOptional(result, 'text')
+  if (text) lines.push(scalar(text))
+  const messageId = selectedOptional(result, 'message_id')
+    ?? stringValue(args.reply_to)
+    ?? stringValue(args.message_id)
+  if (messageId) lines.push(`Message: ${scalar(messageId)}`)
+  const reply = selectedOptional(result, 'reply')
+  if (action === 'ask' && reply) lines.push(`Reply: ${scalar(reply)}`)
+  const target = selectedOptional(result, 'label') ?? (action === 'reply' ? undefined : stringValue(args.target))
+  if (target) lines.push(`Target: ${scalar(target)}`)
+  return lines
 }
 
 function eventSequence(value: unknown): string | undefined {
@@ -585,15 +611,23 @@ export function renderAnswerPermissionCall(args: PermissionArgs, theme: Theme): 
   return linesText([pieces.join(' ')], theme)
 }
 
-export function renderFollowUpCall(args: FollowUpArgs, theme: Theme): Text {
-  const pieces = [
-    `avenor_follow_up run_id ${quoted(args.run_id)}`,
-    `message ${quoted(args.message)}`,
-  ]
-  const label = optionalQuoted(args.label)
-  const supervisor = optionalQuoted(args.supervisor_id)
-  if (label) pieces.push(`label ${label}`)
-  if (supervisor) pieces.push(`supervisor_id ${supervisor}`)
+export function renderMessageResumeCall(args: MessageResumeArgs, theme: Theme): Text {
+  const action = stringValue(args.action) || 'tell'
+  const pieces = [`avenor_message action ${quoted(action)}`]
+  if (action === 'reply') {
+    pieces.push(`reply_to ${quoted(args.reply_to)}`, `message ${quoted(args.message)}`)
+  } else if (action === 'withdraw') {
+    pieces.push(`message_id ${quoted(args.message_id)}`)
+  } else if (action === 'control_reply') {
+    pieces.push(`target ${quoted(args.target)}`)
+    if (args.payload !== undefined) pieces.push(`payload ${quoted(JSON.stringify(args.payload))}`)
+  } else {
+    pieces.push(`target ${quoted(args.target)}`, `message ${quoted(args.message)}`)
+    if (action === 'resume') {
+      const label = optionalQuoted(args.label)
+      if (label) pieces.push(`label ${label}`)
+    }
+  }
   return linesText([pieces.join(' ')], theme)
 }
 
@@ -634,8 +668,8 @@ export function renderAnswerPermissionResult(result: ToolResult, options: ToolRe
   return render('answer_permission', result, options, theme, () => permissionLines(result.details, args))
 }
 
-export function renderFollowUpResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: FollowUpArgs): Text {
-  return render('follow_up', result, options, theme, () => followUpLines(result.details, args))
+export function renderMessageResumeResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: MessageResumeArgs): Text {
+  return render('message', result, options, theme, () => messageLines(result.details, args))
 }
 
 export function renderEventsResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: EventsArgs): Text {

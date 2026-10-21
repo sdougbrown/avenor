@@ -67,7 +67,6 @@ export { followUpTool } from './tools/follow-up.js'
 export type { FollowUpToolArgs, FollowUpToolResult } from './tools/follow-up.js'
 export { askTool } from './tools/ask.js'
 export type { AskToolArgs, AskResult } from './tools/ask.js'
-export type { PeerEntry } from './tools/peers.js'
 export { cancelTool } from './tools/cancel.js'
 export type { CancelToolArgs, CancelResult } from './tools/cancel.js'
 export { brokerReplyTool } from './tools/broker-reply.js'
@@ -80,11 +79,10 @@ export { inspectTool } from './tools/inspect.js'
 export type { InspectResult } from './tools/inspect.js'
 export { shutdownTool } from './tools/shutdown.js'
 
-// Temporary until 356-12: the ask-failure renderer keeps its old text until
-// the Pi child migrates to the router's renderer.
-export { formatAskFailure } from './tools/ask.js'
-export { extractReplyMessage, normalizeAskTimeoutMs } from './messaging-text.js'
 export {
+  extractReplyMessage,
+  renderAskFailure,
+  normalizeAskTimeoutMs,
   renderOutcome,
   repair,
   renderLast,

@@ -7,14 +7,10 @@ import * as path from 'node:path'
 import { createOwnerGate, respond, type OwnerGateRequest } from '../../test/fixtures/owner-gate.js'
 import { OwnerRecordMissingError } from '../owner-attach.js'
 import { answerPermissionTool } from './answer-permission.js'
-import { askTool } from './ask.js'
 import { brokerReceiveTool } from './broker-receive.js'
-import { brokerReplyTool } from './broker-reply.js'
-import { cancelTool } from './cancel.js'
-import { followUpTool } from './follow-up.js'
 import { getSupervisorClient } from './get-supervisor-client.js'
 import { killTool } from './kill.js'
-import { peersTool } from './peers.js'
+import { shutdownTool } from './shutdown.js'
 import { statusTool } from './status.js'
 
 describe('read-only control clients', () => {
@@ -39,13 +35,25 @@ describe('read-only control clients', () => {
         buffer = lines.pop() ?? ''
         for (const line of lines) {
           if (!line.trim()) continue
-          const request = JSON.parse(line) as { id: number, method: string }
+          const request = JSON.parse(line) as { id: number, method: string, params?: Record<string, unknown> }
+          if (request.method === 'message_receive' && request.params?.generation !== 'gen-1') {
+            socket.write(JSON.stringify({
+              jsonrpc: '2.0',
+              id: request.id,
+              error: {
+                code: -32000,
+                message: 'messaging: generation mismatch',
+                data: { code: 'generation-mismatch', outcome: 'not-sent', wire_code: 'generation-mismatch' },
+              },
+            }) + '\n')
+            continue
+          }
           const result = request.method === 'list'
             ? []
-            : request.method === 'broker_peers'
-              ? { sessions: [{ run_id: 'peer' }] }
-              : request.method === 'broker_receive'
-                ? []
+            : request.method === 'message_preflight'
+              ? { protocol: 1, generation: 'gen-1' }
+              : request.method === 'message_receive'
+                ? { messages: [], generation: 'gen-1' }
                 : undefined
           socket.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n')
         }
@@ -69,8 +77,9 @@ describe('read-only control clients', () => {
     expect(await client.list()).toEqual([])
     client.close()
 
-    expect(await peersTool({ supervisorId: socketPath })).toEqual({ peers: [{ run_id: 'peer' }] })
-    expect(await brokerReceiveTool({ supervisorId: socketPath })).toEqual({ asks: [] })
+    expect(await brokerReceiveTool({ supervisorId: socketPath })).toEqual({ asks: [], generation: 'gen-1' })
+    // A bound poll reuses its generation instead of preflighting every receive.
+    expect(await brokerReceiveTool({ supervisorId: socketPath, generation: 'gen-1' })).toEqual({ asks: [], generation: 'gen-1' })
     expect(await statusTool({ supervisorId: socketPath })).toMatchObject({ runs: [], count: 0 })
   })
 
@@ -104,8 +113,6 @@ describe('owner-gated control tools', () => {
           return [{ run_id: 'run-1', label: 'demo', runtime_id: 'rt-1', session_id: 'ses-1' }]
         case 'status':
           return { run_id: 'run-1', runtime_id: 'rt-1', status: 'running', session_id: 'ses-1' }
-        case 'broker_ask':
-          return { message: 'reply text', from_run_id: 'rt-1' }
         default:
           return { ok: true }
       }
@@ -152,31 +159,6 @@ describe('owner-gated control tools', () => {
     run: (supervisorId: string) => Promise<unknown>
   }> = [
     {
-      name: 'cancel',
-      method: 'broker_cancel',
-      run: supervisorId => cancelTool({ messageId: 'message-1', supervisorId }),
-    },
-    {
-      name: 'ask',
-      method: 'broker_ask',
-      run: supervisorId => askTool({ toRunId: 'run-1', message: 'hello', supervisorId }),
-    },
-    {
-      name: 'broker-reply',
-      method: 'broker_reply',
-      run: supervisorId => brokerReplyTool({
-        toRunId: 'rt-1',
-        replyTo: 'message-1',
-        message: 'hi',
-        supervisorId,
-      }),
-    },
-    {
-      name: 'follow-up',
-      method: 'spawn',
-      run: supervisorId => followUpTool({ runId: 'run-1', message: 'continue', supervisorId }),
-    },
-    {
       name: 'kill',
       method: 'cancel',
       run: supervisorId => killTool({ runId: 'run-1', supervisorId }),
@@ -190,6 +172,11 @@ describe('owner-gated control tools', () => {
         requestId: 'request-1',
         supervisorId,
       }),
+    },
+    {
+      name: 'shutdown',
+      method: 'shutdown',
+      run: supervisorId => shutdownTool({ supervisorId }),
     },
   ]
 

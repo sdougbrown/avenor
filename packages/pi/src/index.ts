@@ -1,36 +1,35 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
-import { randomUUID } from 'node:crypto'
 import {
-  buildAgentMessage,
+  createBrokerChildBroker,
+  formatInboundAskBody,
   parseControlMessage,
   postBroker,
   readSubAgentEnv,
   type SubAgentEnv,
 } from './subagent-broker.js'
-// Temporary until 356-13: the retired per-action tools still ask through the
-// legacy child-ask path.
-import {
-  askViaBroker,
-  formatInboundAskBody,
-  resolveReplyTarget,
-  withdrawPendingAsk,
-} from './subagent-legacy.js'
 import {
   answerPermissionTool,
-  askTool,
   attachOwner,
   brokerReceiveTool,
-  brokerReplyTool,
-  cancelTool,
+  boundFinalOutput,
+  createChildMessageProvider,
+  createHostMessageProvider,
   dial,
   eventsTool,
-  followUpTool,
+  extractTurnText,
+  getSupervisorClient,
   inspectTool,
   killTool,
+  messageTool,
+  normalizeTurnStopReason,
   observeRun,
+  peersDetails,
   peersTool,
+  RpcError,
+  renderPeerList,
+  resultOutput,
   resultTool,
   shutdownTool,
   spawnTool,
@@ -46,8 +45,11 @@ import {
   workflowGateTool,
   workflowControllerStatusTool,
   workflowReadyTool,
+  workflowCancelTool,
   type Client,
   type InspectResult,
+  type MessageProvider,
+  type ProviderResult,
   type ResultResult,
   type RunObserver,
   type RunSnapshot,
@@ -82,8 +84,8 @@ import {
   renderAnswerPermissionResult,
   renderEventsCall,
   renderEventsResult,
-  renderFollowUpCall,
-  renderFollowUpResult,
+  renderMessageResumeCall,
+  renderMessageResumeResult,
   renderInspectCall,
   renderInspectResult,
   renderResultCall,
@@ -116,11 +118,10 @@ export interface ExtensionDeps {
   statusTool: typeof statusTool
   eventsTool: typeof eventsTool
   answerPermissionTool: typeof answerPermissionTool
-  followUpTool: typeof followUpTool
+  messageTool: typeof messageTool
   inspectTool: typeof inspectTool
   resultTool: typeof resultTool
   brokerReceiveTool: typeof brokerReceiveTool
-  brokerReplyTool: typeof brokerReplyTool
   shutdownTool: typeof shutdownTool
   killTool: typeof killTool
   workflowStatusTool: typeof workflowStatusTool
@@ -131,6 +132,11 @@ export interface ExtensionDeps {
   workflowGateTool: typeof workflowGateTool
   workflowControllerStatusTool: typeof workflowControllerStatusTool
   workflowReadyTool: typeof workflowReadyTool
+  workflowCancelTool: typeof workflowCancelTool
+  /** Resolve the bound provider for one supervisor, creating it on demand. */
+  hostProviderFor?: (supervisorId: string | undefined) => Promise<MessageProvider>
+  /** Dial a supervisor for the default host provider; tests inject a fake client. */
+  getSupervisorClient?: typeof getSupervisorClient
   observeRun: typeof observeRun
   dial: typeof dial
   attachOwner: typeof attachOwner
@@ -142,11 +148,10 @@ const defaultDeps: ExtensionDeps = {
   statusTool,
   eventsTool,
   answerPermissionTool,
-  followUpTool,
+  messageTool,
   inspectTool,
   resultTool,
   brokerReceiveTool,
-  brokerReplyTool,
   shutdownTool,
   killTool,
   workflowStatusTool,
@@ -157,6 +162,10 @@ const defaultDeps: ExtensionDeps = {
   workflowGateTool,
   workflowControllerStatusTool,
   workflowReadyTool,
+  workflowCancelTool,
+  // A surface that supplies its own provider sets hostProviderFor; the default
+  // is the provider cache below, bound to the singleton.
+  getSupervisorClient,
   observeRun,
   dial,
   attachOwner,
@@ -234,7 +243,7 @@ export function buildCompletionText(
   }
   lines.push(
     '',
-    `Call \`avenor_inspect\` with \`run_id: "${run.runId}"\` for the bounded transcript/snapshot, or \`avenor_follow_up\` to iterate.`,
+    `Call \`avenor_inspect\` with \`run_id: "${run.runId}"\` for the bounded transcript/snapshot, or \`avenor_message\` with \`action: "resume"\` to iterate.`,
   )
   return lines.join('\n')
 }
@@ -255,7 +264,7 @@ function buildWaitingText(run: { runId: string; label: string; agent?: string },
   }
   if (!perm) {
     lines.push(
-      `Use \`avenor_follow_up\` with run_id "${run.runId}" to respond, or \`avenor_inspect\` to review context first.`,
+      `Use \`avenor_message\` with \`action: "resume"\` and target "${run.runId}" to respond, or \`avenor_inspect\` to review context first.`,
     )
   }
   return lines.join('\n')
@@ -509,17 +518,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // Sub-agent broker mode: when the avenor pi provider launches a pi
     // sub-process it injects broker credentials via AVENOR_BROKER_URL /
     // AVENOR_RUN_ID / AVENOR_BROKER_TOKEN. In that mode this extension polls
-    // its own run for inbound asks (a host calling avenor_ask on it) and lets
-    // the sub-agent answer an inbound ask, instead of acting as a top-level
-    // host; 356-13 moves those answers onto the child broker, and until then
-    // the reply still goes through the legacy avenor_reply postBroker call.
+    // its own run for inbound asks (a host calling the merged message tool on
+    // it) and lets the sub-agent answer through the child broker, instead of
+    // acting as a top-level host.
     const subAgentEnv = options.subAgentEnv !== undefined ? options.subAgentEnv : readSubAgentEnv()
     const isSubAgentBrokerMode = subAgentEnv !== null
     let subAgentPollTimer: ReturnType<typeof setTimeout> | null = null
     // Bumped on every start/stop so an in-flight tick cannot reschedule
     // itself after the poll was stopped.
     let subAgentPollGeneration = 0
-    // pending inbound asks keyed by broker message_id so avenor_reply can target them.
+    // pending inbound asks keyed by broker message_id so a reply can reach the asker.
     const subAgentPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
 
     function stopSubAgentPoll(): void {
@@ -549,7 +557,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             const ask = parseControlMessage(msg)
             if (!ask) continue
             subAgentPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
-            pi.sendUserMessage(formatInboundAskBody(ask), { deliverAs: 'steer' as const })
+            pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Inbound ask' }), { deliverAs: 'steer' as const })
           }
         } catch (error) {
           // Broker unreachable while it is starting up is expected; persistent
@@ -572,8 +580,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // Bumped on every start/stop so an in-flight tick cannot deliver or
     // reschedule itself after the poll was invalidated.
     let hostPollGeneration = 0
-    // pending inbound asks keyed by broker message_id so avenor_reply can target them.
+    // The broker generation this poll is bound to. The first tick preflights
+    // once, and a generation mismatch rebinds once instead of retrying the
+    // dead binding forever.
+    let hostReceiveGeneration: string | undefined
+    // pending inbound asks keyed by broker message_id so a reply can reach the asker.
     const hostPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
+
+    function isGenerationMismatch(error: unknown): boolean {
+      if (error instanceof RpcError) {
+        const data = error.data as Record<string, unknown> | null | undefined
+        if (data?.code === 'generation-mismatch' || data?.wire_code === 'generation-mismatch') return true
+      }
+      return error instanceof Error && /generation mismatch/i.test(error.message)
+    }
 
     function stopHostAskPoll(): void {
       hostPollGeneration++
@@ -591,16 +611,26 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // the next tick and surface asks out of order.
       const tick = async (): Promise<void> => {
         try {
-          const { asks } = await deps.brokerReceiveTool({})
+          const receive = () => hostReceiveGeneration
+            ? deps.brokerReceiveTool({ generation: hostReceiveGeneration })
+            : deps.brokerReceiveTool({})
+          let received
+          try {
+            received = await receive()
+          } catch (error) {
+            if (!hostReceiveGeneration || !isGenerationMismatch(error)) throw error
+            // One rebind: the next call preflights and binds the new broker.
+            hostReceiveGeneration = undefined
+            received = await receive()
+          }
           if (generation !== hostPollGeneration) return
-          for (const ask of asks) {
+          if (received.generation) hostReceiveGeneration = received.generation
+          for (const ask of received.asks) {
             hostPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
-            const from = ask.role && ask.role !== 'agent' ? `${ask.from_run_id} (${ask.role})` : ask.from_run_id
-            const body =
-              `**📨 Ask from sub-agent** (\`${from}\`)\n\n` +
-              `${ask.message}\n\n` +
-              `To answer, use the intercom tool: avenor_reply({ from_run_id: ${JSON.stringify(ask.from_run_id)}, reply_to_message_id: ${JSON.stringify(ask.message_id)}, message: "..." })`
-            pi.sendUserMessage(body, { deliverAs: 'steer' as const })
+            pi.sendUserMessage(
+              formatInboundAskBody(ask, { heading: 'Ask from sub-agent', role: ask.role }),
+              { deliverAs: 'steer' as const },
+            )
           }
         } catch {
           // No supervisor/broker yet — this is expected until a supervisor starts a broker.
@@ -1056,43 +1086,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             await client.interruptAndPrompt(runtimeId, text)
           })
         },
-        followUpRun(run, text) {
-          return deps.followUpTool({
-            runId: run.runId,
-            message: text,
-            supervisorId: run.supervisorId,
-          })
+        resumeRun(run, text) {
+          return resumeTrackedRun(run, text)
         },
       }
     }
 
-    async function followUpTrackedRun(run: WatchRunRef, text: string): Promise<{ run_id: string; label: string }> {
-      const result = await deps.followUpTool({
-        runId: run.runId,
-        message: text,
-        supervisorId: run.supervisorId,
-      })
-      try {
-        const rawStatus = await deps.statusTool({ runId: result.run_id, supervisorId: run.supervisorId })
-        const status = asStatusResult(rawStatus)
-        upsertTrackedRun({
-          runId: result.run_id,
-          label: result.label,
-          agent: status?.agent ?? run.agent,
-          runtimeId: status?.runtime_id,
-          supervisorId: run.supervisorId,
-        }, status, false)
-        startPolling()
-      } catch {
-        upsertTrackedRun({
-          runId: result.run_id,
-          label: result.label,
-          agent: run.agent,
-          supervisorId: run.supervisorId,
-        }, undefined, false)
-        startPolling()
-      }
-      return result
+    async function resumeTrackedRun(run: WatchRunRef, text: string): Promise<{ run_id: string; label: string }> {
+      // The bound provider, not hostProviderFor directly: messageProvider attaches
+      // the extension's resume tracking so a watch-triggered resume is polled.
+      const provider = await messageProvider(run.supervisorId)
+      const result = await deps.messageTool(
+        { action: 'resume', target: run.runId, message: text },
+        provider,
+      )
+      return { run_id: result.runId ?? run.runId, label: result.label ?? run.runId }
     }
 
     async function waitForRunWithObserver(
@@ -1226,6 +1234,121 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return waitForRunByPolling(run, signal, onUpdate)
     }
 
+    // One bound host provider per supervisor, created on first use and kept for
+    // the extension's lifetime. A response carrying a generation mismatch is
+    // reported as the not-sent outcome it maps to; the caller must not silently
+    // retarget this binding to another supervisor.
+    const hostProviders = new Map<string, MessageProvider>()
+
+    async function defaultHostProviderFor(supervisorId: string | undefined): Promise<MessageProvider> {
+      const key = supervisorId ?? ''
+      const existing = hostProviders.get(key)
+      if (existing) return existing
+      const { client } = await (deps.getSupervisorClient ?? getSupervisorClient)(supervisorId, { owner: true })
+      const preflight = await client.messagePreflight()
+      const provider = createHostMessageProvider({
+        surface: 'pi-host',
+        supervisorId: supervisorId ?? Supervisor.currentInstance()?.supervisorId ?? '',
+        generation: preflight.generation,
+        client,
+        pendingAsks: hostPendingAsks,
+        pollGeneration: () => hostPollGeneration,
+        onResumed: result => trackResumed(supervisorId, result),
+      })
+      hostProviders.set(key, provider)
+      return provider
+    }
+
+    async function trackResumed(supervisorId: string | undefined, result: ProviderResult): Promise<void> {
+      const run = {
+        runId: result.runId ?? '',
+        label: result.label ?? result.runId ?? '',
+        supervisorId,
+      }
+      try {
+        const rawStatus = await deps.statusTool({ runId: run.runId, supervisorId })
+        const status = asStatusResult(rawStatus)
+        upsertTrackedRun({
+          runId: run.runId,
+          label: run.label,
+          agent: status?.agent,
+          runtimeId: status?.runtime_id,
+          supervisorId,
+        }, status, false)
+      } catch {
+        upsertTrackedRun(run, undefined, false)
+      }
+      startPolling()
+    }
+
+    const hostProviderFor: (supervisorId: string | undefined) => Promise<MessageProvider> =
+      deps.hostProviderFor ?? defaultHostProviderFor
+
+    const childProvider = isSubAgentBrokerMode && subAgentEnv
+      ? createChildMessageProvider({
+        surface: 'pi-child',
+        runId: subAgentEnv.runId,
+        broker: createBrokerChildBroker(subAgentEnv),
+        pendingAsks: subAgentPendingAsks,
+        pollGeneration: () => subAgentPollGeneration,
+      })
+      : null
+
+    function attachPendingAsks(
+      provider: MessageProvider,
+      pending: Map<string, { from_run_id: string; message_id: string }>,
+    ): MessageProvider {
+      if (provider.claimAsk) return provider
+      const claims = new Map<string, { asker: string, generation: number }>()
+      provider.claimAsk = messageId => {
+        const ask = pending.get(messageId)
+        if (!ask) return undefined
+        pending.delete(messageId)
+        claims.set(messageId, { asker: ask.from_run_id, generation: hostPollGeneration })
+        return ask.from_run_id
+      }
+      provider.restoreAsk = (messageId, askerRunId) => {
+        const claim = claims.get(messageId)
+        claims.delete(messageId)
+        // A failed send restores the ask only into the session that received
+        // it; a restart that cleared the poll must not resurrect it.
+        if (claim && claim.generation === hostPollGeneration) {
+          pending.set(messageId, { from_run_id: askerRunId, message_id: messageId })
+        }
+      }
+      return provider
+    }
+
+    async function messageProvider(supervisorId: string | undefined): Promise<MessageProvider> {
+      if (childProvider) return childProvider
+      const provider = attachPendingAsks(await hostProviderFor(supervisorId), hostPendingAsks)
+      // Resume tracking belongs to this extension, not to the provider, so an
+      // injected provider gets the same status + poll + tracked-run behaviour.
+      if (!provider.onResumed) provider.onResumed = result => trackResumed(supervisorId, result)
+      return provider
+    }
+
+    // The host's own last-turn producer. Every turn's end is recorded, including
+    // cancelled and error turns; a run-level end is not a turn (DS-1). A child's
+    // turn is recorded by the broker recorder, so child mode publishes nothing
+    // from here.
+    pi.on('turn_end', async event => {
+      if (isSubAgentBrokerMode) return
+      const turn = extractTurnText([event.message])
+      try {
+        const provider = await hostProviderFor(undefined)
+        if (!provider.recordLastTurn) return
+        const bounded = boundFinalOutput(turn.text)
+        await provider.recordLastTurn(
+          bounded,
+          normalizeTurnStopReason(turn.stopReason),
+          turn.text.length > bounded.length,
+        )
+      } catch (error) {
+        console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
+      }
+    })
+
     pi.on('session_start', async (_event, ctx) => {
       sessionCtx = ctx
       lastStatusEntries = []
@@ -1297,7 +1420,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         'Use avenor_result to retrieve the final result of a sub-agent; it waits by default, but set wait=false for runs that already completed. When awaiting multiple runs, the first stopping point (permission or completion) interrupts the other waits.',
         'Use avenor_inspect to review a bounded transcript and tool activity from a run.',
         'Use avenor_events only when you specifically need raw event payloads.',
-        'Use avenor_follow_up to iterate on a completed run.',
+        'Use avenor_message with action "resume" to iterate on a completed run.',
         'Use avenor_shutdown when done delegating work.',
         'When roster_entry is set, the roster selects agent, model, and backend; do not pass those fields alongside it.',
         'If a roster spawn fails validation or resolution, do not retry the roster: respawn without roster_file/roster_entry. Direct selectors (agent, model, backend) are optional; omission uses runtime defaults.',
@@ -1713,187 +1836,96 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     })
 
     pi.registerTool({
-      name: 'avenor_follow_up',
-      label: 'Avenor Follow Up',
-      description: 'Resume a completed run with a follow-up message.',
+      name: 'avenor_message',
+      label: 'Avenor Message',
+      description:
+        'Send a message to another agent run, answer an inbound ask, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn.',
       parameters: Type.Object({
-        run_id: Type.String({ description: 'Completed run ID to resume' }),
-        message: Type.String({ description: 'Follow-up message text' }),
-        label: Type.Optional(Type.String({ description: 'Override label (defaults to <original>-followup)' })),
-        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
-      }),
-      async execute(_toolCallId, params) {
-        const result = await deps.followUpTool({
-          runId: params.run_id,
-          message: params.message,
-          label: params.label,
-          supervisorId: params.supervisor_id,
-        })
-        try {
-          const rawStatus = await deps.statusTool({ runId: result.run_id, supervisorId: params.supervisor_id })
-          const status = asStatusResult(rawStatus)
-          upsertTrackedRun({
-            runId: result.run_id,
-            label: result.label,
-            agent: status?.agent,
-            runtimeId: status?.runtime_id,
-            supervisorId: params.supervisor_id,
-          }, status, false)
-        } catch {
-          upsertTrackedRun({
-            runId: result.run_id,
-            label: result.label,
-            supervisorId: params.supervisor_id,
-          }, undefined, false)
-        }
-        startPolling()
-        return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-          details: result,
-        }
-      },
-      renderCall(args, theme, context) {
-        return renderFollowUpCall(context.args, theme)
-      },
-      renderResult(result, { expanded, isPartial }, theme, context) {
-        return renderFollowUpResult(result, { expanded, isPartial }, theme, context.args)
-      },
-    })
-
-    pi.registerTool({
-      name: 'avenor_ask',
-      label: 'Avenor Ask',
-      description: 'Ask another agent run a question and block until it replies. An optional timeout_ms bounds the wait; a failed ask reports its message_id and whether it is still pending (withdrawable via avenor_cancel) or already withdrawn.',
-      parameters: Type.Object({
-        to_run_id: Type.String({ description: 'Target run ID' }),
-        message: Type.String({ description: 'Question to ask the other agent' }),
-        timeout_ms: Type.Optional(Type.Integer({ description: 'Optional timeout in milliseconds for the ask' })),
-        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path (ignored in a Pi sub-agent, which asks through its inherited broker)' })),
+        action: Type.Union([
+          Type.Literal('tell'),
+          Type.Literal('ask'),
+          Type.Literal('reply'),
+          Type.Literal('resume'),
+          Type.Literal('withdraw'),
+          Type.Literal('control_reply'),
+        ], { description: 'tell | ask | reply | resume | withdraw | control_reply' }),
+        target: Type.Optional(Type.String({ description: 'Recipient for tell/ask/resume (a run id, a peer label, or "self"), or the opaque control message id for control_reply' })),
+        message: Type.Optional(Type.String({ description: 'Message text for tell/ask/reply/resume' })),
+        reply_to: Type.Optional(Type.String({ description: 'Inbound ask id being answered (reply)' })),
+        message_id: Type.Optional(Type.String({ description: 'Ask id being withdrawn (withdraw)' })),
+        timeout_ms: Type.Optional(Type.Integer({ description: 'Bound on the ask wait in milliseconds' })),
+        label: Type.Optional(Type.String({ description: 'Override label for the resumed run (resume)' })),
+        idempotency_key: Type.Optional(Type.String({ description: 'Forwarded verbatim to the resume authority (resume)' })),
+        payload: Type.Optional(Type.Unknown({ description: 'Control reply body (control_reply)' })),
       }),
       async execute(_toolCallId, params, signal) {
-        // In a pi sub-agent, ask through the inherited broker as its own run:
-        // the parent's control connection is not available to a child.
-        const result = isSubAgentBrokerMode && subAgentEnv
-          ? await askViaBroker(subAgentEnv, {
-            toRunId: params.to_run_id,
-            message: params.message,
-            timeoutMs: params.timeout_ms,
-            signal,
-          })
-          : await askTool({ toRunId: params.to_run_id, message: params.message, timeoutMs: params.timeout_ms, supervisorId: params.supervisor_id })
-        // Pi normalizes a result without content to an empty tool output, so
-        // the reply has to be text the model can read.
+        const provider = await messageProvider(undefined)
+        const result = await deps.messageTool(params, provider, { signal })
         return {
-          content: [{ type: 'text', text: `Reply from ${result.from_run_id || params.to_run_id}:\n${result.reply}` }],
-          details: result,
+          content: [{ type: 'text', text: result.text ?? '' }],
+          details: resultOutput(result),
         }
       },
-    })
-
-    pi.registerTool({
-      name: 'avenor_reply',
-      label: 'Avenor Reply (host)',
-      description: 'Reply to an inbound ask received from a sub-agent. Answer the most recent ask from a given sub-agent, or reply to a specific message_id from avenor_ask.',
-      parameters: Type.Object({
-        from_run_id: Type.Optional(Type.String({ description: 'Sub-agent run id to reply to (the asker)' })),
-        reply_to_message_id: Type.Optional(Type.String({ description: 'The ask\'s broker message id to answer specifically' })),
-        message: Type.String({ description: 'Your answer' }),
-        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
-      }),
-      async execute(_toolCallId, params) {
-        // In a pi sub-agent, reply directly over the broker as its own run so
-        // the answer reaches the host's waiting avenor_ask.
-        if (isSubAgentBrokerMode && subAgentEnv) {
-          const target = resolveReplyTarget(subAgentPendingAsks, params.from_run_id, params.reply_to_message_id)
-          if (!target) {
-            return { content: [{ type: 'text', text: 'No pending ask found to reply to. Pass from_run_id and/or reply_to_message_id.' }], details: { error: true } }
-          }
-          // Claim the ask before awaiting the send so a concurrent reply for
-          // the same ask cannot resolve the same target and double-answer it.
-          const generation = subAgentPollGeneration
-          subAgentPendingAsks.delete(target.message_id)
-          try {
-            await postBroker(subAgentEnv, '/send', buildAgentMessage({
-              fromRunId: subAgentEnv.runId,
-              toRunId: target.from_run_id,
-              messageId: randomUUID(),
-              message: params.message,
-              role: 'agent',
-              replyTo: target.message_id,
-            }))
-          } catch (error) {
-            // Restore only into the session that received the ask.
-            if (generation === subAgentPollGeneration) subAgentPendingAsks.set(target.message_id, target)
-            throw error
-          }
-          return { content: [{ type: 'text', text: 'Reply sent' }] }
-        }
-
-        const target = resolveReplyTarget(hostPendingAsks, params.from_run_id, params.reply_to_message_id)
-        if (!target) {
-          return { content: [{ type: 'text', text: 'No pending ask found to reply to. Pass from_run_id and/or reply_to_message_id.' }], details: { error: true } }
-        }
-        // Claim the ask before awaiting the send so a concurrent reply for
-        // the same ask cannot resolve the same target and double-answer it.
-        const generation = hostPollGeneration
-        hostPendingAsks.delete(target.message_id)
-        try {
-          await deps.brokerReplyTool({ toRunId: target.from_run_id, replyTo: target.message_id, message: params.message, supervisorId: params.supervisor_id })
-        } catch (error) {
-          // A failed send leaves the asker waiting, so keep the ask retryable —
-          // but only while the session that received it is still current.
-          if (generation === hostPollGeneration) hostPendingAsks.set(target.message_id, target)
-          throw error
-        }
-        return { content: [{ type: 'text', text: 'Reply sent' }] }
+      renderCall(args, theme) {
+        return renderMessageResumeCall(args, theme)
+      },
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        return renderMessageResumeResult(result, { expanded, isPartial }, theme, context.args)
       },
     })
 
     pi.registerTool({
       name: 'avenor_peers',
       label: 'Avenor Peers',
-      description: 'List all connected agent sessions with their status and metadata.',
-      parameters: Type.Object({}),
-      async execute() {
-        const result = await peersTool({})
-        if (result.peers.length === 0) {
-          return { content: [{ type: 'text', text: 'No other agent sessions connected.' }] }
+      description:
+        "List the visible agent sessions, rename a run, or read a run's last agent message. `last` returns the target's final text with its stop reason, or an empty result when the target has no completed turn yet.",
+      parameters: Type.Object({
+        action: Type.Optional(Type.Union([
+          Type.Literal('list'),
+          Type.Literal('rename'),
+          Type.Literal('last'),
+        ], { description: 'list (the default) | rename | last' })),
+        name: Type.Optional(Type.String({ description: 'New display name (rename)' })),
+        session_id: Type.Optional(Type.String({ description: 'Run to rename; omitted renames the caller (rename)' })),
+        target: Type.Optional(Type.String({ description: 'Peer to read: a run id, a label, or "self" (last)' })),
+      }),
+      async execute(_toolCallId, params) {
+        const provider = await messageProvider(undefined)
+        const result = await peersTool(params, provider)
+        const text = result.action === 'list'
+          ? [result.text, renderPeerList(result.peers)].filter(part => part !== '').join('\n\n')
+          : result.text
+        return {
+          content: [{ type: 'text', text }],
+          details: peersDetails(result),
         }
-        const lines = result.peers.map(p => {
-          const parts = [p.label ? `${p.label} (${p.run_id})` : p.run_id]
-          const tags = [p.status, p.backend, p.model].filter(Boolean)
-          if (tags.length) parts.push(`[${tags.join(', ')}]`)
-          return `  ${parts.join(' ')}`
-        })
-        return { content: [{ type: 'text', text: `**Active sessions:**\n${lines.join('\n')}` }] }
       },
     })
 
     pi.registerTool({
-      name: 'avenor_cancel',
-      label: 'Avenor Cancel',
-      description: 'Cancel a pending ask by its message ID.',
+      name: 'avenor_workflow_cancel',
+      label: 'Avenor Workflow Cancel',
+      description: 'Cancel a workflow instance. The actor and reason are required.',
       parameters: Type.Object({
-        message_id: Type.String({ description: 'Message ID of the pending ask to cancel' }),
+        workflow_id: Type.String({ description: 'Workflow ID' }),
+        actor: Type.String({ description: 'Who is cancelling' }),
+        reason: Type.String({ description: 'Why the workflow is being cancelled' }),
+        supervisor_id: Type.Optional(Type.String({ description: 'Supervisor ID for multi-supervisor mode' })),
       }),
       async execute(_toolCallId, params) {
-        // Withdrawing an ask is this tool's only operation, and the child's own
-        // run is its sender, so a pi sub-agent withdraws through the inherited
-        // broker instead of the parent's control connection (which it lacks).
-        if (isSubAgentBrokerMode && subAgentEnv) {
-          await withdrawPendingAsk(subAgentEnv, params.message_id)
-          return {
-            content: [{ type: 'text', text: `Cancelled ${params.message_id}` }],
-            details: { cancelled: true },
-          }
-        }
-        const result = await cancelTool({ messageId: params.message_id })
+        const result = await deps.workflowCancelTool({
+          workflow_id: params.workflow_id,
+          actor: params.actor,
+          reason: params.reason,
+          supervisor_id: params.supervisor_id,
+        })
         return {
-          content: [{ type: 'text', text: `Cancelled ${params.message_id}` }],
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,
         }
       },
     })
+
     pi.registerTool({
       name: 'avenor_events',
       label: 'Avenor Events',
@@ -2239,7 +2271,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           initialRunId: args?.trim() || undefined,
           deps: {
             ...createWatchDeps(),
-            followUpRun: (run, text) => followUpTrackedRun(run, text),
+            resumeRun: (run, text) => resumeTrackedRun(run, text),
           },
           onTrackRun: (run, status) => {
             upsertTrackedRun(run, status, false)
