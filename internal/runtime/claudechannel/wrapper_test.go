@@ -39,8 +39,8 @@ func fakeClaudeOnPath(t *testing.T) {
 // TestProviderStartWrapperPrefixesCommand proves the provider-level handoff:
 // StartOptions.LaunchWrapper must reach claudecore.LaunchCommand, so the
 // terminal command the provider launches is the wrapper followed by claude.
-// The generated MCP args are pinned here too: the sidecar registers under the
-// session's label, and dropping --sender silently falls back to the run ID.
+// The generated MCP args are pinned here too: the sidecar is launched without
+// --sender, so the broker stamps the current display name on every send.
 func TestProviderStartWrapperPrefixesCommand(t *testing.T) {
 	fakeClaudeOnPath(t)
 	l := &captureLauncher{term: terminal.NewFakeSession("avenor-channel-test", 4242, "ready")}
@@ -80,8 +80,12 @@ func TestProviderStartWrapperPrefixesCommand(t *testing.T) {
 			continue
 		}
 		found = true
-		if got := strings.Join(server.Args, " "); !strings.Contains(got, "--sender worker") {
-			t.Fatalf("channel sidecar args = %q, want --sender worker", got)
+		got := strings.Join(server.Args, " ")
+		if strings.Contains(got, "--sender") {
+			t.Fatalf("channel sidecar args = %q, want no --sender", got)
+		}
+		if !strings.Contains(got, "--run-id") || !strings.Contains(got, "--token") {
+			t.Fatalf("channel sidecar args = %q, want run id and token", got)
 		}
 	}
 	if !found {

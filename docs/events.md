@@ -172,7 +172,7 @@ The `claude-channel` backend emits a few extra synthesized events so non-Claude 
 
 **`agent.report`** — The Claude sidecar called `avenor_report`. Fields: `state`, `payload`, `source` (`"channel"`). Avenor may also emit a second derived event such as `agent.message_chunk` or `agent.status` from the same report payload for compatibility with existing consumers.
 
-**`agent.reply`** — The Claude sidecar called `avenor_reply`. Fields: `to`, `payload`, `source` (`"channel"`).
+**`agent.reply`** — The Claude sidecar delivered a control reply through `avenor_message` with `action="control_reply"`. Fields: `to`, `payload`, `source` (`"channel"`).
 
 **`agent.finish`** — The Claude sidecar called `avenor_finish`. Fields: `status`, `summary`, `files_changed`, optional `payload`, `source` (`"channel"`). Avenor then emits the terminal `session.end` event derived from that finish record.
 
