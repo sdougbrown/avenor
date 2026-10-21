@@ -5,6 +5,12 @@ import { createRunSnapshot } from '../../core/src/run-reducer.js'
 import { extractEventText } from '../../core/src/run-events.js'
 import { validateSpawnSelection } from '../../core/src/spawn-selection.js'
 import { THINKING_LEVELS } from '../../core/src/thinking-policy.js'
+import { ToolError, renderPeerList } from '../../core/src/message.js'
+import { boundFinalOutput, extractTurnText, normalizeTurnStopReason, renderLast } from '../../core/src/messaging-text.js'
+import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
+import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
+import type { MessageProvider } from '../../core/src/tools/message.js'
+import conformance from '../../../schemas/message_route.conformance.json'
 
 const spawnToolMock = mock(async () => ({
   run_id: 'run-1',
@@ -21,7 +27,40 @@ const statusToolMock = mock(async () => ({
 }))
 const eventsToolMock = mock(async () => ({ events: [] }))
 const answerPermissionToolMock = mock(async () => ({ ok: true }))
-const followUpToolMock = mock(async () => ({ run_id: 'run-2', label: 'test follow-up' }))
+const workflowCancelToolMock = mock(async () => ({ cancelled: true }))
+let providerFactory: () => MessageProvider = () => makeProvider()
+const getSupervisorClientMock = mock(async () => ({
+  client: { messagePreflight: async () => ({ generation: 'gen-1' }) },
+  supervisorId: '/tmp/avenor.sock',
+  isSingleton: true,
+  sup: null,
+}))
+
+function makeProvider(overrides: Partial<MessageProvider> = {}): MessageProvider {
+  return {
+    caller: () => ({ kind: 'owner', runId: 'supervisor' }),
+    surface: () => 'opencode',
+    role: () => 'host',
+    resolve: async (ref: string) => ({ runId: ref, label: ref, match: 'unique' }),
+    state: async () => ({ live: false, resumable: true, status: 'done' }),
+    tell: async () => ({ outcome: 'sent' }),
+    ask: async () => ({ outcome: 'sent' }),
+    reply: async () => ({ outcome: 'replied' }),
+    withdraw: async () => ({ outcome: 'withdrawn' }),
+    resume: async () => ({
+      outcome: 'resumed',
+      runId: 'run-2',
+      runtimeId: 'rt-2',
+      label: 'again',
+      sentinelFile: '/runs/run-2/sentinel.done',
+      onEvent: '/runs/run-2/events.log',
+    }),
+    rename: async () => ({ outcome: 'renamed' }),
+    last: async () => ({ outcome: 'sent', hasRecord: false }),
+    peers: async () => ({ peers: [] }),
+    ...overrides,
+  }
+}
 const resultToolMock = mock(async () => ({ run_id: 'run-1', label: 'test run', status: 'done', ready: true, output: 'final answer' }))
 const shutdownToolMock = mock(async () => ({ ok: true }))
 const killToolMock = mock(async () => ({ killed: true, run_id: 'run-1' }))
@@ -133,7 +172,20 @@ mock.module('@dougbots/avenor-core', () => ({
   statusTool: statusToolMock,
   eventsTool: eventsToolMock,
   answerPermissionTool: answerPermissionToolMock,
-  followUpTool: followUpToolMock,
+  messageTool: realMessageTool,
+  peersTool: realPeersTool,
+  createHostMessageProvider: (options: { onResumed?: MessageProvider['onResumed'] }) => {
+    const provider = providerFactory()
+    if (options?.onResumed) provider.onResumed = options.onResumed
+    return provider
+  },
+  getSupervisorClient: getSupervisorClientMock,
+  ToolError,
+  renderPeerList,
+  boundFinalOutput,
+  extractTurnText,
+  normalizeTurnStopReason,
+  workflowCancelTool: workflowCancelToolMock,
   resultTool: resultToolMock,
   shutdownTool: shutdownToolMock,
   killTool: killToolMock,
@@ -154,7 +206,6 @@ mock.module('@dougbots/avenor-core', () => ({
     currentInstance: currentSupervisorMock,
   },
 }))
-
 const { AvenorPlugin, buildWaitingText, hostIdentityMetadata, terminalStatus } = await import('./plugin.js')
 const originalFetch = globalThis.fetch
 
@@ -226,7 +277,9 @@ describe('AvenorPlugin', () => {
     statusToolMock.mockClear()
     eventsToolMock.mockClear()
     answerPermissionToolMock.mockClear()
-    followUpToolMock.mockClear()
+    workflowCancelToolMock.mockClear()
+    getSupervisorClientMock.mockClear()
+    providerFactory = () => makeProvider()
     resultToolMock.mockClear()
     shutdownToolMock.mockClear()
     killToolMock.mockClear()
@@ -311,11 +364,12 @@ describe('AvenorPlugin', () => {
     }))
     expect(permissionText).toContain('Permission request: Allow access?')
     expect(permissionText).toContain('avenor_answer_permission')
-    expect(permissionText).not.toContain('avenor_follow_up')
+    expect(permissionText).not.toContain('avenor_message')
 
     const questionText = buildWaitingText(run, makeSnapshot({ phase_label: 'Which file?' }))
     expect(questionText).toContain('Question: Which file?')
-    expect(questionText).toContain('avenor_follow_up')
+    expect(questionText).toContain('avenor_message')
+    expect(questionText).toContain('action "resume"')
   })
 
   it('registers existing hooks plus avenor_inspect and formats channel messages', async () => {
@@ -330,7 +384,9 @@ describe('AvenorPlugin', () => {
       'avenor_status',
       'avenor_result',
       'avenor_answer_permission',
-      'avenor_follow_up',
+      'avenor_message',
+      'avenor_peers',
+      'avenor_workflow_cancel',
       'avenor_events',
       'avenor_inspect',
       'avenor_shutdown',
@@ -990,5 +1046,260 @@ describe('AvenorPlugin', () => {
     expect(workflowControllerStatusToolMock).toHaveBeenCalledWith({ controllerId: undefined, supervisorId: 'sup-a' })
     expect(workflowReadyToolMock).not.toHaveBeenCalled()
     expect(output.title).toBe('Avenor workflow controllers — 0')
+  })
+})
+
+const contractFixture = conformance as unknown as {
+  applicability: Record<string, { permitted: string[] }>
+  peers_applicability: Record<string, { permitted: string[] }>
+}
+
+function fieldSet(table: Record<string, { permitted: string[] }>): string[] {
+  const names = new Set<string>()
+  for (const entry of Object.values(table)) {
+    for (const name of entry.permitted) names.add(name)
+  }
+  return [...names].sort()
+}
+
+function toolArgs(hooks: Awaited<ReturnType<typeof AvenorPlugin>>, name: string): Record<string, any> {
+  return (hooks.tool as Record<string, any>)[name].args
+}
+
+function enumValues(schema: any): string[] {
+  const values = schema?.options ?? schema?.unwrap?.()?.options ?? []
+  return [...values].sort()
+}
+
+function toolContext(sessionID: string) {
+  return {
+    sessionID,
+    messageID: 'm-1',
+    agent: 'build',
+    directory: '/tmp/test',
+    worktree: '/tmp/test',
+    abort: new AbortController().signal,
+    metadata: () => {},
+    ask: async () => {},
+  }
+}
+
+function makeTurnClient(messages: ReturnType<typeof mock>, promptAsync = mock(async () => {})) {
+  return { session: { promptAsync, messages } }
+}
+
+function turnResponse(info: Record<string, unknown>, parts: unknown[]) {
+  return { data: [{ info, parts }] }
+}
+
+describe('OpenCode message tool parity', () => {
+  it('registers avenor_message and avenor_peers with the contract field sets', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const message = toolArgs(hooks, 'avenor_message')
+    expect(Object.keys(message).sort()).toEqual(fieldSet(contractFixture.applicability))
+    expect(enumValues(message.action)).toEqual(['ask', 'control_reply', 'reply', 'resume', 'tell', 'withdraw'])
+    expect(message).not.toHaveProperty('supervisor_id')
+
+    const peers = toolArgs(hooks, 'avenor_peers')
+    expect(Object.keys(peers).sort()).toEqual(fieldSet(contractFixture.peers_applicability))
+    expect(enumValues(peers.action)).toEqual(['last', 'list', 'rename'])
+    expect(peers).not.toHaveProperty('supervisor_id')
+  })
+
+  it('routes a tell through the shared provider and returns its contract text', async () => {
+    providerFactory = () => makeProvider({
+      state: async () => ({ live: true, resumable: false, status: 'running' }),
+      tell: async () => ({ outcome: 'sent', messageId: 'm-1' }),
+    })
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const output = await (hooks.tool?.avenor_message as any).execute(
+      { action: 'tell', target: 'mesh-a', message: 'hi' },
+      toolContext('session-1'),
+    )
+    expect(output.output).toBe('message "m-1" delivered to "mesh-a"')
+  })
+
+  it('tracks a resumed run through the provider callback', async () => {
+    providerFactory = () => makeProvider({ registerResumed: () => {} })
+    statusToolMock.mockImplementation(async () => ({
+      run_id: 'run-2',
+      runtime_id: 'rt-2',
+      label: 'again',
+      status: 'done',
+    }))
+    dialQueue.push(makeEventClient([
+      { event: 'session.end', runtime_id: 'rt-2', seq: 1, stop_reason: 'end_turn' },
+    ]))
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const output = await (hooks.tool?.avenor_message as any).execute(
+      { action: 'resume', target: 'run-1', message: 'again' },
+      toolContext('session-1'),
+    )
+    expect(output.title).toBe('again — resumed')
+    expect(output.output).toContain('Run: run-2')
+    for (let index = 0; index < 4; index++) await flush()
+    expect(dialMock).toHaveBeenCalledWith('/tmp/avenor.sock')
+  })
+
+  it('forwards the workflow cancel actor and reason', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    await (hooks.tool?.avenor_workflow_cancel as any).execute(
+      { workflow_id: 'w-1', actor: 'operator', reason: 'superseded', supervisor_id: 'sup-a' },
+      toolContext('session-1'),
+    )
+    expect(workflowCancelToolMock).toHaveBeenCalledWith({
+      workflow_id: 'w-1',
+      actor: 'operator',
+      reason: 'superseded',
+      supervisor_id: 'sup-a',
+    })
+  })
+})
+
+describe('OpenCode peers last', () => {
+  it('renders the shared last template through the bound provider', async () => {
+    providerFactory = () => makeProvider({
+      resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }),
+      last: async () => ({
+        outcome: 'sent',
+        label: 'mesh-a',
+        hasRecord: true,
+        finalOutput: 'OK',
+        stopReason: 'end_turn',
+        truncated: false,
+      }),
+    })
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const output = await (hooks.tool?.avenor_peers as any).execute(
+      { action: 'last', target: 'mesh-a' },
+      toolContext('session-1'),
+    )
+    expect(output.output).toBe(
+      renderLast('header', { run_id: '"rt_7"', label: '"mesh-a"', stop_reason: 'end_turn' }) + '\n\nOK',
+    )
+    expect(output.metadata.last).toMatchObject({ run_id: 'rt_7', runtime_id: 'rt_7', label: 'mesh-a' })
+  })
+
+  it('returns unknown_target without reading the target', async () => {
+    const last = mock(async () => ({ outcome: 'sent' }))
+    providerFactory = () => makeProvider({
+      resolve: async () => ({ runId: '', match: 'none' }),
+      last,
+    })
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const error = await (hooks.tool?.avenor_peers as any)
+      .execute({ action: 'last', target: 'ghost' }, toolContext('session-1'))
+      .catch((thrown: unknown) => thrown)
+    expect(error).toBeInstanceOf(ToolError)
+    expect((error as ToolError).code).toBe('unknown_target')
+    expect(last).not.toHaveBeenCalled()
+  })
+})
+
+describe('OpenCode host turn producer', () => {
+  async function bindSession(hooks: Awaited<ReturnType<typeof AvenorPlugin>>, sessionID: string) {
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext(sessionID))
+  }
+
+  async function idle(hooks: Awaited<ReturnType<typeof AvenorPlugin>>, sessionID: string) {
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID } } as any })
+  }
+
+  it('publishes the settled turn once for the bound session', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const messages = mock(async () => turnResponse(
+      { role: 'assistant', finish: 'stop' },
+      [{ type: 'text', text: 'the answer' }],
+    ))
+    const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+    await bindSession(hooks, 'session-1')
+    await idle(hooks, 'session-1')
+
+    expect(record).toHaveBeenCalledTimes(1)
+    expect(record).toHaveBeenCalledWith('the answer', 'end_turn', false)
+  })
+
+  it('publishes nothing before any host tool binds the session', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const messages = mock(async () => turnResponse({ role: 'assistant', finish: 'stop' }, []))
+    const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+
+    await idle(hooks, 'session-1')
+
+    expect(record).not.toHaveBeenCalled()
+    expect(messages).not.toHaveBeenCalled()
+  })
+
+  it('keeps the first binding when another session runs a host tool', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const messages = mock(async () => turnResponse({ role: 'assistant', finish: 'stop' }, [{ type: 'text', text: 'from one' }]))
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+      await bindSession(hooks, 'session-1')
+      await bindSession(hooks, 'session-2')
+      await idle(hooks, 'session-2')
+      expect(record).not.toHaveBeenCalled()
+
+      await idle(hooks, 'session-1')
+      expect(record).toHaveBeenCalledWith('from one', 'end_turn', false)
+    } finally {
+      console.error = originalError
+    }
+    expect(logged).toContain('opencode: host session already bound to session-1')
+  })
+
+  it('publishes a cancelled turn with no text instead of skipping it', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const messages = mock(async () => turnResponse(
+      { role: 'assistant', error: { name: 'MessageAbortedError' } },
+      [],
+    ))
+    const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+    await bindSession(hooks, 'session-1')
+    await idle(hooks, 'session-1')
+
+    expect(record).toHaveBeenCalledWith('', 'cancelled', false)
+  })
+
+  it('carries the truncation flag from the unbounded text', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const messages = mock(async () => turnResponse(
+      { role: 'assistant', error: { name: 'MessageOutputLengthError' } },
+      [{ type: 'text', text: 'x'.repeat(5000) }],
+    ))
+    const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+    await bindSession(hooks, 'session-1')
+    await idle(hooks, 'session-1')
+
+    const [text, stop, truncated] = record.mock.calls[0] as [string, string, boolean]
+    expect(text).toHaveLength(4096)
+    expect(stop).toBe('max_tokens')
+    expect(truncated).toBe(true)
+  })
+
+  it('logs a failing publish without rejecting the idle handler', async () => {
+    providerFactory = () => makeProvider({
+      recordLastTurn: async () => { throw new Error('broker down') },
+    })
+    const messages = mock(async () => turnResponse({ role: 'assistant', finish: 'stop' }, [{ type: 'text', text: 'turn' }]))
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+      await bindSession(hooks, 'session-1')
+      await expect(idle(hooks, 'session-1')).resolves.toBeUndefined()
+    } finally {
+      console.error = originalError
+    }
+    expect(logged.join('\n')).toContain('session_last_set failed')
   })
 })

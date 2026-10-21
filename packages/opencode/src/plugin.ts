@@ -5,8 +5,9 @@ import * as crypto from 'node:crypto'
 import {
   formatAnswerPermissionOutput,
   formatEventsOutput,
-  formatFollowUpOutput,
   formatInspectOutput,
+  formatMessageOutput,
+  formatPeersOutput,
   formatResultOutput,
   formatShutdownOutput,
   formatKillOutput,
@@ -15,13 +16,21 @@ import {
 } from './render.js'
 import {
   answerPermissionTool,
+  boundFinalOutput,
+  createHostMessageProvider,
   createRunSnapshot,
   dial,
   eventsTool,
-  followUpTool,
+  extractTurnText,
+  getSupervisorClient,
   inspectTool,
+  messageTool,
+  normalizeTurnStopReason,
   observeRun,
+  peersTool,
   resultTool,
+  type MessageProvider,
+  type ProviderResult,
   type RunObserver,
   type RunSnapshot,
   shutdownTool,
@@ -32,6 +41,7 @@ import {
   type StatusResult,
   THINKING_LEVELS,
   validateSpawnSelection,
+  workflowCancelTool,
   workflowStatusTool,
   workflowWaitTool,
   workflowInspectTool,
@@ -61,6 +71,15 @@ type TrackedRun = {
   latestSeq?: number
   lastSnapshot?: RunSnapshot
 }
+
+type HostProviderBinding = {
+  provider: MessageProvider
+  supervisorId: string
+  generation: string
+}
+
+/** The one OpenCode session this plugin publishes turns for. */
+type HostBinding = HostProviderBinding & { sessionId: string }
 
 type MonitorStopReason = 'permission-routed' | 'shutdown' | 'abort' | 'result'
 
@@ -207,7 +226,7 @@ export function buildWaitingText(run: TrackedRun, snapshot: RunSnapshot): string
 
   if (!permission) {
     lines.push(
-      `Use \`avenor_follow_up\` with run_id "${run.runId}" to respond, or \`avenor_status\` to re-check.`,
+      `Use \`avenor_message\` with action "resume" and target "${run.runId}" to respond, or \`avenor_status\` to re-check.`,
     )
   }
 
@@ -241,7 +260,7 @@ function buildCompletionText(
 
   lines.push(
     '',
-    `Call \`avenor_events\` with \`run_id: "${run.runId}"\` for raw events, or \`avenor_follow_up\` to iterate.`,
+    `Call \`avenor_events\` with \`run_id: "${run.runId}"\` for raw events, or \`avenor_message\` with action "resume" to iterate.`,
   )
 
   return lines.join('\n')
@@ -612,6 +631,106 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     }
   }
 
+  // One host provider for this plugin instance: bound to one supervisor and one
+  // generation, created on the first host messaging tool call. It is rebuilt
+  // when the supervisor's client changes (a shutdown followed by a fresh
+  // singleton), so a revoked generation is never reused and no call is
+  // retargeted to another session. A provider call is also how the plugin
+  // learns which OpenCode session owns the broker's supervisor turn.
+  let hostProvider: { client: unknown; binding: HostProviderBinding } | undefined
+  let hostBinding: HostBinding | undefined
+
+  async function boundHostProvider(): Promise<HostProviderBinding> {
+    const { client, supervisorId } = await getSupervisorClient(undefined, { owner: true })
+    if (hostProvider && hostProvider.client === client) return hostProvider.binding
+    const preflight = await client.messagePreflight()
+    const binding: HostProviderBinding = {
+      provider: createHostMessageProvider({
+        surface: 'opencode',
+        supervisorId,
+        generation: preflight.generation,
+        client,
+        onResumed: trackResumed,
+      }),
+      supervisorId,
+      generation: preflight.generation,
+    }
+    hostProvider = { client, binding }
+    if (hostBinding) hostBinding = { ...binding, sessionId: hostBinding.sessionId }
+    return binding
+  }
+
+  async function hostMessageProvider(sessionId: string): Promise<MessageProvider> {
+    const bound = await boundHostProvider()
+    if (!hostBinding) {
+      hostBinding = { ...bound, sessionId }
+    } else if (hostBinding.sessionId !== sessionId) {
+      console.error(`opencode: host session already bound to ${hostBinding.sessionId}`)
+    }
+    return bound.provider
+  }
+
+  async function trackResumed(result: ProviderResult): Promise<void> {
+    const run: TrackedRun = {
+      runId: result.runId ?? '',
+      orchestratorSessionId: hostBinding?.sessionId ?? '',
+      label: result.label ?? result.runId ?? '',
+      supervisorId: hostBinding?.supervisorId,
+      monitoring: false,
+    }
+    trackedRuns.set(run.runId, run)
+    await primeTrackedRun(run)
+    void monitorRun(run).catch(console.error)
+  }
+
+  function stopReasonOf(info: Record<string, unknown>): string {
+    const error = info.error
+    if (error !== null && typeof error === 'object') {
+      const name = (error as Record<string, unknown>).name
+      if (name === 'MessageAbortedError') return 'aborted'
+      if (name === 'MessageOutputLengthError') return 'length'
+      return 'error'
+    }
+    return typeof info.finish === 'string' ? info.finish : ''
+  }
+
+  /** The last assistant message of a session, as the turn it settled on. */
+  async function settledTurn(sessionId: string): Promise<{ text: string; stopReason: string }> {
+    const response = await ctx.client.session.messages({ path: { id: sessionId } })
+    const entries = Array.isArray(response.data) ? response.data : []
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index] as { info?: Record<string, unknown>; parts?: unknown[] } | undefined
+      const info = entry?.info
+      if (!info || info.role !== 'assistant') continue
+      const content = (entry?.parts ?? [])
+        .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
+        .filter(part => part.type === 'text')
+        .map(part => part.text ?? '')
+      return extractTurnText([{ content, stopReason: stopReasonOf(info) }])
+    }
+    return { text: '', stopReason: '' }
+  }
+
+  // The host's own last-turn producer. It publishes only for the session that
+  // first ran a host messaging tool, so an idle from another session neither
+  // publishes nor retargets the binding. A failure is logged, never rethrown.
+  async function publishHostTurn(sessionId: string): Promise<void> {
+    const binding = hostBinding
+    if (!binding || binding.sessionId !== sessionId) return
+    if (!binding.provider.recordLastTurn) return
+    try {
+      const turn = await settledTurn(sessionId)
+      const bounded = boundFinalOutput(turn.text)
+      await binding.provider.recordLastTurn(
+        bounded,
+        normalizeTurnStopReason(turn.stopReason),
+        turn.text.length > bounded.length,
+      )
+    } catch (error) {
+      console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
+    }
+  }
+
   return {
     event: async ({ event }) => {
       if (event.type !== 'session.idle') return
@@ -626,6 +745,8 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           monitorRun(run).catch(console.error)
         }
       }
+
+      await publishHostTurn(sessionID)
     },
 
     'permission.ask': async (permission, _output) => {
@@ -888,36 +1009,53 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         },
       }),
 
-      avenor_follow_up: tool({
-        description: 'Resume a completed run with a follow-up message.',
+      avenor_message: tool({
+        description:
+          'Send a message to another agent run, answer an inbound ask, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn.',
         args: {
-          run_id: tool.schema.string().describe('Completed run ID to resume'),
-          message: tool.schema.string().describe('Follow-up message text'),
-          label: tool.schema.string().optional().describe('Override label (defaults to <original>-followup)'),
-          supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
+          action: tool.schema.enum(['tell', 'ask', 'reply', 'resume', 'withdraw', 'control_reply']).describe('tell | ask | reply | resume | withdraw | control_reply'),
+          target: tool.schema.string().optional().describe('Recipient for tell/ask/resume (a run id, a peer label, or "self"), or the opaque control message id for control_reply'),
+          message: tool.schema.string().optional().describe('Message text for tell/ask/reply/resume'),
+          reply_to: tool.schema.string().optional().describe('Inbound ask id being answered (reply)'),
+          message_id: tool.schema.string().optional().describe('Ask id being withdrawn (withdraw)'),
+          timeout_ms: tool.schema.number().int().optional().describe('Bound on the ask wait in milliseconds'),
+          label: tool.schema.string().optional().describe('Override label for the resumed run (resume)'),
+          idempotency_key: tool.schema.string().optional().describe('Forwarded verbatim to the resume authority (resume)'),
+          payload: tool.schema.unknown().optional().describe('Control reply body (control_reply)'),
         },
         async execute(args, context) {
-          const result = await followUpTool({
-            runId: args.run_id,
-            message: args.message,
-            label: args.label,
-            supervisorId: args.supervisor_id,
-          })
+          const provider = await hostMessageProvider(context.sessionID)
+          const result = await messageTool(args, provider, { signal: context.abort })
+          return formatMessageOutput(args, result)
+        },
+      }),
 
-          const priorRun = trackedRuns.get(args.run_id)
-          const run: TrackedRun = {
-            runId: result.run_id,
-            agent: priorRun?.agent ?? 'agent',
-            orchestratorSessionId: context.sessionID,
-            label: result.label,
-            supervisorId: args.supervisor_id ?? Supervisor.currentInstance()?.supervisorId,
-            monitoring: false,
-          }
-          trackedRuns.set(result.run_id, run)
-          await primeTrackedRun(run)
-          void monitorRun(run).catch(console.error)
+      avenor_peers: tool({
+        description:
+          "List the visible agent sessions, rename a run, or read a run's last agent message. `last` returns the target's final text with its stop reason, or an empty result when the target has no completed turn yet.",
+        args: {
+          action: tool.schema.enum(['list', 'rename', 'last']).optional().describe('list (the default) | rename | last'),
+          name: tool.schema.string().optional().describe('New display name (rename)'),
+          session_id: tool.schema.string().optional().describe('Run to rename; omitted renames the caller (rename)'),
+          target: tool.schema.string().optional().describe('Peer to read: a run id, a label, or "self" (last)'),
+        },
+        async execute(args, context) {
+          const provider = await hostMessageProvider(context.sessionID)
+          return formatPeersOutput(args, await peersTool(args, provider))
+        },
+      }),
 
-          return formatFollowUpOutput(args, result)
+      avenor_workflow_cancel: tool({
+        description: 'Cancel a workflow instance. The actor and reason are required.',
+        args: {
+          workflow_id: tool.schema.string().describe('Workflow ID'),
+          actor: tool.schema.string().describe('Who is cancelling'),
+          reason: tool.schema.string().describe('Why the workflow is being cancelled'),
+          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
+        },
+        async execute(args, _context) {
+          const result = await workflowCancelTool(args)
+          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
         },
       }),
 

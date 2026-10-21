@@ -2,7 +2,9 @@ import { describe, expect, it } from 'bun:test'
 import {
   formatAnswerPermissionOutput,
   formatEventsOutput,
-  formatFollowUpOutput,
+  formatMessageOutput,
+  formatMessageResumeOutput,
+  formatPeersOutput,
   formatInspectOutput,
   formatResultOutput,
   formatShutdownOutput,
@@ -12,6 +14,27 @@ import {
 } from './render.js'
 
 describe('OpenCode Avenor result renderers', () => {
+  it('renders every message action from the contract text', () => {
+    expect(formatMessageOutput(
+      { action: 'tell', target: 'mesh-a' },
+      { action: 'tell', outcome: 'sent', text: 'message "m-1" delivered to "mesh-a"' },
+    )).toEqual({
+      title: 'Avenor tell — sent',
+      output: 'message "m-1" delivered to "mesh-a"',
+      metadata: { action: 'tell', outcome: 'sent', text: 'message "m-1" delivered to "mesh-a"' },
+    })
+
+    expect(formatMessageOutput({ action: 'withdraw' }, { action: 'withdraw', outcome: 'edge-absent', text: '' }).output)
+      .toBe('Avenor message result unavailable.\nRetry the tool or use avenor_status/avenor_inspect.')
+  })
+
+  it('renders the peers list block and passes the router text through', () => {
+    expect(formatPeersOutput({ action: 'list' }, { action: 'list', text: '', peers: [] }).output)
+      .toBe('No other agent sessions connected.')
+    expect(formatPeersOutput({ action: 'last', target: 'mesh-a' }, { action: 'last', text: 'last words', peers: [] }).output)
+      .toBe('last words')
+  })
+
   it('formats status and result prose while retaining complete metadata', () => {
     const status = {
       run_id: 'run-1',
@@ -76,12 +99,20 @@ describe('OpenCode Avenor result renderers', () => {
     expect(permission.output).toContain('Permission answer: accepted.\nRun: run-1\nOption: allow\nRequest: request-1')
     expect(permission.metadata).toEqual({ ok: true, run_id: 'run-1', option_id: 'allow', request_id: 'request-1' })
 
-    const followUp = formatFollowUpOutput({ run_id: 'run-1', message: 'not retained' }, { run_id: 'run-2', label: 'follow-up' })
-    expect(followUp).toEqual(expect.objectContaining({
-      title: 'follow-up — dispatched',
-      output: expect.stringContaining('Source run: run-1\nRun: run-2'),
-      metadata: { run_id: 'run-2', label: 'follow-up', source_run_id: 'run-1' },
-    }))
+    const resumed = formatMessageResumeOutput(
+      { action: 'resume', target: 'run-1' },
+      { action: 'resume', outcome: 'resumed', runId: 'run-2', label: 'again', text: 'resumed' },
+    )
+    expect(resumed.title).toBe('again — resumed')
+    expect(resumed.output).toContain('Source run: run-1\nRun: run-2')
+    expect(resumed.metadata).toEqual({
+      action: 'resume',
+      outcome: 'resumed',
+      runId: 'run-2',
+      label: 'again',
+      text: 'resumed',
+      source_run_id: 'run-1',
+    })
 
     const shutdown = formatShutdownOutput({ supervisor_id: '/tmp/sock', force: true }, { ok: false, cleaned_up: ['/tmp/one'] })
     expect(shutdown).toEqual(expect.objectContaining({
@@ -169,10 +200,13 @@ describe('OpenCode Avenor result renderers', () => {
       output: ['Avenor answer_permission result unavailable.', retry].join('\n'),
       metadata: { ok: 'yes', run_id: 'run-1', option_id: 'allow', request_id: undefined },
     })
-    expect(formatFollowUpOutput({ run_id: 'run-1' }, { run_id: null, label: 'follow-up' } as any)).toEqual({
-      title: 'follow-up — dispatched',
-      output: ['Avenor follow_up result unavailable.', retry].join('\n'),
-      metadata: { run_id: null, label: 'follow-up', source_run_id: 'run-1' },
+    expect(formatMessageResumeOutput(
+      { action: 'resume', target: 'run-1' },
+      { action: 'resume', outcome: 'resumed', runId: null as any, label: 'again' },
+    )).toEqual({
+      title: 'again — resumed',
+      output: ['Avenor message result unavailable.', retry].join('\n'),
+      metadata: { action: 'resume', outcome: 'resumed', runId: null, label: 'again', source_run_id: 'run-1' },
     })
     expect(formatEventsOutput({ run_id: 'run-1' }, malformedEvents as any)).toEqual({
       title: 'run-1 — 2 events',
