@@ -308,6 +308,26 @@ func TestProgStatusChaseWaitsForTheDialogToFinishPainting(t *testing.T) {
 	}
 }
 
+func TestProgStatusPaneScanWaitsForTheDialogToFinishPainting(t *testing.T) {
+	half := "Bash command\n  echo hi\nDo you want to proceed?\n❯ 1. Yes\n"
+	s, term, _ := newProgStatusSession(t, half, half, permissionPane)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	term.ReportProgStatus(rootReport(terminal.ProgBlocked, terminal.ProgKindPermission))
+	s.ScanTerminalTick()
+	for i := 0; i < 3; i++ {
+		s.ProgStatusTick()
+	}
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("permission.request count = %d, want 1", n)
+	}
+	s.Mu.Lock()
+	perm := s.PendingTerminalPerm
+	s.Mu.Unlock()
+	if perm == nil || len(perm.Options) != 2 {
+		t.Fatalf("brokered permission = %+v, want the fully painted dialog", perm)
+	}
+}
+
 func TestProgStatusQuestionWaitsWithoutPermissionRequest(t *testing.T) {
 	s, term, _ := newProgStatusSession(t, permissionPane)
 	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))

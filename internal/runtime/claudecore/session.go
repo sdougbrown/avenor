@@ -129,10 +129,20 @@ func (s *Session) ScanTerminalTick() {
 			return
 		}
 
-		// Parse the permission prompt and broker it.
+		// Parse the permission prompt and broker it. With OSC 7501 active the
+		// dialog paints just after the blocked report, so it is brokered only
+		// once two captures in a row agree, as in the permission chase.
 		out, err := s.Term.Capture(s.Ctx)
 		if err != nil {
 			return
+		}
+		if oscActive {
+			s.Mu.Lock()
+			stable := s.permissionCaptureStableLocked(out)
+			s.Mu.Unlock()
+			if !stable {
+				return
+			}
 		}
 		s.brokerTerminalPermission(out)
 

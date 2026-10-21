@@ -73,8 +73,9 @@ type progTurn struct {
 
 	burstUntil time.Time
 
-	// chaseUntil bounds the permission chase; chaseLast is its previous
-	// capture, which the next one must equal before the dialog is parsed.
+	// chaseUntil bounds the permission chase. chaseLast is the previous
+	// capture of a permission dialog, from the chase or the pane scan, which
+	// the next one must equal before the dialog is parsed.
 	chaseUntil time.Time
 	chaseLast  string
 	// permBrokered is set once the dialog of the current blocked report was
@@ -187,9 +188,7 @@ func (s *Session) ProgStatusTick() time.Duration {
 	if chase {
 		if out, err := s.Term.Capture(s.Ctx); err == nil && ClassifyPane(out) == PaneStatePermission {
 			s.Mu.Lock()
-			// Two identical captures in a row: the dialog has finished painting.
-			stable := out == s.osc.chaseLast
-			s.osc.chaseLast = out
+			stable := s.permissionCaptureStableLocked(out)
 			s.Mu.Unlock()
 			if stable {
 				s.brokerTerminalPermission(out)
@@ -225,6 +224,16 @@ func (s *Session) permissionChaseDue(now time.Time) bool {
 	return s.Prompted && !s.Finished && s.PendingTerminalPerm == nil && !s.osc.permBrokered &&
 		s.osc.root.State == terminal.ProgBlocked && s.osc.root.Kind == terminal.ProgKindPermission &&
 		now.Before(s.osc.chaseUntil)
+}
+
+// permissionCaptureStableLocked records out as the latest capture of a
+// permission dialog and reports whether it equals the previous one: two
+// identical captures in a row mean the dialog has finished painting. Mu is
+// held.
+func (s *Session) permissionCaptureStableLocked(out string) bool {
+	stable := out == s.osc.chaseLast
+	s.osc.chaseLast = out
+	return stable
 }
 
 // permissionBrokeredLocked reports whether the dialog of the current blocked
