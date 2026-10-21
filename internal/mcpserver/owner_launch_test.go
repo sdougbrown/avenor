@@ -156,7 +156,7 @@ func inboundMessageText(t *testing.T, msg messaging.InboundMessage) string {
 
 // TestMCPAutostartAuthenticatedAttachment proves MCP autostart launches a real
 // supervisor, attaches with its published capability and delivers an
-// owner-gated broker_send to the supervisor's registered run.
+// owner-gated message_send to the supervisor's registered run.
 func TestMCPAutostartAuthenticatedAttachment(t *testing.T) {
 	home := shortHome(t)
 	socketPath := supervisorSocketPath(home)
