@@ -93,7 +93,8 @@ func (s *TmuxSession) Capture(ctx context.Context) (string, error) {
 //
 // tmux 3.7 and later pass a pasted buffer through vis(3), which would turn the
 // markers into literal text; -S pastes the bytes as they are. Older tmux has
-// no -S and pastes the bytes as they are, so the paste is retried without it.
+// no -S and pastes the bytes as they are, so when tmux rejects the flag the
+// paste is retried without it.
 func (s *TmuxSession) PasteAndEnter(ctx context.Context, text string) error {
 	bufferName := "avenor-prompt-" + s.name
 	cmd := exec.CommandContext(ctx, "tmux", "load-buffer", "-b", bufferName, "-")
@@ -101,7 +102,10 @@ func (s *TmuxSession) PasteAndEnter(ctx context.Context, text string) error {
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	if err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-S", "-t", s.name, "-b", bufferName).Run(); err != nil {
+	if out, err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-S", "-t", s.name, "-b", bufferName).CombinedOutput(); err != nil {
+		if !strings.Contains(string(out), "unknown flag") && !strings.Contains(string(out), "usage:") {
+			return fmt.Errorf("tmux paste-buffer: %w: %s", err, strings.TrimSpace(string(out)))
+		}
 		if err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-t", s.name, "-b", bufferName).Run(); err != nil {
 			return err
 		}
