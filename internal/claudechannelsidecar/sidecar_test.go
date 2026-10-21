@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 func TestRunHandlesInitializeToolsAndReport(t *testing.T) {
@@ -424,7 +426,12 @@ func TestSidecarPeersLastReadsPeerRecord(t *testing.T) {
 	if isError {
 		t.Fatalf("last reported isError: %s", text)
 	}
-	if want := "**Last message from \"mesh-a\"** (run \"rt_peer\", stop reason: end_turn)\n\nOK"; text != want {
+	want := messaging.LastRender("header", map[string]string{
+		"run_id":      messaging.Quote("rt_peer"),
+		"label":       messaging.Quote("mesh-a"),
+		"stop_reason": messaging.Sanitize("end_turn"),
+	}) + "\n\nOK"
+	if text != want {
 		t.Fatalf("last text = %q, want %q", text, want)
 	}
 	last, _ := structured["last"].(map[string]any)

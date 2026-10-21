@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 func decodeRPCResponses(t *testing.T, data []byte) []map[string]any {
@@ -207,7 +209,7 @@ func TestChildPeersLastShapes(t *testing.T) {
 				"run_id": "rt_peer", "label": "mesh-a", "has_record": true,
 				"final_output": "OK", "stop_reason": "end_turn",
 			},
-			wantText: `**Last message from "mesh-a"** (run "rt_peer", stop reason: end_turn)` + "\n\nOK",
+			wantText: lastRenderText(t, "header", map[string]string{"run_id": "rt_peer", "label": "mesh-a", "stop_reason": "end_turn"}) + "\n\nOK",
 		},
 		{
 			name:       "record with empty text",
@@ -215,7 +217,7 @@ func TestChildPeersLastShapes(t *testing.T) {
 			lastBody: map[string]any{
 				"run_id": "rt_peer", "label": "mesh-a", "has_record": true, "stop_reason": "cancelled",
 			},
-			wantText: `run "rt_peer" finished (stop reason: cancelled) with no final text`,
+			wantText: lastRenderText(t, "no_text", map[string]string{"run_id": "rt_peer", "stop_reason": "cancelled"}),
 		},
 		{
 			name:       "known run with no record",
@@ -223,7 +225,7 @@ func TestChildPeersLastShapes(t *testing.T) {
 			lastBody: map[string]any{
 				"run_id": "rt_peer", "label": "mesh-a", "has_record": false,
 			},
-			wantText: `run "rt_peer" has no completed turn yet`,
+			wantText: lastRenderText(t, "empty", map[string]string{"run_id": "rt_peer"}),
 		},
 		{
 			name:       "target unavailable",
@@ -350,4 +352,20 @@ func TestChildPeersListNamesKind(t *testing.T) {
 	if first["kind"] != "supervisor" {
 		t.Fatalf("peer kind = %v, want supervisor", first["kind"])
 	}
+}
+
+// lastRenderText renders one peers `last` template from the shared contract
+// fixture, so a surface test pins the renderer's use rather than the template
+// text.
+func lastRenderText(t *testing.T, key string, facts map[string]string) string {
+	t.Helper()
+	quoted := make(map[string]string, len(facts))
+	for name, value := range facts {
+		if name == "stop_reason" {
+			quoted[name] = messaging.Sanitize(value)
+			continue
+		}
+		quoted[name] = messaging.Quote(value)
+	}
+	return messaging.LastRender(key, quoted)
 }
