@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
 func decodeRPCResponses(t *testing.T, data []byte) []map[string]any {
@@ -209,7 +210,7 @@ func TestChildPeersLastShapes(t *testing.T) {
 				"run_id": "rt_peer", "label": "mesh-a", "has_record": true,
 				"final_output": "OK", "stop_reason": "end_turn",
 			},
-			wantText: lastRenderText(t, "header", map[string]string{"run_id": "rt_peer", "label": "mesh-a", "stop_reason": "end_turn"}) + "\n\nOK",
+			wantText: lastRenderText(t, "header", "rt_peer", "mesh-a", "end_turn") + "\n\nOK",
 		},
 		{
 			name:       "record with empty text",
@@ -217,7 +218,7 @@ func TestChildPeersLastShapes(t *testing.T) {
 			lastBody: map[string]any{
 				"run_id": "rt_peer", "label": "mesh-a", "has_record": true, "stop_reason": "cancelled",
 			},
-			wantText: lastRenderText(t, "no_text", map[string]string{"run_id": "rt_peer", "stop_reason": "cancelled"}),
+			wantText: lastRenderText(t, "no_text", "rt_peer", "mesh-a", "cancelled"),
 		},
 		{
 			name:       "known run with no record",
@@ -225,7 +226,7 @@ func TestChildPeersLastShapes(t *testing.T) {
 			lastBody: map[string]any{
 				"run_id": "rt_peer", "label": "mesh-a", "has_record": false,
 			},
-			wantText: lastRenderText(t, "empty", map[string]string{"run_id": "rt_peer"}),
+			wantText: lastRenderText(t, "empty", "rt_peer", "mesh-a", ""),
 		},
 		{
 			name:       "target unavailable",
@@ -355,17 +356,9 @@ func TestChildPeersListNamesKind(t *testing.T) {
 }
 
 // lastRenderText renders one peers `last` template from the shared contract
-// fixture, so a surface test pins the renderer's use rather than the template
-// text.
-func lastRenderText(t *testing.T, key string, facts map[string]string) string {
+// fixture and the router's own fact construction, so a surface test pins the
+// renderer's use rather than the template text or its escaping rule.
+func lastRenderText(t *testing.T, key, runID, label, stopReason string) string {
 	t.Helper()
-	quoted := make(map[string]string, len(facts))
-	for name, value := range facts {
-		if name == "stop_reason" {
-			quoted[name] = messaging.Sanitize(value)
-			continue
-		}
-		quoted[name] = messaging.Quote(value)
-	}
-	return messaging.LastRender(key, quoted)
+	return messaging.LastRender(key, router.LastFacts(runID, label, stopReason))
 }

@@ -165,11 +165,7 @@ func peersLast(ctx context.Context, p Provider, action string, input peersInput)
 		StopReason:  last.StopReason,
 		Truncated:   last.Truncated,
 	}
-	facts := map[string]string{
-		"run_id":      quote(result.RunID),
-		"label":       quote(label),
-		"stop_reason": sanitize(last.StopReason),
-	}
+	facts := LastFacts(result.RunID, label, last.StopReason)
 	switch {
 	case !last.HasRecord:
 		result.Text = messaging.LastRender("empty", facts)
@@ -183,6 +179,19 @@ func peersLast(ctx context.Context, p Provider, action string, input peersInput)
 		result.Text = text
 	}
 	return result, nil
+}
+
+// LastFacts builds the template facts for a peers `last` result: the run id and
+// label are quoted, while the stop reason is sanitized because it is a bare wire
+// fact. The rule lives here so a surface test can render the expected text
+// without restating it, and the templates cannot be pinned by a test that
+// reproduces a wrong rule.
+func LastFacts(runID, label, stopReason string) map[string]string {
+	return map[string]string{
+		"run_id":      quote(runID),
+		"label":       quote(label),
+		"stop_reason": sanitize(stopReason),
+	}
 }
 
 // RenderPeers renders the peers list block the Go surfaces show. It is the one

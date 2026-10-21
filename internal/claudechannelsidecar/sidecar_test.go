@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
 func TestRunHandlesInitializeToolsAndReport(t *testing.T) {
@@ -426,11 +427,7 @@ func TestSidecarPeersLastReadsPeerRecord(t *testing.T) {
 	if isError {
 		t.Fatalf("last reported isError: %s", text)
 	}
-	want := messaging.LastRender("header", map[string]string{
-		"run_id":      messaging.Quote("rt_peer"),
-		"label":       messaging.Quote("mesh-a"),
-		"stop_reason": messaging.Sanitize("end_turn"),
-	}) + "\n\nOK"
+	want := messaging.LastRender("header", router.LastFacts("rt_peer", "mesh-a", "end_turn")) + "\n\nOK"
 	if text != want {
 		t.Fatalf("last text = %q, want %q", text, want)
 	}

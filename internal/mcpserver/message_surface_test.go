@@ -407,14 +407,11 @@ func toolRequest(t *testing.T, args map[string]any) *mcpsdk.CallToolRequest {
 }
 
 // lastRenderText renders the peers `last` header from the shared contract
-// fixture instead of restating the template in the test.
+// fixture and the router's own fact construction, so a test pins the renderer's
+// use instead of restating the template or its escaping rule.
 func lastRenderText(t *testing.T, runID, label, stopReason string) string {
 	t.Helper()
-	return messaging.LastRender("header", map[string]string{
-		"run_id":      messaging.Quote(runID),
-		"label":       messaging.Quote(label),
-		"stop_reason": messaging.Sanitize(stopReason),
-	})
+	return messaging.LastRender("header", router.LastFacts(runID, label, stopReason))
 }
 
 // TestMCPMessageProviderRunStateReadsBrokerOnlySupervisor proves the one run
