@@ -37,7 +37,7 @@ display label.
 | Spawned child | its runtime ID (`rt_N`) | Before the child's backend starts, so it can poll and reply. |
 
 A spawned `pi` child asks through its inherited broker credentials. That path
-sends `to_run_id` unchanged: unlike the host's `avenor_ask`, it does not resolve
+sends `to_run_id` unchanged: unlike the host's `avenor_message` ask, it does not resolve
 a public spawn ID or a label first. A child asking its supervisor therefore has
 to use `supervisor`. Asking `rt_N` addresses that child, not the supervisor. A
 child asking a sibling uses the sibling's `rt_N`.
@@ -108,7 +108,7 @@ A failed ask reaches tool surfaces as a JSON-RPC error whose `data` carries
 `message_id`, `pending`, and — when known — `outcome`. `pending` is true exactly
 when the outcome is `possibly-pending`: a wait that failed but whose cleanup
 withdrawal confirmed a terminal fence is no longer pending, and
-`broker_cancel` accepts the retained ID.
+`message_withdraw` (or `avenor_message action="withdraw"`) accepts the retained ID.
 
 Two rules follow from the table and are enforced everywhere:
 

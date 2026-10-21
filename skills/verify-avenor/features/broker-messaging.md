@@ -3,9 +3,9 @@
 ## Sub-features
 
 - A spawned `pi` child asks the supervisor and waits for its reply
-  (`avenor_ask`, target `supervisor`)
-- The supervisor host drains an inbound ask (`broker_receive`) and answers it
-  (`avenor_reply`)
+  (`avenor_message` action `ask`, target `supervisor`)
+- The supervisor host drains an inbound ask (the extension's `message_receive`
+  poll) and answers it (`avenor_message` action `reply`)
 - Broker run addressing: the supervisor is `supervisor`; a child is its runtime
   ID (`rt_N`). Public spawn run IDs and labels are not broker targets.
 
@@ -59,13 +59,13 @@ the supervisor before the ask arrives.
 AVENOR_BIN=$SCRATCH/avenor timeout -k 10 300 pi --no-session --no-extensions \
   --extension "$PWD/packages/pi/dist/index.js" \
   --no-skills --no-prompt-templates --no-mcp --no-context-files --print \
-  "Spawn a pi child with avenor_spawn (wait false, backend pi, dir $SCRATCH/work) whose prompt is: Call avenor_ask exactly once with to_run_id \"supervisor\", message \"PING-FROM-CHILD\", timeout_ms 120000, then report the answer and finish. Then keep this turn open: the extension delivers the child's ask into your context (it drains it with broker_receive every two seconds), so answer that ask with avenor_reply, using the from_run_id and reply_to_message_id the delivered ask names, and message \"PONG-FROM-SUPERVISOR\". Report the child's final output." \
+  "Spawn a pi child with avenor_spawn (wait false, backend pi, dir $SCRATCH/work) whose prompt is: Call avenor_message once with action \"ask\", target \"supervisor\", message \"PING-FROM-CHILD\", timeout_ms 120000, then report the answer and finish. Then keep this turn open: the extension delivers the child's ask into your context (it drains it with message_receive every two seconds), so answer that ask with avenor_message action \"reply\", using the reply_to message id the delivered ask names, and message \"PONG-FROM-SUPERVISOR\". Report the child's final output." \
   > "$SCRATCH/evidence/host.out" 2> "$SCRATCH/evidence/host.err"
 ```
 
 **Observable end state (the proof):** the child's event log
-(`$AVENOR_HOME/runs/<spawn-run-id>/events.log`) contains an `avenor_ask`
-`tool.call` with `"to_run_id": "supervisor"`, a successful tool result reading
+(`$AVENOR_HOME/runs/<spawn-run-id>/events.log`) contains an `avenor_message`
+`tool.call` with `"action": "ask"` and `"target": "supervisor"`, a successful tool result reading
 `Reply from supervisor:\nPONG-FROM-SUPERVISOR`, and a terminal `session.end`
 whose `final_output` contains `PONG-FROM-SUPERVISOR`. The child's sentinel
 (`$AVENOR_HOME/runs/<spawn-run-id>/sentinel.done`) carries `DONE` and
@@ -78,7 +78,7 @@ finishes its turn; a print-mode host that is still attached when `timeout` kills
 it flushes nothing, so a successful drive can leave `host.out` empty.
 
 `avenor_status` is not part of this proof: it reports runs, not asks. The ask
-reaches the host through the extension's `broker_receive` poll, which is what
+reaches the host through the extension's `message_receive` poll, which is what
 surfaces it in the host session.
 
 Tear the drive down: shut the supervisor down through its socket, unset the
@@ -109,10 +109,10 @@ credentials into a scratch home and deleting them again on teardown, and that
 teardown can delete the real credentials when it runs out of order.
 
 So this drive proves the child leg only as far as your installed extension
-speaks broker mode — an `avenor_ask` that posts to `AVENOR_BROKER_URL` instead of
-going back through a supervisor. With an install that predates that path, the
+speaks broker mode — an `avenor_message` ask that posts to `AVENOR_BROKER_URL`
+instead of going back through a supervisor. With an install that predates that path, the
 child starts or attaches to a supervisor of its own, the ask never reaches the
-host, and the child's `avenor_ask` result reports a timeout, a supervisor
+host, and the child's `avenor_message` ask result reports a timeout, a supervisor
 startup failure, or a permission error instead of `PONG-FROM-SUPERVISOR`. Update
 `@dougbots/avenor-pi` (or install this checkout's built `packages/pi/dist`)
 before relying on this drive; do not reintroduce credential copying to work
@@ -120,8 +120,9 @@ around it.
 
 ## Gotchas
 
-- A child's inherited-broker `avenor_ask` sends `to_run_id` unchanged. Target
-  the supervisor as `supervisor`; target a sibling as its `rt_N`. A public spawn
+- A child's inherited-broker `avenor_message` ask sends its resolved run id
+  unchanged. Target the supervisor as `supervisor`; target a sibling as its
+  `rt_N`. A public spawn
   run id or a label does not resolve there. `target-unavailable` means the
   target is not a registered broker run, not that the broker is down
   (`docs/messaging.md`).
