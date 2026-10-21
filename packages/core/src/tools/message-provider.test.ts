@@ -255,6 +255,23 @@ describe('host message provider', () => {
     expect(result.reply).toBe('{"from_run_id":"rt_7","message_id":"m","payload":{"result":"opaque"}}')
   })
 
+  it('renders a null or empty payload as the full envelope, not as an empty reply', async () => {
+    for (const [payload, rendered] of [
+      [null, '{"from_run_id":"rt_7","message_id":"m","payload":null}'],
+      ['', '{"from_run_id":"rt_7","message_id":"m","payload":""}'],
+    ] as const) {
+      const client = fakeClient({
+        messageWait: mock(async () => ({
+          outcome: 'replied',
+          message_id: 'm',
+          reply: { message_id: 'm', from_run_id: 'rt_7', payload },
+        })),
+      })
+      const result = await executeMessage(provider(client), { action: 'ask', target: 'supervisor', message: 'question' })
+      expect(result.reply).toBe(rendered)
+    }
+  })
+
   it('fills the public run id when a label resolves by runtime id', async () => {
     const supervisorId = '/tmp/avenor-provider.sock'
     fs.mkdirSync(path.join(home, 'runs', 'run-42'), { recursive: true, mode: 0o700 })

@@ -618,8 +618,10 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
 
 /**
  * Render a wait result's reply body the way askclient.RenderReply does: a
- * `{message}` payload is the text, an empty payload is `(empty reply)`, and
- * anything else is the full envelope with the payload passed through.
+ * `{message}` payload is the text, a payload the wire left out is
+ * `(empty reply)`, and anything else is the full envelope with the payload
+ * passed through. A payload that is JSON `null` or an empty string is present,
+ * so it renders the envelope rather than claiming the reply was empty.
  */
 function renderReply(reply: MessageInbound | undefined): string {
   if (!reply) return ''
@@ -636,8 +638,8 @@ function renderReply(reply: MessageInbound | undefined): string {
       })
     }
   }
-  if (payload === undefined || payload === null || payload === '') return '(empty reply)'
-  if (typeof payload === 'object') {
+  if (payload === undefined) return '(empty reply)'
+  if (payload !== null && typeof payload === 'object') {
     const message = (payload as Record<string, unknown>).message
     if (typeof message === 'string' && message) return message
   }
