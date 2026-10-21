@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -357,5 +358,46 @@ func TestResumeConcurrentKeyedSpawnsOneRuntime(t *testing.T) {
 	}
 	if resumes := provider.resumesRecorded(); len(resumes) != 1 {
 		t.Fatalf("provider resumes = %d, want one for the keyed first use", len(resumes))
+	}
+}
+
+// TestResumeKeySpaceIsolatedFromSpawn pins the follow_up: key prefix: a spawn
+// and a resume may both use key "k" without the resume being rejected as the
+// same key reused with different parameters.
+func TestResumeKeySpaceIsolatedFromSpawn(t *testing.T) {
+	sup, _ := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "sentinel.env")
+	eventLog := filepath.Join(dir, "events.log")
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		SentinelFile: sentinel, OnEvent: eventLog,
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	writeSentinel(t, sentinel, "DONE", "ses_resumed")
+
+	raw, err := json.Marshal(SpawnParams{Prompt: "keyed", Dir: dir, Agent: "claude", IdempotencyKey: "k"})
+	if err != nil {
+		t.Fatalf("marshal spawn params: %v", err)
+	}
+	if _, err := sup.Spawn(raw); err != nil {
+		t.Fatalf("keyed spawn: %v", err)
+	}
+
+	resumed, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID:          resumeUUID1,
+		Target:         prior.RuntimeID,
+		Message:        "continue",
+		IdempotencyKey: "k",
+		SentinelFile:   filepath.Join(dir, "avenor-run-"+resumeUUID1+".done"),
+		EventLog:       filepath.Join(dir, "avenor-run-"+resumeUUID1+".log"),
+	})
+	if err != nil {
+		t.Fatalf("resume reused the spawn's key space: %v", err)
+	}
+	if resumed.RunID != resumeUUID1 {
+		t.Fatalf("resumed run_id = %q, want the freshly minted %q (a keyed replay returns the first run's id)", resumed.RunID, resumeUUID1)
 	}
 }
