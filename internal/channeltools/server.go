@@ -155,12 +155,7 @@ func (s *Server) message(ctx context.Context, args json.RawMessage) (any, error)
 		}
 		return nil, err
 	}
-	object := result.Output()
-	text, err := json.Marshal(object)
-	if err != nil {
-		return nil, err
-	}
-	return structuredToolResult(object, string(text), false), nil
+	return structuredToolResult(result.Output(), result.Text, false), nil
 }
 
 func (s *Server) peers(ctx context.Context, args json.RawMessage) (any, error) {
@@ -178,9 +173,10 @@ func (s *Server) peers(ctx context.Context, args json.RawMessage) (any, error) {
 	return structuredToolResult(router.PeersDetails(result), router.PeersContent(result), false), nil
 }
 
-// peersDetails is the structured peers result: the list records, the rename
-// triple, or the last-message object. It never merges a peers action into the
-// message result object.
+// structuredToolResult wraps one tool outcome in the MCP envelope: content
+// carries the rendered sentence as its single text part, structuredContent
+// carries the shared snake_case result object, and isError marks a router
+// refusal.
 func structuredToolResult(object map[string]any, text string, isError bool) map[string]any {
 	return map[string]any{
 		"content":           []map[string]any{{"type": "text", "text": text}},

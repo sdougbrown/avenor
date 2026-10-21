@@ -2960,6 +2960,19 @@ func (s *closeRecordingSink) Close() error {
 	return nil
 }
 
+type promptRecordingProvider struct {
+	*stableFakeProvider
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (p *promptRecordingProvider) Prompt(ctx context.Context, sessionID, prompt string) error {
+	p.mu.Lock()
+	p.prompts = append(p.prompts, prompt)
+	p.mu.Unlock()
+	return p.stableFakeProvider.Prompt(ctx, sessionID, prompt)
+}
+
 type stableFakeProvider struct {
 	events     chan events.Event
 	startCalls int
@@ -6145,6 +6158,59 @@ func withFakeExec(t *testing.T, fake func(name string, arg ...string) *exec.Cmd)
 	old := httpExecCommand
 	httpExecCommand = fake
 	t.Cleanup(func() { httpExecCommand = old })
+}
+
+func TestSpawnParentNoteNamesMessageTool(t *testing.T) {
+	sup := newTestSupervisor(t, Config{
+		ControlSocket: newStableSocketPath(t, "spawn-parent-note"),
+		MaxRuntimes:   2,
+	})
+	provider := &promptRecordingProvider{stableFakeProvider: &stableFakeProvider{events: make(chan events.Event, 1)}}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+
+	result, err := sup.spawn(SpawnParams{Prompt: "Do work.", Dir: t.TempDir(), ParentRunID: "parent_run"})
+	if err != nil {
+		t.Fatalf("spawn with parent run id: %v", err)
+	}
+	sup.controlMu.Lock()
+	child := sup.runtimes[result.RuntimeID]
+	sup.controlMu.Unlock()
+	if child == nil {
+		t.Fatalf("spawned runtime %q not found", result.RuntimeID)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		provider.mu.Lock()
+		n := len(provider.prompts)
+		provider.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("provider did not receive the spawn prompt")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	provider.mu.Lock()
+	prompts := append([]string(nil), provider.prompts...)
+	provider.mu.Unlock()
+	if len(prompts) != 1 {
+		t.Fatalf("prompts = %d, want 1", len(prompts))
+	}
+	note := prompts[0]
+	if strings.Contains(note, "avenor_send") {
+		t.Fatalf("parent note names the retired tool: %q", note)
+	}
+	if !strings.Contains(note, "message") {
+		t.Fatalf("parent note does not name the message tool: %q", note)
+	}
+	if !strings.Contains(note, `"parent_run"`) {
+		t.Fatalf("parent note lost the quoted parent run ID: %q", note)
+	}
+	if !strings.HasSuffix(note, "\n\nDo work.") {
+		t.Fatalf("parent note is not in front of the prompt: %q", note)
+	}
 }
 
 // TestSpawnAndSendToParent exercises the full parent-child round-trip through

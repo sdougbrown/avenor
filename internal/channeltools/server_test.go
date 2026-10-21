@@ -217,6 +217,64 @@ func TestChildTellSendsNoReplyWithNoSender(t *testing.T) {
 	if sentBody["to_run_id"] != "parent_run" {
 		t.Fatalf("to_run_id = %v", sentBody["to_run_id"])
 	}
+	if text != structured["text"] {
+		t.Fatalf("tell content text = %q, want the rendered result text %q", text, structured["text"])
+	}
+}
+
+func TestChildTellUnknownTargetIsToolError(t *testing.T) {
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"messaging_protocol": 1,
+				"generation":         "gen-1",
+				"sessions": []any{
+					map[string]any{"run_id": "child_run", "label": "child", "kind": "agent", "status": "running"},
+					map[string]any{"run_id": "parent_run", "label": "parent", "kind": "supervisor", "status": "running"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer brokerSrv.Close()
+
+	response := runTool(t, brokerSrv.URL, brokerSrv.Client(), "avenor_message", map[string]any{
+		"action": "tell", "target": "ghost", "message": "hi",
+	})
+	if _, ok := response["error"]; ok {
+		t.Fatalf("unknown target became a JSON-RPC error: %#v", response)
+	}
+	text, structured, isError := toolContent(t, response)
+	if !isError {
+		t.Fatalf("unknown target reported isError=false; text=%q", text)
+	}
+	if structured["code"] != "unknown_target" {
+		t.Fatalf("code = %v, want unknown_target; structured=%#v", structured["code"], structured)
+	}
+}
+
+func TestToolCallBrokerAuthFailureReturnsJSONRPCError(t *testing.T) {
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "bad run token", "code": "invalid-request"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer brokerSrv.Close()
+
+	response := runTool(t, brokerSrv.URL, brokerSrv.Client(), "avenor_message", map[string]any{
+		"action": "tell", "target": "parent_run", "message": "hi",
+	})
+	if _, ok := response["error"]; !ok {
+		t.Fatalf("rejected run token did not produce a JSON-RPC error: %#v", response)
+	}
+	if _, ok := response["result"]; ok {
+		t.Fatalf("rejected run token produced a result alongside no error: %#v", response)
+	}
 }
 
 func TestChildPeersLastShapes(t *testing.T) {
