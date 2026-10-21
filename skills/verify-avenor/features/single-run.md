@@ -85,6 +85,46 @@ names before signalling — a bare `kill -0` also succeeds for a recycled pid, a
 a `$!` captured from a `setsid` launcher can name a shell that already exited.
 The pid file is gone after the sentinel appears.
 
+## Claude backend: OSC 7501 status reports
+
+On its default PTY launcher the `claude` backend answers Claude Code's OSC 7501
+detection query and uses Claude's own status reports for readiness, status, and
+completion gating. Prove both the report path and the scraping fallback with
+two one-word runs. When driving from inside Claude Code, scrub every `CLAUDE*`
+variable from the run's environment: the hosted Claude otherwise inherits the
+outer session and the run hangs or misbehaves.
+
+```sh
+SCRATCH=$(mktemp -d /tmp/avenor-verify.XXXXXX)
+SCRUB=$(env | awk -F= '/^CLAUDE/{print "-u " $1}')
+env $SCRUB ./avenor run --backend claude --model haiku \
+  --prompt "Reply with the single word OK and nothing else." \
+  --dir "$SCRATCH" --on-event "$SCRATCH/osc.ndjson" \
+  --sentinel-file "$SCRATCH/osc.env" --timeout 120s
+echo "exit=$?"
+grep -o '"ready_signal":"[a-z0-9]*"' "$SCRATCH/osc.ndjson"
+grep -c '"signal":"osc7501"' "$SCRATCH/osc.ndjson"
+
+env $SCRUB AVENOR_CLAUDE_OSC7501=off ./avenor run --backend claude --model haiku \
+  --prompt "Reply with the single word OK and nothing else." \
+  --dir "$SCRATCH" --on-event "$SCRATCH/off.ndjson" \
+  --sentinel-file "$SCRATCH/off.env" --timeout 120s
+echo "exit=$?"
+grep -o '"ready_signal":"[a-z0-9]*"' "$SCRATCH/off.ndjson"
+grep -c '"signal":"osc7501"' "$SCRATCH/off.ndjson"
+```
+
+**Report path (the proof):** `exit=0`; `agent.prompt_submitted` carries
+`"ready_signal":"osc7501"`; at least one `agent.status` carries
+`"signal":"osc7501"` with `"phase":"working"` and `"source":"pty"`, emitted
+once (not repeated every 500ms); the terminal `session.end` has
+`stop_reason: end_turn` and `final_output` `OK`.
+
+**Fallback (the proof):** `exit=0`; `"ready_signal":"pane"`; zero
+`"signal":"osc7501"` events; the run still ends with `stop_reason: end_turn`.
+`AVENOR_CLAUDE_TERMINAL=tmux` also gives `ready_signal=pane`: the tmux launcher
+and `claude-channel` never answer the query.
+
 ## Gotchas
 
 - Runs are real model calls — keep prompts to one-word replies.

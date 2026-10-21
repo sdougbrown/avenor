@@ -148,13 +148,23 @@ The `claude` backend emits a subset of the `claude-channel` event surface. It ha
 Events emitted:
 - `session.start` — carries `backend="claude"`, `dir`, and `dangerously_load=false` (the flag is never set).
 - `session.end` — `stop_reason` is one of `end_turn`, `cancelled`, or `cancelled_forced`. No token usage field (transcript does not expose it).
-- `agent.prompt_submitted` — `delivery` is `"pty"` or `"tmux"` depending on the active launcher.
-- `agent.status` — `phase=working` sourced from `"transcript"` when new JSONL records appear; `phase=waiting` sourced from `"pty"` or `"tmux"` when a pane-scrape detects a permission prompt.
+- `agent.prompt_submitted` — `delivery` is `"pty"` or `"tmux"` depending on the active launcher. `ready_signal` says what decided the input box was taking input: `"osc7501"` when the prompt waited for Claude's startup `idle` report, `"pane"` when the visible input box alone decided (tmux, `AVENOR_CLAUDE_OSC7501=off`, or no report in time).
+- `agent.status` — `phase=working` sourced from `"transcript"` when new JSONL records appear; `phase=waiting` sourced from `"pty"` or `"tmux"` on each pane scrape that finds Claude at its input box, until the first OSC 7501 report arrives (see below).
 - `permission.request` — emitted from pane-scrape when a permission dialog is detected.
+
+On the PTY launcher Claude Code reports its own state with OSC 7501 (Program Status Protocol) once Avenor answers its detection query. After the first report the pane heartbeat stops and `agent.status` events also come from report transitions, one per transition, tagged `signal="osc7501"` with `source="pty"`:
+
+- `phase=working` when Claude starts working on the prompt.
+- `phase=waiting` with `reason="question"` or `reason="auth"` when Claude is blocked on a question or on authentication. `label` carries Claude's message, truncated to 200 characters; it is display text only. No `permission.request` is emitted for these. A blocked report with no recognised kind gives `phase=waiting` with no `reason`.
+- `phase=waiting` with `reason="idle"` when Claude returns to its input box mid-turn (a cancelled or denied turn).
+
+A report that Claude is blocked on a permission emits no `agent.status`; Avenor brokers the dialog as a `permission.request` as soon as it is on screen. Reports from subagents never affect the turn. `session.end` stays transcript-driven: an `end_turn` record ends the turn, except that while Claude still reports the turn working (a background subagent ends an inner turn first) Avenor holds it until Claude reports `done` or `idle`, and once reports are flowing it ends the turn only after about 0.75s passes without a later `end_turn`, so the final reply is emitted first. Claude reporting `done` without a transcript `end_turn` never ends the session.
+
+The tmux launcher and the `claude-channel` backend do not answer the query and keep the pane-scrape behaviour above. `AVENOR_CLAUDE_OSC7501=off` (or `0`, `false`) turns the reply off for the `claude` backend.
 
 Events **not** emitted by `claude` (channel-only): `agent.channel_ready`, `agent.prompt_queued`, `agent.report`, `agent.reply`, `agent.finish`.
 
-The `source` field on `agent.status` is limited to `"transcript"`, `"pty"`, and `"tmux"` — never `"channel"` or `"sidecar"`.
+The `source` field on `agent.status` is limited to `"transcript"`, `"pty"`, and `"tmux"` — never `"channel"` or `"sidecar"`. `signal` and `reason` appear only on report-derived events.
 
 For the `claude` backend, `session.end` is the authoritative lifecycle signal. There is no `agent.finish` event; use `session.end` to detect completion.
 
@@ -218,7 +228,7 @@ Every event in this section is written to the durable `--on-event` NDJSON except
 
 **`agent.status`** — Synthesized by Avenor to signal agent phase transitions. Emitted before the protocol event that triggered it.
 
-Fields: `phase` (one of `thinking`, `working`, `waiting`, `done`), `source` (`"avenor"` for synthesized transitions, `"agent"` for explicit markers in output text; for `claude-channel`, also `"transcript"` when derived from JSONL records, or the terminal kind `"tmux"`/`"pty"` for pane-scrape-derived `waiting`/permission states), optional `label` (human-readable activity description), `ts` (Unix milliseconds).
+Fields: `phase` (one of `thinking`, `working`, `waiting`, `done`), `source` (`"avenor"` for synthesized transitions, `"agent"` for explicit markers in output text; for `claude-channel`, also `"transcript"` when derived from JSONL records, or the terminal kind `"tmux"`/`"pty"` for pane-scrape-derived `waiting`/permission states), optional `label` (human-readable activity description), optional `signal` (`"osc7501"` when the program's own status report produced the event; `claude` backend only), optional `reason` (why a `waiting` phase is waiting: `question`, `auth`, or `idle`), `ts` (Unix milliseconds).
 
 Also includes `run_id` and `run_label` when present.
 
