@@ -134,7 +134,7 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 }
 
 // messageRouter binds the shared child provider to one generation and hands the
-// call to the one router all Go surfaces use.
+// call to the shared router.
 func (s *Server) messageRouter(ctx context.Context) (*router.Router, error) {
 	if err := s.provider.Prepare(ctx); err != nil {
 		return nil, err
@@ -143,26 +143,41 @@ func (s *Server) messageRouter(ctx context.Context) (*router.Router, error) {
 }
 
 func (s *Server) message(ctx context.Context, args json.RawMessage) (any, error) {
-	rt, err := s.messageRouter(ctx)
-	if err != nil {
-		return nil, err
-	}
-	result, err := rt.Execute(ctx, args)
-	if err != nil {
-		var toolErr *router.ToolError
-		if errors.As(err, &toolErr) {
-			return structuredToolResult(toolErr.Output(), toolErr.Message, true), nil
-		}
-		return nil, err
-	}
-	return structuredToolResult(result.Output(), result.Text, false), nil
+	return routeResult(
+		func() (router.Result, error) {
+			rt, err := s.messageRouter(ctx)
+			if err != nil {
+				return router.Result{}, err
+			}
+			return rt.Execute(ctx, args)
+		},
+		func(result router.Result) (map[string]any, string) {
+			return result.Output(), result.Text
+		},
+	)
 }
 
 func (s *Server) peers(ctx context.Context, args json.RawMessage) (any, error) {
 	if err := s.provider.Prepare(ctx); err != nil {
 		return nil, err
 	}
-	result, err := router.ExecutePeers(ctx, s.provider, args)
+	return routeResult(
+		func() (router.Result, error) {
+			return router.ExecutePeers(ctx, s.provider, args)
+		},
+		func(result router.Result) (map[string]any, string) {
+			return router.PeersDetails(result), router.PeersContent(result)
+		},
+	)
+}
+
+// routeResult maps one router outcome into the MCP envelope, so both tools
+// answer a refusal the same way: a router refusal becomes an isError result
+// carrying the router's output and message, any other error goes back to the
+// JSON-RPC layer, and render turns a successful result into the structured
+// object and its rendered text.
+func routeResult(call func() (router.Result, error), render func(router.Result) (map[string]any, string)) (any, error) {
+	result, err := call()
 	if err != nil {
 		var toolErr *router.ToolError
 		if errors.As(err, &toolErr) {
@@ -170,7 +185,8 @@ func (s *Server) peers(ctx context.Context, args json.RawMessage) (any, error) {
 		}
 		return nil, err
 	}
-	return structuredToolResult(router.PeersDetails(result), router.PeersContent(result), false), nil
+	object, text := render(result)
+	return structuredToolResult(object, text, false), nil
 }
 
 // structuredToolResult wraps one tool outcome in the MCP envelope: content

@@ -1,8 +1,7 @@
-// Package childmessaging holds the shared child-side messaging seam used by the
-// two Go child surfaces: the channeltools server and the claude-channel
-// sidecar. It implements the router Provider over one localhttp transport, so
-// a child surface supplies credentials and a surface name and gets the same
-// resolution, state, rename and last-message behaviour on both.
+// Package childmessaging holds the shared child-side messaging seam. It
+// implements the router Provider over one localhttp transport, so a Go child
+// surface supplies credentials and a surface name and gets the router's
+// resolution, state, rename and last-message behaviour over that one transport.
 package childmessaging
 
 import (
