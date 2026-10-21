@@ -3,16 +3,16 @@ import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { randomUUID } from 'node:crypto'
 import {
-  askViaBroker,
   buildAgentMessage,
-  formatInboundAskBody,
   parseControlMessage,
   postBroker,
   readSubAgentEnv,
-  resolveReplyTarget,
   withdrawPendingAsk,
   type SubAgentEnv,
 } from './subagent-broker.js'
+// Temporary until 356-13: the retired per-action tools still ask through the
+// legacy child-ask path.
+import { askViaBroker, formatInboundAskBody, resolveReplyTarget } from './subagent-legacy.js'
 import {
   answerPermissionTool,
   askTool,
