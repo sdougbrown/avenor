@@ -423,6 +423,11 @@ async function brokerAsk(
     if (await sendNeverReachedBroker(error, env, fetchImpl)) {
       return { outcome: 'not-sent', messageId }
     }
+    // A broker that rejected the send classified it itself; Go's ask client
+    // reports that rejection rather than the outcome of withdrawing an edge
+    // the rejected send never created.
+    const rejected = brokerErrorOutcome(error)
+    if (rejected) return { outcome: rejected, messageId }
     const cleaned = await withdrawAsk(env, messageId, fetchImpl)
     return { outcome: cleaned.outcome, messageId }
   }

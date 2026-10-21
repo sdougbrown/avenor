@@ -163,23 +163,35 @@ describe('child broker ask', () => {
     expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 
-  it('withdraws an ask whose send drew an HTTP error response', async () => {
+  it('reports a rejected ask-send as the rejection instead of the withdrawal', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Response.json({ code: 'target-unavailable' }, { status: 404 }),
+      '/cancel_message': () => new Response('no pending ask', { status: 404 }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('rt_gone', 'q', 'av1.m.10')
+    expect(result).toEqual({ outcome: 'not-sent', messageId: 'av1.m.10' })
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
+  })
+
+  it('reports an unenveloped ask-send rejection as possibly-pending without spending a cancel', async () => {
     const { calls, fetchImpl } = stubFetch({
       '/send': () => new Response('boom', { status: 500 }),
       '/cancel_message': () => Response.json({ outcome: 'withdrawn' }),
     })
     const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.4')
-    expect(result.outcome).toBe('withdrawn')
-    expect(calls.find(call => call.url.endsWith('/cancel_message'))?.body).toMatchObject({ cancel_message_id: 'av1.m.4' })
+    expect(result.outcome).toBe('possibly-pending')
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 
   it('reports possibly-pending when the cleanup cannot be confirmed', async () => {
-    const { fetchImpl } = stubFetch({
-      '/send': () => new Response('boom', { status: 500 }),
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Response.json({ queued: true, outcome: 'sent' }),
+      '/wait_reply': () => Promise.reject(new Error('connection reset')),
       '/cancel_message': () => new Response('unavailable', { status: 503 }),
     })
     const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.5')
     expect(result.outcome).toBe('possibly-pending')
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
   })
 
   it('withdraws a child ask when the caller aborts', async () => {
