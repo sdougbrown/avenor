@@ -185,11 +185,18 @@ export function normalizeTurnStopReason(stopReason: string): string {
   switch (stopReason) {
     case 'stop':
     case 'end_of_turn':
+    case 'end-turn':
       return 'end_turn'
     case 'length':
       return 'max_tokens'
     case 'aborted':
       return 'cancelled'
+    // ai-sdk finish values, so a turn ending in a tool call reports the same
+    // word a Pi host's tool-use turn does.
+    case 'tool-calls':
+    case 'tool_calls':
+    case 'toolUse':
+      return 'tool_use'
     default:
       return stopReason
   }

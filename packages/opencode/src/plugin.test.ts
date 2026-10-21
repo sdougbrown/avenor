@@ -1088,14 +1088,6 @@ function toolContext(sessionID: string) {
   }
 }
 
-function makeTurnClient(messages: ReturnType<typeof mock>, promptAsync = mock(async () => {})) {
-  return { session: { promptAsync, messages } }
-}
-
-function turnResponse(info: Record<string, unknown>, parts: unknown[]) {
-  return { data: [{ info, parts }] }
-}
-
 describe('OpenCode message tool parity', () => {
   it('registers avenor_message and avenor_peers with the contract field sets', async () => {
     const hooks = await AvenorPlugin(makeCtx() as any)
@@ -1270,56 +1262,134 @@ describe('OpenCode peers last', () => {
 })
 
 describe('OpenCode host turn producer', () => {
-  async function bindSession(hooks: Awaited<ReturnType<typeof AvenorPlugin>>, sessionID: string) {
-    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext(sessionID))
+  type Hooks = Awaited<ReturnType<typeof AvenorPlugin>>
+
+  function makeProducerClient(partsByMessage: Record<string, unknown[]>) {
+    const message = mock(async (options: any) => ({
+      data: { info: {}, parts: partsByMessage[options.path?.messageID] ?? [] },
+    }))
+    return { client: { session: { promptAsync: mock(async () => {}), message } }, message }
   }
 
-  async function idle(hooks: Awaited<ReturnType<typeof AvenorPlugin>>, sessionID: string) {
+  function assistant(id: string, extra: Record<string, unknown> = {}) {
+    return {
+      id,
+      sessionID: 'session-1',
+      role: 'assistant',
+      time: { created: 1, completed: 2 },
+      ...extra,
+    }
+  }
+
+  async function turn(hooks: Hooks, info: Record<string, unknown>) {
+    await hooks.event?.({
+      event: { type: 'message.updated', properties: { info } } as any,
+    })
+  }
+
+  async function idle(hooks: Hooks, sessionID: string) {
     await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID } } as any })
   }
 
-  it('publishes the settled turn once for the bound session', async () => {
+  async function bindSession(hooks: Hooks, sessionID: string) {
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext(sessionID))
+  }
+
+  it('publishes each settled assistant turn from the message the event carries', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     providerFactory = () => makeProvider({ recordLastTurn: record })
-    const messages = mock(async () => turnResponse(
-      { role: 'assistant', finish: 'stop' },
-      [{ type: 'text', text: 'the answer' }],
-    ))
-    const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
     await bindSession(hooks, 'session-1')
-    await idle(hooks, 'session-1')
+    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
 
     expect(record).toHaveBeenCalledTimes(1)
-    expect(record).toHaveBeenCalledWith('the answer', 'end_turn', false)
+    expect(record).toHaveBeenCalledWith('one', 'end_turn', false)
+    expect(producer.message).toHaveBeenCalledWith({ path: { id: 'session-1', messageID: 'msg-1' } })
+  })
+
+  it('publishes successive turns in either arrival order, once each', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({
+      'msg-1': [{ type: 'text', text: 'one' }],
+      'msg-2': [{ type: 'text', text: 'two' }],
+    })
+
+    const forwards = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(forwards, 'session-1')
+    await turn(forwards, assistant('msg-1', { finish: 'stop' }))
+    await turn(forwards, assistant('msg-2', { finish: 'stop' }))
+    expect(record.mock.calls.map(call => call[0])).toEqual(['one', 'two'])
+    await turn(forwards, assistant('msg-2', { finish: 'stop' }))
+    expect(record).toHaveBeenCalledTimes(2)
+
+    record.mockClear()
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const backwards = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(backwards, 'session-1')
+    await turn(backwards, assistant('msg-2', { finish: 'stop' }))
+    await turn(backwards, assistant('msg-1', { finish: 'stop' }))
+    expect(record.mock.calls.map(call => call[0])).toEqual(['two', 'one'])
+  })
+
+  it('publishes nothing for an idle with no new message and never erases the record', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(hooks, 'session-1')
+
+    await idle(hooks, 'session-1')
+    expect(record).not.toHaveBeenCalled()
+
+    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    await idle(hooks, 'session-1')
+    expect(record).toHaveBeenCalledTimes(1)
+    expect(record).toHaveBeenCalledWith('one', 'end_turn', false)
+  })
+
+  it('ignores an assistant message that has not completed and any user message', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(hooks, 'session-1')
+
+    await turn(hooks, { id: 'msg-1', sessionID: 'session-1', role: 'assistant', time: { created: 1 } })
+    await turn(hooks, { id: 'msg-9', sessionID: 'session-1', role: 'user', time: { created: 1, completed: 2 } })
+
+    expect(record).not.toHaveBeenCalled()
+    expect(producer.message).not.toHaveBeenCalled()
   })
 
   it('publishes nothing before any host tool binds the session', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     providerFactory = () => makeProvider({ recordLastTurn: record })
-    const messages = mock(async () => turnResponse({ role: 'assistant', finish: 'stop' }, []))
-    const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
 
-    await idle(hooks, 'session-1')
+    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
 
     expect(record).not.toHaveBeenCalled()
-    expect(messages).not.toHaveBeenCalled()
+    expect(producer.message).not.toHaveBeenCalled()
   })
 
   it('keeps the first binding when another session runs a host tool', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     providerFactory = () => makeProvider({ recordLastTurn: record })
-    const messages = mock(async () => turnResponse({ role: 'assistant', finish: 'stop' }, [{ type: 'text', text: 'from one' }]))
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'from one' }] })
     const logged: string[] = []
     const originalError = console.error
     console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
     try {
-      const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+      const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
       await bindSession(hooks, 'session-1')
       await bindSession(hooks, 'session-2')
-      await idle(hooks, 'session-2')
+      await turn(hooks, { ...assistant('msg-1', { finish: 'stop' }), sessionID: 'session-2' })
       expect(record).not.toHaveBeenCalled()
 
-      await idle(hooks, 'session-1')
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
       expect(record).toHaveBeenCalledWith('from one', 'end_turn', false)
     } finally {
       console.error = originalError
@@ -1330,27 +1400,32 @@ describe('OpenCode host turn producer', () => {
   it('publishes a cancelled turn with no text instead of skipping it', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     providerFactory = () => makeProvider({ recordLastTurn: record })
-    const messages = mock(async () => turnResponse(
-      { role: 'assistant', error: { name: 'MessageAbortedError' } },
-      [],
-    ))
-    const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+    const producer = makeProducerClient({ 'msg-1': [] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
     await bindSession(hooks, 'session-1')
-    await idle(hooks, 'session-1')
+    await turn(hooks, assistant('msg-1', { error: { name: 'MessageAbortedError' } }))
 
     expect(record).toHaveBeenCalledWith('', 'cancelled', false)
+  })
+
+  it('publishes canonical stop reasons for ai-sdk finish values', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'checking' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(hooks, 'session-1')
+    await turn(hooks, assistant('msg-1', { finish: 'tool-calls' }))
+
+    expect(record).toHaveBeenCalledWith('checking', 'tool_use', false)
   })
 
   it('carries the truncation flag from the unbounded text', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     providerFactory = () => makeProvider({ recordLastTurn: record })
-    const messages = mock(async () => turnResponse(
-      { role: 'assistant', error: { name: 'MessageOutputLengthError' } },
-      [{ type: 'text', text: 'x'.repeat(5000) }],
-    ))
-    const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'x'.repeat(5000) }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
     await bindSession(hooks, 'session-1')
-    await idle(hooks, 'session-1')
+    await turn(hooks, assistant('msg-1', { error: { name: 'MessageOutputLengthError' } }))
 
     const [text, stop, truncated] = record.mock.calls[0] as [string, string, boolean]
     expect(text).toHaveLength(4096)
@@ -1358,18 +1433,18 @@ describe('OpenCode host turn producer', () => {
     expect(truncated).toBe(true)
   })
 
-  it('logs a failing publish without rejecting the idle handler', async () => {
+  it('logs a failing publish without rejecting the event handler', async () => {
     providerFactory = () => makeProvider({
       recordLastTurn: async () => { throw new Error('broker down') },
     })
-    const messages = mock(async () => turnResponse({ role: 'assistant', finish: 'stop' }, [{ type: 'text', text: 'turn' }]))
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'turn' }] })
     const logged: string[] = []
     const originalError = console.error
     console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
     try {
-      const hooks = await AvenorPlugin(makeCtx({ client: makeTurnClient(messages) }) as any)
+      const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
       await bindSession(hooks, 'session-1')
-      await expect(idle(hooks, 'session-1')).resolves.toBeUndefined()
+      await expect(turn(hooks, assistant('msg-1', { finish: 'stop' }))).resolves.toBeUndefined()
     } finally {
       console.error = originalError
     }

@@ -683,6 +683,12 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     void monitorRun(run).catch(console.error)
   }
 
+  // The last assistant message this plugin published, so a repeated
+  // message.updated (or a later idle) never republishes a turn or erases the
+  // record with nothing.
+  let publishedMessageId: string | undefined
+
+  /** The raw stop reason one settled OpenCode assistant message reports. */
   function stopReasonOf(info: Record<string, unknown>): string {
     const error = info.error
     if (error !== null && typeof error === 'object') {
@@ -691,41 +697,45 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       if (name === 'MessageOutputLengthError') return 'length'
       return 'error'
     }
-    return typeof info.finish === 'string' ? info.finish : ''
+    const finish = typeof info.finish === 'string' ? info.finish.trim() : ''
+    return finish === '' ? 'end_turn' : finish
   }
 
-  /** The last assistant message of a session, as the turn it settled on. */
-  async function settledTurn(sessionId: string): Promise<{ text: string; stopReason: string }> {
-    const response = await ctx.client.session.messages({ path: { id: sessionId } })
-    const entries = Array.isArray(response.data) ? response.data : []
-    for (let index = entries.length - 1; index >= 0; index--) {
-      const entry = entries[index] as { info?: Record<string, unknown>; parts?: unknown[] } | undefined
-      const info = entry?.info
-      if (!info || info.role !== 'assistant') continue
-      const content = (entry?.parts ?? [])
-        .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
-        .filter(part => part.type === 'text')
-        .map(part => part.text ?? '')
-      return extractTurnText([{ content, stopReason: stopReasonOf(info) }])
-    }
-    return { text: '', stopReason: '' }
+  /**
+   * The text parts of one assistant message, read by id. The read is bounded to
+   * the message the event carried, never the session's whole history.
+   */
+  async function settledTurnText(sessionId: string, messageId: string): Promise<string[]> {
+    const response = await ctx.client.session.message({ path: { id: sessionId, messageID: messageId } })
+    const parts = Array.isArray(response.data?.parts) ? response.data.parts : []
+    return parts
+      .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
+      .filter(part => part.type === 'text')
+      .map(part => part.text ?? '')
   }
 
-  // The host's own last-turn producer. It publishes only for the session that
-  // first ran a host messaging tool, so an idle from another session neither
-  // publishes nor retargets the binding. A failure is logged, never rethrown.
-  async function publishHostTurn(sessionId: string): Promise<void> {
+  // The host's own last-turn producer. It publishes the turn the event carries
+  // only for the session that first ran a host messaging tool and only once the
+  // assistant message has completed, so a turn from another session neither
+  // publishes nor retargets the binding, and an idle that produced no message
+  // publishes nothing. A failure is logged, never rethrown.
+  async function publishHostTurn(info: Record<string, unknown>): Promise<void> {
     const binding = hostBinding
-    if (!binding || binding.sessionId !== sessionId) return
+    if (!binding) return
+    if (info.role !== 'assistant') return
+    if (info.sessionID !== binding.sessionId) return
+    if (typeof (info.time as Record<string, unknown> | undefined)?.completed !== 'number') return
+    const messageId = typeof info.id === 'string' ? info.id : ''
+    if (messageId === '' || messageId === publishedMessageId) return
     if (!binding.provider.recordLastTurn) return
+    // Claim the message before the first await so two updates for one message
+    // cannot both publish.
+    publishedMessageId = messageId
     try {
-      const turn = await settledTurn(sessionId)
+      const content = await settledTurnText(binding.sessionId, messageId)
+      const turn = extractTurnText([{ content, stopReason: normalizeTurnStopReason(stopReasonOf(info)) }])
       const bounded = boundFinalOutput(turn.text)
-      await binding.provider.recordLastTurn(
-        bounded,
-        normalizeTurnStopReason(turn.stopReason),
-        turn.text.length > bounded.length,
-      )
+      await binding.provider.recordLastTurn(bounded, turn.stopReason, turn.text.length > bounded.length)
     } catch (error) {
       console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
     }
@@ -733,6 +743,13 @@ export const AvenorPlugin: Plugin = async (ctx) => {
 
   return {
     event: async ({ event }) => {
+      // OpenCode's per-message completion event is this surface's turn_end: it
+      // carries the assistant message that settled, so the turn is published
+      // from the event instead of re-derived from the session.
+      if (event.type === 'message.updated') {
+        await publishHostTurn(event.properties.info as unknown as Record<string, unknown>)
+        return
+      }
       if (event.type !== 'session.idle') return
       const { sessionID } = (
         event as { type: 'session.idle'; properties: { sessionID: string } }
@@ -745,8 +762,6 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           monitorRun(run).catch(console.error)
         }
       }
-
-      await publishHostTurn(sessionID)
     },
 
     'permission.ask': async (permission, _output) => {

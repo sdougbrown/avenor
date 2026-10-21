@@ -9,6 +9,7 @@ import {
   formatAskFailure,
   newMsgID,
   normalizeAskTimeoutMs,
+  normalizeTurnStopReason,
   substitute,
 } from './messaging-text.js'
 
@@ -56,6 +57,19 @@ describe('extractTurnText', () => {
       stopReason: 'error',
     })
     expect(extractTurnText([])).toEqual({ text: '', stopReason: '' })
+  })
+})
+
+describe('normalizeTurnStopReason', () => {
+  it('maps pi and ai-sdk turn endings onto the canonical words', () => {
+    expect(normalizeTurnStopReason('stop')).toBe('end_turn')
+    expect(normalizeTurnStopReason('end_of_turn')).toBe('end_turn')
+    expect(normalizeTurnStopReason('length')).toBe('max_tokens')
+    expect(normalizeTurnStopReason('aborted')).toBe('cancelled')
+    expect(normalizeTurnStopReason('tool-calls')).toBe('tool_use')
+    expect(normalizeTurnStopReason('tool_calls')).toBe('tool_use')
+    expect(normalizeTurnStopReason('toolUse')).toBe('tool_use')
+    expect(normalizeTurnStopReason('error')).toBe('error')
   })
 })
 
