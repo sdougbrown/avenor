@@ -428,6 +428,32 @@ func TestProgStatusHeldEndTurnFinishesWhenRootStopsWorking(t *testing.T) {
 	}
 }
 
+func TestProgStatusHeldEndTurnHeldAgainWhenRootResumesWorking(t *testing.T) {
+	for name, state := range map[string]terminal.ProgState{"after clear": terminal.ProgClear, "after error": terminal.ProgError} {
+		t.Run(name, func(t *testing.T) {
+			s, term, path := newProgStatusSession(t)
+			term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+			appendTranscript(t, path, assistantText("started a subagent", "end_turn"))
+			s.ScanTranscriptTick()
+			term.ReportProgStatus(rootReport(state, ""))
+			term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+			s.ProgStatusTick()
+			time.Sleep(2 * progFinishSettle)
+			tickUntilFinished(t, s)
+			if n := countEvents(drainSessionEvents(s.Events), "session.end"); n != 0 {
+				t.Fatal("inner end_turn finished the turn after the root resumed working")
+			}
+
+			term.ReportProgStatus(rootReport(terminal.ProgDone, ""))
+			appendTranscript(t, path, assistantText("DONE", "end_turn"))
+			tickUntilFinished(t, s)
+			if n := countEvents(drainSessionEvents(s.Events), "session.end"); n != 1 {
+				t.Fatalf("session.end count = %d, want 1 after root done", n)
+			}
+		})
+	}
+}
+
 func TestProgStatusHeldEndTurnReleasedAtCeiling(t *testing.T) {
 	s, term, path := newProgStatusSession(t)
 	savedCeiling := progHoldCeiling

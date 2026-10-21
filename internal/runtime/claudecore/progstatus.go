@@ -65,7 +65,8 @@ type progTurn struct {
 
 	// endTurnHeld is a transcript end_turn waiting to finish the turn. A zero
 	// finishAt holds it until the root leaves working (done, idle, clear or
-	// error), reports were lost, or progHoldCeiling passes since heldAt.
+	// error), reports were lost, or progHoldCeiling passes since heldAt. A
+	// root working report before any done holds it again.
 	endTurnHeld bool
 	finishAt    time.Time
 	// heldAt is when the end_turn was first held.
@@ -382,6 +383,12 @@ func (s *Session) applyProgReport(r terminal.ProgReport) {
 	case terminal.ProgWorking:
 		if turn {
 			o.workingSincePrompt = true
+			// A clear or error released the held end_turn, but the root is
+			// working again with no done yet: hold it again. progHoldCeiling
+			// still bounds the hold from heldAt.
+			if o.endTurnHeld && !o.doneSincePrompt {
+				o.finishAt = time.Time{}
+			}
 		}
 		if announce {
 			emit = append(emit, s.progStatusEvent("working", "", ""))
