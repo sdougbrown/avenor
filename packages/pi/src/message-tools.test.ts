@@ -1,7 +1,32 @@
-import { describe, expect, it, mock } from 'bun:test'
+import { afterEach, describe, expect, it, mock } from 'bun:test'
 import conformance from '../../../schemas/message_route.conformance.json'
 import { messageTool as realMessageTool, renderLast, type MessageProvider } from '@dougbots/avenor-core'
 import { makeMessageProvider, startExtensionHarness } from './test-fixtures.js'
+
+const openHarnesses: Array<{
+  harness: Awaited<ReturnType<typeof startExtensionHarness>>
+  closed: boolean
+}> = []
+
+/** Track each started extension so a test that forgets to shut down is caught. */
+async function startHarness(options: Parameters<typeof startExtensionHarness>[0] = {}) {
+  const harness = await startExtensionHarness(options)
+  const record = { harness, closed: false }
+  const shutdown = harness.eventHandlers.session_shutdown
+  harness.eventHandlers.session_shutdown = async (...args: any[]) => {
+    record.closed = true
+    return shutdown(...args)
+  }
+  openHarnesses.push(record)
+  return harness
+}
+
+afterEach(async () => {
+  const leaked = openHarnesses.filter(record => !record.closed)
+  for (const record of leaked) await record.harness.eventHandlers.session_shutdown({}, {})
+  openHarnesses.length = 0
+  if (leaked.length > 0) throw new Error(`${leaked.length} test(s) left the extension poll running`)
+})
 
 const fixture = conformance as unknown as {
   applicability: Record<string, { permitted: string[] }>
@@ -32,22 +57,24 @@ function registered(schema: unknown): { fields: string[], actions: string[] } {
 
 describe('Pi message tool parity', () => {
   it('registers avenor_message with the contract field set in host mode', async () => {
-    const harness = await startExtensionHarness({})
+    const harness = await startHarness({})
     const tool = harness.registeredTools.avenor_message
     const { fields, actions } = registered(tool.parameters)
     expect(fields).toEqual(fieldSet(fixture.applicability))
     expect(actions).toEqual(['ask', 'control_reply', 'reply', 'resume', 'tell', 'withdraw'])
+    await harness.eventHandlers.session_shutdown({}, {})
   })
 
   it('registers avenor_peers with the contract field set in host mode', async () => {
-    const harness = await startExtensionHarness({})
+    const harness = await startHarness({})
     const { fields, actions } = registered(harness.registeredTools.avenor_peers.parameters)
     expect(fields).toEqual(fieldSet(fixture.peers_applicability))
     expect(actions).toEqual(['last', 'list', 'rename'])
+    await harness.eventHandlers.session_shutdown({}, {})
   })
 
   it('keeps both tool field sets in child mode', async () => {
-    const harness = await startExtensionHarness({
+    const harness = await startHarness({
       extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
     })
     expect(registered(harness.registeredTools.avenor_message.parameters).fields)
@@ -55,6 +82,7 @@ describe('Pi message tool parity', () => {
     const peers = registered(harness.registeredTools.avenor_peers.parameters)
     expect(peers.fields).toEqual(fieldSet(fixture.peers_applicability))
     expect(peers.actions).toEqual(['last', 'list', 'rename'])
+    await harness.eventHandlers.session_shutdown({}, {})
   })
 })
 
@@ -63,36 +91,33 @@ describe('Pi host turn producer', () => {
     return makeMessageProvider({ recordLastTurn: record as unknown as MessageProvider['recordLastTurn'] })
   }
 
-  it('publishes the settled host turn', async () => {
+  function turnEnd(message: unknown) {
+    return { type: 'turn_end', turnIndex: 0, message, toolResults: [] }
+  }
+
+  it('publishes the host turn on turn_end', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
-    const harness = await startExtensionHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
-    harness.eventHandlers.agent_end({ type: 'agent_end', messages: [
-      { role: 'assistant', content: [{ type: 'text', text: 'the answer' }], stopReason: 'stop' },
-    ] })
-    await harness.eventHandlers.agent_settled({})
+    const harness = await startHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
+    await harness.eventHandlers.turn_end(turnEnd({
+      role: 'assistant', content: [{ type: 'text', text: 'the answer' }], stopReason: 'stop',
+    }))
     expect(record).toHaveBeenCalledWith('the answer', 'end_turn', false)
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
-  it('publishes an empty or cancelled settled turn instead of skipping it', async () => {
+  it('publishes an empty or cancelled turn instead of skipping it', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
-    const harness = await startExtensionHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
-    harness.eventHandlers.agent_end({ type: 'agent_end', messages: [
-      { role: 'assistant', content: [], stopReason: 'aborted' },
-    ] })
-    await harness.eventHandlers.agent_settled({})
+    const harness = await startHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
+    await harness.eventHandlers.turn_end(turnEnd({ role: 'assistant', content: [], stopReason: 'aborted' }))
     expect(record).toHaveBeenCalledWith('', 'cancelled', false)
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
   it('publishes the truncation flag carried from the unbounded text', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
-    const harness = await startExtensionHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
+    const harness = await startHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
     const long = 'x'.repeat(5000)
-    harness.eventHandlers.agent_end({ type: 'agent_end', messages: [
-      { role: 'assistant', content: long, stopReason: 'stop' },
-    ] })
-    await harness.eventHandlers.agent_settled({})
+    await harness.eventHandlers.turn_end(turnEnd({ role: 'assistant', content: long, stopReason: 'stop' }))
     const [text, stop, truncated] = record.mock.calls[0] as [string, string, boolean]
     expect(text).toHaveLength(4096)
     expect(stop).toBe('end_turn')
@@ -100,25 +125,24 @@ describe('Pi host turn producer', () => {
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
-  it('publishes once when a retry emits agent_end twice before one settle', async () => {
+  it('publishes every turn end, including an error turn', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
-    const harness = await startExtensionHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
-    harness.eventHandlers.agent_end({ type: 'agent_end', messages: [{ content: 'first attempt', stopReason: 'error' }] })
-    harness.eventHandlers.agent_end({ type: 'agent_end', messages: [{ content: 'retry', stopReason: 'stop' }] })
-    await harness.eventHandlers.agent_settled({})
-    expect(record).toHaveBeenCalledTimes(1)
-    expect(record).toHaveBeenCalledWith('retry', 'end_turn', false)
+    const harness = await startHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'first attempt', stopReason: 'error' }))
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'retry', stopReason: 'stop' }))
+    expect(record).toHaveBeenCalledTimes(2)
+    expect(record.mock.calls[0]).toEqual(['first attempt', 'error', false])
+    expect(record.mock.calls[1]).toEqual(['retry', 'end_turn', false])
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
   it('publishes nothing in child mode', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
-    const harness = await startExtensionHarness({
+    const harness = await startHarness({
       deps: { hostProviderFor: mock(async () => recordingProvider(record)) },
       extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
     })
-    harness.eventHandlers.agent_end({ type: 'agent_end', messages: [{ content: 'child turn', stopReason: 'stop' }] })
-    await harness.eventHandlers.agent_settled({})
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'child turn', stopReason: 'stop' }))
     expect(record).not.toHaveBeenCalled()
     await harness.eventHandlers.session_shutdown({}, {})
   })
@@ -127,9 +151,8 @@ describe('Pi host turn producer', () => {
     const record = mock(async () => {
       throw new Error('broker down')
     })
-    const harness = await startExtensionHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
-    harness.eventHandlers.agent_end({ type: 'agent_end', messages: [{ content: 'turn', stopReason: 'stop' }] })
-    await expect(harness.eventHandlers.agent_settled({})).resolves.toBeUndefined()
+    const harness = await startHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
+    await expect(harness.eventHandlers.turn_end(turnEnd({ content: 'turn', stopReason: 'stop' }))).resolves.toBeUndefined()
     await harness.eventHandlers.session_shutdown({}, {})
   })
 })
@@ -154,7 +177,7 @@ describe('Pi resumed-run tracking', () => {
       registerResumed: () => {},
     })
     const hostProviderFor = mock(async (_supervisorId?: string) => provider)
-    const harness = await startExtensionHarness({
+    const harness = await startHarness({
       deps: { hostProviderFor, statusTool, messageTool: realMessageTool },
     })
     const result = await harness.registeredTools.avenor_message.execute('t1', {
@@ -181,7 +204,7 @@ describe('Pi peers last', () => {
         truncated: false,
       }),
     })
-    const harness = await startExtensionHarness({ deps: { hostProviderFor: mock(async () => provider) } })
+    const harness = await startHarness({ deps: { hostProviderFor: mock(async () => provider) } })
     const result = await harness.registeredTools.avenor_peers.execute('t1', { action: 'last', target: 'mesh-a' })
     expect(result.content[0].text).toBe(
       renderLast('header', { run_id: '"rt_7"', label: '"mesh-a"', stop_reason: 'end_turn' }) + '\n\nOK',

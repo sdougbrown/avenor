@@ -1323,20 +1323,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return provider
     }
 
-    // The host's own last-turn producer. agent_end captures one attempt and
-    // agent_settled publishes the settled turn: a retry loop emits agent_end per
-    // attempt and settles once, so intermediate attempts are overwritten and
-    // never published. A child's turn is recorded by the broker recorder, so
-    // child mode publishes nothing from here.
-    let pendingTurn: { text: string; stopReason: string } | undefined
-    pi.on('agent_end', event => {
+    // The host's own last-turn producer. Every turn's end is recorded, including
+    // cancelled and error turns; a run-level end is not a turn (DS-1). A child's
+    // turn is recorded by the broker recorder, so child mode publishes nothing
+    // from here.
+    pi.on('turn_end', async event => {
       if (isSubAgentBrokerMode) return
-      pendingTurn = extractTurnText(event.messages ?? [])
-    })
-    pi.on('agent_settled', async () => {
-      const turn = pendingTurn
-      pendingTurn = undefined
-      if (!turn || isSubAgentBrokerMode) return
+      const turn = extractTurnText([event.message])
       try {
         const provider = await hostProviderFor(undefined)
         if (!provider.recordLastTurn) return
