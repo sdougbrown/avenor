@@ -1417,13 +1417,25 @@ describe('OpenCode host turn producer', () => {
 
   it('publishes canonical stop reasons for ai-sdk finish values', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
-    providerFactory = () => makeProvider({ recordLastTurn: record })
     const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'checking' }] })
-    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
-    await bindSession(hooks, 'session-1')
-    await turn(hooks, assistant('msg-1', { finish: 'tool-calls' }))
 
-    expect(record).toHaveBeenCalledWith('checking', 'tool_use', false)
+    const cases: Array<[string, string]> = [
+      ['tool-calls', 'tool_use'],
+      ['tool_calls', 'tool_use'],
+      ['toolUse', 'tool_use'],
+      ['end-turn', 'end_turn'],
+      ['stop', 'end_turn'],
+      ['length', 'max_tokens'],
+      ['', 'end_turn'],
+    ]
+    for (const [finish, want] of cases) {
+      record.mockClear()
+      providerFactory = () => makeProvider({ recordLastTurn: record })
+      const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+      await bindSession(hooks, 'session-1')
+      await turn(hooks, assistant('msg-1', { finish }))
+      expect(record.mock.calls.map(call => call[1])).toEqual([want])
+    }
   })
 
   it('carries the truncation flag from the unbounded text', async () => {

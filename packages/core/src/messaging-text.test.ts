@@ -61,15 +61,21 @@ describe('extractTurnText', () => {
 })
 
 describe('normalizeTurnStopReason', () => {
-  it('maps pi and ai-sdk turn endings onto the canonical words', () => {
+  it('maps exactly the pi turn endings Go normalises', () => {
     expect(normalizeTurnStopReason('stop')).toBe('end_turn')
     expect(normalizeTurnStopReason('end_of_turn')).toBe('end_turn')
     expect(normalizeTurnStopReason('length')).toBe('max_tokens')
     expect(normalizeTurnStopReason('aborted')).toBe('cancelled')
-    expect(normalizeTurnStopReason('tool-calls')).toBe('tool_use')
-    expect(normalizeTurnStopReason('tool_calls')).toBe('tool_use')
-    expect(normalizeTurnStopReason('toolUse')).toBe('tool_use')
     expect(normalizeTurnStopReason('error')).toBe('error')
+  })
+
+  it('passes through every spelling Go passes through, so host and child agree', () => {
+    // internal/runtime/pi/events.go:normalizePiStopReason leaves these alone
+    // (TestTranslateAgentEndMapsPiStopReasons pins the same words), so a Pi
+    // host that rewrote them would disagree with the same turn seen as a child.
+    for (const raw of ['end-turn', 'tool-calls', 'tool_calls', 'toolUse', 'end_turn']) {
+      expect(normalizeTurnStopReason(raw)).toBe(raw)
+    }
   })
 })
 

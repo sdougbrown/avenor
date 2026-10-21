@@ -702,6 +702,24 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   }
 
   /**
+   * Translate the ai-sdk finish spellings onto the words the shared normaliser
+   * knows. They are adapter vocabulary, not pi spellings, so they are mapped
+   * here rather than in the shared table a Pi child's session.end also uses.
+   */
+  function normalizeFinish(stopReason: string): string {
+    switch (stopReason) {
+      case 'tool-calls':
+      case 'tool_calls':
+      case 'toolUse':
+        return 'tool_use'
+      case 'end-turn':
+        return 'end_of_turn'
+      default:
+        return stopReason
+    }
+  }
+
+  /**
    * The text parts of one assistant message, read by id. The read is bounded to
    * the message the event carried, never the session's whole history.
    */
@@ -733,7 +751,9 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     publishedMessageId = messageId
     try {
       const content = await settledTurnText(binding.sessionId, messageId)
-      const turn = extractTurnText([{ content, stopReason: normalizeTurnStopReason(stopReasonOf(info)) }])
+      const turn = extractTurnText([
+        { content, stopReason: normalizeTurnStopReason(normalizeFinish(stopReasonOf(info))) },
+      ])
       const bounded = boundFinalOutput(turn.text)
       await binding.provider.recordLastTurn(bounded, turn.stopReason, turn.text.length > bounded.length)
     } catch (error) {

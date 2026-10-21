@@ -162,8 +162,13 @@ func TestTranslateAgentEndMapsPiStopReasons(t *testing.T) {
 		// Unmapped pi values pass through unchanged and land on the generic
 		// exit-1 (retryable) path — pinned so a future remapping is a
 		// conscious choice. toolUse as a terminal stopReason is anomalous:
-		// agent_end only fires once the run settles.
+		// agent_end only fires once the run settles. The ai-sdk finish
+		// spellings are not pi stop reasons, so they stay unknown here as
+		// they do in packages/core's normalizeTurnStopReason.
 		"toolUse":        "toolUse",
+		"tool-calls":     "tool-calls",
+		"tool_calls":     "tool_calls",
+		"end-turn":       "end-turn",
 		"unknown_reason": "unknown_reason",
 	}
 	for raw, want := range cases {
