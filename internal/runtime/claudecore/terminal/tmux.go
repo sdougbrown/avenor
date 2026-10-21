@@ -87,14 +87,14 @@ func (s *TmuxSession) Capture(ctx context.Context) (string, error) {
 }
 
 // PasteAndEnter pastes the sanitised text as a bracketed paste, then sends
-// Enter. The buffer carries its own markers: paste-buffer -p adds them only
+// Enter. The buffer carries its own markers. paste-buffer -p adds them only
 // once the pane has enabled bracketed paste, and an unframed multi-line prompt
 // is submitted line by line. See bracketedPaste.
 //
-// tmux 3.7 and later pass a pasted buffer through vis(3), which would turn the
-// markers into literal text; -S pastes the bytes as they are. Older tmux has
-// no -S and pastes the bytes as they are, so when tmux rejects the flag the
-// paste is retried without it.
+// tmux 3.7 and later pass a pasted buffer through vis(3), which turns the
+// markers into literal text; -S pastes the bytes unchanged. Older tmux has no
+// -S and pastes bytes unchanged. When tmux rejects the flag, the paste is
+// retried without it.
 func (s *TmuxSession) PasteAndEnter(ctx context.Context, text string) error {
 	bufferName := "avenor-prompt-" + s.name
 	cmd := exec.CommandContext(ctx, "tmux", "load-buffer", "-b", bufferName, "-")

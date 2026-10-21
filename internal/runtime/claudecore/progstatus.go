@@ -75,9 +75,9 @@ type progTurn struct {
 
 	burstUntil time.Time
 
-	// chaseUntil bounds the permission chase. chaseLast holds the options of
-	// the previous capture of a permission dialog, from the chase or the pane
-	// scan, which the next capture must repeat before the dialog is brokered.
+	// chaseUntil bounds the permission chase. chaseLast holds the dialog
+	// options from the previous capture, by the chase or the pane scan. The
+	// next capture must repeat them before the dialog is brokered.
 	chaseUntil time.Time
 	chaseLast  string
 	// permBrokered is set once the dialog of the current blocked report was
@@ -229,10 +229,10 @@ func (s *Session) permissionChaseDue(now time.Time) bool {
 }
 
 // permissionCaptureStableLocked records the options of the permission dialog
-// in out and reports whether they equal the previous capture's: the same
+// in out and reports whether they equal the previous capture's. The same
 // options twice in a row mean the dialog has finished painting. Only the
-// options are compared, so live output elsewhere on screen cannot keep the
-// dialog from ever settling. Mu is held.
+// options are compared, so live output elsewhere on screen cannot stop the
+// dialog from settling. Mu is held.
 func (s *Session) permissionCaptureStableLocked(out string) bool {
 	var key strings.Builder
 	if perm := ParseTerminalPermission(out); perm != nil {
@@ -403,7 +403,7 @@ func (s *Session) applyProgReport(r terminal.ProgReport) {
 		if turn {
 			o.workingSincePrompt = true
 			// A clear or error released the held end_turn, but the root is
-			// working again with no done yet: hold it again, until
+			// working again with no done yet. Hold it again until
 			// progHoldCeiling has passed since heldAt.
 			if o.endTurnHeld && !o.doneSincePrompt && now.Sub(o.heldAt) < progHoldCeiling {
 				o.finishAt = time.Time{}
