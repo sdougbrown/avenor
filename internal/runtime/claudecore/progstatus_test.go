@@ -497,26 +497,42 @@ func TestProgStatusHeldEndTurnHeldAgainWhenRootResumesWorking(t *testing.T) {
 }
 
 func TestProgStatusHeldEndTurnReleasedAtCeiling(t *testing.T) {
-	s, term, path := newProgStatusSession(t)
-	savedCeiling := progHoldCeiling
-	progHoldCeiling = 50 * time.Millisecond
-	t.Cleanup(func() { progHoldCeiling = savedCeiling })
-	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
-	appendTranscript(t, path, assistantText("OK", "end_turn"))
-	s.ScanTranscriptTick()
-	time.Sleep(60 * time.Millisecond)
-	s.ProgStatusTick()
-	// Reports that keep returning to working, faster than the settle, do not
-	// hold it again.
-	deadline := time.Now().Add(4 * progFinishSettle)
-	for time.Now().Before(deadline) {
-		term.ReportProgStatus(rootReport(terminal.ProgBlocked, terminal.ProgKindQuestion))
-		term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
-		s.ProgStatusTick()
-		time.Sleep(progFinishSettle / 5)
+	// Each case repeats reports, faster than the settle, that would otherwise
+	// hold the end_turn again or move its finish time out.
+	cases := map[string][]terminal.ProgState{
+		"blocked then working": {terminal.ProgBlocked, terminal.ProgWorking},
+		"repeated clear":       {terminal.ProgClear},
+		"done then working":    {terminal.ProgDone, terminal.ProgWorking},
+		"error then working":   {terminal.ProgError, terminal.ProgWorking},
 	}
-	if n := countEvents(drainSessionEvents(s.Events), "session.end"); n != 1 {
-		t.Fatalf("session.end count = %d, want 1 once the ceiling passed", n)
+	for name, states := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, term, path := newProgStatusSession(t)
+			savedCeiling := progHoldCeiling
+			progHoldCeiling = 50 * time.Millisecond
+			t.Cleanup(func() { progHoldCeiling = savedCeiling })
+			term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+			appendTranscript(t, path, assistantText("OK", "end_turn"))
+			s.ScanTranscriptTick()
+			time.Sleep(60 * time.Millisecond)
+			s.ProgStatusTick()
+			deadline := time.Now().Add(4 * progFinishSettle)
+			for time.Now().Before(deadline) {
+				for _, st := range states {
+					kind := terminal.ProgKind("")
+					if st == terminal.ProgBlocked {
+						kind = terminal.ProgKindQuestion
+					}
+					term.ReportProgStatus(rootReport(st, kind))
+				}
+				s.ProgStatusTick()
+				time.Sleep(progFinishSettle / 5)
+			}
+			s.ProgStatusTick()
+			if n := countEvents(drainSessionEvents(s.Events), "session.end"); n != 1 {
+				t.Fatalf("session.end count = %d, want 1 once the ceiling passed", n)
+			}
+		})
 	}
 }
 

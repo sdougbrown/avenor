@@ -260,12 +260,17 @@ func (s *Session) notePermissionBrokeredLocked() {
 	}
 }
 
-// releaseHeldEndTurnLocked lets a held end_turn finish once it settles. Mu is
-// held.
+// releaseHeldEndTurnLocked lets a held end_turn finish once it settles. Once
+// progHoldCeiling has passed, a released end_turn keeps its finish time, so
+// repeated reports cannot keep moving it out. Mu is held.
 func (s *Session) releaseHeldEndTurnLocked(now time.Time) {
-	if s.osc.endTurnHeld {
-		s.osc.finishAt = now.Add(progFinishSettle)
+	if !s.osc.endTurnHeld {
+		return
 	}
+	if !s.osc.finishAt.IsZero() && !s.osc.heldAt.IsZero() && now.Sub(s.osc.heldAt) >= progHoldCeiling {
+		return
+	}
+	s.osc.finishAt = now.Add(progFinishSettle)
 }
 
 // holdEndTurn decides what a transcript end_turn does while OSC is active.
