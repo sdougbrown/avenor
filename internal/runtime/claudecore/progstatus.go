@@ -47,8 +47,9 @@ var (
 // progTurn is the session's view of the root OSC 7501 record. Guarded by
 // Session.Mu.
 type progTurn struct {
-	// active is set by the first root report other than clear. Until then
-	// every rule in this file is off and the session behaves as without OSC.
+	// active is set by the first root report other than clear applied after
+	// the detection query was answered. Until then every rule in this file is
+	// off and the session behaves as without OSC.
 	active bool
 	root   terminal.ProgStatus
 
@@ -60,18 +61,29 @@ type progTurn struct {
 	doneSincePrompt    bool
 
 	// endTurnHeld is a transcript end_turn waiting to finish the turn. A zero
-	// finishAt holds it until root done or idle.
+	// finishAt holds it until the root leaves working (done, idle, clear or
+	// error) or reports were lost.
 	endTurnHeld bool
 	finishAt    time.Time
 
 	burstUntil time.Time
+
+	// chaseUntil bounds the permission chase; chaseLast is its previous
+	// capture, which the next one must equal before the dialog is parsed.
 	chaseUntil time.Time
+	chaseLast  string
+	// permBrokered is set once the dialog of the current blocked report was
+	// brokered. Answering it does not change the report, so it stops the
+	// stale dialog from being brokered again until the root leaves blocked
+	// or reports a different dialog.
+	permBrokered bool
 }
 
 // AttachProgStatus makes the session follow term's OSC 7501 reports, when term
-// has the capability.
+// has the capability and answers the detection query. Reports from a program
+// that was never answered are not trusted.
 func (s *Session) AttachProgStatus(term terminal.Session) {
-	if ps, ok := term.(terminal.ProgStatusSession); ok {
+	if ps, ok := term.(terminal.ProgStatusSession); ok && ps.ProgStatusAnswering() {
 		s.progStatus = ps
 	}
 }
@@ -99,7 +111,7 @@ func (s *Session) WaitForProgStatusReady(ctx context.Context) string {
 	ticker := time.NewTicker(progReadyPoll)
 	defer ticker.Stop()
 	for {
-		if root, ok := ps.ProgStatusRoot(); ok && root.State == terminal.ProgIdle {
+		if root, ok := ps.ProgStatusRoot(); ok && root.State == terminal.ProgIdle && ps.ProgStatusAnswered() {
 			return ReadySignalProgStatus
 		}
 		waited := time.Since(paneReady)
@@ -166,7 +178,14 @@ func (s *Session) ProgStatusTick() time.Duration {
 
 	if chase {
 		if out, err := s.Term.Capture(s.Ctx); err == nil && ClassifyPane(out) == PaneStatePermission {
-			s.brokerTerminalPermission(out)
+			s.Mu.Lock()
+			// Two identical captures in a row: the dialog has finished painting.
+			stable := out == s.osc.chaseLast
+			s.osc.chaseLast = out
+			s.Mu.Unlock()
+			if stable {
+				s.brokerTerminalPermission(out)
+			}
 		}
 	}
 	if scan {
@@ -195,14 +214,37 @@ func (s *Session) ProgStatusTick() time.Duration {
 // permissionChaseDue reports whether a blocked permission report is still
 // waiting for its dialog to be brokered. Mu is held.
 func (s *Session) permissionChaseDue(now time.Time) bool {
-	return s.Prompted && !s.Finished && s.PendingTerminalPerm == nil &&
+	return s.Prompted && !s.Finished && s.PendingTerminalPerm == nil && !s.osc.permBrokered &&
 		s.osc.root.State == terminal.ProgBlocked && s.osc.root.Kind == terminal.ProgKindPermission &&
 		now.Before(s.osc.chaseUntil)
 }
 
+// permissionBrokeredLocked reports whether the dialog of the current blocked
+// report was already brokered. Mu is held.
+func (s *Session) permissionBrokeredLocked() bool {
+	return s.osc.permBrokered && s.osc.root.State == terminal.ProgBlocked
+}
+
+// notePermissionBrokeredLocked records that the dialog of the current blocked
+// report was brokered and ends its chase. Mu is held.
+func (s *Session) notePermissionBrokeredLocked() {
+	if s.osc.active && s.osc.root.State == terminal.ProgBlocked {
+		s.osc.permBrokered = true
+		s.osc.chaseUntil = time.Time{}
+	}
+}
+
+// releaseHeldEndTurnLocked lets a held end_turn finish once it settles. Mu is
+// held.
+func (s *Session) releaseHeldEndTurnLocked(now time.Time) {
+	if s.osc.endTurnHeld {
+		s.osc.finishAt = now.Add(progFinishSettle)
+	}
+}
+
 // holdEndTurn decides what a transcript end_turn does while OSC is active.
 // It returns false when OSC is inactive and the caller finishes as usual.
-// Otherwise the end_turn is held: until root done or idle when the root is
+// Otherwise the end_turn is held: until the root leaves working when it is
 // still working with no done since the prompt (a background subagent ends an
 // inner turn first), or else for progFinishSettle, so a later end_turn's
 // content is emitted before the turn ends.
@@ -246,15 +288,27 @@ func (s *Session) drainProgStatus() {
 
 // drainProgStatusLocked applies reports in order. progDrainMu is held, so
 // events derived from reports keep report order whichever goroutine drains.
+// Reports that arrive before the detection query was answered are skipped:
+// Claude reports only after the answer, so they did not come from it.
 func (s *Session) drainProgStatusLocked() {
 	reports, lost := s.progStatus.ProgStatusSince(s.progNext)
+	if !s.progStatus.ProgStatusAnswered() {
+		if n := len(reports); n > 0 {
+			s.progNext = reports[n-1].Seq
+		}
+		return
+	}
 	for _, r := range reports {
 		s.progNext = r.Seq
 		s.applyProgReport(r)
 	}
 	if lost {
 		// Reports were dropped before they were applied; the retained tail is
-		// applied above, and the current root record is the final word.
+		// applied above, and the current root record is the final word. A
+		// dropped report may have been the one a held end_turn waits for.
+		s.Mu.Lock()
+		s.releaseHeldEndTurnLocked(time.Now())
+		s.Mu.Unlock()
 		if root, ok := s.progStatus.ProgStatusRoot(); ok {
 			s.applyProgReport(terminal.ProgReport{Seq: s.progNext, Status: root})
 		}
@@ -262,8 +316,9 @@ func (s *Session) drainProgStatusLocked() {
 }
 
 // applyProgReport applies one report's lifecycle effect. Only root state
-// transitions count: child records, repeats of the current state, error and
-// clear change nothing beyond the recorded root. Report text is display-only.
+// transitions count: child records and repeats of the current state change
+// nothing beyond the recorded root, except that a blocked report with a new
+// message is a new dialog. Report text is otherwise display-only.
 func (s *Session) applyProgReport(r terminal.ProgReport) {
 	st := r.Status
 	if st.ID != "" {
@@ -275,19 +330,27 @@ func (s *Session) applyProgReport(r terminal.ProgReport) {
 	s.Mu.Lock()
 	o := &s.osc
 	prev := o.root
+	if st.State != terminal.ProgBlocked {
+		o.permBrokered = false
+	}
 	if st.State == terminal.ProgClear {
 		o.root = terminal.ProgStatus{}
+		s.releaseHeldEndTurnLocked(now)
 		s.Mu.Unlock()
 		return
 	}
 	o.active = true
 	o.root = st
-	if prev.State == st.State && prev.Kind == st.Kind {
+	newDialog := st.State == terminal.ProgBlocked && prev.State == terminal.ProgBlocked && prev.Msg != st.Msg
+	if prev.State == st.State && prev.Kind == st.Kind && !newDialog {
 		s.Mu.Unlock()
 		return
 	}
 	turn := o.armed && r.Seq > o.promptSeq
 	announce := turn && !s.Finished
+	if newDialog {
+		o.permBrokered = false
+	}
 
 	if prev.State == terminal.ProgBlocked {
 		switch st.State {
@@ -307,6 +370,12 @@ func (s *Session) applyProgReport(r terminal.ProgReport) {
 		if st.Kind == terminal.ProgKindPermission {
 			if turn {
 				o.chaseUntil = now.Add(progPermissionChase)
+				o.chaseLast = ""
+			}
+			// A request already pending on entering blocked is this
+			// report's dialog, brokered by the pane scan.
+			if !newDialog && s.PendingTerminalPerm != nil {
+				o.permBrokered = true
 			}
 		} else if announce {
 			emit = append(emit, s.progStatusEvent("waiting", string(st.Kind), st.Msg))
@@ -317,13 +386,14 @@ func (s *Session) applyProgReport(r terminal.ProgReport) {
 				o.doneSincePrompt = true
 			}
 			o.burstUntil = now.Add(progTranscriptBurst)
-			if o.endTurnHeld {
-				o.finishAt = now.Add(progFinishSettle)
-			}
+			s.releaseHeldEndTurnLocked(now)
 		}
-		if announce && st.State == terminal.ProgIdle {
+		// A late startup idle after the prompt is not a turn waiting for input.
+		if announce && st.State == terminal.ProgIdle && o.workingSincePrompt {
 			emit = append(emit, s.progStatusEvent("waiting", "idle", ""))
 		}
+	case terminal.ProgError:
+		s.releaseHeldEndTurnLocked(now)
 	}
 	s.Mu.Unlock()
 

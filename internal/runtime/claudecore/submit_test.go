@@ -68,3 +68,12 @@ func TestResendEnterStopsAtDeadline(t *testing.T) {
 		t.Fatalf("Enters sent = %d, want between 1 and 12", got)
 	}
 }
+
+func TestInputBoxHoldsPromptMatchesFromTheStart(t *testing.T) {
+	if inputBoxHoldsPrompt(unsentPane("1. Yes"), "Yes") {
+		t.Fatal("prompt matched inside an option line")
+	}
+	if !inputBoxHoldsPrompt(unsentPane("Yes please"), "Yes") {
+		t.Fatal("prompt at the start of the input box not matched")
+	}
+}

@@ -698,6 +698,8 @@ func TestCancelTakesProgStatusIdleAfterWorkingAsCancelled(t *testing.T) {
 	term.SetKind("pty")
 	sent := make(chan []string, 1)
 	term.SetSendNotify(sent)
+	term.SetProgStatusAnswering(true)
+	term.AnswerProgStatusQuery()
 	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-cancel-osc", EventsBuf: 16})
 	defer s.CancelFn()
 	s.Term = term

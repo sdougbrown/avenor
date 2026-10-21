@@ -162,8 +162,9 @@ func (s *Session) ScanTerminalTick() {
 }
 
 // brokerTerminalPermission parses a permission dialog from out and emits a
-// permission.request for it, unless one is already pending. It reports whether
-// a request is pending afterwards.
+// permission.request for it, unless one is already pending or Claude still
+// reports the blocked state whose dialog was already brokered. It reports
+// whether a request is pending afterwards.
 func (s *Session) brokerTerminalPermission(out string) bool {
 	tmuxPerm := ParseTerminalPermission(out)
 	if tmuxPerm == nil {
@@ -177,7 +178,12 @@ func (s *Session) brokerTerminalPermission(out string) bool {
 		s.Mu.Unlock()
 		return true
 	}
+	if s.permissionBrokeredLocked() {
+		s.Mu.Unlock()
+		return false
+	}
 	s.PendingTerminalPerm = tmuxPerm
+	s.notePermissionBrokeredLocked()
 	s.Mu.Unlock()
 
 	// Emit the brokered permission request.

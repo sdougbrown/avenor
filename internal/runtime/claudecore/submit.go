@@ -66,8 +66,9 @@ func resendEnterUntilSubmitted(ctx context.Context, term terminal.Session, promp
 }
 
 // inputBoxHoldsPrompt reports whether the last `❯` line, the live input box
-// rather than an earlier echo of a submitted prompt, holds the prompt or its
-// pasted-text placeholder.
+// rather than an earlier echo of a submitted prompt, starts with the prompt or
+// holds its pasted-text placeholder. A prefix match keeps a short prompt from
+// matching inside an option line such as `❯ 1. Yes`.
 func inputBoxHoldsPrompt(out, prompt string) bool {
 	var box string
 	for _, line := range strings.Split(normalizePane(out), "\n") {
@@ -85,5 +86,5 @@ func inputBoxHoldsPrompt(out, prompt string) bool {
 	if len(needle) > promptNeedleLen {
 		needle = needle[:promptNeedleLen]
 	}
-	return needle != "" && strings.Contains(box, needle)
+	return needle != "" && strings.HasPrefix(box, needle)
 }

@@ -263,9 +263,7 @@ func writeChunks(ctx context.Context, ptmx *os.File, chunks [][]byte) error {
 }
 
 func (p *PTYSession) writeReply(ptmx *os.File, b []byte) {
-	if _, err := ptmx.Write(b); err == nil {
-		p.psMarkAnswered()
-	}
+	_, _ = ptmx.Write(b)
 }
 
 // ProgStatusAnswering reports whether this session answers OSC 7501
@@ -274,13 +272,16 @@ func (p *PTYSession) ProgStatusAnswering() bool { return p.answer }
 
 // answerQuery queues a detection reply. It runs on the reader and must not
 // block: a writer stuck on a program that stopped reading input would
-// otherwise stop the reader draining that program's output.
+// otherwise stop the reader draining that program's output. The query counts
+// as answered once the reply is queued, on the reader, so the mark precedes
+// every report the program sends in response.
 func (p *PTYSession) answerQuery() {
 	if !p.answer {
 		return
 	}
 	select {
 	case p.replies <- []byte(progStatusReply):
+		p.psMarkAnswered()
 	default:
 	}
 }

@@ -29,22 +29,32 @@ func shortenProgStatusTimings(t *testing.T) {
 // test appends records to.
 func newProgStatusSession(t *testing.T, captures ...string) (*Session, *terminal.FakeSession, string) {
 	t.Helper()
+	s, term, path := newAttachedSession(t, true, true, captures...)
+	term.ReportProgStatus(rootReport(terminal.ProgIdle, ""))
+	s.ArmProgStatusPrompt()
+	s.Prompted = true
+	return s, term, path
+}
+
+// newAttachedSession returns a session attached to a fake PTY that has not
+// reported anything yet and has no prompt armed.
+func newAttachedSession(t *testing.T, answering, answered bool, captures ...string) (*Session, *terminal.FakeSession, string) {
+	t.Helper()
 	shortenProgStatusTimings(t)
 	if len(captures) == 0 {
 		captures = []string{workingPane}
 	}
 	term := terminal.NewFakeSessionQueue("osc", 1, captures)
 	term.SetKind("pty")
-	term.SetProgStatusAnswering(true)
-	term.AnswerProgStatusQuery()
+	term.SetProgStatusAnswering(answering)
+	if answered {
+		term.AnswerProgStatusQuery()
+	}
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	s := NewSession(context.Background(), SessionOptions{SessionID: "ses-osc", Transcript: NewTranscriptReader(path), EventsBuf: 64})
 	t.Cleanup(s.CancelFn)
 	s.Term = term
 	s.AttachProgStatus(term)
-	term.ReportProgStatus(rootReport(terminal.ProgIdle, ""))
-	s.ArmProgStatusPrompt()
-	s.Prompted = true
 	return s, term, path
 }
 
@@ -209,6 +219,7 @@ func TestProgStatusBlockedPermissionBrokersAndSurvivesPaneIdle(t *testing.T) {
 		t.Fatal("blocked permission without a dialog yet scheduled no retry")
 	}
 	s.ProgStatusTick()
+	s.ProgStatusTick()
 	got := drainSessionEvents(s.Events)
 	if countEvents(got, "permission.request") != 1 || countEvents(got, "agent.status") != 1 {
 		t.Fatalf("events = %v, want working then one permission.request", eventNames(got))
@@ -239,6 +250,61 @@ func TestProgStatusBlockedPermissionBrokersAndSurvivesPaneIdle(t *testing.T) {
 	s.Mu.Unlock()
 	if cleared != nil {
 		t.Fatal("blocked to working left the permission pending")
+	}
+}
+
+func TestProgStatusAnsweredPermissionIsNotBrokeredAgain(t *testing.T) {
+	s, term, _ := newProgStatusSession(t, permissionPane)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	blocked := rootReport(terminal.ProgBlocked, terminal.ProgKindPermission)
+	blocked.Msg = "approve Bash: echo hi"
+	term.ReportProgStatus(blocked)
+	s.ProgStatusTick()
+	s.ProgStatusTick()
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("permission.request count = %d, want 1", n)
+	}
+
+	// AnswerPermission clears the request; Claude stays blocked and the
+	// answered dialog stays on screen until it repaints.
+	s.Mu.Lock()
+	s.PendingTerminalPerm = nil
+	s.Mu.Unlock()
+	if d := s.ProgStatusTick(); d != 0 {
+		t.Fatalf("chase still pending (%v) after the dialog was brokered", d)
+	}
+	s.ProgStatusTick()
+	s.ScanTerminalTick()
+	if got := drainSessionEvents(s.Events); countEvents(got, "permission.request") != 0 {
+		t.Fatalf("answered dialog brokered again: %v", eventNames(got))
+	}
+
+	next := blocked
+	next.Msg = "approve Bash: echo again"
+	term.ReportProgStatus(next)
+	s.ProgStatusTick()
+	s.ProgStatusTick()
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("new dialog while blocked: permission.request count = %d, want 1", n)
+	}
+}
+
+func TestProgStatusChaseWaitsForTheDialogToFinishPainting(t *testing.T) {
+	half := "Bash command\n  echo hi\nDo you want to proceed?\n❯ 1. Yes\n"
+	s, term, _ := newProgStatusSession(t, half, permissionPane)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	term.ReportProgStatus(rootReport(terminal.ProgBlocked, terminal.ProgKindPermission))
+	for i := 0; i < 3; i++ {
+		s.ProgStatusTick()
+	}
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("permission.request count = %d, want 1", n)
+	}
+	s.Mu.Lock()
+	perm := s.PendingTerminalPerm
+	s.Mu.Unlock()
+	if perm == nil || len(perm.Options) != 2 {
+		t.Fatalf("brokered permission = %+v, want the fully painted dialog", perm)
 	}
 }
 
@@ -298,6 +364,32 @@ func TestProgStatusHoldsEndTurnWhileRootWorking(t *testing.T) {
 	}
 }
 
+func TestProgStatusHeldEndTurnFinishesWhenRootStopsWorking(t *testing.T) {
+	cases := map[string]func(*terminal.FakeSession){
+		// A terminal reset reaches the log as a root clear too.
+		"root clear": func(term *terminal.FakeSession) { term.ReportProgStatus(rootReport(terminal.ProgClear, "")) },
+		"root error": func(term *terminal.FakeSession) { term.ReportProgStatus(rootReport(terminal.ProgError, "")) },
+		"lost reports": func(term *terminal.FakeSession) {
+			for i := 0; i < 300; i++ {
+				term.ReportProgStatus(terminal.ProgStatus{ID: "a1", State: terminal.ProgWorking, Progress: -1})
+			}
+		},
+	}
+	for name, release := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, term, path := newProgStatusSession(t)
+			term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+			appendTranscript(t, path, assistantText("OK", "end_turn"))
+			s.ScanTranscriptTick()
+			release(term)
+			tickUntilFinished(t, s)
+			if n := countEvents(drainSessionEvents(s.Events), "session.end"); n != 1 {
+				t.Fatalf("session.end count = %d, want 1", n)
+			}
+		})
+	}
+}
+
 func TestProgStatusEndTurnAfterDoneFinishesOnce(t *testing.T) {
 	s, term, path := newProgStatusSession(t)
 	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
@@ -320,6 +412,35 @@ func TestProgStatusDoneAloneNeverFinishes(t *testing.T) {
 	tickUntilFinished(t, s)
 	if countEvents(drainSessionEvents(s.Events), "session.end") != 0 {
 		t.Fatal("root done without a transcript end_turn finished the turn")
+	}
+}
+
+func TestProgStatusReportsIgnoredUnlessQueryAnswered(t *testing.T) {
+	for name, answering := range map[string]bool{"not answering": false, "query not answered": true} {
+		t.Run(name, func(t *testing.T) {
+			s, term, path := newAttachedSession(t, answering, false)
+			term.ReportProgStatus(rootReport(terminal.ProgIdle, ""))
+			s.ArmProgStatusPrompt()
+			s.Prompted = true
+			term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+			appendTranscript(t, path, assistantText("OK", "end_turn"))
+			s.ScanTranscriptTick()
+			got := eventNames(drainSessionEvents(s.Events))
+			if len(got) != 2 || got[0] != "agent.message_chunk:OK" || got[1] != "session.end" {
+				t.Fatalf("events = %v, want the chunk then session.end with OSC off", got)
+			}
+		})
+	}
+}
+
+func TestProgStatusLateStartupIdleIsNotAWait(t *testing.T) {
+	s, term, _ := newAttachedSession(t, true, true)
+	s.ArmProgStatusPrompt()
+	s.Prompted = true
+	term.ReportProgStatus(rootReport(terminal.ProgIdle, ""))
+	s.ProgStatusTick()
+	if got := drainSessionEvents(s.Events); len(got) != 0 {
+		t.Fatalf("startup idle after the prompt emitted %v", eventNames(got))
 	}
 }
 
