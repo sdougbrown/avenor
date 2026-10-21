@@ -376,13 +376,13 @@ func NewServer(opts Options) (*Server, error) {
 	// error shape the other surfaces never produce.
 	mcpServer.AddTool(&mcp.Tool{
 		Name:        "message",
-		Description: "Send, ask, reply to, resume, withdraw or answer a control message between agent runs",
+		Description: "Send, ask, reply to, resume, withdraw or answer a control message between agent runs. The call is bound to the supervisor this server knows the addressed run on, so a run on a non-default supervisor is addressable only once this server has registered it: call status with that supervisor_id first, for example after an MCP restart.",
 		InputSchema: messaging.MessageInputSchema(),
 	}, s.handleAvenorMessage)
 
 	mcpServer.AddTool(&mcp.Tool{
 		Name:        "peers",
-		Description: "List connected agent sessions, rename a run's display name, or read a peer's last agent message",
+		Description: "List connected agent sessions, rename a run's display name, or read a peer's last agent message. A peer on a non-default supervisor is addressable only once this server has registered a run there (call status with that supervisor_id).",
 		InputSchema: messaging.PeersInputSchema(),
 	}, s.handleAvenorPeers)
 

@@ -98,7 +98,10 @@ func toolArguments(req *mcp.CallToolRequest) json.RawMessage {
 // spawned on a non-default supervisor stays reachable through the provider. A
 // key that identifies more than one run binds nothing, so the call answers on
 // the default supervisor rather than on whichever entry a map iteration
-// reached first.
+// reached first. The registry is in-process memory, so the binding is not
+// restored with the server: after an MCP restart a run on a non-default
+// supervisor is addressable only once a status call naming that supervisor_id
+// has registered it again.
 func (s *Server) messageSupervisorPath(raw json.RawMessage) string {
 	var probe struct {
 		Target    string `json:"target"`
