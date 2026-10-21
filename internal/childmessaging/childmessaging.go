@@ -121,16 +121,10 @@ func (p *MessageProvider) Preflight(ctx context.Context) (messaging.PreflightRes
 	return p.transport.Preflight(ctx)
 }
 
-// peerSession is the SessionInfo projection a child can read from /sessions.
-type peerSession struct {
-	RunID  string `json:"run_id"`
-	Label  string `json:"label"`
-	Kind   string `json:"kind"`
-	Status string `json:"status"`
-}
-
-// listedPeers reads the broker's visible peers for this caller.
-func (p *MessageProvider) listedPeers(ctx context.Context) ([]peerSession, error) {
+// listedPeers reads the broker's visible peers for this caller. It decodes the
+// session with the router's own peer record, so a field added to the peer
+// contract reaches Resolve and RunState instead of stopping at a local copy.
+func (p *MessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerRecord, error) {
 	peers, err := p.transport.Peers(ctx, messaging.PeersRequest{
 		Sender:     messaging.Identity{RunID: p.opts.RunID},
 		Generation: p.Generation(),
@@ -138,20 +132,20 @@ func (p *MessageProvider) listedPeers(ctx context.Context) ([]peerSession, error
 	if err != nil {
 		return nil, err
 	}
-	sessions := make([]peerSession, 0, len(peers.Peers))
+	records := make([]messaging.PeerRecord, 0, len(peers.Peers))
 	for _, peer := range peers.Peers {
-		var session peerSession
+		var record messaging.PeerRecord
 		if len(peer.Session) > 0 {
-			if err := json.Unmarshal(peer.Session, &session); err != nil {
+			if err := json.Unmarshal(peer.Session, &record); err != nil {
 				return nil, err
 			}
 		}
-		if session.RunID == "" {
-			session.RunID = peer.RunID
+		if record.RunID == "" {
+			record.RunID = peer.RunID
 		}
-		sessions = append(sessions, session)
+		records = append(records, record)
 	}
-	return sessions, nil
+	return records, nil
 }
 
 // Resolve is the child ladder: the run's own id, then a runtime id, then an

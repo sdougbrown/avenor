@@ -165,6 +165,9 @@ func TestRenameMapsWireCodes(t *testing.T) {
 		{"ambiguous", http.StatusConflict, map[string]any{"error": "two runs", "code": "ambiguous-name"}, "ambiguous_name"},
 		{"refused", http.StatusBadRequest, map[string]any{"error": "persist failed", "code": "invalid-request"}, "refused"},
 		{"rejected token", http.StatusUnauthorized, map[string]any{"error": "bad run token", "code": "invalid-request"}, "not_permitted"},
+		{"unrecognised forbidden", http.StatusForbidden, map[string]any{"error": "odd 403", "code": "some-new-code"}, "not_permitted"},
+		{"unrecognised missing", http.StatusNotFound, map[string]any{"error": "odd 404", "code": "some-new-code"}, "unknown_target"},
+		{"unrecognised conflict", http.StatusConflict, map[string]any{"error": "odd 409", "code": "some-new-code"}, "ambiguous_name"},
 		{"unrecognised", http.StatusTeapot, map[string]any{"error": "odd"}, "refused"},
 	}
 	for _, tc := range cases {
