@@ -328,6 +328,33 @@ func TestProgStatusPaneScanWaitsForTheDialogToFinishPainting(t *testing.T) {
 	}
 }
 
+func TestProgStatusPaneScanBrokersAStableDialog(t *testing.T) {
+	// No blocked report, so no chase: the pane scan is the only broker. Each
+	// scan captures twice (classify, then parse).
+	half := "Bash command\n  echo hi\nDo you want to proceed?\n❯ 1. Yes\n"
+	s, term, _ := newProgStatusSession(t, half, half, permissionPane)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	s.ProgStatusTick()
+	drainSessionEvents(s.Events)
+
+	s.ScanTerminalTick()
+	s.ScanTerminalTick()
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 0 {
+		t.Fatalf("permission.request count = %d before two matching captures, want 0", n)
+	}
+	s.ScanTerminalTick()
+	s.ScanTerminalTick()
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("permission.request count = %d, want 1", n)
+	}
+	s.Mu.Lock()
+	perm := s.PendingTerminalPerm
+	s.Mu.Unlock()
+	if perm == nil || len(perm.Options) != 2 {
+		t.Fatalf("brokered permission = %+v, want the fully painted dialog", perm)
+	}
+}
+
 func TestProgStatusTranscriptRecordsDoNotEndAWait(t *testing.T) {
 	s, term, path := newProgStatusSession(t)
 	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
