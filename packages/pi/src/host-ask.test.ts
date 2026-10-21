@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from 'bun:test'
-import { messageTool as realMessageTool } from '@dougbots/avenor-core'
+import { messageTool as realMessageTool, RpcError } from '@dougbots/avenor-core'
 import { makeMessageProvider, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 interface HostAsk {
@@ -63,6 +63,45 @@ describe('host inbound ask delivery', () => {
       expect(body).toContain('is the build green?')
       expect(body).toContain('avenor_message({ action: "reply", reply_to: "ask-1"')
       expect(options.deliverAs).toBe('steer')
+    } finally {
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('binds the generation the first receive reports', async () => {
+    const brokerReceiveTool = mock(async (args: { generation?: string }) => ({
+      asks: [],
+      generation: args.generation ?? 'gen-1',
+    }))
+    const harness = await startHostExtension(brokerReceiveTool)
+    try {
+      await waitFor(() => brokerReceiveTool.mock.calls.length >= 2)
+      expect(brokerReceiveTool.mock.calls[0][0]).toEqual({})
+      expect(brokerReceiveTool.mock.calls[1][0]).toEqual({ generation: 'gen-1' })
+    } finally {
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('rebinds once after a generation mismatch', async () => {
+    const seen: string[] = []
+    let unbound = 0
+    const brokerReceiveTool = mock(async (args: { generation?: string }) => {
+      seen.push(args.generation ?? '')
+      if (args.generation === 'gen-1') {
+        throw new RpcError(-32000, 'messaging: generation mismatch', {
+          code: 'generation-mismatch',
+          outcome: 'not-sent',
+          wire_code: 'generation-mismatch',
+        })
+      }
+      const generation = args.generation ?? (unbound++ === 0 ? 'gen-1' : 'gen-2')
+      return { asks: [], generation }
+    })
+    const harness = await startHostExtension(brokerReceiveTool)
+    try {
+      await waitFor(() => seen.includes('gen-2'))
+      expect(seen.slice(0, 4)).toEqual(['', 'gen-1', '', 'gen-2'])
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
     }

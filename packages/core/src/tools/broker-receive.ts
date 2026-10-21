@@ -2,6 +2,8 @@ import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor
 
 export interface BrokerReceiveArgs {
   supervisorId?: string
+  /** The generation this poll is bound to; absent asks the tool to preflight once. */
+  generation?: string
 }
 
 export interface InboundAsk {
@@ -13,6 +15,8 @@ export interface InboundAsk {
 
 export interface BrokerReceiveResult {
   asks: InboundAsk[]
+  /** The generation the receive ran under, so the caller can bind its next poll. */
+  generation?: string
 }
 
 async function executeBrokerReceive(
@@ -21,7 +25,11 @@ async function executeBrokerReceive(
 ): Promise<BrokerReceiveResult> {
   const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
   try {
-    const received = await client.messageReceive({ generation: '' })
+    let generation = args.generation ?? ''
+    if (!generation) {
+      generation = (await client.messagePreflight()).generation
+    }
+    const received = await client.messageReceive({ generation })
     const asks = received.messages.map(message => {
       const payload = message.payload !== null && typeof message.payload === 'object'
         ? message.payload as Record<string, unknown>
@@ -33,7 +41,7 @@ async function executeBrokerReceive(
         role: typeof payload?.role === 'string' ? payload.role : undefined,
       }
     })
-    return { asks }
+    return { asks, generation: received.generation || generation }
   } finally {
     if (!isSingleton) {
       client.close()

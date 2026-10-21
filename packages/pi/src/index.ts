@@ -26,6 +26,7 @@ import {
   normalizeTurnStopReason,
   observeRun,
   peersTool,
+  RpcError,
   renderPeerList,
   resultTool,
   shutdownTool,
@@ -131,7 +132,9 @@ export interface ExtensionDeps {
   workflowReadyTool: typeof workflowReadyTool
   workflowCancelTool: typeof workflowCancelTool
   /** Resolve the bound provider for one supervisor, creating it on demand. */
-  hostProviderFor: (supervisorId: string | undefined) => Promise<MessageProvider>
+  hostProviderFor?: (supervisorId: string | undefined) => Promise<MessageProvider>
+  /** Dial a supervisor for the default host provider; tests inject a fake client. */
+  getSupervisorClient?: typeof getSupervisorClient
   observeRun: typeof observeRun
   dial: typeof dial
   attachOwner: typeof attachOwner
@@ -158,11 +161,9 @@ const defaultDeps: ExtensionDeps = {
   workflowControllerStatusTool,
   workflowReadyTool,
   workflowCancelTool,
-  // Replaced per extension by a provider cache bound to the singleton; tests
-  // inject their own.
-  hostProviderFor: async () => {
-    throw new Error('hostProviderFor is not configured')
-  },
+  // A surface that supplies its own provider sets hostProviderFor; the default
+  // is the provider cache below, bound to the singleton.
+  getSupervisorClient,
   observeRun,
   dial,
   attachOwner,
@@ -576,8 +577,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // Bumped on every start/stop so an in-flight tick cannot deliver or
     // reschedule itself after the poll was invalidated.
     let hostPollGeneration = 0
+    // The broker generation this poll is bound to. The first tick preflights
+    // once, and a generation mismatch rebinds once instead of retrying the
+    // dead binding forever.
+    let hostReceiveGeneration: string | undefined
     // pending inbound asks keyed by broker message_id so a reply can reach the asker.
     const hostPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
+
+    function isGenerationMismatch(error: unknown): boolean {
+      if (error instanceof RpcError) {
+        const data = error.data as Record<string, unknown> | null | undefined
+        if (data?.code === 'generation-mismatch' || data?.wire_code === 'generation-mismatch') return true
+      }
+      return error instanceof Error && /generation mismatch/i.test(error.message)
+    }
 
     function stopHostAskPoll(): void {
       hostPollGeneration++
@@ -595,9 +608,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // the next tick and surface asks out of order.
       const tick = async (): Promise<void> => {
         try {
-          const { asks } = await deps.brokerReceiveTool({})
+          const receive = () => hostReceiveGeneration
+            ? deps.brokerReceiveTool({ generation: hostReceiveGeneration })
+            : deps.brokerReceiveTool({})
+          let received
+          try {
+            received = await receive()
+          } catch (error) {
+            if (!hostReceiveGeneration || !isGenerationMismatch(error)) throw error
+            // One rebind: the next call preflights and binds the new broker.
+            hostReceiveGeneration = undefined
+            received = await receive()
+          }
           if (generation !== hostPollGeneration) return
-          for (const ask of asks) {
+          if (received.generation) hostReceiveGeneration = received.generation
+          for (const ask of received.asks) {
             hostPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
             pi.sendUserMessage(
               formatInboundAskBody(ask, { heading: 'Ask from sub-agent', role: ask.role }),
@@ -1214,7 +1239,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const key = supervisorId ?? ''
       const existing = hostProviders.get(key)
       if (existing) return existing
-      const { client } = await getSupervisorClient(supervisorId, { owner: true })
+      const { client } = await (deps.getSupervisorClient ?? getSupervisorClient)(supervisorId, { owner: true })
       const preflight = await client.messagePreflight()
       const provider = createHostMessageProvider({
         surface: 'pi-host',

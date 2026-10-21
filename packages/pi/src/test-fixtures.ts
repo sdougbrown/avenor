@@ -1,7 +1,7 @@
 // Shared test fixtures for the pi extension test suites. Kept out of the
 // *.test.ts files so every suite builds its ExtensionDeps mock from one set.
 import { mock } from 'bun:test'
-import type { InspectResult, MessageProvider, RunSnapshot, StatusResult } from '@dougbots/avenor-core'
+import { getSupervisorClient, type InspectResult, type MessageProvider, type RunSnapshot, type StatusResult } from '@dougbots/avenor-core'
 import { RunReducer } from '@dougbots/avenor-core'
 import type { ExtensionDeps } from './index.js'
 import { createExtension } from './index.js'
@@ -64,6 +64,7 @@ export async function startExtensionHarness(options: {
     workflowReadyTool: mock(async () => ({})),
     workflowCancelTool: mock(async () => ({})),
     hostProviderFor: mock(async () => makeMessageProvider()),
+    getSupervisorClient: getSupervisorClient as any,
     observeRun: mock(() => null),
     dial: mock(async () => ({ close() {} })),
     attachOwner: mock(async () => ({ close() {} })),

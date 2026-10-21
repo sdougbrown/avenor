@@ -190,3 +190,35 @@ describe('Pi peers last', () => {
     await harness.eventHandlers.session_shutdown({}, {})
   })
 })
+
+describe('Pi default host provider wiring', () => {
+  it('drives the real bound provider when no hostProviderFor is injected', async () => {
+    const send = mock(async (params: { message_id: string }) => ({ outcome: 'sent', message_id: params.message_id }))
+    const client = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
+      messageSend: send,
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: 'supervisor', session: { run_id: 'supervisor', status: 'running' } }],
+      })),
+    }
+    const harness = await startExtensionHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: 'sup' })) as any,
+        messageTool: realMessageTool,
+      },
+    })
+    const result = await harness.registeredTools.avenor_message.execute('t1', {
+      action: 'tell',
+      target: 'self',
+      message: 'hi',
+    })
+    expect(result.details.outcome).toBe('sent')
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      to_run_id: 'supervisor',
+      generation: 'gen-1',
+      no_reply: true,
+    }))
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+})

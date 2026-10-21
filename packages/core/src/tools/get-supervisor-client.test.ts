@@ -35,12 +35,26 @@ describe('read-only control clients', () => {
         buffer = lines.pop() ?? ''
         for (const line of lines) {
           if (!line.trim()) continue
-          const request = JSON.parse(line) as { id: number, method: string }
+          const request = JSON.parse(line) as { id: number, method: string, params?: Record<string, unknown> }
+          if (request.method === 'message_receive' && request.params?.generation !== 'gen-1') {
+            socket.write(JSON.stringify({
+              jsonrpc: '2.0',
+              id: request.id,
+              error: {
+                code: -32000,
+                message: 'messaging: generation mismatch',
+                data: { code: 'generation-mismatch', outcome: 'not-sent', wire_code: 'generation-mismatch' },
+              },
+            }) + '\n')
+            continue
+          }
           const result = request.method === 'list'
             ? []
-            : request.method === 'message_receive'
-              ? { messages: [] }
-              : undefined
+            : request.method === 'message_preflight'
+              ? { protocol: 1, generation: 'gen-1' }
+              : request.method === 'message_receive'
+                ? { messages: [], generation: 'gen-1' }
+                : undefined
           socket.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n')
         }
       })
@@ -63,7 +77,9 @@ describe('read-only control clients', () => {
     expect(await client.list()).toEqual([])
     client.close()
 
-    expect(await brokerReceiveTool({ supervisorId: socketPath })).toEqual({ asks: [] })
+    expect(await brokerReceiveTool({ supervisorId: socketPath })).toEqual({ asks: [], generation: 'gen-1' })
+    // A bound poll reuses its generation instead of preflighting every receive.
+    expect(await brokerReceiveTool({ supervisorId: socketPath, generation: 'gen-1' })).toEqual({ asks: [], generation: 'gen-1' })
     expect(await statusTool({ supervisorId: socketPath })).toMatchObject({ runs: [], count: 0 })
   })
 
