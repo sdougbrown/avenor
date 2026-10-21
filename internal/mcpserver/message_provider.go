@@ -339,7 +339,9 @@ func (p *mcpMessageProvider) peerRunState(ctx context.Context, runID string) (me
 
 // Resume forwards every router-supplied field to the control verb and mints
 // only the run id and paths the provider owns. A registration failure is a
-// typed refusal that still names both ids; the run itself is never killed.
+// plain error, not a typed refusal: the resume already ran, so reporting a
+// refusal would deny an action that was performed. The error names both facts
+// and keeps the cause; the run itself is never killed.
 func (p *mcpMessageProvider) Resume(ctx context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
 	_ = ctx
 	runID := uuid.New().String()
@@ -357,12 +359,8 @@ func (p *mcpMessageProvider) Resume(ctx context.Context, req messaging.ResumeReq
 	if err != nil {
 		return messaging.ResumeResult{}, authorityToolError(err)
 	}
-	if err := p.server.registerResumed(p.client, p.supervisorPath, req, res); err != nil {
-		return messaging.ResumeResult{}, &router.ToolError{
-			Code:    "refused",
-			Message: fmt.Sprintf("resume succeeded but registration failed for run_id %q runtime_id %q: %v", res.RunID, res.RuntimeID, err),
-			Facts:   map[string]string{},
-		}
+	if err := p.server.registerResumed(p.client, p.supervisorPath, res); err != nil {
+		return messaging.ResumeResult{}, fmt.Errorf("resume succeeded but registration failed for run_id %q runtime_id %q: %w", res.RunID, res.RuntimeID, err)
 	}
 	return res, nil
 }

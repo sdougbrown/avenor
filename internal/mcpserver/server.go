@@ -660,7 +660,9 @@ func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunIn
 // miss and resolves one public run id only. Unlike lookupRun it never matches a
 // label, a runtime id or a sentinel path fragment, so the message provider
 // keeps the two resolution planes while still resolving a public run id that
-// outlived this MCP server process.
+// outlived this MCP server process. It reaps a stale label mapping before the
+// store exactly as lookupRun does, so a supervisor restart cannot leave the
+// rehydrated entry rejected by a pre-restart mapping of the same label.
 func (s *Server) lookupRunByPublicID(cl ControlClient, supervisorPath, runID string) (*RunInfo, error) {
 	// Public run ids are UUIDs the surface minted; anything else is a label or
 	// a runtime id and belongs to the broker listing, so no list is issued.
@@ -679,6 +681,7 @@ func (s *Server) lookupRunByPublicID(cl ControlClient, supervisorPath, runID str
 		if runstate.RunIDFromSentinel(sentinelFile) != runID {
 			continue
 		}
+		s.reapStaleLabel(supervisorPath, entries, entry)
 		return s.runInfoFromListEntry(entry, supervisorPath)
 	}
 	return nil, nil
@@ -1542,7 +1545,7 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 // its event log is readable. Identity comes from the new runtime's status, the
 // same way a follow-up read it; a status miss leaves the identity empty instead
 // of failing a resume that already succeeded. The run is never killed here.
-func (s *Server) registerResumed(cl ControlClient, supervisorPath string, req messaging.ResumeRequest, res messaging.ResumeResult) error {
+func (s *Server) registerResumed(cl ControlClient, supervisorPath string, res messaging.ResumeResult) error {
 	identity := resolvedSpawnIdentity{}
 	var status map[string]any
 	if res.RuntimeID != "" {

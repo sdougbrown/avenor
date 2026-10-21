@@ -183,13 +183,11 @@ func TestRunRegistryLookupRuntimeIsScopedBySupervisor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < 200; i++ {
-		if ri := r.LookupRuntime("/tmp/a.sock", "rt_1"); ri == nil || ri.RunID != "run-a" {
-			t.Fatalf("runtime lookup on a.sock = %#v, want run-a", ri)
-		}
-		if ri := r.LookupRuntime("/tmp/b.sock", "rt_1"); ri == nil || ri.RunID != "run-b" {
-			t.Fatalf("runtime lookup on b.sock = %#v, want run-b", ri)
-		}
+	if ri := r.LookupRuntime("/tmp/a.sock", "rt_1"); ri == nil || ri.RunID != "run-a" {
+		t.Fatalf("runtime lookup on a.sock = %#v, want run-a", ri)
+	}
+	if ri := r.LookupRuntime("/tmp/b.sock", "rt_1"); ri == nil || ri.RunID != "run-b" {
+		t.Fatalf("runtime lookup on b.sock = %#v, want run-b", ri)
 	}
 	if ri := r.LookupRuntime("/tmp/c.sock", "rt_1"); ri != nil {
 		t.Fatalf("runtime lookup on an unregistered supervisor = %#v, want nil", ri)

@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 const testSupervisorPath = "/tmp/avenor-test-supervisor.sock"
@@ -30,6 +33,7 @@ type fakeMessageControlClient struct {
 	receiveFunc   func(context.Context, messaging.ReceiveRequest) (messaging.ReceiveResult, error)
 	peersFunc     func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error)
 	preflightFunc func(context.Context) (messaging.PreflightResult, error)
+	resumeFunc    func(messaging.ResumeRequest) (messaging.ResumeResult, error)
 
 	waitGenerations  []string
 	peersGenerations []string
@@ -86,7 +90,10 @@ func (f *fakeMessageControlClient) MessagePreflightContext(ctx context.Context) 
 	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-1"}, nil
 }
 
-func (f *fakeMessageControlClient) Resume(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+func (f *fakeMessageControlClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	if f.resumeFunc != nil {
+		return f.resumeFunc(req)
+	}
 	return messaging.ResumeResult{}, nil
 }
 
@@ -176,12 +183,26 @@ func TestMCPMessageProviderResolveLadder(t *testing.T) {
 		Label:        "peer-label",
 	}
 	tests := []struct {
-		name   string
-		info   []*RunInfo
-		peers  []messaging.Peer
-		ref    string
-		wanted messaging.Resolution
+		name            string
+		info            []*RunInfo
+		peers           []messaging.Peer
+		ref             string
+		wantNoTransport bool
+		wanted          messaging.Resolution
 	}{
+		{
+			name: "supervisor alias resolves itself without the listing",
+			// A label or runtime id that shadows the alias must not win: the
+			// reserved alias is answered before any lookup runs.
+			peers:           []messaging.Peer{testPeer("rt-shadow", supervisorRunID, "running")},
+			ref:             supervisorRunID,
+			wantNoTransport: true,
+			wanted: messaging.Resolution{
+				RunID: supervisorRunID,
+				Label: supervisorRunID,
+				Match: messaging.MatchUnique,
+			},
+		},
 		{
 			name: "registry hit by public id",
 			info: []*RunInfo{registryInfo},
@@ -245,9 +266,11 @@ func TestMCPMessageProviderResolveLadder(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			peerCalls := 0
 			cl := &fakeMessageControlClient{
 				fakeClient: &fakeClient{},
 				peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+					peerCalls++
 					return messaging.PeersResult{Peers: tc.peers, Generation: "gen-1"}, nil
 				},
 			}
@@ -260,6 +283,9 @@ func TestMCPMessageProviderResolveLadder(t *testing.T) {
 			got, err := p.Resolve(context.Background(), tc.ref)
 			if err != nil {
 				t.Fatalf("Resolve(%q) error = %v", tc.ref, err)
+			}
+			if tc.wantNoTransport && peerCalls != 0 {
+				t.Fatalf("Resolve(%q) issued %d peer listings, want none", tc.ref, peerCalls)
 			}
 			if !reflect.DeepEqual(got, tc.wanted) {
 				t.Fatalf("Resolve(%q) = %#v, want %#v", tc.ref, got, tc.wanted)
@@ -338,5 +364,149 @@ func TestAuthorityToolErrorCodeGate(t *testing.T) {
 				t.Fatalf("tool error message = %q, want %q", toolErr.Message, tc.wantMessage)
 			}
 		})
+	}
+}
+
+// TestMCPMessageProviderResumeRegistrationFailureIsUnclassified proves a
+// resume that ran but could not be registered is reported as a server-side
+// failure, not as a typed refusal that would deny an action already performed.
+// A label already held by another run makes the registry store reject the new
+// entry, which is the realistic collision.
+func TestMCPMessageProviderResumeRegistrationFailureIsUnclassified(t *testing.T) {
+	const (
+		heldLabel = "held"
+		publicID  = "3f6a9d1c-2b44-4f0e-9d31-5a7c8e2b4d61"
+	)
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{}}
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		return messaging.ResumeResult{
+			RunID:        publicID,
+			RuntimeID:    "rt-new",
+			Label:        heldLabel,
+			SentinelFile: filepath.Join(t.TempDir(), "avenor-run-"+publicID+".done"),
+			OnEvent:      filepath.Join(t.TempDir(), "avenor-run-"+publicID+".log"),
+		}, nil
+	}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{
+		RunID:        "pub-holder",
+		RuntimeID:    "rt-holder",
+		Label:        heldLabel,
+		SupervisorID: testSupervisorPath,
+	}); err != nil {
+		t.Fatalf("registry.Store: %v", err)
+	}
+
+	_, err := p.Resume(context.Background(), messaging.ResumeRequest{Target: "rt-holder", Message: "keep going", Label: heldLabel})
+	if err == nil {
+		t.Fatal("Resume error = nil, want the registration failure")
+	}
+	var toolErr *router.ToolError
+	if errors.As(err, &toolErr) {
+		t.Fatalf("Resume error = %T %v, want a plain error, not a router refusal", err, err)
+	}
+	for _, want := range []string{"resume succeeded", "registration failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Resume error = %q, want it to name %q", err, want)
+		}
+	}
+}
+
+// TestMCPMessageProviderResolveByPublicIDReapsStaleLabel proves the public-id
+// rung reaps a pre-restart label mapping before it stores, so a supervisor
+// restart that re-points a label does not leave the run resolvable by label
+// but not by its public id.
+func TestMCPMessageProviderResolveByPublicIDReapsStaleLabel(t *testing.T) {
+	const (
+		publicID = "9c1f0e77-58ad-4c3a-8b25-0d6e4f7a2b93"
+		label    = "reused"
+	)
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{listResult: []map[string]any{{
+		"runtime_id":    "rt-live",
+		"label":         label,
+		"session_id":    "sess-live",
+		"sentinel_file": filepath.Join(t.TempDir(), "avenor-run-"+publicID+".done"),
+	}}}}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{
+		RunID:        "pub-stale",
+		RuntimeID:    "rt-stale",
+		Label:        label,
+		SupervisorID: testSupervisorPath,
+	}); err != nil {
+		t.Fatalf("registry.Store: %v", err)
+	}
+
+	got, err := p.Resolve(context.Background(), publicID)
+	if err != nil {
+		t.Fatalf("Resolve(%q) error = %v", publicID, err)
+	}
+	want := messaging.Resolution{
+		RunID:       "rt-live",
+		PublicRunID: publicID,
+		Label:       label,
+		Match:       messaging.MatchUnique,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Resolve(%q) = %#v, want %#v", publicID, got, want)
+	}
+}
+
+// TestMCPMessageProviderLookupRunByPublicIDRehydrates proves the id-only rung
+// rehydrates an entry from the supervisor's list on a registry miss, reading
+// the public run id out of the sentinel basename.
+func TestMCPMessageProviderLookupRunByPublicIDRehydrates(t *testing.T) {
+	const publicID = "5b8e2c40-7a19-4d63-9f02-1c3d5e7a9b48"
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{listResult: []map[string]any{{
+		"runtime_id":    "rt-listed",
+		"label":         "listed-label",
+		"session_id":    "sess-listed",
+		"sentinel_file": filepath.Join(t.TempDir(), "avenor-run-"+publicID+".done"),
+		"on_event":      "/tmp/avenor-run-listed.log",
+	}}}}
+	p := newTestMessageProvider(t, cl)
+
+	info, err := p.server.lookupRunByPublicID(cl, testSupervisorPath, publicID)
+	if err != nil {
+		t.Fatalf("lookupRunByPublicID(%q) error = %v", publicID, err)
+	}
+	if info == nil {
+		t.Fatalf("lookupRunByPublicID(%q) = nil, want the rehydrated entry", publicID)
+	}
+	if info.RunID != publicID || info.RuntimeID != "rt-listed" || info.Label != "listed-label" {
+		t.Fatalf("rehydrated entry = %#v, want run id %q runtime rt-listed label listed-label", info, publicID)
+	}
+	if info.SessionID != "sess-listed" || info.SupervisorID != testSupervisorPath {
+		t.Fatalf("rehydrated entry = %#v, want session sess-listed on %q", info, testSupervisorPath)
+	}
+}
+
+// TestMCPMessageProviderRunStateTranslatesStatus proves RunState reports the
+// translated status, an in-flight turn as live, and a raw session id as
+// resumable.
+func TestMCPMessageProviderRunStateTranslatesStatus(t *testing.T) {
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{
+		statusResult: map[string]any{
+			"status":     "running",
+			"phase":      "active",
+			"session_id": "sess-1",
+		},
+	}}
+	p := newTestMessageProvider(t, cl)
+
+	got, err := p.RunState(context.Background(), "rt-running")
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	want := messaging.RunFacts{
+		RunID:  "rt-running",
+		Status: runstate.StatusRunning,
+		// A non-terminal raw phase passes through Translate unchanged.
+		Phase:     runstate.Phase("active"),
+		Live:      true,
+		Resumable: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RunState = %#v, want %#v", got, want)
 	}
 }
