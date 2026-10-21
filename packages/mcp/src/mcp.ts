@@ -5,6 +5,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { spawnInputShape } from './spawn-schema.js'
+import { routerAdmittedSchema } from './router-schema.js'
+import messageContract from '../../../schemas/message.input.json'
+import peersContract from '../../../schemas/peers.input.json'
 import {
   spawnTool,
   statusTool,
@@ -161,32 +164,13 @@ server.registerTool('answer_permission', {
   })
 })
 
-const MESSAGE_ACTIONS = ['tell', 'ask', 'reply', 'resume', 'withdraw', 'control_reply'] as const
-const PEERS_ACTIONS = ['list', 'rename', 'last'] as const
-
 /**
- * The message and peers tools publish their input schemas but admit through
- * the shared router: the object is loose so unknown properties reach
- * `assertMessageInput`/`assertPeersInput` instead of being stripped here.
+ * The message and peers tools publish the shared contract's per-action union
+ * schema but admit through the shared router: admission belongs to the router
+ * on every surface, so the SDK's own validation must not answer first.
  */
-const messageInputSchema = z.object({
-  action: z.enum(MESSAGE_ACTIONS).describe('tell | ask | reply | resume | withdraw | control_reply'),
-  target: z.string().optional().describe('Recipient for tell/ask/resume (a run id, a peer label, or "self"), or the opaque control message id for control_reply'),
-  message: z.string().optional().describe('Message text for tell/ask/reply/resume'),
-  reply_to: z.string().optional().describe('Inbound ask id being answered (reply)'),
-  message_id: z.string().optional().describe('Ask id being withdrawn (withdraw)'),
-  timeout_ms: z.number().int().optional().describe('Bound on the ask wait in milliseconds'),
-  label: z.string().optional().describe('Override label for the resumed run (resume)'),
-  idempotency_key: z.string().optional().describe('Forwarded verbatim to the resume authority (resume)'),
-  payload: z.unknown().optional().describe('Control reply body (control_reply)'),
-}).passthrough()
-
-const peersInputSchema = z.object({
-  action: z.enum(PEERS_ACTIONS).optional().describe('list (the default) | rename | last'),
-  name: z.string().optional().describe('New display name (rename)'),
-  session_id: z.string().optional().describe('Run to rename; omitted renames the caller (rename)'),
-  target: z.string().optional().describe('Peer to read: a run id, a label, or "self" (last)'),
-}).passthrough()
+const messageInputSchema = routerAdmittedSchema(messageContract)
+const peersInputSchema = routerAdmittedSchema(peersContract)
 
 /**
  * The bound host provider: one supervisor and one generation at a time. It is

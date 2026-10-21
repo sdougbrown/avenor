@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "description": "The one result object the message and peers tools return on every surface: snake_case keys, the contract field set, and the same nesting for peers list, rename and last. Each surface's test builds the same provider outcome and asserts its structured result equals the entry here, so the Go MCP host, the TypeScript MCP host and the OpenCode plugin cannot drift. 'error' is the shared tool-error object. Keys are absent exactly when the corresponding fact is absent, matching internal/messaging/router Result.Output and ToolError.Output.",
+  "message": {
+    "tell": {
+      "action": "tell",
+      "outcome": "sent",
+      "text": "message \"m-1\" delivered to \"mesh-a\"",
+      "message_id": "m-1",
+      "label": "mesh-a"
+    },
+    "resume": {
+      "action": "resume",
+      "outcome": "resumed",
+      "text": "resumed \"again\" as run \"run-2\"",
+      "run_id": "run-2",
+      "label": "again",
+      "sentinel_file": "/runs/run-2/sentinel.done",
+      "on_event": "/runs/run-2/events.log"
+    },
+    "reply_edge_absent": {
+      "action": "reply",
+      "outcome": "edge-absent",
+      "text": "no ask \"a-1\" is pending on this surface; nothing was sent",
+      "message_id": "a-1"
+    }
+  },
+  "peers": {
+    "list": {
+      "peers": [
+        { "run_id": "rt_2", "label": "mesh-a", "kind": "agent", "status": "running" },
+        { "run_id": "rt_3" }
+      ]
+    },
+    "rename": {
+      "renamed": {
+        "run_id": "rt_2",
+        "label": "mesh-renamed",
+        "previous_label": "mesh-a"
+      }
+    },
+    "last": {
+      "last": {
+        "run_id": "rt_7",
+        "runtime_id": "rt_7",
+        "label": "mesh-a",
+        "final_output": "OK",
+        "stop_reason": "end_turn",
+        "final_output_truncated": false
+      }
+    }
+  },
+  "error": {
+    "code": "unknown_target",
+    "text": "no run matches \"ghost\""
+  }
+}

@@ -9,7 +9,9 @@ import { renderLast } from '../../core/src/messaging-text.js'
 import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
 import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
 import type { MessageProvider } from '../../core/src/tools/message.js'
-import conformance from '../../../schemas/message_route.conformance.json'
+import messageContract from '../../../schemas/message.input.json'
+import peersContract from '../../../schemas/peers.input.json'
+import resultFixture from '../../../schemas/message_route.result.json'
 
 // Stub the core controller tools so the production registrations never dial a
 // real supervisor; the stubs record the camelCase args the registrations
@@ -204,19 +206,6 @@ describe('avenor MCP server', () => {
   })
 })
 
-const contractFixture = conformance as unknown as {
-  applicability: Record<string, { permitted: string[] }>
-  peers_applicability: Record<string, { permitted: string[] }>
-}
-
-function fieldSet(table: Record<string, { permitted: string[] }>): string[] {
-  const names = new Set<string>()
-  for (const entry of Object.values(table)) {
-    for (const name of entry.permitted) names.add(name)
-  }
-  return [...names].sort()
-}
-
 async function withClient<T>(run: (client: Client) => Promise<T>): Promise<T> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   const client = new Client({ name: 'test-client', version: '0.1.0' })
@@ -262,18 +251,49 @@ describe('avenor MCP messaging tools', () => {
     })
   })
 
-  it('registers message and peers with the contract field sets', async () => {
+  it('publishes the contract per-action union schemas, not a flat record', async () => {
     await withClient(async (client) => {
       const { tools } = await client.listTools()
-      const message = listedTool(tools, 'message')
-      expect(Object.keys(message.inputSchema.properties).sort()).toEqual(fieldSet(contractFixture.applicability))
-      expect(message.inputSchema.properties.action.enum).toEqual(['tell', 'ask', 'reply', 'resume', 'withdraw', 'control_reply'])
-      expect(message.inputSchema.properties).not.toHaveProperty('supervisor_id')
+      expect(listedTool(tools, 'message').inputSchema).toEqual(messageContract)
+      expect(listedTool(tools, 'peers').inputSchema).toEqual(peersContract)
+    })
+  })
 
-      const peers = listedTool(tools, 'peers')
-      expect(Object.keys(peers.inputSchema.properties).sort()).toEqual(fieldSet(contractFixture.peers_applicability))
-      expect(peers.inputSchema.properties.action.enum).toEqual(['list', 'rename', 'last'])
-      expect(peers.inputSchema.properties).not.toHaveProperty('supervisor_id')
+  it('lists peers when the call omits the arguments object', async () => {
+    providerFactory = () => makeProvider({
+      peers: async () => ({ peers: [{ run_id: 'rt_2', label: 'mesh-a' }] }),
+    })
+    await withClient(async (client) => {
+      const result: any = await client.callTool({ name: 'peers' })
+      expect(result.isError).toBeFalsy()
+      expect(result.content[0].text).toBe('**Active sessions:**\n  mesh-a (rt_2)')
+      expect(result.structuredContent.peers).toEqual([{ run_id: 'rt_2', label: 'mesh-a' }])
+    })
+  })
+
+  it('answers every inadmissible call with the router error, not the SDK error', async () => {
+    await withClient(async (client) => {
+      const cases: Array<{ name: string; args?: Record<string, unknown>; code: string }> = [
+        { name: 'message', code: 'invalid_action' },
+        { name: 'message', args: { action: 'bogus' }, code: 'invalid_action' },
+        { name: 'message', args: { action: 'tell', target: 5, message: 'm' }, code: 'invalid_request' },
+        { name: 'message', args: { action: 'ask', target: 'x', message: 'm', timeout_ms: 1.5 }, code: 'invalid_request' },
+        { name: 'message', args: { action: 'tell', target: 'x', message: 'm', supervisor_id: 's' }, code: 'invalid_request' },
+        { name: 'peers', args: { action: 'bogus' }, code: 'invalid_action' },
+        { name: 'peers', args: { action: 5 }, code: 'invalid_action' },
+        { name: 'peers', args: { action: 'last' }, code: 'invalid_request' },
+      ]
+      for (const testCase of cases) {
+        const result: any = await client.callTool(
+          testCase.args === undefined
+            ? { name: testCase.name }
+            : { name: testCase.name, arguments: testCase.args },
+        )
+        const label = `${testCase.name} ${JSON.stringify(testCase.args)}`
+        expect({ label, isError: result.isError }).toEqual({ label, isError: true })
+        expect({ label, code: result.structuredContent?.code }).toEqual({ label, code: testCase.code })
+        expect({ label, sdk: /Input validation error/.test(result.content[0].text) }).toEqual({ label, sdk: false })
+      }
     })
   })
 
