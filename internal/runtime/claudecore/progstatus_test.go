@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,6 +353,36 @@ func TestProgStatusPaneScanBrokersAStableDialog(t *testing.T) {
 	s.Mu.Unlock()
 	if perm == nil || len(perm.Options) != 2 {
 		t.Fatalf("brokered permission = %+v, want the fully painted dialog", perm)
+	}
+}
+
+func TestProgStatusPaneScanNeedsTwoCapturesPerDialog(t *testing.T) {
+	// Two dialogs in a row with the same options: the second is brokered only
+	// after two captures of its own.
+	second := strings.Replace(permissionPane, "echo hi", "echo bye", 1)
+	s, term, _ := newProgStatusSession(t, permissionPane, permissionPane, permissionPane, permissionPane, second)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	s.ProgStatusTick()
+	drainSessionEvents(s.Events)
+
+	s.ScanTerminalTick()
+	s.ScanTerminalTick()
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("first dialog: permission.request count = %d, want 1", n)
+	}
+	// AnswerPermission clears the request.
+	s.Mu.Lock()
+	s.PendingTerminalPerm = nil
+	s.Mu.Unlock()
+
+	s.ScanTerminalTick()
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 0 {
+		t.Fatalf("second dialog brokered on its first capture (%d requests)", n)
+	}
+	s.ScanTerminalTick()
+	got := drainSessionEvents(s.Events)
+	if n := countEvents(got, "permission.request"); n != 1 {
+		t.Fatalf("second dialog: permission.request count = %d, want 1", n)
 	}
 }
 

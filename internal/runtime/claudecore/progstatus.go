@@ -252,8 +252,10 @@ func (s *Session) permissionBrokeredLocked() bool {
 }
 
 // notePermissionBrokeredLocked records that the dialog of the current blocked
-// report was brokered and ends its chase. Mu is held.
+// report was brokered and ends its chase. The next dialog needs two captures
+// of its own, even when it shows the same options. Mu is held.
 func (s *Session) notePermissionBrokeredLocked() {
+	s.osc.chaseLast = ""
 	if s.osc.active && s.osc.root.State == terminal.ProgBlocked {
 		s.osc.permBrokered = true
 		s.osc.chaseUntil = time.Time{}
@@ -366,6 +368,10 @@ func (s *Session) applyProgReport(r terminal.ProgReport) {
 	prev := o.root
 	if st.State != terminal.ProgBlocked {
 		o.permBrokered = false
+		// The dialog is gone; a later one must not match its captures.
+		if o.root.State == terminal.ProgBlocked {
+			o.chaseLast = ""
+		}
 	}
 	if st.State == terminal.ProgClear {
 		o.root = terminal.ProgStatus{}
