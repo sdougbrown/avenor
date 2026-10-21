@@ -12,6 +12,11 @@ func TestScrubParentClaudeEnvDropsSessionIdentity(t *testing.T) {
 		"CLAUDE_CODE_CHILD_SESSION=1",
 		"CLAUDE_CODE_SESSION_ID=abc-123",
 		"CLAUDE_PID=4242",
+		"CLAUDECODE=1",
+		"CLAUDE_CODE_SESSION_ATTENDED=1",
+		"CLAUDE_EFFORT=high",
+		"CLAUDE_CODE_MESSAGING_SOCKET=/tmp/s.sock",
+		"CLAUDE_CODE_MESSAGING_TOKEN=secret",
 		"HOME=/home/x",
 	}
 	got := ScrubParentClaudeEnv(in)
@@ -27,7 +32,9 @@ func TestScrubParentClaudeEnvKeepsUnrelatedAndNearMisses(t *testing.T) {
 	in := []string{
 		"CLAUDE_CODE_CHILD_SESSION_EXTRA=keep",
 		"CLAUDE_PIDGIN=keep",
-		"CLAUDECODE=1",
+		"CLAUDECODE_X=keep",
+		"CLAUDE_CONFIG_DIR=/cfg",
+		"CLAUDE_CODE_USE_BEDROCK=1",
 		"CLAUDE_CODE_ENTRYPOINT=cli",
 		"NOT_AN_ASSIGNMENT",
 	}
