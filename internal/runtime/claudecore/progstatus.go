@@ -384,9 +384,9 @@ func (s *Session) applyProgReport(r terminal.ProgReport) {
 		if turn {
 			o.workingSincePrompt = true
 			// A clear or error released the held end_turn, but the root is
-			// working again with no done yet: hold it again. progHoldCeiling
-			// still bounds the hold from heldAt.
-			if o.endTurnHeld && !o.doneSincePrompt {
+			// working again with no done yet: hold it again, until
+			// progHoldCeiling has passed since heldAt.
+			if o.endTurnHeld && !o.doneSincePrompt && now.Sub(o.heldAt) < progHoldCeiling {
 				o.finishAt = time.Time{}
 			}
 		}

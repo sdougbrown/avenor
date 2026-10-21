@@ -463,9 +463,18 @@ func TestProgStatusHeldEndTurnReleasedAtCeiling(t *testing.T) {
 	appendTranscript(t, path, assistantText("OK", "end_turn"))
 	s.ScanTranscriptTick()
 	time.Sleep(60 * time.Millisecond)
-	tickUntilFinished(t, s)
+	s.ProgStatusTick()
+	// Reports that keep returning to working, faster than the settle, do not
+	// hold it again.
+	deadline := time.Now().Add(4 * progFinishSettle)
+	for time.Now().Before(deadline) {
+		term.ReportProgStatus(rootReport(terminal.ProgBlocked, terminal.ProgKindQuestion))
+		term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+		s.ProgStatusTick()
+		time.Sleep(progFinishSettle / 5)
+	}
 	if n := countEvents(drainSessionEvents(s.Events), "session.end"); n != 1 {
-		t.Fatalf("session.end count = %d, want 1", n)
+		t.Fatalf("session.end count = %d, want 1 once the ceiling passed", n)
 	}
 }
 
