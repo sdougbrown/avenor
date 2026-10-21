@@ -2,9 +2,11 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -375,5 +377,95 @@ func TestLastAgentMessageReportsCurrentLabelAfterRename(t *testing.T) {
 	record, ok = b.LastAgentMessage("rt_2")
 	if ok || record.Label != "new-peer" {
 		t.Fatalf("no-record label = %q ok=%v, want the current display name", record.Label, ok)
+	}
+}
+
+// renameRequestWithCaller builds the request withAuth would hand to handleRename:
+// the authenticated caller travels in the context, never in the body.
+func renameRequestWithCaller(t *testing.T, caller, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/rename", strings.NewReader(body))
+	return req.WithContext(context.WithValue(req.Context(), authenticatedCallerKey{}, caller))
+}
+
+func TestRenameEndpointRefusesAnotherRunsRunID(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	tokenA, err := b.CreateRun("rt_a", "name-a")
+	if err != nil {
+		t.Fatalf("create run a: %v", err)
+	}
+	if _, err := b.CreateRun("rt_b", "name-b"); err != nil {
+		t.Fatalf("create run b: %v", err)
+	}
+	b.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
+		if err := b.RenameRun(callerRunID, name); err != nil {
+			return messaging.RenameResult{}, err
+		}
+		return messaging.RenameResult{RunID: callerRunID, Label: name}, nil
+	})
+
+	status, body := postAuthBroker(t, b.Addr(), "/rename", "rt_b", tokenA, map[string]any{"name": "hijacked"})
+	if status == http.StatusOK {
+		t.Fatalf("rename with another run's id succeeded: %v", body)
+	}
+	if got := b.DisplayName("rt_b"); got != "name-b" {
+		t.Fatalf("target label = %q, want name-b", got)
+	}
+}
+
+func TestRenameHandlerRefusesBodyRunIDThatIsNotTheAuthenticatedCaller(t *testing.T) {
+	b := New("")
+	if _, err := b.CreateRun("rt_a", "name-a"); err != nil {
+		t.Fatalf("create run a: %v", err)
+	}
+	if _, err := b.CreateRun("rt_b", "name-b"); err != nil {
+		t.Fatalf("create run b: %v", err)
+	}
+	handlerCalled := false
+	b.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
+		handlerCalled = true
+		return messaging.RenameResult{RunID: callerRunID, Label: name}, nil
+	})
+
+	req := renameRequestWithCaller(t, "rt_a", `{"run_id":"rt_b","token":"ignored","name":"hijacked"}`)
+	rec := httptest.NewRecorder()
+	b.handleRename(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if handlerCalled {
+		t.Fatal("the handler was called with an identity the caller did not authenticate as")
+	}
+	if got := b.DisplayName("rt_b"); got != "name-b" {
+		t.Fatalf("target label = %q, want name-b", got)
+	}
+}
+
+func TestRenameFallbackRefusesBodyRunIDThatIsNotTheAuthenticatedCaller(t *testing.T) {
+	b := New("")
+	if _, err := b.CreateRun("rt_a", "name-a"); err != nil {
+		t.Fatalf("create run a: %v", err)
+	}
+	if _, err := b.CreateRun("rt_b", "name-b"); err != nil {
+		t.Fatalf("create run b: %v", err)
+	}
+
+	req := renameRequestWithCaller(t, "rt_a", `{"run_id":"rt_b","token":"ignored","name":"hijacked"}`)
+	rec := httptest.NewRecorder()
+	b.handleRename(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if got := b.DisplayName("rt_b"); got != "name-b" {
+		t.Fatalf("target label = %q, want name-b", got)
+	}
+	if got := b.DisplayName("rt_a"); got != "name-a" {
+		t.Fatalf("caller label = %q, want name-a", got)
 	}
 }

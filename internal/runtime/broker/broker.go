@@ -444,6 +444,15 @@ func (b *Broker) withMethod(method string, next http.HandlerFunc) http.HandlerFu
 	}
 }
 
+// authenticatedCallerKey carries the run ID withAuth verified into a handler,
+// so a handler never has to trust the request body for the caller's identity.
+type authenticatedCallerKey struct{}
+
+func authenticatedCaller(r *http.Request) string {
+	caller, _ := r.Context().Value(authenticatedCallerKey{}).(string)
+	return caller
+}
+
 func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Check global HTTP token for push-control
@@ -504,7 +513,7 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(context.WithValue(r.Context(), authenticatedCallerKey{}, cred.RunID)))
 	}
 }
 
@@ -1098,10 +1107,11 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRename renames one run's display name. It authenticates, rejects a
-// malformed request, and delegates the decision: with a handler installed the
-// supervisor's SessionRename decides every row; without one the broker can only
-// rename the authenticated caller's own record.
+// handleRename renames one run's display name. It rejects a malformed request
+// and a body whose run_id is not the run withAuth authenticated, then delegates
+// the decision: with a handler installed the supervisor's SessionRename decides
+// every row; without one the broker can only rename the authenticated caller's
+// own record.
 func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -1127,6 +1137,14 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Replacing this block would let a caller act as another run: the body
+	// only repeats who authenticated, and it must agree.
+	caller := authenticatedCaller(r)
+	if body.RunID != caller {
+		writeCodedError(w, http.StatusForbidden, "run_id does not match this run", "not-permitted")
+		return
+	}
+
 	handler := b.renameAuthority()
 	if handler == nil {
 		// Broker-only fallback: the authority is the broker's own registry, so
@@ -1136,20 +1154,20 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusBadRequest, messaging.SessionNameRuleMessage(body.Name), "invalid-name")
 			return
 		}
-		previous := b.DisplayName(body.RunID)
-		if err := b.RenameRun(body.RunID, body.Name); err != nil {
+		previous := b.DisplayName(caller)
+		if err := b.RenameRun(caller, body.Name); err != nil {
 			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
 			return
 		}
 		writeJSONBody(w, http.StatusOK, map[string]any{
-			"run_id":         body.RunID,
-			"label":          b.DisplayName(body.RunID),
+			"run_id":         caller,
+			"label":          b.DisplayName(caller),
 			"previous_label": previous,
 		})
 		return
 	}
 
-	result, err := handler(body.RunID, body.SessionID, body.Name)
+	result, err := handler(caller, body.SessionID, body.Name)
 	if err != nil {
 		type toolCoder interface{ ToolCode() string }
 		var coded toolCoder
