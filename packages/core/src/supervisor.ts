@@ -537,6 +537,21 @@ export class Supervisor {
     return this.runs.get(reference) ?? this.aliases.get(reference)
   }
 
+  /**
+   * Look up a run by its public run ID only, never by a label alias. The
+   * messaging router resolves public IDs and labels on separate planes, so a
+   * label that happens to equal another run's old ID must not match here.
+   */
+  getRunById(runId: string): RunInfo | undefined {
+    return this.runs.get(runId)
+  }
+
+  /** Register a run this supervisor resumed, so its ID and label stay resolvable. */
+  registerResumed(run: RunInfo): void {
+    this.runs.set(run.runId, run)
+    this.aliases.set(run.label, run)
+  }
+
   /** Match a stored run by its broker runtime ID. */
   getRunByRuntimeId(runtimeId: string): RunInfo | undefined {
     if (!runtimeId) return undefined
