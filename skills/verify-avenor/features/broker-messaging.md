@@ -65,8 +65,9 @@ AVENOR_BIN=$SCRATCH/avenor timeout -k 10 300 pi --no-session --no-extensions \
 
 **Observable end state (the proof):** the child's event log
 (`$AVENOR_HOME/runs/<spawn-run-id>/events.log`) contains an `avenor_message`
-`tool.call` with `"action": "ask"` and `"target": "supervisor"`, a successful tool result reading
-`Reply from supervisor:\nPONG-FROM-SUPERVISOR`, and a terminal `session.end`
+`tool.call` with `"action": "ask"` and `"target": "supervisor"`, a successful
+tool result whose text is the bare reply `PONG-FROM-SUPERVISOR` (the merged tool
+renders `ask`/`replied` as the reply alone), and a terminal `session.end`
 whose `final_output` contains `PONG-FROM-SUPERVISOR`. The child's sentinel
 (`$AVENOR_HOME/runs/<spawn-run-id>/sentinel.done`) carries `DONE` and
 `STOP_REASON=end_turn`.
