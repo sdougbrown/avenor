@@ -383,19 +383,26 @@ describe('AvenorPlugin', () => {
     expect(typeof hooks['permission.ask']).toBe('function')
     expect(typeof hooks['chat.message']).toBe('function')
     expect(typeof hooks['experimental.text.complete']).toBe('function')
-    expect(Object.keys(hooks.tool ?? {})).toEqual(expect.arrayContaining([
-      'avenor_spawn',
-      'avenor_status',
-      'avenor_result',
+    expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
       'avenor_answer_permission',
-      'avenor_message',
-      'avenor_peers',
-      'avenor_workflow_cancel',
       'avenor_events',
       'avenor_inspect',
-      'avenor_shutdown',
       'avenor_kill',
-    ]))
+      'avenor_message',
+      'avenor_peers',
+      'avenor_result',
+      'avenor_shutdown',
+      'avenor_spawn',
+      'avenor_status',
+      'avenor_workflow_cancel',
+      'avenor_workflow_complete',
+      'avenor_workflow_controller_status',
+      'avenor_workflow_events',
+      'avenor_workflow_gate',
+      'avenor_workflow_inspect',
+      'avenor_workflow_status',
+      'avenor_workflow_wait',
+    ])
 
     const message = {
       parts: [{ type: 'text', text: '<channel source="agent-reviewer" from_run_id="abc12345" from_role="reviewer">Looks good</channel>' }],
