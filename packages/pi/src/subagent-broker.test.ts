@@ -106,7 +106,13 @@ function stubFetch(handlers: Record<string, (init: RequestInit | undefined) => R
     const path = new URL(href).pathname + new URL(href).search
     calls.push({ url: href, init, body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
     const handler = handlers[path.split('?')[0]]
-    if (!handler) return new Response('not found', { status: 404 })
+    if (!handler) {
+      // The broker always answers /sessions; a child pins its generation there.
+      if (path === '/sessions') {
+        return Response.json({ sessions: [], generation: 'gen-1', messaging_protocol: 1 })
+      }
+      return new Response('not found', { status: 404 })
+    }
     return handler(init)
   }) as typeof fetch
   return { calls, fetchImpl }
@@ -317,5 +323,83 @@ describe('child broker routes', () => {
     })
     await expect(createBrokerChildBroker(env, missing.fetchImpl).last('ghost'))
       .rejects.toMatchObject({ code: 'unknown_target' })
+  })
+})
+
+describe('child broker generation pin', () => {
+  const generation = 'e7fd9f123bd148ba1f8f43f340197ef7'
+
+  /**
+   * A fake broker that refuses a versioned message id unless the request carries
+   * the generation it advertises on /sessions, the way the ask store refuses one
+   * that arrives without it.
+   */
+  function generationBroker(options: { advertised?: string, waitOutcome?: 'replied' | 'timed-out' } = {}) {
+    const advertised = options.advertised ?? generation
+    const calls: FetchCall[] = []
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url)
+      const path = new URL(href).pathname
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+      calls.push({ url: href, init, body })
+      if (path === '/sessions') {
+        return Response.json({
+          sessions: [{ run_id: 'supervisor', label: 'main', kind: 'supervisor', status: 'running' }],
+          generation: advertised,
+          messaging_protocol: 1,
+        })
+      }
+      if (body.generation !== generation) {
+        return Response.json(
+          { code: 'generation-mismatch', error: 'generation mismatch', outcome: 'not-sent' },
+          { status: 409 },
+        )
+      }
+      if (path === '/wait_reply') {
+        return options.waitOutcome === 'timed-out'
+          ? Response.json({ timeout: true, outcome: 'timed-out' }, { status: 504 })
+          : Response.json({ outcome: 'replied', from_run_id: 'supervisor', payload: { message: 'pong' } })
+      }
+      if (path === '/cancel_message') return Response.json({ outcome: 'withdrawn' })
+      return Response.json({ queued: true, outcome: 'sent' })
+    }) as typeof fetch
+    return { calls, fetchImpl }
+  }
+
+  it('pins the generation once and stamps it on the ask send and its wait', async () => {
+    const { calls, fetchImpl } = generationBroker()
+    const broker = createBrokerChildBroker(env, fetchImpl)
+    expect(await broker.ask('supervisor', 'is it green?', 'av1.m.20')).toEqual({
+      outcome: 'replied',
+      messageId: 'av1.m.20',
+      reply: 'pong',
+    })
+    expect((await broker.ask('supervisor', 'still green?', 'av1.m.21')).outcome).toBe('replied')
+
+    expect(calls.filter(call => call.url.endsWith('/sessions'))).toHaveLength(1)
+    expect(calls.filter(call => call.url.endsWith('/send')).map(call => call.body.generation))
+      .toEqual([generation, generation])
+    expect(calls.filter(call => call.url.endsWith('/wait_reply')).map(call => call.body.generation))
+      .toEqual([generation, generation])
+  })
+
+  it('stamps the generation on a tell and on every ask withdrawal', async () => {
+    const { calls, fetchImpl } = generationBroker({ waitOutcome: 'timed-out' })
+    const broker = createBrokerChildBroker(env, fetchImpl)
+    expect((await broker.tell('supervisor', 'hi', 'av1.t.20')).outcome).toBe('sent')
+    expect((await broker.ask('supervisor', 'q', 'av1.m.22', 1)).outcome).toBe('timed-out')
+    expect((await broker.withdraw('av1.m.23')).outcome).toBe('withdrawn')
+
+    expect(calls.find(call => call.url.endsWith('/send'))?.body.generation).toBe(generation)
+    expect(calls.filter(call => call.url.endsWith('/cancel_message')).map(call => call.body.generation))
+      .toEqual([generation, generation])
+  })
+
+  it('reports an ask as not-sent when the broker advertises no generation', async () => {
+    const { calls, fetchImpl } = generationBroker({ advertised: '' })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.24')
+    expect(result).toEqual({ outcome: 'not-sent', messageId: 'av1.m.24' })
+    expect(calls.filter(call => call.url.endsWith('/sessions'))).toHaveLength(1)
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 })

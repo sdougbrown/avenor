@@ -112,11 +112,14 @@ export interface AgentMessageFields {
   replyTo?: string
   /** Set only on an ask, so the broker tracks the waiting reply. */
   expectsReply?: boolean
+  /** The pinned broker generation a versioned message id was minted for. */
+  generation?: string
 }
 
 /** Build the `/send` body for one agent_message, as the broker child tools do. */
 export function buildAgentMessage(fields: AgentMessageFields): Record<string, unknown> {
   return {
+    ...(fields.generation !== undefined ? { generation: fields.generation } : {}),
     from_run_id: fields.fromRunId,
     to_run_id: fields.toRunId,
     type: 'agent_message',
@@ -182,6 +185,38 @@ export async function getBroker(
   return res.json()
 }
 
+/** The broker generation a child pins once, read the way the Go child's Prepare reads it. */
+export type BrokerGenerationPin = () => Promise<string>
+
+/** Read the ask generation `/sessions` advertises, or empty for none. */
+async function readGeneration(env: SubAgentEnv, fetchImpl: typeof fetch): Promise<string> {
+  const body = await getBroker(env, '/sessions', fetchImpl) as Record<string, unknown> | null
+  return typeof body?.generation === 'string' ? body.generation : ''
+}
+
+/**
+ * Pin the generation on first use and reuse it, so one child binds to one broker
+ * generation. The broker rotates it when its ask store resets; a pinned child is
+ * then refused instead of being retargeted. A broker that advertises no
+ * generation is not pinned, so the next call reads it again.
+ */
+function pinGeneration(env: SubAgentEnv, fetchImpl: typeof fetch): BrokerGenerationPin {
+  let pinned: Promise<string> | undefined
+  return () => {
+    pinned ??= readGeneration(env, fetchImpl).then(
+      generation => {
+        if (!generation) pinned = undefined
+        return generation
+      },
+      error => {
+        pinned = undefined
+        throw error
+      },
+    )
+    return pinned
+  }
+}
+
 export interface BrokerAskArgs {
   toRunId: string
   message: string
@@ -205,6 +240,7 @@ function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal
 export async function withdrawPendingAsk(
   env: SubAgentEnv,
   messageId: string,
+  generation: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ outcome: MessageOutcome }> {
   // A fresh deadline: the caller's own signal may already have aborted the
@@ -212,7 +248,7 @@ export async function withdrawPendingAsk(
   const body = await postBroker(
     env,
     '/cancel_message',
-    { cancel_message_id: messageId },
+    { cancel_message_id: messageId, generation },
     fetchImpl,
     AbortSignal.timeout(ASK_CLEANUP_TIMEOUT_MS),
   ) as Record<string, unknown> | null
@@ -230,10 +266,11 @@ export async function withdrawPendingAsk(
 async function withdrawAsk(
   env: SubAgentEnv,
   messageId: string,
+  generation: string,
   fetchImpl: typeof fetch,
 ): Promise<{ pending: boolean; outcome: MessageOutcome }> {
   try {
-    const withdrawn = await withdrawPendingAsk(env, messageId, fetchImpl)
+    const withdrawn = await withdrawPendingAsk(env, messageId, generation, fetchImpl)
     return { pending: false, outcome: withdrawn.outcome }
   } catch (error) {
     // The broker clears the edge itself when a cancelled wait_reply request
@@ -392,15 +429,32 @@ function brokerErrorOutcome(error: unknown): MessageOutcome | undefined {
   return unenvelopedOutcome(error.status)
 }
 
+/**
+ * The outcome of a generation pin that failed before any message was sent: no
+ * request reached the send route, so only a credential refusal keeps its own
+ * outcome and everything else is a message that was never sent.
+ */
+function pinFailureOutcome(error: unknown): MessageOutcome {
+  return brokerErrorOutcome(error) === 'auth-rejected' ? 'auth-rejected' : 'not-sent'
+}
+
 async function brokerAsk(
   env: SubAgentEnv,
   args: BrokerAskArgs,
   messageId: string,
   fetchImpl: typeof fetch,
+  pin: BrokerGenerationPin,
 ): Promise<ProviderResult> {
   const role = 'agent'
   const timeoutMs = normalizeAskTimeoutMs(args.timeoutMs)
   const signal = combineSignals(args.signal, timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined)
+
+  let generation: string
+  try {
+    generation = await pin()
+  } catch (error) {
+    return { outcome: pinFailureOutcome(error), messageId }
+  }
 
   try {
     await postBroker(
@@ -413,6 +467,7 @@ async function brokerAsk(
         message: args.message,
         role,
         expectsReply: true,
+        generation,
       }),
       fetchImpl,
       signal,
@@ -428,17 +483,17 @@ async function brokerAsk(
     // the rejected send never created.
     const rejected = brokerErrorOutcome(error)
     if (rejected) return { outcome: rejected, messageId }
-    const cleaned = await withdrawAsk(env, messageId, fetchImpl)
+    const cleaned = await withdrawAsk(env, messageId, generation, fetchImpl)
     return { outcome: cleaned.outcome, messageId }
   }
 
   let reply: unknown
   try {
-    reply = await postBroker(env, '/wait_reply', { waiting_for: messageId }, fetchImpl, signal)
+    reply = await postBroker(env, '/wait_reply', { waiting_for: messageId, generation }, fetchImpl, signal)
   } catch (error) {
     const timedOut = (error instanceof Error && error.name === 'TimeoutError')
       || brokerErrorOutcome(error) === 'timed-out'
-    const cleaned = await withdrawAsk(env, messageId, fetchImpl)
+    const cleaned = await withdrawAsk(env, messageId, generation, fetchImpl)
     if (timedOut) return { outcome: 'timed-out', messageId }
     const outcome = brokerErrorOutcome(error)
     if (outcome) return { outcome, messageId }
@@ -518,14 +573,28 @@ export function createBrokerChildBroker(
   env: SubAgentEnv,
   fetchImpl: typeof fetch = fetch,
 ): ChildBroker {
+  const pin = pinGeneration(env, fetchImpl)
   return {
     async tell(targetRunId, message, messageId) {
+      let generation: string
+      try {
+        generation = await pin()
+      } catch (error) {
+        return { outcome: pinFailureOutcome(error), messageId }
+      }
       let body: Record<string, unknown> | null
       try {
         body = await postBroker(
           env,
           '/send',
-          buildAgentMessage({ fromRunId: env.runId, toRunId: targetRunId, messageId, message, role: 'agent' }),
+          buildAgentMessage({
+            fromRunId: env.runId,
+            toRunId: targetRunId,
+            messageId,
+            message,
+            role: 'agent',
+            generation,
+          }),
           fetchImpl,
         ) as Record<string, unknown> | null
       } catch (error) {
@@ -540,9 +609,11 @@ export function createBrokerChildBroker(
     },
 
     ask(targetRunId, message, messageId, timeoutMs, signal) {
-      return brokerAsk(env, { toRunId: targetRunId, message, timeoutMs, signal }, messageId, fetchImpl)
+      return brokerAsk(env, { toRunId: targetRunId, message, timeoutMs, signal }, messageId, fetchImpl, pin)
     },
 
+    // A reply carries no generation: the broker completes the edge by looking it
+    // up in its own current generation, exactly as the Go transport's Reply does.
     async reply(askerRunId, inboundAskId, message) {
       let body: Record<string, unknown> | null
       try {
@@ -568,11 +639,17 @@ export function createBrokerChildBroker(
     },
 
     async withdraw(messageId) {
+      let generation: string
+      try {
+        generation = await pin()
+      } catch (error) {
+        throw brokerToolError(error)
+      }
       try {
         const body = await postBroker(
           env,
           '/cancel_message',
-          { cancel_message_id: messageId },
+          { cancel_message_id: messageId, generation },
           fetchImpl,
         ) as Record<string, unknown> | null
         return { outcome: brokerOutcome(body) }

@@ -7,9 +7,13 @@ import { makeMessageProvider, startExtensionHarness, waitFor, waitUntilAborted }
 const subAgentEnv = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } as const
 
 /** The broker's peer listing a child resolves its targets through. */
-const supervisorSessions = () => Response.json({
+const sessionsBody = {
   sessions: [{ run_id: 'supervisor', label: 'supervisor', status: 'running', kind: 'supervisor' }],
-})
+  generation: 'gen-fixture',
+  messaging_protocol: 1,
+}
+
+const supervisorSessions = () => Response.json(sessionsBody)
 
 interface FetchCall {
   path: string
@@ -53,6 +57,9 @@ function stubBrokerFetch(
         const value = pollIndex < pollResponses.length ? pollResponses[pollIndex] : []
         pollIndex++
         return { ok: true, status: 200, json: async () => value, text: async () => '' } as Response
+      }
+      if (path === '/sessions') {
+        return { ok: true, status: 200, json: async () => sessionsBody, text: async () => '' } as Response
       }
       if (pendingSendFailures > 0) {
         pendingSendFailures--
