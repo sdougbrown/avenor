@@ -1801,18 +1801,19 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 		t.Errorf("expected 1 session (ourselves), got %d", len(sessions))
 	}
 
-	// Register a run and check again
-	_, err = b.CreateRun("runner_1", "")
+	// Register a run and check again. The label is owned by CreateRun, not by
+	// the metadata patch.
+	_, err = b.CreateRun("runner_1", "my-runner")
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 
 	b.UpdateSessionInfo("runner_1", &SessionInfo{
-		Label:   "my-runner",
 		Backend: "test-backend",
 		Model:   "test-model",
 		Dir:     "/tmp/test",
 		Status:  "thinking",
+		Kind:    "agent",
 	})
 
 	resp2, err := getSessions(b.Addr(), "sessions_user", token)
@@ -1846,6 +1847,9 @@ func TestBrokerSessionsEndpoint(t *testing.T) {
 			}
 			if entry["status"] != "thinking" {
 				t.Errorf("status = %q, want thinking", entry["status"])
+			}
+			if entry["kind"] != "agent" {
+				t.Errorf("kind = %q, want agent", entry["kind"])
 			}
 			break
 		}

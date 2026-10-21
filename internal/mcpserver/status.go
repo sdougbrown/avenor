@@ -3,8 +3,6 @@ package mcpserver
 import (
 	"fmt"
 	"io"
-	"os"
-	"strings"
 
 	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/runstate"
@@ -36,11 +34,8 @@ func (d *statusDiagnostics) note(runtimeID, rawStatus string) {
 	}
 }
 
-type sentinelData struct {
-	Status     string
-	SessionID  string
-	StopReason string
-}
+// sentinelData is the runstate sentinel this file renders.
+type sentinelData = runstate.Sentinel
 
 // statusRun is the typed shape of one run status in avenor_status structured
 // output. Pointer fields preserve the pass-through presence semantics of the
@@ -214,31 +209,6 @@ func recordOf(m map[string]any, key string) map[string]any {
 	return nil
 }
 
-func readSentinel(path string) (*sentinelData, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read sentinel: %w", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) == 0 || lines[0] == "" {
-		return nil, fmt.Errorf("empty sentinel file")
-	}
-	sd := &sentinelData{Status: lines[0]}
-	for _, line := range lines[1:] {
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		switch k {
-		case "SESSION":
-			sd.SessionID = v
-		case "STOP_REASON":
-			sd.StopReason = v
-		}
-	}
-	return sd, nil
-}
-
 func translateStatus(diag *statusDiagnostics, runtimeID string, raw map[string]any, sentinelPath string) map[string]any {
 	result := make(map[string]any)
 
@@ -290,7 +260,7 @@ func translateStatus(diag *statusDiagnostics, runtimeID string, raw map[string]a
 		}
 	case "ended":
 		if sentinelPath != "" {
-			if sd, err := readSentinel(sentinelPath); err == nil {
+			if sd, err := runstate.ReadSentinel(sentinelPath); err == nil {
 				applySentinelStatus(result, sd)
 				return result
 			}
@@ -313,7 +283,7 @@ func translateStatus(diag *statusDiagnostics, runtimeID string, raw map[string]a
 		// Sentinels are an MCP registry fallback, not part of shared supervisor
 		// state translation. Preserve the live session ID as authoritative.
 		if sentinelPath != "" {
-			if sd, err := readSentinel(sentinelPath); err == nil {
+			if sd, err := runstate.ReadSentinel(sentinelPath); err == nil {
 				applySentinelStatus(result, sd)
 			}
 		}
@@ -361,26 +331,6 @@ func applyRunInfoIdentity(status map[string]any, info *RunInfo) {
 	setIfMissing("effective_agent", effectiveAgent)
 	setIfMissing("effective_model", effectiveModel)
 	setIfMissing("effective_backend", effectiveBackend)
-}
-
-func readSentinelSession(path string) (string, error) {
-	sd, err := readSentinel(path)
-	if err != nil {
-		return "", err // readSentinel already wraps with descriptive context
-	}
-	// DONE, FAILED, and BLOCKED settle the provider session itself: the
-	// backend transcript persists, so a follow-up can reload and continue it.
-	// TIMEOUT and KILLED are supervisor-imposed terminations (time budget,
-	// cancellation) where an automatic continuation would surprise.
-	switch strings.ToUpper(sd.Status) {
-	case "DONE", "FAILED", "BLOCKED":
-	default:
-		return "", fmt.Errorf("run is not resumable (status: %s)", strings.ToLower(sd.Status))
-	}
-	if sd.SessionID == "" {
-		return "", fmt.Errorf("no session in sentinel")
-	}
-	return sd.SessionID, nil
 }
 
 func applySentinelStatus(result map[string]any, sd *sentinelData) {

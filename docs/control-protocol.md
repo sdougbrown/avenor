@@ -365,6 +365,50 @@ Returns all active and recently-completed child runtimes with status summaries. 
 
 `status` is one of `"idle"`, `"running"`, or `"ended"`. A live runtime reports `running` from spawn until its run ends, including workflow (loop/team) children before their first attempt and between attempts. `idle` means no attempt is live: a direct run settled a turn and is waiting for the next prompt, or is in a pending retry probe. A workflow runtime reads `idle` only briefly, between its run ending and its completion being published. Metadata fields are additive and may be absent when the backend does not expose them. Completed runtimes can include a bounded `final_output` preview; when it was bounded, `final_output_truncated: true` is included. Use `result` with that runtime's `runtime_id` for the complete reply. Blocked runtimes include their pending permission details.
 
+#### `resume`
+
+`resume` continues a prior run in a new one. Params: `{run_id, target, message, label?, idempotency_key?, sentinel_file?, on_event?}`. `target` is the prior child broker runtime id (`rt_N`), or an exact display name; the supervisor session is not a resume target. A host surface resolves its public run id to a runtime id before calling. It is owner-gated.
+
+`resume` refuses a target whose completion sentinel says `TIMEOUT` or `KILLED` with `not_resumable` (the sentinel's status word is the fact); `DONE`, `FAILED` and `BLOCKED` sentinels continue. It carries the prior run's agent/model/backend, thinking, directory, agent profile, auto-approve, roster file and roster entry, then starts the new runtime with the prior session id. The result reports the `sentinel_file` and `on_event` the spawned run actually writes, including when the request left them empty. A keyed call replays the first run: the stored result's `run_id`, `sentinel_file` and `on_event` win over the freshly minted ones.
+
+#### `session_rename`
+
+`session_rename` renames one run's display name. Params: `{session_id, name}`. `name` is 1-64 runes with no control or formatting characters. It is owner-gated and applies the same one-authority rule as `POST /rename`:
+
+- an owner caller may rename only the supervisor session (`session_id` omitted, `"supervisor"`, or the supervisor's current display name);
+- a broker-authenticated caller may rename only itself.
+
+Resolution runs before permission: an exact runtime id first, then the exact display name, so a rename changes what `avenor_peers`, `/sessions`, the outbound sender stamp and later resolution calls report. A stale launch label resolves nowhere. The result carries `{run_id, label, previous_label}` and the rename publishes `session.renamed` after it persists.
+
+#### `session_last`
+
+`session_last` reads a run's recorded last agent turn. Params: `{runtime_id}`. It is read-only and ungated, like `result` and `status`, so any connected client may read any known run. The result is `{run_id, label, has_record, final_output, stop_reason, final_output_truncated, at}`; `label` is the target's current display name, so a rename is reflected. A known run with no completed turn answers `has_record: false` with empty text and a real `run_id`/`label`, while an unknown runtime is a typed `unknown_target` failure: `-32000` with `error.data.code: "unknown_target"`. The text is bounded; `final_output_truncated` is the producer's flag, and is also set whenever the store's bound shortens the text.
+
+#### `session_last_set`
+
+`session_last_set` publishes the supervisor session's last turn. Params: `{runtime_id, final_output, stop_reason?, final_output_truncated?}`. It is owner-gated and accepts `runtime_id: "supervisor"` for an owner caller and nothing else. It publishes no event: the last-message store is a read model, not a lifecycle fact.
+
+#### `message_send`, `message_wait`, `message_reply`, `message_withdraw`
+
+These typed messaging methods delegate to the supervisor's in-process transport and require the owner grant. Their params and results are the snake_case DTOs in `internal/control/message_dto.go` (`to_run_id`/`message_id`/`generation`/`body`/`no_reply` for a send; `message_id`/`generation`/`timeout_ms` for a wait). The owner connection always acts as the supervisor session, so the request params carry no sender or from-run field; inbound results keep `sender` and `from_run_id` as the attribution pair. A failure returns `-32000` with structured `error.data` (`code`, `outcome`, `message_id`, `wire_code`) so clients classify it without parsing text. `message_send` forwards `no_reply` for a fire-and-forget `tell`.
+
+`resume`, `session_rename`, `session_last` and `session_last_set` report what an authority decided rather than what a send did, so their `error.data` carries `code` alone: no `outcome` and no `wire_code` are reported for them.
+
+#### `message_receive`, `message_peers`, `message_preflight`
+
+The read-only half of the typed messaging surface. They are ungated, matching `broker_receive` and `broker_peers`, and answer the same snake_case DTOs (`messages`, `peers`, `protocol`/`generation`). `message_receive` is a blocking verb with the same rules as `message_wait`: a negative `timeout_ms` is `-32602`, a value above the ceiling is clamped to it, and the receive runs off the connection's read loop under the shared per-connection slot budget.
+
+#### `broker_*` (superseded)
+
+The `broker_*` verbs are superseded by the `message_*` family and will be removed.
+
+- `broker_send` → `message_send`: the same delivery, with `body` in place of `message` and an outcome in the result.
+- `broker_ask` → `message_send` then `message_wait`: the typed pair splits the send from the bounded wait, and the wait reports the messaging outcome and the inbound reply rather than one flat reply record.
+- `broker_cancel` → `message_withdraw`: the typed verb answers the terminal fence the withdrawal installed.
+- `broker_reply` → `message_reply`: the inbound ask's id travels as `message_id` where `broker_reply` used `reply_to`, alongside an optional `correlation_id`.
+- `broker_peers` → `message_peers`: the same visible peers under `peers`, plus the generation it answered for.
+- `broker_receive` → `message_receive`: the same inbound messages under `messages`, plus the generation it answered for; the request takes an optional `limit`.
+
 #### `shutdown`
 
 ```json
@@ -431,15 +475,15 @@ The control server is constructed with an immutable owner capability that the ow
 
 ### Gated methods
 
-Eleven methods require a connection's owner grant. A call from a connection without one fails with `-32010` (`permission_denied`) before the handler runs:
+Eighteen methods require a connection's owner grant. A call from a connection without one fails with `-32010` (`permission_denied`) before the handler runs:
 
-`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `spawn_mcp`, `shutdown`, `broker_send`, `broker_ask`, `broker_cancel`, `broker_reply`.
+`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `spawn_mcp`, `shutdown`, `broker_send`, `broker_ask`, `broker_cancel`, `broker_reply`, `message_send`, `message_wait`, `message_reply`, `message_withdraw`, `resume`, `session_rename`, `session_last_set`.
 
 ### Ungated methods
 
-Twenty-six method names are unauthenticated and stay that way. None of them consults the owner grant, so any client that can open the socket may call them:
+Thirty method names are unauthenticated and stay that way. None of them consults the owner grant, so any client that can open the socket may call them:
 
-- Observation: `identity`, `result`, `status`, `subscribe`, `history`, `wait_turn`, `list`, `broker_peers`, `broker_receive`.
+- Observation: `identity`, `result`, `status`, `subscribe`, `history`, `wait_turn`, `list`, `broker_peers`, `broker_receive`, `message_receive`, `message_peers`, `message_preflight`, `session_last`.
 - Runner plumbing: `send_to_parent`, `tree_budget`, `wait_for_capacity`.
 - Workflow: `workflow.create`, `workflow.instantiate`, `workflow.status`, `workflow.inspect`, `workflow.wait`, `workflow.events`, `workflow.cancel`, `workflow.command`, `workflow.controller.create`, `workflow.controller.enable`, `workflow.controller.disable`, `workflow.controller.status`, `workflow.controller.list`, `workflow.ready`.
 

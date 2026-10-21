@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avenor.dev/schemas/message.input.json",
+  "title": "avenor_message input",
+  "description": "Discriminated-union input for the avenor_message tool. One complete object per action: every variant enumerates all the properties it permits and refuses the rest, so a field that belongs to another action is a schema error rather than a silently ignored key. The same admission rules are published as ActionApplicability in internal/messaging (Go) and assertMessageInput (TypeScript); TestSchemaMatchesRouteTable proves the two agree.",
+  "type": "object",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "tell",
+          "description": "Deliver a message without creating a reply edge."
+        },
+        "target": {
+          "type": "string",
+          "description": "Recipient: a reserved self alias, a broker/runtime id, a host-surface public run id, or a peer label."
+        },
+        "message": {
+          "type": "string",
+          "description": "Text the recipient reads."
+        }
+      },
+      "required": ["action", "target", "message"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "ask",
+          "description": "Deliver a message and wait for one reply."
+        },
+        "target": {
+          "type": "string",
+          "description": "Recipient: a reserved self alias, a broker/runtime id, a host-surface public run id, or a peer label."
+        },
+        "message": {
+          "type": "string",
+          "description": "Question the recipient answers."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000,
+          "description": "Bounded wait in whole milliseconds, at least zero and at most the shared wait cap (600000); absent or zero uses the shared wait cap."
+        }
+      },
+      "required": ["action", "target", "message"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "reply",
+          "description": "Answer an ask this surface received."
+        },
+        "reply_to": {
+          "type": "string",
+          "description": "Message id of the inbound ask, as an opaque handle."
+        },
+        "message": {
+          "type": "string",
+          "description": "Reply text the asker reads."
+        }
+      },
+      "required": ["action", "reply_to", "message"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "resume",
+          "description": "Continue a finished run in a new run."
+        },
+        "target": {
+          "type": "string",
+          "description": "Prior run: a reserved self alias, a broker/runtime id, a host-surface public run id, or a peer label."
+        },
+        "message": {
+          "type": "string",
+          "description": "Instruction the resumed run receives."
+        },
+        "label": {
+          "type": "string",
+          "description": "Display name for the new run; defaults to the prior run's label."
+        },
+        "idempotency_key": {
+          "type": "string",
+          "description": "Caller-chosen key that makes a repeated resume replay the first result."
+        }
+      },
+      "required": ["action", "target", "message"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "withdraw",
+          "description": "Retract an ask this caller sent."
+        },
+        "message_id": {
+          "type": "string",
+          "description": "Message id of the ask to withdraw."
+        }
+      },
+      "required": ["action", "message_id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "control_reply",
+          "description": "Answer a claude-channel control request; registered only on the claude-channel backend."
+        },
+        "target": {
+          "type": "string",
+          "description": "Opaque claude-channel control message id, passed through unchanged."
+        },
+        "payload": {
+          "type": "object",
+          "description": "JSON payload the control channel receives; absent sends an empty object."
+        }
+      },
+      "required": ["action", "target"],
+      "additionalProperties": false
+    }
+  ]
+}

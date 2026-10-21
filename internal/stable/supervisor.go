@@ -189,10 +189,17 @@ type SpawnParams struct {
 	// so teardown releases the run's own slot even if another runtime wears
 	// the same label.
 	permissionDeciderSlotKey string
+	// resumeRunID is the public run id a resume's surface minted. It carries no
+	// JSON tag so it never affects the idempotency parameter hash; the spawn
+	// result echoes it, which is how a keyed replay reports the first run's id.
+	resumeRunID string
 }
 
 type SpawnResult struct {
-	RuntimeID        string `json:"runtime_id"`
+	RuntimeID string `json:"runtime_id"`
+	// RunID is the public run id the surface supplied, internal to the resume
+	// path; it is not part of the spawn wire shape.
+	RunID            string `json:"-"`
 	SessionID        string `json:"session_id"`
 	OnEvent          string `json:"on_event"`
 	SentinelFile     string `json:"sentinel_file"`
@@ -240,8 +247,16 @@ type directPermissionReservation struct {
 }
 
 type childRuntime struct {
-	id               string
-	label            string
+	id string
+	// label is the display name the run was launched under. It is written
+	// before the runtime is published and never rewritten: event metadata,
+	// provider label environment and launch provenance describe the launch.
+	label string
+	// displayName is the run's current display name, the one messaging peers
+	// see. A spawn sets it and applySessionName rewrites it under
+	// s.controlMu -> child.mu, the locks List, RuntimeStatus and
+	// labelHolderLocked read it under.
+	displayName      string
 	agent            string
 	agentProfile     string
 	model            string
@@ -735,6 +750,11 @@ func NewSupervisor(cfg Config) *Supervisor {
 		// so an ask the supervisor makes is the same ask a child can answer
 		// over HTTP.
 		sup.messaging = inprocess.New(sup.broker.Store())
+		// POST /rename decides nothing itself: it forwards the authenticated
+		// caller and the optional target to the one authority.
+		sup.broker.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
+			return sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: callerRunID}, sessionID, name)
+		})
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	sup.capacityCh = make(chan struct{})
@@ -1447,7 +1467,7 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 func (s *Supervisor) labelHolderLocked(label string) string {
 	for _, child := range s.runtimes {
 		child.mu.Lock()
-		holding := child.label == label && !child.lc.isCompleted()
+		holding := child.displayName == label && !child.lc.isCompleted()
 		child.mu.Unlock()
 		if holding {
 			return child.id
@@ -1556,9 +1576,10 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// written without child.mu afterwards.
 	child := &childRuntime{
 		id: rtID,
-		// The label is visible under s.controlMu at the moment the child
+		// The labels are visible under s.controlMu at the moment the child
 		// becomes visible to the label scans.
 		label:                    params.Label,
+		displayName:              params.Label,
 		agent:                    params.Agent,
 		agentProfile:             params.AgentProfile,
 		model:                    params.Model,
@@ -1747,6 +1768,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		// SpawnResult.SessionID is empty — phase session IDs are in events.
 		result := SpawnResult{
 			RuntimeID:    rtID,
+			RunID:        params.resumeRunID,
 			OnEvent:      onEvent,
 			SentinelFile: sentinelFile,
 			BrokerURL:    s.brokerURL(),
@@ -1788,6 +1810,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 
 		result := SpawnResult{
 			RuntimeID:    rtID,
+			RunID:        params.resumeRunID,
 			OnEvent:      onEvent,
 			SentinelFile: sentinelFile,
 			BrokerURL:    s.brokerURL(),
@@ -1892,6 +1915,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	brokerURL := s.brokerURL()
 	return SpawnResult{
 		RuntimeID:        rtID,
+		RunID:            params.resumeRunID,
 		SessionID:        session.SessionID,
 		OnEvent:          onEvent,
 		SentinelFile:     sentinelFile,
@@ -1934,6 +1958,9 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 	if token == "" {
 		return "", ""
 	}
+	// Metadata only: the label was fixed by EnsureRun and only RenameRun
+	// changes it, so this write can never undo a rename.
+	s.broker.UpdateSessionInfo("supervisor", &broker.SessionInfo{Kind: "supervisor", Status: "running"})
 	s.brokerRunID = "supervisor"
 	s.brokerToken = token
 	return s.brokerRunID, token
@@ -1947,11 +1974,33 @@ func (s *Supervisor) ensureChildBrokerRun(child *childRuntime) string {
 	if s.broker == nil {
 		return ""
 	}
-	token, _ := s.broker.EnsureRun(child.id, child.label)
+	child.mu.Lock()
+	label := child.label
+	child.mu.Unlock()
+	token, _ := s.broker.EnsureRun(child.id, label)
 	child.mu.Lock()
 	child.brokerToken = token
+	backend, model, dir := child.effectiveBackend, child.effectiveModel, child.dir
 	child.mu.Unlock()
+	// Metadata only: EnsureRun already recorded the launch label.
+	s.broker.UpdateSessionInfo(child.id, &broker.SessionInfo{
+		Kind:    "agent",
+		Backend: backend,
+		Model:   model,
+		Dir:     dir,
+		Status:  "running",
+	})
 	return token
+}
+
+// MessageTransport is the supervisor's own transport over the broker's ask
+// store. It is the one transport the control message_* methods delegate to and
+// it never leaves the supervisor.
+func (s *Supervisor) MessageTransport() (messaging.Transport, error) {
+	if s.messaging == nil {
+		return nil, fmt.Errorf("broker not available")
+	}
+	return s.messaging, nil
 }
 
 // brokerPost sends an authenticated POST to the broker HTTP endpoint.
@@ -3885,6 +3934,9 @@ func (s *Supervisor) emitSessionEnd(child *childRuntime, stopReason string) {
 	if len(outputFiles) > 0 {
 		fields["output_files"] = outputFiles
 	}
+	if s.broker != nil {
+		s.broker.UpdateSessionInfo(child.id, &broker.SessionInfo{Status: "ended"})
+	}
 	if err := s.fanoutWriterLocked(child).writeRunEnd(events.Event{
 		Event:     "session.end",
 		SessionID: child.sessionID(),
@@ -4065,7 +4117,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"runtime_id":         rt.id,
 			"session_id":         rt.session.SessionID,
 			"run_id":             rt.runID,
-			"label":              rt.label,
+			"label":              rt.displayName,
 			"agent":              identity.Agent,
 			"agent_profile":      identity.AgentProfile,
 			"model":              identity.Model,
@@ -5171,7 +5223,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"runtime_id":         rt.id,
 		"session_id":         rt.session.SessionID,
 		"run_id":             rt.runID,
-		"label":              rt.label,
+		"label":              rt.displayName,
 		"agent":              identity.Agent,
 		"agent_profile":      identity.AgentProfile,
 		"model":              identity.Model,

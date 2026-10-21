@@ -48,10 +48,21 @@ func (rec *Recorder) Feed(evt events.Event) {
 	var kind string
 	switch evt.Event {
 	case "session.end":
-		if stopReason, ok := evt.Fields["stop_reason"].(string); ok && stopReason != "" {
+		stopReason, _ := evt.Fields["stop_reason"].(string)
+		if stopReason != "" {
 			kind = stopReason
 		} else {
 			kind = "done"
+		}
+		// A run-level end (end_kind=run) closes a run that never completed a
+		// turn: it carries no final_output and must not overwrite a real turn.
+		if endKind, _ := evt.Fields["end_kind"].(string); endKind != "run" {
+			finalOutput, _ := evt.Fields["final_output"].(string)
+			truncated, _ := evt.Fields["final_output_truncated"].(bool)
+			// The error is deliberately discarded: this is a read model, no
+			// waiter or lifecycle decision depends on the write, and a child's
+			// session.end must not fail because a peer peek could not be stored.
+			_ = rec.broker.SetLastAgentMessage(rec.runID, finalOutput, stopReason, truncated)
 		}
 	case "agent.status":
 		kind = "status"

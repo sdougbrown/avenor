@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "conditions": {
+    "callerKind": {
+      "type": "string",
+      "description": "Who invoked the tool: owner (the control socket's single owner connection) or broker (a broker-authenticated run)."
+    },
+    "surface": {
+      "type": "string",
+      "description": "Model-facing surface: mcp | channeltools | sidecar | pi-host | pi-child | opencode | mcp-ts."
+    },
+    "targetLive": {
+      "type": "boolean",
+      "description": "A turn is in flight on the resolved target."
+    },
+    "targetResumable": {
+      "type": "boolean",
+      "description": "The resolved target can be continued: a done, failed or blocked sentinel, or a live session id."
+    },
+    "targetMatch": {
+      "type": "string",
+      "description": "Resolution outcome for the addressed target: unique | ambiguous | none."
+    },
+    "controlReplySupported": {
+      "type": "boolean",
+      "description": "The surface can deliver a claude-channel control reply (the sidecar only)."
+    }
+  },
+  "fields": {
+    "action": {
+      "isEmpty": "string",
+      "description": "One of tell, ask, reply, resume, withdraw, control_reply. Peers actions are deliberately absent: they have no route preconditions and are validated against PeersApplicabilityTable."
+    },
+    "target": {
+      "isEmpty": "string",
+      "description": "Addressed recipient, run reference or opaque control message id."
+    },
+    "message": {
+      "isEmpty": "string",
+      "description": "Text the tool delivers."
+    },
+    "reply_to": {
+      "isEmpty": "string",
+      "description": "Inbound ask id being answered."
+    },
+    "message_id": {
+      "isEmpty": "string",
+      "description": "Ask id being withdrawn."
+    }
+  },
+  "rules": [
+    {
+      "type": "check",
+      "field": "action",
+      "check": {
+        "op": "in",
+        "field": "action",
+        "value": ["tell", "ask", "reply", "resume", "withdraw", "control_reply"]
+      },
+      "reason": "not a known action (tell, ask, reply, resume, withdraw, control_reply)"
+    },
+    {
+      "type": "enabledWhen",
+      "field": "target",
+      "when": {
+        "op": "or",
+        "exprs": [
+          {
+            "op": "neq",
+            "field": "action",
+            "value": "control_reply"
+          },
+          {
+            "op": "cond",
+            "condition": "controlReplySupported"
+          }
+        ]
+      },
+      "reason": "action \"control_reply\" is only available on the claude-channel backend"
+    },
+    {
+      "type": "fairWhen",
+      "field": "target",
+      "when": {
+        "op": "or",
+        "exprs": [
+          {
+            "op": "neq",
+            "field": "action",
+            "value": "resume"
+          },
+          {
+            "op": "condIn",
+            "condition": "callerKind",
+            "values": ["owner"]
+          }
+        ]
+      },
+      "reason": "a broker-authenticated run may resume only a run it spawned, which a child cannot own"
+    },
+    {
+      "type": "enabledWhen",
+      "field": "message",
+      "when": {
+        "op": "or",
+        "exprs": [
+          {
+            "op": "not",
+            "exprs": [
+              {
+                "op": "in",
+                "field": "action",
+                "values": ["tell", "ask"]
+              }
+            ]
+          },
+          {
+            "op": "cond",
+            "condition": "targetLive"
+          }
+        ]
+      },
+      "reason": "target is not live for this action"
+    },
+    {
+      "type": "fairWhen",
+      "field": "message",
+      "when": {
+        "op": "or",
+        "exprs": [
+          {
+            "op": "neq",
+            "field": "action",
+            "value": "resume"
+          },
+          {
+            "op": "cond",
+            "condition": "targetResumable"
+          }
+        ]
+      },
+      "reason": "target is not resumable"
+    }
+  ]
+}

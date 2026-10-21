@@ -19,6 +19,8 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 func TestSocketStartSignalsReadinessFD(t *testing.T) {
@@ -2170,6 +2172,20 @@ type mockStableHandler struct {
 	waitCanceled         chan struct{} // non-nil: one send when RuntimeWaitTurn exits via ctx cancellation
 	sendToParentCalled   int
 	sendToParentMessages []string
+
+	messageTransport messaging.Transport
+	resumeResult     messaging.ResumeResult
+	resumeErr        error
+	renameResult     messaging.RenameResult
+	renameErr        error
+	renameSessionID  string
+	renameName       string
+	lastRecord       broker.LastAgentMessage
+	lastOK           bool
+	lastErr          error
+	lastRuntimeID    string
+	lastSetErr       error
+	lastSetCalls     int
 }
 
 func (m *mockStableHandler) Spawn(params json.RawMessage) (any, error) {
@@ -2243,6 +2259,33 @@ func (m *mockStableHandler) BrokerReceive() (any, error) {
 
 func (m *mockStableHandler) BrokerReply(toRunID, replyTo, message string) error {
 	return nil
+}
+
+func (m *mockStableHandler) MessageTransport() (messaging.Transport, error) {
+	if m.messageTransport == nil {
+		return nil, errors.New("no transport")
+	}
+	return m.messageTransport, nil
+}
+
+func (m *mockStableHandler) Resume(caller messaging.Caller, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return m.resumeResult, m.resumeErr
+}
+
+func (m *mockStableHandler) SessionRename(caller messaging.Caller, sessionID, name string) (messaging.RenameResult, error) {
+	m.renameSessionID = sessionID
+	m.renameName = name
+	return m.renameResult, m.renameErr
+}
+
+func (m *mockStableHandler) SessionLast(runtimeID string) (broker.LastAgentMessage, bool, error) {
+	m.lastRuntimeID = runtimeID
+	return m.lastRecord, m.lastOK, m.lastErr
+}
+
+func (m *mockStableHandler) SessionLastSet(caller messaging.Caller, runtimeID, finalOutput, stopReason string, truncated bool) error {
+	m.lastSetCalls++
+	return m.lastSetErr
 }
 
 func (m *mockStableHandler) RuntimeSendToParent(runtimeID, message string) error {

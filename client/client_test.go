@@ -11,7 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 func startTestServer(t *testing.T) (string, func()) {
@@ -1272,6 +1275,120 @@ func TestClientClosedStateByFailureKind(t *testing.T) {
 		}
 		if c.Closed() {
 			t.Fatal("Closed() = true after a response timeout, want false")
+		}
+	})
+}
+
+// TestMessageWaitOutlivesServerMaximumWait pins the client-side deadline: the
+// server answers a zero timeout after up to messaging.MaxWait, so the client's
+// response timer must outlast that ceiling rather than fall back to call's 30s
+// default. It runs on synthetic time so the wait costs nothing.
+func TestMessageWaitOutlivesServerMaximumWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer serverConn.Close()
+		defer clientConn.Close()
+
+		c := &Client{
+			conn:    clientConn,
+			pending: map[int]chan Response{},
+			eventCh: make(chan Event, 1),
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := c.MessageWait(messaging.WaitRequest{MessageID: "m1", Generation: "gen_1"})
+			done <- err
+		}()
+
+		var raw map[string]any
+		if err := json.NewDecoder(serverConn).Decode(&raw); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if raw["method"] != "message_wait" {
+			t.Fatalf("method = %v, want message_wait", raw["method"])
+		}
+
+		// Past call's 30s fallback, but still inside what the server may use.
+		time.Sleep(messaging.MaxWait)
+		select {
+		case err := <-done:
+			t.Fatalf("client gave up while the server could still answer: %v", err)
+		default:
+		}
+
+		resp := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      raw["id"],
+			"result":  map[string]any{"outcome": "replied", "message_id": "m1"},
+		}
+		data, _ := json.Marshal(resp)
+		if _, err := serverConn.Write(append(data, '\n')); err != nil {
+			t.Fatalf("write response: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("MessageWait: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("the wait never observed the late response")
+		}
+	})
+}
+
+// TestMessageReceiveOutlivesServerMaximumWait pins the same client-side deadline
+// for message_receive, whose zero timeout also means the server may park until
+// messaging.MaxWait.
+func TestMessageReceiveOutlivesServerMaximumWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer serverConn.Close()
+		defer clientConn.Close()
+
+		c := &Client{
+			conn:    clientConn,
+			pending: map[int]chan Response{},
+			eventCh: make(chan Event, 1),
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := c.MessageReceive(messaging.ReceiveRequest{Generation: "gen_1"})
+			done <- err
+		}()
+
+		var raw map[string]any
+		if err := json.NewDecoder(serverConn).Decode(&raw); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if raw["method"] != "message_receive" {
+			t.Fatalf("method = %v, want message_receive", raw["method"])
+		}
+
+		time.Sleep(messaging.MaxWait)
+		select {
+		case err := <-done:
+			t.Fatalf("client gave up while the server could still answer: %v", err)
+		default:
+		}
+
+		resp := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      raw["id"],
+			"result":  map[string]any{"messages": []any{}, "generation": "gen_1"},
+		}
+		data, _ := json.Marshal(resp)
+		if _, err := serverConn.Write(append(data, '\n')); err != nil {
+			t.Fatalf("write response: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("MessageReceive: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("the receive never observed the late response")
 		}
 	})
 }

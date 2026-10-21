@@ -23,6 +23,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
@@ -130,6 +131,13 @@ type StableHandler interface {
 	BrokerReceive() (any, error)
 	BrokerReply(toRunID, replyTo, message string) error
 
+	// The typed messaging methods delegate to the supervisor's own transport.
+	MessageTransport() (messaging.Transport, error)
+	Resume(caller messaging.Caller, req messaging.ResumeRequest) (messaging.ResumeResult, error)
+	SessionRename(caller messaging.Caller, sessionID, name string) (messaging.RenameResult, error)
+	SessionLast(runtimeID string) (broker.LastAgentMessage, bool, error)
+	SessionLastSet(caller messaging.Caller, runtimeID, finalOutput, stopReason string, truncated bool) error
+
 	// TreeBudgetStatus reports tree-budget diagnostics. A supervisor without an
 	// active budget returns a degraded status map with its reason.
 	TreeBudgetStatus() any
@@ -186,6 +194,11 @@ type connState struct {
 
 	// askSlots bounds concurrent in-flight broker asks on this connection.
 	askSlots chan struct{}
+
+	// messageSlots bounds concurrent in-flight blocking message verbs
+	// (message_wait, message_receive) on this connection, matching the
+	// broker_ask and wait_turn bounds.
+	messageSlots chan struct{}
 }
 
 type subscriber struct {
@@ -1169,7 +1182,12 @@ func (s *ControlServer) acceptLoop() {
 			continue
 		}
 		seq++
-		cs := &connState{id: seq, server: s, conn: conn, askSlots: make(chan struct{}, maxInflightAsksPerConn), waitSlots: make(chan struct{}, maxInflightAsksPerConn)}
+		cs := &connState{
+			id: seq, server: s, conn: conn,
+			askSlots:         make(chan struct{}, maxInflightAsksPerConn),
+			waitSlots:        make(chan struct{}, maxInflightAsksPerConn),
+			messageSlots:     make(chan struct{}, maxInflightAsksPerConn),
+		}
 		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
 		// Stop sets stopped before it closes the listener, so registering under
@@ -1219,10 +1237,20 @@ func (s *ControlServer) handleConn(c *connState) {
 // and broker edges.
 const maxInflightAsksPerConn = 8
 
-// maxAskTimeoutMS is the server-side cap on a request's timeout_ms. It sits
+// maxAskTimeoutMS is the one server-side cap on a request's timeout_ms. It sits
 // below the ask store's DefaultAskTimeout so a clamped value expires on the
-// server (with structured error data) instead of racing the broker's 504.
+// server (with structured error data) instead of racing the broker's 504. The
+// message DTO only converts milliseconds to a duration and imposes no ceiling.
 const maxAskTimeoutMS = int64(askstore.DefaultAskTimeout-5*time.Second) / int64(time.Millisecond)
+
+// clampAskTimeout caps a blocking verb's timeout_ms at maxAskTimeoutMS so every
+// blocking verb enforces the same ceiling.
+func clampAskTimeout(ms int64) int64 {
+	if ms > maxAskTimeoutMS {
+		return maxAskTimeoutMS
+	}
+	return ms
+}
 
 // codeWaitTurnTimeout marks a wait_turn request whose timeout_ms elapsed
 // before the runtime's turn settled. Clients match this code to a typed
@@ -1237,6 +1265,71 @@ var ErrWaitTurnTimeout = errors.New("wait_turn: timeout before the runtime's tur
 // response is written when the goroutine completes, so handleConn must not
 // write it a second time.
 var asyncResponse = Response{JSONRPC: "2.0"}
+
+// messageTransport resolves the shared transport for one message_* request and
+// maps a lookup failure onto the wire error the verb returns.
+type messageTransport func() (messaging.Transport, Response, bool)
+
+// messagePrelude applies the nil-handler gate, the optional owner gate and the
+// params decode every message_* verb shares. The transport lookup is deferred
+// so a blocking verb can take its slot first and release it if the lookup
+// fails, exactly like the hand-written verbs it replaces.
+func (s *ControlServer) messagePrelude(c *connState, req Request, params any, ownerOnly bool) (messageTransport, Response, bool) {
+	if s.stableHandler == nil {
+		return nil, failure(req.ID, -32601, "method not found", nil), false
+	}
+	if ownerOnly && !s.ensureOwner(c) {
+		return nil, failure(req.ID, -32010, "permission_denied", nil), false
+	}
+	if params != nil {
+		if err := json.Unmarshal(req.Params, params); err != nil {
+			return nil, failure(req.ID, -32602, "invalid params", nil), false
+		}
+	}
+	return func() (messaging.Transport, Response, bool) {
+		tr, err := s.stableHandler.MessageTransport()
+		if err != nil {
+			return nil, failure(req.ID, -32000, err.Error(), messageErrorData(err, "", "")), false
+		}
+		return tr, Response{}, true
+	}, Response{}, true
+}
+
+// messageAsyncResult is one blocking verb's outcome and wire result, so the
+// shared runner can render either message_wait or message_receive.
+type messageAsyncResult struct {
+	outcome messaging.Outcome
+	payload any
+}
+
+// runMessageAsync parks one blocking message verb on a background goroutine
+// bound to the connection context, holding one per-connection slot for the
+// call's lifetime.
+func (c *connState) runMessageAsync(req Request, messageID string, transport messageTransport, call func(context.Context, messaging.Transport) (messageAsyncResult, error)) Response {
+	select {
+	case c.messageSlots <- struct{}{}:
+	default:
+		return failure(req.ID, -32000, "too many in-flight message waits or receives on this connection", nil)
+	}
+	tr, resp, ok := transport()
+	if !ok {
+		<-c.messageSlots
+		return resp
+	}
+	go func() {
+		defer func() { <-c.messageSlots }()
+		result, err := call(c.ctx, tr)
+		if req.ID == nil || c.ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			_ = c.writeJSON(failure(req.ID, -32000, err.Error(), messageErrorData(err, result.outcome, messageID)))
+			return
+		}
+		_ = c.writeJSON(success(req.ID, result.payload))
+	}()
+	return asyncResponse
+}
 
 func (s *ControlServer) dispatch(c *connState, req Request) Response {
 	switch req.Method {
@@ -1634,11 +1727,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if p.TimeoutMS < 0 {
 			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
 		}
-		// The broker long-poll itself expires at its 10-minute ask timeout, so
-		// a larger server-side budget cannot be honored.
-		if p.TimeoutMS > maxAskTimeoutMS {
-			p.TimeoutMS = maxAskTimeoutMS
-		}
+		p.TimeoutMS = clampAskTimeout(p.TimeoutMS)
 		// Bound concurrent in-flight asks per connection so one owner cannot
 		// accumulate unbounded parked goroutines and broker edges.
 		select {
@@ -1722,6 +1811,168 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		if err := s.stableHandler.BrokerReply(p.ToRunID, p.ReplyTo, p.Message); err != nil {
 			return failure(req.ID, -32000, err.Error(), nil)
+		}
+		return success(req.ID, map[string]any{"ok": true})
+	case "message_send":
+		var p MessageSendParams
+		transport, resp, ok := s.messagePrelude(c, req, &p, true)
+		if !ok {
+			return resp
+		}
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
+		}
+		res, err := tr.Send(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, res.MessageID))
+		}
+		return success(req.ID, newMessageSendResult(res))
+	case "message_wait":
+		var p MessageWaitParams
+		transport, resp, ok := s.messagePrelude(c, req, &p, true)
+		if !ok {
+			return resp
+		}
+		if p.TimeoutMS < 0 {
+			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
+		}
+		p.TimeoutMS = clampAskTimeout(p.TimeoutMS)
+		return c.runMessageAsync(req, p.MessageID, transport, func(ctx context.Context, tr messaging.Transport) (messageAsyncResult, error) {
+			res, err := tr.Wait(ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+			return messageAsyncResult{outcome: res.Outcome, payload: newMessageWaitResult(res)}, err
+		})
+	case "message_reply":
+		var p MessageReplyParams
+		transport, resp, ok := s.messagePrelude(c, req, &p, true)
+		if !ok {
+			return resp
+		}
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
+		}
+		res, err := tr.Reply(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, res.MessageID))
+		}
+		return success(req.ID, newMessageSendResult(res))
+	case "message_withdraw":
+		var p MessageWithdrawParams
+		transport, resp, ok := s.messagePrelude(c, req, &p, true)
+		if !ok {
+			return resp
+		}
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
+		}
+		res, err := tr.Withdraw(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, p.MessageID))
+		}
+		return success(req.ID, newMessageWithdrawResult(res))
+	case "message_receive":
+		var p MessageReceiveParams
+		transport, resp, ok := s.messagePrelude(c, req, &p, false)
+		if !ok {
+			return resp
+		}
+		if p.TimeoutMS < 0 {
+			return failure(req.ID, -32602, "invalid params: timeout_ms must be non-negative", nil)
+		}
+		p.TimeoutMS = clampAskTimeout(p.TimeoutMS)
+		return c.runMessageAsync(req, "", transport, func(ctx context.Context, tr messaging.Transport) (messageAsyncResult, error) {
+			res, err := tr.Receive(ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+			return messageAsyncResult{payload: newMessageReceiveResult(res)}, err
+		})
+	case "message_peers":
+		var p MessagePeersParams
+		transport, resp, ok := s.messagePrelude(c, req, &p, false)
+		if !ok {
+			return resp
+		}
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
+		}
+		res, err := tr.Peers(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		return success(req.ID, newMessagePeersResult(res))
+	case "message_preflight":
+		transport, resp, ok := s.messagePrelude(c, req, nil, false)
+		if !ok {
+			return resp
+		}
+		tr, resp, ok := transport()
+		if !ok {
+			return resp
+		}
+		res, err := tr.Preflight(c.ctx)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+		}
+		return success(req.ID, newMessagePreflightResult(res))
+	case "resume":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p ResumeParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		res, err := s.stableHandler.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.request())
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
+		}
+		return success(req.ID, newResumeResult(res))
+	case "session_rename":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p SessionRenameParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		res, err := s.stableHandler.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.SessionID, p.Name)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
+		}
+		return success(req.ID, newSessionRenameResult(res))
+	case "session_last":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		var p SessionLastParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		record, ok, err := s.stableHandler.SessionLast(p.RuntimeID)
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
+		}
+		return success(req.ID, newSessionLastResult(record, ok))
+	case "session_last_set":
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		var p SessionLastSetParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		if err := s.stableHandler.SessionLastSet(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.RuntimeID, p.FinalOutput, p.StopReason, p.Truncated); err != nil {
+			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
 		}
 		return success(req.ID, map[string]any{"ok": true})
 	case "shutdown":

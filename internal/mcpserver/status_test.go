@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/diagnote"
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 func writeSentinel(t *testing.T, dir, name, content string) string {
@@ -440,7 +441,7 @@ func TestTranslateStatusLiveNonTerminalPhaseIgnoresSentinel(t *testing.T) {
 }
 
 func TestReadSentinelError(t *testing.T) {
-	_, err := readSentinel("/nonexistent/path")
+	_, err := runstate.ReadSentinel("/nonexistent/path")
 	if err == nil {
 		t.Fatal("expected error for nonexistent sentinel")
 	}
