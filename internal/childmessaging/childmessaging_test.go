@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
@@ -15,9 +17,16 @@ import (
 func newTestProvider(t *testing.T, handler http.HandlerFunc) (*MessageProvider, *httptest.Server) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
+	return newTestProviderOn(t, srv, srv.Client())
+}
+
+// newTestProviderOn builds a provider over an already-started broker with the
+// client the surface supplies.
+func newTestProviderOn(t *testing.T, srv *httptest.Server, client *http.Client) (*MessageProvider, *httptest.Server) {
+	t.Helper()
 	t.Cleanup(srv.Close)
 	provider, err := NewMessageProvider(messaging.SurfaceChanneltools, Options{
-		RunID: "child_run", Token: "tok_1", BrokerURL: srv.URL, HTTPClient: srv.Client(),
+		RunID: "child_run", Token: "tok_1", BrokerURL: srv.URL, HTTPClient: client,
 	})
 	if err != nil {
 		t.Fatalf("NewMessageProvider: %v", err)
@@ -174,6 +183,98 @@ func TestLastSeparatesUnknownTargetFromEmptyRecord(t *testing.T) {
 	var toolErr *router.ToolError
 	if !errors.As(err, &toolErr) || toolErr.Code != "unknown_target" {
 		t.Fatalf("unknown target error = %v", err)
+	}
+}
+
+// pathFaultTransport delegates to a real transport except for the listed
+// paths, which it fails with the given error. It shows which client a request
+// was sent on.
+type pathFaultTransport struct {
+	base http.RoundTripper
+	fail map[string]error
+}
+
+func (t pathFaultTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err, ok := t.fail[req.URL.Path]; ok {
+		return nil, err
+	}
+	return t.base.RoundTrip(req)
+}
+
+// TestSurfaceClientCarriesRenameAndLast proves rename and last are sent on the
+// client the child surface supplies, so a surface that configures a transport
+// or a timeout gets it on those routes too instead of on the ask verbs only.
+func TestSurfaceClientCarriesRenameAndLast(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
+		case "/rename":
+			_ = json.NewEncoder(w).Encode(map[string]any{"run_id": "child_run", "label": "new"})
+		case "/last_message":
+			_ = json.NewEncoder(w).Encode(map[string]any{"run_id": "rt_1", "has_record": true, "final_output": "OK"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	fault := errors.New("surface client transport refused the request")
+	client := &http.Client{Transport: pathFaultTransport{
+		base: srv.Client().Transport,
+		fail: map[string]error{"/rename": fault, "/last_message": fault},
+	}}
+	provider, _ := newTestProviderOn(t, srv, client)
+	ctx := context.Background()
+	if _, err := provider.Rename(ctx, messaging.RenameRequest{Name: "new"}); !errors.Is(err, fault) {
+		t.Fatalf("rename error = %v, want the surface client's transport fault", err)
+	}
+	if _, err := provider.Last(ctx, "rt_1"); !errors.Is(err, fault) {
+		t.Fatalf("last error = %v, want the surface client's transport fault", err)
+	}
+}
+
+// TestSurfaceClientTimeoutBoundsRenameAndLast proves the surface's request
+// timeout applies to rename and last, not the transport's own 30s default.
+func TestSurfaceClientTimeoutBoundsRenameAndLast(t *testing.T) {
+	var once sync.Once
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
+			return
+		}
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{"run_id": "child_run", "has_record": false})
+	}))
+	client := &http.Client{Timeout: 100 * time.Millisecond, Transport: srv.Client().Transport}
+	provider, _ := newTestProviderOn(t, srv, client)
+	// Registered after the server's own cleanup, so a blocked handler is
+	// released before srv.Close waits for it.
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	ctx := context.Background()
+	calls := []struct {
+		name string
+		call func() error
+	}{
+		{"rename", func() error {
+			_, err := provider.Rename(ctx, messaging.RenameRequest{Name: "new"})
+			return err
+		}},
+		{"last", func() error {
+			_, err := provider.Last(ctx, "rt_1")
+			return err
+		}},
+	}
+	for _, call := range calls {
+		done := make(chan error, 1)
+		go func() { done <- call.call() }()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("%s error = %v, want the surface client's timeout", call.name, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s outlived the surface client's timeout", call.name)
+		}
 	}
 }
 

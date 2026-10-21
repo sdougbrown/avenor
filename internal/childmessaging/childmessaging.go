@@ -19,9 +19,10 @@ import (
 )
 
 // Options is what one child surface supplies. RunID and Token are the run's own
-// broker credentials; BrokerURL is the local broker base URL. HTTPClient is
-// used by the authenticated helpers (rename and last message), not by the
-// transport, which owns its own client.
+// broker credentials; BrokerURL is the local broker base URL. HTTPClient's
+// transport and timeout carry every request the provider makes, so the surface's
+// own client bounds rename and last message as well as the transport calls; a
+// nil client keeps the transport's default.
 type Options struct {
 	RunID      string
 	Token      string
@@ -45,13 +46,11 @@ type MessageProvider struct {
 // A transport that cannot be built fails here instead of registering a nil
 // transport; the generation is read once per provider by Prepare.
 func NewMessageProvider(surface messaging.Surface, opts Options) (*MessageProvider, error) {
-	if opts.HTTPClient == nil {
-		opts.HTTPClient = &http.Client{}
-	}
 	tr, err := localhttp.New("", messaging.LocalCredentials{RunID: opts.RunID, Token: opts.Token, BaseURL: opts.BrokerURL})
 	if err != nil {
 		return nil, err
 	}
+	tr.UseHTTPClient(opts.HTTPClient)
 	return &MessageProvider{opts: opts, surface: surface, transport: tr}, nil
 }
 
