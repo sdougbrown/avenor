@@ -328,6 +328,31 @@ function brokerOutcome(body: unknown): MessageOutcome {
     : 'sent'
 }
 
+/**
+ * Classify a broker HTTP rejection the way the Go local transport does: the
+ * body's outcome wins, and a known wire code supplies the outcome when the body
+ * names none. An unclassifiable failure keeps its refusal.
+ */
+function brokerErrorOutcome(error: unknown): MessageOutcome | undefined {
+  if (!(error instanceof BrokerHttpError)) return undefined
+  try {
+    const parsed = JSON.parse(error.body) as Record<string, unknown>
+    if (typeof parsed.outcome === 'string' && parsed.outcome) return parsed.outcome as MessageOutcome
+  } catch {
+    // A non-JSON body carries no outcome.
+  }
+  switch (error.code) {
+    case 'auth-rejected':
+    case 'sender-mismatch':
+      return 'auth-rejected'
+    case 'not-ask-sender':
+    case 'not-ask-target':
+      return 'edge-absent'
+    default:
+      return 'not-sent'
+  }
+}
+
 async function brokerAsk(
   env: SubAgentEnv,
   args: BrokerAskArgs,
@@ -367,9 +392,12 @@ async function brokerAsk(
   try {
     reply = await postBroker(env, '/wait_reply', { waiting_for: messageId }, fetchImpl, signal)
   } catch (error) {
-    const timedOut = error instanceof Error && error.name === 'TimeoutError'
+    const timedOut = (error instanceof Error && error.name === 'TimeoutError')
+      || brokerErrorOutcome(error) === 'timed-out'
     const cleaned = await withdrawAsk(env, messageId, fetchImpl)
     if (timedOut) return { outcome: 'timed-out', messageId }
+    const outcome = brokerErrorOutcome(error)
+    if (outcome) return { outcome, messageId }
     if (cleaned.pending) return { outcome: 'possibly-pending', messageId }
     return { outcome: cleaned.outcome === 'replied' ? 'replied' : cleaned.outcome, messageId }
   }
@@ -448,12 +476,19 @@ export function createBrokerChildBroker(
 ): ChildBroker {
   return {
     async tell(targetRunId, message, messageId) {
-      const body = await postBroker(
-        env,
-        '/send',
-        buildAgentMessage({ fromRunId: env.runId, toRunId: targetRunId, messageId, message, role: 'agent' }),
-        fetchImpl,
-      ) as Record<string, unknown> | null
+      let body: Record<string, unknown> | null
+      try {
+        body = await postBroker(
+          env,
+          '/send',
+          buildAgentMessage({ fromRunId: env.runId, toRunId: targetRunId, messageId, message, role: 'agent' }),
+          fetchImpl,
+        ) as Record<string, unknown> | null
+      } catch (error) {
+        const outcome = brokerErrorOutcome(error)
+          ?? (await sendNeverReachedBroker(error, env, fetchImpl) ? 'not-sent' : 'possibly-pending')
+        return { outcome, messageId }
+      }
       return {
         outcome: brokerOutcome(body),
         messageId: typeof body?.message_id === 'string' && body.message_id ? body.message_id : messageId,
@@ -465,19 +500,26 @@ export function createBrokerChildBroker(
     },
 
     async reply(askerRunId, inboundAskId, message) {
-      const body = await postBroker(
-        env,
-        '/send',
-        buildAgentMessage({
-          fromRunId: env.runId,
-          toRunId: askerRunId,
-          messageId: `${inboundAskId}.reply`,
-          message,
-          role: 'agent',
-          replyTo: inboundAskId,
-        }),
-        fetchImpl,
-      ) as Record<string, unknown> | null
+      let body: Record<string, unknown> | null
+      try {
+        body = await postBroker(
+          env,
+          '/send',
+          buildAgentMessage({
+            fromRunId: env.runId,
+            toRunId: askerRunId,
+            messageId: `${inboundAskId}.reply`,
+            message,
+            role: 'agent',
+            replyTo: inboundAskId,
+          }),
+          fetchImpl,
+        ) as Record<string, unknown> | null
+      } catch (error) {
+        const outcome = brokerErrorOutcome(error)
+          ?? (await sendNeverReachedBroker(error, env, fetchImpl) ? 'not-sent' : 'possibly-pending')
+        return { outcome, messageId: inboundAskId }
+      }
       return { outcome: brokerOutcome(body), messageId: inboundAskId }
     },
 

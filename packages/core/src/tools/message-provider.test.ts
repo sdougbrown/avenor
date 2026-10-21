@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { createChildMessageProvider, createHostMessageProvider, type MessageClient } from './message-provider.js'
+import { RpcError } from '../client.js'
 import { forgetExternalRuns, registerExternalRun } from './run-registry.js'
 import { executeMessage, executePeers } from '../message.js'
 
@@ -56,7 +57,9 @@ function fakeClient(overrides: Partial<MessageClient> = {}): MessageClient & {
 describe('host message provider', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-provider-'))
   const previousHome = process.env.AVENOR_HOME
-  process.env.AVENOR_HOME = home
+  beforeEach(() => {
+    process.env.AVENOR_HOME = home
+  })
   afterEach(() => {
     if (previousHome === undefined) delete process.env.AVENOR_HOME
     else process.env.AVENOR_HOME = previousHome
@@ -152,6 +155,126 @@ describe('host message provider', () => {
     const result = await executePeers(provider(client), { action: 'list' })
     expect(result.text).toBe('')
     expect(result.peers.map(peer => peer.run_id)).toEqual(['supervisor', 'rt_7'])
+  })
+
+  it('returns a rejected host send as the transport outcome, not a refusal', async () => {
+    const client = fakeClient({
+      messageSend: mock(async () => {
+        throw new RpcError(-32000, 'messaging: generation mismatch', {
+          code: 'generation-mismatch',
+          outcome: 'not-sent',
+          wire_code: 'generation-mismatch',
+        })
+      }),
+    })
+    const result = await executeMessage(provider(client), { action: 'tell', target: 'supervisor', message: 'hi' })
+    expect(result.outcome).toBe('not-sent')
+    expect(result.text).toBe('message "av1.test.1" not sent to "supervisor"; nothing is pending'.replace('av1.test.1', result.messageId ?? ''))
+  })
+
+  it('reports a reply transport failure as not-sent and leaves the ask claimable', async () => {
+    const pending = new Map([['ask-1', { from_run_id: 'rt_7', message_id: 'ask-1' }]])
+    const client = fakeClient({
+      messageReply: mock(async () => {
+        throw new RpcError(-32000, 'messaging: target unavailable', {
+          code: 'target-unavailable',
+          outcome: 'not-sent',
+          wire_code: 'target-unavailable',
+        })
+      }),
+    })
+    const host = createHostMessageProvider({
+      surface: 'pi-host',
+      supervisorId: '/tmp/avenor-provider.sock',
+      generation: 'gen-1',
+      client,
+      pendingAsks: pending,
+      pollGeneration: () => 1,
+    })
+    const result = await executeMessage(host, { action: 'reply', reply_to: 'ask-1', message: 'OK' })
+    expect(result.outcome).toBe('not-sent')
+    expect(result.text).toBe('reply to "ask-1" was not sent; nothing is pending')
+    expect(pending.has('ask-1')).toBe(true)
+  })
+
+  it('reports a fence-capacity withdrawal as possibly-pending', async () => {
+    const client = fakeClient({
+      messageWithdraw: mock(async () => {
+        throw new RpcError(-32000, 'messaging: fence capacity', {
+          code: 'edge-absent',
+          outcome: 'edge-absent',
+          wire_code: 'fence-capacity',
+        })
+      }),
+    })
+    const result = await executeMessage(provider(client), { action: 'withdraw', message_id: 'av1.w.1' })
+    expect(result.outcome).toBe('possibly-pending')
+    expect(result.text).toBe('ask "av1.w.1" may still be pending; retry avenor_message action="withdraw" message_id="av1.w.1"')
+  })
+
+  it('withdraws a wait that ended without a reply', async () => {
+    const client = fakeClient({
+      messageWait: mock(async () => ({ outcome: 'timed-out', message_id: 'm' })),
+    })
+    const result = await executeMessage(provider(client), {
+      action: 'ask',
+      target: 'supervisor',
+      message: 'question',
+      timeout_ms: 50,
+    })
+    expect(result.outcome).toBe('timed-out')
+    expect(client.withdraw).toHaveBeenCalled()
+  })
+
+  it('withdraws an ask when the tool call aborts', async () => {
+    const client = fakeClient({
+      messageWait: mock(() => new Promise(() => {})),
+    })
+    const controller = new AbortController()
+    const pending = executeMessage(provider(client), {
+      action: 'ask',
+      target: 'supervisor',
+      message: 'question',
+      timeout_ms: 10_000,
+    }, { signal: controller.signal })
+    controller.abort(new Error('cancelled'))
+    const result = await pending
+    expect(result.outcome).toBe('possibly-pending')
+    expect(client.withdraw).toHaveBeenCalledWith({ message_id: result.messageId, generation: 'gen-1' })
+  })
+
+  it('renders a reply payload without message as the full envelope', async () => {
+    const client = fakeClient({
+      messageWait: mock(async () => ({
+        outcome: 'replied',
+        message_id: 'm',
+        reply: { message_id: 'm', from_run_id: 'rt_7', payload: { result: 'opaque' } },
+      })),
+    })
+    const result = await executeMessage(provider(client), { action: 'ask', target: 'supervisor', message: 'question' })
+    expect(result.reply).toBe('{"from_run_id":"rt_7","message_id":"m","payload":{"result":"opaque"}}')
+  })
+
+  it('fills the public run id when a label resolves by runtime id', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    fs.mkdirSync(path.join(home, 'runs', 'run-42'), { recursive: true, mode: 0o700 })
+    registerExternalRun({
+      runId: 'run-42',
+      label: 'mesh-a',
+      supervisorId,
+      sentinelPath: path.join(home, 'runs', 'run-42', 'sentinel.done'),
+      eventLogPath: path.join(home, 'runs', 'run-42', 'events.log'),
+      runtimeId: 'rt_7',
+    })
+    try {
+      const host = provider(fakeClient())
+      expect(await host.resolve('mesh-a')).toMatchObject({ runId: 'rt_7', publicRunId: 'run-42', label: 'mesh-a' })
+      const last = await executePeers(host, { action: 'last', target: 'mesh-a' })
+      expect(last.last?.run_id).toBe('run-42')
+      expect(last.last?.runtime_id).toBe('rt_7')
+    } finally {
+      forgetExternalRuns(supervisorId)
+    }
   })
 })
 

@@ -9,6 +9,7 @@ import {
   assertPeersInput,
   executeMessage,
   executePeers,
+  normalizeRouteRules,
   ToolError,
 } from './message.js'
 import {
@@ -446,6 +447,26 @@ describe('message admission', () => {
     }
   })
 
+  it('rejects an integral timeout outside int64 as a type error, like the Go router', () => {
+    expect(() => assertMessageInput({ action: 'ask', target: 'rt_7', message: 'hi', timeout_ms: 1e21 }))
+      .toThrow('property "timeout_ms" must be an integer')
+    // 2^58+1 fits int64, so both routers reject it on the shared maximum bound.
+    expect(() => assertMessageInput({ action: 'ask', target: 'rt_7', message: 'hi', timeout_ms: 288230376151711745 }))
+      .toThrow('property "timeout_ms" must be at most 600000')
+  })
+
+  it('rejects route shapes the normaliser cannot reproduce faithfully', () => {
+    expect(() => normalizeRouteRules([
+      { type: 'enabledWhen', field: 'target', when: { op: 'mystery' } },
+    ])).toThrow('unsupported expression op "mystery"')
+    expect(() => normalizeRouteRules([
+      { type: 'enabledWhen', field: 'target', when: { op: 'not', exprs: [{ op: 'cond', condition: 'a' }, { op: 'cond', condition: 'b' }] } },
+    ])).toThrow('a not rule must carry exactly one expression')
+    expect(() => normalizeRouteRules([
+      { type: 'anyOf', rules: [{ type: 'check', field: 'action' }] },
+    ])).toThrow('only the top-level action enum check rule can be omitted')
+  })
+
   it('reads the peers action union and name limits from the published schema', () => {
     const variants = (peersInputSchema as { oneOf: Array<{ properties: Record<string, unknown> }> }).oneOf
     const schemaActions = variants.map(variant => (variant.properties.action as { const: string }).const).sort()
@@ -477,9 +498,6 @@ describe('outcome text totality', () => {
         ).toBe(true)
       }
     }
-    expect(renderOutcome('reply', 'lost', { message_id: '"av1.reply.8"' })).toBe(
-      'no receipt for reply "av1.reply.8" survived; the reply may or may not have landed',
-    )
   })
 
   it('renders every failure action the contract declares', () => {

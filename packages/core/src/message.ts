@@ -137,16 +137,36 @@ type RouteExpr = {
  * rule's reason directly, and @umpire/json's validator cannot represent an
  * `in` check.
  */
+const ROUTE_OPS = new Set([
+  'eq', 'neq', 'gt', 'gte', 'lt', 'lte',
+  'present', 'absent', 'truthy', 'falsy',
+  'in', 'notIn', 'cond', 'condEq', 'condIn', 'fieldInCond',
+  'and', 'or', 'not',
+])
+
+function normalisationError(detail: string): Error {
+  return new Error(`unfaithful route schema: ${detail}`)
+}
+
 function normalizeRouteExpr(expression: RouteExpr): RouteExpr {
   const normalized: RouteExpr = { ...expression }
-  if (normalized.op === 'in' && normalized.values === undefined && normalized.value !== undefined) {
-    normalized.values = normalized.value
-    delete normalized.value
+  if (typeof normalized.op !== 'string' || !ROUTE_OPS.has(normalized.op)) {
+    throw normalisationError(`unsupported expression op ${JSON.stringify(normalized.op)}`)
   }
-  if (normalized.op === 'not' && normalized.expr === undefined && normalized.exprs) {
-    normalized.expr = normalized.exprs.length === 1
-      ? normalized.exprs[0]
-      : { op: 'and', exprs: normalized.exprs }
+  if (normalized.op === 'in') {
+    if (normalized.values === undefined) {
+      if (!Array.isArray(normalized.value)) {
+        throw normalisationError('an in rule has neither values nor a value list')
+      }
+      normalized.values = normalized.value
+      delete normalized.value
+    }
+  }
+  if (normalized.op === 'not' && normalized.expr === undefined) {
+    if (!Array.isArray(normalized.exprs) || normalized.exprs.length !== 1) {
+      throw normalisationError('a not rule must carry exactly one expression')
+    }
+    normalized.expr = normalized.exprs[0]
     delete normalized.exprs
   }
   if (normalized.exprs) normalized.exprs = normalized.exprs.map(normalizeRouteExpr)
@@ -154,29 +174,44 @@ function normalizeRouteExpr(expression: RouteExpr): RouteExpr {
   return normalized
 }
 
-function normalizeRouteRule(rule: RouteRule): RouteRule | undefined {
-  if (rule.type === 'check') return undefined
+function normalizeRouteRule(rule: RouteRule, topLevel: boolean): RouteRule | undefined {
+  if (rule.type === 'check') {
+    const check = (rule as unknown as { check?: RouteExpr & { field?: unknown } }).check
+    if (!topLevel || rule.field !== 'action' || !check || check.op !== 'in' || check.field !== 'action' || !Array.isArray(check.value)) {
+      throw normalisationError('only the top-level action enum check rule can be omitted')
+    }
+    return undefined
+  }
   const normalized: RouteRule = { ...rule }
   if (normalized.when) normalized.when = normalizeRouteExpr(normalized.when)
   if (normalized.rules) {
     normalized.rules = normalized.rules
-      .map(normalizeRouteRule)
+      .map(inner => normalizeRouteRule(inner, false))
       .filter((inner): inner is RouteRule => inner !== undefined)
   }
   if (normalized.branches) {
     normalized.branches = Object.fromEntries(
-      Object.entries(normalized.branches).map(([branch, rules]) => [branch, rules.map(normalizeRouteRule).filter((inner): inner is RouteRule => inner !== undefined)]),
+      Object.entries(normalized.branches).map(([branch, rules]) => [branch, rules.map(inner => normalizeRouteRule(inner, false)).filter((inner): inner is RouteRule => inner !== undefined)]),
     )
   }
   return normalized
 }
 
+/**
+ * Normalise the schema's route rules onto the dialect @umpire/json compiles.
+ * Every shape this cannot reproduce exactly is a load error, so a schema change
+ * that the Go generator would honour cannot be silently dropped here.
+ */
+export function normalizeRouteRules(rules: RouteRule[]): RouteRule[] {
+  return rules
+    .map(rule => normalizeRouteRule(rule, true))
+    .filter((rule): rule is RouteRule => rule !== undefined)
+}
+
 const routeSchema = messageRouteSchema as unknown as { rules: RouteRule[] }
 const parsedRoute = fromJson({
   ...(messageRouteSchema as unknown as UmpireJsonSchema),
-  rules: routeSchema.rules
-    .map(normalizeRouteRule)
-    .filter((rule): rule is RouteRule => rule !== undefined),
+  rules: normalizeRouteRules(routeSchema.rules),
 } as UmpireJsonSchema)
 const messageRoute = umpire({ fields: parsedRoute.fields, rules: parsedRoute.rules })
 const invalidActionReason = routeSchema.rules.find(rule => rule.type === 'check')?.reason ?? ''
@@ -256,7 +291,9 @@ function hasWireType(value: unknown, kind: string): boolean {
     case 'string':
       return typeof value === 'string'
     case 'integer':
-      return typeof value === 'number' && Number.isInteger(value)
+      // Go's wire type requires the exact rational to fit int64; a JSON number
+      // outside that range is a type error, not a violated bound.
+      return typeof value === 'number' && Number.isInteger(value) && value >= -(2 ** 63) && value < 2 ** 63
     case 'object':
       return value !== null && typeof value === 'object' && !Array.isArray(value)
     default:

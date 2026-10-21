@@ -17,7 +17,7 @@ import { ensureRunPaths } from '../paths.js'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { newMsgID, type MessageOutcome } from '../messaging-text.js'
 import { ToolError } from '../message.js'
-import { findExternalRunById, registerExternalRun } from './run-registry.js'
+import { findExternalRunById, listExternalRuns, registerExternalRun } from './run-registry.js'
 import type {
   MessageProvider,
   MessageSurface,
@@ -118,6 +118,32 @@ function controlOutcome(error: unknown): string | undefined {
   if (!(error instanceof RpcError) || error.data === null || typeof error.data !== 'object') return undefined
   const outcome = (error.data as Record<string, unknown>).outcome
   return typeof outcome === 'string' && outcome ? outcome : undefined
+}
+
+function controlWireCode(error: unknown): string | undefined {
+  if (!(error instanceof RpcError) || error.data === null || typeof error.data !== 'object') return undefined
+  const code = (error.data as Record<string, unknown>).wire_code
+  return typeof code === 'string' && code ? code : undefined
+}
+
+/** Reject an abort exactly the way fetch does, so the ask cleanup path runs. */
+function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error('aborted'))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error('aborted'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      value => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 const ROUTER_CODES = new Set([
@@ -228,6 +254,22 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     return peerRecords(await client.messagePeers({ generation }))
   }
 
+  // A failed wait leaves no reader for the ask, so retract it the way
+  // askclient.withdrawFailedWait does; the cleanup budget is best effort.
+  async function retractAsk(messageId: string): Promise<void> {
+    try {
+      await client.messageWithdraw({ message_id: messageId, generation })
+    } catch {
+      // A failed cleanup must not replace the ask's own outcome.
+    }
+  }
+
+  function publicRunIdFor(runId: string): string | undefined {
+    const local = Supervisor.getInstance(supervisorId)?.getRunByRuntimeId(runId)
+    if (local?.runId) return local.runId
+    return listExternalRuns(supervisorId).find(info => info.runtimeId === runId)?.runId
+  }
+
   function unique(info: RunInfo): Resolution {
     return {
       runId: info.runtimeId ?? '',
@@ -257,10 +299,22 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       }
       const peers = await listedPeers()
       const exact = peers.find(peer => peer.run_id === ref)
-      if (exact) return { runId: exact.run_id, label: firstNonEmpty(exact.label, exact.run_id), match: 'unique' }
+      if (exact) {
+        return {
+          runId: exact.run_id,
+          publicRunId: publicRunIdFor(exact.run_id),
+          label: firstNonEmpty(exact.label, exact.run_id),
+          match: 'unique',
+        }
+      }
       const candidates = peers.filter(peer => peer.label === ref).map(peer => peer.run_id)
       if (candidates.length === 1) {
-        return { runId: candidates[0], label: ref, match: 'unique' }
+        return {
+          runId: candidates[0],
+          publicRunId: publicRunIdFor(candidates[0]),
+          label: ref,
+          match: 'unique',
+        }
       }
       if (candidates.length > 1) return { runId: '', match: 'ambiguous', candidates }
       return { runId: '', match: 'none' }
@@ -298,20 +352,32 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         message,
         role: 'host',
       })
-      const result = await client.messageSend({
-        to_run_id: targetRunId,
-        message_id: messageId,
-        generation,
-        body,
-        no_reply: true,
-      })
+      let result: MessageSendResult
+      try {
+        result = await client.messageSend({
+          to_run_id: targetRunId,
+          message_id: messageId,
+          generation,
+          body,
+          no_reply: true,
+        })
+      } catch (error) {
+        const outcome = controlOutcome(error)
+        if (outcome) return { outcome: outcome as MessageOutcome, messageId }
+        throw authorityError(error)
+      }
       return {
         outcome: result.outcome as MessageOutcome,
         messageId: firstNonEmpty(result.message_id, messageId),
       }
     },
 
-    async ask(targetRunId: string, message: string, timeoutMs?: number): Promise<ProviderResult> {
+    async ask(
+      targetRunId: string,
+      message: string,
+      timeoutMs?: number,
+      signal?: AbortSignal,
+    ): Promise<ProviderResult> {
       const messageId = newMsgID()
       const body = JSON.stringify({
         id: messageId,
@@ -322,23 +388,32 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         role: 'host',
         expects_reply: true,
       })
-      const sent = await client.messageSend({
-        to_run_id: targetRunId,
-        message_id: messageId,
-        generation,
-        body,
-      })
+      let sent: MessageSendResult
+      try {
+        sent = await client.messageSend({
+          to_run_id: targetRunId,
+          message_id: messageId,
+          generation,
+          body,
+        })
+      } catch (error) {
+        const outcome = controlOutcome(error)
+        if (outcome) return { outcome: outcome as MessageOutcome, messageId }
+        throw authorityError(error)
+      }
       if (sent.outcome === 'not-sent' || sent.outcome === 'auth-rejected') {
         return { outcome: sent.outcome as MessageOutcome, messageId: firstNonEmpty(sent.message_id, messageId) }
       }
       let waited: MessageWaitResult
       try {
-        waited = await client.messageWait({
+        waited = await raceAbort(client.messageWait({
           message_id: messageId,
           generation,
           ...(timeoutMs !== undefined ? { timeout_ms: timeoutMs } : {}),
-        })
+        }), signal)
       } catch (error) {
+        await retractAsk(messageId)
+        if (signal?.aborted) return { outcome: 'possibly-pending', messageId }
         const outcome = controlOutcome(error)
         if (!outcome) throw authorityError(error)
         const carried = error instanceof RpcError && error.data && typeof error.data === 'object'
@@ -349,6 +424,9 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           messageId: typeof carried === 'string' && carried ? carried : messageId,
         }
       }
+      // A wait that ended without a reply leaves the ask unread; retract it the
+      // way askclient does, so a timed-out target does not keep a live edge.
+      if (waited.outcome !== 'replied') await retractAsk(messageId)
       const result: ProviderResult = {
         outcome: waited.outcome as MessageOutcome,
         messageId: firstNonEmpty(waited.message_id, messageId),
@@ -359,12 +437,19 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
 
     async reply(inboundAskId: string, message: string, askerRunId: string): Promise<ProviderResult> {
       const body = JSON.stringify({ message, role: 'host' })
-      const sent = await client.messageReply({
-        to_run_id: askerRunId,
-        message_id: inboundAskId,
-        correlation_id: inboundAskId,
-        body,
-      })
+      let sent: MessageSendResult
+      try {
+        sent = await client.messageReply({
+          to_run_id: askerRunId,
+          message_id: inboundAskId,
+          correlation_id: inboundAskId,
+          body,
+        })
+      } catch (error) {
+        const outcome = controlOutcome(error)
+        if (outcome) return { outcome: outcome as MessageOutcome, messageId: inboundAskId }
+        throw authorityError(error)
+      }
       if (sent.outcome === 'replied') claims.delete(inboundAskId)
       return { outcome: sent.outcome as MessageOutcome, messageId: inboundAskId }
     },
@@ -375,7 +460,14 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         return { outcome: withdrawn.outcome as MessageOutcome }
       } catch (error) {
         const outcome = controlOutcome(error)
-        if (outcome) return { outcome: outcome as MessageOutcome }
+        if (outcome) {
+          // An absence fence that could not be installed leaves a delayed send
+          // admissible; claiming nothing is pending would be a lie.
+          if (controlWireCode(error) === 'fence-capacity' && outcome === 'edge-absent') {
+            return { outcome: 'possibly-pending' }
+          }
+          return { outcome: outcome as MessageOutcome }
+        }
         throw authorityError(error)
       }
     },
@@ -524,7 +616,11 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
   return provider
 }
 
-/** Render a wait result's reply body the way askclient.RenderReply does. */
+/**
+ * Render a wait result's reply body the way askclient.RenderReply does: a
+ * `{message}` payload is the text, an empty payload is `(empty reply)`, and
+ * anything else is the full envelope with the payload passed through.
+ */
 function renderReply(reply: MessageInbound | undefined): string {
   if (!reply) return ''
   let payload = reply.payload
@@ -532,15 +628,24 @@ function renderReply(reply: MessageInbound | undefined): string {
     try {
       payload = JSON.parse(payload)
     } catch {
-      return String(payload)
+      payload = undefined
+      return JSON.stringify({
+        from_run_id: reply.from_run_id,
+        message_id: reply.message_id,
+        payload: reply.payload,
+      })
     }
   }
-  if (payload !== undefined && payload !== null && typeof payload === 'object') {
+  if (payload === undefined || payload === null || payload === '') return '(empty reply)'
+  if (typeof payload === 'object') {
     const message = (payload as Record<string, unknown>).message
     if (typeof message === 'string' && message) return message
-    return JSON.stringify(payload)
   }
-  return '(empty reply)'
+  return JSON.stringify({
+    from_run_id: reply.from_run_id,
+    message_id: reply.message_id,
+    payload,
+  })
 }
 
 export interface ChildProviderOptions {

@@ -142,6 +142,17 @@ describe('child broker ask', () => {
     expect(calls.some(call => call.url.endsWith('/wait_reply'))).toBe(true)
   })
 
+  it('reports a broker-side wait timeout as timed-out, not withdrawn', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Response.json({ queued: true }),
+      '/wait_reply': () => Response.json({ timeout: true, outcome: 'timed-out' }, { status: 504 }),
+      '/cancel_message': () => Response.json({ outcome: 'withdrawn' }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.9')
+    expect(result.outcome).toBe('timed-out')
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
+  })
+
   it('reports a send whose dial never opened as not-sent without spending a cancel', async () => {
     const dialError = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
     const { calls, fetchImpl } = stubFetch({
@@ -193,6 +204,22 @@ describe('child broker ask', () => {
 })
 
 describe('child broker routes', () => {
+  it('reports a rejected child tell as the wire outcome instead of a refusal', async () => {
+    const { fetchImpl } = stubFetch({
+      '/send': () => Response.json({ code: 'target-unavailable' }, { status: 404 }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).tell('rt_gone', 'hi', 'av1.t.1')
+    expect(result).toEqual({ outcome: 'not-sent', messageId: 'av1.t.1' })
+  })
+
+  it('reports a rejected child reply as the wire outcome instead of a refusal', async () => {
+    const { fetchImpl } = stubFetch({
+      '/send': () => Response.json({ code: 'not-ask-target', outcome: 'edge-absent' }, { status: 403 }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).reply('rt_asker', 'av1.r.1', 'OK')
+    expect(result).toEqual({ outcome: 'edge-absent', messageId: 'av1.r.1' })
+  })
+
   it('maps an absent withdrawal to edge-absent and a full fence to possibly-pending', async () => {
     const absent = stubFetch({
       '/cancel_message': () => new Response('no pending ask', { status: 404 }),

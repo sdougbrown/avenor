@@ -226,9 +226,12 @@ describe('sub-agent broker mode (integration)', () => {
       const { registeredTools, sendUserMessage } = harness
       await waitFor(() => sendUserMessage.mock.calls.length > 0)
 
-      await expect(
-        registeredTools.avenor_message.execute('t1', { action: 'reply', reply_to: 'ask-r', message: 'first try' }),
-      ).rejects.toThrow('500 boom')
+      const failed = await registeredTools.avenor_message.execute('t1', {
+        action: 'reply',
+        reply_to: 'ask-r',
+        message: 'first try',
+      })
+      expect(failed.details.outcome).toBe('not-sent')
       fetchStub.setHandler('/send', () => Response.json({ queued: true, outcome: 'replied' }))
 
       const result = await registeredTools.avenor_message.execute('t2', {
@@ -395,12 +398,12 @@ describe('sub-agent broker mode (integration)', () => {
         action: 'reply',
         reply_to: 'old-child-reply',
         message: 'late answer',
-      }).then(() => null, (error: unknown) => error)
+      })
       await waitFor(() => sendCalls === 1)
       await harness.eventHandlers.session_shutdown({}, {})
       await harness.eventHandlers.session_start({}, harness.ctx)
       send.resolve(new Response('broker down', { status: 503 }))
-      expect(await reply).toBeInstanceOf(Error)
+      expect((await reply).details.outcome).toBe('not-sent')
       const retry = await harness.registeredTools.avenor_message.execute('t2', {
         action: 'reply',
         reply_to: 'old-child-reply',
