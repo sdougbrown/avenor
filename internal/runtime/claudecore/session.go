@@ -35,6 +35,14 @@ type Session struct {
 	Active              bool
 	Finished            bool
 	PendingTerminalPerm *TerminalPermission
+
+	// progStatus is the OSC 7501 source set by AttachProgStatus. Without one,
+	// or before its first root report, the pane and transcript rules alone
+	// drive the session.
+	progStatus  terminal.ProgStatusSession
+	progDrainMu sync.Mutex
+	progNext    uint64 // guarded by progDrainMu
+	osc         progTurn
 }
 
 type SessionOptions struct {
@@ -94,6 +102,7 @@ func (s *Session) SendCancelKeys(ctx context.Context) error {
 }
 
 func (s *Session) ScanTerminalTick() {
+	s.drainProgStatus()
 	state, err := ScanTerminal(s.Ctx, s.Term)
 	if err != nil {
 		return
@@ -103,6 +112,8 @@ func (s *Session) ScanTerminalTick() {
 	prompted := s.Prompted
 	finished := s.Finished
 	currentPerm := s.PendingTerminalPerm
+	oscActive := s.osc.active
+	rootBlocked := s.osc.root.State == terminal.ProgBlocked
 	s.Mu.Unlock()
 
 	if finished || !prompted {
@@ -123,32 +134,7 @@ func (s *Session) ScanTerminalTick() {
 		if err != nil {
 			return
 		}
-		tmuxPerm := ParseTerminalPermission(string(out))
-		if tmuxPerm == nil {
-			return
-		}
-		tmuxPerm.CreatedAt = time.Now()
-		tmuxPerm.RequestID = uuid.New().String()
-
-		s.Mu.Lock()
-		s.PendingTerminalPerm = tmuxPerm
-		s.Mu.Unlock()
-
-		// Emit the brokered permission request.
-		opts := make([]map[string]any, len(tmuxPerm.Options))
-		for i, o := range tmuxPerm.Options {
-			opts[i] = map[string]any{"id": o.ID, "label": o.Label}
-		}
-		s.Events <- events.Event{
-			Event:     "permission.request",
-			SessionID: s.SessionID,
-			Fields: map[string]any{
-				"request_id":  tmuxPerm.RequestID,
-				"source":      s.Term.Kind(),
-				"description": tmuxPerm.Prompt,
-				"options":     opts,
-			},
-		}
+		s.brokerTerminalPermission(out)
 
 	case PaneStateActive:
 		// Mark the session as active but don't emit a working event from the
@@ -159,20 +145,66 @@ func (s *Session) ScanTerminalTick() {
 	case PaneStateIdle:
 		// Idle means Claude is at the prompt, waiting for next input.
 		// Don't end the session — the channel supports multi-turn.
-		// Clear any stale permission.
-		if currentPerm != nil {
+		// Clear any stale permission, unless Claude still reports itself
+		// blocked: the screen can show the input box while the dialog is
+		// being repainted.
+		if currentPerm != nil && !rootBlocked {
 			s.Mu.Lock()
 			s.PendingTerminalPerm = nil
 			s.Mu.Unlock()
 		}
-		s.Emit(events.Event{Event: "agent.status", SessionID: s.SessionID, Fields: map[string]any{"phase": "waiting", "source": s.Term.Kind()}})
+		// With OSC 7501 active, status events come from report transitions
+		// rather than this heartbeat.
+		if !oscActive {
+			s.Emit(events.Event{Event: "agent.status", SessionID: s.SessionID, Fields: map[string]any{"phase": "waiting", "source": s.Term.Kind()}})
+		}
 	}
+}
+
+// brokerTerminalPermission parses a permission dialog from out and emits a
+// permission.request for it, unless one is already pending. It reports whether
+// a request is pending afterwards.
+func (s *Session) brokerTerminalPermission(out string) bool {
+	tmuxPerm := ParseTerminalPermission(out)
+	if tmuxPerm == nil {
+		return false
+	}
+	tmuxPerm.CreatedAt = time.Now()
+	tmuxPerm.RequestID = uuid.New().String()
+
+	s.Mu.Lock()
+	if s.PendingTerminalPerm != nil {
+		s.Mu.Unlock()
+		return true
+	}
+	s.PendingTerminalPerm = tmuxPerm
+	s.Mu.Unlock()
+
+	// Emit the brokered permission request.
+	opts := make([]map[string]any, len(tmuxPerm.Options))
+	for i, o := range tmuxPerm.Options {
+		opts[i] = map[string]any{"id": o.ID, "label": o.Label}
+	}
+	s.Events <- events.Event{
+		Event:     "permission.request",
+		SessionID: s.SessionID,
+		Fields: map[string]any{
+			"request_id":  tmuxPerm.RequestID,
+			"source":      s.Term.Kind(),
+			"description": tmuxPerm.Prompt,
+			"options":     opts,
+		},
+	}
+	return true
 }
 
 func (s *Session) ScanTranscriptTick() {
 	if s.Transcript == nil {
 		return
 	}
+	// Apply pending reports first so an end_turn is judged against the
+	// current root record.
+	s.drainProgStatus()
 	recs, _, err := s.Transcript.Tick()
 	if err != nil || len(recs) == 0 {
 		return
@@ -186,25 +218,24 @@ func (s *Session) ScanTranscriptTick() {
 		return
 	}
 
+	heldEndTurn := false
 	for _, rec := range recs {
 		for _, ev := range rec.ContentEvents {
 			ev.SessionID = s.SessionID
 			s.Emit(ev)
 		}
 		if rec.StopReason == "end_turn" {
-			if !s.MarkFinished() {
-				return
+			if s.holdEndTurn() {
+				// ProgStatusTick finishes the turn; keep emitting what follows.
+				heldEndTurn = true
+				continue
 			}
-			s.Emit(events.Event{
-				Event:     "session.end",
-				SessionID: s.SessionID,
-				Fields: map[string]any{
-					"status":      "done",
-					"stop_reason": "end_turn",
-				},
-			})
+			s.finishEndTurn()
 			return
 		}
+	}
+	if heldEndTurn {
+		return
 	}
 
 	s.MarkActive()

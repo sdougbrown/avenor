@@ -43,7 +43,20 @@ func defaultLauncher() terminal.Launcher {
 	case "tmux":
 		return terminal.TmuxLauncher{}
 	default:
-		return terminal.PTYLauncher{}
+		return terminal.PTYLauncher{AnswerProgStatus: progStatusEnabled()}
+	}
+}
+
+// progStatusEnabled reports whether the PTY answers Claude's OSC 7501
+// detection query, which turns on the status reports readiness, status and
+// completion gating use. AVENOR_CLAUDE_OSC7501=off (or 0, false) leaves Claude
+// silent and the session on pane and transcript scraping alone.
+func progStatusEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AVENOR_CLAUDE_OSC7501"))) {
+	case "off", "0", "false":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -131,6 +144,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, fmt.Errorf("terminal launch: %w", err)
 	}
 	s.Term = term
+	s.AttachProgStatus(term)
 
 	p.mu.Lock()
 	p.sessions[sessionID] = s
@@ -199,6 +213,23 @@ func (p *Provider) runSession(ctx context.Context, s *claudecore.Session) {
 	transcriptTick := time.NewTicker(transcriptScanInterval)
 	defer transcriptTick.Stop()
 
+	// OSC 7501 reports wake the loop directly; the follow-up timer runs the
+	// short-lived work they start (see ProgStatusTick).
+	progChanged := s.ProgStatusChanged()
+	followUp := time.NewTimer(time.Hour)
+	followUp.Stop()
+	defer followUp.Stop()
+	var followUpC <-chan time.Time
+	scheduleFollowUp := func(d time.Duration) {
+		if d <= 0 {
+			followUp.Stop()
+			followUpC = nil
+			return
+		}
+		followUp.Reset(d)
+		followUpC = followUp.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -214,6 +245,11 @@ func (p *Provider) runSession(ctx context.Context, s *claudecore.Session) {
 			s.ScanTerminalTick()
 		case <-transcriptTick.C:
 			s.ScanTranscriptTick()
+			scheduleFollowUp(s.ProgStatusTick())
+		case <-progChanged:
+			scheduleFollowUp(s.ProgStatusTick())
+		case <-followUpC:
+			scheduleFollowUp(s.ProgStatusTick())
 		}
 	}
 }
@@ -261,6 +297,8 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			})
 			return
 		}
+		readySignal := s.WaitForProgStatusReady(s.Ctx)
+		s.ArmProgStatusPrompt()
 		if err := s.Term.PasteAndEnter(s.Ctx, prompt); err != nil {
 			s.Emit(events.Event{
 				Event:     "agent.prompt_failed",
@@ -280,9 +318,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			Fields: map[string]any{
 				"delivery":      s.Term.Kind(),
 				"prompt_length": len(prompt),
+				"ready_signal":  readySignal,
 			},
 		})
-		go claudecore.ResendEnterUntilSubmitted(s.Ctx, s.Term, prompt, nil)
+		go claudecore.ResendEnterUntilSubmitted(s.Ctx, s.Term, prompt, s.ProgStatusTurnStarted)
 	}()
 
 	return nil
@@ -314,11 +353,17 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 		case <-cancelDeadline.C:
 			return p.forceCancel(s)
 		case <-pollTick.C:
-			state, err := claudecore.ScanTerminal(ctx, s.Term)
-			if err != nil {
-				continue
+			// Root idle after the turn started working is Claude's own report
+			// of the interrupted turn; the startup idle never counts.
+			cancelled := s.ProgStatusInterrupted()
+			if !cancelled {
+				state, err := claudecore.ScanTerminal(ctx, s.Term)
+				if err != nil {
+					continue
+				}
+				cancelled = state == claudecore.PaneStateIdle
 			}
-			if state == claudecore.PaneStateIdle {
+			if cancelled {
 				if !s.MarkFinished() {
 					return nil
 				}

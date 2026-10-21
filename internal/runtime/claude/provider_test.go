@@ -51,6 +51,16 @@ func TestDefaultLauncherIsPTY(t *testing.T) {
 	}
 }
 
+func TestOSC7501EnvControlsDetectionReply(t *testing.T) {
+	t.Setenv("AVENOR_CLAUDE_TERMINAL", "")
+	for value, want := range map[string]bool{"": true, "on": true, "off": false, "OFF": false, "0": false, "false": false} {
+		t.Setenv("AVENOR_CLAUDE_OSC7501", value)
+		if got := defaultLauncher().(terminal.PTYLauncher).AnswerProgStatus; got != want {
+			t.Errorf("AVENOR_CLAUDE_OSC7501=%q: AnswerProgStatus = %v, want %v", value, got, want)
+		}
+	}
+}
+
 func TestTmuxEnvSelectsTmux(t *testing.T) {
 	t.Setenv("AVENOR_CLAUDE_TERMINAL", "tmux")
 	l := defaultLauncher()
@@ -628,4 +638,94 @@ func TestSessionGoneEmitsEndEvent(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for runSession to exit")
 	}
+}
+
+const testInputBox = "────────────────────\n❯ \n────────────────────\n"
+
+func TestPromptReportsReadySignal(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		attach bool
+		want   string
+	}{
+		{"osc idle", true, claudecore.ReadySignalProgStatus},
+		{"pane only", false, claudecore.ReadySignalPane},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Provider{sessions: make(map[string]*claudecore.Session)}
+			term := terminal.NewFakeSession("test-term", 1, testInputBox)
+			term.SetKind("pty")
+			s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-ready", EventsBuf: 16})
+			defer s.CancelFn()
+			s.Term = term
+			if tc.attach {
+				term.SetProgStatusAnswering(true)
+				term.AnswerProgStatusQuery()
+				term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgIdle, Progress: -1})
+				s.AttachProgStatus(term)
+			}
+			p.sessions[s.SessionID] = s
+
+			if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+				t.Fatalf("Prompt: %v", err)
+			}
+			deadline := time.After(3 * time.Second)
+			for {
+				select {
+				case ev := <-s.Events:
+					if ev.Event != "agent.prompt_submitted" {
+						continue
+					}
+					if got := ev.Fields["ready_signal"]; got != tc.want {
+						t.Fatalf("ready_signal = %v, want %s", got, tc.want)
+					}
+					return
+				case <-deadline:
+					t.Fatal("no agent.prompt_submitted")
+				}
+			}
+		})
+	}
+}
+
+func TestCancelTakesProgStatusIdleAfterWorkingAsCancelled(t *testing.T) {
+	p := &Provider{
+		sessions:    make(map[string]*claudecore.Session),
+		cancelGrace: 2 * time.Second,
+	}
+	// The pane never shows idle, so only the report can end the cancel early.
+	term := terminal.NewFakeSession("test-term", 1, "✻ Churning… (2m 17s · ↓ 7.2k tokens)")
+	term.SetKind("pty")
+	sent := make(chan []string, 1)
+	term.SetSendNotify(sent)
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-cancel-osc", EventsBuf: 16})
+	defer s.CancelFn()
+	s.Term = term
+	s.AttachProgStatus(term)
+	term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgIdle, Progress: -1})
+	s.ArmProgStatusPrompt()
+	term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgWorking, Progress: -1})
+	p.sessions[s.SessionID] = s
+
+	done := make(chan error, 1)
+	go func() { done <- p.Cancel(context.Background(), s.SessionID) }()
+	<-sent
+	term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgIdle, Progress: -1})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Cancel: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Cancel ignored root idle after working")
+	}
+	for len(s.Events) > 0 {
+		if ev := <-s.Events; ev.Event == "session.end" {
+			if ev.Fields["stop_reason"] != "cancelled" {
+				t.Fatalf("stop_reason = %v, want cancelled", ev.Fields["stop_reason"])
+			}
+			return
+		}
+	}
+	t.Fatal("no session.end emitted")
 }
