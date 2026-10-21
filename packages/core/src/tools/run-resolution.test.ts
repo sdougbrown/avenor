@@ -5,7 +5,6 @@ import * as path from 'node:path'
 import { Supervisor, type RunInfo } from '../supervisor.js'
 import { answerPermissionTool } from './answer-permission.js'
 import { createEventsTool } from './events.js'
-import { createFollowUpTool } from './follow-up.js'
 import { findLocalRunByReference } from './run-resolution.js'
 import { createStatusTool } from './status.js'
 
@@ -153,7 +152,6 @@ describe('local run resolution', () => {
       })) as any
       const statusTool = createStatusTool(getSupervisorClient)
       const eventsTool = createEventsTool(getSupervisorClient)
-      const followUpTool = createFollowUpTool(getSupervisorClient)
 
       const statusResult = await statusTool({
         runId: canonical.runId,
@@ -201,19 +199,12 @@ describe('local run resolution', () => {
       ])
       expect(history).not.toHaveBeenCalled()
 
-      const spawnCallsBeforeFollowUp = spawn.mock.calls.length
-      const followUpResult = await followUpTool({
-        runId: canonical.runId,
-        message: 'continue canonical run',
-        supervisorId: '/tmp/avenor-mcp-local-run-resolution.sock',
-      })
-      expect(spawn).toHaveBeenCalledTimes(spawnCallsBeforeFollowUp + 1)
-      const followUpParams = spawn.mock.calls[spawnCallsBeforeFollowUp]?.[0]
-      expect(followUpParams).toMatchObject({
-        session_id: canonical.sessionId,
-        label: `${canonical.runId}-followup`,
-      })
-      expect(followUpResult.runtime_id).not.toBe(colliding.runtimeId)
+      // The ID-only accessor is the router's public-id plane: a label that
+      // collides with another run's ID must not shadow the canonical run.
+      expect(sup.getRunById(canonical.runId)).toBe(canonical)
+      expect(sup.getRunById(canonical.runId)?.runtimeId).toBe(canonical.runtimeId)
+      expect(sup.getRunById(colliding.runId)).toBe(colliding)
+      expect(sup.getRunByReference(canonical.runId)).toBe(canonical)
 
       const originalSupervisorGet = Supervisor.get
       Supervisor.get = mock(async () => sup) as typeof Supervisor.get

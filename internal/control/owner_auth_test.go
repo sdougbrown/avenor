@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +39,6 @@ func attachOwner(t *testing.T, srv *ControlServer, cap OwnerCapability) *connSta
 		id:        1,
 		server:    srv,
 		conn:      conn,
-		askSlots:  make(chan struct{}, 1),
 		waitSlots: make(chan struct{}, 1),
 	}
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
@@ -133,7 +133,7 @@ func TestMessagingCredentialCannotControl(t *testing.T) {
 		{name: "launch identity", cap: OwnerCapability{ID: "run_child", Secret: "launch-identity"}},
 		{name: "empty", cap: OwnerCapability{}},
 	}
-	gated := []string{"spawn", "spawn_mcp", "cancel", "prompt", "interrupt_and_prompt", "answer_permission", "shutdown", "broker_send", "broker_ask", "broker_cancel", "broker_reply"}
+	gated := []string{"spawn", "spawn_mcp", "cancel", "prompt", "interrupt_and_prompt", "answer_permission", "shutdown", "message_send", "message_wait", "message_withdraw", "message_reply"}
 	for _, candidate := range candidates {
 		conn := mustDial(t, s.path)
 		params, _ := json.Marshal(OwnerAuthRequest{Version: OwnerAuthVersion, CapabilityID: candidate.cap.ID, Secret: candidate.cap.Secret})
@@ -148,11 +148,7 @@ func TestMessagingCredentialCannotControl(t *testing.T) {
 			switch method {
 			case "cancel", "prompt", "interrupt_and_prompt", "shutdown":
 				params = nil
-			case "broker_send":
-				params = json.RawMessage(`{"from_run_id":"run_1","to_run_id":"run_child","message":"hi"}`)
-			case "broker_ask":
-				params = json.RawMessage(`{"to_run_id":"run_child","message":"hi"}`)
-			case "broker_cancel", "broker_reply", "answer_permission":
+			case "answer_permission":
 				params = json.RawMessage(`{"message_id":"x","request_id":"x","option_id":"x"}`)
 			}
 			if err := writeReq(t, conn, Request{JSONRPC: "2.0", ID: i + 2, Method: method, Params: params}); err != nil {
@@ -376,7 +372,7 @@ func TestUngatedMethodsStayUnauthenticated(t *testing.T) {
 
 	ungated := []string{
 		"identity", "result", "status", "subscribe", "history", "wait_turn", "list",
-		"broker_peers", "broker_receive", "send_to_parent", "tree_budget", "wait_for_capacity",
+		"message_peers", "message_receive", "message_preflight", "send_to_parent", "tree_budget", "wait_for_capacity",
 		"workflow.create", "workflow.instantiate", "workflow.status", "workflow.inspect",
 		"workflow.wait", "workflow.events", "workflow.cancel", "workflow.command",
 		"workflow.controller.create", "workflow.controller.enable", "workflow.controller.disable",
@@ -384,7 +380,7 @@ func TestUngatedMethodsStayUnauthenticated(t *testing.T) {
 	}
 	gated := []string{
 		"spawn", "spawn_mcp", "cancel", "prompt", "interrupt_and_prompt", "answer_permission",
-		"shutdown", "broker_send", "broker_ask", "broker_cancel", "broker_reply",
+		"shutdown", "message_send", "message_wait", "message_withdraw", "message_reply",
 	}
 
 	conn := mustDial(t, s.path)
@@ -409,32 +405,14 @@ func TestUngatedMethodsStayUnauthenticated(t *testing.T) {
 	}
 }
 
-// brokerBackedHandler delivers broker_send through a real broker queue.
-type brokerBackedHandler struct {
-	*mockStableHandler
-	broker *broker.Broker
-}
-
-func (h brokerBackedHandler) BrokerSend(fromRunID, toRunID, message, role string) error {
-	payload, err := json.Marshal(map[string]any{"from": fromRunID, "to_run_id": toRunID, "message": message, "role": role})
-	if err != nil {
-		return err
-	}
-	return h.broker.SendTo(fromRunID, toRunID, "agent_message", payload, "")
-}
-
-// TestOwnerWireBrokerSendDelivers proves the raw wire: a published record, an
-// owner-authenticated connection and a gated broker_send that really reaches
-// the recipient.
-func TestOwnerWireBrokerSendDelivers(t *testing.T) {
-	b := broker.New("")
-	if _, err := b.CreateRun("run_recipient", "named recipient"); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-
+// TestOwnerWireMessageSendDelivers proves the raw wire: a published record, an
+// owner-authenticated connection and a gated message_send that really reaches
+// the transport.
+func TestOwnerWireMessageSendDelivers(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s, cap := NewTestServer(state)
-	s.SetStableHandler(brokerBackedHandler{mockStableHandler: &mockStableHandler{}, broker: b})
+	tr := &recordingTransport{}
+	s.SetStableHandler(&mockStableHandler{messageTransport: tr})
 	if err := s.Start(testSocketPath(t)); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -442,33 +420,18 @@ func TestOwnerWireBrokerSendDelivers(t *testing.T) {
 
 	conn := dialOwner(t, s, cap)
 	defer conn.Close()
-	params := json.RawMessage(`{"from_run_id":"run_1","to_run_id":"run_recipient","message":"hello recipient"}`)
-	if err := writeReq(t, conn, Request{JSONRPC: "2.0", ID: 2, Method: "broker_send", Params: params}); err != nil {
-		t.Fatalf("write broker_send: %v", err)
+	params := json.RawMessage(`{"to_run_id":"run_recipient","message_id":"m_1","generation":"gen_1","body":"{\"message\":\"hello recipient\"}"}`)
+	if err := writeReq(t, conn, Request{JSONRPC: "2.0", ID: 2, Method: "message_send", Params: params}); err != nil {
+		t.Fatalf("write message_send: %v", err)
 	}
 	if resp := readResp(t, conn); resp.Error != nil {
-		t.Fatalf("broker_send: %+v", resp.Error)
+		t.Fatalf("message_send: %+v", resp.Error)
 	}
-
-	delivered, err := b.DrainAgentMessages("run_recipient", 10)
-	if err != nil {
-		t.Fatalf("drain: %v", err)
+	if tr.sendReq.To.RunID != "run_recipient" || tr.sendReq.MessageID != "m_1" || tr.sendReq.Generation != "gen_1" {
+		t.Fatalf("send request = %+v, want the recipient and minted id", tr.sendReq)
 	}
-	if len(delivered) != 1 {
-		t.Fatalf("delivered %d messages, want 1", len(delivered))
-	}
-	if got := string(delivered[0].Payload); !contains([]byte(got), "hello recipient") {
-		t.Fatalf("delivered payload = %s", got)
-	}
-	run := b.GetRun("run_recipient")
-	if run == nil || run.Info == nil || run.Info.Label != "named recipient" {
-		t.Fatalf("recipient label = %+v, want the registered name", run)
-	}
-	if err := b.RenameRun("run_recipient", "renamed recipient"); err != nil {
-		t.Fatalf("rename: %v", err)
-	}
-	if got := b.GetRun("run_recipient").Info.Label; got != "renamed recipient" {
-		t.Fatalf("label after rename = %q", got)
+	if !strings.Contains(tr.sendReq.Body, "hello recipient") {
+		t.Fatalf("send body = %s", tr.sendReq.Body)
 	}
 }
 

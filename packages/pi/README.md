@@ -117,8 +117,11 @@ Available tools for LLM sub-agent management:
 | `avenor_result` | Wait for a run and return its complete final output without transcript details |
 | `avenor_inspect` | Review a bounded transcript, tool activity, permissions, and final output |
 | `avenor_answer_permission` | Answer a pending permission request |
-| `avenor_follow_up` | Resume a completed run with a follow-up message |
+| `avenor_message` | One messaging tool with an explicit `action`: `tell`, `ask`, `reply`, `resume`, `withdraw` or `control_reply`. Every result states the outcome and, for a failed ask, whether it can still be withdrawn. |
+| `avenor_peers` | One peers tool with an explicit `action`: `list` (the default), `rename` or `last`. `last` returns the target's last agent message with its stop reason, or the empty result when the target has no completed turn yet. |
 | `avenor_events` | Read events from a run |
+| `avenor_kill` | Kill a run |
+| `avenor_workflow_cancel` | Cancel a workflow instance (`workflow_id`, `actor`, `reason`) |
 | `avenor_shutdown` | Shut down the avenor supervisor |
 
 ### Direct and roster spawns
@@ -194,7 +197,7 @@ is not an `avenor_spawn` parameter and applies only to Pi-backed child runs.
 2. tool call returns       →  completion preview with status + session_id
 3. avenor_result           →  retrieve the complete final output when needed
 4. avenor_inspect          →  inspect transcript and tool details when needed
-5. avenor_follow_up        →  optionally iterate
+5. avenor_message           →  action "resume" to optionally iterate
 6. avenor_shutdown         →  clean up when finished
 ```
 

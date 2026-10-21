@@ -205,7 +205,7 @@ function routeCheck(
     message_id: 'x',
     ...fields,
   }
-  return messageRoute.check(values, conditions, {}) as unknown as Record<string, FieldStatus>
+  return messageRoute.check(values, conditions as unknown as Record<string, unknown>, {}) as unknown as Record<string, FieldStatus>
 }
 
 function firstReason(status: FieldStatus | undefined): string {
@@ -511,11 +511,12 @@ async function ask(
   provider: MessageProvider,
   input: MessageInput,
   resolution: Awaited<ReturnType<typeof resolveTarget>>,
+  signal: AbortSignal | undefined,
 ): Promise<ProviderResult> {
   const label = resolutionLabel(resolution, input.target ?? '')
   let result: ProviderResult
   try {
-    result = await provider.ask(resolution.runId, input.message ?? '', input.timeout_ms)
+    result = await provider.ask(resolution.runId, input.message ?? '', input.timeout_ms, signal)
   } catch (err) {
     throw asToolError(err)
   }
@@ -553,7 +554,7 @@ async function resume(
     label: quote(result.label ?? ''),
   })
   try {
-    provider.registerResumed?.(result)
+    await provider.registerResumed?.(result)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     throw new ToolError(
@@ -578,7 +579,7 @@ async function reply(provider: MessageProvider, input: MessageInput): Promise<Pr
   if (asker === undefined) return edgeAbsent()
   let result: ProviderResult
   try {
-    result = await provider.reply(messageId, input.message ?? '')
+    result = await provider.reply(messageId, input.message ?? '', asker)
   } catch (err) {
     provider.restoreAsk?.(messageId, asker)
     throw asToolError(err)
@@ -632,6 +633,7 @@ async function controlReply(provider: MessageProvider, input: MessageInput): Pro
 export async function executeMessage(
   provider: MessageProvider,
   input: unknown,
+  options?: { signal?: AbortSignal },
 ): Promise<ProviderResult> {
   assertMessageInput(input)
   const typed = input
@@ -666,7 +668,7 @@ export async function executeMessage(
     case 'tell':
       return tell(provider, typed, resolution)
     case 'ask':
-      return ask(provider, typed, resolution)
+      return ask(provider, typed, resolution, options?.signal)
     case 'resume':
       return resume(provider, typed, resolution)
   }
@@ -761,4 +763,22 @@ export async function executePeers(
       final_output_truncated: last.truncated ?? false,
     },
   }
+}
+
+/**
+ * Render the peers list block the surfaces show. It is the one list text for
+ * the shared records, so every TypeScript surface renders a peer identically.
+ */
+export function renderPeerList(records: PeerRecord[]): string {
+  if (records.length === 0) return 'No other agent sessions connected.'
+  const lines = records.map(record => {
+    let line = `  ${record.run_id}`
+    if (record.label) line = `  ${record.label} (${record.run_id})`
+    const attrs = [record.kind, record.status, record.backend, record.model].filter(
+      (value): value is string => typeof value === 'string' && value !== '',
+    )
+    if (attrs.length > 0) line += ` [${attrs.join(', ')}]`
+    return line
+  })
+  return `**Active sessions:**\n${lines.join('\n')}`
 }

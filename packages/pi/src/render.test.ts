@@ -5,8 +5,8 @@ import {
   renderAnswerPermissionResult,
   renderEventsCall,
   renderEventsResult,
-  renderFollowUpCall,
-  renderFollowUpResult,
+  renderMessageResumeCall,
+  renderMessageResumeResult,
   renderInspectCall,
   renderInspectResult,
   renderResultCall,
@@ -42,7 +42,7 @@ describe('Avenor Pi renderers', () => {
     expect(text(renderResultCall({ run_id: 'run', wait: false, timeout: '5m', supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_result run_id "run" wait=false timeout "5m" supervisor_id "/tmp/sock"')
     expect(text(renderInspectCall({ run_id: 'run', limit: 10, after_seq: 3, supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_inspect run_id "run" limit=10 after_seq=3 supervisor_id "/tmp/sock"')
     expect(text(renderAnswerPermissionCall({ run_id: 'run', option_id: 'allow', request_id: 'request', message: 'yes', supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_answer_permission run_id "run" option_id "allow" request_id "request" message "yes" supervisor_id "/tmp/sock"')
-    expect(text(renderFollowUpCall({ run_id: 'run', message: 'continue', label: 'again', supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_follow_up run_id "run" message "continue" label "again" supervisor_id "/tmp/sock"')
+    expect(text(renderMessageResumeCall({ action: 'resume', target: 'run', message: 'continue', label: 'again' }, theme))).toBe('avenor_message action "resume" target "run" message "continue" label "again"')
     expect(text(renderEventsCall({ run_id: 'run', types: ['agent.message', 'session.end'], limit: 5, supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_events run_id "run" types=["agent.message", "session.end"] limit=5 supervisor_id "/tmp/sock"')
     expect(text(renderShutdownCall({ supervisor_id: '/tmp/sock', force: true }, theme))).toBe('avenor_shutdown supervisor_id "/tmp/sock" force=true')
   })
@@ -121,8 +121,8 @@ describe('Avenor Pi renderers', () => {
       'Guidance: Call avenor_status with run_id "run-1" to verify the permission state.',
     ].join('\n'))
 
-    expect(text(renderFollowUpResult(result({ run_id: 'run-2', label: 'follow-up' }), collapsed, theme, {
-      run_id: 'run-1', message: 'continue',
+    expect(text(renderMessageResumeResult(result({ runId: 'run-2', label: 'follow-up' }), collapsed, theme, {
+      action: 'resume', target: 'run-1', message: 'continue',
     }))).toContain('Source run: run-1\nRun: run-2\nLabel: follow-up')
 
     const events = { events: [{ event: 'agent.message', seq: '2', delta: 'hello' }, { type: 'session.end', seq: 3 }] }

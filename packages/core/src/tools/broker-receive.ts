@@ -21,7 +21,18 @@ async function executeBrokerReceive(
 ): Promise<BrokerReceiveResult> {
   const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
   try {
-    const asks = await client.brokerReceive()
+    const received = await client.messageReceive({ generation: '' })
+    const asks = received.messages.map(message => {
+      const payload = message.payload !== null && typeof message.payload === 'object'
+        ? message.payload as Record<string, unknown>
+        : undefined
+      return {
+        from_run_id: message.from_run_id,
+        message_id: message.message_id,
+        message: typeof payload?.message === 'string' ? payload.message : '',
+        role: typeof payload?.role === 'string' ? payload.role : undefined,
+      }
+    })
     return { asks }
   } finally {
     if (!isSingleton) {

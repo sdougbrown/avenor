@@ -116,7 +116,7 @@ function makeDeps(overrides: Partial<WatchDeps> = {}): WatchDeps {
     observeRun: overrides.observeRun ?? mock(async () => null),
     cancelRun: overrides.cancelRun ?? mock(async () => {}),
     interruptAndPromptRun: overrides.interruptAndPromptRun ?? mock(async () => {}),
-    followUpRun: overrides.followUpRun ?? mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
+    resumeRun: overrides.resumeRun ?? mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
   }
 }
 
@@ -334,13 +334,13 @@ describe('RunInspectorOverlay', () => {
         ? makeInspectResult(next, { status: 'running' })
         : makeInspectResult(completed, { status: 'done' }),
     )
-    const followUpRun = mock(async () => ({ run_id: 'run-5', label: 'follow-up' }))
+    const resumeRun = mock(async () => ({ run_id: 'run-5', label: 'follow-up' }))
 
     const overlay = new RunInspectorOverlay(
       tui as any,
       theme as any,
       keybindings as any,
-      makeDeps({ inspectRun, followUpRun }),
+      makeDeps({ inspectRun, resumeRun }),
       { runId: 'run-4', runtimeId: 'rt-4' },
       () => {},
     )
@@ -348,7 +348,7 @@ describe('RunInspectorOverlay', () => {
     await flush()
     ;(overlay as any).submit('more detail')
     await flush()
-    expect(followUpRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-4' }), 'more detail')
+    expect(resumeRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-4' }), 'more detail')
     expect(inspectRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-5', label: 'follow-up' }))
     overlay.dispose()
   })

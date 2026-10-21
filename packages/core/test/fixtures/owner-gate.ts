@@ -4,7 +4,7 @@ import * as fs from 'node:fs'
 /** Methods the control server refuses before owner authentication. */
 export const GATED_METHODS: readonly string[] = [
   'spawn', 'spawn_mcp', 'cancel', 'prompt', 'interrupt_and_prompt', 'answer_permission',
-  'shutdown', 'broker_send', 'broker_ask', 'broker_cancel', 'broker_reply',
+  'shutdown', 'message_send', 'message_wait', 'message_withdraw', 'message_reply',
 ]
 
 export interface OwnerGateRequest {

@@ -29,6 +29,7 @@ export interface ProviderResult {
   text?: string
   runId?: string
   runtimeId?: string
+  sessionId?: string
   label?: string
   previousLabel?: string
   sentinelFile?: string
@@ -72,8 +73,13 @@ export interface MessageProvider {
   resolve(ref: string): Promise<Resolution>
   state(runId: string): Promise<RunFacts>
   tell(targetRunId: string, message: string): Promise<ProviderResult>
-  ask(targetRunId: string, message: string, timeoutMs?: number): Promise<ProviderResult>
-  reply(inboundAskId: string, message: string): Promise<ProviderResult>
+  ask(
+    targetRunId: string,
+    message: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<ProviderResult>
+  reply(inboundAskId: string, message: string, askerRunId: string): Promise<ProviderResult>
   withdraw(messageId: string): Promise<ProviderResult>
   controlReply?(target: string, payload: unknown): Promise<ProviderResult>
   /** `target` is the RESOLVED runtime id; the provider mints runId and paths. */
@@ -91,7 +97,7 @@ export interface MessageProvider {
   claimAsk?(messageId: string): string | undefined
   restoreAsk?(messageId: string, askerRunId: string): void
   onResumed?(result: ProviderResult): void | Promise<void>
-  registerResumed?(result: ProviderResult): void
+  registerResumed?(result: ProviderResult): void | Promise<void>
 }
 
 /**
@@ -102,8 +108,9 @@ export interface MessageProvider {
 export async function messageTool(
   args: unknown,
   provider: MessageProvider,
+  options?: { signal?: AbortSignal },
 ): Promise<ProviderResult> {
-  return executeMessage(provider, args)
+  return executeMessage(provider, args, options)
 }
 
 /** Bind the handler to one provider. */

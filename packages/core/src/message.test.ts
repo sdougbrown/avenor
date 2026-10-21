@@ -250,7 +250,7 @@ describe('message conformance', () => {
 
       const result = await executeMessage(provider, testCase.input)
       expect(result.text, `${testCase.name}: a successful call produced no text`).not.toBe('')
-      expect(result.outcome, testCase.name).toBe(expected.outcome)
+      expect(result.outcome, testCase.name).toBe(expected.outcome ?? '')
       expect(substituteMessageId(result.text ?? '', result.messageId ?? ''), testCase.name).toBe(
         substituteMessageId(expected.message, result.messageId ?? ''),
       )

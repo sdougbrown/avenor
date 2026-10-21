@@ -120,6 +120,16 @@ export function registerExternalRun(runInfo: ExternalRunInfo): void {
   indexRun(runInfo)
 }
 
+/** Look up an external run by its public run ID only, never by an alias. */
+export function findExternalRunById(
+  supervisorId: string,
+  runId: string,
+): ExternalRunInfo | undefined {
+  const exact = externalRuns.get(supervisorId)?.byRunId.get(runId)
+  if (exact) return exact
+  return readPersistedRun(supervisorId, runId)
+}
+
 export function findExternalRun(
   supervisorId: string,
   reference: string,

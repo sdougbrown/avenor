@@ -1,7 +1,7 @@
 // Shared test fixtures for the pi extension test suites. Kept out of the
 // *.test.ts files so every suite builds its ExtensionDeps mock from one set.
 import { mock } from 'bun:test'
-import type { InspectResult, RunSnapshot, StatusResult } from '@dougbots/avenor-core'
+import type { InspectResult, MessageProvider, RunSnapshot, StatusResult } from '@dougbots/avenor-core'
 import { RunReducer } from '@dougbots/avenor-core'
 import type { ExtensionDeps } from './index.js'
 import { createExtension } from './index.js'
@@ -42,11 +42,16 @@ export async function startExtensionHarness(options: {
     statusTool: mock(async () => ({ runs: [], count: 0 })),
     eventsTool: mock(async () => ({ events: [] })),
     answerPermissionTool: mock(async () => ({ ok: true })),
-    followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
+    messageTool: mock(async () => ({
+      action: 'resume',
+      outcome: 'resumed',
+      runId: 'run-2',
+      label: 'follow-up',
+      text: 'resumed "follow-up" as run "run-2"',
+    })),
     inspectTool: mock(async () => makeInspectResult({ status: 'running' })),
     resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
     brokerReceiveTool: mock(async () => ({ asks: [] })),
-    brokerReplyTool: mock(async () => ({ ok: true })),
     shutdownTool: mock(async () => ({ ok: true })),
     killTool: mock(async () => ({ killed: true, run_id: 'run-1' })),
     workflowStatusTool: mock(async () => ({})),
@@ -57,6 +62,8 @@ export async function startExtensionHarness(options: {
     workflowGateTool: mock(async () => ({})),
     workflowControllerStatusTool: mock(async () => ({})),
     workflowReadyTool: mock(async () => ({})),
+    workflowCancelTool: mock(async () => ({})),
+    hostProviderFor: mock(async () => makeMessageProvider()),
     observeRun: mock(() => null),
     dial: mock(async () => ({ close() {} })),
     attachOwner: mock(async () => ({ close() {} })),
@@ -67,6 +74,34 @@ export async function startExtensionHarness(options: {
   const ctx = { cwd: '/tmp', ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) } }
   await eventHandlers.session_start({}, ctx)
   return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, setStatus, setWidget }
+}
+
+/** A bound provider fake; host-mode tools pass one to the core handlers. */
+export function makeMessageProvider(overrides: Partial<MessageProvider> = {}): MessageProvider {
+  const provider: MessageProvider = {
+    caller: () => ({ kind: 'owner', runId: 'supervisor' }),
+    surface: () => 'pi-host',
+    role: () => 'host',
+    resolve: async ref => ({ runId: ref, label: ref, match: 'unique' }),
+    state: async () => ({ live: false, resumable: true, status: 'done' }),
+    tell: async () => ({ outcome: 'sent', messageId: 'msg-1' }),
+    ask: async () => ({ outcome: 'replied', messageId: 'msg-1', reply: 'OK' }),
+    reply: async () => ({ outcome: 'replied', messageId: 'msg-1' }),
+    withdraw: async () => ({ outcome: 'withdrawn', messageId: 'msg-1' }),
+    resume: async () => ({
+      outcome: 'resumed',
+      runId: 'run-2',
+      runtimeId: 'rt-2',
+      label: 'follow-up',
+      sentinelFile: '/runs/run-2/sentinel.done',
+      onEvent: '/runs/run-2/events.log',
+    }),
+    rename: async () => ({ outcome: 'renamed', runId: 'rt-1', label: 'renamed', previousLabel: 'demo' }),
+    last: async () => ({ outcome: 'sent', hasRecord: false }),
+    peers: async () => ({ peers: [] }),
+    ...overrides,
+  }
+  return provider
 }
 
 export async function waitFor(predicate: () => boolean, timeoutMs = 2000, intervalMs = 5): Promise<void> {

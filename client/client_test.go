@@ -990,14 +990,14 @@ func TestCallErrorPreservesData(t *testing.T) {
 		if json.Unmarshal(line, &req) != nil {
 			return
 		}
-		data, _ := json.Marshal(map[string]any{"message_id": "ask123", "pending": false})
+		data, _ := json.Marshal(map[string]any{"code": "possibly-pending", "outcome": "possibly-pending", "message_id": "ask123"})
 		resp, _ := json.Marshal(Response{JSONRPC: "2.0", ID: req.ID, Error: &RespError{
 			Code: -32000, Message: "wait for reply: context deadline exceeded", Data: data,
 		}})
 		_, _ = serverConn.Write(append(resp, '\n'))
 	}()
 
-	err := c.Call("broker_ask", map[string]any{"to_run_id": "rt_1", "message": "hi"}, nil)
+	err := c.Call("message_wait", map[string]any{"message_id": "ask123", "generation": "g"}, nil)
 	var rpcErr *RPCError
 	if err == nil || !errors.As(err, &rpcErr) {
 		t.Fatalf("error type = %T (%v), want *RPCError", err, err)
@@ -1012,8 +1012,8 @@ func TestCallErrorPreservesData(t *testing.T) {
 	if id, _ := payload["message_id"].(string); id != "ask123" {
 		t.Errorf("message_id = %v, want ask123", payload["message_id"])
 	}
-	if pending, _ := payload["pending"].(bool); pending {
-		t.Errorf("pending = %v, want false", payload["pending"])
+	if outcome, _ := payload["outcome"].(string); outcome != "possibly-pending" {
+		t.Errorf("outcome = %v, want possibly-pending", payload["outcome"])
 	}
 	if got := rpcErr.Error(); got != "rpc error [-32000]: wait for reply: context deadline exceeded" {
 		t.Errorf("Error() = %q", got)

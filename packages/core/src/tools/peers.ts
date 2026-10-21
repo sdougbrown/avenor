@@ -1,43 +1,18 @@
-import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
+import { executePeers, type PeersInput, type PeersRouterResult } from '../message.js'
+import type { MessageProvider } from './message.js'
 
-export interface PeersToolArgs {
-  supervisorId?: string
+export interface PeersToolArgs extends PeersInput {}
+
+export type PeersResult = PeersRouterResult
+
+/** The one avenor_peers handler; it resolves and reads through the bound provider. */
+export async function peersTool(args: PeersToolArgs, provider: MessageProvider): Promise<PeersResult> {
+  return executePeers(provider, args)
 }
 
-export interface PeerEntry {
-  run_id: string
-  label?: string
-  status?: string
-  backend?: string
-  model?: string
-  dir?: string
-}
-
-export interface PeersResult {
-  peers: PeerEntry[]
-}
-
-async function executePeersTool(
-  args: PeersToolArgs,
-  getSupervisorClient: typeof realGetSupervisorClient,
-): Promise<PeersResult> {
-  const { client, isSingleton } = await getSupervisorClient(args.supervisorId)
-  try {
-
-    const sessions = await client.brokerPeers()
-    return { peers: sessions as PeerEntry[] }
-
-  } finally {
-    if (!isSingleton) {
-      client.close()
-    }
-  }
-}
-
+/** Bind the peers handler to one provider. */
 export function createPeersTool(
-  getSupervisorClient: typeof realGetSupervisorClient,
+  provider: MessageProvider,
 ): (args: PeersToolArgs) => Promise<PeersResult> {
-  return args => executePeersTool(args, getSupervisorClient)
+  return args => peersTool(args, provider)
 }
-
-export const peersTool = createPeersTool(realGetSupervisorClient)
