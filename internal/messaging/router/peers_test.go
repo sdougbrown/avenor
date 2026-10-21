@@ -429,6 +429,14 @@ func TestSurfaceResultFixture(t *testing.T) {
 	}
 	sameJSON(t, "tell output", tell.Output(), fixture.Message["tell"])
 
+	edgeAbsent := Result{
+		Action:    "reply",
+		Outcome:   messaging.OutcomeEdgeAbsent,
+		MessageID: "a-1",
+		Text:      `no ask "a-1" is pending on this surface; nothing was sent`,
+	}
+	sameJSON(t, "reply edge-absent output", edgeAbsent.Output(), fixture.Message["reply_edge_absent"])
+
 	resumed := Result{
 		Action:       "resume",
 		Outcome:      outcomeResumed,
