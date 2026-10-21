@@ -885,3 +885,35 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// Output is the tool result object every Go surface returns for one routed
+// call. The field set is shared: code is present only on a tool error (see
+// ToolError.Output), message_id for tell/ask/reply/withdraw, run_id+label for
+// resume and peers rename, text always, and reply for an answered ask.
+func (r Result) Output() map[string]any {
+	out := map[string]any{
+		"action":  r.Action,
+		"outcome": string(r.Outcome),
+		"text":    r.Text,
+	}
+	if r.MessageID != "" {
+		out["message_id"] = r.MessageID
+	}
+	if r.RunID != "" {
+		out["run_id"] = r.RunID
+	}
+	if r.Label != "" {
+		out["label"] = r.Label
+	}
+	if r.Reply != "" {
+		out["reply"] = r.Reply
+	}
+	return out
+}
+
+// Output is the shared tool result object for a refused or rejected call: only
+// the typed code and the rendered text, which carries the same sentence the
+// model would see as content.
+func (e *ToolError) Output() map[string]any {
+	return map[string]any{"code": e.Code, "text": e.Message}
+}

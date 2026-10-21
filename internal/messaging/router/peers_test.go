@@ -71,6 +71,9 @@ func assertPeersResult(t *testing.T, c messaging.ConformanceCase, provider *fake
 			if got, want := result.Peers[index].Label, stringOf(record["label"]); got != want {
 				t.Fatalf("peer %d label = %q, want %q", index, got, want)
 			}
+			if got, want := result.Peers[index].Kind, stringOf(record["kind"]); got != want {
+				t.Fatalf("peer %d kind = %q, want %q", index, got, want)
+			}
 			if got, want := result.Peers[index].Status, stringOf(record["status"]); got != want {
 				t.Fatalf("peer %d status = %q, want %q", index, got, want)
 			}
@@ -258,5 +261,38 @@ func TestPeersListIncompleteListingKeepsPeers(t *testing.T) {
 	}
 	if !strings.Contains(result.Text, messaging.Repair("refused_io", nil)) {
 		t.Fatalf("text = %q, want the classified read failure", result.Text)
+	}
+}
+
+func TestRenderPeersIncludesKind(t *testing.T) {
+	got := RenderPeers([]messaging.PeerRecord{
+		{RunID: "supervisor", Label: "supervisor", Kind: "supervisor", Status: "running", Backend: "pi"},
+		{RunID: "rt_7", Label: "child-a", Kind: "agent", Status: "running"},
+	})
+	want := "**Active sessions:**\n" +
+		"  supervisor (supervisor) [supervisor, running, pi]\n" +
+		"  child-a (rt_7) [agent, running]"
+	if got != want {
+		t.Fatalf("RenderPeers = %q, want %q", got, want)
+	}
+	if got, want := RenderPeers(nil), "No other agent sessions connected."; got != want {
+		t.Fatalf("empty RenderPeers = %q, want %q", got, want)
+	}
+}
+
+func TestToolOutputObject(t *testing.T) {
+	tell := Result{Action: "tell", Outcome: messaging.OutcomeSent, MessageID: "msg_1", Label: "peer", Text: "sent"}
+	want := map[string]any{"action": "tell", "outcome": "sent", "text": "sent", "message_id": "msg_1", "label": "peer"}
+	if got := tell.Output(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("tell output = %#v, want %#v", got, want)
+	}
+	reply := Result{Action: "ask", Outcome: messaging.OutcomeReplied, MessageID: "msg_2", Text: "ok", Reply: "answer"}
+	if got := reply.Output()["reply"]; got != "answer" {
+		t.Fatalf("ask output reply = %v, want answer", got)
+	}
+	failure := (&ToolError{Code: "not_permitted", Message: "no"}).Output()
+	wantFailure := map[string]any{"code": "not_permitted", "text": "no"}
+	if !reflect.DeepEqual(failure, wantFailure) {
+		t.Fatalf("tool error output = %#v, want %#v", failure, wantFailure)
 	}
 }

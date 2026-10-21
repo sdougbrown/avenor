@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
@@ -182,4 +183,82 @@ func peersLast(ctx context.Context, p Provider, action string, input peersInput)
 		result.Text = text
 	}
 	return result, nil
+}
+
+// RenderPeers renders the peers list block the Go surfaces show. It is the one
+// list text for the shared records, so the three Go surfaces cannot disagree on
+// how a peer's display name, kind and status are rendered.
+func RenderPeers(records []messaging.PeerRecord) string {
+	if len(records) == 0 {
+		return "No other agent sessions connected."
+	}
+	lines := make([]string, 0, len(records))
+	for _, record := range records {
+		line := "  " + record.RunID
+		if record.Label != "" {
+			line = "  " + record.Label + " (" + record.RunID + ")"
+		}
+		var attrs []string
+		for _, value := range []string{record.Kind, record.Status, record.Backend, record.Model} {
+			if value != "" {
+				attrs = append(attrs, value)
+			}
+		}
+		if len(attrs) > 0 {
+			line += " [" + strings.Join(attrs, ", ") + "]"
+		}
+		lines = append(lines, line)
+	}
+	return "**Active sessions:**\n" + strings.Join(lines, "\n")
+}
+
+// PeersDetails is the structured peers result every Go surface returns: the
+// list records, the rename triple, or the last-message object. A peers action
+// is never merged into the message result object.
+func PeersDetails(result Result) map[string]any {
+	switch result.Action {
+	case "list":
+		peers := make([]map[string]any, 0, len(result.Peers))
+		for _, peer := range result.Peers {
+			record := map[string]any{"run_id": peer.RunID}
+			for key, value := range map[string]string{
+				"label": peer.Label, "kind": peer.Kind, "status": peer.Status,
+				"backend": peer.Backend, "model": peer.Model, "dir": peer.Dir,
+			} {
+				if value != "" {
+					record[key] = value
+				}
+			}
+			peers = append(peers, record)
+		}
+		return map[string]any{"peers": peers}
+	case "rename":
+		return map[string]any{"renamed": map[string]any{
+			"run_id":         result.RunID,
+			"label":          result.Label,
+			"previous_label": result.PreviousLabel,
+		}}
+	default:
+		return map[string]any{"last": map[string]any{
+			"run_id":                 result.RunID,
+			"runtime_id":             result.RuntimeID,
+			"label":                  result.Label,
+			"final_output":           result.FinalOutput,
+			"stop_reason":            result.StopReason,
+			"final_output_truncated": result.Truncated,
+		}}
+	}
+}
+
+// PeersContent is the human text a peers call returns. `last` and `rename` are
+// exactly the router's rendered text; `list` is the shared list block, keeping
+// the router's incomplete-listing sentence above it.
+func PeersContent(result Result) string {
+	if result.Action != "list" {
+		return result.Text
+	}
+	if result.Text != "" {
+		return result.Text + "\n\n" + RenderPeers(result.Peers)
+	}
+	return RenderPeers(result.Peers)
 }
