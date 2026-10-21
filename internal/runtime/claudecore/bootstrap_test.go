@@ -64,3 +64,40 @@ func TestPaneHasInputBoxRejectsPanesThatAreNotTakingInput(t *testing.T) {
 		})
 	}
 }
+
+// nbspPane is a pane captured from Claude Code 2.1.303: the empty input box
+// holds the placeholder `❯` + U+00A0 + `Try "..."`.
+const nbspPane = " ▐▛███▛█   Claude Code v2.1.303\n" +
+	"▝▜██████▀  Haiku 5.5 · Claude Team\n" +
+	" ▝▝   ▝▝   /private/tmp\n\n" +
+	testRule + "\n" +
+	"❯ Try \"fix lint errors\"\n" +
+	testRule + "\n" +
+	"  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+
+func TestPaneIsReadyAcceptsNBSPPlaceholder(t *testing.T) {
+	if !paneIsReady(nbspPane) {
+		t.Fatalf("Claude Code 2.1.303 pane with NBSP placeholder not recognised:\n%s", nbspPane)
+	}
+}
+
+func TestPaneIsReadyRejectsNBSPDialogAndEcho(t *testing.T) {
+	for name, pane := range map[string]string{
+		"selection dialog": "Quick safety check\n" + testRule + "\n❯ 1. Yes, I trust this folder\n  2. No\n" + testRule + "\n",
+		"echoed prompt":    testRule + "\n❯ do the thing\n✻ Cogitating for 3s\n" + testRule + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if paneIsReady(pane) {
+				t.Fatalf("pane reported ready but is not taking input:\n%s", pane)
+			}
+		})
+	}
+}
+
+func TestParseTerminalPermissionHandlesNBSPChevron(t *testing.T) {
+	pane := "Do you want to proceed?\n❯ 1. Yes\n  2. No\n"
+	perm := ParseTerminalPermission(pane)
+	if perm == nil || len(perm.Options) != 2 {
+		t.Fatalf("NBSP-chevron option not parsed: %+v", perm)
+	}
+}

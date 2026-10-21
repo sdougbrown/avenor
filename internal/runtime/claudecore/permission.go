@@ -23,6 +23,7 @@ var tmuxOptionRE = regexp.MustCompile(`^\s*(?:❯\s*)?(\d+)\.\s+(.*)`)
 // ParseTerminalPermission extracts a TerminalPermission from pane text, or nil
 // if the text doesn't represent a Claude permission dialog.
 func ParseTerminalPermission(text string) *TerminalPermission {
+	text = normalizePane(text)
 	lines := strings.Split(text, "\n")
 	promptLines := make([]string, 0)
 	options := make([]PermissionOption, 0)

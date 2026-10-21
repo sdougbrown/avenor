@@ -32,6 +32,7 @@ func ScanTerminal(ctx context.Context, term terminal.Session) (PaneState, error)
 // activity line therefore must beat any `❯` line, otherwise we'd report idle
 // while a turn is still running.
 func ClassifyPane(text string) PaneState {
+	text = normalizePane(text)
 	if strings.Contains(text, "Do you want to proceed?") || strings.Contains(text, "Do you want to make this edit") || strings.Contains(text, "Yes, allow all edits") {
 		return PaneStatePermission
 	}

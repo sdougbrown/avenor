@@ -93,13 +93,27 @@ func WaitForPaneReady(ctx context.Context, term terminal.Session) bool {
 			}
 			continue
 		}
-		for _, marker := range paneReadyMarkers {
-			if strings.Contains(out, marker) {
-				return true
-			}
-		}
-		if paneHasInputBox(out) {
+		if paneIsReady(out) {
 			return true
 		}
 	}
+}
+
+// paneIsReady reports whether the captured pane shows an input box that takes
+// input.
+func paneIsReady(out string) bool {
+	out = normalizePane(out)
+	for _, marker := range paneReadyMarkers {
+		if strings.Contains(out, marker) {
+			return true
+		}
+	}
+	return paneHasInputBox(out)
+}
+
+// normalizePane maps non-breaking spaces to ASCII spaces. Claude Code 2.1.303
+// draws the input placeholder as `❯` + U+00A0 + `Try "..."`; literal-space
+// matching and Go's ASCII-only `\s` would otherwise miss it.
+func normalizePane(out string) string {
+	return strings.ReplaceAll(out, "\u00a0", " ")
 }
