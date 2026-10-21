@@ -12,10 +12,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
-	"github.com/sdougbrown/avenor/internal/messaging/askclient"
-	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
-	"github.com/sdougbrown/avenor/internal/runtime/broker"
-	"github.com/sdougbrown/avenor/internal/runtime/broker/brokertest"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
 func TestRunHandlesInitializeToolsAndReport(t *testing.T) {
@@ -88,10 +85,37 @@ func TestRunHandlesInitializeToolsAndReport(t *testing.T) {
 		m := tool.(map[string]any)
 		gotTools[m["name"].(string)] = true
 	}
-	for _, name := range []string{"avenor_report", "avenor_finish", "avenor_reply"} {
+	for _, num := range tools {
+		m := num.(map[string]any)
+		if name, _ := m["name"].(string); name == "" {
+			t.Fatalf("tools/list advertised a nameless element: %#v", m)
+		}
+	}
+	for _, name := range []string{"avenor_report", "avenor_finish", "avenor_message", "avenor_peers"} {
 		if !gotTools[name] {
 			t.Fatalf("tools/list missing %s: %#v", name, gotTools)
 		}
+	}
+	if len(gotTools) != 4 {
+		t.Fatalf("tools/list advertises %d tools, want exactly report, finish, message and peers: %#v", len(gotTools), gotTools)
+	}
+	schemas := map[string]map[string]any{}
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		schemas[tool["name"].(string)], _ = tool["inputSchema"].(map[string]any)
+	}
+	for _, name := range []string{"avenor_message", "avenor_peers"} {
+		if _, union := schemas[name]["oneOf"]; union {
+			t.Fatalf("%s publishes a oneOf union; MCP clients lose integer and object argument types from it", name)
+		}
+		if schemas[name]["type"] != "object" {
+			t.Fatalf("%s inputSchema type = %v, want object", name, schemas[name]["type"])
+		}
+	}
+	properties, _ := schemas["avenor_message"]["properties"].(map[string]any)
+	payload, _ := properties["payload"].(map[string]any)
+	if payload["type"] != "object" {
+		t.Fatalf("message payload type = %v, want object", payload["type"])
 	}
 	if responses[2]["id"].(float64) != 3 {
 		t.Fatalf("third response id = %v", responses[2]["id"])
@@ -116,7 +140,7 @@ func TestRenderControlMessageIncludesStructuredPayload(t *testing.T) {
 	}
 	got := renderControlMessage(msg)
 	for _, want := range []string{
-		`Status requested. Reply by calling avenor_reply with to="ctrl_1".`,
+		`Status requested. Reply by calling avenor_message with action="control_reply" and target="ctrl_1".`,
 	} {
 		if !bytes.Contains([]byte(got), []byte(want)) {
 			t.Fatalf("rendered message missing %q:\n%s", want, got)
@@ -233,7 +257,7 @@ func TestRenderAgentMessage(t *testing.T) {
 		Payload:   json.RawMessage(`{"from":"Alice","from_run_id":"sender_123","message":"Hello there","role":"agent"}`),
 	}
 	got := renderControlMessage(msg)
-	expected := "Message from run sender_123:\nHello there\n\nReply by calling avenor_send with to_run_id=" + `"sender_123"` + "."
+	expected := "Message from run sender_123:\nHello there\n\nReply by calling avenor_message with action=\"tell\" and target=" + `"sender_123"` + "."
 	if got != expected {
 		t.Fatalf("expected:\n%s\n\ngot:\n%s", expected, got)
 	}
@@ -355,70 +379,43 @@ func TestPollControlLoopFromRunIDInMeta(t *testing.T) {
 	}
 }
 
-func TestToolListIncludesAvenorSend(t *testing.T) {
-	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/register", "/heartbeat":
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		case "/poll-control":
-			_ = json.NewEncoder(w).Encode([]any{})
-		default:
-			t.Errorf("unexpected broker path %s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer brokerSrv.Close()
-
-	input := bytes.NewBufferString(
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
-			`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}` + "\n",
-	)
-	var stdout bytes.Buffer
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := Run(ctx, Options{
-		RunID:      "run_1",
-		Token:      "tok_1",
-		BrokerURL:  brokerSrv.URL,
-		Stdin:      input,
-		Stdout:     &stdout,
-		Stderr:     io.Discard,
-		HTTPClient: brokerSrv.Client(),
+// runSidecarTool drives the sidecar over stdio and returns the tool response.
+func runSidecarTool(t *testing.T, brokerURL string, client *http.Client, name string, args map[string]any) (string, map[string]any, bool) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+		"params": map[string]any{"name": name, "arguments": args},
 	})
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatal(err)
 	}
-
+	input := bytes.NewBufferString(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" + string(body) + "\n",
+	)
+	var stdout, stderr bytes.Buffer
+	if err := Run(context.Background(), Options{
+		RunID: "child_run", Token: "tok_1", BrokerURL: brokerURL,
+		Stdin: input, Stdout: &stdout, Stderr: &stderr, HTTPClient: client,
+	}); err != nil {
+		t.Fatalf("Run: %v; stderr=%s", err, stderr.String())
+	}
 	responses := decodeRPCResponses(t, stdout.Bytes())
 	if len(responses) != 2 {
-		t.Fatalf("responses = %d, want 2", len(responses))
+		t.Fatalf("responses = %d, want 2; stdout=%s", len(responses), stdout.String())
 	}
-	toolsResult := responses[1]["result"].(map[string]any)
-	tools := toolsResult["tools"].([]any)
-	found := false
-	for _, tool := range tools {
-		m := tool.(map[string]any)
-		if m["name"] == "avenor_send" {
-			found = true
-			schema := m["inputSchema"].(map[string]any)
-			props := schema["properties"].(map[string]any)
-			if _, ok := props["role"]; !ok {
-				t.Fatal("avenor_send schema missing optional role property")
-			}
-			req := schema["required"].([]any)
-			if len(req) != 2 || req[0] != "to_run_id" || req[1] != "message" {
-				t.Fatalf("avenor_send required fields = %v, want [to_run_id message]", req)
-			}
-		}
+	result, _ := responses[1]["result"].(map[string]any)
+	content, _ := result["content"].([]any)
+	text := ""
+	if len(content) > 0 {
+		first, _ := content[0].(map[string]any)
+		text, _ = first["text"].(string)
 	}
-	if !found {
-		t.Fatal("tools/list missing avenor_send")
-	}
+	structured, _ := result["structuredContent"].(map[string]any)
+	isError, _ := result["isError"].(bool)
+	return text, structured, isError
 }
 
-func TestAvenorSendToolCall(t *testing.T) {
-	var sentBody map[string]any
+func TestSidecarPeersLastReadsPeerRecord(t *testing.T) {
 	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/register", "/heartbeat":
@@ -426,271 +423,74 @@ func TestAvenorSendToolCall(t *testing.T) {
 		case "/poll-control":
 			_ = json.NewEncoder(w).Encode([]any{})
 		case "/sessions":
-			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
-		case "/send":
-			if err := json.NewDecoder(r.Body).Decode(&sentBody); err != nil {
-				t.Errorf("decode send: %v", err)
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "outcome": "sent"})
-		default:
-			t.Errorf("unexpected broker path %s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer brokerSrv.Close()
-
-	input := bytes.NewBufferString(
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
-			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_send","arguments":{"to_run_id":"target_run","message":"Hello target"}}}` + "\n",
-	)
-	var stdout bytes.Buffer
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := Run(ctx, Options{
-		RunID:      "sender_run",
-		Token:      "tok_1",
-		BrokerURL:  brokerSrv.URL,
-		Stdin:      input,
-		Stdout:     &stdout,
-		Stderr:     io.Discard,
-		HTTPClient: brokerSrv.Client(),
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	responses := decodeRPCResponses(t, stdout.Bytes())
-	if len(responses) != 2 {
-		t.Fatalf("responses = %d, want 2", len(responses))
-	}
-	// Check tool call result
-	result := responses[1]["result"].(map[string]any)
-	content := result["content"].([]any)
-	text := content[0].(map[string]any)["text"].(string)
-	if text != `sent message to run "target_run"` {
-		t.Fatalf("avenor_send result text = %q", text)
-	}
-	// Check sent body shape
-	if sentBody["type"] != "agent_message" {
-		t.Fatalf("broker /send type = %v, want agent_message", sentBody["type"])
-	}
-	payload := sentBody["payload"].(map[string]any)
-	if payload["message"] != "Hello target" {
-		t.Fatalf("message = %v, want Hello target", payload["message"])
-	}
-	if payload["from_run_id"] != "sender_run" {
-		t.Fatalf("from_run_id = %v, want sender_run", payload["from_run_id"])
-	}
-}
-
-func TestAvenorUpsendToolCallIncludesRole(t *testing.T) {
-	var sentBody map[string]any
-	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/register", "/heartbeat":
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		case "/poll-control":
-			_ = json.NewEncoder(w).Encode([]any{})
-		case "/sessions":
-			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
-		case "/send":
-			if err := json.NewDecoder(r.Body).Decode(&sentBody); err != nil {
-				t.Errorf("decode send: %v", err)
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "outcome": "sent"})
-		default:
-			t.Errorf("unexpected broker path %s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer brokerSrv.Close()
-
-	input := bytes.NewBufferString(
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
-			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_send","arguments":{"to_run_id":"parent_run","message":"status update","role":"reviewer"}}}` + "\n",
-	)
-	var stdout bytes.Buffer
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := Run(ctx, Options{
-		RunID:      "child_run",
-		Token:      "tok_1",
-		BrokerURL:  brokerSrv.URL,
-		Stdin:      input,
-		Stdout:     &stdout,
-		Stderr:     io.Discard,
-		HTTPClient: brokerSrv.Client(),
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	responses := decodeRPCResponses(t, stdout.Bytes())
-	if len(responses) != 2 {
-		t.Fatalf("responses = %d, want 2", len(responses))
-	}
-	result := responses[1]["result"].(map[string]any)
-	content := result["content"].([]any)
-	text := content[0].(map[string]any)["text"].(string)
-	if text != `sent message to run "parent_run"` {
-		t.Fatalf("avenor_send result text = %q", text)
-	}
-	payload := sentBody["payload"].(map[string]any)
-	if payload["role"] != "reviewer" {
-		t.Fatalf("role = %v, want reviewer", payload["role"])
-	}
-	if payload["message"] != "status update" {
-		t.Fatalf("message = %v, want status update", payload["message"])
-	}
-}
-
-func TestAvenorSendMissingArgs(t *testing.T) {
-	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/register", "/heartbeat":
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		case "/poll-control":
-			_ = json.NewEncoder(w).Encode([]any{})
-		default:
-			t.Errorf("unexpected broker path %s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer brokerSrv.Close()
-
-	input := bytes.NewBufferString(
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n" +
-			`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"avenor_send","arguments":{}}}` + "\n",
-	)
-	var stdout bytes.Buffer
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	err := Run(ctx, Options{
-		RunID:      "run_1",
-		Token:      "tok_1",
-		BrokerURL:  brokerSrv.URL,
-		Stdin:      input,
-		Stdout:     &stdout,
-		Stderr:     io.Discard,
-		HTTPClient: brokerSrv.Client(),
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	responses := decodeRPCResponses(t, stdout.Bytes())
-	if len(responses) != 2 {
-		t.Fatalf("responses = %d, want 2", len(responses))
-	}
-	// Missing required args should produce an error response
-	result := responses[1]["result"]
-	if result != nil {
-		t.Fatalf("expected error for missing args, got result: %#v", result)
-	}
-	if responses[1]["error"] == nil {
-		t.Fatalf("expected JSON-RPC error for missing args, got %#v", responses[1])
-	}
-}
-
-// TestSidecarStandaloneLocalAsk drives avenor_ask end to end against a real
-// local broker: the sidecar sends a versioned ask under its own sender name,
-// the target answers over the broker, and the sidecar renders the reply.
-func TestSidecarStandaloneLocalAsk(t *testing.T) {
-	brokertest.RunStandaloneLocalAsk(t, brokertest.StandaloneAsk{
-		Sender:       "claude-child",
-		ReplyMessage: "all good",
-		WantText:     "Reply from parent_run:\nall good",
-		Run: func(ctx context.Context, in brokertest.StandaloneAskRun) error {
-			return Run(ctx, Options{
-				RunID:     in.RunID,
-				Sender:    in.Sender,
-				Token:     in.Token,
-				BrokerURL: in.BrokerURL,
-				Stdin:     in.Stdin,
-				Stdout:    in.Stdout,
-				Stderr:    io.Discard,
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"messaging_protocol": 1, "generation": "gen-1",
+				"sessions": []any{map[string]any{"run_id": "rt_peer", "label": "mesh-a", "kind": "agent", "status": "running"}},
 			})
-		},
+		case "/last_message":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"run_id": "rt_peer", "label": "mesh-a", "has_record": true,
+				"final_output": "OK", "stop_reason": "end_turn",
+			})
+		default:
+			t.Errorf("unexpected broker path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer brokerSrv.Close()
+
+	text, structured, isError := runSidecarTool(t, brokerSrv.URL, brokerSrv.Client(), "avenor_peers", map[string]any{
+		"action": "last", "target": "rt_peer",
 	})
+	if isError {
+		t.Fatalf("last reported isError: %s", text)
+	}
+	want := messaging.LastRender("header", router.LastFacts("rt_peer", "mesh-a", "end_turn")) + "\n\nOK"
+	if text != want {
+		t.Fatalf("last text = %q, want %q", text, want)
+	}
+	last, _ := structured["last"].(map[string]any)
+	if last["final_output"] != "OK" || last["runtime_id"] != "rt_peer" {
+		t.Fatalf("last details = %#v", structured)
+	}
 }
 
-// TestSidecarCancelWithdrawsLiveAsk drives avenor_cancel through a real broker:
-// a live ask is withdrawn, and an ask the broker never queued reports that
-// nothing is pending.
-func TestSidecarCancelWithdrawsLiveAsk(t *testing.T) {
-	b := broker.New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("broker.Start: %v", err)
-	}
-	defer func() { _ = b.Stop() }()
-	childToken, err := b.CreateRun("child_run", "claude-child")
-	if err != nil {
-		t.Fatalf("CreateRun child: %v", err)
-	}
-	if _, err := b.CreateRun("parent_run", "parent"); err != nil {
-		t.Fatalf("CreateRun parent: %v", err)
-	}
-	transport, err := localhttp.New("", messaging.LocalCredentials{
-		RunID:   "child_run",
-		Token:   childToken,
-		BaseURL: "http://" + b.Addr(),
+func TestSidecarControlReplyPostsReply(t *testing.T) {
+	var replyBody map[string]any
+	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/register", "/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/poll-control":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case "/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
+		case "/reply":
+			if err := json.NewDecoder(r.Body).Decode(&replyBody); err != nil {
+				t.Errorf("decode reply: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			t.Errorf("unexpected broker path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer brokerSrv.Close()
+
+	text, structured, isError := runSidecarTool(t, brokerSrv.URL, brokerSrv.Client(), "avenor_message", map[string]any{
+		"action": "control_reply", "target": "ctrl_1", "payload": map[string]any{"ok": true},
 	})
-	if err != nil {
-		t.Fatalf("localhttp.New: %v", err)
+	if isError {
+		t.Fatalf("control_reply reported isError: %s", text)
 	}
-	defer func() { _ = transport.Close() }()
-	s := &Server{
-		opts: Options{RunID: "child_run", Sender: "claude-child", Token: childToken, BrokerURL: "http://" + b.Addr()},
-		ask:  askclient.New(transport, askclient.Options{}),
+	if structured["outcome"] != "sent" {
+		t.Fatalf("control_reply outcome = %v", structured["outcome"])
 	}
-
-	ctx := context.Background()
-	askDone := make(chan error, 1)
-	go func() {
-		_, err := s.callTool(ctx, "avenor_ask", json.RawMessage(`{"to_run_id":"parent_run","message":"status?"}`))
-		askDone <- err
-	}()
-	ask := brokertest.WaitForAgentMessage(t, b, "parent_run")
-	args, err := json.Marshal(map[string]any{"message_id": ask.ID})
-	if err != nil {
-		t.Fatalf("marshal cancel: %v", err)
+	if replyBody["to"] != "ctrl_1" {
+		t.Fatalf("reply target = %v, want ctrl_1 passed through verbatim", replyBody["to"])
 	}
-
-	result, err := s.callTool(ctx, "avenor_cancel", args)
-	if err != nil {
-		t.Fatalf("first cancel: %v", err)
-	}
-	content, _ := result.(map[string]any)["content"].([]map[string]any)
-	if len(content) != 1 {
-		t.Fatalf("first cancel content = %#v", content)
-	}
-	text, _ := content[0]["text"].(string)
-	if text != "Cancellation requested for "+ask.ID {
-		t.Fatalf("first cancel text = %q", text)
-	}
-
-	unasked, err := messaging.NewMsgID(time.Now(), time.Time{})
-	if err != nil {
-		t.Fatalf("NewMsgID: %v", err)
-	}
-	args, err = json.Marshal(map[string]any{"message_id": unasked})
-	if err != nil {
-		t.Fatalf("marshal cancel: %v", err)
-	}
-	if _, err := s.callTool(ctx, "avenor_cancel", args); err == nil || err.Error() != "no pending ask for "+unasked {
-		t.Fatalf("absent cancel error = %v, want the pending-ask error", err)
-	}
-
-	select {
-	case <-askDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the withdrawn ask did not return")
+	payload, _ := replyBody["payload"].(map[string]any)
+	if payload["ok"] != true {
+		t.Fatalf("reply payload = %#v", replyBody["payload"])
 	}
 }
