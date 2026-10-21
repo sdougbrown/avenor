@@ -355,6 +355,21 @@ func TestProgStatusPaneScanBrokersAStableDialog(t *testing.T) {
 	}
 }
 
+func TestProgStatusChaseBrokersBesideLiveOutput(t *testing.T) {
+	// A background subagent keeps updating its line above the dialog, so no
+	// two captures of the screen are identical.
+	live := func(n string) string { return "  ⎿ subagent: " + n + " tool uses\n" + permissionPane }
+	s, term, _ := newProgStatusSession(t, live("3"), live("4"), live("5"), live("6"))
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	term.ReportProgStatus(rootReport(terminal.ProgBlocked, terminal.ProgKindPermission))
+	for i := 0; i < 4; i++ {
+		s.ProgStatusTick()
+	}
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("permission.request count = %d, want 1", n)
+	}
+}
+
 func TestProgStatusTranscriptRecordsDoNotEndAWait(t *testing.T) {
 	s, term, path := newProgStatusSession(t)
 	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))

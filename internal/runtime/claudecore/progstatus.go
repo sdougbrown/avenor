@@ -2,6 +2,7 @@ package claudecore
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -74,9 +75,9 @@ type progTurn struct {
 
 	burstUntil time.Time
 
-	// chaseUntil bounds the permission chase. chaseLast is the previous
-	// capture of a permission dialog, from the chase or the pane scan, which
-	// the next one must equal before the dialog is parsed.
+	// chaseUntil bounds the permission chase. chaseLast holds the options of
+	// the previous capture of a permission dialog, from the chase or the pane
+	// scan, which the next capture must repeat before the dialog is brokered.
 	chaseUntil time.Time
 	chaseLast  string
 	// permBrokered is set once the dialog of the current blocked report was
@@ -227,13 +228,20 @@ func (s *Session) permissionChaseDue(now time.Time) bool {
 		now.Before(s.osc.chaseUntil)
 }
 
-// permissionCaptureStableLocked records out as the latest capture of a
-// permission dialog and reports whether it equals the previous one: two
-// identical captures in a row mean the dialog has finished painting. Mu is
-// held.
+// permissionCaptureStableLocked records the options of the permission dialog
+// in out and reports whether they equal the previous capture's: the same
+// options twice in a row mean the dialog has finished painting. Only the
+// options are compared, so live output elsewhere on screen cannot keep the
+// dialog from ever settling. Mu is held.
 func (s *Session) permissionCaptureStableLocked(out string) bool {
-	stable := out == s.osc.chaseLast
-	s.osc.chaseLast = out
+	var key strings.Builder
+	if perm := ParseTerminalPermission(out); perm != nil {
+		for _, o := range perm.Options {
+			key.WriteString(o.ID + ". " + o.Label + "\n")
+		}
+	}
+	stable := key.Len() > 0 && key.String() == s.osc.chaseLast
+	s.osc.chaseLast = key.String()
 	return stable
 }
 
