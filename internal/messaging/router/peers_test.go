@@ -265,6 +265,28 @@ func TestPeersListIncompleteListingKeepsPeers(t *testing.T) {
 	}
 }
 
+// TestPeersDetailsKeepsPeerDir pins the `dir` key the structured list result
+// carries: the working directory a peer session runs in is the only field that
+// says where it is working, and a dropped or renamed key is invisible unless a
+// record actually sets it.
+func TestPeersDetailsKeepsPeerDir(t *testing.T) {
+	result := Result{Action: "list", Peers: []messaging.PeerRecord{
+		{RunID: "rt_7", Label: "child-a", Dir: "/home/u/Code/child-a"},
+	}}
+	details := PeersDetails(result)
+	peers, ok := details["peers"].([]map[string]any)
+	if !ok || len(peers) != 1 {
+		t.Fatalf("peers details = %#v, want one peer record", details)
+	}
+	got, ok := peers[0]["dir"]
+	if !ok {
+		t.Fatalf("peer record %#v carries no dir key", peers[0])
+	}
+	if want := "/home/u/Code/child-a"; got != want {
+		t.Fatalf("peer record dir = %v, want %q", got, want)
+	}
+}
+
 func TestRenderPeersIncludesKind(t *testing.T) {
 	got := RenderPeers([]messaging.PeerRecord{
 		{RunID: "supervisor", Label: "supervisor", Kind: "supervisor", Status: "running", Backend: "pi"},
@@ -278,6 +300,23 @@ func TestRenderPeersIncludesKind(t *testing.T) {
 	}
 	if got, want := RenderPeers(nil), "No other agent sessions connected."; got != want {
 		t.Fatalf("empty RenderPeers = %q, want %q", got, want)
+	}
+}
+
+// TestRenderPeersOmitsMissingLabelAndAttributes pins the two branches a sparse
+// record takes: a peer with no label renders as its bare run id rather than with
+// empty parentheses, and a peer with no kind, status, backend or model renders
+// with no attribute block at all instead of an empty ` []`.
+func TestRenderPeersOmitsMissingLabelAndAttributes(t *testing.T) {
+	got := RenderPeers([]messaging.PeerRecord{
+		{RunID: "rt_8", Kind: "agent"},
+		{RunID: "rt_9"},
+	})
+	want := "**Active sessions:**\n" +
+		"  rt_8 [agent]\n" +
+		"  rt_9"
+	if got != want {
+		t.Fatalf("RenderPeers = %q, want %q", got, want)
 	}
 }
 

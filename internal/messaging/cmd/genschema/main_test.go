@@ -47,6 +47,76 @@ func TestFlattenReportsAPropertyTypeDisagreement(t *testing.T) {
 	}
 }
 
+// TestFlattenReportsAPropertyConstraintDisagreement pins the generator's other
+// stop rule: two actions declaring one property at the same type but with
+// different limits cannot share a flat declaration either, so the generator must
+// fail loudly instead of publishing the first action's constraints and silently
+// admitting or refusing values for the other.
+func TestFlattenReportsAPropertyConstraintDisagreement(t *testing.T) {
+	union := []byte(`{"oneOf":[
+		{"properties":{"action":{"const":"tell"},"timeout_ms":{"type":"integer","minimum":0,"maximum":600000}}},
+		{"properties":{"action":{"const":"reply"},"timeout_ms":{"type":"integer","minimum":0,"maximum":300000}}}
+	]}`)
+	_, err := flattenInput(union, flatSchemaMeta{})
+	if err == nil {
+		t.Fatal("flattenInput accepted two declarations of one property")
+	}
+	for _, want := range []string{`property "timeout_ms"`, `action "tell"`, `action "reply"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestFlattenRejectsMalformedUnions pins the guards that run before a flat
+// schema can be built: a union with no variant has no action to publish, a
+// variant without an action const would put an empty string in the enum, and two
+// actions with different defaults leave one flat default unable to keep both. In
+// each case the generator must return its own error and no schema at all.
+func TestFlattenRejectsMalformedUnions(t *testing.T) {
+	cases := []struct {
+		name  string
+		union string
+		want  string
+	}{
+		{
+			name:  "no variant",
+			union: `{"oneOf":[]}`,
+			want:  "input schema declares no action variant",
+		},
+		{
+			name: "variant without action const",
+			union: `{"oneOf":[
+				{"properties":{"action":{"const":"tell"}}},
+				{"properties":{"payload":{"type":"object"}}}
+			]}`,
+			want: "an input schema variant declares no action const",
+		},
+		{
+			name: "different action defaults",
+			union: `{"oneOf":[
+				{"properties":{"action":{"const":"tell","default":"tell"}}},
+				{"properties":{"action":{"const":"ask","default":"ask"}}}
+			]}`,
+			want: "actions declare different defaults",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			flat, err := flattenInput([]byte(c.union), flatSchemaMeta{})
+			if err == nil {
+				t.Fatalf("flattenInput accepted the union and returned:\n%s", flat)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("error %q does not name %q", err, c.want)
+			}
+			if flat != nil {
+				t.Fatalf("flattenInput returned a schema alongside its error:\n%s", flat)
+			}
+		})
+	}
+}
+
 // TestFlattenKeepsTheActionDeclarations pins the two action declarations one
 // flat property still has to carry: the union's action default, which a client
 // prefills from, and every action's description, which cannot stay attached to
