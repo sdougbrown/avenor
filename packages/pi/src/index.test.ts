@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { createHash } from 'node:crypto'
+import { messageTool as realMessageTool } from '@dougbots/avenor-core'
 import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
@@ -14,7 +15,7 @@ import extensionFactory, {
   statusSupervisorId,
 } from './index.js'
 import { findLiveStatusForTrackedRun } from './types.js'
-import { makeInspectResult, makeMessageProvider, startExtensionHarness } from './test-fixtures.js'
+import { makeInspectResult, makeMessageProvider, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 async function withoutAmbientAgentProfile<T>(run: () => Promise<T>): Promise<T> {
   const previous = process.env.PI_AGENT_PROFILE
@@ -438,6 +439,55 @@ describe('Avenor Pi extension', () => {
       expect.objectContaining({ source: 'spawn-status', runId: 'run-1', count: 1 }),
     ])
     await harness.eventHandlers.session_shutdown()
+  })
+
+  it('routes a watch resume through the bound provider and tracks the resumed run', async () => {
+    const resumeSpy = mock(async () => ({
+      outcome: 'resumed' as const,
+      runId: 'run-2',
+      runtimeId: 'rt-2',
+      label: 'follow-up',
+      sentinelFile: '/runs/run-2/sentinel.done',
+      onEvent: '/runs/run-2/events.log',
+    }))
+    const provider = makeMessageProvider({
+      resume: resumeSpy,
+      registerResumed: () => {},
+    })
+    const hostProviderFor = mock(async (_supervisorId?: string) => provider)
+    const statusTool = mock(async (args: { runId?: string } = {}) => args.runId === 'run-2'
+      ? { run_id: 'run-2', label: 'follow-up', status: 'done', runtime_id: 'rt-2' }
+      : { run_id: 'run-1', label: 'demo', status: 'done', runtime_id: 'rt-1' })
+    const harness = await startExtensionHarness({
+      deps: { hostProviderFor, statusTool, messageTool: realMessageTool },
+      extOptions: { subAgentEnv: null },
+    })
+    let overlay: any
+    await harness.registeredCommands['avenor-watch'].handler('run-1', {
+      hasUI: true,
+      ui: {
+        custom: async (factory: any) => {
+          overlay = factory(
+            { terminal: { rows: 24 }, requestRender() {} },
+            {
+              fg: (_color: string, text: string) => text,
+              bg: (_color: string, text: string) => text,
+              bold: (text: string) => text,
+              italic: (text: string) => text,
+            },
+            {},
+            () => {},
+          )
+        },
+      },
+    })
+    await waitFor(() => Boolean(overlay?.state?.status))
+    overlay.submit('continue')
+    await waitFor(() => statusTool.mock.calls.some(call => (call[0] as { runId?: string })?.runId === 'run-2'))
+    expect(hostProviderFor).toHaveBeenCalledWith(undefined)
+    expect(resumeSpy).toHaveBeenCalledWith(expect.objectContaining({ target: 'run-1', message: 'continue' }))
+    overlay.dispose()
+    await harness.eventHandlers.session_shutdown({}, {})
   })
 
   it('registers all expected tools, commands, renderers, and event handlers', async () => {

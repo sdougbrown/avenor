@@ -1090,7 +1090,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     }
 
     async function resumeTrackedRun(run: WatchRunRef, text: string): Promise<{ run_id: string; label: string }> {
-      const provider = await hostProviderFor(run.supervisorId)
+      // The bound provider, not hostProviderFor directly: messageProvider attaches
+      // the extension's resume tracking so a watch-triggered resume is polled.
+      const provider = await messageProvider(run.supervisorId)
       const result = await deps.messageTool(
         { action: 'resume', target: run.runId, message: text },
         provider,
