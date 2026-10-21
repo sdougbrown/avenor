@@ -45,7 +45,7 @@ func TestProgStatusParserSplitPositions(t *testing.T) {
 		"\x1b]7501;state=idle:app=claude-code\x07" +
 		"\x1b(B\x0f\x1b7\xe2\x9d\xaf\x1b8" +
 		"\x1b]7501;state=working:app=claude-code:id=a1:title=" + b64("Reply") + "\x1b\\" +
-		"\x1bP+q\x1b]7501;state=done\x07\x1b\\" +
+		"\x1bP+q]7501;state=done\x07\x1b\\" +
 		"\x1b]7501;state=blocked:kind=permission:msg=" + b64("approve ❯") + "\x1b\\" +
 		"\x1b]7501;state=clear:id=a1\x07" + "\x1bc"
 	want := []string{
@@ -178,10 +178,18 @@ func TestProgStatusParserFieldRules(t *testing.T) {
 }
 
 func TestProgStatusParserSkipsStringSequences(t *testing.T) {
-	inner := "\x1b]7501;state=working\x07"
 	for _, intro := range []string{"\x1bP", "\x1bX", "\x1b^", "\x1b_"} {
-		rec, store := feedAll(intro + "body" + inner + "tail\x1b\\" + osc("state=idle"))
+		rec, store := feedAll(intro + "body]7501;state=working\x07tail\x1b\\" + osc("state=idle"))
 		if !reflect.DeepEqual(rec.events, []string{"idle|||-1|||"}) || store.Len() != 1 {
+			t.Errorf("%q: %q", intro, rec.events)
+		}
+	}
+}
+
+func TestProgStatusParserUnterminatedStringDoesNotHideReports(t *testing.T) {
+	for _, intro := range []string{"\x1bP", "\x1bX", "\x1b^", "\x1b_"} {
+		rec, _ := feedAll(intro+"never terminated", osc("state=done"))
+		if !reflect.DeepEqual(rec.events, []string{"done|||-1|||"}) {
 			t.Errorf("%q: %q", intro, rec.events)
 		}
 	}

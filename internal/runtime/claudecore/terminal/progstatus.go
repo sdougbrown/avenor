@@ -299,13 +299,15 @@ func (p *ProgStatusParser) step(b byte) {
 			p.state = psGround
 		}
 	case psStringEsc:
-		switch b {
-		case '\\', 0x18, 0x1a:
+		// ESC \ is ST. ESC followed by anything else aborts the string and
+		// starts a new escape, so an unterminated string cannot hide the
+		// sequences after it.
+		if b == '\\' {
 			p.state = psGround
-		case 0x1b:
-		default:
-			p.state = psString
+			return
 		}
+		p.state = psEsc
+		p.escByte(b)
 	case psOSC:
 		switch b {
 		case 0x07:
