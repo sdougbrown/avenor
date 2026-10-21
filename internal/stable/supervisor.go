@@ -1701,7 +1701,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	var parentToken string
 	if params.ParentRunID != "" && s.broker != nil {
 		parentToken, _ = s.broker.EnsureRun(params.ParentRunID, "")
-		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Use avenor_send with this run ID to send status updates, findings, or questions back to your parent.\n\n", params.ParentRunID)
+		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Use avenor_message with action \"tell\" (or \"ask\") and this run ID to send status updates, findings, or questions back to your parent.\n\n", params.ParentRunID)
 		promptText = parentNote + promptText
 	}
 
@@ -1831,7 +1831,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// Start provider and session.
 	// Register the child's broker run and capture its token so the pi provider
 	// can hand broker credentials to the sub-process for inbound ask polling and
-	// avenor_reply. Idempotent; the run may already exist for tasking.
+	// avenor_message action="tell"/"ask". Idempotent; the run may already exist for tasking.
 	if s.broker != nil {
 		s.ensureChildBrokerRun(child)
 	}

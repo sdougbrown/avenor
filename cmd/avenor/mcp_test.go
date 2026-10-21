@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/mcpserver"
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 func TestRunMCPInvalidTransport(t *testing.T) {
@@ -217,6 +218,36 @@ func (s *stubControlClient) WorkflowControllerStatus(string) (map[string]any, er
 }
 func (s *stubControlClient) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
+}
+func (s *stubControlClient) MessageSend(req messaging.SendRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{}, nil
+}
+func (s *stubControlClient) MessageWait(req messaging.WaitRequest) (messaging.WaitResult, error) {
+	return messaging.WaitResult{}, nil
+}
+func (s *stubControlClient) MessageReply(req messaging.ReplyRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{}, nil
+}
+func (s *stubControlClient) MessageWithdraw(req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	return messaging.WithdrawResult{}, nil
+}
+func (s *stubControlClient) MessageReceive(req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return messaging.ReceiveResult{}, nil
+}
+func (s *stubControlClient) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult, error) {
+	return messaging.PeersResult{}, nil
+}
+func (s *stubControlClient) MessagePreflight() (messaging.PreflightResult, error) {
+	return messaging.PreflightResult{}, nil
+}
+func (s *stubControlClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return messaging.ResumeResult{}, nil
+}
+func (s *stubControlClient) SessionRename(sessionID, name string) (messaging.RenameResult, error) {
+	return messaging.RenameResult{}, nil
+}
+func (s *stubControlClient) SessionLast(runtimeID string) (messaging.PeerLast, error) {
+	return messaging.PeerLast{}, nil
 }
 
 func writeTokenFile(t *testing.T, content string, mode os.FileMode) string {
