@@ -5068,3 +5068,42 @@ func TestNewServerWithSupervisorSocketDialsZeroTimes(t *testing.T) {
 		t.Fatalf("dials during construction = %d, want 0", got)
 	}
 }
+
+func TestAvenorFollowUpDefaultsToCurrentDisplayName(t *testing.T) {
+	sentinelPath := filepath.Join(t.TempDir(), "renamed-followup.done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_prior\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeClient{
+		statusResult: map[string]any{"label": "renamed-prior", "session_id": "ses_current"},
+		spawnResult:  map[string]any{"runtime_id": "rt_followup_renamed", "session_id": "ses_followup_renamed"},
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.registry.Store(&RunInfo{
+		RunID:        "run-prior-renamed",
+		Label:        "launch-label",
+		RuntimeID:    "rt_prior_renamed",
+		SentinelPath: sentinelPath,
+	})
+
+	_, result, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
+		RunID:   "run-prior-renamed",
+		Message: "continue working",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", result)
+	}
+	if m["label"] != "renamed-prior-followup" {
+		t.Fatalf("follow-up label = %v, want the current display name", m["label"])
+	}
+	if got := fake.spawnCapturedParams["label"]; got != "renamed-prior-followup" {
+		t.Fatalf("spawn label = %v, want the current display name", got)
+	}
+}

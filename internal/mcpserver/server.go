@@ -1556,9 +1556,17 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	runID := uuid.New().String()
+	priorLabel := ri.Label
+	// The default is the current display name, so a rename reaches the
+	// follow-up instead of the launch-time label.
+	if liveIdentityStatus != nil {
+		if current, ok := liveIdentityStatus["label"].(string); ok && current != "" {
+			priorLabel = current
+		}
+	}
 	followupLabel := args.Label
 	if followupLabel == "" {
-		followupLabel = ri.Label + runstate.FollowUpLabelSuffix
+		followupLabel = priorLabel + runstate.FollowUpLabelSuffix
 	}
 
 	sentinelPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
