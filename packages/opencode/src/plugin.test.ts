@@ -1480,4 +1480,27 @@ describe('OpenCode host turn producer', () => {
     }
     expect(logged.join('\n')).toContain('session_last_set failed')
   })
+
+  it('retries a turn whose first publish failed', async () => {
+    let attempts = 0
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {
+      attempts++
+      if (attempts === 1) throw new Error('broker down')
+    })
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const originalError = console.error
+    console.error = () => {}
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+      await bindSession(hooks, 'session-1')
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    } finally {
+      console.error = originalError
+    }
+
+    expect(attempts).toBe(2)
+    expect(record.mock.calls[1]).toEqual(['one', 'end_turn', false])
+  })
 })

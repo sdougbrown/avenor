@@ -689,6 +689,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   // last in the session rather than the one whose event arrived last.
   let publishedTurn: { created: number; id: string } | undefined
 
+  // Messages whose publish is in flight: two updates for one message cannot
+  // both publish, and the id is not claimed, so a failure is retried.
+  const publishing = new Set<string>()
+
   function isNewerTurn(created: number, id: string): boolean {
     if (!publishedTurn) return true
     if (created !== publishedTurn.created) return created > publishedTurn.created
@@ -753,11 +757,9 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     if (typeof time?.completed !== 'number') return
     const created = typeof time.created === 'number' ? time.created : 0
     const messageId = typeof info.id === 'string' ? info.id : ''
-    if (messageId === '' || !isNewerTurn(created, messageId)) return
+    if (messageId === '' || publishing.has(messageId) || !isNewerTurn(created, messageId)) return
     if (!binding.provider.recordLastTurn) return
-    // Claim the turn before the first await so two updates for one message
-    // cannot both publish.
-    publishedTurn = { created, id: messageId }
+    publishing.add(messageId)
     try {
       const content = await settledTurnText(binding.sessionId, messageId)
       const turn = extractTurnText([
@@ -765,8 +767,13 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       ])
       const bounded = boundFinalOutput(turn.text)
       await binding.provider.recordLastTurn(bounded, turn.stopReason, turn.text.length > bounded.length)
+      // Claimed only once the broker accepted the turn, so a transient failure
+      // leaves it unclaimed and the next update for it is retried.
+      publishedTurn = { created, id: messageId }
     } catch (error) {
       console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
+    } finally {
+      publishing.delete(messageId)
     }
   }
 
