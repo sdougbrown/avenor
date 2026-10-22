@@ -18,8 +18,10 @@ describe('read-only control clients', () => {
   let previousHome: string | undefined
   let server: net.Server
   let socketPath: string
+  let receivedMessages: unknown[]
 
   beforeEach(async () => {
+    receivedMessages = []
     previousHome = process.env.AVENOR_HOME
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-read-only-'))
     process.env.AVENOR_HOME = home
@@ -53,7 +55,7 @@ describe('read-only control clients', () => {
             : request.method === 'message_preflight'
               ? { protocol: 1, generation: 'gen-1' }
               : request.method === 'message_receive'
-                ? { messages: [], generation: 'gen-1' }
+                ? { messages: receivedMessages, generation: 'gen-1' }
                 : undefined
           socket.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n')
         }
@@ -81,6 +83,27 @@ describe('read-only control clients', () => {
     // A bound poll reuses its generation instead of preflighting every receive.
     expect(await brokerReceiveTool({ supervisorId: socketPath, generation: 'gen-1' })).toEqual({ asks: [], generation: 'gen-1' })
     expect(await statusTool({ supervisorId: socketPath })).toMatchObject({ runs: [], count: 0 })
+  })
+
+  it('maps real inbound records onto asks', async () => {
+    receivedMessages = [
+      { from_run_id: 'rt-object', message_id: 'msg-object', payload: { message: 'object payload', role: 'agent' } },
+      { from_run_id: 'rt-string', message_id: 'msg-string', payload: JSON.stringify({ message: 'string payload', role: 'reviewer' }) },
+      { from_run_id: 'rt-null', message_id: 'msg-null', payload: null },
+      { from_run_id: 'rt-bare', message_id: 'msg-bare', payload: { kind: 'status' } },
+      { from_run_id: 'rt-malformed', message_id: 'msg-malformed', payload: 'not json' },
+    ]
+
+    expect(await brokerReceiveTool({ supervisorId: socketPath, generation: 'gen-1' })).toEqual({
+      asks: [
+        { from_run_id: 'rt-object', message_id: 'msg-object', message: 'object payload', role: 'agent' },
+        { from_run_id: 'rt-string', message_id: 'msg-string', message: 'string payload', role: 'reviewer' },
+        { from_run_id: 'rt-null', message_id: 'msg-null', message: '', role: undefined },
+        { from_run_id: 'rt-bare', message_id: 'msg-bare', message: '', role: undefined },
+        { from_run_id: 'rt-malformed', message_id: 'msg-malformed', message: '', role: undefined },
+      ],
+      generation: 'gen-1',
+    })
   })
 
   it('requires the published record for an owner attach', async () => {

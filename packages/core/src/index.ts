@@ -61,10 +61,9 @@ export type { ThinkingOutcome } from './thinking-policy.js'
 export { statusTool } from './tools/status.js'
 export type { StatusResult, StatusListResult, StatusToolArgs, StatusView } from './tools/status.js'
 export { resultTool } from './tools/result.js'
-// Temporary until 356-17: the retired tools stay exported until the last
-// surface using them moves to the merged message tool: the OpenCode plugin
-// until slice 14, then MCP until slice 15. Both still resume through
-// followUpTool and report failures through formatAskFailure.
+// Temporary until 356-17: the retired tools stay exported until the OpenCode
+// plugin (slice 14) and MCP (slice 15) move to the merged message tool. Both
+// still resume through followUpTool; askTool keeps its own formatAskFailure.
 export { followUpTool } from './tools/follow-up.js'
 export type { FollowUpToolArgs, FollowUpToolResult } from './tools/follow-up.js'
 export { askTool } from './tools/ask.js'

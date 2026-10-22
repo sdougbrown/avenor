@@ -4,6 +4,8 @@ export interface BrokerReceiveArgs {
   supervisorId?: string
   /** The generation this poll is bound to; absent asks the tool to preflight once. */
   generation?: string
+  /** Bound on the receive wait; the caller owns it, so the tool adds no default. */
+  timeout_ms?: number
 }
 
 export interface InboundAsk {
@@ -29,10 +31,20 @@ async function executeBrokerReceive(
     if (!generation) {
       generation = (await client.messagePreflight()).generation
     }
-    const received = await client.messageReceive({ generation })
+    const received = await client.messageReceive({ generation, timeout_ms: args.timeout_ms })
     const asks = received.messages.map(message => {
-      const payload = message.payload !== null && typeof message.payload === 'object'
-        ? message.payload as Record<string, unknown>
+      // The wire may carry the payload as a JSON string; a payload that does not
+      // parse is treated as absent rather than as a message body.
+      let raw = message.payload
+      if (typeof raw === 'string') {
+        try {
+          raw = JSON.parse(raw)
+        } catch {
+          raw = undefined
+        }
+      }
+      const payload = raw !== null && typeof raw === 'object'
+        ? raw as Record<string, unknown>
         : undefined
       return {
         from_run_id: message.from_run_id,
