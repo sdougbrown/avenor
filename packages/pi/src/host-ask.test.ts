@@ -69,15 +69,15 @@ describe('host inbound ask delivery', () => {
   })
 
   it('binds the generation the first receive reports', async () => {
-    const brokerReceiveTool = mock(async (args: { generation?: string }) => ({
+    const brokerReceiveTool = mock(async (args: { generation?: string, timeout_ms?: number }) => ({
       asks: [],
       generation: args.generation ?? 'gen-1',
     }))
     const harness = await startHostExtension(brokerReceiveTool)
     try {
       await waitFor(() => brokerReceiveTool.mock.calls.length >= 2)
-      expect(brokerReceiveTool.mock.calls[0][0]).toEqual({})
-      expect(brokerReceiveTool.mock.calls[1][0]).toEqual({ generation: 'gen-1' })
+      expect(brokerReceiveTool.mock.calls[0][0]).toEqual({ timeout_ms: 5 })
+      expect(brokerReceiveTool.mock.calls[1][0]).toEqual({ generation: 'gen-1', timeout_ms: 5 })
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
     }
@@ -245,6 +245,59 @@ describe('host inbound ask delivery', () => {
       })
       expect(afterRestart.details.outcome).toBe('edge-absent')
       expect(replySpy).toHaveBeenCalledTimes(1)
+    } finally {
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('keeps a claimed ask restorable when another supervisor is disposed', async () => {
+    const brokerReceiveTool = drainOnce([
+      { message_id: 'ask-kept', from_run_id: 'rt_child', message: 'keep my claim', role: 'agent' },
+    ])
+    const send = deferred<{ outcome: string }>()
+    let sends = 0
+    const replySpy = mock((_args: Record<string, unknown>) => {
+      sends++
+      return sends === 1 ? send.promise : Promise.resolve({ outcome: 'replied' })
+    })
+    // hostProviderFor serves a provider per supervisor, so each key has its own claim map.
+    const harness = await startExtensionHarness({
+      deps: {
+        brokerReceiveTool,
+        messageTool: realMessageTool,
+        hostProviderFor: mock(async (supervisorId: string | undefined) => makeMessageProvider({
+          reply: async (inboundAskId: string, message: string, askerRunId: string) => {
+            await replySpy({ supervisorId, askerRunId, inboundAskId, message })
+            return { outcome: 'replied', messageId: inboundAskId }
+          },
+        })),
+      },
+      extOptions: { subAgentEnv: null, pollIntervalMs: 10 },
+    })
+    try {
+      await waitFor(() => harness.sendUserMessage.mock.calls.length === 1)
+      const inflight = harness.registeredTools.avenor_message.execute('t1', {
+        action: 'reply',
+        reply_to: 'ask-kept',
+        message: 'first try',
+      })
+      await waitFor(() => replySpy.mock.calls.length === 1)
+      await harness.registeredTools.avenor_shutdown.execute('t2', { supervisor_id: 'sup-b' })
+      send.reject(new Error('send failed'))
+      await expect(inflight).rejects.toThrow('send failed')
+
+      const retried = await harness.registeredTools.avenor_message.execute('t3', {
+        action: 'reply',
+        reply_to: 'ask-kept',
+        message: 'retry',
+      })
+      expect(retried.details.outcome).toBe('replied')
+      expect(replySpy).toHaveBeenCalledTimes(2)
+      expect(replySpy.mock.calls[1][0]).toMatchObject({
+        askerRunId: 'rt_child',
+        inboundAskId: 'ask-kept',
+        message: 'retry',
+      })
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
     }

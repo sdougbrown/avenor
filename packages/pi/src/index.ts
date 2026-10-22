@@ -610,12 +610,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const generation = hostPollGeneration
       const intervalMs = options.pollIntervalMs ?? 2000
       // Recursive setTimeout (not setInterval): a slow receive must not overlap
-      // the next tick and surface asks out of order.
+      // the next tick and surface asks out of order. The receive itself is
+      // bounded by the interval, and the elapsed wait is subtracted from the
+      // next delay so the cadence stays the same.
       const tick = async (): Promise<void> => {
+        const startedAt = Date.now()
         try {
           const receive = () => hostReceiveGeneration
-            ? deps.brokerReceiveTool({ generation: hostReceiveGeneration })
-            : deps.brokerReceiveTool({})
+            ? deps.brokerReceiveTool({ generation: hostReceiveGeneration, timeout_ms: intervalMs })
+            : deps.brokerReceiveTool({ timeout_ms: intervalMs })
           let received
           try {
             received = await receive()
@@ -641,7 +644,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // No supervisor/broker yet — this is expected until a supervisor starts a broker.
         }
         if (generation !== hostPollGeneration) return
-        hostPollTimer = setTimeout(() => void tick(), intervalMs)
+        hostPollTimer = setTimeout(() => void tick(), Math.max(0, intervalMs - (Date.now() - startedAt)))
         hostPollTimer.unref?.()
       }
       hostPollTimer = setTimeout(() => void tick(), intervalMs)
@@ -1248,7 +1251,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       client: Client | null
       isSingleton: boolean
     }>()
-    const hostAskClaims: AskClaims = new Map()
+    // One reply-claim map per binding: an ask claimed through one supervisor
+    // stays restorable while another supervisor is disposed.
+    const hostAskClaims = new Map<string, AskClaims>()
 
     // Drop one cached binding before its supervisor stops answering, so the
     // next call redials and preflights instead of reusing a closed socket. The
@@ -1261,7 +1266,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const binding = hostProviders.get(key)
       hostProviders.delete(key)
       // A disposed provider's claims belong to a dead session.
-      hostAskClaims.clear()
+      hostAskClaims.delete(key)
       if (!binding || binding.isSingleton || !binding.client) return
       try {
         binding.client.close()
@@ -1336,7 +1341,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const provider = await hostProviderFor(supervisorId)
       // Install once per provider: the claim/restore pair is core's, and the
       // generation scope is this poll's, so a restart cannot resurrect an ask.
-      if (!provider.claimAsk) installAskClaims(provider, hostAskClaims, hostPendingAsks, () => hostPollGeneration)
+      if (!provider.claimAsk) {
+        const key = supervisorId ?? ''
+        let claims = hostAskClaims.get(key)
+        if (!claims) {
+          claims = new Map()
+          hostAskClaims.set(key, claims)
+        }
+        installAskClaims(provider, claims, hostPendingAsks, () => hostPollGeneration)
+      }
       // Resume tracking belongs to this extension, not to the provider, so an
       // injected provider gets the same status + poll + tracked-run behaviour.
       if (!provider.onResumed) provider.onResumed = result => trackResumed(supervisorId, result)
@@ -1859,7 +1872,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       name: 'avenor_message',
       label: 'Avenor Message',
       description:
-        'Send a message to another agent run, answer an inbound ask, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn.',
+        'Send a message to another agent run, answer an inbound ask, withdraw a pending ask, or resume a completed run. Every action is explicit and the result states whether a failed ask can still be withdrawn. `control_reply` is available only on the claude-channel surface.',
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal('tell'),
