@@ -312,6 +312,29 @@ func TestAvenorStatusWaitValidationAndLifecycleTimeout(t *testing.T) {
 	}
 }
 
+func TestAvenorStatusWaitTurnComplete(t *testing.T) {
+	s, fake := newWaitTestServer(t, []map[string]any{
+		{"status": "running", "phase": "working"},
+		{"status": "done", "phase": "done"},
+	})
+	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{
+		RunID: "run-1", View: "lifecycle", WaitFor: "turn_complete", Timeout: "5s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := statusOutputMap(t, result)
+	if status["status"] != "done" {
+		t.Fatalf("status = %#v, want done", status)
+	}
+	if status["timed_out"] == true {
+		t.Fatalf("status = %#v, want no timeout", status)
+	}
+	if len(fake.statusCapturedRuntimeIDs) < 2 {
+		t.Fatalf("status calls = %d, want at least 2 polls", len(fake.statusCapturedRuntimeIDs))
+	}
+}
+
 func TestAvenorResultPermissionInterruptWhileRunning(t *testing.T) {
 	fake := &fakeClient{statusResult: map[string]any{
 		"runtime_id":         "rt-permission",
