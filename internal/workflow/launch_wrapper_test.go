@@ -449,6 +449,8 @@ func TestResolveNodeLaunchWrapper(t *testing.T) {
 		{"empty literal value", []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: "/usr/local/bin/claude"}, {Type: LaunchWrapperArgKindLiteral}}},
 		{"NUL in a literal value", []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: "/usr/local/bin/claude"}, {Type: LaunchWrapperArgKindLiteral, Value: "a\x00b"}}},
 		{"non-literal executable", []LaunchWrapperArg{{Type: LaunchWrapperArgKind("env"), Value: "/usr/local/bin/claude"}}},
+		{"empty argv", nil},
+		{"relative executable", []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: "bin/wrapper"}}},
 	}
 	for _, tc := range unvalidated {
 		t.Run(tc.name, func(t *testing.T) {
