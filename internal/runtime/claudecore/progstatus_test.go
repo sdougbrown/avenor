@@ -165,6 +165,35 @@ func TestWaitForProgStatusReady(t *testing.T) {
 	}
 }
 
+func TestWaitForProgStatusReadyFollowUpPrompt(t *testing.T) {
+	cases := []struct {
+		name    string
+		reports []terminal.ProgState
+		want    string
+		maxWait time.Duration
+	}{
+		{"root done after a completed turn", []terminal.ProgState{terminal.ProgIdle, terminal.ProgWorking, terminal.ProgDone}, ReadySignalProgStatus, 100 * time.Millisecond},
+		{"root cleared after exit", []terminal.ProgState{terminal.ProgIdle, terminal.ProgWorking, terminal.ProgDone, terminal.ProgClear}, ReadySignalPane, 400 * time.Millisecond},
+		{"root working mid-turn", []terminal.ProgState{terminal.ProgIdle, terminal.ProgWorking}, ReadySignalPane, 400 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, term, _ := newAttachedSession(t, true, true, readyPane)
+			for _, st := range tc.reports {
+				term.ReportProgStatus(rootReport(st, ""))
+			}
+			start := time.Now()
+			got := s.WaitForProgStatusReady(context.Background())
+			if got != tc.want {
+				t.Fatalf("ready signal = %q, want %q", got, tc.want)
+			}
+			if el := time.Since(start); el > tc.maxWait {
+				t.Fatalf("readiness took %v, want <= %v", el, tc.maxWait)
+			}
+		})
+	}
+}
+
 func TestProgStatusStartupIdleIsNeitherCompletionNorCancel(t *testing.T) {
 	s, _, _ := newProgStatusSession(t)
 	if s.ProgStatusInterrupted() {

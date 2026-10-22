@@ -106,10 +106,10 @@ func (s *Session) ProgStatusChanged() <-chan struct{} {
 }
 
 // WaitForProgStatusReady runs after WaitForPaneReady. When the terminal answers
-// detection queries it waits for Claude's startup idle report, since the input
-// box paints before Claude can take a prompt. It gives up and trusts the pane
-// when no query arrives within progQueryWindow, or no idle within
-// progIdleGrace. It returns the ready_signal value.
+// detection queries it waits for the root to report idle (startup) or done
+// (between turns), since the input box paints before Claude can take a prompt.
+// It gives up and trusts the pane when no query arrives within progQueryWindow,
+// or no such report within progIdleGrace. It returns the ready_signal value.
 func (s *Session) WaitForProgStatusReady(ctx context.Context) string {
 	ps := s.progStatus
 	if ps == nil || !ps.ProgStatusAnswering() {
@@ -119,7 +119,7 @@ func (s *Session) WaitForProgStatusReady(ctx context.Context) string {
 	ticker := time.NewTicker(progReadyPoll)
 	defer ticker.Stop()
 	for {
-		if root, ok := ps.ProgStatusRoot(); ok && root.State == terminal.ProgIdle && ps.ProgStatusAnswered() {
+		if root, ok := ps.ProgStatusRoot(); ok && (root.State == terminal.ProgIdle || root.State == terminal.ProgDone) && ps.ProgStatusAnswered() {
 			return ReadySignalProgStatus
 		}
 		waited := time.Since(paneReady)
