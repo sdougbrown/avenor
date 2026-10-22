@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -243,6 +244,81 @@ func TestSessionScanTranscriptTickEmitsIncrementalContent(t *testing.T) {
 	}
 }
 
+// stubEndTurnSettle replaces the end_turn settle wait with during, run in
+// place of the wait.
+func stubEndTurnSettle(t *testing.T, during func()) {
+	t.Helper()
+	saved := endTurnSettleWait
+	endTurnSettleWait = func(context.Context) bool {
+		during()
+		return true
+	}
+	t.Cleanup(func() { endTurnSettleWait = saved })
+}
+
+func appendFile(t *testing.T, path, text string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const (
+	splitThinking = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"}],"stop_reason":"end_turn"}}` + "\n"
+	splitText     = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn"}}` + "\n"
+)
+
+func TestScanTranscriptTickWaitsForSplitEndTurnText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(splitThinking), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess := NewSession(context.Background(), SessionOptions{SessionID: "ses_1", Transcript: NewTranscriptReader(path), EventsBuf: 16})
+	sess.Prompted = true
+	stubEndTurnSettle(t, func() { appendFile(t, path, splitText) })
+
+	sess.ScanTranscriptTick()
+	sess.ScanTranscriptTick()
+
+	var names []string
+	for _, ev := range drainSessionEvents(sess.Events) {
+		names = append(names, ev.Event)
+	}
+	want := "agent.thought_chunk,agent.message_chunk,session.end"
+	if got := strings.Join(names, ","); got != want {
+		t.Fatalf("events = %s, want %s", got, want)
+	}
+}
+
+func TestScanTranscriptTickCancelDuringSettleEmitsNothingMore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(splitThinking), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sess := NewSession(context.Background(), SessionOptions{SessionID: "ses_1", Transcript: NewTranscriptReader(path), EventsBuf: 16})
+	sess.Prompted = true
+	// A cancel finishes the session while the end_turn settles.
+	stubEndTurnSettle(t, func() {
+		appendFile(t, path, splitText)
+		sess.MarkFinished()
+	})
+
+	sess.ScanTranscriptTick()
+
+	var names []string
+	for _, ev := range drainSessionEvents(sess.Events) {
+		names = append(names, ev.Event)
+	}
+	if got := strings.Join(names, ","); got != "agent.thought_chunk" {
+		t.Fatalf("events = %s, want only the chunk read before the cancel", got)
+	}
+}
+
 func drainSessionEvents(ch <-chan events.Event) []events.Event {
 	var out []events.Event
 	for {
@@ -252,5 +328,36 @@ func drainSessionEvents(ch <-chan events.Event) []events.Event {
 		default:
 			return out
 		}
+	}
+}
+
+func TestTranscriptPathResolvesSymlinkedDir(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	want := TranscriptPath("/home/u", real, "sid")
+	if got := TranscriptPath("/home/u", link, "sid"); got != want {
+		t.Fatalf("symlinked dir: got %q, want %q", got, want)
+	}
+	if !strings.Contains(want, encodeProjectPath(real)) {
+		t.Fatalf("path %q does not use the resolved dir", want)
+	}
+}
+
+func TestTranscriptPathMissingDirUsedAsGiven(t *testing.T) {
+	got := TranscriptPath("/home/u", "/no/such/dir", "sid")
+	want := filepath.Join("/home/u", ".claude", "projects", "-no-such-dir", "sid.jsonl")
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

@@ -14,14 +14,16 @@ const (
 )
 
 // Trust-safety dialog Claude shows on first launch in an unfamiliar directory.
-// We require both the header and the highlighted option to be present, so a
-// stray match on either string in unrelated TUI content doesn't trigger the
-// auto-dismiss. The default-highlighted option is "Yes, I trust this folder",
-// so a single Enter dismisses it — avenor is invoked against a directory the
-// user chose.
+// We require both the header and the trust option to be present, so a stray
+// match on either string in unrelated TUI content doesn't trigger the
+// auto-dismiss. Claude Code 2.1.303 highlights "No, exit" by default, so one
+// Down moves the selection to "Yes, I trust this folder" before Enter
+// confirms it; older releases highlight the trust option and take Enter
+// alone. avenor is invoked against a directory the user chose.
 const (
 	trustDialogHeader = "Quick safety check"
 	trustDialogOption = "Yes, I trust this folder"
+	trustDialogExit   = "No, exit"
 )
 
 // paneReadyMarkers are strings that appear once the input box accepts input.
@@ -74,6 +76,9 @@ func WaitForPaneReady(ctx context.Context, term terminal.Session) bool {
 	ticker := time.NewTicker(PromptInjectCheckInterval)
 	defer ticker.Stop()
 
+	// downBase is the capture a Down was sent on, for the dialog currently on
+	// screen; empty when no Down has been sent for it.
+	var downBase string
 	for {
 		select {
 		case <-ctx.Done():
@@ -87,19 +92,82 @@ func WaitForPaneReady(ctx context.Context, term terminal.Session) bool {
 		if err != nil {
 			return false
 		}
-		if strings.Contains(out, trustDialogHeader) && strings.Contains(out, trustDialogOption) {
-			if err := term.SendKeys(ctx, terminal.KeyEnter); err != nil {
-				return false
+		norm := normalizePane(out)
+		if !strings.Contains(norm, trustDialogHeader) || !strings.Contains(norm, trustDialogOption) {
+			downBase = ""
+			if paneIsReady(out) {
+				return true
 			}
 			continue
 		}
-		for _, marker := range paneReadyMarkers {
-			if strings.Contains(out, marker) {
-				return true
+		if key, ok := trustDialogKey(norm, downBase); ok {
+			if err := term.SendKeys(ctx, key); err != nil {
+				return false
+			}
+			if key == terminal.KeyDown {
+				downBase = norm
 			}
 		}
-		if paneHasInputBox(out) {
+	}
+}
+
+// trustDialogKey picks the key for a trust dialog capture, or ok=false to send
+// nothing. downBase is the capture the dialog's one Down was sent on, or empty.
+//
+// A dialog gets at most one Down: with two options a second one wraps the
+// selection back to "No, exit". After the Down nothing is sent until the
+// screen changes, since the capture it was based on can still be on screen;
+// then Enter once a `❯` line shows the trust option. The repainted frame may
+// keep the old marker, so any marked line counts there. Before a Down, Enter
+// only when the trust option is marked and "No, exit" is not.
+func trustDialogKey(norm, downBase string) (key terminal.Key, ok bool) {
+	if downBase != "" {
+		if norm == downBase || !trustOptionHighlighted(norm) {
+			return "", false
+		}
+		return terminal.KeyEnter, true
+	}
+	if trustOptionHighlighted(norm) && !markedLineContains(norm, trustDialogExit) {
+		return terminal.KeyEnter, true
+	}
+	return terminal.KeyDown, true
+}
+
+// trustOptionHighlighted reports whether a `❯`-marked line of the trust dialog
+// is the trust option. The text must already be normalised. Any marked line
+// counts, not just the first: the PTY screen emulator can keep the previous
+// frame's marker on screen after Claude repaints the dialog with the selection
+// moved, and the repainted marker can follow a stray rule character.
+func trustOptionHighlighted(out string) bool {
+	return markedLineContains(out, trustDialogOption)
+}
+
+// markedLineContains reports whether text follows a `❯` on any line of out.
+func markedLineContains(out, text string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		_, after, found := strings.Cut(line, "❯")
+		if found && strings.Contains(after, text) {
 			return true
 		}
 	}
+	return false
+}
+
+// paneIsReady reports whether the captured pane shows an input box that takes
+// input.
+func paneIsReady(out string) bool {
+	out = normalizePane(out)
+	for _, marker := range paneReadyMarkers {
+		if strings.Contains(out, marker) {
+			return true
+		}
+	}
+	return paneHasInputBox(out)
+}
+
+// normalizePane maps non-breaking spaces to ASCII spaces. Claude Code 2.1.303
+// draws the input placeholder as `❯` + U+00A0 + `Try "..."`; literal-space
+// matching and Go's ASCII-only `\s` would otherwise miss it.
+func normalizePane(out string) string {
+	return strings.ReplaceAll(out, "\u00a0", " ")
 }

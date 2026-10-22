@@ -24,12 +24,23 @@ import (
 // whenever avenor is launched from inside Claude Code, which is how the avenor
 // MCP plugin runs it.
 //
-// The other two carry the parent's identity rather than changing behaviour. They
-// are dropped so a hosted session cannot be mistaken for its launcher.
+// The rest carry the parent's identity or channels rather than changing
+// behaviour. CLAUDECODE, CLAUDE_CODE_SESSION_ATTENDED and CLAUDE_EFFORT are
+// injected by Claude Code into its child processes and describe the parent.
+// CLAUDE_CODE_MESSAGING_SOCKET and CLAUDE_CODE_MESSAGING_TOKEN point at the
+// parent's messaging channel, and the token is a secret. They are dropped so a
+// hosted session cannot be mistaken for its launcher or reach its channel.
+// User-set configuration (CLAUDE_CONFIG_DIR, CLAUDE_CODE_USE_*, ANTHROPIC_*) is
+// not listed and passes through.
 var parentClaudeSessionEnv = []string{
 	"CLAUDE_CODE_CHILD_SESSION",
 	"CLAUDE_CODE_SESSION_ID",
 	"CLAUDE_PID",
+	"CLAUDECODE",
+	"CLAUDE_CODE_SESSION_ATTENDED",
+	"CLAUDE_EFFORT",
+	"CLAUDE_CODE_MESSAGING_SOCKET",
+	"CLAUDE_CODE_MESSAGING_TOKEN",
 }
 
 // ScrubParentClaudeEnv returns env without the parent's Claude Code session

@@ -1,6 +1,12 @@
 package claudecore
 
-import "testing"
+import (
+	"context"
+	"reflect"
+	"testing"
+
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
+)
 
 const testRule = "────────────────────────────────────────"
 
@@ -60,6 +66,101 @@ func TestPaneHasInputBoxRejectsPanesThatAreNotTakingInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if paneHasInputBox(tc.pane) {
 				t.Fatalf("pane reported ready but is not taking input:\n%s", tc.pane)
+			}
+		})
+	}
+}
+
+// nbspPane is a pane captured from Claude Code 2.1.303: the empty input box
+// holds the placeholder `❯` + U+00A0 + `Try "..."`.
+const nbspPane = " ▐▛███▛█   Claude Code v2.1.303\n" +
+	"▝▜██████▀  Haiku 5.5 · Claude Team\n" +
+	" ▝▝   ▝▝   /private/tmp\n\n" +
+	testRule + "\n" +
+	"❯ Try \"fix lint errors\"\n" +
+	testRule + "\n" +
+	"  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+
+func TestPaneIsReadyAcceptsNBSPPlaceholder(t *testing.T) {
+	if !paneIsReady(nbspPane) {
+		t.Fatalf("Claude Code 2.1.303 pane with NBSP placeholder not recognised:\n%s", nbspPane)
+	}
+}
+
+func TestPaneIsReadyRejectsNBSPDialogAndEcho(t *testing.T) {
+	for name, pane := range map[string]string{
+		"selection dialog": "Quick safety check\n" + testRule + "\n❯ 1. Yes, I trust this folder\n  2. No\n" + testRule + "\n",
+		"echoed prompt":    testRule + "\n❯ do the thing\n✻ Cogitating for 3s\n" + testRule + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if paneIsReady(pane) {
+				t.Fatalf("pane reported ready but is not taking input:\n%s", pane)
+			}
+		})
+	}
+}
+
+func TestParseTerminalPermissionHandlesNBSPChevron(t *testing.T) {
+	pane := "Do you want to proceed?\n❯ 1. Yes\n  2. No\n"
+	perm := ParseTerminalPermission(pane)
+	if perm == nil || len(perm.Options) != 2 {
+		t.Fatalf("NBSP-chevron option not parsed: %+v", perm)
+	}
+}
+
+func TestWaitForPaneReadySelectsTrustOptionBeforeConfirming(t *testing.T) {
+	dialog := func(marker string) string {
+		lines := []string{"No, exit", "Yes, I trust this folder"}
+		out := " Quick safety check: Is this a project you created or one you trust?\n\n"
+		for _, l := range lines {
+			if l == marker {
+				out += " ❯ " + l + "\n"
+			} else {
+				out += "   " + l + "\n"
+			}
+		}
+		return out + " Enter to confirm · Esc to cancel\n"
+	}
+	term := terminal.NewFakeSessionQueue("trust", 1, []string{
+		dialog("No, exit"),
+		dialog("Yes, I trust this folder"),
+		readyPane,
+	})
+	if !WaitForPaneReady(context.Background(), term) {
+		t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+	}
+	want := [][]string{{string(terminal.KeyDown)}, {string(terminal.KeyEnter)}}
+	if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("SendCalls = %v, want %v", got, want)
+	}
+}
+
+func TestWaitForPaneReadyConfirmsTrustWhenStaleMarkerRemains(t *testing.T) {
+	header := " Quick safety check: Is this a project you created or one you trust?\n"
+	onExit := header + " ❯ No, exit\n   Yes, I trust this folder\n"
+	onTrust := header + "   No, exit\n ❯ Yes, I trust this folder\n"
+	// The repainted frame after a Down, with the old marker still on screen.
+	stale := header +
+		"   No, exit\n" +
+		"─❯─Yes, I trust this folder──────\n" +
+		" ❯ No, exit\n" +
+		"   Yes, I trust this folder\n"
+	cases := map[string][]string{
+		// The unchanged capture after the Down gets no second Down.
+		"stale marker after the Down": {onExit, onExit, stale, readyPane},
+		// Without a Down, a stale trust marker beside a marked "No, exit"
+		// is not taken as the selection.
+		"stale marker before any Down": {stale, stale, onTrust, readyPane},
+	}
+	for name, captures := range cases {
+		t.Run(name, func(t *testing.T) {
+			term := terminal.NewFakeSessionQueue("trust", 1, captures)
+			if !WaitForPaneReady(context.Background(), term) {
+				t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+			}
+			want := [][]string{{string(terminal.KeyDown)}, {string(terminal.KeyEnter)}}
+			if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("SendCalls = %v, want %v", got, want)
 			}
 		})
 	}

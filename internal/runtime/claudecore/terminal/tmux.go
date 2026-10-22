@@ -86,15 +86,29 @@ func (s *TmuxSession) Capture(ctx context.Context) (string, error) {
 	return string(out), nil
 }
 
+// PasteAndEnter pastes the sanitised text as a bracketed paste, then sends
+// Enter. The buffer carries its own markers. paste-buffer -p adds them only
+// once the pane has enabled bracketed paste, and an unframed multi-line prompt
+// is submitted line by line. See bracketedPaste.
+//
+// tmux 3.7 and later pass a pasted buffer through vis(3), which turns the
+// markers into literal text; -S pastes the bytes unchanged. Older tmux has no
+// -S and pastes bytes unchanged. When tmux rejects the flag, the paste is
+// retried without it.
 func (s *TmuxSession) PasteAndEnter(ctx context.Context, text string) error {
 	bufferName := "avenor-prompt-" + s.name
 	cmd := exec.CommandContext(ctx, "tmux", "load-buffer", "-b", bufferName, "-")
-	cmd.Stdin = strings.NewReader(text)
+	cmd.Stdin = bytes.NewReader(bracketedPaste(text))
 	if err := cmd.Run(); err != nil {
 		return err
 	}
-	if err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-t", s.name, "-b", bufferName).Run(); err != nil {
-		return err
+	if out, err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-S", "-t", s.name, "-b", bufferName).CombinedOutput(); err != nil {
+		if !strings.Contains(string(out), "unknown flag") && !strings.Contains(string(out), "usage:") {
+			return fmt.Errorf("tmux paste-buffer: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		if err := exec.CommandContext(ctx, "tmux", "paste-buffer", "-t", s.name, "-b", bufferName).Run(); err != nil {
+			return err
+		}
 	}
 	return exec.CommandContext(ctx, "tmux", "send-keys", "-t", s.name, string(KeyEnter)).Run()
 }

@@ -21,6 +21,10 @@ import (
 // PTYLauncher implements Launcher by spawning processes with a PTY.
 type PTYLauncher struct {
 	Env []string // environment to set; defaults to TERM/COLORTERM/FORCE_COLOR
+	// AnswerProgStatus answers the hosted program's OSC 7501 detection query,
+	// which is what turns its status reports on. Reports are observed either
+	// way; device-attribute queries are never answered.
+	AnswerProgStatus bool
 }
 
 func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
@@ -57,16 +61,27 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
-
-	ps := &PTYSession{
-		name:     opts.Name,
-		cmd:      cmd,
-		ptmx:     ptmx,
-		terminal: vt10x.New(vt10x.WithSize(opts.Cols, opts.Rows)),
-		alive:    true,
-		waitDone: make(chan struct{}),
+	if ptmx, err = pollableMaster(ptmx); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("pty start: %w", err)
 	}
 
+	ps := &PTYSession{
+		name:       opts.Name,
+		cmd:        cmd,
+		ptmx:       ptmx,
+		terminal:   vt10x.New(vt10x.WithSize(opts.Cols, opts.Rows)),
+		alive:      true,
+		waitDone:   make(chan struct{}),
+		answer:     l.AnswerProgStatus,
+		writes:     make(chan ptyWrite),
+		replies:    make(chan []byte, ptyReplyQueue),
+		closed:     make(chan struct{}),
+		writerDone: make(chan struct{}),
+	}
+
+	go ps.writeLoop(ptmx)
 	go ps.readLoop()
 	// Reap natural exits even if a caller only observes Alive. Wait still joins
 	// this single reaper synchronously.
@@ -87,7 +102,35 @@ type PTYSession struct {
 	waitOnce sync.Once
 	waitDone chan struct{}
 	waitErr  error
+
+	progStatusLog
+	answer bool
+
+	// writeLoop owns every ptmx write. Callers hand it requests on writes; the
+	// reader hands it detection replies on replies without ever waiting.
+	writes     chan ptyWrite
+	replies    chan []byte
+	closed     chan struct{}
+	closeOnce  sync.Once
+	writerDone chan struct{}
 }
+
+// ptyWrite is one caller's ordered writes. The writer performs them back to
+// back, so nothing else reaches the program between them.
+type ptyWrite struct {
+	ctx    context.Context
+	chunks [][]byte
+	done   chan error
+}
+
+// ptyReplyQueue bounds detection replies waiting for the writer; a query that
+// arrives while the queue is full goes unanswered.
+const ptyReplyQueue = 4
+
+// progStatusReply answers an OSC 7501 detection query.
+const progStatusReply = "\x1b]7501;?\x1b\\"
+
+var errPTYClosed = errors.New("pty closed")
 
 func (p *PTYSession) Kind() string { return "pty" }
 
@@ -106,15 +149,11 @@ func (p *PTYSession) Capture(_ context.Context) (string, error) {
 	return p.terminal.String(), nil
 }
 
-func (p *PTYSession) PasteAndEnter(_ context.Context, text string) error {
-	p.mu.Lock()
-	ptmx := p.ptmx
-	p.mu.Unlock()
-	if ptmx == nil {
-		return fmt.Errorf("pty closed")
-	}
-	_, err := ptmx.Write([]byte(text + "\r"))
-	return err
+// PasteAndEnter writes the prompt as a bracketed paste, then Enter. Text and
+// Enter go out as separate writes: an Enter in the same burst as a long prompt
+// is read as part of a paste and dropped, so the prompt never submits.
+func (p *PTYSession) PasteAndEnter(ctx context.Context, text string) error {
+	return p.submit(ctx, bracketedPaste(text), []byte{'\r'})
 }
 
 func encodeKeys(keys []Key) ([]byte, error) {
@@ -125,6 +164,8 @@ func encodeKeys(keys []Key) ([]byte, error) {
 			buf = append(buf, '\r')
 		case KeyEsc:
 			buf = append(buf, '\x1b')
+		case KeyDown:
+			buf = append(buf, "\x1b[B"...)
 		default:
 			if len(k) == 1 && k[0] >= 0x20 && k[0] <= 0x7e {
 				buf = append(buf, k[0])
@@ -136,19 +177,111 @@ func encodeKeys(keys []Key) ([]byte, error) {
 	return buf, nil
 }
 
-func (p *PTYSession) SendKeys(_ context.Context, keys ...Key) error {
+func (p *PTYSession) SendKeys(ctx context.Context, keys ...Key) error {
 	encoded, err := encodeKeys(keys)
 	if err != nil {
 		return err
 	}
-	p.mu.Lock()
-	ptmx := p.ptmx
-	p.mu.Unlock()
-	if ptmx == nil {
-		return fmt.Errorf("pty closed")
+	return p.submit(ctx, encoded)
+}
+
+// submit hands chunks to the writer and waits for the result. A caller whose
+// ctx ends gets ctx.Err(); a chunk already being written still completes, and
+// the request's later chunks are skipped.
+func (p *PTYSession) submit(ctx context.Context, chunks ...[]byte) error {
+	select {
+	case <-p.closed:
+		return errPTYClosed
+	default:
 	}
-	_, err = ptmx.Write(encoded)
-	return err
+	w := ptyWrite{ctx: ctx, chunks: chunks, done: make(chan error, 1)}
+	select {
+	case p.writes <- w:
+	case <-p.closed:
+		return errPTYClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-w.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.closed:
+		select {
+		case err := <-w.done:
+			return err
+		default:
+			return errPTYClosed
+		}
+	}
+}
+
+func (p *PTYSession) writeLoop(ptmx *os.File) {
+	defer close(p.writerDone)
+	for {
+		// A reply waiting alongside a request goes first; either way it is
+		// written between requests, never inside one.
+		select {
+		case b := <-p.replies:
+			p.writeReply(ptmx, b)
+			continue
+		default:
+		}
+		select {
+		case <-p.closed:
+			return
+		case b := <-p.replies:
+			p.writeReply(ptmx, b)
+		case w := <-p.writes:
+			select {
+			case <-p.closed:
+				w.done <- errPTYClosed
+			default:
+				w.done <- writeChunks(w.ctx, ptmx, w.chunks)
+			}
+		}
+	}
+}
+
+func writeChunks(ctx context.Context, ptmx *os.File, chunks [][]byte) error {
+	for _, c := range chunks {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := ptmx.Write(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *PTYSession) writeReply(ptmx *os.File, b []byte) {
+	_, _ = ptmx.Write(b)
+}
+
+// ProgStatusAnswering reports whether this session answers OSC 7501
+// detection queries.
+func (p *PTYSession) ProgStatusAnswering() bool { return p.answer }
+
+// answerQuery queues a detection reply. It runs on the reader and must not
+// block: a writer stuck on a program that stopped reading input would
+// otherwise stop the reader draining that program's output. The query counts
+// as answered once the reply is queued, on the reader, so the mark precedes
+// every report the program sends in response.
+func (p *PTYSession) answerQuery() {
+	if !p.answer {
+		return
+	}
+	select {
+	case p.replies <- []byte(progStatusReply):
+		p.psMarkAnswered()
+	default:
+	}
+}
+
+func (p *PTYSession) markClosed() {
+	p.closeOnce.Do(func() { close(p.closed) })
 }
 
 func (p *PTYSession) Alive(_ context.Context) bool {
@@ -170,16 +303,17 @@ func (p *PTYSession) Interrupt(_ context.Context) error {
 	}
 }
 
+// Kill rejects further writes and kills the process. The pty master stays
+// open until the reaper sees the exit: a killed process can block in exit
+// until its pending output is read, so the reader must keep draining. A master
+// write still blocked on the program's input fails when the child's side
+// closes or, at the latest, when the reaper closes the master.
 func (p *PTYSession) Kill(_ context.Context) error {
 	p.mu.Lock()
-	ptmx := p.ptmx
-	p.ptmx = nil
 	p.alive = false
 	p.mu.Unlock()
 
-	if ptmx != nil {
-		_ = ptmx.Close()
-	}
+	p.markClosed()
 	var err error
 	if p.cmd != nil && p.cmd.Process != nil {
 		err = p.cmd.Process.Kill()
@@ -221,6 +355,7 @@ func (p *PTYSession) startWait() {
 			ptmx := p.ptmx
 			p.ptmx = nil
 			p.mu.Unlock()
+			p.markClosed()
 			if ptmx != nil {
 				_ = ptmx.Close()
 			}
@@ -230,15 +365,25 @@ func (p *PTYSession) startWait() {
 }
 
 var _ InterruptSession = (*PTYSession)(nil)
+var _ ProgStatusSession = (*PTYSession)(nil)
 
+// readLoop renders output into the screen emulator and feeds the same bytes to
+// the OSC 7501 parser. The parser runs outside p.mu, and nothing it calls
+// waits on the writer.
 func (p *PTYSession) readLoop() {
 	defer func() {
 		p.mu.Lock()
 		p.alive = false
 		p.mu.Unlock()
+		p.psDropOnExit()
 	}()
-	// Snapshot ptmx under the lock — Kill() nils the field concurrently,
-	// and Read on the closed fd is the loop's exit signal.
+	parser := NewProgStatusParser(nil, ProgStatusHooks{
+		OnQuery:  p.answerQuery,
+		OnReport: p.psRecord,
+		OnReset:  p.psReset,
+	})
+	// Snapshot ptmx under the lock — the reaper nils the field concurrently,
+	// and Read failing once the process is gone is the loop's exit signal.
 	p.mu.Lock()
 	ptmx := p.ptmx
 	p.mu.Unlock()
@@ -252,6 +397,7 @@ func (p *PTYSession) readLoop() {
 			p.mu.Lock()
 			p.terminal.Write(buf[:n])
 			p.mu.Unlock()
+			parser.Feed(buf[:n])
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {

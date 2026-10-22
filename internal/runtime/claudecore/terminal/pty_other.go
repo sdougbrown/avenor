@@ -12,7 +12,8 @@ import (
 // package still compiles. The PTY adapter is only implemented for unix-like
 // systems where github.com/creack/pty and github.com/chubin/vt10x work.
 type PTYLauncher struct {
-	Env []string
+	Env              []string
+	AnswerProgStatus bool
 }
 
 func (PTYLauncher) Start(_ context.Context, _ StartOptions) (Session, error) {

@@ -142,6 +142,18 @@ AVENOR_CLAUDE_TERMINAL=tmux avenor --backend claude --prompt "say hi"
 
 `AVENOR_CLAUDE_TERMINAL` is shared with `claude-channel`, but the defaults differ: `claude` defaults to PTY, `claude-channel` defaults to tmux.
 
+### Status reports (OSC 7501)
+
+On the PTY launcher Avenor answers Claude Code's OSC 7501 (Program Status Protocol) detection query, so Claude reports its own state: `idle`, `working`, `blocked` (on a permission, question, or authentication), and `done`. Without the answer Claude reports nothing, and Avenor ignores any report that arrives before it answered. After the first report Avenor uses the reports alongside the pane and transcript:
+
+- **Readiness.** The prompt waits for the input box and for Claude's root `idle` (startup) or `done` (after a completed turn) report. If no detection query arrives within about 2s of the input box appearing, or neither report within about 3s, the input box alone decides. `agent.prompt_submitted` carries `ready_signal` (`osc7501` or `pane`).
+- **Status.** Each transition emits one `agent.status` with `signal=osc7501` (see [Events](events.md#claude-backend-events)); the 500ms pane heartbeat and the transcript `working` events stop. A `working` report also ends the Enter resend.
+- **Permissions.** A blocked-on-permission report brokers the dialog as soon as two consecutive screen reads show it fully painted, without waiting for the next pane scan. Each dialog is brokered once: after it is answered, the screen still shows it until Claude moves on, and it is not brokered again while Claude reports the same blocked state. A blocked report with a new message is a new dialog. The pending request survives a pane scan that shows the input box while Claude still reports blocked.
+- **Completion.** The transcript `end_turn` still ends the turn. While Claude reports the turn working, an `end_turn` (from a background subagent) is held until Claude reports `done`, `idle`, `clear` or `error`, the terminal resets, or reports are lost. A later `working` report before any `done` holds it again. A hold lasts at most 10 minutes.
+- **Cancel.** Claude reporting `idle` after the turn started working counts as a completed cancel, alongside the pane going idle.
+
+Reports are untrusted: they never approve anything, and report text is display-only. Set `AVENOR_CLAUDE_OSC7501=off` (or `0`, `false`) to leave the query unanswered; the session then behaves exactly as with scraping alone (`ready_signal=pane`, no `signal=osc7501` events). The tmux launcher and `claude-channel` never answer the query and keep scraping.
+
 ### Requirements
 
 - Claude Code installed and on `PATH`.
@@ -154,7 +166,7 @@ AVENOR_CLAUDE_TERMINAL=tmux avenor --backend claude --prompt "say hi"
 | New sessions | ✓ |
 | Session resume | ⚠ (in-memory, while avenor is alive) |
 | Prompt execution | ✓ (PTY paste) |
-| Cancel | ✓ (Esc-Esc → pane-scrape idle → forced kill) |
+| Cancel | ✓ (Esc-Esc → reported or pane-scrape idle → forced kill) |
 | Event streaming | ✓ |
 | Permission relay | ⚠ (pane-scrape only, experimental) |
 | Model selection | ✓ (via `--model`) |
@@ -163,7 +175,7 @@ AVENOR_CLAUDE_TERMINAL=tmux avenor --backend claude --prompt "say hi"
 
 ### Cancel semantics
 
-`Cancel()` sends Esc-Esc and polls the pane for an idle prompt (up to ~3s). If the pane goes idle, `session.end stop_reason=cancelled` is emitted and the terminal is killed. If the poll times out, the terminal is killed immediately and `session.end stop_reason=cancelled_forced` is emitted.
+`Cancel()` sends Esc-Esc and polls the pane for an idle prompt (up to ~3s). If the pane goes idle, or Claude reports `idle` after the turn started working, `session.end stop_reason=cancelled` is emitted and the terminal is killed. If the poll times out, the terminal is killed immediately and `session.end stop_reason=cancelled_forced` is emitted.
 
 ---
 
@@ -178,7 +190,7 @@ Use `claude-channel` if:
 - You need structured, broker-mediated permission and control flow via `claude/channel` MCP push events.
 - You want the richer event surface (`agent.channel_ready`, `agent.prompt_queued`, `agent.report`, `agent.finish`) for orchestration.
 
-Both backends share the same terminal session model, pane-scrape idle detection, and JSONL transcript reader. The difference is whether a broker channel is opened between Avenor and the running Claude process.
+Both backends share the same terminal session model, pane-scrape idle detection, and JSONL transcript reader. The difference is whether a broker channel is opened between Avenor and the running Claude process. Only `claude` on its PTY launcher also uses Claude's OSC 7501 status reports.
 
 ---
 

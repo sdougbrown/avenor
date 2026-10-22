@@ -29,6 +29,9 @@ type FakeSession struct {
 	waitCalls          int
 	waitDone           chan struct{}
 	waitOnce           sync.Once
+
+	progStatusLog
+	progAnswering bool
 }
 
 // NewFakeSession creates a FakeSession with the given initial capture text.
@@ -321,5 +324,27 @@ func (f *FakeSession) SetPID(pid int) {
 	f.pid = pid
 }
 
+// ProgStatusAnswering reports the value set by SetProgStatusAnswering
+// (false by default, so a fake never reports unless a test scripts it).
+func (f *FakeSession) ProgStatusAnswering() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.progAnswering
+}
+
+// SetProgStatusAnswering controls ProgStatusAnswering.
+func (f *FakeSession) SetProgStatusAnswering(v bool) {
+	f.mu.Lock()
+	f.progAnswering = v
+	f.mu.Unlock()
+}
+
+// AnswerProgStatusQuery records that a detection query was answered.
+func (f *FakeSession) AnswerProgStatusQuery() { f.psMarkAnswered() }
+
+// ReportProgStatus delivers a report as if the hosted program had sent it.
+func (f *FakeSession) ReportProgStatus(r ProgStatus) { f.psRecord(r) }
+
 var _ Session = (*FakeSession)(nil)
 var _ InterruptSession = (*FakeSession)(nil)
+var _ ProgStatusSession = (*FakeSession)(nil)
