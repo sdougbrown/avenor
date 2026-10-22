@@ -7,12 +7,16 @@ import {
   parseControlMessage,
   postBroker,
   readSubAgentEnv,
-  withdrawPendingAsk,
   type SubAgentEnv,
 } from './subagent-broker.js'
 // Temporary until 356-13: the retired per-action tools still ask through the
 // legacy child-ask path.
-import { askViaBroker, formatInboundAskBody, resolveReplyTarget } from './subagent-legacy.js'
+import {
+  askViaBroker,
+  formatInboundAskBody,
+  resolveReplyTarget,
+  withdrawPendingAsk,
+} from './subagent-legacy.js'
 import {
   answerPermissionTool,
   askTool,
