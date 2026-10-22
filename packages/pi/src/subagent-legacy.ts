@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { extractReplyMessage, formatAskFailure, normalizeAskTimeoutMs } from '@dougbots/avenor-core'
 import type { AskResult } from '@dougbots/avenor-core'
 
-import { BrokerHttpError, buildAgentMessage, postBroker, type InboundAsk, type SubAgentEnv } from './subagent-broker.js'
+import type { InboundAsk, SubAgentEnv } from './subagent-broker.js'
 
 /** Deadline for a cleanup call whose caller's own deadline has already expired. */
 const ASK_CLEANUP_TIMEOUT_MS = 5000

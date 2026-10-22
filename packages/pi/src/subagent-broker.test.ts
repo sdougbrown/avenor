@@ -6,7 +6,7 @@ import {
   postBroker,
   readSubAgentEnv,
 } from './subagent-broker.js'
-import { waitFor, waitUntilAborted } from './test-fixtures.js'
+import { waitUntilAborted } from './test-fixtures.js'
 
 const env = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_1', token: 'tok' } as const
 
@@ -155,6 +155,17 @@ describe('child broker ask', () => {
       '/cancel_message': () => Response.json({ outcome: 'withdrawn' }),
     })
     const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.9')
+    expect(result.outcome).toBe('timed-out')
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
+  })
+
+  it('lets its own deadline time a pending wait out and cancels the ask', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Response.json({ queued: true }),
+      '/wait_reply': init => waitUntilAborted(init),
+      '/cancel_message': () => Response.json({ outcome: 'withdrawn' }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.10', 5)
     expect(result.outcome).toBe('timed-out')
     expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
   })
