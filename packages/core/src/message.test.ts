@@ -76,7 +76,7 @@ function fakeProvider(testCase: FixtureCase) {
     resolveRef?: string
     tell?: { targetRunId: string; message: string }
     ask?: { targetRunId: string; message: string; timeoutMs?: number }
-    reply?: { inboundAskId: string; message: string }
+    reply?: { inboundAskId: string; message: string; askerRunId: string }
     withdraw?: { messageId: string }
     resume?: { target: string; message: string; label?: string; idempotencyKey?: string }
     rename?: { sessionId?: string; name: string }
@@ -130,8 +130,8 @@ function fakeProvider(testCase: FixtureCase) {
       if (outcome === 'replied') result.reply = stringOf(spec.reply)
       return result
     },
-    async reply(inboundAskId: string, message: string): Promise<ProviderResult> {
-      calls.reply = { inboundAskId, message }
+    async reply(inboundAskId: string, message: string, askerRunId: string): Promise<ProviderResult> {
+      calls.reply = { inboundAskId, message, askerRunId }
       return { outcome: stringOf(spec.outcome) as MessageOutcome, messageId: inboundAskId }
     },
     async withdraw(id: string): Promise<ProviderResult> {
@@ -230,9 +230,13 @@ function assertNoWrite(provider: ReturnType<typeof fakeProvider>): void {
 }
 
 describe('message conformance', () => {
-  it('runs every shared message case', async () => {
+  it('the fixture declares message cases', () => {
     expect(fixture.cases.length).toBeGreaterThan(0)
-    for (const testCase of fixture.cases) {
+  })
+
+  it.each(fixture.cases.map(testCase => [testCase.name, testCase] as const))(
+    'message case: %s',
+    async (_name: string, testCase: FixtureCase) => {
       const provider = fakeProvider(testCase)
       const input = testCase.input as { action?: string }
       const expected = testCase.expect
@@ -250,7 +254,7 @@ describe('message conformance', () => {
         expect(toolError.message, testCase.name).toBe(expected.message)
         expect(toolError.facts, testCase.name).toEqual(expected.facts ?? {})
         assertNoWrite(provider)
-        continue
+        return
       }
 
       const result = await executeMessage(provider, testCase.input)
@@ -260,12 +264,16 @@ describe('message conformance', () => {
       )
       expect(result.action, testCase.name).toBe(input.action)
       assertMessageRequest(testCase, provider, object(testCase.provider?.request))
-    }
+    },
+  )
+
+  it('the fixture declares peers cases', () => {
+    expect(fixture.peers_cases.length).toBeGreaterThan(0)
   })
 
-  it('runs every shared peers case', async () => {
-    expect(fixture.peers_cases.length).toBeGreaterThan(0)
-    for (const testCase of fixture.peers_cases) {
+  it.each(fixture.peers_cases.map(testCase => [testCase.name, testCase] as const))(
+    'peers case: %s',
+    async (_name: string, testCase: FixtureCase) => {
       const provider = fakeProvider(testCase)
       const expected = testCase.expect
 
@@ -285,15 +293,15 @@ describe('message conformance', () => {
             throw new Error(`${testCase.name}: a rejected request reached the provider`)
           }
         }
-        continue
+        return
       }
 
       const result = await executePeers(provider, testCase.input)
       expect(result.outcome ?? '', testCase.name).toBe(expected.outcome ?? '')
       expect(result.text, testCase.name).toBe(expected.message)
       assertPeersResult(testCase, provider, result)
-    }
-  })
+    },
+  )
 })
 
 function assertMessageRequest(
@@ -328,6 +336,9 @@ function assertMessageRequest(
       }
       if (request?.message !== undefined) {
         expect(provider.calls.reply?.message, testCase.name).toBe(stringOf(request.message))
+      }
+      if (request?.to_run_id !== undefined) {
+        expect(provider.calls.reply?.askerRunId, testCase.name).toBe(stringOf(request.to_run_id))
       }
       break
     case 'withdraw':
@@ -581,6 +592,56 @@ describe('router invariants', () => {
       await executeMessage(provider, { action: 'reply', reply_to: 'av1.reply.1', message: 'OK' })
       expect(claimed.has('av1.reply.1'), outcome).toBe(restored)
     }
+  })
+
+  it('restores the ask claim when the provider reply throws', async () => {
+    const buildProvider = (thrown: unknown) => {
+      const claimed = new Map<string, string>([['av1.reply.1', 'run-asker']])
+      const provider: MessageProvider = {
+        caller: () => ({ kind: 'broker', runId: 'run-caller' }),
+        surface: () => 'pi-child',
+        role: () => 'agent',
+        resolve: async () => ({ runId: 'rt_7', match: 'unique' }),
+        state: async () => ({ live: false, resumable: false, status: 'done' }),
+        tell: async () => ({ outcome: 'sent' }),
+        ask: async () => ({ outcome: 'sent' }),
+        reply: async () => {
+          throw thrown
+        },
+        withdraw: async () => ({ outcome: 'withdrawn' }),
+        resume: async () => ({ outcome: 'resumed' }),
+        rename: async () => ({ outcome: 'renamed' }),
+        last: async () => ({ outcome: 'sent' }),
+        peers: async () => ({ peers: [] }),
+        claimAsk: id => {
+          const asker = claimed.get(id)
+          claimed.delete(id)
+          return asker
+        },
+        restoreAsk: (id, asker) => { claimed.set(id, asker) },
+      }
+      return { claimed, provider }
+    }
+
+    const untyped = buildProvider(new Error('socket closed'))
+    const untypedError = await executeMessage(untyped.provider, {
+      action: 'reply',
+      reply_to: 'av1.reply.1',
+      message: 'OK',
+    }).then(() => null, (caught: unknown) => caught as ToolError)
+    expect(untypedError).toBeInstanceOf(ToolError)
+    expect(untypedError?.code).toBe('refused')
+    expect(untyped.claimed.has('av1.reply.1')).toBe(true)
+    expect(untyped.claimed.get('av1.reply.1')).toBe('run-asker')
+
+    const typed = buildProvider(new ToolError('not_permitted', 'no'))
+    const typedError = await executeMessage(typed.provider, {
+      action: 'reply',
+      reply_to: 'av1.reply.1',
+      message: 'OK',
+    }).then(() => null, (caught: unknown) => caught as ToolError)
+    expect(typedError?.code).toBe('not_permitted')
+    expect(typed.claimed.get('av1.reply.1')).toBe('run-asker')
   })
 
   it('denies a resume before reading run state', async () => {
