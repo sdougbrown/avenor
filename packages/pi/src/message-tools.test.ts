@@ -196,6 +196,50 @@ describe('Pi host turn producer', () => {
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
+  it('opens no host provider when the session has no supervisor', async () => {
+    const getSupervisorClient = mock(async () => {
+      throw new Error('a chat-only turn must not start a supervisor')
+    })
+    const harness = await startHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        Supervisor: class {
+          static currentInstance() {
+            return null
+          }
+        } as any,
+      },
+    })
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'chat only', stopReason: 'stop' }))
+    expect(getSupervisorClient).not.toHaveBeenCalled()
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
+  it('records the turn through the bound provider when a supervisor exists', async () => {
+    const sessionLastSet = mock(async () => ({}))
+    const client = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
+      sessionLastSet,
+    }
+    const getSupervisorClient = mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: 'sup' }))
+    const harness = await startHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        Supervisor: class {
+          static currentInstance() {
+            return { supervisorId: 'sup' }
+          }
+        } as any,
+      },
+    })
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'the answer', stopReason: 'stop' }))
+    expect(getSupervisorClient).toHaveBeenCalledTimes(1)
+    expect(sessionLastSet).toHaveBeenCalledWith('supervisor', 'the answer', 'end_turn', false)
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
   it('logs a throwing session_last_set without rejecting the handler', async () => {
     const record = mock(async () => {
       throw new Error('broker down')
@@ -333,6 +377,20 @@ describe('Pi surface result objects', () => {
 })
 
 describe('Pi default host provider wiring', () => {
+  /** A control client fake plus the close spy the cache may or may not call. */
+  function fakeClient() {
+    const close = mock(() => {})
+    const client = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
+      messageSend: mock(async (params: { message_id: string }) => ({ outcome: 'sent', message_id: params.message_id })),
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: 'supervisor', session: { run_id: 'supervisor', status: 'running' } }],
+      })),
+      close,
+    }
+    return { client, close }
+  }
+
   it('drives the real bound provider when no hostProviderFor is injected', async () => {
     const send = mock(async (params: { message_id: string }) => ({ outcome: 'sent', message_id: params.message_id }))
     const client = {
@@ -363,7 +421,7 @@ describe('Pi default host provider wiring', () => {
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
-  it('releases the owner socket and redials after the session shuts down', async () => {
+  it('closes the owner socket it dialled and redials after the session shuts down', async () => {
     const closes = [mock(() => {}), mock(() => {})]
     const clients = closes.map(close => ({
       messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
@@ -375,9 +433,9 @@ describe('Pi default host provider wiring', () => {
     }))
     const getSupervisorClient = mock(async () => ({
       client: clients.shift(),
-      isSingleton: true,
+      isSingleton: false,
       sup: null,
-      supervisorId: 'sup',
+      supervisorId: '/tmp/other.sock',
     }))
     const harness = await startExtensionHarness({
       deps: {
@@ -401,5 +459,92 @@ describe('Pi default host provider wiring', () => {
     expect(getSupervisorClient).toHaveBeenCalledTimes(2)
     await harness.eventHandlers.session_shutdown({}, {})
     expect(closes[1]).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the shared singleton client open and rebinds it after the session shuts down', async () => {
+    const { client, close } = fakeClient()
+    const getSupervisorClient = mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: 'sup' }))
+    const harness = await startExtensionHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        messageTool: realMessageTool,
+      },
+    })
+    const tell = () => harness.registeredTools.avenor_message.execute('t', {
+      action: 'tell',
+      target: 'self',
+      message: 'hi',
+    })
+
+    await tell()
+    await harness.eventHandlers.session_shutdown({}, {})
+    expect(close).not.toHaveBeenCalled()
+
+    // The binding is gone even though its client is not closed, so the next
+    // call preflights again on the same live client.
+    await tell()
+    expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+    expect(client.messageSend).toHaveBeenCalledTimes(2)
+    await harness.eventHandlers.session_shutdown({}, {})
+    expect(close).not.toHaveBeenCalled()
+  })
+
+  it('evicts the singleton binding when avenor_shutdown stops the singleton', async () => {
+    const { client, close } = fakeClient()
+    const getSupervisorClient = mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: 'sup' }))
+    const harness = await startExtensionHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        messageTool: realMessageTool,
+      },
+    })
+    const tell = () => harness.registeredTools.avenor_message.execute('t', {
+      action: 'tell',
+      target: 'self',
+      message: 'hi',
+    })
+
+    await tell()
+    await harness.registeredTools.avenor_shutdown.execute('s', {})
+    expect(close).not.toHaveBeenCalled()
+
+    await tell()
+    expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
+  it('keeps the default binding when avenor_shutdown targets another supervisor', async () => {
+    const OTHER = '/tmp/other.sock'
+    const { client, close } = fakeClient()
+    const other = fakeClient()
+    const getSupervisorClient = mock(async (supervisorId?: string) => supervisorId === OTHER
+      ? { client: other.client, isSingleton: false, sup: null, supervisorId: OTHER }
+      : { client, isSingleton: true, sup: null, supervisorId: 'sup' })
+    const harness = await startExtensionHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        messageTool: realMessageTool,
+      },
+    })
+    const tell = () => harness.registeredTools.avenor_message.execute('t', {
+      action: 'tell',
+      target: 'self',
+      message: 'hi',
+    })
+
+    await tell()
+    expect(getSupervisorClient).toHaveBeenCalledTimes(1)
+    await harness.registeredTools.avenor_shutdown.execute('s', { supervisor_id: OTHER })
+    expect(close).not.toHaveBeenCalled()
+
+    // The default binding survived, so the next call reuses it instead of
+    // dialling again.
+    await tell()
+    expect(getSupervisorClient).toHaveBeenCalledTimes(1)
+    expect(client.messageSend).toHaveBeenCalledTimes(2)
+    await harness.eventHandlers.session_shutdown({}, {})
   })
 })

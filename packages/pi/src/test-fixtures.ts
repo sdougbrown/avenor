@@ -68,7 +68,12 @@ export async function startExtensionHarness(options: {
     observeRun: mock(() => null),
     dial: mock(async () => ({ close() {} })),
     attachOwner: mock(async () => ({ close() {} })),
-    Supervisor: class {} as any,
+    // A started session shares an in-process supervisor unless a test says otherwise.
+    Supervisor: class {
+      static currentInstance() {
+        return { supervisorId: 'sup' }
+      }
+    } as any,
   }
   await createExtension({ ...baseDeps, ...options.deps }, { pollIntervalMs: 5, subAgentEnv: null, ...options.extOptions })(mockPi as any)
 

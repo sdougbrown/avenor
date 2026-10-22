@@ -62,7 +62,9 @@ export { statusTool } from './tools/status.js'
 export type { StatusResult, StatusListResult, StatusToolArgs, StatusView } from './tools/status.js'
 export { resultTool } from './tools/result.js'
 // Temporary until 356-17: the retired tools stay exported until the last
-// surface that imports them has moved to the merged message tool.
+// surface using them moves to the merged message tool: the OpenCode plugin
+// until slice 14, then MCP until slice 15. Both still resume through
+// followUpTool and report failures through formatAskFailure.
 export { followUpTool } from './tools/follow-up.js'
 export type { FollowUpToolArgs, FollowUpToolResult } from './tools/follow-up.js'
 export { askTool } from './tools/ask.js'

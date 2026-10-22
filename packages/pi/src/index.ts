@@ -1243,22 +1243,37 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // until the supervisor behind it goes away. A response carrying a
     // generation mismatch is reported as the not-sent outcome it maps to; the
     // caller must not silently retarget this binding to another supervisor.
-    const hostProviders = new Map<string, { provider: MessageProvider, client: Client | null }>()
+    const hostProviders = new Map<string, {
+      provider: MessageProvider
+      client: Client | null
+      isSingleton: boolean
+    }>()
     const hostAskClaims: AskClaims = new Map()
 
-    // Drop every cached binding before the supervisor stops answering: the next
-    // call redials and preflights instead of reusing a closed socket.
-    function disposeHostProviders(): void {
-      for (const { client } of hostProviders.values()) {
-        if (!client) continue
-        try {
-          client.close()
-        } catch {
-          // A socket that is already gone needs no further cleanup.
-        }
-      }
-      hostProviders.clear()
+    // Drop one cached binding before its supervisor stops answering, so the
+    // next call redials and preflights instead of reusing a closed socket. The
+    // client is closed only when this extension dialled it: the default binding
+    // holds the process-shared singleton client, and closing that reports the
+    // supervisor as crashed, so a singleton binding is evicted and its client
+    // is left open for the rest of the process.
+    function disposeHostProvider(supervisorId: string | undefined): void {
+      const key = supervisorId ?? ''
+      const binding = hostProviders.get(key)
+      hostProviders.delete(key)
       // A disposed provider's claims belong to a dead session.
+      hostAskClaims.clear()
+      if (!binding || binding.isSingleton || !binding.client) return
+      try {
+        binding.client.close()
+      } catch {
+        // A socket that is already gone needs no further cleanup.
+      }
+    }
+
+    // Drop every cached binding for a session that is going away. Singleton
+    // bindings are only evicted; their shared client stays open.
+    function disposeHostProviders(): void {
+      for (const key of [...hostProviders.keys()]) disposeHostProvider(key)
       hostAskClaims.clear()
     }
 
@@ -1266,7 +1281,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const key = supervisorId ?? ''
       const existing = hostProviders.get(key)
       if (existing) return existing.provider
-      const { client } = await (deps.getSupervisorClient ?? getSupervisorClient)(supervisorId, { owner: true })
+      const { client, isSingleton } = await (deps.getSupervisorClient ?? getSupervisorClient)(supervisorId, { owner: true })
       const preflight = await client.messagePreflight()
       const provider = createHostMessageProvider({
         surface: 'pi-host',
@@ -1277,7 +1292,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         pollGeneration: () => hostPollGeneration,
         onResumed: result => trackResumed(supervisorId, result),
       })
-      hostProviders.set(key, { provider, client })
+      hostProviders.set(key, { provider, client, isSingleton })
       return provider
     }
 
@@ -1334,6 +1349,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // from here.
     pi.on('turn_end', async event => {
       if (isSubAgentBrokerMode) return
+      // Nobody can read a last-turn record while no supervisor exists, and
+      // recording one must not start a supervisor (plus its broker) in a
+      // session that never delegates.
+      if (!deps.Supervisor.currentInstance?.()) return
       const turn = extractTurnText([event.message])
       try {
         const provider = await hostProviderFor(undefined)
@@ -1998,9 +2017,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           supervisorId: params.supervisor_id,
           force: params.force,
         })
-        // The supervisor behind these clients just stopped; drop the bindings
-        // so the next call dials a fresh one.
-        disposeHostProviders()
+        // The supervisor behind this client just stopped; drop its binding so
+        // the next call dials a fresh one. Other supervisors stay bound. The
+        // in-process singleton is reachable through both the default binding
+        // and its own id, so a stopped singleton drops both.
+        disposeHostProvider(params.supervisor_id)
+        if (targetIsSingleton && target !== undefined) disposeHostProvider(undefined)
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,
