@@ -3811,10 +3811,11 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 	}
 	child.mu.Lock()
 	identity := effectiveIdentity{
-		Backend:      child.effectiveBackend,
-		Agent:        child.effectiveAgent,
-		Model:        child.effectiveModel,
-		AgentProfile: child.agentProfile,
+		Backend:       child.effectiveBackend,
+		Agent:         child.effectiveAgent,
+		Model:         child.effectiveModel,
+		AgentProfile:  child.agentProfile,
+		LaunchWrapper: child.launchWrapper,
 	}
 	provider := child.provider
 	fallbackBackend := child.backend
@@ -3840,16 +3841,17 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		}
 	}
 	return cli.StartSession(ctx, provider, identity.Backend, runtime.StartOptions{
-		Agent:        identity.Agent,
-		AgentProfile: identity.AgentProfile,
-		Label:        label,
-		Dir:          dir,
-		Model:        identity.Model,
-		Thinking:     thinking,
-		RuntimeID:    child.id,
-		Broker:       s.broker,
-		BrokerToken:  brokerToken,
-		Provenance:   runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
+		Agent:         identity.Agent,
+		AgentProfile:  identity.AgentProfile,
+		Label:         label,
+		Dir:           dir,
+		Model:         identity.Model,
+		Thinking:      thinking,
+		RuntimeID:     child.id,
+		Broker:        s.broker,
+		BrokerToken:   brokerToken,
+		LaunchWrapper: identity.LaunchWrapper,
+		Provenance:    runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
 	}, resumeID)
 }
 
