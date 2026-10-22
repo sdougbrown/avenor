@@ -22,25 +22,35 @@ type PermissionOption struct {
 
 var tmuxOptionRE = regexp.MustCompile(`^\s*(?:❯\s*)?(\d+)\.\s+(.*)`)
 
-// permissionOptionKind classifies a dialog option by its label: Claude Code
-// labels the declining choices "No" or "No, ...".
+// permissionOptionKind classifies a dialog option by its label. Claude Code
+// starts approving labels with "Yes" and declining labels with "No". Any other
+// label gets no kind, so the resolvers refuse to select it.
 func permissionOptionKind(label string) string {
-	if label == "No" || strings.HasPrefix(label, "No,") || strings.HasPrefix(label, "No ") {
+	switch {
+	case labelStartsWith(label, "Yes"):
+		return "allow"
+	case labelStartsWith(label, "No"):
 		return "reject"
+	default:
+		return ""
 	}
-	return "allow"
+}
+
+func labelStartsWith(label, word string) bool {
+	return label == word || strings.HasPrefix(label, word+",") || strings.HasPrefix(label, word+" ")
 }
 
 // ParseTerminalPermission extracts a TerminalPermission from pane text, or nil
 // if the text does not represent a Claude permission dialog. The pane can show
 // numbered lists above the dialog, so the options are the last list numbered
-// from 1. The prompt is the text between that list and the one before it.
+// from 1. The prompt is the text between that list and the numbered line
+// before it.
 func ParseTerminalPermission(text string) *TerminalPermission {
 	text = normalizePane(text)
 	lines := strings.Split(text, "\n")
 	promptLines := make([]string, 0)
 	options := make([]PermissionOption, 0)
-	// pending holds the prompt candidates seen since the last option line.
+	// pending holds the prompt candidates seen since the last numbered line.
 	pending := make([]string, 0)
 
 	for _, line := range lines {
@@ -56,9 +66,9 @@ func ParseTerminalPermission(text string) *TerminalPermission {
 			if matches[1] == strconv.Itoa(len(options)+1) {
 				label := strings.TrimSpace(matches[2])
 				options = append(options, PermissionOption{ID: matches[1], Label: label, Kind: permissionOptionKind(label)})
-				pending = pending[:0]
-				continue
 			}
+			pending = pending[:0]
+			continue
 		}
 		if !strings.HasPrefix(trimmed, "❯") && !strings.HasPrefix(trimmed, "●") && !strings.HasPrefix(trimmed, "✻") && !strings.HasPrefix(trimmed, "✢") {
 			pending = append(pending, trimmed)
