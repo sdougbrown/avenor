@@ -21,6 +21,7 @@ import {
   extractTurnText,
   getSupervisorClient,
   inspectTool,
+  installAskClaims,
   killTool,
   messageTool,
   normalizeTurnStopReason,
@@ -46,6 +47,7 @@ import {
   workflowControllerStatusTool,
   workflowReadyTool,
   workflowCancelTool,
+  type AskClaims,
   type Client,
   type InspectResult,
   type MessageProvider,
@@ -621,6 +623,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             if (!hostReceiveGeneration || !isGenerationMismatch(error)) throw error
             // One rebind: the next call preflights and binds the new broker.
             hostReceiveGeneration = undefined
+            // The cached providers carry the old generation, so a send through
+            // them would be refused as not-sent; drop them and redial instead.
+            disposeHostProviders()
             received = await receive()
           }
           if (generation !== hostPollGeneration) return
@@ -1234,16 +1239,33 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return waitForRunByPolling(run, signal, onUpdate)
     }
 
-    // One bound host provider per supervisor, created on first use and kept for
-    // the extension's lifetime. A response carrying a generation mismatch is
-    // reported as the not-sent outcome it maps to; the caller must not silently
-    // retarget this binding to another supervisor.
-    const hostProviders = new Map<string, MessageProvider>()
+    // One bound host provider per supervisor, created on first use and kept
+    // until the supervisor behind it goes away. A response carrying a
+    // generation mismatch is reported as the not-sent outcome it maps to; the
+    // caller must not silently retarget this binding to another supervisor.
+    const hostProviders = new Map<string, { provider: MessageProvider, client: Client | null }>()
+    const hostAskClaims: AskClaims = new Map()
+
+    // Drop every cached binding before the supervisor stops answering: the next
+    // call redials and preflights instead of reusing a closed socket.
+    function disposeHostProviders(): void {
+      for (const { client } of hostProviders.values()) {
+        if (!client) continue
+        try {
+          client.close()
+        } catch {
+          // A socket that is already gone needs no further cleanup.
+        }
+      }
+      hostProviders.clear()
+      // A disposed provider's claims belong to a dead session.
+      hostAskClaims.clear()
+    }
 
     async function defaultHostProviderFor(supervisorId: string | undefined): Promise<MessageProvider> {
       const key = supervisorId ?? ''
       const existing = hostProviders.get(key)
-      if (existing) return existing
+      if (existing) return existing.provider
       const { client } = await (deps.getSupervisorClient ?? getSupervisorClient)(supervisorId, { owner: true })
       const preflight = await client.messagePreflight()
       const provider = createHostMessageProvider({
@@ -1255,7 +1277,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         pollGeneration: () => hostPollGeneration,
         onResumed: result => trackResumed(supervisorId, result),
       })
-      hostProviders.set(key, provider)
+      hostProviders.set(key, { provider, client })
       return provider
     }
 
@@ -1294,34 +1316,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       })
       : null
 
-    function attachPendingAsks(
-      provider: MessageProvider,
-      pending: Map<string, { from_run_id: string; message_id: string }>,
-    ): MessageProvider {
-      if (provider.claimAsk) return provider
-      const claims = new Map<string, { asker: string, generation: number }>()
-      provider.claimAsk = messageId => {
-        const ask = pending.get(messageId)
-        if (!ask) return undefined
-        pending.delete(messageId)
-        claims.set(messageId, { asker: ask.from_run_id, generation: hostPollGeneration })
-        return ask.from_run_id
-      }
-      provider.restoreAsk = (messageId, askerRunId) => {
-        const claim = claims.get(messageId)
-        claims.delete(messageId)
-        // A failed send restores the ask only into the session that received
-        // it; a restart that cleared the poll must not resurrect it.
-        if (claim && claim.generation === hostPollGeneration) {
-          pending.set(messageId, { from_run_id: askerRunId, message_id: messageId })
-        }
-      }
-      return provider
-    }
-
     async function messageProvider(supervisorId: string | undefined): Promise<MessageProvider> {
       if (childProvider) return childProvider
-      const provider = attachPendingAsks(await hostProviderFor(supervisorId), hostPendingAsks)
+      const provider = await hostProviderFor(supervisorId)
+      // Install once per provider: the claim/restore pair is core's, and the
+      // generation scope is this poll's, so a restart cannot resurrect an ask.
+      if (!provider.claimAsk) installAskClaims(provider, hostAskClaims, hostPendingAsks, () => hostPollGeneration)
       // Resume tracking belongs to this extension, not to the provider, so an
       // injected provider gets the same status + poll + tracked-run behaviour.
       if (!provider.onResumed) provider.onResumed = result => trackResumed(supervisorId, result)
@@ -1362,6 +1362,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // Invalidate broker work before the first await so late receives and failed replies cannot repopulate a closed session.
       stopHostAskPoll()
       stopSubAgentPoll()
+      disposeHostProviders()
       hostPendingAsks.clear()
       subAgentPendingAsks.clear()
       await stopPolling()
@@ -1997,6 +1998,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           supervisorId: params.supervisor_id,
           force: params.force,
         })
+        // The supervisor behind these clients just stopped; drop the bindings
+        // so the next call dials a fresh one.
+        disposeHostProviders()
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           details: result,

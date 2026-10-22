@@ -362,4 +362,44 @@ describe('Pi default host provider wiring', () => {
     }))
     await harness.eventHandlers.session_shutdown({}, {})
   })
+
+  it('releases the owner socket and redials after the session shuts down', async () => {
+    const closes = [mock(() => {}), mock(() => {})]
+    const clients = closes.map(close => ({
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
+      messageSend: mock(async (params: { message_id: string }) => ({ outcome: 'sent', message_id: params.message_id })),
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: 'supervisor', session: { run_id: 'supervisor', status: 'running' } }],
+      })),
+      close,
+    }))
+    const getSupervisorClient = mock(async () => ({
+      client: clients.shift(),
+      isSingleton: true,
+      sup: null,
+      supervisorId: 'sup',
+    }))
+    const harness = await startExtensionHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        messageTool: realMessageTool,
+      },
+    })
+    const tell = () => harness.registeredTools.avenor_message.execute('t', {
+      action: 'tell',
+      target: 'self',
+      message: 'hi',
+    })
+
+    await tell()
+    expect(getSupervisorClient).toHaveBeenCalledTimes(1)
+    await harness.eventHandlers.session_shutdown({}, {})
+    expect(closes[0]).toHaveBeenCalledTimes(1)
+
+    await tell()
+    expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+    await harness.eventHandlers.session_shutdown({}, {})
+    expect(closes[1]).toHaveBeenCalledTimes(1)
+  })
 })

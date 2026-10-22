@@ -246,10 +246,10 @@ export interface HostProviderOptions {
   onResumed?: (result: ProviderResult) => void | Promise<void>
 }
 
-type AskClaims = Map<string, { asker: string, generation: number }>
+export type AskClaims = Map<string, { asker: string, generation: number }>
 
 /** Install the claim/restore pair both factories share, so a restart cannot resurrect a stale ask. */
-function installAskClaims(
+export function installAskClaims(
   provider: MessageProvider,
   claims: AskClaims,
   pendingAsks: Map<string, PendingAsk>,
