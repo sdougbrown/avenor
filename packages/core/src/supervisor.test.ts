@@ -100,6 +100,57 @@ describe('Supervisor roster metadata', () => {
   })
 })
 
+describe('run lookup planes', () => {
+  function bareSupervisor(): Supervisor {
+    const sup = Object.create(Supervisor.prototype) as Supervisor
+    ;(sup as any).runs = new Map()
+    ;(sup as any).aliases = new Map()
+    return sup
+  }
+
+  function runInfo(runId: string, label: string): RunInfo {
+    return {
+      runId,
+      label,
+      sentinelPath: `/tmp/${runId}.sentinel`,
+      eventLogPath: `/tmp/${runId}.events`,
+    } as RunInfo
+  }
+
+  it('never resolves a label on the ID plane', () => {
+    const sup = bareSupervisor()
+    const alpha = runInfo('run-a', 'alpha')
+    sup.registerResumed(alpha)
+    sup.registerResumed(runInfo('run-b', 'run-a'))
+
+    expect(sup.getRunById('run-a')).toBe(alpha)
+    expect(sup.getRunById('run-a')?.runId).toBe('run-a')
+    expect(sup.getRunByReference('alpha')).toBe(alpha)
+  })
+
+  it('does not reach a run by a label that is not any run ID', () => {
+    const sup = bareSupervisor()
+    const run = runInfo('run-b', 'run-a')
+    sup.registerResumed(run)
+
+    expect(
+      sup.getRunById('run-a'),
+      'a label that is not any run ID must not resolve on the ID plane',
+    ).toBeUndefined()
+    expect(sup.getRunByReference('run-a')).toBe(run)
+  })
+
+  it('leaves both planes resolvable after registerResumed', () => {
+    const sup = bareSupervisor()
+    const run = runInfo('run-c', 'gamma')
+    sup.registerResumed(run)
+
+    expect(sup.getRunById(run.runId)).toBe(run)
+    expect(sup.getRunByReference(run.runId)).toBe(run)
+    expect(sup.getRunByReference(run.label)).toBe(run)
+  })
+})
+
 describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
   let supervisor: Supervisor
   let originalRun: RunInfo
