@@ -209,6 +209,22 @@ describe('Avenor Pi renderers', () => {
     ].join('\n'))
   })
 
+  it('renders the reply line for an answered ask and for no other action', () => {
+    const answeredAsk = text(renderMessageResumeResult(result({
+      action: 'ask', outcome: 'replied', message_id: 'ask-1', reply: 'green',
+    }), collapsed, theme, { action: 'ask', target: 'run-2', message: 'colour?' }))
+    expect(answeredAsk).toContain('Ask: replied.')
+    expect(answeredAsk).toContain('Reply: green')
+    expect(answeredAsk).toContain('Target: run-2')
+
+    // A non-ask result that happens to carry a reply field must not print one.
+    const tellWithReply = text(renderMessageResumeResult(result({
+      action: 'tell', outcome: 'sent', message_id: 'av1.t.9', reply: 'green',
+    }), collapsed, theme, { action: 'tell', target: 'mesh-a', message: 'hi' }))
+    expect(tellWithReply).toContain('Tell: sent.')
+    expect(tellWithReply).not.toContain('Reply:')
+  })
+
   it('keeps result, event, and shutdown details out of collapsed renderings', () => {
     const collapsedResult = text(renderResultResult(result({
       run_id: 'run-1', label: 'worker', status: 'done', output: 'answer', session_id: 'session-1', stop_reason: 'budget',
