@@ -25,37 +25,38 @@ import (
 type recordingControlClient struct {
 	*fakeClient
 
-	sent      messaging.SendRequest
-	sentRes   messaging.SendResult
-	sentErr   error
-	waited    messaging.WaitRequest
-	waitRes   messaging.WaitResult
-	waitErr   error
-	replied   messaging.ReplyRequest
-	replyRes  messaging.SendResult
-	replyErr  error
-	withdrew  messaging.WithdrawRequest
-	withdrawR messaging.WithdrawResult
-	withdrawE error
-	received  messaging.ReceiveRequest
-	receiveR  messaging.ReceiveResult
-	receiveE  error
-	peered    messaging.PeersRequest
-	peerRes   messaging.PeersResult
-	peerErr   error
-	preflight messaging.PreflightResult
-	preflErr  error
-	resumeReq messaging.ResumeRequest
-	resumeRes messaging.ResumeResult
-	resumeErr error
-	renameID  string
-	renameNew string
-	renameRes messaging.RenameResult
-	renameErr error
-	lastID    string
-	lastRes   messaging.PeerLast
-	lastErr   error
-	ctxs      []context.Context
+	sent       messaging.SendRequest
+	sentRes    messaging.SendResult
+	sentErr    error
+	waited     messaging.WaitRequest
+	waitRes    messaging.WaitResult
+	waitErr    error
+	replied    messaging.ReplyRequest
+	replyRes   messaging.SendResult
+	replyErr   error
+	withdrew   messaging.WithdrawRequest
+	withdrawR  messaging.WithdrawResult
+	withdrawE  error
+	received   messaging.ReceiveRequest
+	receiveR   messaging.ReceiveResult
+	receiveE   error
+	peered     messaging.PeersRequest
+	peerRes    messaging.PeersResult
+	peerErr    error
+	peersCalls int
+	preflight  messaging.PreflightResult
+	preflErr   error
+	resumeReq  messaging.ResumeRequest
+	resumeRes  messaging.ResumeResult
+	resumeErr  error
+	renameID   string
+	renameNew  string
+	renameRes  messaging.RenameResult
+	renameErr  error
+	lastID     string
+	lastRes    messaging.PeerLast
+	lastErr    error
+	ctxs       []context.Context
 }
 
 func newRecordingControlClient() *recordingControlClient {
@@ -95,6 +96,7 @@ func (c *recordingControlClient) MessageReceiveContext(ctx context.Context, req 
 func (c *recordingControlClient) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	c.ctxs = append(c.ctxs, ctx)
 	c.peered = req
+	c.peersCalls++
 	return c.peerRes, c.peerErr
 }
 
@@ -230,6 +232,12 @@ func TestMCPMessageProviderResolveLadder(t *testing.T) {
 			{RunID: "rt_a", Session: json.RawMessage(`{"run_id":"rt_a","label":"alpha"}`)},
 			{RunID: "rt_b", Session: json.RawMessage(`{"run_id":"rt_b","label":"mesh"}`)},
 			{RunID: "rt_c", Session: json.RawMessage(`{"run_id":"rt_c","label":"mesh"}`)},
+			// The shadow row carries the reserved alias as a label, so only a guard
+			// that runs before the listing can keep it from answering "supervisor".
+			{RunID: "rt_shadow", Session: json.RawMessage(`{"run_id":"rt_shadow","label":"supervisor"}`)},
+			// The bare row has no session blob, pinning the decoder's empty-session
+			// guard, its run-id fallback and the resolution's label fallback.
+			{RunID: "rt_bare"},
 		},
 	}
 	p, err := newMCPMessageProvider(context.Background(), s, cl, "supervisor-socket")
@@ -241,6 +249,9 @@ func TestMCPMessageProviderResolveLadder(t *testing.T) {
 	self, err := p.Resolve(ctx, "supervisor")
 	if err != nil || self.Match != messaging.MatchUnique || self.RunID != "supervisor" {
 		t.Fatalf("self = %+v, %v", self, err)
+	}
+	if cl.peersCalls != 0 {
+		t.Fatalf("reserved alias issued %d peer listings, want none", cl.peersCalls)
 	}
 	publicID, err := p.Resolve(ctx, "run-a")
 	if err != nil || publicID.RunID != "rt_a" || publicID.PublicRunID != "run-a" || publicID.Label != "alpha" {
@@ -257,6 +268,10 @@ func TestMCPMessageProviderResolveLadder(t *testing.T) {
 	none, err := p.Resolve(ctx, "ghost")
 	if err != nil || none.Match != messaging.MatchNone {
 		t.Fatalf("none = %+v, %v", none, err)
+	}
+	bare, err := p.Resolve(ctx, "rt_bare")
+	if err != nil || bare.Match != messaging.MatchUnique || bare.RunID != "rt_bare" || bare.Label != "rt_bare" {
+		t.Fatalf("bare peer row = %+v, %v", bare, err)
 	}
 }
 
