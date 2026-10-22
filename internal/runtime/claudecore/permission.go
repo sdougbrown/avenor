@@ -43,15 +43,15 @@ func labelStartsWith(label, word string) bool {
 // ParseTerminalPermission extracts a TerminalPermission from pane text, or nil
 // if the text does not represent a Claude permission dialog. The pane can show
 // numbered lists above the dialog, so the options are the last list numbered
-// from 1. The prompt is the text between that list and the numbered line
-// before it.
+// from 1. The prompt is all pane text above that list, numbered lines included.
+// A numbered line in a command preview therefore cannot hide the lines above it.
 func ParseTerminalPermission(text string) *TerminalPermission {
 	text = normalizePane(text)
 	lines := strings.Split(text, "\n")
 	promptLines := make([]string, 0)
 	options := make([]PermissionOption, 0)
-	// pending holds the prompt candidates seen since the last numbered line.
-	pending := make([]string, 0)
+	// above holds every prompt candidate line seen so far.
+	above := make([]string, 0)
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -61,17 +61,15 @@ func ParseTerminalPermission(text string) *TerminalPermission {
 		if matches := tmuxOptionRE.FindStringSubmatch(trimmed); len(matches) == 3 {
 			if matches[1] == "1" {
 				options = options[:0]
-				promptLines, pending = pending, make([]string, 0)
+				promptLines = append(promptLines[:0], above...)
 			}
 			if matches[1] == strconv.Itoa(len(options)+1) {
 				label := strings.TrimSpace(matches[2])
 				options = append(options, PermissionOption{ID: matches[1], Label: label, Kind: permissionOptionKind(label)})
 			}
-			pending = pending[:0]
-			continue
 		}
 		if !strings.HasPrefix(trimmed, "❯") && !strings.HasPrefix(trimmed, "●") && !strings.HasPrefix(trimmed, "✻") && !strings.HasPrefix(trimmed, "✢") {
-			pending = append(pending, trimmed)
+			above = append(above, trimmed)
 		}
 	}
 
