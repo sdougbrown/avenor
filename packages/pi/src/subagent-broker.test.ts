@@ -138,14 +138,14 @@ describe('child broker ask', () => {
     })
   })
 
-  it('reports a wait timeout as timed-out and cleans up the ask', async () => {
+  it('reports a 200 withdrawn wait as withdrawn without re-cancelling the ask', async () => {
     const { calls, fetchImpl } = stubFetch({
       '/send': () => Response.json({ queued: true }),
-      '/wait_reply': () => Response.json({ outcome: 'timed-out' }),
+      '/wait_reply': () => Response.json({ cancelled: true, message_id: 'av1.m.2', outcome: 'withdrawn' }),
     })
     const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.2', 1)
-    expect(result.outcome).toBe('timed-out')
-    expect(calls.some(call => call.url.endsWith('/wait_reply'))).toBe(true)
+    expect(result.outcome).toBe('withdrawn')
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 
   it('reports a broker-side wait timeout as timed-out, not withdrawn', async () => {
@@ -312,7 +312,10 @@ describe('child broker routes', () => {
 
   it('maps an absent withdrawal to edge-absent and a full fence to possibly-pending', async () => {
     const absent = stubFetch({
-      '/cancel_message': () => new Response('no pending ask', { status: 404 }),
+      '/cancel_message': () => Response.json(
+        { error: 'no pending ask for this message id', outcome: 'edge-absent' },
+        { status: 404 },
+      ),
     })
     expect(await createBrokerChildBroker(env, absent.fetchImpl).withdraw('av1.m.7')).toEqual({
       outcome: 'edge-absent',
