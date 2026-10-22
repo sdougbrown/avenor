@@ -12,9 +12,15 @@ import (
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
 
-// tsToolNames lists the ten MCP tools the TypeScript reference
-// (packages/mcp/src/mcp.ts) and this Go host share. MCP surfaces register
-// unprefixed names; the MCP client namespaces them.
+// tsToolNames lists the unprefixed owner-surface tool names the shared contract
+// defines, which the TypeScript MCP server adopts in slice 15 of the 356 stack.
+// TestToolNameParity checks this Go server's own registration against this list,
+// not against the TypeScript source.
+//
+// The owner MCP surface registers the unprefixed contract names, while the child
+// channel servers publish avenor_message/avenor_peers into their backends' own
+// tool namespace and keep the prefix, and the extension surfaces keep the prefix
+// because they share a flat namespace.
 var tsToolNames = []string{
 	"spawn",
 	"status",
@@ -110,12 +116,6 @@ func TestSchemaFieldParity(t *testing.T) {
 		allowed := []string{"run_id", "wait", "timeout", "supervisor_id"}
 		required := []string{"run_id"}
 		assertFields(t, "resultArgs", allowed, required)
-	})
-
-	t.Run("peers", func(t *testing.T) {
-		// peersArgs — optional action, name, session_id, target (list is the default)
-		allowed := []string{"action", "name", "session_id", "target"}
-		assertFields(t, "peersArgs", allowed, nil)
 	})
 
 	t.Run("answer_permission", func(t *testing.T) {
@@ -405,16 +405,6 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if a.RunID != "r" || a.OptionID != "o" || a.RequestID != "req" || a.SupervisorID != "s" || a.Message != "typed" {
 			t.Errorf("%s: fields not populated correctly", structName)
 		}
-	case "peersArgs":
-		data := map[string]any{"action": "last", "name": "n", "session_id": "s", "target": "t"}
-		b, _ := json.Marshal(data)
-		var a peersArgs
-		if err := json.Unmarshal(b, &a); err != nil {
-			t.Fatalf("%s: unmarshal: %v", structName, err)
-		}
-		if a.Action != "last" || a.Name != "n" || a.SessionID != "s" || a.Target != "t" {
-			t.Errorf("%s: fields not populated correctly", structName)
-		}
 	case "eventsArgs":
 		data := map[string]any{"run_id": "r", "types": []string{"a"}, "limit": float64(10), "supervisor_id": "s"}
 		b, _ := json.Marshal(data)
@@ -591,8 +581,6 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 		typ = reflect.TypeOf(resultArgs{})
 	case "permissionArgs":
 		typ = reflect.TypeOf(permissionArgs{})
-	case "peersArgs":
-		typ = reflect.TypeOf(peersArgs{})
 	case "eventsArgs":
 		typ = reflect.TypeOf(eventsArgs{})
 	case "killArgs":

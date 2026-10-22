@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"reflect"
 	"strings"
@@ -898,4 +899,42 @@ func TestValidateIntegerConstraintEnforcesAZeroMaximum(t *testing.T) {
 	if detail := validateIntegerConstraint("timeout_ms", json.RawMessage(`0`), constraint); detail != "" {
 		t.Fatalf("detail = %q, want the zero maximum to accept 0", detail)
 	}
+}
+
+// TestToolFailure pins the one mapping a surface uses to render a router
+// refusal, including the unwrapping the child surfaces rely on.
+func TestToolFailure(t *testing.T) {
+	toolErr := &ToolError{Code: "invalid_name", Message: "rename refused: bad name"}
+
+	t.Run("tool error", func(t *testing.T) {
+		object, text, ok := ToolFailure(toolErr)
+		if !ok {
+			t.Fatal("ToolFailure(*ToolError) ok = false, want true")
+		}
+		if !reflect.DeepEqual(object, toolErr.Output()) {
+			t.Fatalf("object = %#v, want %#v", object, toolErr.Output())
+		}
+		if text != toolErr.Message {
+			t.Fatalf("text = %q, want %q", text, toolErr.Message)
+		}
+	})
+
+	t.Run("wrapped tool error", func(t *testing.T) {
+		object, text, ok := ToolFailure(fmt.Errorf("context: %w", toolErr))
+		if !ok {
+			t.Fatal("ToolFailure(wrapped *ToolError) ok = false, want true")
+		}
+		if !reflect.DeepEqual(object, toolErr.Output()) {
+			t.Fatalf("object = %#v, want %#v", object, toolErr.Output())
+		}
+		if text != toolErr.Message {
+			t.Fatalf("text = %q, want %q", text, toolErr.Message)
+		}
+	})
+
+	t.Run("other error", func(t *testing.T) {
+		if object, text, ok := ToolFailure(errors.New("boom")); ok {
+			t.Fatalf("ToolFailure(plain error) = %#v, %q, true; want false", object, text)
+		}
+	})
 }

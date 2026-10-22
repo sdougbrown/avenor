@@ -35,9 +35,16 @@ type fakeMessageControlClient struct {
 	peersFunc     func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error)
 	preflightFunc func(context.Context) (messaging.PreflightResult, error)
 	resumeFunc    func(messaging.ResumeRequest) (messaging.ResumeResult, error)
+	renameFunc    func(context.Context, string, string) (messaging.RenameResult, error)
 
 	waitGenerations  []string
 	peersGenerations []string
+	renameCalls      []renameCall
+}
+
+type renameCall struct {
+	sessionID string
+	name      string
 }
 
 func (f *fakeMessageControlClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
@@ -98,7 +105,11 @@ func (f *fakeMessageControlClient) ResumeContext(_ context.Context, req messagin
 	return messaging.ResumeResult{}, nil
 }
 
-func (f *fakeMessageControlClient) SessionRenameContext(context.Context, string, string) (messaging.RenameResult, error) {
+func (f *fakeMessageControlClient) SessionRenameContext(ctx context.Context, sessionID, name string) (messaging.RenameResult, error) {
+	f.renameCalls = append(f.renameCalls, renameCall{sessionID: sessionID, name: name})
+	if f.renameFunc != nil {
+		return f.renameFunc(ctx, sessionID, name)
+	}
 	return messaging.RenameResult{}, nil
 }
 
