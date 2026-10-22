@@ -1,6 +1,8 @@
 import { executeMessage } from '../message.js'
 import type { MessageProvider, ProviderResult } from '../message.js'
 
+export { ToolError } from '../message.js'
+
 /*
  * The port lives with the router that consumes it (packages/core/src/message.ts);
  * this module is the handler every surface binds, so it re-exports the port for
@@ -8,6 +10,7 @@ import type { MessageProvider, ProviderResult } from '../message.js'
  */
 export type {
   MessageCallerKind,
+  MessageInput,
   MessageSurface,
   MessageProvider,
   PeerRecord,
