@@ -254,7 +254,6 @@ describe('message conformance', () => {
       }
 
       const result = await executeMessage(provider, testCase.input)
-      expect(result.text, `${testCase.name}: a successful call produced no text`).not.toBe('')
       expect(result.outcome, testCase.name).toBe(expected.outcome ?? '')
       expect(substituteMessageId(result.text ?? '', result.messageId ?? ''), testCase.name).toBe(
         substituteMessageId(expected.message, result.messageId ?? ''),
@@ -505,9 +504,19 @@ describe('outcome text totality', () => {
   })
 
   it('renders every failure action the contract declares', () => {
-    for (const action of ['tell', 'ask', 'reply', 'withdraw']) {
-      expect(renderOutcome(action, 'not-sent', { message_id: '"m"', target: '"t"' })).not.toBe('')
-      expect(renderOutcome(action, 'auth-rejected', { message_id: '"m"', target: '"t"' })).not.toBe('')
+    const facts = { message_id: '"m"', target: '"t"' }
+    const cases: [string, string, string][] = [
+      ['tell', 'not-sent', 'message "m" not sent to "t"; nothing is pending'],
+      ['ask', 'not-sent', 'ask "m" was not sent to "t"; nothing is pending'],
+      ['reply', 'not-sent', 'reply to "m" was not sent; nothing is pending'],
+      ['withdraw', 'not-sent', 'withdrawal of "m" was not sent; nothing is pending'],
+      ['tell', 'auth-rejected', 'message "m" to "t" was rejected (not authorized); nothing is pending'],
+      ['ask', 'auth-rejected', 'ask "m" to "t" was rejected (not authorized); nothing is pending'],
+      ['reply', 'auth-rejected', 'reply to "m" was rejected (not authorized); nothing is pending'],
+      ['withdraw', 'auth-rejected', 'withdrawal of "m" was rejected (not authorized)'],
+    ]
+    for (const [action, outcome, expected] of cases) {
+      expect(renderOutcome(action, outcome, facts), `${action}:${outcome}`).toBe(expected)
     }
   })
 })
