@@ -197,9 +197,9 @@ func (s *Session) brokerTerminalPermission(out string) bool {
 	s.Mu.Unlock()
 
 	// Emit the brokered permission request.
-	opts := make([]map[string]any, len(tmuxPerm.Options))
+	opts := make([]any, len(tmuxPerm.Options))
 	for i, o := range tmuxPerm.Options {
-		opts[i] = map[string]any{"id": o.ID, "label": o.Label}
+		opts[i] = map[string]any{"optionId": o.ID, "kind": o.Kind, "label": o.Label}
 	}
 	s.Events <- events.Event{
 		Event:     "permission.request",

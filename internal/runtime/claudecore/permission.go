@@ -16,9 +16,19 @@ type TerminalPermission struct {
 type PermissionOption struct {
 	ID    string
 	Label string
+	Kind  string
 }
 
 var tmuxOptionRE = regexp.MustCompile(`^\s*(?:❯\s*)?(\d+)\.\s+(.*)`)
+
+// permissionOptionKind classifies a dialog option by its label: Claude Code
+// labels the declining choices "No" or "No, ...".
+func permissionOptionKind(label string) string {
+	if label == "No" || strings.HasPrefix(label, "No,") || strings.HasPrefix(label, "No ") {
+		return "reject"
+	}
+	return "allow"
+}
 
 // ParseTerminalPermission extracts a TerminalPermission from pane text, or nil
 // if the text doesn't represent a Claude permission dialog.
@@ -37,7 +47,8 @@ func ParseTerminalPermission(text string) *TerminalPermission {
 		if tmuxOptionRE.MatchString(trimmed) {
 			matches := tmuxOptionRE.FindStringSubmatch(trimmed)
 			if len(matches) == 3 {
-				options = append(options, PermissionOption{ID: matches[1], Label: strings.TrimSpace(matches[2])})
+				label := strings.TrimSpace(matches[2])
+				options = append(options, PermissionOption{ID: matches[1], Label: label, Kind: permissionOptionKind(label)})
 				inOptions = true
 				continue
 			}
