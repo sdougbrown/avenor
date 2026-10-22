@@ -252,7 +252,6 @@ export async function withdrawPendingAsk(
     fetchImpl,
     AbortSignal.timeout(ASK_CLEANUP_TIMEOUT_MS),
   ) as Record<string, unknown> | null
-  if (body?.outcome === 'replied') return { outcome: 'replied' }
   if (typeof body?.outcome === 'string' && body.outcome) {
     return { outcome: body.outcome as MessageOutcome }
   }
@@ -498,7 +497,7 @@ async function brokerAsk(
     const outcome = brokerErrorOutcome(error)
     if (outcome) return { outcome, messageId }
     if (cleaned.pending) return { outcome: 'possibly-pending', messageId }
-    return { outcome: cleaned.outcome === 'replied' ? 'replied' : cleaned.outcome, messageId }
+    return { outcome: cleaned.outcome, messageId }
   }
 
   const record = reply !== null && typeof reply === 'object' ? reply as Record<string, unknown> : {}
