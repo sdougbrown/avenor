@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from 'bun:test'
 import type { ExtensionDeps } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
 import { messageTool as realMessageTool } from '@dougbots/avenor-core'
-import { makeMessageProvider, startExtensionHarness, waitFor, waitUntilAborted } from './test-fixtures.js'
+import { makeMessageProvider, settleWithin, startExtensionHarness, waitFor, waitUntilAborted } from './test-fixtures.js'
 
 const subAgentEnv = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } as const
 
@@ -86,13 +86,17 @@ async function startSubAgentExtension(opts: {
   fetchStub: ReturnType<typeof stubBrokerFetch>
   subAgentEnv?: SubAgentEnv | null
   deps?: Partial<ExtensionDeps>
+  pollIntervalMs?: number
 }) {
   // null must stay null: it is the declared way to force non-sub-agent mode.
   return startExtensionHarness({
     // Every action routes through the one message handler; the child provider
     // the extension builds is what makes the broker calls.
     deps: { messageTool: realMessageTool, ...opts.deps },
-    extOptions: { subAgentEnv: opts.subAgentEnv === undefined ? subAgentEnv : opts.subAgentEnv },
+    extOptions: {
+      subAgentEnv: opts.subAgentEnv === undefined ? subAgentEnv : opts.subAgentEnv,
+      ...(opts.pollIntervalMs !== undefined && { pollIntervalMs: opts.pollIntervalMs }),
+    },
   })
 }
 
@@ -150,6 +154,37 @@ describe('sub-agent broker mode (integration)', () => {
         message: 'again?',
       })
       expect(second.details.outcome).toBe('edge-absent')
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('interrupts a blocking avenor_result when the sub-agent receives an ask', async () => {
+    const fetchStub = stubBrokerFetch([])
+    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+      args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
+    }))
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub, deps: { resultTool }, pollIntervalMs: 5 })
+      const resultPromise = harness.registeredTools.avenor_result.execute('t1', { run_id: 'supervisor' })
+      await waitFor(() => resultTool.mock.calls.length === 1)
+
+      fetchStub.setHandler('/poll-control', () => Response.json([
+        { type: 'agent_message', payload: { id: 'ask-block', from_run_id: 'supervisor', message: 'still there?' } },
+      ]))
+      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
+      const interrupted = await settleWithin(
+        resultPromise,
+        'blocking avenor_result did not return after the sub-agent received an ask',
+      )
+      expect(interrupted.details).toMatchObject({
+        run_id: 'supervisor',
+        status: 'running',
+        ready: false,
+        interrupted_by: { run_id: 'supervisor', status: 'asking' },
+      })
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()

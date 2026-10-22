@@ -15,7 +15,7 @@ import extensionFactory, {
   statusSupervisorId,
 } from './index.js'
 import { findLiveStatusForTrackedRun } from './types.js'
-import { makeInspectResult, makeMessageProvider, startExtensionHarness, waitFor } from './test-fixtures.js'
+import { makeInspectResult, makeMessageProvider, settleWithin, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 async function withoutAmbientAgentProfile<T>(run: () => Promise<T>): Promise<T> {
   const previous = process.env.PI_AGENT_PROFILE
@@ -47,6 +47,7 @@ async function createMultiSupervisorHarness(options: {
   shutdownTool?: any
   observeRun?: any
   resultTool?: any
+  brokerReceiveTool?: any
   /** Supervisor mock; provides isCurrentInstance for singleton-scope tests. */
   supervisor?: { isCurrentInstance?: (supervisorId: string) => boolean }
 }) {
@@ -71,6 +72,7 @@ async function createMultiSupervisorHarness(options: {
       ...(options.shutdownTool !== undefined && { shutdownTool: options.shutdownTool }),
       ...(options.observeRun !== undefined && { observeRun: options.observeRun }),
       ...(options.resultTool !== undefined && { resultTool: options.resultTool }),
+      ...(options.brokerReceiveTool !== undefined && { brokerReceiveTool: options.brokerReceiveTool }),
       ...(options.supervisor !== undefined && { Supervisor: options.supervisor as any }),
     },
     extOptions: { pollIntervalMs: options.pollIntervalMs ?? 5 },
@@ -1458,6 +1460,46 @@ describe('Avenor Pi extension', () => {
       status: 'running',
       ready: false,
       interrupted_by: { run_id: 'rb', label: 'beta', status: 'done' },
+    })
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('interrupts a blocking avenor_result when the awaited sub-agent asks the host a question', async () => {
+    const SOCK = '/tmp/ask-interrupt-host.sock'
+    let deliverAsk = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return { run_id: 'rt_1', label: 'worker', status: 'running', runtime_id: 'rt-1' }
+    })
+    const resultTool = makeBlockingResultTool()
+    const brokerReceiveTool = mock(async () => ({
+      asks: deliverAsk
+        ? [{ message_id: 'ask-1', from_run_id: 'rt_1', message: 'may I proceed?', role: 'agent' }]
+        : [],
+    }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      brokerReceiveTool,
+      spawnTool: mock(async () => ({ run_id: 'rt_1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt-1' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'rt_1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    await waitFor(() => resultTool.mock.calls.length === 1)
+
+    deliverAsk = true
+    await waitFor(() => h.sendUserMessage.mock.calls.length > 0)
+    const interrupted = await settleWithin(
+      resultPromise,
+      'blocking avenor_result did not return after the awaited run asked a question',
+    )
+    expect(interrupted.details).toMatchObject({
+      run_id: 'rt_1',
+      status: 'running',
+      ready: false,
+      interrupted_by: { run_id: 'rt_1', status: 'asking' },
     })
 
     await h.eventHandlers.session_shutdown()
