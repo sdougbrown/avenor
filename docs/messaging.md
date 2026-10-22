@@ -105,10 +105,14 @@ messages.
 | `lost` | The ask is provably gone and cannot appear later. |
 
 A failed ask reaches tool surfaces as a JSON-RPC error whose `data` carries
-`message_id`, `pending`, and — when known — `outcome`. `pending` is true exactly
-when the outcome is `possibly-pending`: a wait that failed but whose cleanup
-withdrawal confirmed a terminal fence is no longer pending, and
-`message_withdraw` (or the message tool's `withdraw` action) accepts the retained ID.
+`code` (the typed tool code), `outcome`, `message_id` and `wire_code`, omitting
+the last three where the failure does not know them; `resume` and the
+`session_*` verbs report the authority's decision and send `code` alone. What a
+caller does next follows from `outcome`: `not-sent` may be re-sent, while
+`possibly-pending` means retain the message ID and never re-send it — a wait
+whose cleanup withdrawal confirmed a terminal fence is not `possibly-pending`.
+Withdrawal is `message_withdraw` (or the message tool's `withdraw` action),
+which accepts the retained ID.
 
 Two rules follow from the table and are enforced everywhere:
 
