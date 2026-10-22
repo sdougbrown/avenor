@@ -16,8 +16,6 @@ export interface AskResult {
   from_run_id: string
 }
 
-export { extractReplyMessage, normalizeAskTimeoutMs }
-
 /**
  * Build the failure message every ask path reports: the broker message id plus
  * whether the ask edge is still pending (withdrawable via avenor_cancel) or

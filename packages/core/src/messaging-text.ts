@@ -230,10 +230,11 @@ function extractPiText(value: unknown): string {
 }
 
 /**
- * Extract the last assistant message's text and stop reason from an agent_end
- * payload, the TS twin of internal/runtime/pi's translateAgentEnd/extractPiText.
- * pi serialises AgentMessage fields in camelCase (stopReason); the snake_case
- * alias is accepted for older shims.
+ * Read the last assistant message's text and raw stop reason from an agent_end
+ * payload's `messages`, the TS twin of internal/runtime/pi's extractPiText plus
+ * the per-message `stopReason` read that translateAgentEnd does. Go also falls
+ * back to payload-level stopReason/errorMessage and normalises the stop reason;
+ * this helper sees only the messages array and does neither.
  */
 export function extractTurnText(messages: unknown[]): { text: string; stopReason: string } {
   if (messages.length === 0) return { text: '', stopReason: '' }

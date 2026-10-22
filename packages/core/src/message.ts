@@ -455,7 +455,7 @@ function validateFields(
   return null
 }
 
-function invalidAction(fields: Record<string, unknown> = {}): ToolError {
+function invalidAction(): ToolError {
   return new ToolError('invalid_action', invalidActionReason)
 }
 
@@ -481,7 +481,7 @@ export function assertMessageInput(input: unknown): asserts input is MessageInpu
   const action = fields.action
   if (typeof action !== 'string') throw invalidAction()
   const entry = messageApplicability[action]
-  if (!entry) throw invalidAction({ action })
+  if (!entry) throw invalidAction()
   const detail = validateFields(fields, entry, messageConstraints)
   if (detail) throw invalidRequest(action, detail)
 }
