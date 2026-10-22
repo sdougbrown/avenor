@@ -313,10 +313,30 @@ func TestAvenorStatusWaitValidationAndLifecycleTimeout(t *testing.T) {
 }
 
 func TestAvenorStatusWaitTurnComplete(t *testing.T) {
-	s, fake := newWaitTestServer(t, []map[string]any{
+	snapshots := []map[string]any{
 		{"status": "running", "phase": "working"},
 		{"status": "done", "phase": "done"},
-	})
+	}
+	var observed []string
+	index := 0
+	fake := &fakeClient{}
+	fake.statusFunc = func(string) (map[string]any, error) {
+		snapshot := snapshots[len(snapshots)-1]
+		if index < len(snapshots) {
+			snapshot = snapshots[index]
+			index++
+		}
+		word, _ := snapshot["status"].(string)
+		observed = append(observed, word)
+		return snapshot, nil
+	}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.sleep = func(ctx context.Context, _ time.Duration) error {
+		return ctx.Err()
+	}
 	_, result, err := s.handleAvenorStatus(context.Background(), nil, statusArgs{
 		RunID: "run-1", View: "lifecycle", WaitFor: "turn_complete", Timeout: "5s",
 	})
@@ -330,8 +350,17 @@ func TestAvenorStatusWaitTurnComplete(t *testing.T) {
 	if status["timed_out"] == true {
 		t.Fatalf("status = %#v, want no timeout", status)
 	}
-	if len(fake.statusCapturedRuntimeIDs) < 2 {
-		t.Fatalf("status calls = %d, want at least 2 polls", len(fake.statusCapturedRuntimeIDs))
+	runningAt, doneAt := -1, -1
+	for i, word := range observed {
+		if word == "running" && runningAt < 0 {
+			runningAt = i
+		}
+		if word == "done" && doneAt < 0 {
+			doneAt = i
+		}
+	}
+	if runningAt < 0 || doneAt < 0 || runningAt > doneAt {
+		t.Fatalf("observed statuses = %v, want running before done", observed)
 	}
 }
 

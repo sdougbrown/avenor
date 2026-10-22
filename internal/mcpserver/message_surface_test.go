@@ -890,10 +890,6 @@ func TestAvenorMessageResumesRunOnExternallyWatchedSupervisor(t *testing.T) {
 
 	cl := newRecordingControlClient()
 	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
-	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
-		t.Error("the default supervisor received a resume addressed to another supervisor")
-		return messaging.ResumeResult{}, errors.New("wrong supervisor")
-	}
 	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
 	if err != nil {
 		t.Fatal(err)
@@ -926,6 +922,9 @@ func TestAvenorMessageResumesRunOnExternallyWatchedSupervisor(t *testing.T) {
 	}
 	if resumed.params["target"] != "rt_ext" || resumed.params["message"] != "go" {
 		t.Fatalf("external resume = %#v", resumed.params)
+	}
+	if cl.resumeReq != (messaging.ResumeRequest{}) {
+		t.Fatalf("default supervisor resume = %+v, want the default supervisor never asked to resume", cl.resumeReq)
 	}
 	object, _ := res.StructuredContent.(map[string]any)
 	runID, _ := object["run_id"].(string)
