@@ -417,12 +417,13 @@ one.
 
 ```json
 {
+  "params": [{ "id": "run_dir", "type": "string", "required": true }],
   "launch_wrappers": [
     {
       "id": "sandbox",
       "argv": [
         { "type": "literal", "value": "/opt/bin/agent-sandbox" },
-        { "type": "literal", "value": "--keep-env PATH,HOME" }
+        { "type": "instance_param", "from_instance_param": "run_dir" }
       ]
     }
   ]
@@ -437,10 +438,11 @@ A node selects a wrapper by ID with `launch_wrapper`, a sibling of `action`
   "action": { "type": "run", "prompt": "Reply OK" } }
 ```
 
-- **Resolution.** Each element is a literal value passed through as one
-  complete argv element — no interpolation, no expansion, no trimming.
-  `argv[0]` must be a literal absolute path. Unknown or duplicate wrapper IDs
-  and invalid argv are rejected at validation.
+- **Resolution.** Each `instance_param` reference substitutes the param's value
+  as one complete argv element — whole-argv substitution, with no interpolation
+  or expansion. `argv[0]` must be a literal absolute path. References must name
+  declared, required `string` params. Unknown or duplicate wrapper IDs and
+  invalid argv are rejected at validation.
 - **Selection.** Only `run`, `loop`, and `team` nodes select a wrapper. Phases
   inherit the parent's resolved argv; child workflows do not. There is no
   template default. An existing session's ownership persists the resolved argv;

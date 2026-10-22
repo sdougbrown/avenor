@@ -1948,6 +1948,34 @@ func svalidateWorkflowProfileLaunchWrapperArg(raw json.RawMessage, path, schemaP
 				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 			}
 		}
+	case "instance_param":
+		allowed := map[string]bool{
+			"from_instance_param": true,
+			"type":                true,
+		}
+		for key := range m {
+			if allowed[key] {
+				continue
+			}
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
+		}
+		if _, ok := m["from_instance_param"]; !ok {
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("from_instance_param"), schemaPath))
+		}
+		if r, ok := m["from_instance_param"]; ok {
+			fpath := path + "/" + escapePtr("from_instance_param")
+			fspath := schemaPath + "/properties/" + escapePtr("from_instance_param")
+			switch WorkflowProfileStructuralKind(r) {
+			case "string":
+				var sv string
+				_ = json.Unmarshal(r, &sv)
+				if utf8.RuneCountInString(sv) < 1 {
+					*issues = append(*issues, WorkflowProfileStructuralIssueAt("minLength", fpath, fspath))
+				}
+			default:
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+			}
+		}
 	default:
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("discriminator", discPath, discSPath))
 	}
@@ -3009,6 +3037,7 @@ func svalidateWorkflowProfileLaunchWrapperArgKind(raw json.RawMessage, path, sch
 	var value string
 	_ = json.Unmarshal(raw, &value)
 	switch value {
+	case "instance_param":
 	case "literal":
 	default:
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("enum", path, schemaPath))
@@ -3714,6 +3743,8 @@ func (v WorkflowProfileLaunchWrapperArg) validate(path string, issues *[]Issue) 
 	switch branch := v.Value.(type) {
 	case *WorkflowProfileLaunchWrapperArgValueLiteral:
 		branch.validate(path, issues)
+	case *WorkflowProfileLaunchWrapperArgValueInstanceParam:
+		branch.validate(path, issues)
 	case nil:
 		*issues = append(*issues, Issue{Code: "required", Path: path})
 	}
@@ -3721,12 +3752,25 @@ func (v WorkflowProfileLaunchWrapperArg) validate(path string, issues *[]Issue) 
 
 func (v WorkflowProfileLaunchWrapperArgValueLiteral) validate(path string, issues *[]Issue) {
 	switch v.Type {
+	case WorkflowProfileLaunchWrapperArgKindInstanceParam:
 	case WorkflowProfileLaunchWrapperArgKindLiteral:
 	default:
 		*issues = append(*issues, Issue{Code: "enum", Path: path + "/" + escapePtr("type")})
 	}
 	if utf8.RuneCountInString(v.Value) < 1 {
 		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("value")})
+	}
+}
+
+func (v WorkflowProfileLaunchWrapperArgValueInstanceParam) validate(path string, issues *[]Issue) {
+	if utf8.RuneCountInString(v.FromInstanceParam) < 1 {
+		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("from_instance_param")})
+	}
+	switch v.Type {
+	case WorkflowProfileLaunchWrapperArgKindInstanceParam:
+	case WorkflowProfileLaunchWrapperArgKindLiteral:
+	default:
+		*issues = append(*issues, Issue{Code: "enum", Path: path + "/" + escapePtr("type")})
 	}
 }
 
@@ -3926,7 +3970,8 @@ const (
 type WorkflowProfileLaunchWrapperArgKind string
 
 const (
-	WorkflowProfileLaunchWrapperArgKindLiteral WorkflowProfileLaunchWrapperArgKind = "literal"
+	WorkflowProfileLaunchWrapperArgKindInstanceParam WorkflowProfileLaunchWrapperArgKind = "instance_param"
+	WorkflowProfileLaunchWrapperArgKindLiteral       WorkflowProfileLaunchWrapperArgKind = "literal"
 )
 
 type WorkflowProfileTemplateParamTypeValue string
@@ -6887,6 +6932,61 @@ func (v *WorkflowProfileLaunchWrapperArgValueLiteral) UnmarshalJSON(data []byte)
 	return nil
 }
 
+type WorkflowProfileLaunchWrapperArgValueInstanceParam struct {
+	FromInstanceParam string                              "json:\"from_instance_param\""
+	Type              WorkflowProfileLaunchWrapperArgKind "json:\"type\""
+}
+
+func (*WorkflowProfileLaunchWrapperArgValueInstanceParam) isWorkflowProfileLaunchWrapperArgValue() {}
+
+func (v *WorkflowProfileLaunchWrapperArgValueInstanceParam) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		return fmt.Errorf("expected object, got null")
+	}
+	for key := range raw {
+		switch key {
+		case "from_instance_param":
+		case "type":
+		default:
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if r, ok := raw["from_instance_param"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"from_instance_param\" must not be null")
+		}
+	}
+	if r, ok := raw["type"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"type\" must not be null")
+		}
+	}
+	if _, ok := raw["from_instance_param"]; !ok {
+		return fmt.Errorf("missing required field \"from_instance_param\"")
+	}
+	if _, ok := raw["type"]; !ok {
+		return fmt.Errorf("missing required field \"type\"")
+	}
+	type alias WorkflowProfileLaunchWrapperArgValueInstanceParam
+	var next alias
+	if encoded, ok := raw["from_instance_param"]; ok {
+		if err := json.Unmarshal(encoded, &next.FromInstanceParam); err != nil {
+			return err
+		}
+	}
+	if encoded, ok := raw["type"]; ok {
+		if err := json.Unmarshal(encoded, &next.Type); err != nil {
+			return err
+		}
+	}
+	*v = WorkflowProfileLaunchWrapperArgValueInstanceParam(next)
+	return nil
+}
+
 // UnmarshalJSON decodes WorkflowProfileLaunchWrapperArg by its "type" discriminator const.
 func (u *WorkflowProfileLaunchWrapperArg) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
@@ -6909,6 +7009,13 @@ func (u *WorkflowProfileLaunchWrapperArg) UnmarshalJSON(data []byte) error {
 		}
 		u.Value = &next
 		return nil
+	case WorkflowProfileLaunchWrapperArgKindInstanceParam:
+		var next WorkflowProfileLaunchWrapperArgValueInstanceParam
+		if err := json.Unmarshal(data, &next); err != nil {
+			return err
+		}
+		u.Value = &next
+		return nil
 	default:
 		return fmt.Errorf("unknown discriminator type: %q", dv)
 	}
@@ -6920,6 +7027,11 @@ func (u WorkflowProfileLaunchWrapperArg) MarshalJSON() ([]byte, error) {
 	}
 	switch branch := u.Value.(type) {
 	case *WorkflowProfileLaunchWrapperArgValueLiteral:
+		if branch == nil {
+			return nil, fmt.Errorf("cannot marshal WorkflowProfileLaunchWrapperArg: selected branch is nil")
+		}
+		return json.Marshal(branch)
+	case *WorkflowProfileLaunchWrapperArgValueInstanceParam:
 		if branch == nil {
 			return nil, fmt.Errorf("cannot marshal WorkflowProfileLaunchWrapperArg: selected branch is nil")
 		}

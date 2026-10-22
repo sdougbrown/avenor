@@ -7,15 +7,16 @@ import (
 )
 
 // ResolveNodeLaunchWrapper resolves one node's launch-wrapper selection into
-// an argv slice: every element is passed through exactly as declared (no
-// shell expansion, no interpolation, no trimming). A node without a
-// selection resolves to nil with no error.
+// an argv slice: every literal element is passed through exactly as declared
+// (no shell expansion, no interpolation, no trimming), and every
+// instance-param element is replaced with the named parameter's recorded
+// value. A node without a selection resolves to nil with no error.
 //
 // Templates are normally validated before they reach this resolver, but the
-// resolver fails closed anyway: a missing definition, an empty value, a NUL
-// in any argv element, or a first element that is not a literal absolute
-// path is an error, never a silently degraded argv.
-func ResolveNodeLaunchWrapper(template Template, node NodeDefinition, _ map[string]string) ([]string, error) {
+// resolver fails closed anyway: a missing definition, an unsupplied or empty
+// resolved value, a NUL in any argv element, or a first element that is not
+// a literal absolute path is an error, never a silently degraded argv.
+func ResolveNodeLaunchWrapper(template Template, node NodeDefinition, params map[string]string) ([]string, error) {
 	if node.LaunchWrapper == "" {
 		return nil, nil
 	}
@@ -31,7 +32,7 @@ func ResolveNodeLaunchWrapper(template Template, node NodeDefinition, _ map[stri
 	}
 	argv := make([]string, 0, len(definition.Argv))
 	for index, arg := range definition.Argv {
-		value, err := launchWrapperArgValue(node.LaunchWrapper, index, arg)
+		value, err := launchWrapperArgValue(node.LaunchWrapper, index, arg, params)
 		if err != nil {
 			return nil, err
 		}
@@ -45,11 +46,16 @@ func ResolveNodeLaunchWrapper(template Template, node NodeDefinition, _ map[stri
 
 // launchWrapperArgValue resolves one argv element, rejecting an empty or NUL
 // result regardless of the element's declared form.
-func launchWrapperArgValue(wrapperID string, index int, arg LaunchWrapperArg) (string, error) {
+func launchWrapperArgValue(wrapperID string, index int, arg LaunchWrapperArg, params map[string]string) (string, error) {
 	var value string
 	switch arg.Type {
 	case LaunchWrapperArgKindLiteral:
 		value = arg.Value
+	case LaunchWrapperArgKindInstanceParam:
+		value = params[arg.FromInstanceParam]
+		if _, ok := params[arg.FromInstanceParam]; !ok {
+			return "", fmt.Errorf("launch wrapper %q: argv[%d] instance param %q is not supplied", wrapperID, index, arg.FromInstanceParam)
+		}
 	default:
 		return "", fmt.Errorf("launch wrapper %q: argv[%d] type %q is not a launch_wrapper_arg type", wrapperID, index, arg.Type)
 	}

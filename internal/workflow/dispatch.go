@@ -62,8 +62,8 @@ type BeginDispatchResult struct {
 	// supervisor's working directory.
 	WorkingDirectory string
 	// LaunchWrapper is the node's launch-wrapper argv resolved from the
-	// immutable template definition. Nil means the node declared no wrapper
-	// and the runtime launches unwrapped.
+	// immutable template definition and the recorded instance params. Nil
+	// means the node declared no wrapper and the runtime launches unwrapped.
 	LaunchWrapper []string
 }
 

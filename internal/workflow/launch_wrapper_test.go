@@ -11,9 +11,9 @@ import (
 	"testing"
 )
 
-// launchWrapperTemplateJSON builds a template with the given launch-wrapper
-// definitions (nil omits the field) and an optional node-level launch_wrapper
-// selection.
+// launchWrapperTemplateJSON builds a template with one required "worktree"
+// param, the given launch-wrapper definitions (nil omits the field), and an
+// optional node-level launch_wrapper selection.
 func launchWrapperTemplateJSON(t *testing.T, templateID string, wrappers []any, nodeWrapper any) []byte {
 	t.Helper()
 	tmpl := map[string]any{
@@ -21,6 +21,7 @@ func launchWrapperTemplateJSON(t *testing.T, templateID string, wrappers []any, 
 		"template_id":      templateID,
 		"template_version": "1",
 		"entry_nodes":      []string{"start"},
+		"params":           []any{map[string]any{"id": "worktree", "type": "string", "required": true}},
 		"nodes": []any{
 			map[string]any{
 				"id":     "start",
@@ -42,14 +43,14 @@ func launchWrapperTemplateJSON(t *testing.T, templateID string, wrappers []any, 
 	return data
 }
 
-// validClaudeWrapper is a definition that exercises the declared arg form,
-// including a value with spaces and shell metacharacters.
+// validClaudeWrapper is a definition that exercises every declared arg form.
 func validClaudeWrapper() map[string]any {
 	return map[string]any{
 		"id": "claude",
 		"argv": []any{
 			map[string]any{"type": "literal", "value": "/usr/local/bin/claude"},
 			map[string]any{"type": "literal", "value": "--workdir flag with spaces and $dollar"},
+			map[string]any{"type": "instance_param", "from_instance_param": "worktree"},
 		},
 	}
 }
@@ -66,6 +67,9 @@ func TestValidateLaunchWrapperIngress(t *testing.T) {
 	literal := func(value string) map[string]any {
 		return map[string]any{"type": "literal", "value": value}
 	}
+	param := func(name string) map[string]any {
+		return map[string]any{"type": "instance_param", "from_instance_param": name}
+	}
 
 	tests := []struct {
 		name        string
@@ -74,7 +78,7 @@ func TestValidateLaunchWrapperIngress(t *testing.T) {
 		wantErr     string
 	}{
 		{
-			name:        "valid literal args with node selection",
+			name:        "valid literal and instance-param args with node selection",
 			wrappers:    []any{valid(nil)},
 			nodeWrapper: "claude",
 		},
@@ -119,6 +123,12 @@ func TestValidateLaunchWrapperIngress(t *testing.T) {
 			wantErr:     "node \"start\" launch_wrapper names unknown launch wrapper \"claude\"",
 		},
 		{
+			name:        "first argv element is an instance param",
+			wrappers:    []any{valid(func(w map[string]any) { w["argv"] = argv(param("worktree")) })},
+			nodeWrapper: "claude",
+			wantErr:     "argv[0] must be a literal absolute executable path",
+		},
+		{
 			name:        "first argv element is a relative literal",
 			wrappers:    []any{valid(func(w map[string]any) { w["argv"] = argv(literal("bin/claude")) })},
 			nodeWrapper: "claude",
@@ -133,6 +143,11 @@ func TestValidateLaunchWrapperIngress(t *testing.T) {
 			name:     "NUL inside a literal value",
 			wrappers: []any{valid(func(w map[string]any) { w["argv"] = append(argv(), literal("a\x00b")) })},
 			wantErr:  "must not contain NUL",
+		},
+		{
+			name:     "undeclared instance param",
+			wrappers: []any{valid(func(w map[string]any) { w["argv"] = append(argv(), param("nope")) })},
+			wantErr:  "names undeclared instance param \"nope\"",
 		},
 	}
 	for _, tc := range tests {
@@ -181,6 +196,11 @@ func TestValidateLaunchWrapperArgIngress(t *testing.T) {
 			wantErr: "additionalProperties at /launch_wrappers/0/argv/1/from_instance_param",
 		},
 		{
+			name:    "extraneous variant field on an instance param",
+			element: map[string]any{"type": "instance_param", "from_instance_param": "worktree", "value": "/x"},
+			wantErr: "additionalProperties at /launch_wrappers/0/argv/1/value",
+		},
+		{
 			name:    "non-object element",
 			element: "/x",
 			wantErr: "type at /launch_wrappers/0/argv/1",
@@ -208,6 +228,24 @@ func TestValidateLaunchWrapperArgIngress(t *testing.T) {
 				t.Fatalf("ValidateTemplateJSON() = %v, want containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestValidateLaunchWrapperRequiresRequiredParam proves a launch-wrapper arg
+// can only name a required param: an unsupplied optional param would resolve
+// to an empty argv element.
+func TestValidateLaunchWrapperRequiresRequiredParam(t *testing.T) {
+	var tmpl map[string]any
+	if err := json.Unmarshal(launchWrapperTemplateJSON(t, "lw-optional", []any{validClaudeWrapper()}, nil), &tmpl); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	tmpl["params"] = []any{map[string]any{"id": "worktree", "type": "string"}}
+	data, err := json.Marshal(tmpl)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := ValidateTemplateJSON(data); err == nil || !strings.Contains(err.Error(), "must be declared required") {
+		t.Fatalf("ValidateTemplateJSON() = %v, want the required-param rejection", err)
 	}
 }
 
@@ -292,6 +330,27 @@ func TestValidateLaunchWrapperInMemoryCrossFields(t *testing.T) {
 			},
 			wantErr: `type "" is not a launch_wrapper_arg type`,
 		},
+		{
+			name: "literal with the instance-param field also set",
+			mutate: func(w *LaunchWrapperDefinition) {
+				w.Argv = []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: absolute, FromInstanceParam: "worktree"}}
+			},
+			wantErr: "must not declare from_instance_param",
+		},
+		{
+			name: "instance param with the literal value also set",
+			mutate: func(w *LaunchWrapperDefinition) {
+				w.Argv = []LaunchWrapperArg{{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree", Value: absolute}}
+			},
+			wantErr: "must not declare value",
+		},
+		{
+			name: "first element is an instance param",
+			mutate: func(w *LaunchWrapperDefinition) {
+				w.Argv = []LaunchWrapperArg{{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree"}}
+			},
+			wantErr: "argv[0] must be a literal absolute executable path",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -302,6 +361,7 @@ func TestValidateLaunchWrapperInMemoryCrossFields(t *testing.T) {
 				EntryNodes:       []NodeID{"start"},
 				Nodes:            []NodeDefinition{{ID: "start", Action: Action{Kind: ActionRun, Run: &RunAction{Prompt: "p"}}, LaunchWrapper: "claude"}},
 				TerminalOutcomes: []OutcomeName{"done"},
+				Params:           []TemplateParam{{ID: "worktree", Type: "string", Required: true}},
 				LaunchWrappers:   []LaunchWrapperDefinition{{ID: "claude", Argv: []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: absolute}}}},
 			}
 			tc.mutate(&template.LaunchWrappers[0])
@@ -314,7 +374,7 @@ func TestValidateLaunchWrapperInMemoryCrossFields(t *testing.T) {
 }
 
 // TestLaunchWrapperRegistrationAndInstantiate proves the manager path accepts
-// a valid wrapper template and instantiates it.
+// a valid wrapper template and instantiates it with the required param.
 func TestLaunchWrapperRegistrationAndInstantiate(t *testing.T) {
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
@@ -327,6 +387,7 @@ func TestLaunchWrapperRegistrationAndInstantiate(t *testing.T) {
 	}
 	payload, err := json.Marshal(map[string]any{
 		"template_id": "lw-register", "template_version": "1",
+		"params": map[string]string{"worktree": "/tmp/lw-worktree"},
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -349,14 +410,17 @@ func TestLaunchWrapperRoundTripPreservesExactArguments(t *testing.T) {
 	if wrapper.ID != "claude" {
 		t.Fatalf("wrapper ID = %q, want %q", wrapper.ID, "claude")
 	}
-	if len(wrapper.Argv) != 2 {
-		t.Fatalf("argv length = %d, want 2", len(wrapper.Argv))
+	if len(wrapper.Argv) != 3 {
+		t.Fatalf("argv length = %d, want 3", len(wrapper.Argv))
 	}
 	if wrapper.Argv[0] != (LaunchWrapperArg{Type: LaunchWrapperArgKindLiteral, Value: "/usr/local/bin/claude"}) {
 		t.Fatalf("argv[0] = %+v", wrapper.Argv[0])
 	}
 	if wrapper.Argv[1].Value != spaces {
 		t.Fatalf("argv[1].value = %q, want %q", wrapper.Argv[1].Value, spaces)
+	}
+	if wrapper.Argv[2] != (LaunchWrapperArg{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree"}) {
+		t.Fatalf("argv[2] = %+v", wrapper.Argv[2])
 	}
 	encoded, err := json.Marshal(template)
 	if err != nil {
@@ -381,16 +445,18 @@ func TestResolveNodeLaunchWrapper(t *testing.T) {
 			Argv: []LaunchWrapperArg{
 				{Type: LaunchWrapperArgKindLiteral, Value: "/usr/local/bin/claude"},
 				{Type: LaunchWrapperArgKindLiteral, Value: "--workdir with spaces and $dollar"},
+				{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree"},
 			},
 		}},
 	}
 	node := NodeDefinition{ID: "start", LaunchWrapper: "claude"}
+	params := map[string]string{"worktree": "/tmp/wt"}
 
-	resolved, err := ResolveNodeLaunchWrapper(template, node, nil)
+	resolved, err := ResolveNodeLaunchWrapper(template, node, params)
 	if err != nil {
 		t.Fatalf("ResolveNodeLaunchWrapper() = %v, want nil", err)
 	}
-	want := []string{"/usr/local/bin/claude", "--workdir with spaces and $dollar"}
+	want := []string{"/usr/local/bin/claude", "--workdir with spaces and $dollar", "/tmp/wt"}
 	if len(resolved) != len(want) {
 		t.Fatalf("resolved = %q, want %q", resolved, want)
 	}
@@ -402,7 +468,7 @@ func TestResolveNodeLaunchWrapper(t *testing.T) {
 
 	// The result is a fresh slice: mutating it cannot corrupt the template.
 	resolved[0] = "mutated"
-	again, err := ResolveNodeLaunchWrapper(template, node, nil)
+	again, err := ResolveNodeLaunchWrapper(template, node, params)
 	if err != nil {
 		t.Fatalf("second ResolveNodeLaunchWrapper() = %v, want nil", err)
 	}
@@ -412,21 +478,25 @@ func TestResolveNodeLaunchWrapper(t *testing.T) {
 
 	// No selection resolves to nil.
 	plain := NodeDefinition{ID: "start"}
-	if resolved, err := ResolveNodeLaunchWrapper(template, plain, nil); resolved != nil || err != nil {
+	if resolved, err := ResolveNodeLaunchWrapper(template, plain, params); resolved != nil || err != nil {
 		t.Fatalf("ResolveNodeLaunchWrapper(no selection) = %q, %v, want nil, nil", resolved, err)
 	}
 
 	failures := []struct {
 		name    string
 		node    NodeDefinition
+		params  map[string]string
 		wantErr string
 	}{
-		{"missing definition", NodeDefinition{ID: "start", LaunchWrapper: "missing"}, "unknown launch wrapper"},
-		{"whitespace-only selection", NodeDefinition{ID: "start", LaunchWrapper: " "}, "unknown launch wrapper"},
+		{"missing definition", NodeDefinition{ID: "start", LaunchWrapper: "missing"}, params, "unknown launch wrapper"},
+		{"whitespace-only selection", NodeDefinition{ID: "start", LaunchWrapper: " "}, params, "unknown launch wrapper"},
+		{"missing param", node, map[string]string{}, "instance param \"worktree\" is not supplied"},
+		{"empty resolved value", node, map[string]string{"worktree": ""}, "resolved to an empty value"},
+		{"NUL in resolved value", node, map[string]string{"worktree": "a\x00b"}, "must not contain NUL"},
 	}
 	for _, tc := range failures {
 		t.Run(tc.name, func(t *testing.T) {
-			resolved, err := ResolveNodeLaunchWrapper(template, tc.node, nil)
+			resolved, err := ResolveNodeLaunchWrapper(template, tc.node, tc.params)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("ResolveNodeLaunchWrapper() = %q, %v, want containing %q", resolved, err, tc.wantErr)
 			}
@@ -436,9 +506,7 @@ func TestResolveNodeLaunchWrapper(t *testing.T) {
 		})
 	}
 
-	// Fail closed on unvalidated argv, even when the caller skipped
-	// validation: an empty value, a NUL, and a non-literal first element are
-	// each rejected.
+	// Fail closed on unvalidated argv, even when the caller skipped validation.
 	unvalidated := []struct {
 		name string
 		argv []LaunchWrapperArg
@@ -448,11 +516,12 @@ func TestResolveNodeLaunchWrapper(t *testing.T) {
 		{"non-literal executable", []LaunchWrapperArg{{Type: LaunchWrapperArgKind("env"), Value: "/usr/local/bin/claude"}}},
 		{"empty argv", nil},
 		{"relative executable", []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: "bin/wrapper"}}},
+		{"instance-param executable", []LaunchWrapperArg{{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree"}}},
 	}
 	for _, tc := range unvalidated {
 		t.Run(tc.name, func(t *testing.T) {
 			broken := Template{LaunchWrappers: []LaunchWrapperDefinition{{ID: "claude", Argv: tc.argv}}}
-			if _, err := ResolveNodeLaunchWrapper(broken, node, nil); err == nil {
+			if _, err := ResolveNodeLaunchWrapper(broken, node, params); err == nil {
 				t.Fatalf("ResolveNodeLaunchWrapper(%s) = nil error, want the fail-closed rejection", tc.name)
 			}
 		})
