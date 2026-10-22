@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
-	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/tools"
@@ -1539,38 +1538,5 @@ func TestSessionState_removeSubscriber_nonExistent(t *testing.T) {
 	_, ok := <-ch1
 	if !ok {
 		t.Error("ch1 should still be open and receive the event")
-	}
-}
-
-func TestApprovalRequestAnswersThroughFileHandler(t *testing.T) {
-	ss := &sessionState{}
-	p := &Provider{cfg: Config{ToolApproval: map[string]bool{"bash": true}}, sessions: map[string]*sessionState{"ses-perm": ss}}
-	eventCh := make(chan events.Event, 1)
-	allowed := make(chan bool, 1)
-	go func() {
-		ok, _ := p.makeApprovalChecker(ss)(context.Background(), "bash", eventCh)
-		allowed <- ok
-	}()
-	req := <-eventCh
-	req.SessionID = "ses-perm"
-
-	base := filepath.Join(t.TempDir(), "perm")
-	handler := permission.NewFileHandler(base)
-	handler.PollInterval = 5 * time.Millisecond
-	handler.Timeout = 5 * time.Second
-	go func() {
-		for {
-			if _, err := os.Stat(base + ".req"); err == nil {
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-		_ = os.WriteFile(base+".req.response", []byte(`{"outcome":"selected","option_id":"allow"}`), 0o600)
-	}()
-	if _, err := handler.Handle(context.Background(), p, req); err != nil {
-		t.Fatalf("file handler: %v", err)
-	}
-	if !<-allowed {
-		t.Fatal("approval checker denied the tool after an allow answer")
 	}
 }

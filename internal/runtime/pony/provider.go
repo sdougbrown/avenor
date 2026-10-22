@@ -478,9 +478,9 @@ func (p *Provider) makeApprovalChecker(ss *sessionState) ApprovalChecker {
 			"request_id": requestID,
 			"tool":       toolName,
 			"question":   fmt.Sprintf("Allow %s to execute?", toolName),
-			"options": []any{
-				map[string]any{"optionId": "allow", "kind": "allow"},
-				map[string]any{"optionId": "deny", "kind": "deny"},
+			"options": []map[string]any{
+				{"optionId": "allow", "kind": "allow"},
+				{"optionId": "deny", "kind": "deny"},
 			},
 		})
 
