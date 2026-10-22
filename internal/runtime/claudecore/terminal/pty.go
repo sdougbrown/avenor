@@ -61,6 +61,11 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 	if err != nil {
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
+	if ptmx, err = pollableMaster(ptmx); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("pty start: %w", err)
+	}
 
 	ps := &PTYSession{
 		name:       opts.Name,
@@ -300,8 +305,9 @@ func (p *PTYSession) Interrupt(_ context.Context) error {
 
 // Kill rejects further writes and kills the process. The pty master stays
 // open until the reaper sees the exit: a killed process can block in exit
-// until its pending output is read, so the reader must keep draining, and a
-// blocked master write only returns once the child's side has closed.
+// until its pending output is read, so the reader must keep draining. A master
+// write still blocked on the program's input fails when the child's side
+// closes or, at the latest, when the reaper closes the master.
 func (p *PTYSession) Kill(_ context.Context) error {
 	p.mu.Lock()
 	p.alive = false
