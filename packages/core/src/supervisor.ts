@@ -546,8 +546,17 @@ export class Supervisor {
     return this.runs.get(runId)
   }
 
-  /** Register a run this supervisor resumed, so its ID and label stay resolvable. */
+  /**
+   * Register a run this supervisor resumed, so its ID and label stay resolvable.
+   * Last write wins: an existing entry with the same run ID, or a label held by
+   * another run, is replaced. Duplicate rejection is the resume provider's job.
+   */
   registerResumed(run: RunInfo): void {
+    this.register(run)
+  }
+
+  /** The one place a run's ID and label are registered, for spawn and for resume. */
+  private register(run: RunInfo): void {
     this.runs.set(run.runId, run)
     this.aliases.set(run.label, run)
   }
@@ -704,8 +713,7 @@ export class Supervisor {
       autoApprove: spawnParams.auto_approve,
     }
 
-    this.runs.set(runId, runInfo)
-    this.aliases.set(runInfo.label, runInfo)
+    this.register(runInfo)
     return runInfo
   }
 

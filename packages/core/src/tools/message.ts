@@ -36,6 +36,6 @@ export async function messageTool(
 /** Bind the handler to one provider. */
 export function createMessageTool(
   provider: MessageProvider,
-): (args: unknown) => Promise<ProviderResult> {
-  return args => messageTool(args, provider)
+): (args: unknown, options?: { signal?: AbortSignal }) => Promise<ProviderResult> {
+  return (args, options) => messageTool(args, provider, options)
 }
