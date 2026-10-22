@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker/brokertest"
 )
 
@@ -197,4 +199,96 @@ func TestSupervisorAskReachesChildThroughMessageVerbs(t *testing.T) {
 	if err := json.Unmarshal(waited.Reply.Payload, &reply); err != nil || reply.Message != "all good" {
 		t.Fatalf("reply payload = %s (%v), want all good", waited.Reply.Payload, err)
 	}
+}
+
+// TestAskToCompletedRunChildIsQueuedAndTimesOut pins what a runChild teardown
+// leaves behind: a completed direct child's broker run stays registered, so an
+// ask to its rt_N is admitted and queued, and the asker waits out its own
+// bounded timeout instead of being told the target is unavailable.
+func TestAskToCompletedRunChildIsQueuedAndTimesOut(t *testing.T) {
+	provider := &stableScriptedProvider{
+		attempt: 0,
+		scripts: []stableScriptedAttempt{{
+			sessionID: "ses_ended_ask",
+			events: []stableScriptedEvent{{event: events.Event{
+				Event:     "session.end",
+				SessionID: "ses_ended_ask",
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}}},
+		}},
+	}
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "ended-ask"), MaxRuntimes: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	child := &childRuntime{
+		id:          "rt_ended_ask",
+		provider:    provider,
+		session:     runtime.Session{SessionID: "ses_ended_ask"},
+		eventWriter: stableTestSink{},
+		done:        make(chan struct{}),
+		promptCh:    make(chan struct{}, 1),
+		cancelFn:    cancel,
+	}
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
+	go sup.runChild(ctx, child, "ask me", 0, 0)
+
+	// The child is run by runChild itself, so the broker run under test is the
+	// one the spawn path installs, and the parked done phase is what its teardown
+	// leaves: no active runtime and no broker run removed with it.
+	waitForStableChild(t, child, func(active bool, completed bool, phase, phaseLabel string) bool {
+		return !active && !completed && phase == "done"
+	})
+	if sup.broker.GetRun(child.id) == nil {
+		t.Fatal("the completed child's broker run went away with its runtime")
+	}
+
+	askerToken, err := sup.broker.CreateRun("asker", "")
+	if err != nil {
+		t.Fatalf("create asker run: %v", err)
+	}
+	asker, err := localhttp.New(sup.broker.Addr(), messaging.LocalCredentials{RunID: "asker", Token: askerToken})
+	if err != nil {
+		t.Fatalf("asker transport: %v", err)
+	}
+	defer asker.Close()
+	pre, err := asker.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("asker preflight: %v", err)
+	}
+	now := time.Now().UTC()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("message id: %v", err)
+	}
+	body, err := messaging.AskBody(msgID, "asker", child.id, "status?", "agent")
+	if err != nil {
+		t.Fatalf("ask body: %v", err)
+	}
+	sent, err := asker.Send(ctx, messaging.SendRequest{
+		From:       messaging.Identity{RunID: "asker"},
+		To:         messaging.Identity{RunID: child.id},
+		MessageID:  msgID,
+		Generation: pre.Generation,
+		Body:       string(body),
+	})
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("ask to a completed child = (%+v, %v), want sent", sent, err)
+	}
+	queued := brokertest.WaitForAgentMessage(t, sup.broker, child.id)
+	if queued.Payload == nil || queued.ID != msgID {
+		t.Fatalf("queued ask = %+v, want the asker's %s", queued, msgID)
+	}
+
+	waited, err := asker.Wait(ctx, messaging.WaitRequest{
+		Sender:     messaging.Identity{RunID: "asker"},
+		MessageID:  msgID,
+		Generation: pre.Generation,
+		Timeout:    300 * time.Millisecond,
+	})
+	if err != nil || waited.Outcome != messaging.OutcomeTimedOut || waited.Reply != nil {
+		t.Fatalf("wait on a completed child = (%+v, %v), want a bounded timeout with no reply", waited, err)
+	}
+
+	cancel()
+	waitForStableDone(t, child)
 }
