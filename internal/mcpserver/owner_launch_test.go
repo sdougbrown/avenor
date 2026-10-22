@@ -154,6 +154,22 @@ func inboundMessageText(t *testing.T, msg messaging.InboundMessage) string {
 	return payload.Message
 }
 
+// sendAndVerifyDelivery drains the inbound queue, delivers one message to the
+// supervisor's own run and asserts the supervisor received exactly it. The
+// drain registers the supervisor's named run, so the delivery has a recipient.
+func sendAndVerifyDelivery(t *testing.T, cl *client.Client, text string) {
+	t.Helper()
+	_ = receiveInbound(t, cl)
+	sendSupervisorMessage(t, cl, text)
+	received := receiveInbound(t, cl)
+	if len(received) != 1 {
+		t.Fatalf("received %d messages, want 1: %v", len(received), received)
+	}
+	if inboundMessageText(t, received[0]) != text || received[0].FromRunID != "supervisor" {
+		t.Fatalf("received = %v, want the supervisor's %q", received[0], text)
+	}
+}
+
 // TestMCPAutostartAuthenticatedAttachment proves MCP autostart launches a real
 // supervisor, attaches with its published capability and delivers an
 // owner-gated message_send to the supervisor's registered run.
@@ -171,15 +187,7 @@ func TestMCPAutostartAuthenticatedAttachment(t *testing.T) {
 
 	// message_receive registers the supervisor's own named run, so the delivery
 	// below has a recipient.
-	_ = receiveInbound(t, cl)
-	sendSupervisorMessage(t, cl, "hello supervisor")
-	received := receiveInbound(t, cl)
-	if len(received) != 1 {
-		t.Fatalf("received %d messages, want 1: %v", len(received), received)
-	}
-	if inboundMessageText(t, received[0]) != "hello supervisor" || received[0].FromRunID != "supervisor" {
-		t.Fatalf("received = %v", received[0])
-	}
+	sendAndVerifyDelivery(t, cl, "hello supervisor")
 
 	// The recipient is the supervisor's run, registered under its name.
 	peers, err := cl.MessagePeers(messaging.PeersRequest{Generation: controlGeneration(t, cl)})
@@ -291,12 +299,7 @@ func TestMCPAttachReloadsRotatedOwnerRecord(t *testing.T) {
 	}
 
 	cl := launcherClient(t, launcher)
-	_ = receiveInbound(t, cl)
-	sendSupervisorMessage(t, cl, "post-rotation")
-	received := receiveInbound(t, cl)
-	if len(received) != 1 || inboundMessageText(t, received[0]) != "post-rotation" {
-		t.Fatalf("received = %v, want the delivered message", received)
-	}
+	sendAndVerifyDelivery(t, cl, "post-rotation")
 }
 
 // TestFreshLauncherRespawnsAfterSIGKILL proves a launcher that never captured
@@ -326,10 +329,5 @@ func TestFreshLauncherRespawnsAfterSIGKILL(t *testing.T) {
 		t.Fatalf("fresh launcher attach: %v", err)
 	}
 	cl := launcherClient(t, launcher)
-	_ = receiveInbound(t, cl)
-	sendSupervisorMessage(t, cl, "after sigkill")
-	received := receiveInbound(t, cl)
-	if len(received) != 1 || inboundMessageText(t, received[0]) != "after sigkill" {
-		t.Fatalf("received = %v, want the delivered message", received)
-	}
+	sendAndVerifyDelivery(t, cl, "after sigkill")
 }

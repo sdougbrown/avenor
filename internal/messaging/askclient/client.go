@@ -88,8 +88,7 @@ func (e *Error) Pending() bool {
 //   - replied: the legacy any-return is {message_id, from_run_id, payload};
 //     the tool surfaces render `Reply from <target>:\n` plus Text().
 //   - timed-out, withdrawn, edge-absent, lost and possibly-pending return an
-//     *Error carrying the outcome; the legacy ask error maps it to
-//     control.AskError with Pending set only for possibly-pending.
+//     *Error carrying the outcome.
 //   - not-sent and auth-rejected are terminal send failures and never retried.
 func (c *Client) Ask(ctx context.Context, send messaging.SendRequest, wait messaging.WaitRequest) (AskResult, error) {
 	result := AskResult{MessageID: send.MessageID, Generation: send.Generation}

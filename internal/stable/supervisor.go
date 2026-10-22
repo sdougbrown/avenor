@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -660,8 +659,6 @@ type Supervisor struct {
 	brokerRunID                  string
 	brokerToken                  string
 	brokerRunMu                  sync.Mutex
-	brokerHTTPClientOnce         sync.Once
-	brokerHTTPClient             *http.Client // private transport: never reuses another broker's pooled connections
 	newProviderFunc              func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)
 	sessionIdentityMu            sync.RWMutex
 	sessionIdentities            map[string]sessionIdentityEntry
@@ -2002,7 +1999,6 @@ func (s *Supervisor) MessageTransport() (messaging.Transport, error) {
 	return s.messaging, nil
 }
 
-// brokerGet sends an authenticated GET to the broker HTTP endpoint.
 // deadlineFromContext returns the context's deadline, or the zero time when
 // the context carries none.
 func deadlineFromContext(ctx context.Context) time.Time {
