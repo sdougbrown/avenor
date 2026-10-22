@@ -2,6 +2,7 @@ package claudecore
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,37 +32,36 @@ func permissionOptionKind(label string) string {
 }
 
 // ParseTerminalPermission extracts a TerminalPermission from pane text, or nil
-// if the text doesn't represent a Claude permission dialog.
+// if the text does not represent a Claude permission dialog. The pane can show
+// numbered lists above the dialog, so the options are the last list numbered
+// from 1. The prompt is the text between that list and the one before it.
 func ParseTerminalPermission(text string) *TerminalPermission {
 	text = normalizePane(text)
 	lines := strings.Split(text, "\n")
 	promptLines := make([]string, 0)
 	options := make([]PermissionOption, 0)
+	// pending holds the prompt candidates seen since the last option line.
+	pending := make([]string, 0)
 
-	inOptions := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
-		if tmuxOptionRE.MatchString(trimmed) {
-			matches := tmuxOptionRE.FindStringSubmatch(trimmed)
-			if len(matches) == 3 {
+		if matches := tmuxOptionRE.FindStringSubmatch(trimmed); len(matches) == 3 {
+			if matches[1] == "1" {
+				options = options[:0]
+				promptLines, pending = pending, make([]string, 0)
+			}
+			if matches[1] == strconv.Itoa(len(options)+1) {
 				label := strings.TrimSpace(matches[2])
 				options = append(options, PermissionOption{ID: matches[1], Label: label, Kind: permissionOptionKind(label)})
-				inOptions = true
+				pending = pending[:0]
 				continue
 			}
-		}
-		if inOptions {
-			// After options, skip footer lines (Esc to cancel, etc.)
-			if strings.Contains(trimmed, "Esc to cancel") || strings.HasPrefix(trimmed, "Esc ") {
-				continue
-			}
-			break
 		}
 		if !strings.HasPrefix(trimmed, "❯") && !strings.HasPrefix(trimmed, "●") && !strings.HasPrefix(trimmed, "✻") && !strings.HasPrefix(trimmed, "✢") {
-			promptLines = append(promptLines, trimmed)
+			pending = append(pending, trimmed)
 		}
 	}
 
