@@ -167,10 +167,10 @@ async function withdrawAsk(
     await withdrawPendingAsk(env, messageId, fetchImpl)
     return false
   } catch (error) {
-    // The broker clears the edge itself when a cancelled wait_reply request
-    // disconnects, so a 404 from /cancel_message means the ask is already gone.
-    // Anything else, including a transport failure that drew no response, may
-    // leave the edge behind.
+    // A 404 is the broker's "no such edge" answer: the ask was never
+    // registered, its store generation rotated, the run is gone, or the
+    // terminal fence was pruned. Anything else, including a transport failure
+    // that drew no response, may leave the edge behind.
     if (error instanceof BrokerHttpError) {
       return error.status !== 404
     }

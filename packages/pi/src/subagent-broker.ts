@@ -3,9 +3,10 @@
 // When the avenor pi provider launches a pi sub-process it injects broker
 // credentials via AVENOR_BROKER_URL / AVENOR_RUN_ID / AVENOR_BROKER_TOKEN. In
 // that mode the extension polls its own run for inbound asks (a host calling
-// the message tool on it), and every action reaches the broker through the
-// child broker below. These helpers are kept free of extension-context
-// dependencies so they can be exercised by unit tests.
+// the message tool on it), and the child broker below carries those actions to
+// the broker; 356-13 moves the per-action tools onto it, and until then they
+// still go through the legacy path. These helpers are kept free of
+// extension-context dependencies so they can be exercised by unit tests.
 
 import { extractReplyMessage, normalizeAskTimeoutMs, type MessageOutcome } from '@dougbots/avenor-core'
 import type { ChildBroker, PeerRecord, ProviderResult } from '@dougbots/avenor-core'
