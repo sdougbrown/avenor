@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
@@ -90,18 +89,12 @@ func toolArguments(req *mcp.CallToolRequest) json.RawMessage {
 // supervisor is addressable only once a status call naming that supervisor_id
 // has registered it again.
 func (s *Server) messageSupervisorPath(raw json.RawMessage) string {
-	var probe struct {
-		Target    string `json:"target"`
-		SessionID string `json:"session_id"`
-	}
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &probe)
-	}
-	for _, key := range []string{probe.Target, probe.SessionID} {
+	for _, key := range router.SupervisorKeys(raw) {
 		// The router substitutes its reserved self alias with the caller's run
-		// id before a provider sees it, so neither that alias nor the
-		// supervisor's own run id names a supervisor to bind to.
-		if key == "" || key == messaging.SupervisorRunID || key == "self" {
+		// id before a provider sees it, so IsReservedTarget keeps that alias,
+		// the empty key and the supervisor's own run id from binding a
+		// supervisor.
+		if router.IsReservedTarget(key) {
 			continue
 		}
 		if supervisorID := s.supervisorForPeerKey(key); supervisorID != "" {

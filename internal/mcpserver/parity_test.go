@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
 
@@ -678,9 +678,9 @@ func TestMCPStdioHandshake(t *testing.T) {
 	}
 }
 
-// TestMessageSchemaPublished proves the two merged tools advertise the flat
-// schema compiled from the shared contract, so a surface cannot publish a
-// different shape from the one every other MCP surface publishes.
+// TestMessageSchemaPublished pins the property names the two merged tools
+// publish against an explicit literal list, so the published surface is checked
+// independently of the shared contract that compiles it.
 func TestMessageSchemaPublished(t *testing.T) {
 	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: &fakeClient{}})
 	if err != nil {
@@ -713,22 +713,29 @@ func TestMessageSchemaPublished(t *testing.T) {
 			published[tool.Name] = tool.InputSchema
 		}
 	}
-	for name, want := range map[string]map[string]any{
-		"message": messaging.MessageInputFlatSchema(),
-		"peers":   messaging.PeersInputFlatSchema(),
+	for name, want := range map[string][]string{
+		"message": {"action", "idempotency_key", "label", "message", "message_id", "payload", "reply_to", "target", "timeout_ms"},
+		"peers":   {"action", "name", "session_id", "target"},
 	} {
-		got := published[name]
-		if got == nil {
-			t.Fatalf("%s tool not published", name)
+		schema, ok := published[name].(map[string]any)
+		if !ok {
+			t.Fatalf("%s tool not published with an object schema", name)
 		}
-		// The SDK hands back the same decoded schema object it validated.
-		gotJSON, _ := json.Marshal(got)
-		wantJSON, _ := json.Marshal(want)
-		var gotValue, wantValue any
-		_ = json.Unmarshal(gotJSON, &gotValue)
-		_ = json.Unmarshal(wantJSON, &wantValue)
-		if !reflect.DeepEqual(gotValue, wantValue) {
-			t.Fatalf("%s schema = %s, want %s", name, gotJSON, wantJSON)
+		if got := schema["type"]; got != "object" {
+			t.Errorf("%s schema type = %v, want object", name, got)
+		}
+		properties, ok := schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s schema has no properties object", name)
+		}
+		got := make([]string, 0, len(properties))
+		for property := range properties {
+			got = append(got, property)
+		}
+		sort.Strings(got)
+		sort.Strings(want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s published properties = %v, want %v", name, got, want)
 		}
 	}
 }

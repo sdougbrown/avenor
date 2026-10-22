@@ -349,26 +349,16 @@ func (c *spawnCountingClient) MessagePeersContext(ctx context.Context, req messa
 func (c *spawnCountingClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
 	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-test"}, nil
 }
-func (c *spawnCountingClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
-	return messaging.ResumeResult{}, nil
-}
-func (c *spawnCountingClient) SessionRename(sessionID, name string) (messaging.RenameResult, error) {
-	return messaging.RenameResult{}, nil
-}
-func (c *spawnCountingClient) SessionLast(runtimeID string) (messaging.PeerLast, error) {
-	return messaging.PeerLast{}, nil
-}
-
 func (c *spawnCountingClient) ResumeContext(_ context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
-	return c.Resume(req)
+	return messaging.ResumeResult{}, nil
 }
 
 func (c *spawnCountingClient) SessionRenameContext(_ context.Context, sessionID, name string) (messaging.RenameResult, error) {
-	return c.SessionRename(sessionID, name)
+	return messaging.RenameResult{}, nil
 }
 
 func (c *spawnCountingClient) SessionLastContext(_ context.Context, runtimeID string) (messaging.PeerLast, error) {
-	return c.SessionLast(runtimeID)
+	return messaging.PeerLast{}, nil
 }
 func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
 func (c *spawnCountingClient) WorkflowStatus(string) (map[string]any, error) { return nil, nil }

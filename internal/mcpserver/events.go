@@ -71,7 +71,7 @@ func readEvents(path string, types []string, limit int, afterSeq *int64) ([]map[
 				continue
 			}
 		}
-		// avenor_events is an attachment/display surface. Durable NDJSON keeps
+		// events is an attachment/display surface. Durable NDJSON keeps
 		// the original reply, while this presentation copy remains bounded.
 		if finalOutput, _ := event["final_output"].(string); finalOutput != "" {
 			preview := events.BoundedFinalOutput(finalOutput)

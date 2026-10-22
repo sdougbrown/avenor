@@ -241,23 +241,14 @@ func (s *stubControlClient) MessagePeersContext(ctx context.Context, req messagi
 func (s *stubControlClient) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
 	return messaging.PreflightResult{}, nil
 }
-func (s *stubControlClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+func (s *stubControlClient) ResumeContext(_ context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
 	return messaging.ResumeResult{}, nil
 }
-func (s *stubControlClient) SessionRename(sessionID, name string) (messaging.RenameResult, error) {
+func (s *stubControlClient) SessionRenameContext(_ context.Context, sessionID, name string) (messaging.RenameResult, error) {
 	return messaging.RenameResult{}, nil
 }
-func (s *stubControlClient) SessionLast(runtimeID string) (messaging.PeerLast, error) {
-	return messaging.PeerLast{}, nil
-}
-func (s *stubControlClient) ResumeContext(_ context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
-	return s.Resume(req)
-}
-func (s *stubControlClient) SessionRenameContext(_ context.Context, sessionID, name string) (messaging.RenameResult, error) {
-	return s.SessionRename(sessionID, name)
-}
 func (s *stubControlClient) SessionLastContext(_ context.Context, runtimeID string) (messaging.PeerLast, error) {
-	return s.SessionLast(runtimeID)
+	return messaging.PeerLast{}, nil
 }
 
 func writeTokenFile(t *testing.T, content string, mode os.FileMode) string {

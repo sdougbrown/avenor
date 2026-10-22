@@ -470,6 +470,12 @@ func (r *Router) controlReply(ctx context.Context, input messageInput) (Result, 
 	return result, nil
 }
 
+// IsReservedTarget reports whether ref is a reserved alias or the supervisor's
+// own run id, so a caller binding a supervisor must not treat it as a run key.
+func IsReservedTarget(ref string) bool {
+	return ref == "" || ref == aliasSelf || ref == messaging.SupervisorRunID
+}
+
 // resolve substitutes the reserved `self` alias and hands the rest of the
 // ladder to the provider, then turns a non-unique match into its typed error.
 func (r *Router) resolve(ctx context.Context, ref string) (messaging.Resolution, error) {
@@ -647,6 +653,23 @@ type messageInput struct {
 	Label          string          `json:"label"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	Payload        json.RawMessage `json:"payload"`
+}
+
+// SupervisorKeys returns the target and session_id of one message or peers
+// call, in probe order, decoded through the same input types the routers
+// decode so a schema field rename has one definition. Empty keys are dropped.
+func SupervisorKeys(input json.RawMessage) []string {
+	var message messageInput
+	_ = json.Unmarshal(input, &message)
+	var peers peersInput
+	_ = json.Unmarshal(input, &peers)
+	keys := make([]string, 0, 2)
+	for _, key := range []string{message.Target, peers.SessionID} {
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 // decodeObject decodes one tool input as a JSON object keyed by property name,
