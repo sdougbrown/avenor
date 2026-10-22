@@ -251,6 +251,7 @@ const maxInstanceParamValueLength = 256
 // registry definitions validate at this boundary too.
 func validateTemplateParams(template Template) error {
 	declared := make(map[string]struct{}, len(template.Params))
+	required := make(map[string]bool, len(template.Params))
 	for _, param := range template.Params {
 		if !isValidParamID(param.ID) {
 			return fmt.Errorf("invalid workflow template: params[%q].id must be a path-safe identifier", param.ID)
@@ -259,6 +260,7 @@ func validateTemplateParams(template Template) error {
 			return fmt.Errorf("invalid workflow template: params declares %q twice", param.ID)
 		}
 		declared[param.ID] = struct{}{}
+		required[param.ID] = param.Required
 		if param.Type != "string" {
 			return fmt.Errorf("invalid workflow template: params[%q].type %q is not supported (only \"string\")", param.ID, param.Type)
 		}
@@ -276,19 +278,15 @@ func validateTemplateParams(template Template) error {
 			return fmt.Errorf("invalid workflow template: node %q dispatch.concurrency_key names undeclared instance param %q", node.ID, spec.FromInstanceParam)
 		}
 	}
-	if err := validateWorkingDirectoryRefs(template, declared); err != nil {
+	if err := validateWorkingDirectoryRefs(template, declared, required); err != nil {
 		return err
 	}
-	return validateLaunchWrappers(template, declared)
+	return validateLaunchWrappers(template, declared, required)
 }
 
 // validateLaunchWrappers checks every definition and node selection, including
 // unused definitions. Parameter references must name declared, required params.
-func validateLaunchWrappers(template Template, declared map[string]struct{}) error {
-	required := make(map[string]bool, len(template.Params))
-	for _, param := range template.Params {
-		required[param.ID] = param.Required
-	}
+func validateLaunchWrappers(template Template, declared map[string]struct{}, required map[string]bool) error {
 	ids := make(map[string]struct{}, len(template.LaunchWrappers))
 	for index, wrapper := range template.LaunchWrappers {
 		if strings.TrimSpace(wrapper.ID) == "" {
@@ -363,7 +361,7 @@ func validateLaunchWrapperArgv(id string, argv []LaunchWrapperArg, declared map[
 // template default and every node override must name a declared instance
 // param. Literal paths are rejected at decode time (the only declared value
 // form is from_instance_param), so this is the declared-param check.
-func validateWorkingDirectoryRefs(template Template, declared map[string]struct{}) error {
+func validateWorkingDirectoryRefs(template Template, declared map[string]struct{}, required map[string]bool) error {
 	type whereRef struct {
 		where string
 		ref   WorkingDirectoryRef
@@ -376,10 +374,6 @@ func validateWorkingDirectoryRefs(template Template, declared map[string]struct{
 		if node.WorkingDirectory != nil {
 			refs = append(refs, whereRef{fmt.Sprintf("node %q", node.ID), *node.WorkingDirectory})
 		}
-	}
-	required := make(map[string]bool, len(template.Params))
-	for _, param := range template.Params {
-		required[param.ID] = param.Required
 	}
 	for _, wr := range refs {
 		if strings.TrimSpace(wr.ref.FromInstanceParam) == "" {
