@@ -11,6 +11,11 @@ const (
 	CallerBroker CallerKind = "broker"
 )
 
+// SupervisorRunID is the broker run id of the supervisor session. The owner
+// connection on the control socket acts as this run, so a reserved-alias or
+// supervisor-only path matches this value.
+const SupervisorRunID = "supervisor"
+
 // Caller names who invoked a tool. RunID is the broker/runtime id the caller
 // acts as; the Go host's owner caller passes the literal "supervisor", which is
 // the supervisor session's broker run id.

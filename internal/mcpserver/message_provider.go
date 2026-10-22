@@ -16,9 +16,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
-// supervisorRunID is the broker run id the Go host's owner connection acts as.
-const supervisorRunID = "supervisor"
-
 // mcpMessageProvider is the router Provider for the Go host surface. It carries
 // no broker token and implements no rename on the transport: resume and rename
 // are control verbs, and a reply has no inbound delivery to claim here.
@@ -43,9 +40,9 @@ type messageControlClient interface {
 	MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error)
 	MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error)
 	MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error)
-	Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error)
-	SessionRename(sessionID, name string) (messaging.RenameResult, error)
-	SessionLast(runtimeID string) (messaging.PeerLast, error)
+	ResumeContext(ctx context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error)
+	SessionRenameContext(ctx context.Context, sessionID, name string) (messaging.RenameResult, error)
+	SessionLastContext(ctx context.Context, runtimeID string) (messaging.PeerLast, error)
 }
 
 func newMCPMessageProvider(server *Server, client messageControlClient, supervisorPath string) (*mcpMessageProvider, error) {
@@ -176,7 +173,7 @@ func retryGenerationMismatch[T any](ctx context.Context, p *mcpMessageProvider, 
 }
 
 func (p *mcpMessageProvider) Caller() messaging.Caller {
-	return messaging.Caller{Kind: messaging.CallerOwner, RunID: supervisorRunID}
+	return messaging.Caller{Kind: messaging.CallerOwner, RunID: messaging.SupervisorRunID}
 }
 
 func (p *mcpMessageProvider) Surface() messaging.Surface { return messaging.SurfaceMCP }
@@ -187,7 +184,7 @@ func (p *mcpMessageProvider) Role() string { return "host" }
 // decodes each session with the router's own peer record, so Resolve and
 // peerRunState read one peer shape.
 func (p *mcpMessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerRecord, error) {
-	peers, err := p.Peers(ctx, messaging.PeersRequest{Sender: messaging.Identity{RunID: supervisorRunID}})
+	peers, err := p.Peers(ctx, messaging.PeersRequest{Sender: messaging.Identity{RunID: messaging.SupervisorRunID}})
 	if err != nil {
 		return nil, err
 	}
@@ -215,8 +212,8 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 	if ref == "" {
 		return messaging.Resolution{Match: messaging.MatchNone}, nil
 	}
-	if ref == supervisorRunID {
-		return messaging.Resolution{RunID: supervisorRunID, Label: supervisorRunID, Match: messaging.MatchUnique}, nil
+	if ref == messaging.SupervisorRunID {
+		return messaging.Resolution{RunID: messaging.SupervisorRunID, Label: messaging.SupervisorRunID, Match: messaging.MatchUnique}, nil
 	}
 	if info := p.server.registry.Lookup(p.supervisorPath, ref); info != nil && info.RuntimeID != "" {
 		return messaging.Resolution{
@@ -285,7 +282,7 @@ func (p *mcpMessageProvider) peerResolution(runID, label string) messaging.Resol
 // supervisor session is broker-only (it has no runtime), so its state comes
 // from the peer listing the same surface already reads.
 func (p *mcpMessageProvider) RunState(ctx context.Context, runID string) (messaging.RunFacts, error) {
-	if runID == supervisorRunID {
+	if runID == messaging.SupervisorRunID {
 		return p.peerRunState(ctx, runID)
 	}
 	status, err := p.client.Status(runID)
@@ -343,11 +340,10 @@ func (p *mcpMessageProvider) peerRunState(ctx context.Context, runID string) (me
 // refusal would deny an action that was performed. The error names both facts
 // and keeps the cause; the run itself is never killed.
 func (p *mcpMessageProvider) Resume(ctx context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
-	_ = ctx
 	runID := uuid.New().String()
 	sentinelFile := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
 	eventLog := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", runID))
-	res, err := p.client.Resume(messaging.ResumeRequest{
+	res, err := p.client.ResumeContext(ctx, messaging.ResumeRequest{
 		RunID:          runID,
 		Target:         req.Target,
 		Message:        req.Message,
@@ -366,8 +362,7 @@ func (p *mcpMessageProvider) Resume(ctx context.Context, req messaging.ResumeReq
 }
 
 func (p *mcpMessageProvider) Rename(ctx context.Context, req messaging.RenameRequest) (messaging.RenameResult, error) {
-	_ = ctx
-	result, err := p.client.SessionRename(req.SessionID, req.Name)
+	result, err := p.client.SessionRenameContext(ctx, req.SessionID, req.Name)
 	if err != nil {
 		return messaging.RenameResult{}, authorityToolError(err)
 	}
@@ -375,8 +370,7 @@ func (p *mcpMessageProvider) Rename(ctx context.Context, req messaging.RenameReq
 }
 
 func (p *mcpMessageProvider) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
-	_ = ctx
-	last, err := p.client.SessionLast(runID)
+	last, err := p.client.SessionLastContext(ctx, runID)
 	if err != nil {
 		return messaging.PeerLast{}, authorityToolError(err)
 	}

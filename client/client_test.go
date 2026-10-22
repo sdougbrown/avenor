@@ -1471,3 +1471,65 @@ func TestCallContextStopsWaitingWhenCancelled(t *testing.T) {
 		t.Fatalf("result after cancelled CallContext = %#v, want status running", result)
 	}
 }
+
+// TestControlVerbContextStopsWaitingWhenCancelled proves the ctx-carrying
+// control verbs for resume, rename and last are released by cancellation
+// instead of waiting for the verb to settle server-side.
+func TestControlVerbContextStopsWaitingWhenCancelled(t *testing.T) {
+	verbs := []struct {
+		name string
+		call func(ctx context.Context, c *Client) error
+	}{
+		{"resume", func(ctx context.Context, c *Client) error {
+			_, err := c.ResumeContext(ctx, messaging.ResumeRequest{Target: "agent"})
+			return err
+		}},
+		{"session_rename", func(ctx context.Context, c *Client) error {
+			_, err := c.SessionRenameContext(ctx, "run_1", "renamed")
+			return err
+		}},
+		{"session_last", func(ctx context.Context, c *Client) error {
+			_, err := c.SessionLastContext(ctx, "run_1")
+			return err
+		}},
+	}
+	for _, verb := range verbs {
+		t.Run(verb.name, func(t *testing.T) {
+			serverConn, clientConn := net.Pipe()
+			defer serverConn.Close()
+			// Read requests so the synchronous pipe write completes, and never
+			// answer: only cancellation can release the caller.
+			go func() {
+				reader := bufio.NewReader(serverConn)
+				for {
+					if _, err := reader.ReadString('\n'); err != nil {
+						return
+					}
+				}
+			}()
+			c := newClient(clientConn)
+			defer c.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				cancel()
+			}()
+
+			done := make(chan error, 1)
+			go func() { done <- verb.call(ctx, c) }()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("%s = %v, want context.Canceled", verb.name, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s ignored cancellation and kept waiting", verb.name)
+			}
+			if c.Closed() {
+				t.Fatal("cancelling the call closed the connection")
+			}
+		})
+	}
+}

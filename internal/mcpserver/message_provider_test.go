@@ -90,18 +90,18 @@ func (f *fakeMessageControlClient) MessagePreflightContext(ctx context.Context) 
 	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-1"}, nil
 }
 
-func (f *fakeMessageControlClient) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+func (f *fakeMessageControlClient) ResumeContext(_ context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
 	if f.resumeFunc != nil {
 		return f.resumeFunc(req)
 	}
 	return messaging.ResumeResult{}, nil
 }
 
-func (f *fakeMessageControlClient) SessionRename(string, string) (messaging.RenameResult, error) {
+func (f *fakeMessageControlClient) SessionRenameContext(context.Context, string, string) (messaging.RenameResult, error) {
 	return messaging.RenameResult{}, nil
 }
 
-func (f *fakeMessageControlClient) SessionLast(string) (messaging.PeerLast, error) {
+func (f *fakeMessageControlClient) SessionLastContext(context.Context, string) (messaging.PeerLast, error) {
 	return messaging.PeerLast{}, nil
 }
 
@@ -194,12 +194,12 @@ func TestMCPMessageProviderResolveLadder(t *testing.T) {
 			name: "supervisor alias resolves itself without the listing",
 			// A label or runtime id that shadows the alias must not win: the
 			// reserved alias is answered before any lookup runs.
-			peers:           []messaging.Peer{testPeer("rt-shadow", supervisorRunID, "running")},
-			ref:             supervisorRunID,
+			peers:           []messaging.Peer{testPeer("rt-shadow", "supervisor", "running")},
+			ref:             "supervisor",
 			wantNoTransport: true,
 			wanted: messaging.Resolution{
-				RunID: supervisorRunID,
-				Label: supervisorRunID,
+				RunID: "supervisor",
+				Label: "supervisor",
 				Match: messaging.MatchUnique,
 			},
 		},

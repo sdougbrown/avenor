@@ -1823,7 +1823,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if !ok {
 			return resp
 		}
-		res, err := tr.Send(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		res, err := tr.Send(c.ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, res.MessageID))
 		}
@@ -1839,7 +1839,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		p.TimeoutMS = clampAskTimeout(p.TimeoutMS)
 		return c.runMessageAsync(req, p.MessageID, transport, func(ctx context.Context, tr messaging.Transport) (messageAsyncResult, error) {
-			res, err := tr.Wait(ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+			res, err := tr.Wait(ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
 			return messageAsyncResult{outcome: res.Outcome, payload: newMessageWaitResult(res)}, err
 		})
 	case "message_reply":
@@ -1852,7 +1852,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if !ok {
 			return resp
 		}
-		res, err := tr.Reply(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		res, err := tr.Reply(c.ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, res.MessageID))
 		}
@@ -1867,7 +1867,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if !ok {
 			return resp
 		}
-		res, err := tr.Withdraw(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		res, err := tr.Withdraw(c.ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, p.MessageID))
 		}
@@ -1883,7 +1883,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		p.TimeoutMS = clampAskTimeout(p.TimeoutMS)
 		return c.runMessageAsync(req, "", transport, func(ctx context.Context, tr messaging.Transport) (messageAsyncResult, error) {
-			res, err := tr.Receive(ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+			res, err := tr.Receive(ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
 			return messageAsyncResult{payload: newMessageReceiveResult(res)}, err
 		})
 	case "message_peers":
@@ -1896,7 +1896,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if !ok {
 			return resp
 		}
-		res, err := tr.Peers(c.ctx, p.request(messaging.Identity{RunID: "supervisor"}))
+		res, err := tr.Peers(c.ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
 		}
@@ -1926,7 +1926,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
-		res, err := s.stableHandler.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.request())
+		res, err := s.stableHandler.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: messaging.SupervisorRunID}, p.request())
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
 		}
@@ -1942,7 +1942,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
-		res, err := s.stableHandler.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.SessionID, p.Name)
+		res, err := s.stableHandler.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: messaging.SupervisorRunID}, p.SessionID, p.Name)
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
 		}
@@ -1971,7 +1971,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
-		if err := s.stableHandler.SessionLastSet(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, p.RuntimeID, p.FinalOutput, p.StopReason, p.Truncated); err != nil {
+		if err := s.stableHandler.SessionLastSet(messaging.Caller{Kind: messaging.CallerOwner, RunID: messaging.SupervisorRunID}, p.RuntimeID, p.FinalOutput, p.StopReason, p.Truncated); err != nil {
 			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
 		}
 		return success(req.ID, map[string]any{"ok": true})

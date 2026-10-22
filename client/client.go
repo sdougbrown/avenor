@@ -1123,8 +1123,13 @@ func (c *Client) MessagePreflightContext(ctx context.Context) (messaging.Preflig
 
 // Resume continues a prior run in a new one.
 func (c *Client) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return c.ResumeContext(context.Background(), req)
+}
+
+// ResumeContext continues a prior run and stops waiting when ctx is done.
+func (c *Client) ResumeContext(ctx context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
 	var result control.ResumeResult
-	if err := c.Call("resume", control.NewResumeParams(req), &result); err != nil {
+	if err := c.CallContext(ctx, "resume", control.NewResumeParams(req), &result); err != nil {
 		return messaging.ResumeResult{}, err
 	}
 	return result.ResumeResult(), nil
@@ -1132,8 +1137,13 @@ func (c *Client) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, er
 
 // SessionRename renames one run's display name.
 func (c *Client) SessionRename(sessionID, name string) (messaging.RenameResult, error) {
+	return c.SessionRenameContext(context.Background(), sessionID, name)
+}
+
+// SessionRenameContext renames one run and stops waiting when ctx is done.
+func (c *Client) SessionRenameContext(ctx context.Context, sessionID, name string) (messaging.RenameResult, error) {
 	var result control.SessionRenameResult
-	if err := c.Call("session_rename", control.SessionRenameParams{SessionID: sessionID, Name: name}, &result); err != nil {
+	if err := c.CallContext(ctx, "session_rename", control.SessionRenameParams{SessionID: sessionID, Name: name}, &result); err != nil {
 		return messaging.RenameResult{}, err
 	}
 	return result.RenameResult(), nil
@@ -1141,8 +1151,14 @@ func (c *Client) SessionRename(sessionID, name string) (messaging.RenameResult, 
 
 // SessionLast reads a run's recorded last turn.
 func (c *Client) SessionLast(runtimeID string) (messaging.PeerLast, error) {
+	return c.SessionLastContext(context.Background(), runtimeID)
+}
+
+// SessionLastContext reads a run's recorded last turn and stops waiting when
+// ctx is done.
+func (c *Client) SessionLastContext(ctx context.Context, runtimeID string) (messaging.PeerLast, error) {
 	var result control.SessionLastResult
-	if err := c.Call("session_last", control.SessionLastParams{RuntimeID: runtimeID}, &result); err != nil {
+	if err := c.CallContext(ctx, "session_last", control.SessionLastParams{RuntimeID: runtimeID}, &result); err != nil {
 		return messaging.PeerLast{}, err
 	}
 	return result.PeerLast(), nil
