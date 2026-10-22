@@ -8,6 +8,7 @@ import { createOwnerGate, respond, type OwnerGateRequest } from '../../test/fixt
 import { OwnerRecordMissingError } from '../owner-attach.js'
 import { answerPermissionTool } from './answer-permission.js'
 import { brokerReceiveTool } from './broker-receive.js'
+import { brokerReplyTool } from './broker-reply.js'
 import { getSupervisorClient } from './get-supervisor-client.js'
 import { killTool } from './kill.js'
 import { shutdownTool } from './shutdown.js'
@@ -200,6 +201,16 @@ describe('owner-gated control tools', () => {
       name: 'shutdown',
       method: 'shutdown',
       run: supervisorId => shutdownTool({ supervisorId }),
+    },
+    {
+      name: 'broker-reply',
+      method: 'broker_reply',
+      run: supervisorId => brokerReplyTool({
+        toRunId: 'rt_1',
+        replyTo: 'msg-1',
+        message: 'answer',
+        supervisorId,
+      }),
     },
   ]
 
