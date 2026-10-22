@@ -66,6 +66,29 @@ describe('formatInboundAskBody', () => {
     expect(body).toContain('hello')
     expect(body).toContain('avenor_message({ action: "reply", reply_to: "ask-1"')
   })
+
+  it('annotates the asker with a non-agent role, options over the ask', () => {
+    const fromAsk = formatInboundAskBody(
+      { from_run_id: 'host-1', message_id: 'ask-2', message: 'hello', role: 'supervisor' },
+      { heading: 'Inbound ask' },
+    )
+    expect(fromAsk).toContain('from `host-1` (supervisor)')
+
+    // `agent` is the default asker kind, so the suffix is dropped rather than
+    // rendered as `(agent)`.
+    const overridden = formatInboundAskBody(
+      { from_run_id: 'host-1', message_id: 'ask-3', message: 'hello', role: 'supervisor' },
+      { heading: 'Ask from sub-agent', role: 'agent' },
+    )
+    expect(overridden).toContain('from `host-1`')
+    expect(overridden).not.toContain('(supervisor)')
+
+    const roleFromOptions = formatInboundAskBody(
+      { from_run_id: 'host-1', message_id: 'ask-4', message: 'hello' },
+      { heading: 'Inbound ask', role: 'supervisor' },
+    )
+    expect(roleFromOptions).toContain('from `host-1` (supervisor)')
+  })
 })
 
 describe('postBroker', () => {
