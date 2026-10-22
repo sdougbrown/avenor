@@ -12,19 +12,20 @@ import (
 
 // Template is an immutable, reusable workflow definition.
 type Template struct {
-	SchemaVersion     int                     `json:"schema_version"`
-	TemplateID        TemplateID              `json:"template_id"`
-	TemplateVersion   TemplateVersion         `json:"template_version"`
-	Metadata          map[string]any          `json:"metadata,omitempty"`
-	EntryNodes        []NodeID                `json:"entry_nodes"`
-	Nodes             []NodeDefinition        `json:"nodes"`
-	TerminalOutcomes  []OutcomeName           `json:"terminal_outcomes"`
-	BoundedLoops      []BoundedLoopDefinition `json:"bounded_loops,omitempty"`
-	DefaultLease      *LeasePolicy            `json:"default_lease_policy,omitempty"`
-	DefaultRetry      *RetryPolicy            `json:"default_retry_policy,omitempty"`
-	WorkingDirectory  *WorkingDirectoryRef    `json:"working_directory,omitempty"`
-	CompositionLimits *CompositionLimits      `json:"composition_limits,omitempty"`
-	Params            []TemplateParam         `json:"params,omitempty"`
+	SchemaVersion     int                       `json:"schema_version"`
+	TemplateID        TemplateID                `json:"template_id"`
+	TemplateVersion   TemplateVersion           `json:"template_version"`
+	Metadata          map[string]any            `json:"metadata,omitempty"`
+	EntryNodes        []NodeID                  `json:"entry_nodes"`
+	Nodes             []NodeDefinition          `json:"nodes"`
+	TerminalOutcomes  []OutcomeName             `json:"terminal_outcomes"`
+	BoundedLoops      []BoundedLoopDefinition   `json:"bounded_loops,omitempty"`
+	DefaultLease      *LeasePolicy              `json:"default_lease_policy,omitempty"`
+	DefaultRetry      *RetryPolicy              `json:"default_retry_policy,omitempty"`
+	WorkingDirectory  *WorkingDirectoryRef      `json:"working_directory,omitempty"`
+	LaunchWrappers    []LaunchWrapperDefinition `json:"launch_wrappers,omitempty"`
+	CompositionLimits *CompositionLimits        `json:"composition_limits,omitempty"`
+	Params            []TemplateParam           `json:"params,omitempty"`
 }
 
 // WorkingDirectoryRef declares where an attempt's working directory comes
@@ -33,6 +34,30 @@ type Template struct {
 // machine-specific directory is always supplied at instantiation.
 type WorkingDirectoryRef struct {
 	FromInstanceParam string `json:"from_instance_param"`
+}
+
+// LaunchWrapperArgKind discriminates the argv element form.
+type LaunchWrapperArgKind string
+
+const (
+	// LaunchWrapperArgKindLiteral is one exact argv element: the value is
+	// passed verbatim, with no shell expansion or interpolation.
+	LaunchWrapperArgKindLiteral LaunchWrapperArgKind = "literal"
+)
+
+// LaunchWrapperDefinition is a trusted named argv template: a wrapper
+// executable plus its fixed arguments. Definitions are project
+// configuration, not untrusted input, so there is no runtime allowlist.
+type LaunchWrapperDefinition struct {
+	ID   string             `json:"id"`
+	Argv []LaunchWrapperArg `json:"argv"`
+}
+
+// LaunchWrapperArg is one argv element: a literal value, discriminated by
+// Type. Values are never trimmed or rewritten.
+type LaunchWrapperArg struct {
+	Type  LaunchWrapperArgKind `json:"type"`
+	Value string               `json:"value,omitempty"`
 }
 
 // TemplateParam declares one instance parameter a template accepts at

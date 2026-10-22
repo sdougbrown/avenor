@@ -61,6 +61,13 @@
         "items": {
           "$ref": "#/$defs/template_param"
         }
+      },
+      "launch_wrappers": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "$ref": "#/$defs/launch_wrapper"
+        }
       }
     },
     "required": [
@@ -803,6 +810,48 @@
           "parent_output"
         ],
         "additionalProperties": false
+      },
+      "launch_wrapper": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "argv": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/launch_wrapper_arg"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "argv"
+        ],
+        "additionalProperties": false
+      },
+      "launch_wrapper_arg": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "literal"
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        ]
       }
     }
   },
@@ -853,6 +902,9 @@
         "isEmpty": "object"
       },
       "params": {
+        "isEmpty": "array"
+      },
+      "launch_wrappers": {
         "isEmpty": "array"
       }
     },
