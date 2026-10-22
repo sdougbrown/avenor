@@ -73,10 +73,6 @@ func TestValidateLaunchWrapperIngress(t *testing.T) {
 			wrappers: []any{valid(nil)},
 		},
 		{
-			name:     "unused definition still validates",
-			wrappers: []any{valid(nil)},
-		},
-		{
 			name: "duplicate definition IDs",
 			wrappers: []any{
 				valid(nil),
@@ -88,6 +84,11 @@ func TestValidateLaunchWrapperIngress(t *testing.T) {
 			name:     "blank definition ID",
 			wrappers: []any{valid(func(w map[string]any) { w["id"] = "" })},
 			wantErr:  "minLength at /launch_wrappers/0/id",
+		},
+		{
+			name:     "whitespace-only definition ID",
+			wrappers: []any{valid(func(w map[string]any) { w["id"] = " " })},
+			wantErr:  "launch wrapper ID is required",
 		},
 		{
 			name:     "empty argv",
@@ -200,6 +201,13 @@ func TestValidateLaunchWrapperInMemoryCrossFields(t *testing.T) {
 			name: "blank ID",
 			mutate: func(w *LaunchWrapperDefinition) {
 				w.ID = ""
+			},
+			wantErr: "launch wrapper ID is required",
+		},
+		{
+			name: "whitespace-only ID",
+			mutate: func(w *LaunchWrapperDefinition) {
+				w.ID = " "
 			},
 			wantErr: "launch wrapper ID is required",
 		},

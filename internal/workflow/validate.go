@@ -247,7 +247,8 @@ const maxInstanceParamValueLength = 256
 // validateTemplateParams enforces the template-side parameter contract: each
 // declared param is a path-safe identifier typed as string, every
 // templated concurrency key names a declared param, and every
-// working-directory declaration names a declared param.
+// working-directory declaration names a declared param. Launch-wrapper
+// registry definitions validate at this boundary too.
 func validateTemplateParams(template Template) error {
 	declared := make(map[string]struct{}, len(template.Params))
 	for _, param := range template.Params {
@@ -281,10 +282,9 @@ func validateTemplateParams(template Template) error {
 	return validateLaunchWrappers(template)
 }
 
-// validateLaunchWrappers enforces the launch-wrapper registry contract: every
-// definition has a unique, non-blank ID and a well-formed argv (the first
-// element a literal absolute executable path, values non-empty and NUL-free).
-// The whole registry validates, including definitions no node selects.
+// validateLaunchWrappers validates every launch-wrapper definition: unique
+// non-blank ID, non-empty argv whose first element is a literal absolute
+// executable path, values non-empty and NUL-free.
 func validateLaunchWrappers(template Template) error {
 	ids := make(map[string]struct{}, len(template.LaunchWrappers))
 	for index, wrapper := range template.LaunchWrappers {
@@ -302,8 +302,8 @@ func validateLaunchWrappers(template Template) error {
 	return nil
 }
 
-// validateLaunchWrapperArgv enforces the argv rules for one definition:
-// strict element shapes, exact unmodified values, and a literal absolute
+// validateLaunchWrapperArgv enforces one definition's argv rules: strict
+// element shapes, non-empty NUL-free values, and a literal absolute
 // executable path first.
 func validateLaunchWrapperArgv(id string, argv []LaunchWrapperArg) error {
 	if len(argv) == 0 {
