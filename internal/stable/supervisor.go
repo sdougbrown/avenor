@@ -3811,10 +3811,11 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 	}
 	child.mu.Lock()
 	identity := effectiveIdentity{
-		Backend:      child.effectiveBackend,
-		Agent:        child.effectiveAgent,
-		Model:        child.effectiveModel,
-		AgentProfile: child.agentProfile,
+		Backend:       child.effectiveBackend,
+		Agent:         child.effectiveAgent,
+		Model:         child.effectiveModel,
+		AgentProfile:  child.agentProfile,
+		LaunchWrapper: child.launchWrapper,
 	}
 	provider := child.provider
 	fallbackBackend := child.backend
@@ -3840,16 +3841,17 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		}
 	}
 	return cli.StartSession(ctx, provider, identity.Backend, runtime.StartOptions{
-		Agent:        identity.Agent,
-		AgentProfile: identity.AgentProfile,
-		Label:        label,
-		Dir:          dir,
-		Model:        identity.Model,
-		Thinking:     thinking,
-		RuntimeID:    child.id,
-		Broker:       s.broker,
-		BrokerToken:  brokerToken,
-		Provenance:   runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
+		Agent:         identity.Agent,
+		AgentProfile:  identity.AgentProfile,
+		Label:         label,
+		Dir:           dir,
+		Model:         identity.Model,
+		Thinking:      thinking,
+		RuntimeID:     child.id,
+		Broker:        s.broker,
+		BrokerToken:   brokerToken,
+		LaunchWrapper: identity.LaunchWrapper,
+		Provenance:    runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
 	}, resumeID)
 }
 
@@ -6217,6 +6219,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.PromptFile = ec.Action.Run.PromptFile
 		params.Timeout = ec.Action.Run.Timeout
 	}
+	params.LaunchWrapper = ec.LaunchWrapper
 	dir, err := attemptSpawnDir(ec)
 	if err != nil {
 		// Pre-start failure: the attempt was already started durably by the
@@ -6276,6 +6279,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.LoopFile = ec.Action.Loop.LoopFile
 		params.Timeout = ec.Action.Loop.Timeout
 	}
+	params.LaunchWrapper = ec.LaunchWrapper
 	dir, err := attemptSpawnDir(ec)
 	if err != nil {
 		// Pre-start failure: the attempt was already started durably by the
@@ -6337,6 +6341,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.TeamFile = ec.Action.Team.TeamFile
 		params.Timeout = ec.Action.Team.Timeout
 	}
+	params.LaunchWrapper = ec.LaunchWrapper
 	dir, err := attemptSpawnDir(ec)
 	if err != nil {
 		// Pre-start failure: the attempt was already started durably by the

@@ -142,6 +142,7 @@ fields:
 | `lease_policy` | Per-node lease override. |
 | `skip_rule` | Authority rule for `workflow.skip`. |
 | `waive_rules` | Authority rules for `workflow.gate` `waive`. |
+| `launch_wrapper` | Selects an ID from the template's `launch_wrappers` registry (see [Launch wrappers](#launch-wrappers)). |
 
 Ordinary `dependencies` must be acyclic. A cycle is valid only through an
 explicit bounded loop or through declared **branches**, which create new
@@ -409,8 +410,10 @@ no params behave exactly as before.
 
 ## Launch wrappers
 
-A template may declare a `launch_wrappers` registry: trusted, author-reviewed
-executable configurations, each a named argv template:
+A template may declare a `launch_wrappers` registry: a list of trusted,
+author-reviewed executable configurations that a node may launch under. The
+helper executable is operator-provided — Avenor does not ship or instantiate
+one.
 
 ```json
 {
@@ -426,14 +429,31 @@ executable configurations, each a named argv template:
 }
 ```
 
-- Each argv element is a literal value passed through as one complete argv
-  element — no interpolation, no expansion, no trimming. `argv[0]` must be a
-  literal absolute executable path.
-- Wrapper IDs must be non-blank and unique. The whole registry validates,
-  including definitions nothing references.
-- Wrappers are trusted author configuration: there is no per-workflow
-  allowlist and no defaults. The helper executable is operator-provided —
-  Avenor does not ship or instantiate one.
+A node selects a wrapper by ID with `launch_wrapper`, a sibling of `action`
+— never inside `action`:
+
+```json
+{ "id": "fix", "launch_wrapper": "sandbox",
+  "action": { "type": "run", "prompt": "Reply OK" } }
+```
+
+- **Resolution.** Each element is a literal value passed through as one
+  complete argv element — no interpolation, no expansion, no trimming.
+  `argv[0]` must be a literal absolute path. Unknown or duplicate wrapper IDs
+  and invalid argv are rejected at validation.
+- **Selection.** Only `run`, `loop`, and `team` nodes select a wrapper. Phases
+  inherit the parent's resolved argv; child workflows do not. There is no
+  template default. An existing session's ownership persists the resolved argv;
+  resuming with a different wrapper is rejected.
+- **Trust.** Wrappers are trusted, author-reviewed executable config — there is
+  no per-workflow allowlist, and the ad-hoc MCP policy is unchanged.
+  Permission-decider spawns are not wrapped by a worker's setting.
+- **Semantics.** The wrapper must preserve stdio, exit-code, and signal
+  semantics and keep same-path mounts and reachability per
+  [backends](backends.md#launch-wrapper). The operator's wrapper (not the
+  supervisor) must expose Claude's transcript
+  (`~/.claude/projects/<encoded cwd>/`) at host-visible matching paths. Avenor
+  does not implement isolation.
 
 ## Working directories
 

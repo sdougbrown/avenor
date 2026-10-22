@@ -154,6 +154,10 @@ type ExecutorContext struct {
 	// to the supervisor's working directory (templates without a
 	// working_directory declaration behave exactly as before).
 	WorkingDirectory string
+	// LaunchWrapper is the node's launch-wrapper argv resolved from the
+	// immutable template definition. Nil means the node declared no wrapper
+	// and the runtime launches unwrapped.
+	LaunchWrapper []string
 }
 
 // RegisterExecutor attaches the dispatch backend for one action kind.
@@ -1062,6 +1066,13 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 	}
 	startReq := req
 	startReq.Selection = selection
+	// Resolve the launch wrapper before the attempt intent commits: a
+	// resolution failure must not strand a durably recorded attempt.
+	launchWrapper, err := ResolveNodeLaunchWrapper(*tmpl, *node, snap.Instance.Params)
+	if err != nil {
+		unlockDispatch()
+		return nil, err
+	}
 	if _, err := m.applyStart(wf, snap, act, startReq, attemptID); err != nil {
 		unlockDispatch()
 		return nil, err
@@ -1079,6 +1090,7 @@ func (m *Manager) commandStart(wf WorkflowID, payload json.RawMessage) (any, err
 		Action:           node.Action,
 		Selection:        selection,
 		WorkingDirectory: workingDir,
+		LaunchWrapper:    launchWrapper,
 	}); err != nil {
 		return nil, err
 	}

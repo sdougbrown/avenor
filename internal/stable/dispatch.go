@@ -235,6 +235,7 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		Action:           begin.Action,
 		Selection:        begin.Selection,
 		WorkingDirectory: begin.WorkingDirectory,
+		LaunchWrapper:    begin.LaunchWrapper,
 		Admission:        res,
 	}
 	startErr := mgr.DispatchExecutor(begin.Action.Kind, ec)

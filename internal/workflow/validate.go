@@ -285,6 +285,7 @@ func validateTemplateParams(template Template) error {
 // validateLaunchWrappers validates every launch-wrapper definition: unique
 // non-blank ID, non-empty argv whose first element is a literal absolute
 // executable path, values non-empty and NUL-free.
+// Node selections must name a declared wrapper on a provider-backed action.
 func validateLaunchWrappers(template Template) error {
 	ids := make(map[string]struct{}, len(template.LaunchWrappers))
 	for index, wrapper := range template.LaunchWrappers {
@@ -297,6 +298,17 @@ func validateLaunchWrappers(template Template) error {
 		ids[wrapper.ID] = struct{}{}
 		if err := validateLaunchWrapperArgv(wrapper.ID, wrapper.Argv); err != nil {
 			return err
+		}
+	}
+	for _, node := range template.Nodes {
+		if node.LaunchWrapper == "" {
+			continue
+		}
+		if node.Action.Kind != ActionRun && node.Action.Kind != ActionLoop && node.Action.Kind != ActionTeam {
+			return fmt.Errorf("invalid workflow template: node %q launch_wrapper requires a run, loop, or team action", node.ID)
+		}
+		if _, ok := ids[node.LaunchWrapper]; !ok {
+			return fmt.Errorf("invalid workflow template: node %q launch_wrapper names unknown launch wrapper %q", node.ID, node.LaunchWrapper)
 		}
 	}
 	return nil

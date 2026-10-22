@@ -70,6 +70,8 @@ The wrapper is documented, not enforced. Whatever argv you supply must satisfy t
 - **Same-path mounts** — `--dir` and the paths Avenor injects (config files, event/sentinel files, permission-handler directories) must resolve identically inside the wrapper.
 - **MCP-server reachability** — stdio MCP servers launched by the backend inherit the wrapper's environment automatically; socket or HTTP MCP servers must be exposed by the wrapper (port forwarding, network namespace sharing, or equivalent).
 
+Workflow templates declare their own named `launch_wrappers` registry — a trusted, author-reviewed set of executable configurations that `run`, `loop`, and `team` nodes select by ID. That is distinct from the per-spawn backend wrapper above and from the ad-hoc MCP allowlist. See [Launch wrappers](workflow.md#launch-wrappers).
+
 ## Launch identity
 
 A backend that starts a harness process exports Avenor's launch identity in that process's environment. A local MCP server started by the backend can read it. The variable table, omission rules, attempt numbering and join recipe are in [Event stream → Launch identity](events.md#launch-identity).
