@@ -844,11 +844,6 @@ export class Client {
     return await this.call('broker_ask', params, timeoutMs !== undefined ? { timeoutMs } : undefined) as Record<string, unknown>
   }
 
-  async brokerPeers(): Promise<Array<Record<string, unknown>>> {
-    const result = await this.call('broker_peers') as { sessions?: Array<Record<string, unknown>> }
-    return result.sessions ?? []
-  }
-
   async brokerCancel(messageId: string): Promise<void> {
     await this.call('broker_cancel', { message_id: messageId })
   }
