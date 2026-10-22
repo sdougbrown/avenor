@@ -75,7 +75,7 @@ func (p *mcpMessageProvider) Wait(ctx context.Context, req messaging.WaitRequest
 }
 
 func (p *mcpMessageProvider) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
-	return retryGenerationMismatch(ctx, p, func(ctx context.Context) (messaging.SendResult, error) {
+	return versionedRetry(ctx, p, nil, func(ctx context.Context) (messaging.SendResult, error) {
 		return p.transport.Reply(ctx, req)
 	})
 }
@@ -141,31 +141,22 @@ func (p *mcpMessageProvider) refreshGeneration(ctx context.Context) (string, err
 	return pre.Generation, nil
 }
 
-// versionedRetry binds one generation-carrying request to the provider's
-// current generation and retries it once when the store reports that pin
-// stale. The retry re-preflights first, so the request carries the generation
-// the restarted store just minted instead of the dead one.
+// versionedRetry retries one control verb once after a re-preflight, so a
+// stale cached generation does not fail the verb for the rest of the process.
+// A generation-carrying verb passes its request field, which is pinned to the
+// provider's current generation when empty and updated to the freshly
+// preflighted one on retry; a verb that carries no generation passes nil and
+// the pin/update is skipped. One policy, one place.
 func versionedRetry[T any](ctx context.Context, p *mcpMessageProvider, generation *string, call func(context.Context) (T, error)) (T, error) {
-	if *generation == "" {
+	if generation != nil && *generation == "" {
 		*generation = p.Generation()
 	}
 	result, err := call(ctx)
 	if errors.Is(err, messaging.ErrGenerationMismatch) {
 		if fresh, preflightErr := p.refreshGeneration(ctx); preflightErr == nil {
-			*generation = fresh
-			return call(ctx)
-		}
-	}
-	return result, err
-}
-
-// retryGenerationMismatch retries one unversioned control verb once after
-// re-preflighting, so a stale cached generation does not fail the verb for the
-// rest of the process.
-func retryGenerationMismatch[T any](ctx context.Context, p *mcpMessageProvider, call func(context.Context) (T, error)) (T, error) {
-	result, err := call(ctx)
-	if errors.Is(err, messaging.ErrGenerationMismatch) {
-		if _, preflightErr := p.refreshGeneration(ctx); preflightErr == nil {
+			if generation != nil {
+				*generation = fresh
+			}
 			return call(ctx)
 		}
 	}
@@ -227,17 +218,14 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 	if err != nil {
 		return messaging.Resolution{}, err
 	}
-	var candidates []string
-	label := ""
+	// The run-id rung stays a separate pass: an exact run id wins over any
+	// label, so a label collected alongside it must not be able to answer first.
 	for _, peer := range peers {
 		if peer.RunID == ref {
 			return p.peerResolution(peer.RunID, peer.Label), nil
 		}
-		if peer.Label == ref {
-			candidates = append(candidates, peer.RunID)
-			label = peer.Label
-		}
 	}
+	candidates, label := messaging.LabelCandidates(peers, ref)
 	switch len(candidates) {
 	case 1:
 		return p.peerResolution(candidates[0], label), nil
@@ -264,18 +252,37 @@ func (p *mcpMessageProvider) peerResolution(runID, label string) messaging.Resol
 }
 
 // RunState reads the supervisor's status for the target and classifies the
-// turn and resume facts. Resumable is a resumable sentinel or a live session
-// id; a missing sentinel is simply not resumable from the sentinel. The
-// supervisor session is broker-only (it has no runtime), so its state comes
-// from the peer listing the same surface already reads.
+// turn and resume facts through runFactsFromStatus. A status error falls back
+// to the registry's terminal sentinel, so a run that finished before a
+// supervisor restart still reports as done. The supervisor session is
+// broker-only (it has no runtime), so its state comes from the peer listing
+// the same surface already reads.
 func (p *mcpMessageProvider) RunState(ctx context.Context, runID string) (messaging.RunFacts, error) {
 	if runID == messaging.SupervisorRunID {
 		return p.peerRunState(ctx, runID)
 	}
 	status, err := p.client.Status(runID)
 	if err != nil {
+		// The supervisor's runtime is gone, but the registry deliberately keeps
+		// a dead run discoverable by run id for its persisted terminal result.
+		// Read that fallback narrowly: no entry, no terminal sentinel, or a
+		// sentinel read error keeps the original status failure.
+		if info := p.server.registry.Lookup(p.supervisorPath, runID); info != nil {
+			if terminal, ok := terminalStatusFromRunInfo(info); ok {
+				return runFactsFromStatus(runID, terminal), nil
+			}
+		}
 		return messaging.RunFacts{}, err
 	}
+	return runFactsFromStatus(runID, status), nil
+}
+
+// runFactsFromStatus classifies one supervisor status map into the turn and
+// resume facts the router reads. Resumable is a resumable sentinel or a live
+// session id; a missing sentinel is simply not resumable from the sentinel.
+// The live status and the registry's terminal-status fallback share this
+// classification, so the two paths cannot drift.
+func runFactsFromStatus(runID string, status map[string]any) messaging.RunFacts {
 	rawStatus, _ := status["status"].(string)
 	rawPhase, _ := status["phase"].(string)
 	translation := runstate.Translate(runstate.RuntimeStatus(rawStatus), runstate.Phase(rawPhase))
@@ -294,7 +301,7 @@ func (p *mcpMessageProvider) RunState(ctx context.Context, runID string) (messag
 		Phase:     translation.Phase,
 		Live:      !translation.TurnComplete,
 		Resumable: resumable,
-	}, nil
+	}
 }
 
 // peerRunState reads one broker-only target's state from the peer listing. A

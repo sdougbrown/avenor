@@ -28,6 +28,21 @@ func DecodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 	return records, nil
 }
 
+// LabelCandidates collects the run ids in records whose broker label equals
+// ref, in the records' order (the broker listing order), together with the
+// matched label. Both resolution planes switch on the candidate count with
+// this one collection, so duplicate-label handling cannot land twice.
+func LabelCandidates(records []PeerRecord, ref string) (candidates []string, label string) {
+	for _, record := range records {
+		if record.Label != ref {
+			continue
+		}
+		candidates = append(candidates, record.RunID)
+		label = record.Label
+	}
+	return candidates, label
+}
+
 // PeerRunFacts is the one peer-row-to-facts translation, so every surface
 // classifies a broker peer row the same way. A peer row carries no phase stream
 // and no sentinel, so the phase is PhaseNone, liveness is the inverse of turn

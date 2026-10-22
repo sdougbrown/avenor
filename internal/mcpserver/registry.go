@@ -137,24 +137,33 @@ func (r *RunRegistry) LookupUnique(key string) *RunInfo {
 	return found
 }
 
-// LookupRuntime returns the entry for (supervisorID, runtimeID), or nil. It is
-// an identity projection for reporting a run's public id, not a resolution
-// rung: labels and run ids are still resolved through Lookup/LookupLabel.
-// Runtime ids are minted per supervisor, so every supervisor's first run is
-// rt_1; the scope keeps a projection from answering with another supervisor's
-// run.
+// LookupRuntime returns the entry for (supervisorID, runtimeID) only when
+// exactly one entry under that supervisor carries the runtime id, and nil
+// otherwise. It is an identity projection for reporting a run's public id, not
+// a resolution rung: labels and run ids are still resolved through
+// Lookup/LookupLabel. Runtime ids are minted per supervisor, so every
+// supervisor's first run is rt_1; the scope keeps a projection from answering
+// with another supervisor's run. A supervisor restart mints rt_1 again while
+// the pre-restart entry stays registered, so two entries under one supervisor
+// can share a runtime id; that ambiguity answers nil rather than whichever
+// entry the map iteration reached first.
 func (r *RunRegistry) LookupRuntime(supervisorID, runtimeID string) *RunInfo {
 	if runtimeID == "" {
 		return nil
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	var found *RunInfo
 	for _, info := range r.byID[supervisorID] {
-		if info.RuntimeID == runtimeID {
-			return info
+		if info.RuntimeID != runtimeID {
+			continue
 		}
+		if found != nil {
+			return nil
+		}
+		found = info
 	}
-	return nil
+	return found
 }
 
 // LookupRuntimeUnique resolves a runtime id across all supervisors and returns

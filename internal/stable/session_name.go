@@ -94,9 +94,9 @@ func (s *Supervisor) resolveRenameTarget(caller messaging.Caller, sessionID stri
 			}
 			return caller.RunID, nil
 		}
-		return "supervisor", nil
+		return messaging.SupervisorRunID, nil
 	case sessionID == messaging.SupervisorRunID:
-		return "supervisor", nil
+		return messaging.SupervisorRunID, nil
 	}
 	return s.resolveRunReference(sessionID)
 }

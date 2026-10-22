@@ -205,4 +205,18 @@ func TestRunRegistryLookupRuntimeIsScopedBySupervisor(t *testing.T) {
 	if ri := r.LookupRuntimeUnique(""); ri != nil {
 		t.Fatalf("unique lookup of an empty id = %#v, want nil", ri)
 	}
+
+	// A supervisor restart mints rt_1 again while the pre-restart entry stays
+	// registered, so two entries under one supervisor can share a runtime id.
+	// That ambiguity answers nil rather than whichever entry the map iteration
+	// reached first.
+	if err := r.Store(&RunInfo{RunID: "run-d", RuntimeID: "rt_7", SupervisorID: "/tmp/a.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Store(&RunInfo{RunID: "run-e", RuntimeID: "rt_7", SupervisorID: "/tmp/a.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	if ri := r.LookupRuntime("/tmp/a.sock", "rt_7"); ri != nil {
+		t.Fatalf("runtime id owned by two runs under one supervisor = %#v, want nil", ri)
+	}
 }

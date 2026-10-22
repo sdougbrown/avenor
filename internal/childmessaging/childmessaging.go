@@ -155,14 +155,7 @@ func (p *MessageProvider) Resolve(ctx context.Context, ref string) (messaging.Re
 			}, nil
 		}
 	}
-	var candidates []string
-	label := ""
-	for _, session := range sessions {
-		if session.Label == ref {
-			candidates = append(candidates, session.RunID)
-			label = session.Label
-		}
-	}
+	candidates, label := messaging.LabelCandidates(sessions, ref)
 	switch len(candidates) {
 	case 1:
 		return messaging.Resolution{RunID: candidates[0], Label: label, Match: messaging.MatchUnique}, nil

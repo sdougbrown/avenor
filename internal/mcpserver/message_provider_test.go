@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -655,5 +656,90 @@ func TestMCPMessageProviderRunStateTranslatesStatus(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("RunState = %#v, want %#v", got, want)
+	}
+}
+
+// TestMCPMessageProviderRunStateFallsBackToTerminalSentinel proves a run that
+// finished before a supervisor restart is still reported as done. Status fails
+// because the runtime is gone, and the registry's terminal sentinel answers;
+// without a registry entry the original status error survives.
+func TestMCPMessageProviderRunStateFallsBackToTerminalSentinel(t *testing.T) {
+	const publicID = "3f6a9d1c-2b44-4f0e-9d31-5a7c8e2b4d61"
+	sentinelPath := filepath.Join(t.TempDir(), "avenor-run-"+publicID+".done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_prior\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	statusErr := errors.New("no such runtime")
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusErr: statusErr}}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{
+		SupervisorID: testSupervisorPath,
+		RunID:        publicID,
+		RuntimeID:    "rt_1",
+		Label:        "finished",
+		SentinelPath: sentinelPath,
+	}); err != nil {
+		t.Fatalf("registry.Store: %v", err)
+	}
+
+	got, err := p.RunState(context.Background(), publicID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	want := messaging.RunFacts{
+		RunID:     publicID,
+		Status:    runstate.StatusDone,
+		Live:      false,
+		Resumable: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RunState = %#v, want %#v", got, want)
+	}
+
+	// The fallback is narrow: an unknown run id keeps the status failure.
+	if _, err := p.RunState(context.Background(), "run-unknown"); !errors.Is(err, statusErr) {
+		t.Fatalf("RunState of an unregistered run error = %v, want %v", err, statusErr)
+	}
+}
+
+// TestNewMCPMessageProviderReturnsPreflightError proves the constructor
+// surfaces the preflight failure instead of returning a provider.
+func TestNewMCPMessageProviderReturnsPreflightError(t *testing.T) {
+	preflightErr := errors.New("control store unavailable")
+	cl := &fakeMessageControlClient{
+		fakeClient: &fakeClient{},
+		preflightFunc: func(context.Context) (messaging.PreflightResult, error) {
+			return messaging.PreflightResult{}, preflightErr
+		},
+	}
+
+	p, err := newMCPMessageProvider(context.Background(), &Server{registry: NewRunRegistry()}, cl, testSupervisorPath)
+	if !errors.Is(err, preflightErr) {
+		t.Fatalf("newMCPMessageProvider error = %v, want %v", err, preflightErr)
+	}
+	if p != nil {
+		t.Fatalf("newMCPMessageProvider returned a provider on failure: %#v", p)
+	}
+}
+
+// TestNewMCPMessageProviderSurfacesCancelledPreflight proves a cancelled
+// constructor context fails the preflight rather than returning a provider
+// bound to an empty generation.
+func TestNewMCPMessageProviderSurfacesCancelledPreflight(t *testing.T) {
+	cl := &fakeMessageControlClient{
+		fakeClient: &fakeClient{},
+		preflightFunc: func(ctx context.Context) (messaging.PreflightResult, error) {
+			return messaging.PreflightResult{}, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	p, err := newMCPMessageProvider(ctx, &Server{registry: NewRunRegistry()}, cl, testSupervisorPath)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("newMCPMessageProvider error = %v, want context.Canceled", err)
+	}
+	if p != nil {
+		t.Fatalf("newMCPMessageProvider returned a provider on a cancelled context: %#v", p)
 	}
 }
