@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/google/uuid"
@@ -45,8 +43,10 @@ type messageControlClient interface {
 	SessionLastContext(ctx context.Context, runtimeID string) (messaging.PeerLast, error)
 }
 
-func newMCPMessageProvider(server *Server, client messageControlClient, supervisorPath string) (*mcpMessageProvider, error) {
-	pre, err := client.MessagePreflightContext(context.Background())
+// newMCPMessageProvider preflights the control store under ctx, so a caller can
+// bound or cancel the constructor's one blocking RPC.
+func newMCPMessageProvider(ctx context.Context, server *Server, client messageControlClient, supervisorPath string) (*mcpMessageProvider, error) {
+	pre, err := client.MessagePreflightContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -341,8 +341,7 @@ func (p *mcpMessageProvider) peerRunState(ctx context.Context, runID string) (me
 // and keeps the cause; the run itself is never killed.
 func (p *mcpMessageProvider) Resume(ctx context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
 	runID := uuid.New().String()
-	sentinelFile := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
-	eventLog := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", runID))
+	sentinelFile, eventLog := runArtifactPaths(runID)
 	res, err := p.client.ResumeContext(ctx, messaging.ResumeRequest{
 		RunID:          runID,
 		Target:         req.Target,

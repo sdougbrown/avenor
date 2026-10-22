@@ -107,7 +107,7 @@ func (f *fakeMessageControlClient) SessionLastContext(context.Context, string) (
 
 func newTestMessageProvider(t *testing.T, cl messageControlClient) *mcpMessageProvider {
 	t.Helper()
-	p, err := newMCPMessageProvider(&Server{registry: NewRunRegistry()}, cl, testSupervisorPath)
+	p, err := newMCPMessageProvider(context.Background(), &Server{registry: NewRunRegistry()}, cl, testSupervisorPath)
 	if err != nil {
 		t.Fatalf("newMCPMessageProvider: %v", err)
 	}
@@ -409,6 +409,64 @@ func TestMCPMessageProviderResumeRegistrationFailureIsUnclassified(t *testing.T)
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("Resume error = %q, want it to name %q", err, want)
 		}
+	}
+}
+
+// TestMCPMessageProviderResumeRegistersRun proves the resume happy path stores
+// the run the control verb reports, so a later call resolves the resumed
+// runtime by the public run id, and the result is passed through unchanged.
+func TestMCPMessageProviderResumeRegistersRun(t *testing.T) {
+	const (
+		publicID  = "0b7c4f2a-93d8-4e51-8c6a-1f2e3d4c5b6a"
+		runtimeID = "rt-resumed"
+		label     = "resumed-label"
+	)
+	want := messaging.ResumeResult{
+		RunID:        publicID,
+		RuntimeID:    runtimeID,
+		Label:        label,
+		SessionID:    "sess-resumed",
+		SentinelFile: filepath.Join(t.TempDir(), "avenor-run-"+publicID+".done"),
+		OnEvent:      filepath.Join(t.TempDir(), "avenor-run-"+publicID+".log"),
+	}
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{}}
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		return want, nil
+	}
+	p := newTestMessageProvider(t, cl)
+
+	got, err := p.Resume(context.Background(), messaging.ResumeRequest{
+		Target:  "rt-old",
+		Message: "keep going",
+		Label:   label,
+	})
+	if err != nil {
+		t.Fatalf("Resume error = %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Resume result = %#v, want %#v passed through unchanged", got, want)
+	}
+
+	stored := p.server.registry.LookupLabel(testSupervisorPath, label)
+	if stored == nil {
+		t.Fatalf("registry has no entry for label %q after resume", label)
+	}
+	if stored.RunID != publicID || stored.RuntimeID != runtimeID {
+		t.Fatalf("stored entry = %#v, want run id %q runtime %q", stored, publicID, runtimeID)
+	}
+
+	resolution, err := p.Resolve(context.Background(), publicID)
+	if err != nil {
+		t.Fatalf("Resolve(%q) error = %v", publicID, err)
+	}
+	wantResolution := messaging.Resolution{
+		RunID:       runtimeID,
+		PublicRunID: publicID,
+		Label:       label,
+		Match:       messaging.MatchUnique,
+	}
+	if !reflect.DeepEqual(resolution, wantResolution) {
+		t.Fatalf("Resolve(%q) = %#v, want %#v", publicID, resolution, wantResolution)
 	}
 }
 

@@ -1152,8 +1152,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		label = runID
 	}
 
-	sentinelPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
-	eventLogPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", runID))
+	sentinelPath, eventLogPath := runArtifactPaths(runID)
 
 	params := map[string]any{
 		"dir":           args.RepoDir,
@@ -1660,8 +1659,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		followupLabel = priorLabel + runstate.FollowUpLabelSuffix
 	}
 
-	sentinelPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
-	eventLogPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", runID))
+	sentinelPath, eventLogPath := runArtifactPaths(runID)
 
 	effectiveAgent := identity.EffectiveAgent
 	if effectiveAgent == "" {
