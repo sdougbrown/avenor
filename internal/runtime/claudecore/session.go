@@ -36,6 +36,12 @@ type Session struct {
 	Finished            bool
 	PendingTerminalPerm *TerminalPermission
 
+	// startupWait is how long after launchedAt the first prompt is held;
+	// startupWaitDone is set once the first prompt has claimed it.
+	startupWait     time.Duration
+	launchedAt      time.Time
+	startupWaitDone bool
+
 	// progStatus is the OSC 7501 source set by AttachProgStatus. Without one,
 	// or before its first root report, the pane and transcript rules alone
 	// drive the session.

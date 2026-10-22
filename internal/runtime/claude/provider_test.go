@@ -745,6 +745,48 @@ func TestPromptReportsReadySignal(t *testing.T) {
 	}
 }
 
+func TestPromptSubmittedReportsStartupWaitOnlyWhenConfigured(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		wait    time.Duration
+		present bool
+	}{
+		{"configured", time.Millisecond, true},
+		{"unset", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Provider{sessions: make(map[string]*claudecore.Session)}
+			term := terminal.NewFakeSession("test-term", 1, testInputBox)
+			term.SetKind("pty")
+			s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-wait", EventsBuf: 16})
+			defer s.CancelFn()
+			s.Term = term
+			s.SetStartupWait(tc.wait)
+			p.sessions[s.SessionID] = s
+
+			if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+				t.Fatalf("Prompt: %v", err)
+			}
+			deadline := time.After(3 * time.Second)
+			for {
+				select {
+				case ev := <-s.Events:
+					if ev.Event != "agent.prompt_submitted" {
+						continue
+					}
+					got, present := ev.Fields["startup_wait_ms"]
+					if present != tc.present {
+						t.Fatalf("startup_wait_ms present=%v (%v), want %v", present, got, tc.present)
+					}
+					return
+				case <-deadline:
+					t.Fatal("no agent.prompt_submitted")
+				}
+			}
+		})
+	}
+}
+
 func TestCancelTakesProgStatusIdleAfterWorkingAsCancelled(t *testing.T) {
 	p := &Provider{
 		sessions:    make(map[string]*claudecore.Session),

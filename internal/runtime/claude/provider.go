@@ -144,6 +144,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, fmt.Errorf("terminal launch: %w", err)
 	}
 	s.Term = term
+	s.SetStartupWait(merged.ClaudeMCPWait)
 	s.AttachProgStatus(term)
 
 	p.mu.Lock()
@@ -298,6 +299,17 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			return
 		}
 		readySignal := s.WaitForProgStatusReady(s.Ctx)
+		startupWait, waitConfigured, ok := s.WaitForStartupMCP(s.Ctx)
+		if !ok {
+			s.Emit(events.Event{
+				Event:     "agent.prompt_failed",
+				SessionID: s.SessionID,
+				Fields: map[string]any{
+					"error": "session ended during startup wait",
+				},
+			})
+			return
+		}
 		s.ArmProgStatusPrompt()
 		if err := s.Term.PasteAndEnter(s.Ctx, prompt); err != nil {
 			s.Emit(events.Event{
@@ -312,14 +324,18 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		s.Mu.Lock()
 		s.Prompted = true
 		s.Mu.Unlock()
+		fields := map[string]any{
+			"delivery":      s.Term.Kind(),
+			"prompt_length": len(prompt),
+			"ready_signal":  readySignal,
+		}
+		if waitConfigured {
+			fields["startup_wait_ms"] = startupWait.Milliseconds()
+		}
 		s.Emit(events.Event{
 			Event:     "agent.prompt_submitted",
 			SessionID: s.SessionID,
-			Fields: map[string]any{
-				"delivery":      s.Term.Kind(),
-				"prompt_length": len(prompt),
-				"ready_signal":  readySignal,
-			},
+			Fields:    fields,
 		})
 		go claudecore.ResendEnterUntilSubmitted(s.Ctx, s.Term, prompt, s.ProgStatusTurnStarted)
 	}()

@@ -105,6 +105,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	progressTimeout := fs.Duration("progress-timeout", 0, "session progress timeout (fires if no event for duration)")
 	model := fs.String("model", "", "backend-specific model id")
 	thinking := fs.String("thinking", "", "thinking level (off, minimal, low, medium, high, xhigh, max)")
+	claudeMCPWait := fs.Duration("claude-mcp-wait", 0, "hold the first prompt until this long after launch so MCP servers connect first (claude and claude-channel backends, direct runs only; 0 = off, max 60s)")
 	backend := fs.String("backend", DefaultBackend, "runtime backend")
 	runIDFlag := fs.String("run-id", "", "correlation id for this run (generated if not set)")
 	maxRetries := fs.Int("max-retries", 0, "maximum retry attempts on transient failure (0 = no retry)")
@@ -162,6 +163,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	}
 
 	if workflowMode {
+		if *claudeMCPWait != 0 {
+			fmt.Fprintln(stderr, "avenor: --claude-mcp-wait is not valid with --loop-file or --team-file")
+			return exitWithSentinel(1)
+		}
 		if *rosterEntry != "" {
 			fmt.Fprintln(stderr, "avenor: --roster-entry is not valid with --loop-file or --team-file")
 			return exitWithSentinel(1)
@@ -227,6 +232,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			return exitWithSentinel(1)
 		}
 		if err := runtime.ValidateThinkingForBackend(*backend, *thinking); err != nil {
+			fmt.Fprintf(stderr, "avenor: %v\n", err)
+			return exitWithSentinel(1)
+		}
+		if err := runtime.ValidateClaudeMCPWait(*backend, *claudeMCPWait); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
@@ -464,6 +473,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		ServerURL: discovery.URL,
 		Model:     *model,
 		Thinking:  *thinking,
+
+		ClaudeMCPWait: *claudeMCPWait,
 	}
 
 	if controlServer != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -30,6 +31,11 @@ type StartOptions struct {
 	Model        string
 	AgentProfile string
 	Thinking     string
+	// ClaudeMCPWait holds the first prompt of a claude or claude-channel
+	// session until this long after launch, so MCP servers Claude Code
+	// connects in the background are available to the first turn. Zero
+	// sends the prompt as soon as the terminal is ready.
+	ClaudeMCPWait time.Duration
 	// LaunchWrapper is an opaque argv prefix placed in front of the backend
 	// process command at launch. Avenor does not interpret it; empty means
 	// the backend is launched unwrapped. Probes and helper processes are
@@ -198,6 +204,9 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	}
 	if override.Thinking != "" {
 		merged.Thinking = override.Thinking
+	}
+	if override.ClaudeMCPWait != 0 {
+		merged.ClaudeMCPWait = override.ClaudeMCPWait
 	}
 	if len(override.LaunchWrapper) > 0 {
 		merged.LaunchWrapper = override.LaunchWrapper
