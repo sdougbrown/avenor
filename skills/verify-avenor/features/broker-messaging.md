@@ -103,12 +103,13 @@ that instance is already gone.
 
 ## Limitation
 
-**The child ask leg does not pass today.** A `pi` child's `avenor_message` ask is
-refused at the broker (the child posts `/send` without the broker generation and
-mints a versioned id), so the child reports
-`ask "<id>" was not sent to "supervisor"; nothing is pending` instead of
-`PONG-FROM-SUPERVISOR`. The same defects and the drive that does pass are
-recorded in [messaging.md](messaging.md#known-limits-today).
+**With the installed `@dougbots/avenor-pi`, the child ask leg does not pass
+today.** A `pi` child's `avenor_message` ask is refused at the broker (the child
+posts `/send` without the broker generation and mints a versioned id), so the
+child reports `ask "<id>" was not sent to "supervisor"; nothing is pending`
+instead of `PONG-FROM-SUPERVISOR`. The same defects and the drive that does
+pass, using a `pi` shim pointed at this checkout's build, is step 3 of
+[messaging.md](messaging.md#the-bound-generation).
 
 The child is a plain `pi` sub-process (`pi --mode rpc --no-session`), so it
 loads whatever `@dougbots/avenor-pi` your Pi configuration installs. The recipe
