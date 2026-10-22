@@ -181,27 +181,14 @@ func (p *mcpMessageProvider) Surface() messaging.Surface { return messaging.Surf
 func (p *mcpMessageProvider) Role() string { return "host" }
 
 // listedPeers lists the broker's visible peers for the supervisor session and
-// decodes each session with the router's own peer record, so Resolve and
+// decodes them with the contract's own peer decoder, so Resolve and
 // peerRunState read one peer shape.
 func (p *mcpMessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerRecord, error) {
 	peers, err := p.Peers(ctx, messaging.PeersRequest{Sender: messaging.Identity{RunID: messaging.SupervisorRunID}})
 	if err != nil {
 		return nil, err
 	}
-	records := make([]messaging.PeerRecord, 0, len(peers.Peers))
-	for _, peer := range peers.Peers {
-		var record messaging.PeerRecord
-		if len(peer.Session) > 0 {
-			if err := json.Unmarshal(peer.Session, &record); err != nil {
-				return nil, err
-			}
-		}
-		if record.RunID == "" {
-			record.RunID = peer.RunID
-		}
-		records = append(records, record)
-	}
-	return records, nil
+	return messaging.DecodePeerRecords(peers.Peers)
 }
 
 // Resolve is the host ladder: the reserved self alias already became the
@@ -322,14 +309,7 @@ func (p *mcpMessageProvider) peerRunState(ctx context.Context, runID string) (me
 		if peer.RunID != runID {
 			continue
 		}
-		translation := runstate.Translate(runstate.RuntimeStatus(peer.Status), runstate.PhaseNone)
-		return messaging.RunFacts{
-			RunID:     runID,
-			Status:    translation.Status,
-			Phase:     runstate.PhaseNone,
-			Live:      !translation.TurnComplete,
-			Resumable: false,
-		}, nil
+		return messaging.PeerRunFacts(peer), nil
 	}
 	return messaging.RunFacts{}, messaging.ErrTargetUnavailable
 }

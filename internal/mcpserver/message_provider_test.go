@@ -470,6 +470,62 @@ func TestMCPMessageProviderResumeRegistersRun(t *testing.T) {
 	}
 }
 
+// TestMCPMessageProviderResumeRegistersRunWhenStatusFails proves a status miss
+// after a successful resume leaves the identity empty instead of failing the
+// registration: the resumed run stays in the registry with the ids the control
+// verb reported, and the result comes back unchanged.
+func TestMCPMessageProviderResumeRegistersRunWhenStatusFails(t *testing.T) {
+	const (
+		publicID  = "7d1c9a52-4b8e-4f60-9c37-2a5e8b1d3f47"
+		runtimeID = "rt-resumed-unstatusable"
+		label     = "resumed-unstatusable-label"
+	)
+	want := messaging.ResumeResult{
+		RunID:        publicID,
+		RuntimeID:    runtimeID,
+		Label:        label,
+		SessionID:    "sess-resumed-unstatusable",
+		SentinelFile: filepath.Join(t.TempDir(), "avenor-run-"+publicID+".done"),
+		OnEvent:      filepath.Join(t.TempDir(), "avenor-run-"+publicID+".log"),
+	}
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{
+		statusErr: errors.New("runtime not found"),
+	}}
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		return want, nil
+	}
+	p := newTestMessageProvider(t, cl)
+
+	got, err := p.Resume(context.Background(), messaging.ResumeRequest{
+		Target:  "rt-old",
+		Message: "keep going",
+		Label:   label,
+	})
+	if err != nil {
+		t.Fatalf("Resume error = %v, want the status failure to leave registration intact", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Resume result = %#v, want %#v passed through unchanged", got, want)
+	}
+	if !slices.Contains(cl.statusCapturedRuntimeIDs, runtimeID) {
+		t.Fatalf("Status calls = %v, want the resumed runtime %q queried", cl.statusCapturedRuntimeIDs, runtimeID)
+	}
+
+	stored := p.server.registry.LookupLabel(testSupervisorPath, label)
+	if stored == nil {
+		t.Fatalf("registry has no entry for label %q after a failed status lookup", label)
+	}
+	if stored.RunID != publicID || stored.RuntimeID != runtimeID {
+		t.Fatalf("stored entry = %#v, want run id %q runtime %q", stored, publicID, runtimeID)
+	}
+	if stored.SessionID != want.SessionID || stored.SentinelPath != want.SentinelFile || stored.EventLogPath != want.OnEvent {
+		t.Fatalf("stored entry = %#v, want session %q sentinel %q event log %q", stored, want.SessionID, want.SentinelFile, want.OnEvent)
+	}
+	if stored.Agent != "" || stored.Model != "" || stored.Backend != "" {
+		t.Fatalf("stored identity = agent %q model %q backend %q, want it empty on a status miss", stored.Agent, stored.Model, stored.Backend)
+	}
+}
+
 // TestMCPMessageProviderResolveByPublicIDReapsStaleLabel proves the public-id
 // rung reaps a pre-restart label mapping before it stores, so a supervisor
 // restart that re-points a label does not leave the run resolvable by label
