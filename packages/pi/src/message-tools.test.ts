@@ -515,6 +515,44 @@ describe('Pi default host provider wiring', () => {
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
+  it('evicts both bindings when avenor_shutdown names the singleton socket', async () => {
+    const SINGLETON = '/tmp/singleton.sock'
+    const { client, close } = fakeClient()
+    const getSupervisorClient = mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: SINGLETON }))
+    const harness = await startExtensionHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        messageTool: realMessageTool,
+        Supervisor: class {
+          static currentInstance() {
+            return { supervisorId: SINGLETON }
+          }
+
+          static isCurrentInstance(supervisorId: string) {
+            return supervisorId === SINGLETON
+          }
+        } as any,
+      },
+    })
+    const tell = () => harness.registeredTools.avenor_message.execute('t', {
+      action: 'tell',
+      target: 'self',
+      message: 'hi',
+    })
+
+    // Only the default binding exists, and it holds the process-shared
+    // singleton client the shutdown names by socket.
+    await tell()
+    expect(getSupervisorClient).toHaveBeenCalledTimes(1)
+    await harness.registeredTools.avenor_shutdown.execute('s', { supervisor_id: SINGLETON })
+    expect(close).not.toHaveBeenCalled()
+
+    await tell()
+    expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
   it('keeps the default binding when avenor_shutdown targets another supervisor', async () => {
     const OTHER = '/tmp/other.sock'
     const { client, close } = fakeClient()

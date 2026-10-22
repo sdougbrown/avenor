@@ -500,6 +500,54 @@ describe('Avenor Pi extension', () => {
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
+  it('closes the client a non-singleton binding dialled when avenor_shutdown stops it', async () => {
+    const OTHER = '/tmp/other.sock'
+    const close = mock(() => {})
+    const otherClient = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-other' })),
+      close,
+    }
+    const getSupervisorClient = mock(async () => ({
+      client: otherClient,
+      isSingleton: false,
+      sup: null,
+      supervisorId: OTHER,
+    }))
+    const harness = await startExtensionHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        spawnTool: mock(async () => ({
+          run_id: 'run_1',
+          label: 'demo',
+          supervisor_id: OTHER,
+          runtime_id: 'rt_1',
+        })),
+      },
+      extOptions: { subAgentEnv: null },
+    })
+    // Only a tracked run's supervisorId reaches a non-default binding, so seed
+    // one and let the watch resume dial it.
+    await harness.registeredTools.avenor_spawn.execute(
+      'tool-1',
+      { agent: 'explore', label: 'demo', supervisor_id: OTHER, wait: false },
+      undefined,
+      undefined,
+      harness.ctx,
+    )
+    const overlay = await watchResume(harness, 'run_1', 'continue')
+    await waitFor(() => getSupervisorClient.mock.calls.length === 1)
+    expect(getSupervisorClient).toHaveBeenCalledWith(OTHER, { owner: true })
+    expect(close).not.toHaveBeenCalled()
+
+    await harness.registeredTools.avenor_shutdown.execute('s', { supervisor_id: OTHER })
+    expect(close).toHaveBeenCalledTimes(1)
+    // The default binding was never dialled, so the shutdown left it alone.
+    expect(getSupervisorClient).toHaveBeenCalledTimes(1)
+    overlay.dispose()
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
   it('resumes a tracked run through the host binding in a child session', async () => {
     const resumeSpy = mock(async () => ({
       outcome: 'resumed' as const,
