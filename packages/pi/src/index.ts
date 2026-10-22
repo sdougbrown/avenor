@@ -407,9 +407,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let lastStatusEntries: RunStatusEntry[] = []
 
     // Registry of in-flight blocking waits (avenor_result, spawn with
-    // wait=true). When any run reaches a stopping point, sibling waits are
-    // interrupted so the agent regains control instead of staying blocked
-    // until every parallel run resolves.
+    // wait=true). When any run reaches a stopping point — a terminal state, a
+    // pending permission, or an inbound ask — waits are interrupted so the
+    // agent regains control instead of staying blocked until every parallel
+    // run resolves (or until the ask it should answer is answered).
     interface StoppingPoint {
       runId: string
       label?: string
@@ -437,6 +438,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const wait: PendingWait = { runKey, interrupt }
       pendingWaits.add(wait)
       return wait
+    }
+
+    /** An inbound ask is a stopping point: the asker cannot finish until it is
+     * answered, so every blocking wait returns, the asker's own wait included. */
+    function interruptWaitsForAsk(ask: { from_run_id: string }): void {
+      interruptPendingWaits({ runId: ask.from_run_id, status: 'asking' })
     }
 
     interface InterruptibleWait {
@@ -559,6 +566,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             const ask = parseControlMessage(msg)
             if (!ask) continue
             subAgentPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
+            interruptWaitsForAsk(ask)
             pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Inbound ask' }), { deliverAs: 'steer' as const })
           }
         } catch (error) {
@@ -627,6 +635,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (received.generation) hostReceiveGeneration = received.generation
           for (const ask of received.asks) {
             hostPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
+            interruptWaitsForAsk(ask)
             pi.sendUserMessage(
               formatInboundAskBody(ask, { heading: 'Ask from sub-agent', role: ask.role }),
               { deliverAs: 'steer' as const },
@@ -915,15 +924,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (!run) continue
 
           // Any newly observed stopping point (terminal or pending
-          // permission) interrupts sibling blocking waits so the agent can
-          // react without waiting for every parallel run to resolve. The
-          // waiter for this run itself is excluded: its own stop is delivered
-          // by the natural result path. Only tracked runs drive interrupts:
-          // pollRuns also folds in live singleton runs owned by other
-          // sessions, which must not wake this session's waiters. The
-          // transition gate keeps a persisting stopping point (e.g. an
-          // unanswered permission) from re-interrupting re-issued waits on
-          // every poll cycle.
+          // permission; an inbound ask interrupts from the ask poll instead)
+          // interrupts sibling blocking waits so the agent can react without
+          // waiting for every parallel run to resolve. The waiter for this run
+          // itself is excluded: its own stop is delivered by the natural result
+          // path. Only tracked runs drive interrupts: pollRuns also folds in
+          // live singleton runs owned by other sessions, which must not wake
+          // this session's waiters. The transition gate keeps a persisting
+          // stopping point (e.g. an unanswered permission) from re-interrupting
+          // re-issued waits on every poll cycle.
           const prevStatus = prevStatuses.get(entryKey)
           const wasTerminal = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
           const wasStopped = wasTerminal || !!prevStatus?.pendingPermission
@@ -1445,12 +1454,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       name: 'avenor_spawn',
       label: 'Avenor Spawn',
       description:
-        `Dispatch an agent run via avenor. Optional thinking accepts ${[...THINKING_LEVELS].slice(0, -1).join(', ')}, or ${THINKING_LEVELS[THINKING_LEVELS.length - 1]}; unsupported backends reject explicit values. Blocks by default, showing live progress. Set wait=false for fire-and-forget. With several blocking spawns in parallel, the first stopping point (permission or completion) interrupts the other waits.`,
+        `Dispatch an agent run via avenor. Optional thinking accepts ${[...THINKING_LEVELS].slice(0, -1).join(', ')}, or ${THINKING_LEVELS[THINKING_LEVELS.length - 1]}; unsupported backends reject explicit values. Blocks by default, showing live progress. Set wait=false for fire-and-forget. With several blocking spawns in parallel, the first stopping point (a permission request, an inbound ask, or completion) interrupts the other waits.`,
       promptSnippet: 'Dispatch sub-agent runs via avenor (spawn, status, result, inspect, events, follow-up, shutdown)',
       promptGuidelines: [
         'Use avenor_spawn to delegate well-defined tasks to sub-agents.',
         'Use avenor_status (view "lifecycle") only to check progress or pending permissions.',
-        'Use avenor_result to retrieve the final result of a sub-agent; it waits by default, but set wait=false for runs that already completed. When awaiting multiple runs, the first stopping point (permission or completion) interrupts the other waits.',
+        'Use avenor_result to retrieve the final result of a sub-agent; it waits by default, but set wait=false for runs that already completed. When awaiting multiple runs, the first stopping point (a permission request, an inbound ask, or completion) interrupts the other waits.',
         'Use avenor_inspect to review a bounded transcript and tool activity from a run.',
         'Use avenor_events only when you specifically need raw event payloads.',
         'Use avenor_message with action "resume" to iterate on a completed run.',
@@ -1723,7 +1732,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       name: 'avenor_result',
       label: 'Avenor Result',
       description:
-        `Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking. When several runs are pending, the first stopping point (a permission request or completion on any run) interrupts other blocking waits so they can be handled; re-issue the interrupted wait afterwards.`,
+        `Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking. When several runs are pending, the first stopping point (a permission request, an inbound ask, or completion on any run) interrupts other blocking waits so they can be handled; re-issue the interrupted wait afterwards.`,
       parameters: Type.Object({
         run_id: Type.String({ description: 'Run ID or label' }),
         wait: Type.Optional(Type.Boolean({ description: 'Wait for a terminal result (default true); false retrieves the current state without blocking' })),
