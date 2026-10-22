@@ -14,10 +14,11 @@ import type {
 } from '../client.js'
 import { RpcError } from '../client.js'
 import { ensureRunPaths } from '../paths.js'
-import { Supervisor, type RunInfo } from '../supervisor.js'
+import { Supervisor, retainLiveIdentity, type RunInfo } from '../supervisor.js'
 import { newMsgID, type MessageOutcome } from '../messaging-text.js'
 import { ToolError } from '../message.js'
 import { findExternalRunById, listExternalRuns, registerExternalRun } from './run-registry.js'
+import { RESUMABLE_SENTINEL_STATUSES } from './sentinel-status.js'
 import type {
   MessageProvider,
   MessageSurface,
@@ -94,7 +95,6 @@ export interface PendingAsk {
 
 const SUPERVISOR_RUN_ID = 'supervisor'
 const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
-const RESUMABLE_SENTINEL_STATUSES = new Set(['DONE', 'FAILED', 'BLOCKED'])
 
 function firstNonEmpty(...values: Array<string | undefined>): string {
   for (const value of values) {
@@ -170,8 +170,13 @@ function authorityError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
-/** Normalize a supervisor status and phase the way internal/runstate.Translate does. */
-function translateStatus(rawStatus: string, rawPhase: string): { status: string; live: boolean } {
+/**
+ * The port of Go's `runstate.Translate` that classifies one supervisor status
+ * record into the turn and resume facts the router gates on. `status.ts`'s
+ * `translateStatus` is a different port — the sentinel-aware status renderer
+ * for the status surface, which reads a sentinel file this path never does.
+ */
+function translateRunFacts(rawStatus: string, rawPhase: string): { status: string; live: boolean } {
   let status = rawStatus
   let phase = rawPhase
   switch (rawStatus) {
@@ -241,6 +246,31 @@ export interface HostProviderOptions {
   onResumed?: (result: ProviderResult) => void | Promise<void>
 }
 
+type AskClaims = Map<string, { asker: string, generation: number }>
+
+/** Install the claim/restore pair both factories share, so a restart cannot resurrect a stale ask. */
+function installAskClaims(
+  provider: MessageProvider,
+  claims: AskClaims,
+  pendingAsks: Map<string, PendingAsk>,
+  pollGeneration: (() => number) | undefined,
+): void {
+  provider.claimAsk = (messageId: string) => {
+    const ask = pendingAsks.get(messageId)
+    if (!ask) return undefined
+    pendingAsks.delete(messageId)
+    claims.set(messageId, { asker: ask.from_run_id, generation: pollGeneration?.() ?? 0 })
+    return ask.from_run_id
+  }
+  provider.restoreAsk = (messageId: string, askerRunId: string) => {
+    const claim = claims.get(messageId)
+    claims.delete(messageId)
+    if (claim && claim.generation === (pollGeneration?.() ?? 0)) {
+      pendingAsks.set(messageId, { from_run_id: askerRunId, message_id: messageId })
+    }
+  }
+}
+
 /**
  * Build the bound host provider: one supervisor, one generation, one control
  * client. It never reads an ambient singleton or retargets, and it never
@@ -248,7 +278,7 @@ export interface HostProviderOptions {
  */
 export function createHostMessageProvider(options: HostProviderOptions): MessageProvider {
   const { surface, supervisorId, generation, client, pendingAsks, pollGeneration } = options
-  const claims = new Map<string, { asker: string, generation: number }>()
+  const claims: AskClaims = new Map()
 
   async function listedPeers(): Promise<PeerRecord[]> {
     return peerRecords(await client.messagePeers({ generation }))
@@ -324,7 +354,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       if (runId === SUPERVISOR_RUN_ID) {
         const peers = await listedPeers()
         const peer = peers.find(entry => entry.run_id === SUPERVISOR_RUN_ID)
-        const translation = translateStatus(peer?.status ?? '', '')
+        const translation = translateRunFacts(peer?.status ?? '', '')
         return {
           live: translation.live,
           resumable: false,
@@ -332,7 +362,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         }
       }
       const status = await client.status(runId)
-      const translation = translateStatus(
+      const translation = translateRunFacts(
         typeof status.status === 'string' ? status.status : '',
         typeof status.phase === 'string' ? status.phase : '',
       )
@@ -475,15 +505,28 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     async resume(req): Promise<ProviderResult> {
       const runId = randomUUID()
       const paths = ensureRunPaths(runId)
-      const resumed = await client.resume({
-        run_id: runId,
-        target: req.target,
-        message: req.message,
-        ...(req.label !== undefined ? { label: req.label } : {}),
-        ...(req.idempotencyKey !== undefined ? { idempotency_key: req.idempotencyKey } : {}),
-        sentinel_file: paths.sentinelPath,
-        on_event: paths.eventLogPath,
-      })
+      let resumed: ResumeResult
+      try {
+        resumed = await client.resume({
+          run_id: runId,
+          target: req.target,
+          message: req.message,
+          ...(req.label !== undefined ? { label: req.label } : {}),
+          ...(req.idempotencyKey !== undefined ? { idempotency_key: req.idempotencyKey } : {}),
+          sentinel_file: paths.sentinelPath,
+          on_event: paths.eventLogPath,
+        })
+      } catch (error) {
+        // A resume that never published a run leaves nothing but the directory it
+        // needed; remove it, but only while it is still empty, so a call whose reply
+        // was lost cannot delete a live run's artifacts.
+        try {
+          if (fs.readdirSync(paths.runDir).length === 0) fs.rmdirSync(paths.runDir)
+        } catch {
+          // Best effort: the directory is the only thing at stake.
+        }
+        throw error
+      }
       return {
         outcome: 'resumed',
         runId: resumed.run_id,
@@ -550,41 +593,14 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       if (result.runtimeId) {
         try {
           const status = await client.status(result.runtimeId)
+          retainLiveIdentity(info, status)
           const value = (key: string) => (typeof status[key] === 'string' && status[key] ? status[key] as string : undefined)
-          info.agent = value('effective_agent') ?? value('agent')
-          info.model = value('effective_model') ?? value('model')
-          info.backend = value('effective_backend') ?? value('backend')
-          info.effectiveAgent = info.agent
-          info.effectiveModel = info.model
-          info.effectiveBackend = info.backend
-          info.rosterFile = value('roster_file')
-          info.rosterEntry = value('roster_entry')
-          info.agentProfile = value('agent_profile')
           info.dir = value('dir')
           info.thinking = value('thinking') as RunInfo['thinking']
-          if (status.session_id) info.sessionId = String(status.session_id)
           if (typeof status.auto_approve === 'boolean') info.autoApprove = status.auto_approve
         } catch {
           // Registration still keeps the run resolvable by id and label.
         }
-      }
-      const external = !instance ? findExternalRunById(supervisorId, result.runId ?? '') : undefined
-      for (const key of [
-        'agent',
-        'model',
-        'backend',
-        'effectiveAgent',
-        'effectiveModel',
-        'effectiveBackend',
-        'rosterFile',
-        'rosterEntry',
-        'thinking',
-        'dir',
-        'agentProfile',
-        'autoApprove',
-      ] as const) {
-        const value = external?.[key]
-        if (value !== undefined) (info as unknown as Record<string, unknown>)[key] = value
       }
       if (instance) {
         instance.registerResumed(info)
@@ -596,22 +612,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     onResumed: options.onResumed,
   }
 
-  if (pendingAsks) {
-    provider.claimAsk = (messageId: string) => {
-      const ask = pendingAsks.get(messageId)
-      if (!ask) return undefined
-      pendingAsks.delete(messageId)
-      claims.set(messageId, { asker: ask.from_run_id, generation: pollGeneration?.() ?? 0 })
-      return ask.from_run_id
-    }
-    provider.restoreAsk = (messageId: string, askerRunId: string) => {
-      const claim = claims.get(messageId)
-      claims.delete(messageId)
-      if (claim && claim.generation === (pollGeneration?.() ?? 0)) {
-        pendingAsks.set(messageId, { from_run_id: askerRunId, message_id: messageId })
-      }
-    }
-  }
+  if (pendingAsks) installAskClaims(provider, claims, pendingAsks, pollGeneration)
 
   return provider
 }
@@ -667,7 +668,7 @@ export interface ChildProviderOptions {
  */
 export function createChildMessageProvider(options: ChildProviderOptions): MessageProvider {
   const { surface, runId, broker, pendingAsks, pollGeneration } = options
-  const claims = new Map<string, { asker: string, generation: number }>()
+  const claims: AskClaims = new Map()
 
   async function listedPeers(): Promise<PeerRecord[]> {
     const result = await broker.peers()
@@ -695,7 +696,7 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
       const peers = await listedPeers()
       const peer = peers.find(entry => entry.run_id === targetRunId)
       if (!peer) throw new Error(`run ${targetRunId} is not visible`)
-      const translation = translateStatus(peer.status ?? '', '')
+      const translation = translateRunFacts(peer.status ?? '', '')
       return { live: translation.live, resumable: false, status: translation.status }
     },
 
@@ -718,22 +719,7 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
     peers: () => broker.peers(),
   }
 
-  if (pendingAsks) {
-    provider.claimAsk = (messageId: string) => {
-      const ask = pendingAsks.get(messageId)
-      if (!ask) return undefined
-      pendingAsks.delete(messageId)
-      claims.set(messageId, { asker: ask.from_run_id, generation: pollGeneration?.() ?? 0 })
-      return ask.from_run_id
-    }
-    provider.restoreAsk = (messageId: string, askerRunId: string) => {
-      const claim = claims.get(messageId)
-      claims.delete(messageId)
-      if (claim && claim.generation === (pollGeneration?.() ?? 0)) {
-        pendingAsks.set(messageId, { from_run_id: askerRunId, message_id: messageId })
-      }
-    }
-  }
+  if (pendingAsks) installAskClaims(provider, claims, pendingAsks, pollGeneration)
 
   return provider
 }

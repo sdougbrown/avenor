@@ -31,7 +31,7 @@ describe('workflow cancel tool', () => {
       workflow_id: 'w-1',
       actor: 'operator',
       reason: 'superseded',
-      supervisor_id: '/tmp/avenor-mcp-sup.sock',
+      supervisorId: '/tmp/avenor-mcp-sup.sock',
     })
     expect(result).toEqual({ cancelled: true })
     expect(workflowCancel).toHaveBeenCalledWith('w-1', 'operator', 'superseded')

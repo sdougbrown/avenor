@@ -6,7 +6,7 @@ export interface WorkflowCancelArgs {
   workflow_id: string
   actor: string
   reason: string
-  supervisor_id?: string
+  supervisorId?: string
 }
 
 export type WorkflowCancelResult = Record<string, unknown>
@@ -23,7 +23,7 @@ export function createWorkflowCancelTool(
     if (!args.actor) throw new Error('actor is required')
     if (!args.reason) throw new Error('reason is required')
     return withWorkflowClient(
-      args.supervisor_id,
+      args.supervisorId,
       client => client.workflowCancel(args.workflow_id, args.actor, args.reason),
       getSupervisorClient,
     )

@@ -8,6 +8,7 @@ import { validateRunId } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { findExternalRun, registerExternalRun } from './run-registry.js'
 import { findLocalRunByReference } from './run-resolution.js'
+import { RESUMABLE_SENTINEL_STATUSES } from './sentinel-status.js'
 
 export interface FollowUpToolArgs {
   runId: string
@@ -84,12 +85,6 @@ function rejectSessionConflict(
     throw new Error('run is not resumable: session_id_conflict')
   }
 }
-
-// DONE, FAILED, and BLOCKED settle the provider session itself, so the
-// recorded session id is a loadable transcript. TIMEOUT and KILLED are
-// supervisor-imposed terminations (time budget, cancellation) where an
-// automatic continuation would surprise. Matches the Go readSentinelSession.
-const RESUMABLE_SENTINEL_STATUSES = new Set(['DONE', 'FAILED', 'BLOCKED'])
 
 function rejectNotResumableStatus(sentinel: Record<string, string> | null): void {
   const status = (sentinel?._status ?? '').trim().toUpperCase()

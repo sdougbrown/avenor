@@ -4,8 +4,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { createChildMessageProvider, createHostMessageProvider, type MessageClient } from './message-provider.js'
 import { RpcError } from '../client.js'
-import { forgetExternalRuns, registerExternalRun } from './run-registry.js'
-import { executeMessage, executePeers } from '../message.js'
+import { forgetExternalRuns, findExternalRunById, registerExternalRun } from './run-registry.js'
+import { executeMessage, executePeers, type ProviderResult } from '../message.js'
 
 function fakeClient(overrides: Partial<MessageClient> = {}): MessageClient & {
   send: ReturnType<typeof mock>
@@ -28,7 +28,7 @@ function fakeClient(overrides: Partial<MessageClient> = {}): MessageClient & {
     on_event: params.on_event,
   }))
   const lastSet = mock(async () => {})
-  return {
+  const merged = {
     messageSend: send,
     messageWait: wait,
     messageReply: reply,
@@ -45,13 +45,24 @@ function fakeClient(overrides: Partial<MessageClient> = {}): MessageClient & {
     sessionLastSet: lastSet,
     status: mock(async () => ({ status: 'done', session_id: 'ses_1' })),
     ...overrides,
-    send,
-    wait,
-    reply,
-    withdraw,
-    resume,
-    lastSet,
+  }
+  return {
+    ...merged,
+    send: merged.messageSend,
+    wait: merged.messageWait,
+    reply: merged.messageReply,
+    withdraw: merged.messageWithdraw,
+    resume: merged.resume,
+    lastSet: merged.sessionLastSet,
   } as any
+}
+
+function directoryEntries(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir)
+  } catch {
+    return []
+  }
 }
 
 describe('host message provider', () => {
@@ -291,6 +302,123 @@ describe('host message provider', () => {
       expect(last.last?.runtime_id).toBe('rt_7')
     } finally {
       forgetExternalRuns(supervisorId)
+    }
+  })
+
+  it('reports a finished sentinel as resumable when there is no session', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-sentinel-'))
+    try {
+      const sentinelFile = path.join(dir, 'sentinel.done')
+      fs.writeFileSync(sentinelFile, 'DONE\nSESSION_ID=ses_1\n')
+      const client = fakeClient({
+        status: mock(async () => ({ status: 'ended', sentinel_file: sentinelFile })),
+      })
+      expect(await provider(client).state('run-1')).toMatchObject({ live: false, resumable: true, status: 'done' })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a finished sentinel whose status is not resumable', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-sentinel-'))
+    try {
+      const sentinelFile = path.join(dir, 'sentinel.done')
+      fs.writeFileSync(sentinelFile, 'TIMEOUT\nSESSION_ID=ses_1\n')
+      const client = fakeClient({
+        status: mock(async () => ({ status: 'ended', sentinel_file: sentinelFile })),
+      })
+      expect(await provider(client).state('run-1')).toMatchObject({ live: false, resumable: false, status: 'done' })
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a resumed registration when the status read fails', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const runDir = path.join(home, 'runs', 'resumed-1')
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+    const client = fakeClient({
+      status: mock(async () => {
+        throw new Error('status unavailable')
+      }),
+    })
+    const host = provider(client)
+    try {
+      await host.registerResumed?.({
+        outcome: 'resumed',
+        runId: 'resumed-1',
+        label: 'again',
+        runtimeId: 'rt_9',
+        sentinelFile: path.join(runDir, 'sentinel.done'),
+        onEvent: path.join(runDir, 'events.log'),
+      })
+      expect(findExternalRunById(supervisorId, 'resumed-1')).toBeDefined()
+    } finally {
+      forgetExternalRuns(supervisorId)
+      fs.rmSync(runDir, { recursive: true, force: true })
+    }
+  })
+
+  it('restores an ask only under the poll generation that claimed it', async () => {
+    let generation = 1
+    const pending = new Map([['ask-1', { from_run_id: 'rt_7', message_id: 'ask-1' }]])
+    const host = createHostMessageProvider({
+      surface: 'pi-host',
+      supervisorId: '/tmp/avenor-provider.sock',
+      generation: 'gen-1',
+      client: fakeClient(),
+      pendingAsks: pending,
+      pollGeneration: () => generation,
+    })
+    expect(host.claimAsk?.('ask-1')).toBe('rt_7')
+    host.restoreAsk?.('ask-1', 'rt_7')
+    expect(pending.has('ask-1')).toBe(true)
+    expect(host.claimAsk?.('ask-1')).toBe('rt_7')
+    generation = 2
+    host.restoreAsk?.('ask-1', 'rt_7')
+    expect(pending.has('ask-1')).toBe(false)
+  })
+
+  it('removes the run directory a failed resume created', async () => {
+    const freshHome = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-resume-fail-'))
+    process.env.AVENOR_HOME = freshHome
+    try {
+      const client = fakeClient({
+        resume: mock(async () => {
+          throw new Error('resume refused')
+        }),
+      })
+      await expect(
+        executeMessage(provider(client), { action: 'resume', target: 'rt_7', message: 'again' }),
+      ).rejects.toThrow()
+      expect(directoryEntries(path.join(freshHome, 'runs'))).toEqual([])
+    } finally {
+      process.env.AVENOR_HOME = home
+      fs.rmSync(freshHome, { recursive: true, force: true })
+    }
+  })
+
+  it('registers a successful resume and runs the surface hook', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const onResumed = mock((_result: ProviderResult) => {})
+    const host = createHostMessageProvider({
+      surface: 'pi-host',
+      supervisorId,
+      generation: 'gen-1',
+      client: fakeClient(),
+      onResumed,
+    })
+    let runId: string | undefined
+    try {
+      const result = await executeMessage(host, { action: 'resume', target: 'rt_7', message: 'again' })
+      runId = result.runId
+      expect(onResumed).toHaveBeenCalledTimes(1)
+      const resumed = onResumed.mock.calls[0][0]
+      expect(resumed).toMatchObject({ outcome: 'resumed', runId: result.runId })
+      expect(findExternalRunById(supervisorId, result.runId ?? '')).toBeDefined()
+    } finally {
+      forgetExternalRuns(supervisorId)
+      if (runId) fs.rmSync(path.join(home, 'runs', runId), { recursive: true, force: true })
     }
   })
 })
