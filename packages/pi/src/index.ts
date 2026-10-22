@@ -22,13 +22,13 @@ import {
   getSupervisorClient,
   inspectTool,
   installAskClaims,
+  isGenerationMismatchError,
   killTool,
   messageTool,
   normalizeTurnStopReason,
   observeRun,
   peersDetails,
   peersTool,
-  RpcError,
   renderPeerList,
   resultOutput,
   resultTool,
@@ -589,14 +589,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // pending inbound asks keyed by broker message_id so a reply can reach the asker.
     const hostPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
 
-    function isGenerationMismatch(error: unknown): boolean {
-      if (error instanceof RpcError) {
-        const data = error.data as Record<string, unknown> | null | undefined
-        if (data?.code === 'generation-mismatch' || data?.wire_code === 'generation-mismatch') return true
-      }
-      return error instanceof Error && /generation mismatch/i.test(error.message)
-    }
-
     function stopHostAskPoll(): void {
       hostPollGeneration++
       if (hostPollTimer) {
@@ -623,7 +615,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           try {
             received = await receive()
           } catch (error) {
-            if (!hostReceiveGeneration || !isGenerationMismatch(error)) throw error
+            if (!hostReceiveGeneration || !isGenerationMismatchError(error)) throw error
             // One rebind: the next call preflights and binds the new broker.
             hostReceiveGeneration = undefined
             // The cached providers carry the old generation, so a send through

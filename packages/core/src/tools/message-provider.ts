@@ -126,6 +126,15 @@ function controlWireCode(error: unknown): string | undefined {
   return typeof code === 'string' && code ? code : undefined
 }
 
+/** The broker rejected a receive because the caller's generation is stale. */
+export function isGenerationMismatchError(error: unknown): boolean {
+  if (error instanceof RpcError) {
+    const data = error.data as Record<string, unknown> | null | undefined
+    if (data?.code === 'generation-mismatch' || data?.wire_code === 'generation-mismatch') return true
+  }
+  return error instanceof Error && /generation mismatch/i.test(error.message)
+}
+
 /** Reject an abort exactly the way fetch does, so the ask cleanup path runs. */
 function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise

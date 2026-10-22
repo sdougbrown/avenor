@@ -121,7 +121,7 @@ export type {
   PeerRecord,
   PeersProviderResult,
 } from './tools/message.js'
-export { createHostMessageProvider, createChildMessageProvider, installAskClaims } from './tools/message-provider.js'
+export { createHostMessageProvider, createChildMessageProvider, installAskClaims, isGenerationMismatchError } from './tools/message-provider.js'
 export type { AskClaims, ChildBroker, MessageClient, PendingAsk } from './tools/message-provider.js'
 export { peersTool, createPeersTool } from './tools/peers.js'
 export type { PeersResult, PeersToolArgs } from './tools/peers.js'
