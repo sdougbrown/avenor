@@ -230,10 +230,11 @@ func TestMessageToolPassesNonToolErrorToJSONRPC(t *testing.T) {
 // message and peers tools call and records what it received, so a test can tell
 // which supervisor served a call.
 type messageStubSupervisor struct {
-	mu      sync.Mutex
-	methods []string
-	sends   []control.MessageSendParams
-	renames []control.SessionRenameParams
+	mu        sync.Mutex
+	methods   []string
+	sends     []control.MessageSendParams
+	withdraws []control.MessageWithdrawParams
+	renames   []control.SessionRenameParams
 }
 
 func (s *messageStubSupervisor) record(req client.Request) {
@@ -245,6 +246,10 @@ func (s *messageStubSupervisor) record(req client.Request) {
 		var params control.MessageSendParams
 		_ = json.Unmarshal(req.Params, &params)
 		s.sends = append(s.sends, params)
+	case "message_withdraw":
+		var params control.MessageWithdrawParams
+		_ = json.Unmarshal(req.Params, &params)
+		s.withdraws = append(s.withdraws, params)
 	case "session_rename":
 		var params control.SessionRenameParams
 		_ = json.Unmarshal(req.Params, &params)
@@ -262,6 +267,12 @@ func (s *messageStubSupervisor) recordedRenames() []control.SessionRenameParams 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]control.SessionRenameParams{}, s.renames...)
+}
+
+func (s *messageStubSupervisor) recordedWithdraws() []control.MessageWithdrawParams {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]control.MessageWithdrawParams{}, s.withdraws...)
 }
 
 func stubResult(req client.Request, result any) client.Response {
@@ -299,6 +310,18 @@ func (s *messageStubSupervisor) serve(conn net.Conn, cap control.OwnerCapability
 				Outcome:    string(messaging.OutcomeSent),
 				MessageID:  params.MessageID,
 				Generation: "gen-stub",
+			})
+		case "message_withdraw":
+			var params control.MessageWithdrawParams
+			_ = json.Unmarshal(req.Params, &params)
+			resp = stubResult(req, control.MessageWithdrawResult{
+				Outcome: string(messaging.OutcomeWithdrawn),
+				Fence: &control.MessageFence{
+					Sender:     "rt-remote",
+					MessageID:  params.MessageID,
+					Generation: "gen-stub",
+					Terminal:   true,
+				},
 			})
 		case "session_rename":
 			resp = stubResult(req, control.SessionRenameResult{
@@ -391,6 +414,78 @@ func TestMessageToolBindsNonDefaultSupervisor(t *testing.T) {
 	}
 	if len(cl.statusCapturedRuntimeIDs) != 0 {
 		t.Fatalf("default supervisor status reads = %v, want none", cl.statusCapturedRuntimeIDs)
+	}
+}
+
+// TestMessageToolWithdrawBindsSendSupervisor proves a withdraw reaches the
+// supervisor this surface sent the message on. A withdraw names only a message
+// id, which binds no run, so without the send-side binding it would be answered
+// by the default supervisor's store and report edge-absent for an ask that
+// lives on the other supervisor.
+func TestMessageToolWithdrawBindsSendSupervisor(t *testing.T) {
+	root := stubSocketsRoot(t, t.TempDir())
+	stub, socketPath := startMessageStubSupervisor(t, root, "avenor-mcp-fix06-remote-withdraw.sock")
+
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: runningStatus()}}
+	var defaultWithdraws int
+	cl.withdrawFunc = func(context.Context, messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+		defaultWithdraws++
+		return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
+	}
+	s := newToolServer(t, cl)
+	if err := s.registry.Store(&RunInfo{
+		RunID:        "run-remote",
+		RuntimeID:    "rt-remote",
+		Label:        "remote",
+		SupervisorID: socketPath,
+	}); err != nil {
+		t.Fatalf("registry.Store: %v", err)
+	}
+	session := connectToolSession(t, s)
+
+	if res, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "message",
+		Arguments: map[string]any{"action": "tell", "target": "run-remote", "message": "hello"},
+	}); err != nil {
+		t.Fatalf("call tell: %v", err)
+	} else if res.IsError {
+		t.Fatalf("tell result is an error: %s", toolResultText(t, res))
+	}
+	sends := stub.recordedSends()
+	if len(sends) != 1 {
+		t.Fatalf("non-default supervisor sends = %d, want 1", len(sends))
+	}
+	messageID := sends[0].MessageID
+	if messageID == "" {
+		t.Fatal("non-default supervisor recorded no message id")
+	}
+
+	res, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		Name:      "message",
+		Arguments: map[string]any{"action": "withdraw", "message_id": messageID},
+	})
+	if err != nil {
+		t.Fatalf("call withdraw: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("withdraw result is an error: %s", toolResultText(t, res))
+	}
+	structured, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structured content = %T, want an object", res.StructuredContent)
+	}
+	if structured["outcome"] != string(messaging.OutcomeWithdrawn) {
+		t.Fatalf("withdraw outcome = %v, want %q", structured["outcome"], messaging.OutcomeWithdrawn)
+	}
+	withdraws := stub.recordedWithdraws()
+	if len(withdraws) != 1 {
+		t.Fatalf("non-default supervisor withdraws = %d, want 1", len(withdraws))
+	}
+	if withdraws[0].MessageID != messageID {
+		t.Fatalf("non-default supervisor withdrew %q, want %q", withdraws[0].MessageID, messageID)
+	}
+	if defaultWithdraws != 0 {
+		t.Fatalf("default supervisor withdraws = %d, want none", defaultWithdraws)
 	}
 }
 

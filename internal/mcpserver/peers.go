@@ -47,6 +47,9 @@ func (s *Server) handleAvenorMessage(ctx context.Context, req *mcp.CallToolReque
 	if err != nil {
 		return toolErrorResult(err)
 	}
+	// The send is the only step that learns which supervisor a message id
+	// belongs to; a later withdraw of it names no run, so record it here.
+	s.rememberMessageSupervisor(result.MessageID, provider.supervisorPath)
 	return &mcp.CallToolResult{
 		Content:           []mcp.Content{&mcp.TextContent{Text: result.Text}},
 		StructuredContent: result.Output(),
@@ -88,6 +91,10 @@ func toolArguments(req *mcp.CallToolRequest) json.RawMessage {
 // restored with the server: after an MCP restart a run on a non-default
 // supervisor is addressable only once a status call naming that supervisor_id
 // has registered it again.
+//
+// A withdraw addresses a message id, not a run, so no key above binds it. It
+// falls back to the supervisor this server sent that message on, which is the
+// same in-process lifetime as the registry binding.
 func (s *Server) messageSupervisorPath(raw json.RawMessage) string {
 	for _, key := range router.SupervisorKeys(raw) {
 		// The router substitutes its reserved self alias with the caller's run
@@ -101,7 +108,53 @@ func (s *Server) messageSupervisorPath(raw json.RawMessage) string {
 			return supervisorID
 		}
 	}
-	return ""
+	// Only a message id is decoded here: the peers tool has no message_id
+	// property, so its binding is untouched by this fallback.
+	var withdraw struct {
+		MessageID string `json:"message_id"`
+	}
+	_ = json.Unmarshal(raw, &withdraw)
+	return s.messageSupervisorForMessageID(withdraw.MessageID)
+}
+
+// maxMessageSupervisorBindings bounds the outgoing-message binding cache, so a
+// long-lived server cannot grow it without limit. Oldest-first eviction costs a
+// withdraw of a very old message its supervisor binding, which is the same
+// default-supervisor fallback an unknown id gets.
+const maxMessageSupervisorBindings = 256
+
+// rememberMessageSupervisor records that messageID was sent on supervisorPath.
+// An empty id or path binds nothing: an unknown id must keep resolving to the
+// default supervisor.
+func (s *Server) rememberMessageSupervisor(messageID, supervisorPath string) {
+	if messageID == "" || supervisorPath == "" {
+		return
+	}
+	s.messageSupervisorMu.Lock()
+	defer s.messageSupervisorMu.Unlock()
+	if s.messageSupervisors == nil {
+		s.messageSupervisors = make(map[string]string, maxMessageSupervisorBindings)
+	}
+	if _, bound := s.messageSupervisors[messageID]; !bound {
+		for len(s.messageSupervisorOrder) >= maxMessageSupervisorBindings {
+			oldest := s.messageSupervisorOrder[0]
+			s.messageSupervisorOrder = s.messageSupervisorOrder[1:]
+			delete(s.messageSupervisors, oldest)
+		}
+		s.messageSupervisorOrder = append(s.messageSupervisorOrder, messageID)
+	}
+	s.messageSupervisors[messageID] = supervisorPath
+}
+
+// messageSupervisorForMessageID returns the supervisor messageID was sent on,
+// or "" when this server never sent it.
+func (s *Server) messageSupervisorForMessageID(messageID string) string {
+	if messageID == "" {
+		return ""
+	}
+	s.messageSupervisorMu.Lock()
+	defer s.messageSupervisorMu.Unlock()
+	return s.messageSupervisors[messageID]
 }
 
 // supervisorForRunKey resolves a run id or label to the supervisor that

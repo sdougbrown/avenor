@@ -104,6 +104,21 @@ type Server struct {
 	// in the control plane, so concurrent MCP calls must share it.
 	supervisorMu sync.Mutex
 	closed       bool
+
+	// messageSupervisorMu guards the outgoing-message binding below. A
+	// withdraw names only a message id, so the supervisor the merged message
+	// tool must reach cannot be derived from the call itself; sending the
+	// message is what learns it. Like the run registry, this is in-process
+	// memory: the binding is not restored with the server, so after an MCP
+	// restart a withdraw of a message sent to a run on a non-default
+	// supervisor before the restart is answered by the default supervisor's
+	// store again.
+	messageSupervisorMu sync.Mutex
+	// messageSupervisors maps an outgoing message id to the supervisor path it
+	// was sent on, and messageSupervisorOrder records the send order so the
+	// oldest binding is evicted first.
+	messageSupervisors     map[string]string
+	messageSupervisorOrder []string
 }
 
 type statusArgs struct {
