@@ -1,11 +1,11 @@
-import { describe, it, expect, mock } from 'bun:test'
+import { describe, it, expect, mock, beforeEach } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { validateSpawnSelection } from '@dougbots/avenor-core'
 import { z } from 'zod'
 import { spawnInputShape } from './spawn-schema'
 import { ToolError, renderPeerList } from '../../core/src/message.js'
-import { renderLast } from '../../core/src/messaging-text.js'
+import { renderLast, renderOutcome } from '../../core/src/messaging-text.js'
 import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
 import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
 import type { MessageProvider } from '../../core/src/tools/message.js'
@@ -43,6 +43,45 @@ function makeProvider(overrides: Partial<MessageProvider> = {}): MessageProvider
 
 let providerFactory: () => MessageProvider = () => makeProvider()
 
+/**
+ * The host client the provider dials. It is a stable object per test so the
+ * surface's memoisation is observable: it rebuilds the provider only when this
+ * object changes, which is what a supervisor restart looks like.
+ */
+type HostClient = { messagePreflight: () => Promise<{ generation: string }> }
+
+let preflightCalls = 0
+let providerCalls = 0
+const providerDials: Array<{ surface: string; supervisorId: string; generation: string }> = []
+
+function makeHostClient(): HostClient {
+  return {
+    messagePreflight: async () => {
+      preflightCalls += 1
+      return { generation: `gen-${preflightCalls}` }
+    },
+  }
+}
+
+let hostClient: HostClient = makeHostClient()
+
+/** Swap the provider, and the client with it, so the next call dials again. */
+function useProvider(factory: () => MessageProvider): void {
+  providerFactory = factory
+  hostClient = makeHostClient()
+}
+
+beforeEach(() => {
+  providerFactory = () => makeProvider()
+  hostClient = makeHostClient()
+  preflightCalls = 0
+  providerCalls = 0
+  providerDials.length = 0
+  killCalls.length = 0
+  controllerCalls.status.length = 0
+  workflowCancelCalls.length = 0
+})
+
 mock.module('@dougbots/avenor-core', () => ({
   spawnTool: mock(async () => ({})),
   statusTool: mock(async () => ({ runs: [], count: 0 })),
@@ -52,9 +91,17 @@ mock.module('@dougbots/avenor-core', () => ({
   peersTool: realPeersTool,
   renderPeerList,
   ToolError,
-  createHostMessageProvider: () => providerFactory(),
+  createHostMessageProvider: (options: { surface: string; supervisorId: string; generation: string }) => {
+    providerCalls += 1
+    providerDials.push({
+      surface: options.surface,
+      supervisorId: options.supervisorId,
+      generation: options.generation,
+    })
+    return providerFactory()
+  },
   getSupervisorClient: mock(async () => ({
-    client: { messagePreflight: async () => ({ generation: 'gen-1' }) },
+    client: hostClient,
     supervisorId: '/tmp/avenor.sock',
     isSingleton: true,
     sup: null,
@@ -260,15 +307,103 @@ describe('avenor MCP messaging tools', () => {
   })
 
   it('lists peers when the call omits the arguments object', async () => {
-    providerFactory = () => makeProvider({
+    useProvider(() => makeProvider({
       peers: async () => ({ peers: [{ run_id: 'rt_2', label: 'mesh-a' }] }),
-    })
+    }))
     await withClient(async (client) => {
       const result: any = await client.callTool({ name: 'peers' })
       expect(result.isError).toBeFalsy()
       expect(result.content[0].text).toBe('**Active sessions:**\n  mesh-a (rt_2)')
       expect(result.structuredContent.peers).toEqual([{ run_id: 'rt_2', label: 'mesh-a' }])
     })
+  })
+
+  it('joins the lost sentence and the peer list when the transport reports a detail', async () => {
+    useProvider(() => makeProvider({
+      peers: async () => ({
+        peers: [{ run_id: 'rt_2', label: 'mesh-a' }],
+        detail: 'broker unavailable',
+      }),
+    }))
+    await withClient(async (client) => {
+      const result: any = await client.callTool({ name: 'peers', arguments: { action: 'list' } })
+      expect(result.isError).toBeFalsy()
+      expect(result.content[0].text).toBe(
+        renderOutcome('peers_list', 'lost', { detail: 'broker unavailable' }) +
+          '\n\n' +
+          renderPeerList([{ run_id: 'rt_2', label: 'mesh-a' }]),
+      )
+    })
+  })
+
+  it('dials the host provider once for two calls on the same supervisor client', async () => {
+    useProvider(() => makeProvider({
+      state: async () => ({ live: true, resumable: false, status: 'running' }),
+    }))
+    await withClient(async (client) => {
+      const list: any = await client.callTool({ name: 'peers', arguments: { action: 'list' } })
+      expect(list.isError).toBeFalsy()
+      const tell: any = await client.callTool({
+        name: 'message',
+        arguments: { action: 'tell', target: 'mesh-a', message: 'hi' },
+      })
+      expect(tell.isError).toBeFalsy()
+    })
+    expect(providerCalls).toBe(1)
+    expect(preflightCalls).toBe(1)
+  })
+
+  it('rebuilds the host provider when the supervisor client changes', async () => {
+    await withClient(async (client) => {
+      await client.callTool({ name: 'peers', arguments: { action: 'list' } })
+      hostClient = makeHostClient()
+      const second: any = await client.callTool({ name: 'peers', arguments: { action: 'list' } })
+      expect(second.isError).toBeFalsy()
+    })
+    expect(providerCalls).toBe(2)
+    expect(preflightCalls).toBe(2)
+  })
+
+  it('retries a generation mismatch once with the freshly preflighted generation', async () => {
+    let attempts = 0
+    useProvider(() => makeProvider({
+      state: async () => ({ live: true, resumable: false, status: 'running' }),
+      tell: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('messaging: generation mismatch')
+        return { outcome: 'sent', messageId: 'm-1' }
+      },
+    }))
+    await withClient(async (client) => {
+      const result: any = await client.callTool({
+        name: 'message',
+        arguments: { action: 'tell', target: 'mesh-a', message: 'hi' },
+      })
+      expect(result.isError).toBeFalsy()
+      expect(result.structuredContent).toMatchObject({ action: 'tell', outcome: 'sent', message_id: 'm-1' })
+    })
+    expect(providerCalls).toBe(2)
+    expect(preflightCalls).toBe(2)
+    expect(providerDials.map(dial => dial.generation)).toEqual(['gen-1', 'gen-2'])
+  })
+
+  it('does not retry a failure that is not a generation mismatch', async () => {
+    useProvider(() => makeProvider({
+      state: async () => ({ live: true, resumable: false, status: 'running' }),
+      tell: async () => {
+        throw new ToolError('refused', 'the broker refused the message')
+      },
+    }))
+    await withClient(async (client) => {
+      const result: any = await client.callTool({
+        name: 'message',
+        arguments: { action: 'tell', target: 'mesh-a', message: 'hi' },
+      })
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe('the broker refused the message')
+      expect(result.structuredContent).toMatchObject({ code: 'refused' })
+    })
+    expect(providerCalls).toBe(1)
   })
 
   it('answers every inadmissible call with the router error, not the SDK error', async () => {
@@ -298,7 +433,7 @@ describe('avenor MCP messaging tools', () => {
   })
 
   it('routes a peers last through the shared provider and renders the shared template', async () => {
-    providerFactory = () => makeProvider({
+    useProvider(() => makeProvider({
       resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }),
       last: async () => ({
         outcome: 'sent',
@@ -308,7 +443,7 @@ describe('avenor MCP messaging tools', () => {
         stopReason: 'end_turn',
         truncated: false,
       }),
-    })
+    }))
     await withClient(async (client) => {
       const result: any = await client.callTool({
         name: 'peers',
@@ -323,7 +458,7 @@ describe('avenor MCP messaging tools', () => {
 
   it('returns unknown_target as a failure without reading the target', async () => {
     const last = mock(async () => ({ outcome: 'sent' }))
-    providerFactory = () => makeProvider({ resolve: async () => ({ runId: '', match: 'none' }), last })
+    useProvider(() => makeProvider({ resolve: async () => ({ runId: '', match: 'none' }), last }))
     await withClient(async (client) => {
       const result: any = await client.callTool({
         name: 'peers',
@@ -373,20 +508,20 @@ describe('avenor MCP messaging tools', () => {
     })
 
     await withClient(async (client) => {
-      providerFactory = liveAt
+      useProvider(liveAt)
       const tell: any = await client.callTool({ name: 'message', arguments: { action: 'tell', target: 'mesh-a', message: 'hi' } })
       expect(tell.structuredContent).toEqual(expected.message.tell)
-      expect(JSON.parse(tell.content[0].text)).toEqual(expected.message.tell)
+      expect(tell.content[0].text).toBe(expected.message.tell.text)
 
-      providerFactory = resumableAt
+      useProvider(resumableAt)
       const resume: any = await client.callTool({ name: 'message', arguments: { action: 'resume', target: 'mesh-a', message: 'again' } })
       expect(resume.structuredContent).toEqual(expected.message.resume)
 
-      providerFactory = () => makeProvider()
+      useProvider(() => makeProvider())
       const reply: any = await client.callTool({ name: 'message', arguments: { action: 'reply', reply_to: 'a-1', message: 'pong' } })
       expect(reply.structuredContent).toEqual(expected.message.reply_edge_absent)
 
-      providerFactory = () => makeProvider({
+      useProvider(() => makeProvider({
         peers: async () => ({
           peers: [
             { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running' },
@@ -396,7 +531,7 @@ describe('avenor MCP messaging tools', () => {
         rename: async () => ({ outcome: 'renamed', runId: 'rt_2', label: 'mesh-renamed', previousLabel: 'mesh-a' }),
         resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }),
         last: async () => ({ outcome: 'sent', hasRecord: true, finalOutput: 'OK', stopReason: 'end_turn' }),
-      })
+      }))
       const list: any = await client.callTool({ name: 'peers', arguments: { action: 'list' } })
       expect(list.structuredContent).toEqual(expected.peers.list)
       const rename: any = await client.callTool({ name: 'peers', arguments: { action: 'rename', name: 'mesh-renamed' } })
@@ -404,7 +539,7 @@ describe('avenor MCP messaging tools', () => {
       const last: any = await client.callTool({ name: 'peers', arguments: { action: 'last', target: 'mesh-a' } })
       expect(last.structuredContent).toEqual(expected.peers.last)
 
-      providerFactory = () => makeProvider({ resolve: async () => ({ runId: '', match: 'none' }) })
+      useProvider(() => makeProvider({ resolve: async () => ({ runId: '', match: 'none' }) }))
       const failure: any = await client.callTool({ name: 'peers', arguments: { action: 'last', target: 'ghost' } })
       expect(failure.structuredContent).toEqual(expected.error)
     })
@@ -422,7 +557,7 @@ describe('avenor MCP messaging tools', () => {
       workflow_id: 'w-1',
       actor: 'operator',
       reason: 'superseded',
-      supervisor_id: 'sup-a',
+      supervisorId: 'sup-a',
     })
   })
 })

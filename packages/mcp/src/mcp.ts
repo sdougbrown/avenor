@@ -18,6 +18,7 @@ import {
   shutdownTool,
   createHostMessageProvider,
   getSupervisorClient,
+  isGenerationMismatchError,
   messageTool,
   peersDetails,
   peersTool,
@@ -199,6 +200,22 @@ async function messageProvider(): Promise<MessageProvider> {
   return provider
 }
 
+/**
+ * Run one call through the bound provider, retrying once after a re-preflight
+ * when the supervisor says the cached generation is stale. This is the policy
+ * the Go host already applies inside a single call, so a restarted supervisor
+ * does not fail the call that discovers it.
+ */
+async function withProvider<T>(run: (provider: MessageProvider) => Promise<T>): Promise<T> {
+  try {
+    return await run(await messageProvider())
+  } catch (error) {
+    if (!isGenerationMismatchError(error)) throw error
+    hostProvider = undefined
+    return run(await messageProvider())
+  }
+}
+
 type ToolReply = {
   content: Array<{ type: 'text'; text: string }>
   structuredContent?: Record<string, unknown>
@@ -218,10 +235,10 @@ function toolFailure(error: unknown): ToolReply {
 
 async function messageCall(args: unknown): Promise<ToolReply> {
   try {
-    const result = await messageTool(args, await messageProvider())
+    const result = await withProvider(provider => messageTool(args, provider))
     const output = resultOutput(result)
     return {
-      content: [{ type: 'text', text: JSON.stringify(output) }],
+      content: [{ type: 'text', text: result.text ?? '' }],
       structuredContent: output,
     }
   } catch (error) {
@@ -237,7 +254,7 @@ function peersText(result: PeersRouterResult): string {
 
 async function peersCall(args: unknown): Promise<ToolReply> {
   try {
-    const result = await peersTool(args, await messageProvider())
+    const result = await withProvider(provider => peersTool(args, provider))
     return {
       content: [{ type: 'text', text: peersText(result) }],
       structuredContent: peersDetails(result),
@@ -248,12 +265,12 @@ async function peersCall(args: unknown): Promise<ToolReply> {
 }
 
 server.registerTool('message', {
-  description: 'Send a message to another agent run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn. `reply` always reports edge-absent here: this server receives no inbound asks, so nothing is sent.',
+  description: 'Send a message to another agent run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn. `reply` always reports edge-absent here: this server receives no inbound asks, so nothing is sent. This tool is bound to the default supervisor and takes no `supervisor_id`.',
   inputSchema: messageInputSchema,
 }, async args => messageCall(args))
 
 server.registerTool('peers', {
-  description: "List the visible agent sessions, rename a run, or read a run's last agent message. `last` returns the target's final text with its stop reason, or an empty result when the target has no completed turn yet.",
+  description: "List the visible agent sessions, rename a run, or read a run's last agent message. `last` returns the target's final text with its stop reason, or an empty result when the target has no completed turn yet. This tool is bound to the default supervisor and takes no `supervisor_id`.",
   inputSchema: peersInputSchema,
 }, async args => peersCall(args))
 
@@ -266,7 +283,7 @@ server.registerTool('workflow_cancel', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ workflow_id, actor, reason, supervisor_id }) => {
-  return workflowCancelTool({ workflow_id, actor, reason, supervisor_id })
+  return workflowCancelTool({ workflow_id, actor, reason, supervisorId: supervisor_id })
 })
 
 server.registerTool('events', {

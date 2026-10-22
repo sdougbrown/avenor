@@ -179,7 +179,7 @@ Send a message to another run, withdraw a pending ask, resume a completed run, o
 
 `target` is a run id, a peer label, or `"self"`. `timeout_ms` must be an integer no greater than the shared ask cap. This tool does not take `supervisor_id`; it is bound to the default supervisor. A router tool error is returned as an MCP error result carrying the contract sentence and a `code`.
 
-Every successful result is the shared contract object in snake_case (`action`, `outcome`, `text`, and `message_id`, `run_id`, `label`, `reply`, `sentinel_file`, `on_event` when the outcome carries them), returned both as the JSON text content and as the structured content, exactly like the Go MCP host.
+Every successful result is the shared contract object in snake_case (`action`, `outcome`, `text`, and `message_id`, `run_id`, `label`, `reply`, `sentinel_file`, `on_event` when the outcome carries them), returned as the structured content, with the contract sentence as the text content, exactly like the Go MCP host.
 
 ### `peers`
 
@@ -191,7 +191,7 @@ List the visible agent sessions, rename a run, or read a run's last agent messag
 | `rename` | `name`, optional `session_id` | Change a display name, self by default |
 | `last` | `target` | Read the target's last agent message with its stop reason |
 
-`last` is read-only. This surface never publishes a turn of its own, so `last` of the server's own session returns the shared empty result. The structured result is `{peers}`, `{renamed}` or `{last}` in snake_case, the same object the Go MCP host returns.
+`last` is read-only. This surface never publishes a turn of its own, so `last` of the server's own session returns the shared empty result. This tool does not take `supervisor_id`; it is bound to the default supervisor. The structured result is `{peers}`, `{renamed}` or `{last}` in snake_case, the same object the Go MCP host returns.
 
 ### `events`
 
