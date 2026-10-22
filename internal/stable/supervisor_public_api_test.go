@@ -1825,7 +1825,7 @@ func itestDeciderFactory(worker func(label string) runtime.Provider, decider fun
 
 // itestAnsweringDecider is a decider run that answers the request it was
 // spawned for through RuntimeAnswerPermission, as an agent would through the
-// avenor_answer_permission tool, then finishes its turn.
+// answer_permission tool, then finishes its turn.
 func itestAnsweringDecider(harness func() *itestHarness, optionID string, answered chan<- error) func(runtime.StartOptions) (runtime.Provider, error) {
 	var n atomic.Int64
 	return func(opts runtime.StartOptions) (runtime.Provider, error) {

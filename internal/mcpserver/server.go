@@ -961,14 +961,16 @@ func (s *Server) recoverFinalOutput(supervisorPath, runID string) (string, bool)
 	return output, found
 }
 
+// resultSupervisorID resolves the supervisor a status or result call should
+// bind to: the caller's explicit choice, else the one supervisor that owns the
+// run id or label. The run-key ladder is shared with the peers and message
+// surface; runtime ids are deliberately not a key here, because these tools
+// document run_id as a run id or label.
 func (s *Server) resultSupervisorID(runID, requestedSupervisorID string) string {
 	if requestedSupervisorID != "" {
 		return requestedSupervisorID
 	}
-	if ri := s.registry.LookupUnique(runID); ri != nil {
-		return ri.SupervisorID
-	}
-	return ""
+	return s.supervisorForRunKey(runID)
 }
 
 func (s *Server) retrieveFinalOutput(cl ControlClient, supervisorPath, runID string, status map[string]any) {

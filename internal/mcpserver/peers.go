@@ -104,12 +104,33 @@ func (s *Server) messageSupervisorPath(raw json.RawMessage) string {
 		if key == "" || key == messaging.SupervisorRunID || key == "self" {
 			continue
 		}
-		if info := s.registry.LookupUnique(key); info != nil && info.SupervisorID != "" {
-			return info.SupervisorID
+		if supervisorID := s.supervisorForPeerKey(key); supervisorID != "" {
+			return supervisorID
 		}
-		if info := s.registry.LookupRuntimeUnique(key); info != nil && info.SupervisorID != "" {
-			return info.SupervisorID
-		}
+	}
+	return ""
+}
+
+// supervisorForRunKey resolves a run id or label to the supervisor that
+// registered it, and returns "" when the key is unknown or two supervisors both
+// claim it. It is the ladder every surface that binds by run key shares.
+func (s *Server) supervisorForRunKey(key string) string {
+	if info := s.registry.LookupUnique(key); info != nil {
+		return info.SupervisorID
+	}
+	return ""
+}
+
+// supervisorForPeerKey resolves a key the peers and message tools accept, which
+// may name a runtime id as well as a run id or label. Runtime ids are minted per
+// supervisor, so LookupRuntimeUnique only answers when exactly one supervisor
+// owns the id and the caller falls back deterministically otherwise.
+func (s *Server) supervisorForPeerKey(key string) string {
+	if supervisorID := s.supervisorForRunKey(key); supervisorID != "" {
+		return supervisorID
+	}
+	if info := s.registry.LookupRuntimeUnique(key); info != nil {
+		return info.SupervisorID
 	}
 	return ""
 }
