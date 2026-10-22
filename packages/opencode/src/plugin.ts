@@ -650,7 +650,6 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         supervisorId,
         generation: preflight.generation,
         client,
-        onResumed: trackResumed,
       }),
       supervisorId,
       generation: preflight.generation,
@@ -667,13 +666,16 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     } else if (hostBinding.sessionId !== sessionId) {
       console.error(`opencode: host session already bound to ${hostBinding.sessionId}`)
     }
-    return bound.provider
+    // The host binding stays with the session that first ran a host tool, but a
+    // resumed run belongs to whichever session resumed it, so its monitor
+    // prompts the caller rather than the host's bound session.
+    return { ...bound.provider, onResumed: (result: ProviderResult) => trackResumed(sessionId, result) }
   }
 
-  async function trackResumed(result: ProviderResult): Promise<void> {
+  async function trackResumed(sessionId: string, result: ProviderResult): Promise<void> {
     const run: TrackedRun = {
       runId: result.runId ?? '',
-      orchestratorSessionId: hostBinding?.sessionId ?? '',
+      orchestratorSessionId: sessionId,
       label: result.label ?? result.runId ?? '',
       supervisorId: hostBinding?.supervisorId,
       monitoring: false,
@@ -1108,7 +1110,8 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
         },
         async execute(args, _context) {
-          const result = await workflowCancelTool(args)
+          const { supervisor_id, ...rest } = args
+          const result = await workflowCancelTool({ ...rest, supervisorId: supervisor_id })
           return { title: 'workflow', output: JSON.stringify(result, null, 2) }
         },
       }),

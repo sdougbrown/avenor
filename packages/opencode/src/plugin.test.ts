@@ -1257,7 +1257,40 @@ describe('OpenCode message tool parity', () => {
     expect(dialMock).toHaveBeenCalledWith('/tmp/avenor.sock')
   })
 
-  it('forwards the workflow cancel actor and reason', async () => {
+  it('attributes a resumed run to the session that resumed it', async () => {
+    providerFactory = () => makeProvider({ registerResumed: () => {} })
+    statusToolMock.mockImplementation(async () => ({
+      run_id: 'run-2',
+      runtime_id: 'rt-2',
+      label: 'again',
+      status: 'done',
+    }))
+    dialQueue.push(makeEventClient([
+      { event: 'session.end', runtime_id: 'rt-2', seq: 1, stop_reason: 'end_turn' },
+    ]))
+    const promptAsync = mock(async () => {})
+    const originalError = console.error
+    console.error = () => {}
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
+      // One session owns the host turn; a second one resumes a finished run.
+      await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+      await (hooks.tool?.avenor_message as any).execute(
+        { action: 'resume', target: 'run-1', message: 'again' },
+        toolContext('session-2'),
+      )
+      for (let index = 0; index < 8; index++) await flush()
+    } finally {
+      console.error = originalError
+    }
+
+    expect(promptAsync).toHaveBeenCalledTimes(1)
+    const prompt = promptAsync.mock.calls[0]?.[0]
+    expect(prompt?.path).toEqual({ id: 'session-2' })
+    expect(prompt?.body.parts[0].text).toContain('run-2')
+  })
+
+  it('forwards the workflow cancel actor, reason and supervisor', async () => {
     const hooks = await AvenorPlugin(makeCtx() as any)
     await (hooks.tool?.avenor_workflow_cancel as any).execute(
       { workflow_id: 'w-1', actor: 'operator', reason: 'superseded', supervisor_id: 'sup-a' },
@@ -1267,7 +1300,7 @@ describe('OpenCode message tool parity', () => {
       workflow_id: 'w-1',
       actor: 'operator',
       reason: 'superseded',
-      supervisor_id: 'sup-a',
+      supervisorId: 'sup-a',
     })
   })
 })
