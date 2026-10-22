@@ -46,6 +46,8 @@ describe('Avenor Pi renderers', () => {
     expect(text(renderMessageResumeCall({ action: 'tell', target: 'mesh-a', message: 'hi' }, theme))).toBe('avenor_message action "tell" target "mesh-a" message "hi"')
     expect(text(renderMessageResumeCall({ action: 'reply', reply_to: 'ask-1', message: 'OK' }, theme))).toBe('avenor_message action "reply" reply_to "ask-1" message "OK"')
     expect(text(renderMessageResumeCall({ action: 'withdraw', message_id: 'av1.w.1' }, theme))).toBe('avenor_message action "withdraw" message_id "av1.w.1"')
+    expect(text(renderMessageResumeCall({ action: 'control_reply', target: 'ctrl-1', payload: { ok: true } }, theme))).toBe('avenor_message action "control_reply" target "ctrl-1" payload "{\\"ok\\":true}"')
+    expect(text(renderMessageResumeCall({ action: 'control_reply', target: 'ctrl-1' }, theme))).toBe('avenor_message action "control_reply" target "ctrl-1"')
     expect(text(renderEventsCall({ run_id: 'run', types: ['agent.message', 'session.end'], limit: 5, supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_events run_id "run" types=["agent.message", "session.end"] limit=5 supervisor_id "/tmp/sock"')
     expect(text(renderShutdownCall({ supervisor_id: '/tmp/sock', force: true }, theme))).toBe('avenor_shutdown supervisor_id "/tmp/sock" force=true')
   })
@@ -143,6 +145,21 @@ describe('Avenor Pi renderers', () => {
     }), collapsed, theme, { action: 'withdraw', message_id: 'av1.w.1' }))
     expect(withdraw).toContain('Withdraw: withdrawn.')
     expect(withdraw).not.toContain('dispatched')
+
+    // A reply names no target: its run is implied by the ask it answers, so a
+    // target in the call args never reaches the summary.
+    const reply = text(renderMessageResumeResult(result({
+      action: 'reply', outcome: 'replied', message_id: 'ask-1',
+      text: 'answered ask "ask-1"',
+    }), collapsed, theme, { action: 'reply', reply_to: 'ask-1', target: 'run-9', message: 'OK' }))
+    expect(reply).toContain('Reply: replied.')
+    expect(reply).not.toContain('Target:')
+
+    const tellTarget = text(renderMessageResumeResult(result({
+      action: 'tell', outcome: 'sent', message_id: 'av1.t.2',
+      text: 'message "av1.t.2" delivered',
+    }), collapsed, theme, { action: 'tell', target: 'run-9', message: 'hi' }))
+    expect(tellTarget).toContain('Target: run-9')
 
     const events = { events: [{ event: 'agent.message', seq: '2', delta: 'hello' }, { type: 'session.end', seq: 3 }] }
     expect(text(renderEventsResult(result(events), expanded, theme, { run_id: 'run-1', types: ['agent.message'] }))).toBe([

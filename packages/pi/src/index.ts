@@ -1101,9 +1101,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     }
 
     async function resumeTrackedRun(run: WatchRunRef, text: string): Promise<{ run_id: string; label: string }> {
-      // The bound provider, not hostProviderFor directly: messageProvider attaches
-      // the extension's resume tracking so a watch-triggered resume is polled.
-      const provider = await messageProvider(run.supervisorId)
+      // Resume authority is the host/supervisor side, and the router denies a
+      // child surface resume outright, so a child session asks for the host
+      // binding here too. The resumed run is still tracked by this extension.
+      const provider = await hostMessageProvider(run.supervisorId)
       const result = await deps.messageTool(
         { action: 'resume', target: run.runId, message: text },
         provider,
@@ -1251,8 +1252,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       client: Client | null
       isSingleton: boolean
     }>()
-    // One reply-claim map per binding: an ask claimed through one supervisor
-    // stays restorable while another supervisor is disposed.
+    // The reply-claim map of each host binding, so an ask claimed through one
+    // supervisor stays restorable while another supervisor is disposed. This is
+    // the only place claims are installed for a host provider.
     const hostAskClaims = new Map<string, AskClaims>()
 
     // Drop one cached binding before its supervisor stops answering, so the
@@ -1293,8 +1295,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         supervisorId: supervisorId ?? Supervisor.currentInstance()?.supervisorId ?? '',
         generation: preflight.generation,
         client,
-        pendingAsks: hostPendingAsks,
-        pollGeneration: () => hostPollGeneration,
         onResumed: result => trackResumed(supervisorId, result),
       })
       hostProviders.set(key, { provider, client, isSingleton })
@@ -1336,24 +1336,32 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       })
       : null
 
-    async function messageProvider(supervisorId: string | undefined): Promise<MessageProvider> {
-      if (childProvider) return childProvider
+    // The host binding: the supervisor's provider carrying this extension's
+    // claim map and resumed-run tracking. Production and injected providers
+    // both get the pair installed here, which keeps one claim map per
+    // supervisor key.
+    async function hostMessageProvider(supervisorId: string | undefined): Promise<MessageProvider> {
       const provider = await hostProviderFor(supervisorId)
-      // Install once per provider: the claim/restore pair is core's, and the
-      // generation scope is this poll's, so a restart cannot resurrect an ask.
-      if (!provider.claimAsk) {
-        const key = supervisorId ?? ''
-        let claims = hostAskClaims.get(key)
-        if (!claims) {
-          claims = new Map()
-          hostAskClaims.set(key, claims)
-        }
-        installAskClaims(provider, claims, hostPendingAsks, () => hostPollGeneration)
+      const key = supervisorId ?? ''
+      let claims = hostAskClaims.get(key)
+      if (!claims) {
+        claims = new Map()
+        hostAskClaims.set(key, claims)
       }
+      // The claim/restore pair is core's, and the generation scope is this
+      // poll's, so a restart cannot resurrect an ask.
+      installAskClaims(provider, claims, hostPendingAsks, () => hostPollGeneration)
       // Resume tracking belongs to this extension, not to the provider, so an
       // injected provider gets the same status + poll + tracked-run behaviour.
       if (!provider.onResumed) provider.onResumed = result => trackResumed(supervisorId, result)
       return provider
+    }
+
+    // The tool path: child tools route through the child provider, whose claims
+    // live with the child transport; host tools use the host binding.
+    async function messageProvider(supervisorId: string | undefined): Promise<MessageProvider> {
+      if (childProvider) return childProvider
+      return hostMessageProvider(supervisorId)
     }
 
     // The host's own last-turn producer. Every turn's end is recorded, including

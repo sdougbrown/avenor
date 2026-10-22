@@ -90,6 +90,36 @@ async function createMultiSupervisorHarness(options: {
   return { ...h, confirm, waitPolls, waitPollMatching }
 }
 
+/** Open the watch inspector for a run and send one follow-up through it. */
+async function watchResume(
+  harness: Awaited<ReturnType<typeof startExtensionHarness>>,
+  runId: string,
+  text: string,
+) {
+  let overlay: any
+  await harness.registeredCommands['avenor-watch'].handler(runId, {
+    hasUI: true,
+    ui: {
+      custom: async (factory: any) => {
+        overlay = factory(
+          { terminal: { rows: 24 }, requestRender() {} },
+          {
+            fg: (_color: string, text: string) => text,
+            bg: (_color: string, text: string) => text,
+            bold: (text: string) => text,
+            italic: (text: string) => text,
+          },
+          {},
+          () => {},
+        )
+      },
+    },
+  })
+  await waitFor(() => Boolean(overlay?.state?.status))
+  overlay.submit(text)
+  return overlay
+}
+
 describe('Avenor Pi extension', () => {
   it('exports a function', () => {
     expect(typeof extensionFactory).toBe('function')
@@ -462,32 +492,48 @@ describe('Avenor Pi extension', () => {
       deps: { hostProviderFor, statusTool, messageTool: realMessageTool },
       extOptions: { subAgentEnv: null },
     })
-    let overlay: any
-    await harness.registeredCommands['avenor-watch'].handler('run-1', {
-      hasUI: true,
-      ui: {
-        custom: async (factory: any) => {
-          overlay = factory(
-            { terminal: { rows: 24 }, requestRender() {} },
-            {
-              fg: (_color: string, text: string) => text,
-              bg: (_color: string, text: string) => text,
-              bold: (text: string) => text,
-              italic: (text: string) => text,
-            },
-            {},
-            () => {},
-          )
-        },
-      },
-    })
-    await waitFor(() => Boolean(overlay?.state?.status))
-    overlay.submit('continue')
+    const overlay = await watchResume(harness, 'run-1', 'continue')
     await waitFor(() => statusTool.mock.calls.some(call => (call[0] as { runId?: string })?.runId === 'run-2'))
     expect(hostProviderFor).toHaveBeenCalledWith(undefined)
     expect(resumeSpy).toHaveBeenCalledWith(expect.objectContaining({ target: 'run-1', message: 'continue' }))
     overlay.dispose()
     await harness.eventHandlers.session_shutdown({}, {})
+  })
+
+  it('resumes a tracked run through the host binding in a child session', async () => {
+    const resumeSpy = mock(async () => ({
+      outcome: 'resumed' as const,
+      runId: 'run-2',
+      runtimeId: 'rt-2',
+      label: 'follow-up',
+      sentinelFile: '/runs/run-2/sentinel.done',
+      onEvent: '/runs/run-2/events.log',
+    }))
+    const provider = makeMessageProvider({ resume: resumeSpy, registerResumed: () => {} })
+    const hostProviderFor = mock(async (_supervisorId?: string) => provider)
+    const statusTool = mock(async (args: { runId?: string } = {}) => args.runId === 'run-2'
+      ? { run_id: 'run-2', label: 'follow-up', status: 'done', runtime_id: 'rt-2' }
+      : { run_id: 'run-1', label: 'demo', status: 'done', runtime_id: 'rt-1' })
+    const previousFetch = globalThis.fetch
+    // The child poll has no broker here; an empty queue keeps it off the network.
+    globalThis.fetch = mock(async () => Response.json([])) as unknown as typeof fetch
+    const harness = await startExtensionHarness({
+      deps: { hostProviderFor, statusTool, messageTool: realMessageTool },
+      extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
+    })
+    let overlay: any
+    try {
+      overlay = await watchResume(harness, 'run-1', 'continue')
+      // The child provider's resume always throws not_permitted, so a resume
+      // that completes and reaches the tracker proves the host binding ran it.
+      await waitFor(() => statusTool.mock.calls.some(call => (call[0] as { runId?: string })?.runId === 'run-2'))
+      expect(hostProviderFor).toHaveBeenCalledTimes(1)
+      expect(resumeSpy).toHaveBeenCalledWith(expect.objectContaining({ target: 'run-1', message: 'continue' }))
+    } finally {
+      overlay?.dispose()
+      globalThis.fetch = previousFetch
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
   })
 
   it('registers all expected tools, commands, renderers, and event handlers', async () => {
@@ -550,6 +596,7 @@ describe('Avenor Pi extension', () => {
       statusTool: statusToolMock,
       eventsTool: mock(async () => ({ events: [] })),
       answerPermissionTool: mock(async () => ({ ok: true })),
+      messageTool: mock(async () => ({ outcome: 'sent', messageId: 'm-1', text: 'sent' })),
       inspectTool: mock(async (args: { runId?: string } = {}) => {
         const result = makeInspectResult({ status: 'running' })
         result.snapshot = { ...result.snapshot, ended: false, stop_reason: undefined }
@@ -934,6 +981,7 @@ describe('Avenor Pi extension', () => {
         statusTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', runtime_id: 'rt-1', final_output: 'answer' })),
         eventsTool: mock(async () => ({ events: [] })),
         answerPermissionTool: mock(async () => ({ ok: true })),
+        messageTool: mock(async () => ({ outcome: 'sent', messageId: 'm-1', text: 'sent' })),
           inspectTool: mock(async () => makeInspectResult()),
         resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' })),
         shutdownTool: mock(async () => ({ ok: true })),
