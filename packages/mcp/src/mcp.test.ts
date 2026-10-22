@@ -406,6 +406,44 @@ describe('avenor MCP messaging tools', () => {
     expect(providerCalls).toBe(1)
   })
 
+  it('turns a plain error from a message verb into a coded router failure', async () => {
+    useProvider(() => makeProvider({
+      state: async () => ({ live: true, resumable: false, status: 'running' }),
+      tell: async () => {
+        throw new Error('the broker hung up')
+      },
+    }))
+    await withClient(async (client) => {
+      const result: any = await client.callTool({
+        name: 'message',
+        arguments: { action: 'tell', target: 'mesh-a', message: 'hi' },
+      })
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe('the broker hung up')
+      expect(result.structuredContent).toMatchObject({ code: 'refused' })
+    })
+    expect(providerCalls).toBe(1)
+  })
+
+  // The SDK's own handler renders a thrown handler error as a text-only `isError`
+  // result, which is why this asserts no structured content rather than a code.
+  it('leaves a pre-router failure to the transport instead of inventing a router code', async () => {
+    hostClient = {
+      messagePreflight: async () => {
+        preflightCalls += 1
+        throw new Error('supervisor unreachable')
+      },
+    }
+    await withClient(async (client) => {
+      const result: any = await client.callTool({ name: 'peers', arguments: { action: 'list' } })
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe('supervisor unreachable')
+      expect(result.structuredContent).toBeUndefined()
+    })
+    expect(providerCalls).toBe(0)
+    expect(preflightCalls).toBe(1)
+  })
+
   it('answers every inadmissible call with the router error, not the SDK error', async () => {
     await withClient(async (client) => {
       const cases: Array<{ name: string; args?: Record<string, unknown>; code: string }> = [

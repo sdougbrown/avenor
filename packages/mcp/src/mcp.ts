@@ -222,13 +222,13 @@ type ToolReply = {
   isError?: true
 }
 
-/** A router tool error is a failure result on every surface, never a success. */
+/** A router tool error is a failure result on every surface; anything else is the transport's to report. */
 function toolFailure(error: unknown): ToolReply {
-  const text = error instanceof Error ? error.message : String(error)
-  const code = error instanceof ToolError ? error.code : 'refused'
+  if (!(error instanceof ToolError)) throw error
+  const text = error.message
   return {
     content: [{ type: 'text', text }],
-    structuredContent: { code, text },
+    structuredContent: { code: error.code, text },
     isError: true,
   }
 }
