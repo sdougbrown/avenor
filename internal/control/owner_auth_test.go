@@ -360,7 +360,7 @@ func contains(haystack []byte, needle string) bool {
 }
 
 // TestUngatedMethodsStayUnauthenticated pins the complete ungated method set:
-// the 26 names dispatch leaves unauthenticated, and the 11 gated ones.
+// the 27 names dispatch leaves unauthenticated, and the 11 gated ones.
 func TestUngatedMethodsStayUnauthenticated(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s, _ := NewTestServer(state)

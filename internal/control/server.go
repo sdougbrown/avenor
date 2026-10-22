@@ -1148,8 +1148,8 @@ func (s *ControlServer) acceptLoop() {
 		seq++
 		cs := &connState{
 			id: seq, server: s, conn: conn,
-			waitSlots:        make(chan struct{}, maxInflightAsksPerConn),
-			messageSlots:     make(chan struct{}, maxInflightAsksPerConn),
+			waitSlots:        make(chan struct{}, maxInflightPerConn),
+			messageSlots:     make(chan struct{}, maxInflightPerConn),
 		}
 		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
@@ -1195,10 +1195,10 @@ func (s *ControlServer) handleConn(c *connState) {
 	}
 }
 
-// maxInflightAsksPerConn bounds concurrent in-flight broker asks per
-// connection so a single owner cannot accumulate unbounded parked goroutines
-// and broker edges.
-const maxInflightAsksPerConn = 8
+// maxInflightPerConn bounds the blocking verbs one connection can park —
+// message_wait, message_receive and wait_turn — so a single owner cannot
+// accumulate unbounded parked goroutines and broker edges.
+const maxInflightPerConn = 8
 
 // maxAskTimeoutMS is the one server-side cap on a request's timeout_ms. It sits
 // below the ask store's DefaultAskTimeout so a clamped value expires on the

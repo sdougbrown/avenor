@@ -352,7 +352,7 @@ func (b *saturatedWaitTransport) Wait(ctx context.Context, req messaging.WaitReq
 // checks the connection drains and serves again.
 func TestMessageWaitRefusesBeyondInflightLimit(t *testing.T) {
 	tr := &saturatedWaitTransport{
-		entered: make(chan struct{}, maxInflightAsksPerConn),
+		entered: make(chan struct{}, maxInflightPerConn),
 		release: make(chan struct{}),
 	}
 	state := NewState("run_1", "", 0)
@@ -367,11 +367,11 @@ func TestMessageWaitRefusesBeyondInflightLimit(t *testing.T) {
 	c := dialOwner(t, s, cap)
 	defer c.Close()
 
-	for i := 1; i <= maxInflightAsksPerConn; i++ {
+	for i := 1; i <= maxInflightPerConn; i++ {
 		params := json.RawMessage(fmt.Sprintf(`{"message_id":"m%d","generation":"g"}`, i))
 		_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: uint64(i), Method: "message_wait", Params: params})
 	}
-	for i := 0; i < maxInflightAsksPerConn; i++ {
+	for i := 0; i < maxInflightPerConn; i++ {
 		select {
 		case <-tr.entered:
 		case <-time.After(2 * time.Second):
@@ -379,7 +379,7 @@ func TestMessageWaitRefusesBeyondInflightLimit(t *testing.T) {
 		}
 	}
 
-	overflowID := uint64(maxInflightAsksPerConn + 1)
+	overflowID := uint64(maxInflightPerConn + 1)
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: overflowID, Method: "message_wait", Params: json.RawMessage(`{"message_id":"overflow","generation":"g"}`)})
 	resp := readRespForID(t, c, overflowID)
 	if resp.Error == nil || resp.Error.Code != -32000 || !strings.Contains(resp.Error.Message, "too many in-flight") {
@@ -390,9 +390,9 @@ func TestMessageWaitRefusesBeyondInflightLimit(t *testing.T) {
 	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
 	scanner := bufio.NewScanner(c)
 	drained := map[uint64]bool{}
-	for len(drained) < maxInflightAsksPerConn {
+	for len(drained) < maxInflightPerConn {
 		if !scanner.Scan() {
-			t.Fatalf("drained %d of %d waits: %v", len(drained), maxInflightAsksPerConn, scanner.Err())
+			t.Fatalf("drained %d of %d waits: %v", len(drained), maxInflightPerConn, scanner.Err())
 		}
 		var r Response
 		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
@@ -407,14 +407,14 @@ func TestMessageWaitRefusesBeyondInflightLimit(t *testing.T) {
 		}
 		drained[uint64(id)] = true
 	}
-	for i := 1; i <= maxInflightAsksPerConn; i++ {
+	for i := 1; i <= maxInflightPerConn; i++ {
 		if !drained[uint64(i)] {
 			t.Fatalf("missing response for wait %d", i)
 		}
 	}
 
 	// Every slot is free again, so the connection serves a fresh request.
-	probeID := uint64(maxInflightAsksPerConn + 2)
+	probeID := uint64(maxInflightPerConn + 2)
 	_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: probeID, Method: "message_preflight"})
 	if resp := readRespForID(t, c, probeID); resp.Error != nil {
 		t.Fatalf("message_preflight after drain: %+v", resp.Error)
@@ -561,7 +561,7 @@ func TestMessageWaitSlotRelease(t *testing.T) {
 
 			// One more than the connection allows in flight: sequential waits
 			// must never hit the slot refusal if each releases its slot.
-			for i := 0; i <= maxInflightAsksPerConn; i++ {
+			for i := 0; i <= maxInflightPerConn; i++ {
 				id := uint64(i + 2)
 				_ = writeReq(t, c, Request{JSONRPC: "2.0", ID: id, Method: "message_wait", Params: json.RawMessage(`{"message_id":"m1","generation":"g","timeout_ms":1}`)})
 				resp := readRespForID(t, c, id)
