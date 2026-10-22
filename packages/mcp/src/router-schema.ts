@@ -1,5 +1,11 @@
 import { z } from 'zod'
 
+/** The zod internals this schema patches, named so a move is one edit. */
+type ZodInternals = {
+  run: (payload: { value: unknown }, ctx: unknown) => unknown
+  toJSONSchema?: () => unknown
+}
+
 /**
  * The tool input schema for a tool whose admission belongs to the shared
  * router.
@@ -12,17 +18,22 @@ import { z } from 'zod'
  * Schema (through zod's `toJSONSchema` override) while admitting every argument
  * object unchanged, including the `undefined` a call that omits `arguments`
  * produces, so the router answers first on this surface too.
+ *
+ * Both behaviours ride on zod internals, so construction checks they are there:
+ * a zod release that drops them would otherwise leave this surface publishing
+ * the loose object and refusing the router's own sentences per call.
  */
 export function routerAdmittedSchema(published: unknown): z.ZodType {
-  const schema = z.looseObject({}) as z.ZodType & {
-    _zod: {
-      run: (payload: { value: unknown }, ctx: unknown) => unknown
-      toJSONSchema?: () => unknown
-    }
+  const schema = z.looseObject({})
+  const internals = (schema as unknown as { _zod?: Partial<ZodInternals> })._zod
+  if (!internals || typeof internals.run !== 'function') {
+    throw new Error(
+      'routerAdmittedSchema needs the zod internals `_zod.run` and `_zod.toJSONSchema`; this zod version does not expose them, so the router admission pass-through and the published input schema would stop working',
+    )
   }
-  const run = schema._zod.run.bind(schema._zod)
-  schema._zod.run = (payload, ctx) =>
+  const run = internals.run.bind(internals)
+  internals.run = (payload, ctx) =>
     run(payload.value === undefined ? { ...payload, value: {} } : payload, ctx)
-  schema._zod.toJSONSchema = () => structuredClone(published)
+  internals.toJSONSchema = () => structuredClone(published)
   return schema
 }
