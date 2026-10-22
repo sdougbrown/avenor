@@ -639,11 +639,22 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   // learns which OpenCode session owns the broker's supervisor turn.
   let hostProvider: { client: unknown; binding: HostProviderBinding } | undefined
   let hostBinding: HostBinding | undefined
+  // Bumped by every bind that has to preflight. A bind whose sequence is stale
+  // by the time its preflight resolves raced a later one, and its client may
+  // name a generation the supervisor has already revoked.
+  let bindSeq = 0
 
   async function boundHostProvider(): Promise<HostProviderBinding> {
     const { client, supervisorId } = await getSupervisorClient(undefined, { owner: true })
     if (hostProvider && hostProvider.client === client) return hostProvider.binding
+    const seq = ++bindSeq
     const preflight = await client.messagePreflight()
+    // A later bind started while this one preflighted, so this client may name
+    // a generation the supervisor already revoked. The winner's binding is what
+    // every later call must use; with no winner cached yet, the binding below
+    // serves only this call and is never cached, so the client cannot revive.
+    const stale = seq !== bindSeq
+    if (stale && hostProvider) return hostProvider.binding
     const binding: HostProviderBinding = {
       provider: createHostMessageProvider({
         surface: 'opencode',
@@ -654,6 +665,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       supervisorId,
       generation: preflight.generation,
     }
+    if (stale) return binding
     hostProvider = { client, binding }
     if (hostBinding) hostBinding = { ...binding, sessionId: hostBinding.sessionId }
     return binding
@@ -691,9 +703,11 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   // last in the session rather than the one whose event arrived last.
   let publishedTurn: { created: number; id: string } | undefined
 
-  // Messages whose publish is in flight: two updates for one message cannot
-  // both publish, and the id is not claimed, so a failure is retried.
-  const publishing = new Set<string>()
+  // Publishes run one at a time in the order their events arrived. Without
+  // that, two different messages can pass the newest-turn gate together and
+  // settle in either order, so the broker's last-turn record and publishedTurn
+  // can both end up on the older turn.
+  let publishChain: Promise<void> = Promise.resolve()
 
   function isNewerTurn(created: number, id: string): boolean {
     if (!publishedTurn) return true
@@ -762,9 +776,26 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     if (typeof time?.completed !== 'number') return
     const created = typeof time.created === 'number' ? time.created : 0
     const messageId = typeof info.id === 'string' ? info.id : ''
-    if (messageId === '' || publishing.has(messageId) || !isNewerTurn(created, messageId)) return
+    if (messageId === '') return
     if (!binding.provider.recordLastTurn) return
-    publishing.add(messageId)
+    const publish = publishChain.then(() => publishTurn(binding, info, created, messageId))
+    // A failed publish must not stop every later one, so the chain keeps a
+    // resolved tail while the caller still sees the rejection.
+    publishChain = publish.catch(() => {})
+    await publish
+  }
+
+  /**
+   * One queued publish. The newest-turn gate is read here rather than before
+   * queueing, so it sees the turn the publish ahead of it claimed.
+   */
+  async function publishTurn(
+    binding: HostProviderBinding,
+    info: Record<string, unknown>,
+    created: number,
+    messageId: string,
+  ): Promise<void> {
+    if (!isNewerTurn(created, messageId)) return
     try {
       const content = await settledTurnText(binding.sessionId, messageId)
       const turn = extractTurnText([
@@ -777,8 +808,6 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       publishedTurn = { created, id: messageId }
     } catch (error) {
       console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
-    } finally {
-      publishing.delete(messageId)
     }
   }
 
