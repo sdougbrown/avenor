@@ -154,6 +154,10 @@
             "items": {
               "$ref": "#/$defs/authority_rule"
             }
+          },
+          "launch_wrapper": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [

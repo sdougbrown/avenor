@@ -2032,6 +2032,7 @@ func svalidateWorkflowProfileNode(raw json.RawMessage, path, schemaPath string, 
 		"dispatch":          true,
 		"gates":             true,
 		"id":                true,
+		"launch_wrapper":    true,
 		"lease_policy":      true,
 		"loop_id":           true,
 		"name":              true,
@@ -2155,6 +2156,20 @@ func svalidateWorkflowProfileNode(raw json.RawMessage, path, schemaPath string, 
 	if r, ok := m["id"]; ok {
 		fpath := path + "/" + escapePtr("id")
 		fspath := schemaPath + "/properties/" + escapePtr("id")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+			if utf8.RuneCountInString(sv) < 1 {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("minLength", fpath, fspath))
+			}
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["launch_wrapper"]; ok {
+		fpath := path + "/" + escapePtr("launch_wrapper")
+		fspath := schemaPath + "/properties/" + escapePtr("launch_wrapper")
 		switch WorkflowProfileStructuralKind(r) {
 		case "string":
 			var sv string
@@ -3747,6 +3762,11 @@ func (v WorkflowProfileNode) validate(path string, issues *[]Issue) {
 	if utf8.RuneCountInString(v.Id) < 1 {
 		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("id")})
 	}
+	if v.LaunchWrapper != nil {
+		if utf8.RuneCountInString(*v.LaunchWrapper) < 1 {
+			*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("launch_wrapper")})
+		}
+	}
 	if v.LeasePolicy != nil {
 		v.LeasePolicy.validate(path+"/"+escapePtr("lease_policy"), issues)
 	}
@@ -5061,6 +5081,7 @@ type WorkflowProfileNode struct {
 	Dispatch         *WorkflowProfileDispatch         "json:\"dispatch,omitempty\""
 	Gates            *[]WorkflowProfileGate           "json:\"gates,omitempty\""
 	Id               string                           "json:\"id\""
+	LaunchWrapper    *string                          "json:\"launch_wrapper,omitempty\""
 	LeasePolicy      *WorkflowProfileLeasePolicy      "json:\"lease_policy,omitempty\""
 	LoopId           *string                          "json:\"loop_id,omitempty\""
 	Name             *string                          "json:\"name,omitempty\""
@@ -5091,6 +5112,7 @@ func (v *WorkflowProfileNode) UnmarshalJSON(data []byte) error {
 		case "dispatch":
 		case "gates":
 		case "id":
+		case "launch_wrapper":
 		case "lease_policy":
 		case "loop_id":
 		case "name":
@@ -5147,6 +5169,11 @@ func (v *WorkflowProfileNode) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["id"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"id\" must not be null")
+		}
+	}
+	if r, ok := raw["launch_wrapper"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"launch_wrapper\" must not be null")
 		}
 	}
 	if r, ok := raw["lease_policy"]; ok {
@@ -5261,68 +5288,75 @@ func (v *WorkflowProfileNode) UnmarshalJSON(data []byte) error {
 			return err
 		}
 	}
-	if encoded, ok := raw["lease_policy"]; ok {
-		var decoded7 WorkflowProfileLeasePolicy
+	if encoded, ok := raw["launch_wrapper"]; ok {
+		var decoded7 string
 		if err := json.Unmarshal(encoded, &decoded7); err != nil {
 			return err
 		}
-		next.LeasePolicy = &decoded7
+		next.LaunchWrapper = &decoded7
 	}
-	if encoded, ok := raw["loop_id"]; ok {
-		var decoded8 string
+	if encoded, ok := raw["lease_policy"]; ok {
+		var decoded8 WorkflowProfileLeasePolicy
 		if err := json.Unmarshal(encoded, &decoded8); err != nil {
 			return err
 		}
-		next.LoopId = &decoded8
+		next.LeasePolicy = &decoded8
 	}
-	if encoded, ok := raw["name"]; ok {
+	if encoded, ok := raw["loop_id"]; ok {
 		var decoded9 string
 		if err := json.Unmarshal(encoded, &decoded9); err != nil {
 			return err
 		}
-		next.Name = &decoded9
+		next.LoopId = &decoded9
 	}
-	if encoded, ok := raw["outcomes"]; ok {
-		var decoded10 []WorkflowProfileOutcome
+	if encoded, ok := raw["name"]; ok {
+		var decoded10 string
 		if err := json.Unmarshal(encoded, &decoded10); err != nil {
 			return err
 		}
-		next.Outcomes = &decoded10
+		next.Name = &decoded10
 	}
-	if encoded, ok := raw["outputs"]; ok {
-		var decoded11 []WorkflowProfileOutput
+	if encoded, ok := raw["outcomes"]; ok {
+		var decoded11 []WorkflowProfileOutcome
 		if err := json.Unmarshal(encoded, &decoded11); err != nil {
 			return err
 		}
-		next.Outputs = &decoded11
+		next.Outcomes = &decoded11
 	}
-	if encoded, ok := raw["retry_policy"]; ok {
-		var decoded12 WorkflowProfileRetryPolicy
+	if encoded, ok := raw["outputs"]; ok {
+		var decoded12 []WorkflowProfileOutput
 		if err := json.Unmarshal(encoded, &decoded12); err != nil {
 			return err
 		}
-		next.RetryPolicy = &decoded12
+		next.Outputs = &decoded12
 	}
-	if encoded, ok := raw["skip_rule"]; ok {
-		var decoded13 WorkflowProfileAuthorityRule
+	if encoded, ok := raw["retry_policy"]; ok {
+		var decoded13 WorkflowProfileRetryPolicy
 		if err := json.Unmarshal(encoded, &decoded13); err != nil {
 			return err
 		}
-		next.SkipRule = &decoded13
+		next.RetryPolicy = &decoded13
 	}
-	if encoded, ok := raw["waive_rules"]; ok {
-		var decoded14 []WorkflowProfileAuthorityRule
+	if encoded, ok := raw["skip_rule"]; ok {
+		var decoded14 WorkflowProfileAuthorityRule
 		if err := json.Unmarshal(encoded, &decoded14); err != nil {
 			return err
 		}
-		next.WaiveRules = &decoded14
+		next.SkipRule = &decoded14
 	}
-	if encoded, ok := raw["working_directory"]; ok {
-		var decoded15 WorkflowProfileWorkingDirectory
+	if encoded, ok := raw["waive_rules"]; ok {
+		var decoded15 []WorkflowProfileAuthorityRule
 		if err := json.Unmarshal(encoded, &decoded15); err != nil {
 			return err
 		}
-		next.WorkingDirectory = &decoded15
+		next.WaiveRules = &decoded15
+	}
+	if encoded, ok := raw["working_directory"]; ok {
+		var decoded16 WorkflowProfileWorkingDirectory
+		if err := json.Unmarshal(encoded, &decoded16); err != nil {
+			return err
+		}
+		next.WorkingDirectory = &decoded16
 	}
 	*v = WorkflowProfileNode(next)
 	return nil

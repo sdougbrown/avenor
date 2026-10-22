@@ -13,6 +13,7 @@ state named in each file is the acceptance bar for that feature.
 | Broker messages | [broker-messaging.md](broker-messaging.md) | spawned child ↔ supervisor ask/reply over the broker |
 | Config validation | [verify-command.md](verify-command.md) | `avenor verify` |
 | Launch identity | [provenance.md](provenance.md) | `avenor run --team-file` → MCP env + phase/team events |
+| Workflow launch wrappers | [workflow-launch-wrappers.md](workflow-launch-wrappers.md) | `avenor stable` + `avenor workflow` → wrapper argv + marker completion |
 
 Known secondary surfaces not yet mapped: embedded board web UI (built with
 `-tags board`, see `mise.toml:go-build-full`), MCP server (`avenor mcp`,

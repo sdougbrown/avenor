@@ -6217,6 +6217,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.PromptFile = ec.Action.Run.PromptFile
 		params.Timeout = ec.Action.Run.Timeout
 	}
+	params.LaunchWrapper = ec.LaunchWrapper
 	dir, err := attemptSpawnDir(ec)
 	if err != nil {
 		// Pre-start failure: the attempt was already started durably by the
@@ -6276,6 +6277,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.LoopFile = ec.Action.Loop.LoopFile
 		params.Timeout = ec.Action.Loop.Timeout
 	}
+	params.LaunchWrapper = ec.LaunchWrapper
 	dir, err := attemptSpawnDir(ec)
 	if err != nil {
 		// Pre-start failure: the attempt was already started durably by the
@@ -6337,6 +6339,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.TeamFile = ec.Action.Team.TeamFile
 		params.Timeout = ec.Action.Team.Timeout
 	}
+	params.LaunchWrapper = ec.LaunchWrapper
 	dir, err := attemptSpawnDir(ec)
 	if err != nil {
 		// Pre-start failure: the attempt was already started durably by the

@@ -115,6 +115,7 @@ type NodeDefinition struct {
 	LeasePolicy      *LeasePolicy           `json:"lease_policy,omitempty"`
 	Dispatch         *DispatchPolicy        `json:"dispatch,omitempty"`
 	WorkingDirectory *WorkingDirectoryRef   `json:"working_directory,omitempty"`
+	LaunchWrapper    string                 `json:"launch_wrapper,omitempty"`
 	SkipRule         *AuthorityRule         `json:"skip_rule,omitempty"`
 	WaiveRules       []AuthorityRule        `json:"waive_rules,omitempty"`
 }

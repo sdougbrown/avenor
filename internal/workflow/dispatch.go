@@ -61,6 +61,10 @@ type BeginDispatchResult struct {
 	// from the recorded instance params. Empty means the attempt runs in the
 	// supervisor's working directory.
 	WorkingDirectory string
+	// LaunchWrapper is the node's launch-wrapper argv resolved from the
+	// immutable template definition. Nil means the node declared no wrapper
+	// and the runtime launches unwrapped.
+	LaunchWrapper []string
 }
 
 // FinalizeDispatchRequest records the outcome of one dispatch: the actual
@@ -278,6 +282,10 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 	now := m.now()
 	ttl := leaseTTL(node, tmpl.DefaultLease)
 	workingDir := ResolveNodeWorkingDirectory(*tmpl, *node, snap.Instance.Params)
+	launchWrapper, err := ResolveNodeLaunchWrapper(*tmpl, *node, snap.Instance.Params)
+	if err != nil {
+		return BeginDispatchResult{}, err
+	}
 	leaseID := NewLeaseID()
 	attemptID := NewAttemptID()
 	token := newOwnerToken()
@@ -323,6 +331,7 @@ func (m *Manager) BeginDispatch(req BeginDispatchRequest) (BeginDispatchResult, 
 		Action:           node.Action,
 		Selection:        selection,
 		WorkingDirectory: workingDir,
+		LaunchWrapper:    launchWrapper,
 	}, nil
 }
 
