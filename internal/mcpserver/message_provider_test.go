@@ -169,6 +169,39 @@ func TestMCPMessageProviderGenerationRefreshesAfterMismatch(t *testing.T) {
 	}
 }
 
+func TestMCPMessageProviderGenerationKeepsPinWhenRefreshFails(t *testing.T) {
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{}}
+	preflights := 0
+	refreshErr := errors.New("preflight unavailable")
+	cl.preflightFunc = func(context.Context) (messaging.PreflightResult, error) {
+		preflights++
+		if preflights > 1 {
+			return messaging.PreflightResult{}, refreshErr
+		}
+		return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-1"}, nil
+	}
+	cl.waitFunc = func(context.Context, messaging.WaitRequest) (messaging.WaitResult, error) {
+		return messaging.WaitResult{Outcome: messaging.OutcomeNotSent}, messaging.ErrGenerationMismatch
+	}
+
+	p := newTestMessageProvider(t, cl)
+	_, err := p.Wait(context.Background(), messaging.WaitRequest{MessageID: "msg-1"})
+	// The retry preflight failed, so the original mismatch is what the caller
+	// sees and the cached generation is not replaced with anything.
+	if !errors.Is(err, messaging.ErrGenerationMismatch) {
+		t.Fatalf("Wait error = %v, want the original generation mismatch", err)
+	}
+	if errors.Is(err, refreshErr) {
+		t.Fatalf("Wait error = %v, want the preflight error swallowed", err)
+	}
+	if got := p.Generation(); got != "gen-1" {
+		t.Fatalf("Generation() = %q after a failed refresh, want gen-1", got)
+	}
+	if preflights != 2 {
+		t.Fatalf("preflights = %d, want 2 (construction plus one retry)", preflights)
+	}
+}
+
 func TestMCPMessageProviderResolveLadder(t *testing.T) {
 	registryInfo := &RunInfo{
 		SupervisorID: testSupervisorPath,

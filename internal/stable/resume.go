@@ -30,7 +30,7 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 	}
 	// The supervisor session is not a child runtime this supervisor resumed; it
 	// has no prior session to continue.
-	if runID == "supervisor" {
+	if runID == messaging.SupervisorRunID {
 		return messaging.ResumeResult{}, &router.ToolError{
 			Code:    "refused",
 			Message: "the supervisor session is not a resume target; resume continues a child runtime",
