@@ -278,6 +278,11 @@ export function installAskClaims(
       pendingAsks.set(messageId, { from_run_id: askerRunId, message_id: messageId })
     }
   }
+  // A surface may own the claim map and install it after the factory did, so
+  // the reply path releases through the pair rather than its local map.
+  provider.releaseAsk = (messageId: string) => {
+    claims.delete(messageId)
+  }
 }
 
 /**
@@ -489,7 +494,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         if (outcome) return { outcome: outcome as MessageOutcome, messageId: inboundAskId }
         throw authorityError(error)
       }
-      if (sent.outcome === 'replied') claims.delete(inboundAskId)
+      if (sent.outcome === 'replied') provider.releaseAsk?.(inboundAskId)
       return { outcome: sent.outcome as MessageOutcome, messageId: inboundAskId }
     },
 
@@ -713,7 +718,7 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
     ask: (targetRunId, message, timeoutMs, signal) => broker.ask(targetRunId, message, newMsgID(), timeoutMs, signal),
     reply: async (inboundAskId, message, askerRunId) => {
       const result = await broker.reply(askerRunId, inboundAskId, message)
-      if (result.outcome === 'replied') claims.delete(inboundAskId)
+      if (result.outcome === 'replied') provider.releaseAsk?.(inboundAskId)
       return result
     },
     withdraw: messageId => broker.withdraw(messageId),

@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { createChildMessageProvider, createHostMessageProvider, type MessageClient } from './message-provider.js'
+import {
+  createChildMessageProvider,
+  createHostMessageProvider,
+  installAskClaims,
+  isGenerationMismatchError,
+  type MessageClient,
+} from './message-provider.js'
 import { RpcError } from '../client.js'
 import { forgetExternalRuns, findExternalRunById, registerExternalRun } from './run-registry.js'
 import { executeMessage, executePeers, type ProviderResult } from '../message.js'
@@ -377,6 +383,39 @@ describe('host message provider', () => {
     generation = 2
     host.restoreAsk?.('ask-1', 'rt_7')
     expect(pending.has('ask-1')).toBe(false)
+  })
+
+  it('releases a claim the surface owns once the reply is accepted', async () => {
+    const pending = new Map([['ask-1', { from_run_id: 'rt_7', message_id: 'ask-1' }]])
+    // A surface that keeps claims across provider rebuilds installs its own map.
+    const surfaceClaims: Map<string, { asker: string, generation: number }> = new Map()
+    let claimedWhileSending = -1
+    const client = fakeClient({
+      messageReply: mock(async () => {
+        claimedWhileSending = surfaceClaims.size
+        return { outcome: 'replied' }
+      }),
+    })
+    const host = createHostMessageProvider({
+      surface: 'pi-host',
+      supervisorId: '/tmp/avenor-provider.sock',
+      generation: 'gen-1',
+      client,
+      pendingAsks: pending,
+      pollGeneration: () => 0,
+    })
+    installAskClaims(host, surfaceClaims, pending, () => 0)
+
+    const result = await executeMessage(host, { action: 'reply', reply_to: 'ask-1', message: 'answer' })
+
+    expect(result.outcome).toBe('replied')
+    expect(claimedWhileSending).toBe(1)
+    expect(surfaceClaims.size).toBe(0)
+  })
+
+  it('reads a plain error naming a generation mismatch as stale', () => {
+    expect(isGenerationMismatchError(new Error('messaging: generation mismatch'))).toBe(true)
+    expect(isGenerationMismatchError(new Error('some other error'))).toBe(false)
   })
 
   it('removes the run directory a failed resume created', async () => {
