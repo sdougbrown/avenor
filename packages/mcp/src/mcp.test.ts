@@ -156,14 +156,14 @@ describe('avenor MCP server', () => {
       name: 'workflow_controller_status',
       arguments: { controller_id: 'ctl-1', supervisor_id: 'sup-1' },
     })
-    expect(status).toBeDefined()
+    expect(status).toMatchObject({ state: 'enabled' })
     expect(controllerCalls.status.at(-1)).toEqual({ controllerId: 'ctl-1', supervisorId: 'sup-1' })
 
     const list = await client.callTool({
       name: 'workflow_controller_status',
       arguments: { supervisor_id: 'sup-1' },
     })
-    expect(list).toBeDefined()
+    expect(list).toMatchObject({ controllers: [] })
     expect(controllerCalls.status.at(-1)).toEqual({ controllerId: undefined, supervisorId: 'sup-1' })
     await client.close()
     await server.close()
@@ -351,6 +351,9 @@ describe('avenor MCP messaging tools', () => {
     })
     expect(providerCalls).toBe(1)
     expect(preflightCalls).toBe(1)
+    expect(providerDials).toEqual([
+      { surface: 'mcp-ts', supervisorId: '/tmp/avenor.sock', generation: 'gen-1' },
+    ])
   })
 
   it('rebuilds the host provider when the supervisor client changes', async () => {
@@ -545,41 +548,81 @@ describe('avenor MCP messaging tools', () => {
       }),
     })
 
+    const peerListAt = () => makeProvider({
+      peers: async () => ({
+        peers: [
+          { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running' },
+          { run_id: 'rt_3' },
+        ],
+      }),
+      rename: async () => ({ outcome: 'renamed', runId: 'rt_2', label: 'mesh-renamed', previousLabel: 'mesh-a' }),
+      resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }),
+      last: async () => ({ outcome: 'sent', hasRecord: true, finalOutput: 'OK', stopReason: 'end_turn' }),
+    })
+
+    const cases: Array<{
+      label: string
+      provider: () => MessageProvider
+      call: { name: string; arguments: Record<string, unknown> }
+      expected: Record<string, unknown>
+      text?: string
+    }> = [
+      {
+        label: 'message tell',
+        provider: liveAt,
+        call: { name: 'message', arguments: { action: 'tell', target: 'mesh-a', message: 'hi' } },
+        expected: expected.message.tell,
+        text: expected.message.tell.text as string,
+      },
+      {
+        label: 'message resume',
+        provider: resumableAt,
+        call: { name: 'message', arguments: { action: 'resume', target: 'mesh-a', message: 'again' } },
+        expected: expected.message.resume,
+      },
+      {
+        label: 'message reply',
+        provider: () => makeProvider(),
+        call: { name: 'message', arguments: { action: 'reply', reply_to: 'a-1', message: 'pong' } },
+        expected: expected.message.reply_edge_absent,
+      },
+      {
+        label: 'peers list',
+        provider: peerListAt,
+        call: { name: 'peers', arguments: { action: 'list' } },
+        expected: expected.peers.list,
+      },
+      {
+        label: 'peers rename',
+        provider: peerListAt,
+        call: { name: 'peers', arguments: { action: 'rename', name: 'mesh-renamed' } },
+        expected: expected.peers.rename,
+      },
+      {
+        label: 'peers last',
+        provider: peerListAt,
+        call: { name: 'peers', arguments: { action: 'last', target: 'mesh-a' } },
+        expected: expected.peers.last,
+      },
+      {
+        label: 'peers last with no matching run',
+        provider: () => makeProvider({ resolve: async () => ({ runId: '', match: 'none' }) }),
+        call: { name: 'peers', arguments: { action: 'last', target: 'ghost' } },
+        expected: expected.error,
+      },
+    ]
+
     await withClient(async (client) => {
-      useProvider(liveAt)
-      const tell: any = await client.callTool({ name: 'message', arguments: { action: 'tell', target: 'mesh-a', message: 'hi' } })
-      expect(tell.structuredContent).toEqual(expected.message.tell)
-      expect(tell.content[0].text).toBe(expected.message.tell.text)
-
-      useProvider(resumableAt)
-      const resume: any = await client.callTool({ name: 'message', arguments: { action: 'resume', target: 'mesh-a', message: 'again' } })
-      expect(resume.structuredContent).toEqual(expected.message.resume)
-
-      useProvider(() => makeProvider())
-      const reply: any = await client.callTool({ name: 'message', arguments: { action: 'reply', reply_to: 'a-1', message: 'pong' } })
-      expect(reply.structuredContent).toEqual(expected.message.reply_edge_absent)
-
-      useProvider(() => makeProvider({
-        peers: async () => ({
-          peers: [
-            { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running' },
-            { run_id: 'rt_3' },
-          ],
-        }),
-        rename: async () => ({ outcome: 'renamed', runId: 'rt_2', label: 'mesh-renamed', previousLabel: 'mesh-a' }),
-        resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }),
-        last: async () => ({ outcome: 'sent', hasRecord: true, finalOutput: 'OK', stopReason: 'end_turn' }),
-      }))
-      const list: any = await client.callTool({ name: 'peers', arguments: { action: 'list' } })
-      expect(list.structuredContent).toEqual(expected.peers.list)
-      const rename: any = await client.callTool({ name: 'peers', arguments: { action: 'rename', name: 'mesh-renamed' } })
-      expect(rename.structuredContent).toEqual(expected.peers.rename)
-      const last: any = await client.callTool({ name: 'peers', arguments: { action: 'last', target: 'mesh-a' } })
-      expect(last.structuredContent).toEqual(expected.peers.last)
-
-      useProvider(() => makeProvider({ resolve: async () => ({ runId: '', match: 'none' }) }))
-      const failure: any = await client.callTool({ name: 'peers', arguments: { action: 'last', target: 'ghost' } })
-      expect(failure.structuredContent).toEqual(expected.error)
+      for (const testCase of cases) {
+        useProvider(testCase.provider)
+        const result: any = await client.callTool(testCase.call)
+        expect({ label: testCase.label, result: result.structuredContent })
+          .toEqual({ label: testCase.label, result: testCase.expected })
+        if (testCase.text !== undefined) {
+          expect({ label: testCase.label, text: result.content[0].text })
+            .toEqual({ label: testCase.label, text: testCase.text })
+        }
+      }
     })
   })
 
