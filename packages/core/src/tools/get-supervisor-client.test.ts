@@ -86,6 +86,14 @@ describe('read-only control clients', () => {
     expect(await statusTool({ supervisorId: socketPath })).toMatchObject({ runs: [], count: 0 })
   })
 
+  it('rejects a stale generation as a generation-mismatch RpcError', async () => {
+    await expect(brokerReceiveTool({ supervisorId: socketPath, generation: 'stale' }))
+      .rejects.toMatchObject({
+        name: 'RpcError',
+        data: { code: 'generation-mismatch', wire_code: 'generation-mismatch' },
+      })
+  })
+
   it('maps real inbound records onto asks', async () => {
     receivedMessages = [
       { from_run_id: 'rt-object', message_id: 'msg-object', payload: { message: 'object payload', role: 'agent' } },
