@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1497,5 +1498,72 @@ func TestChannelPolicyBlocked(t *testing.T) {
 	}
 	if channelPolicyBlocked("") {
 		t.Fatal("empty pane misreported as policy-blocked")
+	}
+}
+
+type fakeLauncher struct{ term terminal.Session }
+
+func (l fakeLauncher) Start(context.Context, terminal.StartOptions) (terminal.Session, error) {
+	return l.term, nil
+}
+
+func TestStartupWaitHoldsOnlyTheFirstPrompt(t *testing.T) {
+	binDir := t.TempDir()
+	script := "#!/bin/sh\necho 'Claude Code 2.0.0'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	term := terminal.NewFakeSession("test-term", 1, "Tips for getting started\n")
+	term.SetKind("tmux")
+	p := &Provider{
+		sessions: make(map[string]*session),
+		broker:   broker.New(""),
+		launcher: fakeLauncher{term: term},
+	}
+	started, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir(), ClaudeMCPWait: time.Hour})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	p.mu.Lock()
+	s := p.sessions[started.SessionID]
+	p.mu.Unlock()
+	t.Cleanup(s.CancelFn)
+	var sleeps atomic.Int32
+	s.SetStartupSleep(func(context.Context, time.Duration) bool {
+		sleeps.Add(1)
+		return true
+	})
+
+	submitted := func() events.Event {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case ev := <-s.Events:
+				if ev.Event == "agent.prompt_submitted" {
+					return ev
+				}
+			case <-deadline:
+				t.Fatal("no agent.prompt_submitted")
+			}
+		}
+	}
+
+	if err := p.Prompt(context.Background(), s.SessionID, "first"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if _, ok := submitted().Fields["startup_wait_ms"]; !ok {
+		t.Fatal("first prompt carries no startup_wait_ms")
+	}
+	if err := p.Prompt(context.Background(), s.SessionID, "second"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if _, ok := submitted().Fields["startup_wait_ms"]; ok {
+		t.Fatal("second prompt carries startup_wait_ms")
+	}
+	if got := sleeps.Load(); got != 1 {
+		t.Fatalf("startup wait slept %d times, want 1", got)
 	}
 }

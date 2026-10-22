@@ -41,6 +41,7 @@ type Session struct {
 	startupWait     time.Duration
 	launchedAt      time.Time
 	startupWaitDone bool
+	startupSleepFn  func(ctx context.Context, d time.Duration) bool
 
 	// progStatus is the OSC 7501 source set by AttachProgStatus. Without one,
 	// or before its first root report, the pane and transcript rules alone

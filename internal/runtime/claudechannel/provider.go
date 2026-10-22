@@ -493,6 +493,12 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		if !ok {
 			return
 		}
+		s.Mu.Lock()
+		finished := s.Finished
+		s.Mu.Unlock()
+		if finished {
+			return
+		}
 
 		if err := pastePromptAndSubmit(s.Ctx, s.Term, prompt); err != nil {
 			return

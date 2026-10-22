@@ -310,6 +310,19 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			})
 			return
 		}
+		s.Mu.Lock()
+		finished := s.Finished
+		s.Mu.Unlock()
+		if finished {
+			s.Emit(events.Event{
+				Event:     "agent.prompt_failed",
+				SessionID: s.SessionID,
+				Fields: map[string]any{
+					"error": "session finished during startup wait",
+				},
+			})
+			return
+		}
 		s.ArmProgStatusPrompt()
 		if err := s.Term.PasteAndEnter(s.Ctx, prompt); err != nil {
 			s.Emit(events.Event{

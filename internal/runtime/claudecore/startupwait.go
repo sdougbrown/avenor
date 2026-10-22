@@ -29,6 +29,15 @@ func (s *Session) SetStartupWait(wait time.Duration) {
 	s.launchedAt = startupNow()
 }
 
+// SetStartupSleep replaces how this session's startup wait sleeps, so a caller
+// can control the wait without a wall clock. fn reports false when ctx ended
+// first.
+func (s *Session) SetStartupSleep(fn func(ctx context.Context, d time.Duration) bool) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.startupSleepFn = fn
+}
+
 // WaitForStartupMCP holds the session's first prompt until the configured wait
 // since launch has passed, so MCP servers Claude Code connects in the
 // background are ready for the first turn. Time already spent reaching
@@ -38,6 +47,10 @@ func (s *Session) SetStartupWait(wait time.Duration) {
 func (s *Session) WaitForStartupMCP(ctx context.Context) (waited time.Duration, configured, ok bool) {
 	s.Mu.Lock()
 	wait, launchedAt, done := s.startupWait, s.launchedAt, s.startupWaitDone
+	sleep := s.startupSleepFn
+	if sleep == nil {
+		sleep = startupSleep
+	}
 	if wait > 0 {
 		s.startupWaitDone = true
 	}
@@ -50,7 +63,7 @@ func (s *Session) WaitForStartupMCP(ctx context.Context) (waited time.Duration, 
 	if remaining <= 0 {
 		return 0, true, true
 	}
-	if !startupSleep(ctx, remaining) {
+	if !sleep(ctx, remaining) {
 		return 0, true, false
 	}
 	return startupNow().Sub(start), true, true

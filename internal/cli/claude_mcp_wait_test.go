@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ func TestRunClaudeMCPWaitValidation(t *testing.T) {
 		{"negative", []string{"--backend", "claude", "--claude-mcp-wait", "-1s"}, "negative"},
 		{"over cap", []string{"--backend", "claude", "--claude-mcp-wait", "61s"}, "limit"},
 		{"unsupported backend", []string{"--backend", "agy", "--claude-mcp-wait", "5s"}, "claude-mcp-wait"},
+		{"not shorter than progress timeout", []string{"--backend", "claude", "--claude-mcp-wait", "10s", "--progress-timeout", "10s"}, "--progress-timeout"},
 		{"workflow", []string{"--loop-file", "loop.json", "--claude-mcp-wait", "5s"}, "--loop-file"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -57,5 +60,48 @@ func TestRunClaudeMCPWaitReachesStartOptions(t *testing.T) {
 	}
 	if got.ClaudeMCPWait != 7*time.Second {
 		t.Fatalf("StartOptions.ClaudeMCPWait = %v, want 7s", got.ClaudeMCPWait)
+	}
+}
+
+func TestRunClaudeMCPWaitWithRosterEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		backend  string
+		wantCode int
+	}{
+		{"claude entry carries the wait", "claude", 0},
+		{"non-claude entry rejects it", "codex-app-server", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got runtime.StartOptions
+			called := false
+			oldNewProvider := newProvider
+			provider := newScriptedProvider()
+			newProvider = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+				called = true
+				got = opts
+				return provider, nil
+			}
+			t.Cleanup(func() { newProvider = oldNewProvider })
+
+			dir := t.TempDir()
+			rosterPath := filepath.Join(dir, "roster.json")
+			contents := `{"horse":{"backend":"` + tc.backend + `","model":"m"}}`
+			if err := os.WriteFile(rosterPath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"--dir", dir, "--roster-file", rosterPath, "--roster-entry", "horse", "--claude-mcp-wait", "7s", "--prompt", "noop"}
+			var stderr strings.Builder
+			if code := run(args, func(string) string { return "" }, &stderr); code != tc.wantCode {
+				t.Fatalf("run() = %d, want %d; stderr=%s", code, tc.wantCode, stderr.String())
+			}
+			if tc.wantCode == 0 {
+				if got.ClaudeMCPWait != 7*time.Second {
+					t.Fatalf("StartOptions.ClaudeMCPWait = %v, want 7s", got.ClaudeMCPWait)
+				}
+			} else if called || !strings.Contains(stderr.String(), "claude-mcp-wait") {
+				t.Fatalf("called=%v stderr=%q, want claude-mcp-wait rejection before launch", called, stderr.String())
+			}
+		})
 	}
 }

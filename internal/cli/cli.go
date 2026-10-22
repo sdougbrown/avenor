@@ -239,6 +239,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
+		if *claudeMCPWait != 0 && *progressTimeout != 0 && *claudeMCPWait >= *progressTimeout {
+			fmt.Fprintf(stderr, "avenor: --claude-mcp-wait %s must be shorter than --progress-timeout %s, which fires while the first prompt is held\n", *claudeMCPWait, *progressTimeout)
+			return exitWithSentinel(1)
+		}
 	}
 
 	// Pony backend setup

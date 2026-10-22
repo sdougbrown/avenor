@@ -787,6 +787,85 @@ func TestPromptSubmittedReportsStartupWaitOnlyWhenConfigured(t *testing.T) {
 	}
 }
 
+// A root report that lands during the startup wait belongs to the time before
+// the prompt, so it must not count as the turn starting.
+func TestStartupWaitRunsBeforeThePromptIsArmed(t *testing.T) {
+	p := &Provider{sessions: make(map[string]*claudecore.Session)}
+	term := terminal.NewFakeSession("test-term", 1, testInputBox)
+	term.SetKind("pty")
+	term.SetProgStatusAnswering(true)
+	term.AnswerProgStatusQuery()
+	term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgIdle, Progress: -1})
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-order", EventsBuf: 16})
+	defer s.CancelFn()
+	s.Term = term
+	s.AttachProgStatus(term)
+	s.SetStartupWait(time.Hour)
+	s.SetStartupSleep(func(context.Context, time.Duration) bool {
+		term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgWorking, Progress: -1})
+		return true
+	})
+	p.sessions[s.SessionID] = s
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event != "agent.prompt_submitted" {
+				continue
+			}
+			if s.ProgStatusTurnStarted() {
+				t.Fatal("a working report from the startup wait counted as the turn starting")
+			}
+			return
+		case <-deadline:
+			t.Fatal("no agent.prompt_submitted")
+		}
+	}
+}
+
+func TestPromptSkipsPasteWhenSessionFinishedDuringStartupWait(t *testing.T) {
+	p := &Provider{sessions: make(map[string]*claudecore.Session)}
+	term := terminal.NewFakeSession("test-term", 1, testInputBox)
+	term.SetKind("pty")
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-fin", EventsBuf: 16})
+	defer s.CancelFn()
+	s.Term = term
+	s.SetStartupWait(time.Hour)
+	s.SetStartupSleep(func(context.Context, time.Duration) bool {
+		s.Mu.Lock()
+		s.Finished = true
+		s.Mu.Unlock()
+		return true
+	})
+	p.sessions[s.SessionID] = s
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "agent.prompt_submitted" {
+				t.Fatal("prompt submitted after the session finished")
+			}
+			if ev.Event != "agent.prompt_failed" {
+				continue
+			}
+			if calls := term.PasteCalls(); len(calls) != 0 {
+				t.Fatalf("paste calls = %v, want none", calls)
+			}
+			return
+		case <-deadline:
+			t.Fatal("no agent.prompt_failed")
+		}
+	}
+}
+
 func TestCancelTakesProgStatusIdleAfterWorkingAsCancelled(t *testing.T) {
 	p := &Provider{
 		sessions:    make(map[string]*claudecore.Session),
