@@ -21,6 +21,7 @@ import {
   quote,
   renderLast,
   renderOutcome,
+  repair,
   type MessageOutcome,
 } from './messaging-text.js'
 import type { MessageProvider, PeerRecord, ProviderResult } from './tools/message.js'
@@ -644,6 +645,52 @@ describe('router invariants', () => {
     await expect(executeMessage(provider, { action: 'resume', target: 'mesh-b', message: 'again', label: 'mesh-b-2' }))
       .rejects.toThrow(/resume succeeded but registration failed for run_id "run-77" runtime_id "rt_77"/)
     expect(resumedHook).toBe(0)
+  })
+
+  it('reports a filesystem error from run state as a refused read', async () => {
+    const failingState = (thrown: unknown): MessageProvider => ({
+      caller: () => ({ kind: 'broker', runId: 'run-caller' }),
+      surface: () => 'channeltools',
+      role: () => 'agent',
+      resolve: async () => ({ runId: 'rt_7', label: 'mesh-a', match: 'unique' }),
+      state: async () => {
+        throw thrown
+      },
+      tell: async () => ({ outcome: 'sent' }),
+      ask: async () => ({ outcome: 'sent' }),
+      reply: async () => ({ outcome: 'sent' }),
+      withdraw: async () => ({ outcome: 'withdrawn' }),
+      resume: async () => ({ outcome: 'resumed' }),
+      rename: async () => ({ outcome: 'renamed' }),
+      last: async () => ({ outcome: 'sent' }),
+      peers: async () => ({ peers: [] }),
+    })
+    const failure = (err: unknown) => err as ToolError
+    const path = '/home/someone/.avenor/runs/run-77/state.json'
+
+    for (const code of ['ENOENT', 'EACCES', 'EPERM']) {
+      const err = Object.assign(new Error(`${code}: no such file or directory, open '${path}'`), { code })
+      const error = failure(
+        await executeMessage(failingState(err), { action: 'tell', target: 'mesh-a', message: 'hi' })
+          .then(() => null, (caught: unknown) => caught),
+      )
+      expect(error, code).toBeInstanceOf(ToolError)
+      expect(error.code, code).toBe('refused')
+      expect(error.message, code).toBe(repair('refused_io'))
+      expect(error.message, code).not.toContain(path)
+      expect(error.message, code).not.toContain(code)
+    }
+
+    const control = failure(
+      await executeMessage(failingState(new Error('control plane said no')), {
+        action: 'tell',
+        target: 'mesh-a',
+        message: 'hi',
+      }).then(() => null, (caught: unknown) => caught),
+    )
+    expect(control).toBeInstanceOf(ToolError)
+    expect(control.code).toBe('refused')
+    expect(control.message).toBe('control plane said no')
   })
 })
 
