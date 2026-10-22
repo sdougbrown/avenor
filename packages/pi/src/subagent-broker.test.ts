@@ -211,6 +211,16 @@ describe('child broker ask', () => {
     expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
   })
 
+  it('reports a wait failure whose cleanup confirmed the edge gone as edge-absent', async () => {
+    const { fetchImpl } = stubFetch({
+      '/send': () => Response.json({ queued: true, outcome: 'sent' }),
+      '/wait_reply': () => Promise.reject(new Error('connection reset')),
+      '/cancel_message': () => new Response('no pending ask', { status: 404 }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.11')
+    expect(result).toEqual({ outcome: 'edge-absent', messageId: 'av1.m.11' })
+  })
+
   it('withdraws a child ask when the caller aborts', async () => {
     const controller = new AbortController()
     const { calls, fetchImpl } = stubFetch({
@@ -247,6 +257,28 @@ describe('child broker routes', () => {
     })
     const result = await createBrokerChildBroker(env, fetchImpl).reply('rt_asker', 'av1.r.1', 'OK')
     expect(result).toEqual({ outcome: 'edge-absent', messageId: 'av1.r.1' })
+  })
+
+  it('replies under the inbound ask id and carries reply_to without a generation', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Response.json({ queued: true, outcome: 'sent' }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).reply('rt_asker', 'ask-9', 'green')
+    expect(result).toEqual({ outcome: 'sent', messageId: 'ask-9' })
+    const send = calls.find(call => call.url.endsWith('/send'))
+    expect(send?.body.generation).toBeUndefined()
+    const payload = send?.body.payload as Record<string, unknown>
+    expect(payload).toMatchObject({
+      id: 'ask-9.reply',
+      from: 'rt_1',
+      from_run_id: 'rt_1',
+      to_run_id: 'rt_asker',
+      role: 'agent',
+      reply_to: 'ask-9',
+      message: 'green',
+    })
+    expect(payload).not.toHaveProperty('expects_reply')
+    expect(calls.some(call => call.url.endsWith('/sessions'))).toBe(false)
   })
 
   it('classifies a rejection the envelope does not describe by its status', async () => {
@@ -289,6 +321,24 @@ describe('child broker routes', () => {
       '/cancel_message': () => Response.json({ code: 'fence-capacity' }, { status: 503 }),
     })
     expect((await createBrokerChildBroker(env, full.fetchImpl).withdraw('av1.m.8')).outcome).toBe('possibly-pending')
+  })
+
+  it('maps a code-less refusal by its status when the body carries no wire code', async () => {
+    const forbidden = stubFetch({ '/last_message': () => new Response('forbidden', { status: 403 }) })
+    await expect(createBrokerChildBroker(env, forbidden.fetchImpl).last('ghost'))
+      .rejects.toMatchObject({ name: 'ToolError', code: 'not_permitted', message: 'forbidden' })
+
+    const conflict = stubFetch({ '/rename': () => new Response('two matches', { status: 409 }) })
+    await expect(createBrokerChildBroker(env, conflict.fetchImpl).rename({ name: 'dup' }))
+      .rejects.toMatchObject({ name: 'ToolError', code: 'ambiguous_name', message: 'two matches' })
+  })
+
+  it('rejects a withdrawal whose cancel drew no HTTP response', async () => {
+    const { fetchImpl } = stubFetch({
+      '/cancel_message': () => Promise.reject(new Error('socket hang up')),
+    })
+    await expect(createBrokerChildBroker(env, fetchImpl).withdraw('av1.m.40'))
+      .rejects.toThrow('socket hang up')
   })
 
   it('lists peers from /sessions with header credentials', async () => {
@@ -404,6 +454,53 @@ describe('child broker generation pin', () => {
     expect(calls.find(call => call.url.endsWith('/send'))?.body.generation).toBe(generation)
     expect(calls.filter(call => call.url.endsWith('/cancel_message')).map(call => call.body.generation))
       .toEqual([generation, generation])
+  })
+
+  it('reports an ask whose generation pin was refused as auth-rejected without sending', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/sessions': () => new Response('denied', { status: 401 }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.30')
+    expect(result).toEqual({ outcome: 'auth-rejected', messageId: 'av1.m.30' })
+    expect(calls.some(call => call.url.endsWith('/send'))).toBe(false)
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
+  })
+
+  it('reports an ask whose generation pin failed as not-sent without sending', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/sessions': () => new Response('boom', { status: 500 }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.31')
+    expect(result).toEqual({ outcome: 'not-sent', messageId: 'av1.m.31' })
+    expect(calls.some(call => call.url.endsWith('/send'))).toBe(false)
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
+  })
+
+  it('rejects a withdrawal whose generation pin was refused, without cancelling', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/sessions': () => new Response('denied', { status: 401 }),
+    })
+    await expect(createBrokerChildBroker(env, fetchImpl).withdraw('av1.m.32'))
+      .rejects.toMatchObject({ name: 'ToolError', code: 'refused', message: 'denied' })
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
+  })
+
+  it('re-reads a generation the broker did not advertise instead of latching the empty pin', async () => {
+    let reads = 0
+    const { calls, fetchImpl } = stubFetch({
+      '/sessions': () => {
+        reads += 1
+        return Response.json({ sessions: [], generation: reads === 1 ? '' : 'gen-2' })
+      },
+      '/send': () => Response.json({ queued: true, outcome: 'sent' }),
+      '/wait_reply': () => Response.json({ outcome: 'replied', payload: { message: 'pong' } }),
+    })
+    const broker = createBrokerChildBroker(env, fetchImpl)
+    expect((await broker.ask('supervisor', 'first', 'av1.m.33')).outcome).toBe('replied')
+    expect((await broker.ask('supervisor', 'second', 'av1.m.34')).outcome).toBe('replied')
+    expect(calls.filter(call => call.url.endsWith('/sessions'))).toHaveLength(2)
+    expect(calls.filter(call => call.url.endsWith('/send')).map(call => call.body.generation))
+      .toEqual(['', 'gen-2'])
   })
 
   it('reports an ask as not-sent when the broker advertises no generation', async () => {
