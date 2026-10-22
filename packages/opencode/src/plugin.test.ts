@@ -32,12 +32,15 @@ const eventsToolMock = mock(async () => ({ events: [] }))
 const answerPermissionToolMock = mock(async () => ({ ok: true }))
 const workflowCancelToolMock = mock(async () => ({ cancelled: true }))
 let providerFactory: () => MessageProvider = () => makeProvider()
-const getSupervisorClientMock = mock(async () => ({
+const defaultSupervisorClient = async () => ({
   client: { messagePreflight: async () => ({ generation: 'gen-1' }) },
   supervisorId: '/tmp/avenor.sock',
   isSingleton: true,
   sup: null,
-}))
+})
+const getSupervisorClientMock = mock(defaultSupervisorClient)
+/** Every host provider the plugin built, so a rebind is visible by generation. */
+const hostProviderOptions: Array<Record<string, unknown>> = []
 
 function makeProvider(overrides: Partial<MessageProvider> = {}): MessageProvider {
   return {
@@ -179,7 +182,8 @@ mock.module('@dougbots/avenor-core', () => ({
   peersTool: realPeersTool,
   peersDetails,
   resultOutput,
-  createHostMessageProvider: (options: { onResumed?: MessageProvider['onResumed'] }) => {
+  createHostMessageProvider: (options: Record<string, any>) => {
+    hostProviderOptions.push({ ...options })
     const provider = providerFactory()
     if (options?.onResumed) provider.onResumed = options.onResumed
     return provider
@@ -284,6 +288,7 @@ describe('AvenorPlugin', () => {
     answerPermissionToolMock.mockClear()
     workflowCancelToolMock.mockClear()
     getSupervisorClientMock.mockClear()
+    getSupervisorClientMock.mockImplementation(defaultSupervisorClient)
     providerFactory = () => makeProvider()
     resultToolMock.mockClear()
     shutdownToolMock.mockClear()
@@ -1166,7 +1171,7 @@ describe('OpenCode message tool parity', () => {
     expect(output.output).toBe('message "m-1" delivered to "mesh-a"')
   })
 
-  it('returns the shared result objects for every message and peers action', async () => {
+  it('returns the shared result objects for tell, resume, reply and every peers action', async () => {
     const expected = resultFixture as unknown as {
       message: Record<string, Record<string, unknown>>
       peers: Record<string, Record<string, unknown>>
@@ -1390,6 +1395,38 @@ describe('OpenCode host turn producer', () => {
     expect(record).toHaveBeenCalledTimes(1)
     expect(record).toHaveBeenCalledWith('one', 'end_turn', false)
     expect(producer.message).toHaveBeenCalledWith({ path: { id: 'session-1', messageID: 'msg-1' } })
+    expect(getSupervisorClientMock).toHaveBeenCalledWith(undefined, { owner: true })
+  })
+
+  it('rebinds to a restarted supervisor and adopts its generation', async () => {
+    const first = { messagePreflight: mock(async () => ({ generation: 'gen-1' })) }
+    const second = { messagePreflight: mock(async () => ({ generation: 'gen-2' })) }
+    let current = first
+    getSupervisorClientMock.mockImplementation(async () => ({
+      client: current,
+      supervisorId: '/tmp/avenor.sock',
+      isSingleton: true,
+      sup: null,
+    }))
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    hostProviderOptions.length = 0
+
+    await bindSession(hooks, 'session-1')
+    await bindSession(hooks, 'session-1')
+    expect(first.messagePreflight).toHaveBeenCalledTimes(1)
+
+    // A restart hands back a different client for the same supervisor.
+    current = second
+    await bindSession(hooks, 'session-1')
+    expect(second.messagePreflight).toHaveBeenCalledTimes(1)
+    expect(hostProviderOptions.map(options => options.generation)).toEqual(['gen-1', 'gen-2'])
+
+    // The rebind keeps the session the host was already bound to.
+    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    expect(record).toHaveBeenCalledWith('one', 'end_turn', false)
   })
 
   it('publishes each settled turn once, however often its event repeats', async () => {
@@ -1521,25 +1558,26 @@ describe('OpenCode host turn producer', () => {
     expect(record).toHaveBeenCalledWith('', 'cancelled', false)
   })
 
-  it('publishes canonical stop reasons for ai-sdk finish values', async () => {
+  it('publishes canonical stop reasons for ai-sdk finish values and an unknown error', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'checking' }] })
 
-    const cases: Array<[string, string]> = [
-      ['tool-calls', 'tool_use'],
-      ['tool_calls', 'tool_use'],
-      ['toolUse', 'tool_use'],
-      ['end-turn', 'end_turn'],
-      ['stop', 'end_turn'],
-      ['length', 'max_tokens'],
-      ['', 'end_turn'],
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ finish: 'tool-calls' }, 'tool_use'],
+      [{ finish: 'tool_calls' }, 'tool_use'],
+      [{ finish: 'toolUse' }, 'tool_use'],
+      [{ finish: 'end-turn' }, 'end_turn'],
+      [{ finish: 'stop' }, 'end_turn'],
+      [{ finish: 'length' }, 'max_tokens'],
+      [{ finish: '' }, 'end_turn'],
+      [{ error: { name: 'ModelAPIError' } }, 'error'],
     ]
-    for (const [finish, want] of cases) {
+    for (const [info, want] of cases) {
       record.mockClear()
       providerFactory = () => makeProvider({ recordLastTurn: record })
       const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
       await bindSession(hooks, 'session-1')
-      await turn(hooks, assistant('msg-1', { finish }))
+      await turn(hooks, assistant('msg-1', info))
       expect(record.mock.calls.map(call => call[1])).toEqual([want])
     }
   })
@@ -1597,5 +1635,27 @@ describe('OpenCode host turn producer', () => {
 
     expect(attempts).toBe(2)
     expect(record.mock.calls[1]).toEqual(['one', 'end_turn', false])
+  })
+
+  it('publishes one turn when a repeat update arrives while the publish is in flight', async () => {
+    let calls = 0
+    let release: (() => void) | undefined
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {
+      calls++
+      if (calls === 1) await new Promise<void>((resolve) => { release = resolve })
+    })
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(hooks, 'session-1')
+
+    const first = turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    await flush()
+    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    release?.()
+    await first
+
+    expect(record).toHaveBeenCalledTimes(1)
+    expect(producer.message).toHaveBeenCalledTimes(1)
   })
 })
