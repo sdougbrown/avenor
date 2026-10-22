@@ -17,7 +17,10 @@ type ZodInternals = {
  * contract's own sentence. This schema therefore publishes the supplied JSON
  * Schema (through zod's `toJSONSchema` override) while admitting every argument
  * object unchanged, including the `undefined` a call that omits `arguments`
- * produces, so the router answers first on this surface too.
+ * produces and an explicit `null`, so the router answers first wherever the
+ * argument object reaches this schema. A `null` delivered over the protocol does
+ * not: the SDK's own `CallToolRequestSchema` types `arguments` as a record and
+ * refuses it there, one layer above this coercion.
  *
  * Both behaviours ride on zod internals, so construction checks they are there:
  * a zod release that drops them would otherwise leave this surface publishing
@@ -33,7 +36,7 @@ export function routerAdmittedSchema(published: unknown): z.ZodType {
   }
   const run = internals.run.bind(internals)
   internals.run = (payload, ctx) =>
-    run(payload.value === undefined ? { ...payload, value: {} } : payload, ctx)
+    run(payload.value == null ? { ...payload, value: {} } : payload, ctx)
   internals.toJSONSchema = () => structuredClone(published)
   return schema
 }

@@ -23,9 +23,10 @@ describe('routerAdmittedSchema', () => {
       expect(z.toJSONSchema(schema, { target: 'draft-7', io: 'input' })).toEqual(published)
     })
 
-    it(`admits an omitted arguments object and leaves ${name} admission to the router`, () => {
+    it(`admits omitted and null arguments and leaves ${name} admission to the router`, () => {
       const schema = routerAdmittedSchema(published)
       expect(schema.safeParse(undefined).success).toBe(true)
+      expect(schema.safeParse(null).success).toBe(true)
       expect(schema.safeParse({ action: 5 }).success).toBe(true)
     })
   }
