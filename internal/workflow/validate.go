@@ -279,14 +279,16 @@ func validateTemplateParams(template Template) error {
 	if err := validateWorkingDirectoryRefs(template, declared); err != nil {
 		return err
 	}
-	return validateLaunchWrappers(template)
+	return validateLaunchWrappers(template, declared)
 }
 
-// validateLaunchWrappers validates every launch-wrapper definition: unique
-// non-blank ID, non-empty argv whose first element is a literal absolute
-// executable path, values non-empty and NUL-free.
-// Node selections must name a declared wrapper on a provider-backed action.
-func validateLaunchWrappers(template Template) error {
+// validateLaunchWrappers checks every definition and node selection, including
+// unused definitions. Parameter references must name declared, required params.
+func validateLaunchWrappers(template Template, declared map[string]struct{}) error {
+	required := make(map[string]bool, len(template.Params))
+	for _, param := range template.Params {
+		required[param.ID] = param.Required
+	}
 	ids := make(map[string]struct{}, len(template.LaunchWrappers))
 	for index, wrapper := range template.LaunchWrappers {
 		if strings.TrimSpace(wrapper.ID) == "" {
@@ -296,7 +298,7 @@ func validateLaunchWrappers(template Template) error {
 			return fmt.Errorf("invalid workflow template: launch_wrappers declares %q twice", wrapper.ID)
 		}
 		ids[wrapper.ID] = struct{}{}
-		if err := validateLaunchWrapperArgv(wrapper.ID, wrapper.Argv); err != nil {
+		if err := validateLaunchWrapperArgv(wrapper.ID, wrapper.Argv, declared, required); err != nil {
 			return err
 		}
 	}
@@ -314,21 +316,38 @@ func validateLaunchWrappers(template Template) error {
 	return nil
 }
 
-// validateLaunchWrapperArgv enforces one definition's argv rules: strict
-// element shapes, non-empty NUL-free values, and a literal absolute
-// executable path first.
-func validateLaunchWrapperArgv(id string, argv []LaunchWrapperArg) error {
+// validateLaunchWrapperArgv checks tagged arguments and requires a literal
+// absolute executable path first. Parameter references must name required params.
+func validateLaunchWrapperArgv(id string, argv []LaunchWrapperArg, declared map[string]struct{}, required map[string]bool) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("invalid workflow template: launch wrapper %q argv must not be empty", id)
 	}
 	for index, arg := range argv {
 		switch arg.Type {
 		case LaunchWrapperArgKindLiteral:
+			if arg.FromInstanceParam != "" {
+				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] must not declare from_instance_param", id, index)
+			}
 			if arg.Value == "" {
 				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] literal value must not be empty", id, index)
 			}
 			if strings.ContainsRune(arg.Value, '\x00') {
 				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] literal value must not contain NUL", id, index)
+			}
+		case LaunchWrapperArgKindInstanceParam:
+			if arg.Value != "" {
+				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] must not declare value", id, index)
+			}
+			if strings.TrimSpace(arg.FromInstanceParam) == "" {
+				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d].from_instance_param is required", id, index)
+			}
+			if _, ok := declared[arg.FromInstanceParam]; !ok {
+				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] names undeclared instance param %q", id, index, arg.FromInstanceParam)
+			}
+			// An unsupplied optional param would resolve to an empty argv
+			// element, so the named param must be declared required.
+			if !required[arg.FromInstanceParam] {
+				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] names instance param %q, which must be declared required", id, index, arg.FromInstanceParam)
 			}
 		default:
 			return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] type %q is not a launch_wrapper_arg type", id, index, arg.Type)

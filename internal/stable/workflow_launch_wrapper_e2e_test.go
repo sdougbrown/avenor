@@ -18,13 +18,13 @@ import (
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
-// launchWrapperTestValue is a literal argv element containing a space and
-// shell metacharacters: the resolver must pass it through as one exact argv
-// element with no expansion.
+// launchWrapperTestValue is an instance-param value with a space and shell
+// metacharacters: the resolver must pass it through as one exact argv element
+// with no expansion.
 const launchWrapperTestValue = `value with spaces $(echo pwned)`
 
-// launchWrapperTestArgv is the argv the "wrap-argv" launch wrapper declares:
-// one literal executable element plus one literal argument.
+// launchWrapperTestArgv is the argv the "wrap-argv" launch wrapper resolves
+// to: one literal element plus the wrapper_arg instance param.
 var launchWrapperTestArgv = []string{"/usr/bin/extra-wrap", launchWrapperTestValue}
 
 // wrapperCapture records the supervisor runtime ID and the LaunchWrapper of
@@ -130,8 +130,8 @@ func assertWrapperAttribution(t *testing.T, capture *wrapperCapture, startRTs, c
 
 // launchWrapperTemplate builds a one-node template whose entry node runs the
 // given action type with the given dispatch mode, optionally bound to the
-// "wrap-argv" launch wrapper (one literal executable element plus one
-// literal argument).
+// "wrap-argv" launch wrapper (one literal element plus the required
+// wrapper_arg instance param).
 func launchWrapperTemplate(t *testing.T, templateID, actionType, cfgPath, dispatchMode string, withWrapper bool) []byte {
 	t.Helper()
 	var action map[string]any
@@ -161,11 +161,12 @@ func launchWrapperTemplate(t *testing.T, templateID, actionType, cfgPath, dispat
 		"template_id":      templateID,
 		"template_version": "1",
 		"entry_nodes":      []string{"start"},
+		"params":           []any{map[string]any{"id": "wrapper_arg", "type": "string", "required": true}},
 		"launch_wrappers": []any{map[string]any{
 			"id": "wrap-argv",
 			"argv": []any{
 				map[string]any{"type": "literal", "value": "/usr/bin/extra-wrap"},
-				map[string]any{"type": "literal", "value": launchWrapperTestValue},
+				map[string]any{"type": "instance_param", "from_instance_param": "wrapper_arg"},
 			},
 		}},
 		"nodes":             []any{node},
@@ -227,7 +228,8 @@ func TestWorkflowLaunchWrapperControllerDispatchCarriesResolvedArgv(t *testing.T
 			capture := &wrapperCapture{}
 			capture.install(t, f)
 			wf := f.addWorkflow(t, "tmpl-wrapper-"+tc.mode,
-				launchWrapperTemplate(t, "tmpl-wrapper-"+tc.mode, tc.mode, cfgPath, "auto", tc.withWrapper))
+				launchWrapperTemplate(t, "tmpl-wrapper-"+tc.mode, tc.mode, cfgPath, "auto", tc.withWrapper),
+				map[string]string{"wrapper_arg": launchWrapperTestValue})
 			f.enableController(t, 2)
 
 			// Wait on durable workflow evidence: every node satisfies through
@@ -263,7 +265,8 @@ func TestWorkflowLaunchWrapperSessionOwnershipRecordsResolvedArgv(t *testing.T) 
 	capture := &wrapperCapture{}
 	capture.install(t, f)
 	wf := f.addWorkflow(t, "tmpl-wrapper-ownership",
-		launchWrapperTemplate(t, "tmpl-wrapper-ownership", "run", "", "auto", true))
+		launchWrapperTemplate(t, "tmpl-wrapper-ownership", "run", "", "auto", true),
+		map[string]string{"wrapper_arg": launchWrapperTestValue})
 	f.enableController(t, 2)
 
 	f.waitForInstance(t, wf, "the node to satisfy through the supervisor handoff", func(inst *workflow.WorkflowInstance) bool {
@@ -302,7 +305,8 @@ func TestWorkflowLaunchWrapperManualStartCarriesResolvedArgv(t *testing.T) {
 	capture := &wrapperCapture{}
 	capture.install(t, f)
 	wf := f.addWorkflow(t, "tmpl-wrapper-manual",
-		launchWrapperTemplate(t, "tmpl-wrapper-manual", "run", "", "manual", true))
+		launchWrapperTemplate(t, "tmpl-wrapper-manual", "run", "", "manual", true),
+		map[string]string{"wrapper_arg": launchWrapperTestValue})
 
 	inst := f.instance(t, wf)
 	act := activationFor(&inst, "start")

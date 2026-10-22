@@ -854,6 +854,23 @@
               "value"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "instance_param"
+              },
+              "from_instance_param": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "type",
+              "from_instance_param"
+            ],
+            "additionalProperties": false
           }
         ]
       }

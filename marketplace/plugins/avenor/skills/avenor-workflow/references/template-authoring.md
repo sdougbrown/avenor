@@ -207,7 +207,7 @@ existing version, so a missed bump fails the setup script.
 A template may declare a `launch_wrappers` registry of trusted, author-reviewed
 executable configurations. A `run`, `loop`, or `team` node selects one by ID via
 the `launch_wrapper` field (a sibling of `action`, never inside it). Each `argv`
-element is a literal value, passed through as one complete argv element with no
-interpolation or expansion. Wrappers are
+element is either a literal or a tagged `instance_param` reference to a declared,
+required `string` param, substituted as one complete argv element. Wrappers are
 trusted author ownership — there is no per-workflow allowlist. See the canonical
 [workflow docs](https://avenor.douggo.com/workflow#launch-wrappers).

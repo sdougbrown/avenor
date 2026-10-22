@@ -36,28 +36,34 @@ type WorkingDirectoryRef struct {
 	FromInstanceParam string `json:"from_instance_param"`
 }
 
-// LaunchWrapperArgKind discriminates the argv element form.
+// LaunchWrapperArgKind discriminates the two argv element forms.
 type LaunchWrapperArgKind string
 
 const (
 	// LaunchWrapperArgKindLiteral is one exact argv element: the value is
 	// passed verbatim, with no shell expansion or interpolation.
 	LaunchWrapperArgKindLiteral LaunchWrapperArgKind = "literal"
+	// LaunchWrapperArgKindInstanceParam resolves the element from the named
+	// instance parameter's recorded value.
+	LaunchWrapperArgKindInstanceParam LaunchWrapperArgKind = "instance_param"
 )
 
 // LaunchWrapperDefinition is a trusted named argv template: a wrapper
-// executable plus its fixed arguments. Definitions are project
-// configuration, not untrusted input, so there is no runtime allowlist.
+// executable plus its fixed and instance-param arguments. Definitions are
+// project configuration, not untrusted input, so there is no runtime
+// allowlist.
 type LaunchWrapperDefinition struct {
 	ID   string             `json:"id"`
 	Argv []LaunchWrapperArg `json:"argv"`
 }
 
-// LaunchWrapperArg is one argv element: a literal value, discriminated by
-// Type. Values are never trimmed or rewritten.
+// LaunchWrapperArg is one argv element. Exactly one variant is declared: a
+// literal value or an instance-parameter reference, discriminated by Type.
+// Values are never trimmed or rewritten.
 type LaunchWrapperArg struct {
-	Type  LaunchWrapperArgKind `json:"type"`
-	Value string               `json:"value,omitempty"`
+	Type              LaunchWrapperArgKind `json:"type"`
+	Value             string               `json:"value,omitempty"`
+	FromInstanceParam string               `json:"from_instance_param,omitempty"`
 }
 
 // TemplateParam declares one instance parameter a template accepts at
