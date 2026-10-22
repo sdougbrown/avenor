@@ -255,6 +255,18 @@ async function flush(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 0))
 }
 
+/**
+ * Flush until the predicate holds, bounded by a deadline so a callback chain
+ * that never reaches the observable fails the test instead of looping forever.
+ */
+async function waitFor(predicate: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 2000
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    await flush()
+  }
+}
+
 async function flushMicrotasks(): Promise<void> {
   for (let index = 0; index < 8; index++) {
     await Promise.resolve()
@@ -290,6 +302,7 @@ describe('AvenorPlugin', () => {
     getSupervisorClientMock.mockClear()
     getSupervisorClientMock.mockImplementation(defaultSupervisorClient)
     providerFactory = () => makeProvider()
+    hostProviderOptions.length = 0
     resultToolMock.mockClear()
     shutdownToolMock.mockClear()
     killToolMock.mockClear()
@@ -1171,6 +1184,32 @@ describe('OpenCode message tool parity', () => {
     expect(output.output).toBe('message "m-1" delivered to "mesh-a"')
   })
 
+  it('routes an ask through the shared provider with its timeout and abort signal', async () => {
+    const ask = mock(async (
+      _target: string,
+      _message: string,
+      _timeoutMs?: number,
+      _signal?: AbortSignal,
+    ) => ({ outcome: 'sent', messageId: 'a-1' }))
+    providerFactory = () => makeProvider({
+      state: async () => ({ live: true, resumable: false, status: 'running' }),
+      ask,
+    })
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const context = toolContext('session-1')
+
+    await (hooks.tool?.avenor_message as any).execute(
+      { action: 'ask', target: 'mesh-a', message: 'hi', timeout_ms: 5000 },
+      context,
+    )
+
+    expect(ask).toHaveBeenCalledTimes(1)
+    const [target, message, timeoutMs, signal] = ask.mock.calls[0] as unknown as
+      [string, string, number, AbortSignal]
+    expect([target, message, timeoutMs]).toEqual(['mesh-a', 'hi', 5000])
+    expect(signal).toBe(context.abort)
+  })
+
   it('returns the shared result objects for tell, resume, reply and every peers action', async () => {
     const expected = resultFixture as unknown as {
       message: Record<string, Record<string, unknown>>
@@ -1258,7 +1297,7 @@ describe('OpenCode message tool parity', () => {
     )
     expect(output.title).toBe('again — resumed')
     expect(output.output).toContain('Run: run-2')
-    for (let index = 0; index < 4; index++) await flush()
+    await waitFor(() => dialMock.mock.calls.length > 0, 'the resumed run to dial')
     expect(dialMock).toHaveBeenCalledWith('/tmp/avenor.sock')
   })
 
@@ -1284,7 +1323,7 @@ describe('OpenCode message tool parity', () => {
         { action: 'resume', target: 'run-1', message: 'again' },
         toolContext('session-2'),
       )
-      for (let index = 0; index < 8; index++) await flush()
+      await waitFor(() => promptAsync.mock.calls.length > 0, 'the resumed run prompt to be sent')
     } finally {
       console.error = originalError
     }
@@ -1353,6 +1392,12 @@ describe('OpenCode peers last', () => {
 describe('OpenCode host turn producer', () => {
   type Hooks = Awaited<ReturnType<typeof AvenorPlugin>>
 
+  // The provider cache is module scope, so a test that binds leaves options for
+  // the next one; the reset above only covers the first describe.
+  beforeEach(() => {
+    hostProviderOptions.length = 0
+  })
+
   function makeProducerClient(partsByMessage: Record<string, unknown[]>) {
     const message = mock(async (options: any) => ({
       data: { info: {}, parts: partsByMessage[options.path?.messageID] ?? [] },
@@ -1412,7 +1457,6 @@ describe('OpenCode host turn producer', () => {
     providerFactory = () => makeProvider({ recordLastTurn: record })
     const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
     const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
-    hostProviderOptions.length = 0
 
     await bindSession(hooks, 'session-1')
     await bindSession(hooks, 'session-1')
@@ -1427,6 +1471,45 @@ describe('OpenCode host turn producer', () => {
     // The rebind keeps the session the host was already bound to.
     await turn(hooks, assistant('msg-1', { finish: 'stop' }))
     expect(record).toHaveBeenCalledWith('one', 'end_turn', false)
+  })
+
+  it('keeps the restarted client when two binds interleave across the preflight', async () => {
+    let releaseStale: (() => void) | undefined
+    const stale = {
+      messagePreflight: mock(() => new Promise<{ generation: string }>((resolve) => {
+        releaseStale = () => resolve({ generation: 'gen-1' })
+      })),
+    }
+    const restarted = { messagePreflight: mock(async () => ({ generation: 'gen-2' })) }
+    let current = stale
+    getSupervisorClientMock.mockImplementation(async () => ({
+      client: current,
+      supervisorId: '/tmp/avenor.sock',
+      isSingleton: true,
+      sup: null,
+    }))
+    providerFactory = () => makeProvider({ recordLastTurn: async () => {} })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+
+    // The first bind resolves the old client and stalls in its preflight.
+    const stalling = bindSession(hooks, 'session-1')
+    await flush()
+
+    // The supervisor restarts; a second bind settles on the new client.
+    current = restarted
+    await bindSession(hooks, 'session-1')
+    expect(hostProviderOptions.map(options => options.generation)).toEqual(['gen-2'])
+
+    // The stale bind's preflight resolves late: it must not cache its client.
+    releaseStale?.()
+    await stalling
+    expect(hostProviderOptions.map(options => options.generation)).toEqual(['gen-2'])
+
+    // The binding in use stays the restarted one, so nothing preflights again.
+    await bindSession(hooks, 'session-1')
+    expect(stale.messagePreflight).toHaveBeenCalledTimes(1)
+    expect(restarted.messagePreflight).toHaveBeenCalledTimes(1)
   })
 
   it('publishes each settled turn once, however often its event repeats', async () => {
@@ -1651,11 +1734,49 @@ describe('OpenCode host turn producer', () => {
 
     const first = turn(hooks, assistant('msg-1', { finish: 'stop' }))
     await flush()
-    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    const repeat = turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    await flush()
     release?.()
-    await first
+    await Promise.all([first, repeat])
 
     expect(record).toHaveBeenCalledTimes(1)
     expect(producer.message).toHaveBeenCalledTimes(1)
+  })
+
+  it('publishes queued turns in order so an older turn cannot land last', async () => {
+    const recorded: string[] = []
+    let calls = 0
+    let releaseFirst: (() => void) | undefined
+    const record = mock(async (text: string, _stop: string, _truncated: boolean) => {
+      calls++
+      if (calls === 1) await new Promise<void>((resolve) => { releaseFirst = resolve })
+      recorded.push(text)
+    })
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({
+      'msg-1': [{ type: 'text', text: 'one' }],
+      'msg-2': [{ type: 'text', text: 'two' }],
+      'msg-3': [{ type: 'text', text: 'three' }],
+    })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    await bindSession(hooks, 'session-1')
+
+    const first = turn(hooks, assistant('msg-1', { time: { created: 1, completed: 2 }, finish: 'stop' }))
+    await flush()
+    // A newer turn arrives while the older one's publish still waits on the
+    // broker: it must queue behind it rather than overtake it.
+    const second = turn(hooks, assistant('msg-2', { time: { created: 2, completed: 3 }, finish: 'stop' }))
+    await flush()
+    releaseFirst?.()
+    await Promise.all([first, second])
+
+    expect(recorded).toEqual(['one', 'two'])
+
+    // The newest turn stayed claimed, so a repeat of it publishes nothing and
+    // an even newer one still publishes.
+    await turn(hooks, assistant('msg-2', { time: { created: 2, completed: 3 }, finish: 'stop' }))
+    expect(recorded).toEqual(['one', 'two'])
+    await turn(hooks, assistant('msg-3', { time: { created: 3, completed: 4 }, finish: 'stop' }))
+    expect(recorded).toEqual(['one', 'two', 'three'])
   })
 })
