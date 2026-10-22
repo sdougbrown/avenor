@@ -243,9 +243,6 @@ func TestValidateLaunchWrapperUnsupportedNodeActions(t *testing.T) {
 	}
 }
 
-// TestValidateLaunchWrapperInMemoryCrossFields pins the typed backstop on
-// in-memory structs: a wrong or missing discriminator, both variants set, and
-// an unknown node wrapper are rejected even without going through JSON.
 func TestValidateLaunchWrapperInMemoryCrossFields(t *testing.T) {
 	absolute := "/usr/local/bin/claude"
 	tests := []struct {
