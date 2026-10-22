@@ -1,15 +1,16 @@
 import { describe, expect, it } from 'bun:test'
 
+import messageInputSchema from '../../../schemas/message.input.json'
 import {
   MAX_FINAL_OUTPUT_RUNES,
   MAX_WAIT_MS,
   boundFinalOutput,
   extractReplyMessage,
   extractTurnText,
-  formatAskFailure,
   newMsgID,
   normalizeAskTimeoutMs,
   normalizeTurnStopReason,
+  renderAskFailure,
   substitute,
 } from './messaging-text.js'
 
@@ -89,6 +90,26 @@ describe('boundFinalOutput', () => {
   })
 })
 
+describe('shared bounds', () => {
+  it('matches the ask deadline the contract caps at', () => {
+    // The deadline the message id encodes must equal the shared wait cap, which
+    // the Go router pins to this same schema.
+    const variants = (
+      messageInputSchema as unknown as {
+        oneOf: { properties?: { action?: { const?: string }; timeout_ms?: { maximum?: number } } }[]
+      }
+    ).oneOf
+    const askVariant = variants.find(variant => variant.properties?.action?.const === 'ask')
+    expect(askVariant?.properties?.timeout_ms?.maximum).toBe(MAX_WAIT_MS)
+  })
+
+  it('pins the final output rune bound', () => {
+    // internal/events.MaxFinalOutputRunes carries the same literal; the two
+    // must change together.
+    expect(MAX_FINAL_OUTPUT_RUNES).toBe(4096)
+  })
+})
+
 describe('reply helpers', () => {
   it('extracts a payload message and falls back to the full payload', () => {
     expect(extractReplyMessage({ payload: { message: 'OK' } })).toBe('OK')
@@ -97,10 +118,10 @@ describe('reply helpers', () => {
   })
 
   it('renders the shared ask failure sentence instead of composing guidance', () => {
-    expect(formatAskFailure('av1.m.1', 'mesh-a', 'possibly-pending')).toBe(
+    expect(renderAskFailure('av1.m.1', 'mesh-a', 'possibly-pending')).toBe(
       'ask "av1.m.1" to "mesh-a" may still be pending; if no reply arrives, withdraw it with avenor_message action="withdraw" message_id="av1.m.1"',
     )
-    expect(formatAskFailure('av1.m.1', 'mesh-a', 'withdrawn')).toBe(
+    expect(renderAskFailure('av1.m.1', 'mesh-a', 'withdrawn')).toBe(
       'ask "av1.m.1" to "mesh-a" was withdrawn',
     )
   })

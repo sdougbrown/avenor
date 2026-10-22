@@ -270,7 +270,7 @@ export function extractReplyMessage(result: Record<string, unknown>): string {
  * Render the shared ask failure sentence for an ask that failed. The outcome
  * and the sentence both come from the contract, so TS and Go text agree.
  */
-export function formatAskFailure(
+export function renderAskFailure(
   messageId: string,
   target: string,
   outcome: MessageOutcome = 'possibly-pending',
