@@ -200,6 +200,7 @@ func DecodeWorkflowProfile(data []byte) (WorkflowProfileFields, error) {
 		DefaultLeasePolicy: structural.DefaultLeasePolicy,
 		DefaultRetryPolicy: structural.DefaultRetryPolicy,
 		EntryNodes:         &structural.EntryNodes,
+		LaunchWrappers:     structural.LaunchWrappers,
 		Metadata:           structural.Metadata,
 		Nodes:              &structural.Nodes,
 		Params:             structural.Params,
@@ -243,6 +244,7 @@ func svalidateWorkflowProfile(raw json.RawMessage, path, schemaPath string, issu
 		"default_lease_policy": true,
 		"default_retry_policy": true,
 		"entry_nodes":          true,
+		"launch_wrappers":      true,
 		"metadata":             true,
 		"nodes":                true,
 		"params":               true,
@@ -329,6 +331,33 @@ func svalidateWorkflowProfile(raw json.RawMessage, path, schemaPath string, issu
 						var sv string
 						_ = json.Unmarshal(r, &sv)
 					default:
+						*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+					}
+				}
+			}
+		}
+	}
+	if r, ok := m["launch_wrappers"]; ok {
+		fpath := path + "/" + escapePtr("launch_wrappers")
+		fspath := schemaPath + "/properties/" + escapePtr("launch_wrappers")
+		if WorkflowProfileStructuralKind(r) != "array" {
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		} else {
+			var arr []json.RawMessage
+			_ = json.Unmarshal(r, &arr)
+			if len(arr) < 1 {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("minItems", fpath, fspath))
+			}
+			for i, el := range arr {
+				epath := fpath + "/" + strconv.Itoa(i)
+				espath := fspath + "/items"
+				{
+					r := el
+					fpath := epath
+					fspath := espath
+					if WorkflowProfileStructuralKind(r) == "object" {
+						svalidateWorkflowProfileLaunchWrapper(r, fpath, fspath, issues)
+					} else {
 						*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 					}
 				}
@@ -1804,6 +1833,126 @@ func svalidateWorkflowProfileInputBinding(raw json.RawMessage, path, schemaPath 
 	}
 }
 
+func svalidateWorkflowProfileLaunchWrapper(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
+	if WorkflowProfileStructuralKind(raw) != "object" {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
+		return
+	}
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &m)
+	if _, ok := m["argv"]; !ok {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("argv"), schemaPath))
+	}
+	if _, ok := m["id"]; !ok {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("id"), schemaPath))
+	}
+	allowed := map[string]bool{
+		"argv": true,
+		"id":   true,
+	}
+	for key := range m {
+		if allowed[key] {
+			continue
+		}
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
+	}
+	if r, ok := m["argv"]; ok {
+		fpath := path + "/" + escapePtr("argv")
+		fspath := schemaPath + "/properties/" + escapePtr("argv")
+		if WorkflowProfileStructuralKind(r) != "array" {
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		} else {
+			var arr []json.RawMessage
+			_ = json.Unmarshal(r, &arr)
+			if len(arr) < 1 {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("minItems", fpath, fspath))
+			}
+			for i, el := range arr {
+				epath := fpath + "/" + strconv.Itoa(i)
+				espath := fspath + "/items"
+				{
+					r := el
+					fpath := epath
+					fspath := espath
+					if WorkflowProfileStructuralKind(r) == "object" {
+						svalidateWorkflowProfileLaunchWrapperArg(r, fpath, fspath, issues)
+					} else {
+						*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+					}
+				}
+			}
+		}
+	}
+	if r, ok := m["id"]; ok {
+		fpath := path + "/" + escapePtr("id")
+		fspath := schemaPath + "/properties/" + escapePtr("id")
+		switch WorkflowProfileStructuralKind(r) {
+		case "string":
+			var sv string
+			_ = json.Unmarshal(r, &sv)
+			if utf8.RuneCountInString(sv) < 1 {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("minLength", fpath, fspath))
+			}
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+}
+
+func svalidateWorkflowProfileLaunchWrapperArg(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
+	if WorkflowProfileStructuralKind(raw) != "object" {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
+		return
+	}
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &m)
+	discPath := path + "/" + escapePtr("type")
+	discSPath := schemaPath + "/properties/" + escapePtr("type")
+	dvRaw, ok := m["type"]
+	if !ok {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", discPath, discSPath))
+		return
+	}
+	if WorkflowProfileStructuralKind(dvRaw) != "string" {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("discriminator", discPath, discSPath))
+		return
+	}
+	var dv string
+	_ = json.Unmarshal(dvRaw, &dv)
+	switch dv {
+	case "literal":
+		allowed := map[string]bool{
+			"type":  true,
+			"value": true,
+		}
+		for key := range m {
+			if allowed[key] {
+				continue
+			}
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
+		}
+		if _, ok := m["value"]; !ok {
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("value"), schemaPath))
+		}
+		if r, ok := m["value"]; ok {
+			fpath := path + "/" + escapePtr("value")
+			fspath := schemaPath + "/properties/" + escapePtr("value")
+			switch WorkflowProfileStructuralKind(r) {
+			case "string":
+				var sv string
+				_ = json.Unmarshal(r, &sv)
+				if utf8.RuneCountInString(sv) < 1 {
+					*issues = append(*issues, WorkflowProfileStructuralIssueAt("minLength", fpath, fspath))
+				}
+			default:
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+			}
+		}
+	default:
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("discriminator", discPath, discSPath))
+	}
+}
+
 func svalidateWorkflowProfileLeasePolicy(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
 	if WorkflowProfileStructuralKind(raw) != "object" {
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
@@ -2837,6 +2986,20 @@ func svalidateWorkflowProfileInputBindingValue(raw json.RawMessage, path, schema
 	}
 }
 
+func svalidateWorkflowProfileLaunchWrapperArgKind(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
+	if WorkflowProfileStructuralKind(raw) != "string" {
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
+		return
+	}
+	var value string
+	_ = json.Unmarshal(raw, &value)
+	switch value {
+	case "literal":
+	default:
+		*issues = append(*issues, WorkflowProfileStructuralIssueAt("enum", path, schemaPath))
+	}
+}
+
 func svalidateWorkflowProfileNodeBranches(raw json.RawMessage, path, schemaPath string, issues *[]WorkflowProfileStructuralIssue) {
 	if WorkflowProfileStructuralKind(raw) != "object" {
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", path, schemaPath))
@@ -2942,6 +3105,7 @@ type WorkflowProfile struct {
 	DefaultLeasePolicy *WorkflowProfileLeasePolicy       "json:\"default_lease_policy,omitempty\""
 	DefaultRetryPolicy *WorkflowProfileRetryPolicy       "json:\"default_retry_policy,omitempty\""
 	EntryNodes         []string                          "json:\"entry_nodes\""
+	LaunchWrappers     *[]WorkflowProfileLaunchWrapper   "json:\"launch_wrappers,omitempty\""
 	Metadata           *WorkflowProfileMetadata          "json:\"metadata,omitempty\""
 	Nodes              []WorkflowProfileNode             "json:\"nodes\""
 	Params             *[]WorkflowProfileTemplateParam   "json:\"params,omitempty\""
@@ -2967,6 +3131,7 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 		case "default_lease_policy":
 		case "default_retry_policy":
 		case "entry_nodes":
+		case "launch_wrappers":
 		case "metadata":
 		case "nodes":
 		case "params":
@@ -3002,6 +3167,11 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["entry_nodes"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"entry_nodes\" must not be null")
+		}
+	}
+	if r, ok := raw["launch_wrappers"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"launch_wrappers\" must not be null")
 		}
 	}
 	if r, ok := raw["metadata"]; ok {
@@ -3097,12 +3267,19 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 			return err
 		}
 	}
-	if encoded, ok := raw["metadata"]; ok {
-		var decoded4 WorkflowProfileMetadata
+	if encoded, ok := raw["launch_wrappers"]; ok {
+		var decoded4 []WorkflowProfileLaunchWrapper
 		if err := json.Unmarshal(encoded, &decoded4); err != nil {
 			return err
 		}
-		next.Metadata = &decoded4
+		next.LaunchWrappers = &decoded4
+	}
+	if encoded, ok := raw["metadata"]; ok {
+		var decoded5 WorkflowProfileMetadata
+		if err := json.Unmarshal(encoded, &decoded5); err != nil {
+			return err
+		}
+		next.Metadata = &decoded5
 	}
 	if encoded, ok := raw["nodes"]; ok {
 		if err := json.Unmarshal(encoded, &next.Nodes); err != nil {
@@ -3110,18 +3287,18 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 		}
 	}
 	if encoded, ok := raw["params"]; ok {
-		var decoded5 []WorkflowProfileTemplateParam
-		if err := json.Unmarshal(encoded, &decoded5); err != nil {
+		var decoded6 []WorkflowProfileTemplateParam
+		if err := json.Unmarshal(encoded, &decoded6); err != nil {
 			return err
 		}
-		next.Params = &decoded5
+		next.Params = &decoded6
 	}
 	if encoded, ok := raw["schema_version"]; ok {
-		integer6, integral, safe := WorkflowProfileStructuralIntParts(encoded)
+		integer7, integral, safe := WorkflowProfileStructuralIntParts(encoded)
 		if !integral || !safe {
 			return fmt.Errorf("integer value is not a safe mathematical integer")
 		}
-		next.SchemaVersion = int64(integer6)
+		next.SchemaVersion = int64(integer7)
 	}
 	if encoded, ok := raw["template_id"]; ok {
 		if err := json.Unmarshal(encoded, &next.TemplateId); err != nil {
@@ -3139,11 +3316,11 @@ func (v *WorkflowProfile) UnmarshalJSON(data []byte) error {
 		}
 	}
 	if encoded, ok := raw["working_directory"]; ok {
-		var decoded7 WorkflowProfileWorkingDirectory
-		if err := json.Unmarshal(encoded, &decoded7); err != nil {
+		var decoded8 WorkflowProfileWorkingDirectory
+		if err := json.Unmarshal(encoded, &decoded8); err != nil {
 			return err
 		}
-		next.WorkingDirectory = &decoded7
+		next.WorkingDirectory = &decoded8
 	}
 	*v = WorkflowProfile(next)
 	return nil
@@ -3181,6 +3358,14 @@ func (v WorkflowProfile) validate(path string, issues *[]Issue) {
 	}
 	if v.DefaultRetryPolicy != nil {
 		v.DefaultRetryPolicy.validate(path+"/"+escapePtr("default_retry_policy"), issues)
+	}
+	if v.LaunchWrappers != nil {
+		if len(*v.LaunchWrappers) < 1 {
+			*issues = append(*issues, Issue{Code: "minItems", Path: path + "/" + escapePtr("launch_wrappers")})
+		}
+		for i, it := range *v.LaunchWrappers {
+			it.validate(path+"/"+escapePtr("launch_wrappers")+"/"+strconv.Itoa(i), issues)
+		}
 	}
 	if v.Metadata != nil {
 		v.Metadata.validate(path+"/"+escapePtr("metadata"), issues)
@@ -3498,6 +3683,38 @@ func (v WorkflowProfileInputBinding) validate(path string, issues *[]Issue) {
 	}
 }
 
+func (v WorkflowProfileLaunchWrapper) validate(path string, issues *[]Issue) {
+	if len(v.Argv) < 1 {
+		*issues = append(*issues, Issue{Code: "minItems", Path: path + "/" + escapePtr("argv")})
+	}
+	for i, it := range v.Argv {
+		it.validate(path+"/"+escapePtr("argv")+"/"+strconv.Itoa(i), issues)
+	}
+	if utf8.RuneCountInString(v.Id) < 1 {
+		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("id")})
+	}
+}
+
+func (v WorkflowProfileLaunchWrapperArg) validate(path string, issues *[]Issue) {
+	switch branch := v.Value.(type) {
+	case *WorkflowProfileLaunchWrapperArgValueLiteral:
+		branch.validate(path, issues)
+	case nil:
+		*issues = append(*issues, Issue{Code: "required", Path: path})
+	}
+}
+
+func (v WorkflowProfileLaunchWrapperArgValueLiteral) validate(path string, issues *[]Issue) {
+	switch v.Type {
+	case WorkflowProfileLaunchWrapperArgKindLiteral:
+	default:
+		*issues = append(*issues, Issue{Code: "enum", Path: path + "/" + escapePtr("type")})
+	}
+	if utf8.RuneCountInString(v.Value) < 1 {
+		*issues = append(*issues, Issue{Code: "minLength", Path: path + "/" + escapePtr("value")})
+	}
+}
+
 func (v WorkflowProfileLeasePolicy) validate(path string, issues *[]Issue) {
 	if v.HeartbeatIntervalSeconds != nil {
 	}
@@ -3684,6 +3901,12 @@ type WorkflowProfileDispatchModeValue string
 const (
 	WorkflowProfileDispatchModeValueManual WorkflowProfileDispatchModeValue = "manual"
 	WorkflowProfileDispatchModeValueAuto   WorkflowProfileDispatchModeValue = "auto"
+)
+
+type WorkflowProfileLaunchWrapperArgKind string
+
+const (
+	WorkflowProfileLaunchWrapperArgKindLiteral WorkflowProfileLaunchWrapperArgKind = "literal"
 )
 
 type WorkflowProfileTemplateParamTypeValue string
@@ -4716,6 +4939,59 @@ func (v *WorkflowProfileInputBinding) UnmarshalJSON(data []byte) error {
 		next.Value = &decoded1
 	}
 	*v = WorkflowProfileInputBinding(next)
+	return nil
+}
+
+type WorkflowProfileLaunchWrapper struct {
+	Argv []WorkflowProfileLaunchWrapperArg "json:\"argv\""
+	Id   string                            "json:\"id\""
+}
+
+func (v *WorkflowProfileLaunchWrapper) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		return fmt.Errorf("expected object, got null")
+	}
+	for key := range raw {
+		switch key {
+		case "argv":
+		case "id":
+		default:
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if r, ok := raw["argv"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"argv\" must not be null")
+		}
+	}
+	if r, ok := raw["id"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"id\" must not be null")
+		}
+	}
+	if _, ok := raw["argv"]; !ok {
+		return fmt.Errorf("missing required field \"argv\"")
+	}
+	if _, ok := raw["id"]; !ok {
+		return fmt.Errorf("missing required field \"id\"")
+	}
+	type alias WorkflowProfileLaunchWrapper
+	var next alias
+	if encoded, ok := raw["argv"]; ok {
+		if err := json.Unmarshal(encoded, &next.Argv); err != nil {
+			return err
+		}
+	}
+	if encoded, ok := raw["id"]; ok {
+		if err := json.Unmarshal(encoded, &next.Id); err != nil {
+			return err
+		}
+	}
+	*v = WorkflowProfileLaunchWrapper(next)
 	return nil
 }
 
@@ -6515,6 +6791,110 @@ func (u WorkflowProfileAction) MarshalJSON() ([]byte, error) {
 	}
 }
 
+// WorkflowProfileLaunchWrapperArgValue is the sealed branch value for WorkflowProfileLaunchWrapperArg.
+type WorkflowProfileLaunchWrapperArgValue interface{ isWorkflowProfileLaunchWrapperArgValue() }
+
+type WorkflowProfileLaunchWrapperArg struct {
+	Value WorkflowProfileLaunchWrapperArgValue `json:"-"`
+}
+
+type WorkflowProfileLaunchWrapperArgValueLiteral struct {
+	Type  WorkflowProfileLaunchWrapperArgKind "json:\"type\""
+	Value string                              "json:\"value\""
+}
+
+func (*WorkflowProfileLaunchWrapperArgValueLiteral) isWorkflowProfileLaunchWrapperArgValue() {}
+
+func (v *WorkflowProfileLaunchWrapperArgValueLiteral) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		return fmt.Errorf("expected object, got null")
+	}
+	for key := range raw {
+		switch key {
+		case "type":
+		case "value":
+		default:
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if r, ok := raw["type"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"type\" must not be null")
+		}
+	}
+	if r, ok := raw["value"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"value\" must not be null")
+		}
+	}
+	if _, ok := raw["type"]; !ok {
+		return fmt.Errorf("missing required field \"type\"")
+	}
+	if _, ok := raw["value"]; !ok {
+		return fmt.Errorf("missing required field \"value\"")
+	}
+	type alias WorkflowProfileLaunchWrapperArgValueLiteral
+	var next alias
+	if encoded, ok := raw["type"]; ok {
+		if err := json.Unmarshal(encoded, &next.Type); err != nil {
+			return err
+		}
+	}
+	if encoded, ok := raw["value"]; ok {
+		if err := json.Unmarshal(encoded, &next.Value); err != nil {
+			return err
+		}
+	}
+	*v = WorkflowProfileLaunchWrapperArgValueLiteral(next)
+	return nil
+}
+
+// UnmarshalJSON decodes WorkflowProfileLaunchWrapperArg by its "type" discriminator const.
+func (u *WorkflowProfileLaunchWrapperArg) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	dvRaw, ok := raw["type"]
+	if !ok {
+		return fmt.Errorf("missing discriminator field type")
+	}
+	var dv string
+	if err := json.Unmarshal(dvRaw, &dv); err != nil {
+		return fmt.Errorf("discriminator type is not a string: %v", err)
+	}
+	switch WorkflowProfileLaunchWrapperArgKind(dv) {
+	case WorkflowProfileLaunchWrapperArgKindLiteral:
+		var next WorkflowProfileLaunchWrapperArgValueLiteral
+		if err := json.Unmarshal(data, &next); err != nil {
+			return err
+		}
+		u.Value = &next
+		return nil
+	default:
+		return fmt.Errorf("unknown discriminator type: %q", dv)
+	}
+}
+
+func (u WorkflowProfileLaunchWrapperArg) MarshalJSON() ([]byte, error) {
+	if u.Value == nil {
+		return nil, fmt.Errorf("cannot marshal zero WorkflowProfileLaunchWrapperArg: no union branch selected")
+	}
+	switch branch := u.Value.(type) {
+	case *WorkflowProfileLaunchWrapperArgValueLiteral:
+		if branch == nil {
+			return nil, fmt.Errorf("cannot marshal WorkflowProfileLaunchWrapperArg: selected branch is nil")
+		}
+		return json.Marshal(branch)
+	default:
+		return nil, fmt.Errorf("cannot marshal WorkflowProfileLaunchWrapperArg: invalid union branch %T", u.Value)
+	}
+}
+
 // WorkflowProfileFields holds the fields for WorkflowProfile availability checks.
 type WorkflowProfileFields struct {
 	BoundedLoops       *[]WorkflowProfileBoundedLoop     "json:\"bounded_loops,omitempty\""
@@ -6522,6 +6902,7 @@ type WorkflowProfileFields struct {
 	DefaultLeasePolicy *WorkflowProfileLeasePolicy       "json:\"default_lease_policy,omitempty\""
 	DefaultRetryPolicy *WorkflowProfileRetryPolicy       "json:\"default_retry_policy,omitempty\""
 	EntryNodes         *[]string                         "json:\"entry_nodes,omitempty\""
+	LaunchWrappers     *[]WorkflowProfileLaunchWrapper   "json:\"launch_wrappers,omitempty\""
 	Metadata           *WorkflowProfileMetadata          "json:\"metadata,omitempty\""
 	Nodes              *[]WorkflowProfileNode            "json:\"nodes,omitempty\""
 	Params             *[]WorkflowProfileTemplateParam   "json:\"params,omitempty\""
@@ -6543,6 +6924,7 @@ type WorkflowProfileAvailability struct {
 	DefaultLeasePolicy FieldStatus
 	DefaultRetryPolicy FieldStatus
 	EntryNodes         FieldStatus
+	LaunchWrappers     FieldStatus
 	Metadata           FieldStatus
 	Nodes              FieldStatus
 	Params             FieldStatus
@@ -6588,6 +6970,8 @@ func Check(f WorkflowProfileFields, c WorkflowProfileConditions, prev WorkflowPr
 	DefaultRetryPolicySatisfied := f.DefaultRetryPolicy != nil
 	EntryNodesEnabled := true
 	EntryNodesSatisfied := func() bool { v := f.EntryNodes; return v != nil && len(*v) > 0 }()
+	LaunchWrappersEnabled := true
+	LaunchWrappersSatisfied := func() bool { v := f.LaunchWrappers; return v != nil && len(*v) > 0 }()
 	MetadataEnabled := true
 	MetadataSatisfied := f.Metadata != nil
 	NodesEnabled := true
@@ -6698,6 +7082,28 @@ func Check(f WorkflowProfileFields, c WorkflowProfileConditions, prev WorkflowPr
 			Required:  EntryNodesEnabled && true,
 			Enabled:   EntryNodesEnabled,
 			Satisfied: EntryNodesSatisfied,
+			Fair:      true,
+			Reason: func() *string {
+				var reasons []string
+				if len(reasons) == 0 {
+					return nil
+				}
+				return &reasons[0]
+			}(),
+			Reasons: func() []string {
+				var reasons []string
+				if reasons == nil {
+					reasons = []string{}
+				}
+				return reasons
+			}(),
+			Valid: nil,
+			Error: "",
+		},
+		LaunchWrappers: FieldStatus{
+			Required:  LaunchWrappersEnabled && false,
+			Enabled:   LaunchWrappersEnabled,
+			Satisfied: LaunchWrappersSatisfied,
 			Fair:      true,
 			Reason: func() *string {
 				var reasons []string
@@ -6916,6 +7322,9 @@ func depSatisfied(f WorkflowProfileFields, name string) bool {
 	case "EntryNodes":
 		v := f.EntryNodes
 		return v != nil && len(*v) > 0
+	case "LaunchWrappers":
+		v := f.LaunchWrappers
+		return v != nil && len(*v) > 0
 	case "Metadata":
 		return f.Metadata != nil
 	case "Nodes":
@@ -7093,6 +7502,12 @@ func Challenge(fieldName string, f WorkflowProfileFields, c WorkflowProfileCondi
 	case "EntryNodes", "entry_nodes":
 		found = true
 		status = avail.EntryNodes
+		if status.Reason != nil {
+			explanations = append(explanations, "* "+*status.Reason)
+		}
+	case "LaunchWrappers", "launch_wrappers":
+		found = true
+		status = avail.LaunchWrappers
 		if status.Reason != nil {
 			explanations = append(explanations, "* "+*status.Reason)
 		}

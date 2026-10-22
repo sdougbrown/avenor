@@ -275,7 +275,57 @@ func validateTemplateParams(template Template) error {
 			return fmt.Errorf("invalid workflow template: node %q dispatch.concurrency_key names undeclared instance param %q", node.ID, spec.FromInstanceParam)
 		}
 	}
-	return validateWorkingDirectoryRefs(template, declared)
+	if err := validateWorkingDirectoryRefs(template, declared); err != nil {
+		return err
+	}
+	return validateLaunchWrappers(template)
+}
+
+// validateLaunchWrappers enforces the launch-wrapper registry contract: every
+// definition has a unique, non-blank ID and a well-formed argv (the first
+// element a literal absolute executable path, values non-empty and NUL-free).
+// The whole registry validates, including definitions no node selects.
+func validateLaunchWrappers(template Template) error {
+	ids := make(map[string]struct{}, len(template.LaunchWrappers))
+	for index, wrapper := range template.LaunchWrappers {
+		if strings.TrimSpace(wrapper.ID) == "" {
+			return fmt.Errorf("invalid workflow template: launch_wrappers[%d]: launch wrapper ID is required", index)
+		}
+		if _, duplicate := ids[wrapper.ID]; duplicate {
+			return fmt.Errorf("invalid workflow template: launch_wrappers declares %q twice", wrapper.ID)
+		}
+		ids[wrapper.ID] = struct{}{}
+		if err := validateLaunchWrapperArgv(wrapper.ID, wrapper.Argv); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateLaunchWrapperArgv enforces the argv rules for one definition:
+// strict element shapes, exact unmodified values, and a literal absolute
+// executable path first.
+func validateLaunchWrapperArgv(id string, argv []LaunchWrapperArg) error {
+	if len(argv) == 0 {
+		return fmt.Errorf("invalid workflow template: launch wrapper %q argv must not be empty", id)
+	}
+	for index, arg := range argv {
+		switch arg.Type {
+		case LaunchWrapperArgKindLiteral:
+			if arg.Value == "" {
+				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] literal value must not be empty", id, index)
+			}
+			if strings.ContainsRune(arg.Value, '\x00') {
+				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] literal value must not contain NUL", id, index)
+			}
+		default:
+			return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] type %q is not a launch_wrapper_arg type", id, index, arg.Type)
+		}
+	}
+	if argv[0].Type != LaunchWrapperArgKindLiteral || !filepath.IsAbs(argv[0].Value) {
+		return fmt.Errorf("invalid workflow template: launch wrapper %q argv[0] must be a literal absolute executable path", id)
+	}
+	return nil
 }
 
 // validateWorkingDirectoryRefs enforces the working-directory contract: the

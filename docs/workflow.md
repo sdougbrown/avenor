@@ -113,6 +113,7 @@ fields:
 | `nodes` | yes | Node definitions. |
 | `terminal_outcomes` | yes | Template-global terminal outcome vocabulary. |
 | `params` | no | Declared instance parameters: `[{id, type, required?}]`. Only `type: "string"` exists; ids are path-safe identifiers. |
+| `launch_wrappers` | no | Registry of trusted, author-reviewed executable configurations: `[{id, argv}]` (see [Launch wrappers](#launch-wrappers)). |
 | `bounded_loops` | no | Explicit bounded loop constructs. |
 | `default_lease_policy` | no | `{ttl_seconds, heartbeat_interval_seconds}`. |
 | `default_retry_policy` | no | `{max_attempts, exhaustion, outcome}`. |
@@ -405,6 +406,34 @@ activation as a plain string, so candidate views, held-key serialization,
 and manual starts all read the same resolved key. Replay reproduces it from
 the recorded params. Templates whose keys are plain strings and that declare
 no params behave exactly as before.
+
+## Launch wrappers
+
+A template may declare a `launch_wrappers` registry: trusted, author-reviewed
+executable configurations, each a named argv template:
+
+```json
+{
+  "launch_wrappers": [
+    {
+      "id": "sandbox",
+      "argv": [
+        { "type": "literal", "value": "/opt/bin/agent-sandbox" },
+        { "type": "literal", "value": "--keep-env PATH,HOME" }
+      ]
+    }
+  ]
+}
+```
+
+- Each argv element is a literal value passed through as one complete argv
+  element — no interpolation, no expansion, no trimming. `argv[0]` must be a
+  literal absolute executable path.
+- Wrapper IDs must be non-blank and unique. The whole registry validates,
+  including definitions nothing references.
+- Wrappers are trusted author configuration: there is no per-workflow
+  allowlist and no defaults. The helper executable is operator-provided —
+  Avenor does not ship or instantiate one.
 
 ## Working directories
 
