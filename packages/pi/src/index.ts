@@ -426,6 +426,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     }
     const pendingWaits = new Set<PendingWait>()
 
+    /** The agent-facing clause for a stopping point. A synthetic status such as
+     * `asking` has no run-status spelling, so it must never reach the model raw. */
+    function describeStoppingPoint(stop: StoppingPoint): string {
+      if (stop.status === 'waiting') return 'reached a permission request'
+      if (stop.status === 'asking') return 'asked a question for you'
+      return `reached ${stop.status}`
+    }
+
     function interruptPendingWaits(stop: StoppingPoint, excludeRunKey?: string): void {
       for (const wait of [...pendingWaits]) {
         if (wait.runKey === excludeRunKey) continue
@@ -1583,7 +1591,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               const tracked = getTrackedRun(result.run_id, supervisorId)
               if (tracked) tracked.blocking = false
               return {
-                content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted: "${stop.label ?? stop.runId}" reached ${stop.status === 'waiting' ? 'a permission request' : stop.status}. Handle that first; this run's final result is delivered automatically.` }],
+                content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted: "${stop.label ?? stop.runId}" ${describeStoppingPoint(stop)}. Handle that first; this run's final result is delivered automatically.` }],
                 details: {
                   run_id: result.run_id,
                   interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status },

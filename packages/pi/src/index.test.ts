@@ -1919,6 +1919,63 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('reports an inbound ask as asked a question when it interrupts a blocking spawn wait', async () => {
+    const SOCK = '/tmp/ask-interrupt-spawn.sock'
+    let deliverAsk = false
+    let workerDone = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return workerDone
+        ? { run_id: 'rt_1', label: 'worker', status: 'done', runtime_id: 'rt-1', final_output: 'worker answer' }
+        : { run_id: 'rt_1', label: 'worker', status: 'running', runtime_id: 'rt-1' }
+    })
+    const brokerReceiveTool = mock(async () => ({
+      asks: deliverAsk
+        ? [{ message_id: 'ask-1', from_run_id: 'rt_1', message: 'may I proceed?', role: 'agent' }]
+        : [],
+    }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      brokerReceiveTool,
+      // Keeps the blocking spawn wait alive until the inbound ask aborts it
+      // through the await registry.
+      observeRun: makeDormantObserver(),
+      spawnTool: mock(async () => ({ run_id: 'rt_1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt-1' })),
+    })
+
+    const spawnPromise = h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx)
+
+    deliverAsk = true
+    await waitFor(() => h.sendUserMessage.mock.calls.length > 0)
+    const spawnResult = await settleWithin(
+      spawnPromise,
+      'blocking spawn wait did not return after the awaited run asked a question',
+    )
+
+    // The interruption notice must describe the synthetic `asking` status in
+    // prose; the raw status string must never reach the model.
+    const text = String(spawnResult.content[0].text)
+    expect(text).toContain('asked a question')
+    expect(text).not.toContain('reached asking')
+    // The structured payload keeps the raw status the interrupt carried.
+    expect(spawnResult.details).toMatchObject({
+      run_id: 'rt_1',
+      interrupted_by: { run_id: 'rt_1', status: 'asking' },
+    })
+
+    // Worker must stay tracked in auto-delivery mode (blocking=false), so its
+    // later completion arrives as a follow-up message.
+    let resolveCompletion!: () => void
+    const completionSent = new Promise<void>(resolve => { resolveCompletion = resolve })
+    h.sendUserMessage.mockImplementation(() => resolveCompletion())
+    workerDone = true
+    await completionSent
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
+    expect(completions).toHaveLength(1)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('avenor_shutdown removes only the tracked runs for the target supervisor', async () => {
     const A = '/tmp/supervisor-a.sock'
     const B = '/tmp/supervisor-b.sock'
