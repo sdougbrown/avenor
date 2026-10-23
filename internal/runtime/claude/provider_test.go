@@ -99,6 +99,24 @@ func TestCapabilities(t *testing.T) {
 	}
 }
 
+func TestStartValidatesClaudeMCPWait(t *testing.T) {
+	p := New()
+	for _, tc := range []struct {
+		name    string
+		wait    time.Duration
+		wantErr string
+	}{
+		{"negative", -time.Second, "negative"},
+		{"over cap", runtime.MaxClaudeMCPWait + time.Nanosecond, "limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir(), ClaudeMCPWait: tc.wait}); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("%s Start error = %v, want it to mention %q", tc.name, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestCapabilitiesPTYReportsResume(t *testing.T) {
 	t.Setenv("AVENOR_CLAUDE_TERMINAL", "")
 	p := New()

@@ -77,6 +77,9 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if err := runtime.ValidateThinkingForBackend(backendID, merged.Thinking); err != nil {
 		return runtime.Session{}, err
 	}
+	if err := runtime.ValidateClaudeMCPWait(backendID, merged.ClaudeMCPWait); err != nil {
+		return runtime.Session{}, err
+	}
 	if merged.Dir == "" {
 		var err error
 		merged.Dir, err = os.Getwd()

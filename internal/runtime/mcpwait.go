@@ -29,3 +29,9 @@ func ValidateClaudeMCPWait(backend string, wait time.Duration) error {
 	}
 	return nil
 }
+
+// NewStartOnlyClaudeMCPWaitError reports that the backend holds the first
+// prompt for MCP servers only on a new session, not an explicit resume.
+func NewStartOnlyClaudeMCPWaitError(backend string, wait time.Duration) error {
+	return fmt.Errorf("backend %q supports parameter %q only when starting a session; cannot apply value %q on an explicit resume", backend, "claude-mcp-wait", wait)
+}

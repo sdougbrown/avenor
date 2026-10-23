@@ -1507,6 +1507,24 @@ func (l fakeLauncher) Start(context.Context, terminal.StartOptions) (terminal.Se
 	return l.term, nil
 }
 
+func TestStartValidatesClaudeMCPWait(t *testing.T) {
+	p := New()
+	for _, tc := range []struct {
+		name    string
+		wait    time.Duration
+		wantErr string
+	}{
+		{"negative", -time.Second, "negative"},
+		{"over cap", runtime.MaxClaudeMCPWait + time.Nanosecond, "limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir(), ClaudeMCPWait: tc.wait}); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("%s Start error = %v, want it to mention %q", tc.name, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestStartupWaitHoldsOnlyTheFirstPrompt(t *testing.T) {
 	binDir := t.TempDir()
 	script := "#!/bin/sh\necho 'Claude Code 2.0.0'\n"
@@ -1522,7 +1540,7 @@ func TestStartupWaitHoldsOnlyTheFirstPrompt(t *testing.T) {
 		broker:   broker.New(""),
 		launcher: fakeLauncher{term: term},
 	}
-	started, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir(), ClaudeMCPWait: time.Hour})
+	started, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir(), ClaudeMCPWait: 30 * time.Second})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

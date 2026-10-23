@@ -1049,6 +1049,9 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 	if err := runtime.ValidateThinkingForBackend(backend, opts.Thinking); err != nil {
 		return runtime.Session{}, err
 	}
+	if err := runtime.ValidateClaudeMCPWait(backend, opts.ClaudeMCPWait); err != nil {
+		return runtime.Session{}, err
+	}
 	if resumeID == "" {
 		return provider.Start(ctx, opts)
 	}
@@ -1060,6 +1063,9 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 			return runtime.Session{}, runtime.NewStartOnlyThinkingError(backend, opts.Thinking)
 		}
 		return runtime.Session{}, runtime.NewUnsupportedThinkingError(backend)
+	}
+	if opts.ClaudeMCPWait != 0 {
+		return runtime.Session{}, runtime.NewStartOnlyClaudeMCPWaitError(backend, opts.ClaudeMCPWait)
 	}
 	return provider.Resume(ctx, resumeID)
 }
