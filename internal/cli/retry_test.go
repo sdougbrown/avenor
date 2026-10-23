@@ -38,6 +38,7 @@ func TestRunRetryDropsStartOnlyOptionsOnAdoptedResume(t *testing.T) {
 		// claude resumes take no per-call options, so carrying start-only
 		// options into the adopted resume would abort the retry.
 		{"plain resume backend", "claude", "high", ""},
+		{"plain resume backend, channel", "claude-channel", "medium", ""},
 		// codex resumes with options, so thinking survives the retry.
 		{"resume-with-options backend", "codex-app-server", "max", "max"},
 	} {
@@ -106,9 +107,11 @@ func TestResumeSessionDropsStartOnlyOptionsForPlainResume(t *testing.T) {
 }
 
 func TestDropStartOnlyOptionsKeysOnResumeCapability(t *testing.T) {
-	plain := dropStartOnlyOptions("claude", runtime.StartOptions{Thinking: "high", ClaudeMCPWait: 7 * time.Second})
-	if plain.Thinking != "" || plain.ClaudeMCPWait != 0 {
-		t.Fatalf("claude start-only options not dropped: %+v", plain)
+	for _, backend := range []string{"claude", "claude-channel"} {
+		plain := dropStartOnlyOptions(backend, runtime.StartOptions{Thinking: "high", ClaudeMCPWait: 7 * time.Second})
+		if plain.Thinking != "" || plain.ClaudeMCPWait != 0 {
+			t.Fatalf("%s start-only options not dropped: %+v", backend, plain)
+		}
 	}
 	withOptions := dropStartOnlyOptions("codex-app-server", runtime.StartOptions{Thinking: "max", ClaudeMCPWait: time.Second})
 	if withOptions.Thinking != "max" || withOptions.ClaudeMCPWait != time.Second {
