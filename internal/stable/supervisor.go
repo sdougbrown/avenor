@@ -1868,7 +1868,13 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		_ = writer.Close()
 		return SpawnResult{}, fmt.Errorf("create provider: %w", err)
 	}
-	session, err := cli.StartSession(childCtx, provider, backend, startOpts, params.SessionID)
+	startSessionOpts := startOpts
+	if params.SessionID != "" {
+		// Internal resume of the prior session; start-only options the
+		// resume cannot honor would abort the follow-up.
+		startSessionOpts = cli.DropStartOnlyOptions(backend, startOpts)
+	}
+	session, err := cli.StartSession(childCtx, provider, backend, startSessionOpts, params.SessionID)
 	if err != nil {
 		if closer, ok := provider.(interface{ Close() error }); ok {
 			_ = closer.Close()

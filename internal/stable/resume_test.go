@@ -401,3 +401,31 @@ func TestResumeKeySpaceIsolatedFromSpawn(t *testing.T) {
 		t.Fatalf("resumed run_id = %q, want the freshly minted %q (a keyed replay returns the first run's id)", resumed.RunID, resumeUUID1)
 	}
 }
+
+func TestResumeDropsStartOnlyOptionsForClaudeResume(t *testing.T) {
+	sup, provider := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "sentinel.env")
+	eventLog := filepath.Join(dir, "events.log")
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		Backend: "claude", Thinking: "high", AutoApprove: true,
+		SentinelFile: sentinel, OnEvent: eventLog,
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	writeSentinel(t, sentinel, "DONE", "ses_resumed")
+
+	newSentinel := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
+	newEventLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")
+	if _, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+		SentinelFile: newSentinel, EventLog: newEventLog,
+	}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if resumes := provider.resumesRecorded(); len(resumes) != 1 || resumes[0] != "ses_resumed" {
+		t.Fatalf("provider resumes = %v, want [ses_resumed]", resumes)
+	}
+}
