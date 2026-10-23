@@ -37,8 +37,9 @@ display label.
 | Spawned child | its runtime ID (`rt_N`) | Before the child's backend starts, so it can poll and reply. |
 
 A spawned `pi` child asks through its inherited broker credentials. That path
-sends `to_run_id` unchanged: unlike the host's message tool ask, it does not resolve
-a public spawn ID or a label first. A child asking its supervisor therefore has
+sends `to_run_id` after resolving a label through the broker's visible peers,
+the same ladder the host's message tool ask uses, but it never resolves a
+public spawn ID first. A child asking its supervisor therefore has
 to use `supervisor`. Asking `rt_N` addresses that child, not the supervisor. A
 child asking a sibling uses the sibling's `rt_N`.
 
