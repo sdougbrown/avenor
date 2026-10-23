@@ -537,6 +537,30 @@ export class Supervisor {
     return this.runs.get(reference) ?? this.aliases.get(reference)
   }
 
+  /**
+   * Look up a run by its public run ID only, never by a label alias. The
+   * messaging router resolves public IDs and labels on separate planes, so a
+   * label that happens to equal another run's old ID must not match here.
+   */
+  getRunById(runId: string): RunInfo | undefined {
+    return this.runs.get(runId)
+  }
+
+  /**
+   * Register a run this supervisor resumed, so its ID and label stay resolvable.
+   * Last write wins: an existing entry with the same run ID, or a label held by
+   * another run, is replaced. Duplicate rejection is the resume provider's job.
+   */
+  registerResumed(run: RunInfo): void {
+    this.register(run)
+  }
+
+  /** The one place a run's ID and label are registered, for spawn and for resume. */
+  private register(run: RunInfo): void {
+    this.runs.set(run.runId, run)
+    this.aliases.set(run.label, run)
+  }
+
   /** Match a stored run by its broker runtime ID. */
   getRunByRuntimeId(runtimeId: string): RunInfo | undefined {
     if (!runtimeId) return undefined
@@ -689,8 +713,7 @@ export class Supervisor {
       autoApprove: spawnParams.auto_approve,
     }
 
-    this.runs.set(runId, runInfo)
-    this.aliases.set(runInfo.label, runInfo)
+    this.register(runInfo)
     return runInfo
   }
 

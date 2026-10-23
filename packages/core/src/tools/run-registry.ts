@@ -120,14 +120,27 @@ export function registerExternalRun(runInfo: ExternalRunInfo): void {
   indexRun(runInfo)
 }
 
+/** The exact-hit path both lookups share: the run ID index, then persisted metadata. */
+function lookupExactRun(supervisorId: string, reference: string): ExternalRunInfo | undefined {
+  const exact = externalRuns.get(supervisorId)?.byRunId.get(reference)
+  if (exact) return exact
+  return readPersistedRun(supervisorId, reference)
+}
+
+/** Look up an external run by its public run ID only, never by an alias. */
+export function findExternalRunById(
+  supervisorId: string,
+  runId: string,
+): ExternalRunInfo | undefined {
+  return lookupExactRun(supervisorId, runId)
+}
+
 export function findExternalRun(
   supervisorId: string,
   reference: string,
 ): ExternalRunInfo | undefined {
-  const exact = externalRuns.get(supervisorId)?.byRunId.get(reference)
+  const exact = lookupExactRun(supervisorId, reference)
   if (exact) return exact
-  const persisted = readPersistedRun(supervisorId, reference)
-  if (persisted) return persisted
   listExternalRuns(supervisorId)
   return externalRuns.get(supervisorId)?.byAlias.get(reference)
 }

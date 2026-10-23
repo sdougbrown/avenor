@@ -6,6 +6,7 @@ import { ensureRunPaths } from '../paths.js'
 import {
   externalRunMetadataPath,
   findExternalRun,
+  findExternalRunById,
   forgetExternalRuns,
   listExternalRuns,
   registerExternalRun,
@@ -83,5 +84,15 @@ describe('external run registry', () => {
       'attacker-run',
       'victim-run',
     ])
+  })
+
+  it('the by-id lookup never reaches a label or a runtime id', () => {
+    registerExternalRun(runInfo('victim-run', 'victim', 'rt-victim'))
+    registerExternalRun(runInfo('attacker-run', 'victim-run', 'rt-attacker'))
+
+    expect(findExternalRunById(supervisorId, 'victim-run')?.runtimeId).toBe('rt-victim')
+    expect(findExternalRunById(supervisorId, 'victim')).toBeUndefined()
+    expect(findExternalRunById(supervisorId, 'rt-victim')).toBeUndefined()
+    expect(findExternalRun(supervisorId, 'victim')?.runtimeId).toBe('rt-victim')
   })
 })
