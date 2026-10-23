@@ -104,3 +104,14 @@ func TestResumeSessionDropsStartOnlyOptionsForPlainResume(t *testing.T) {
 		t.Fatalf("resume calls = %d, start calls = %d, want one plain resume", p.resumeCalls, p.startCalls)
 	}
 }
+
+func TestDropStartOnlyOptionsKeysOnResumeCapability(t *testing.T) {
+	plain := dropStartOnlyOptions("claude", runtime.StartOptions{Thinking: "high", ClaudeMCPWait: 7 * time.Second})
+	if plain.Thinking != "" || plain.ClaudeMCPWait != 0 {
+		t.Fatalf("claude start-only options not dropped: %+v", plain)
+	}
+	withOptions := dropStartOnlyOptions("codex-app-server", runtime.StartOptions{Thinking: "max", ClaudeMCPWait: time.Second})
+	if withOptions.Thinking != "max" || withOptions.ClaudeMCPWait != time.Second {
+		t.Fatalf("resume-with-options backend lost options: %+v", withOptions)
+	}
+}
