@@ -1868,13 +1868,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		_ = writer.Close()
 		return SpawnResult{}, fmt.Errorf("create provider: %w", err)
 	}
-	startSessionOpts := startOpts
-	if params.SessionID != "" {
-		// Internal resume of the prior session; start-only options the
-		// resume cannot honor would abort the follow-up.
-		startSessionOpts = cli.DropStartOnlyOptions(backend, startOpts)
-	}
-	session, err := cli.StartSession(childCtx, provider, backend, startSessionOpts, params.SessionID)
+	session, err := cli.ResumeSession(childCtx, provider, backend, startOpts, params.SessionID)
 	if err != nil {
 		if closer, ok := provider.(interface{ Close() error }); ok {
 			_ = closer.Close()
@@ -2561,13 +2555,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			startSessionOpts := startOpts
-			if resumeID != "" {
-				// Internal resume of the previous phase's session; start-only
-				// options the resume cannot honor would abort the boundary.
-				startSessionOpts = cli.DropStartOnlyOptions(identity.Backend, startOpts)
-			}
-			session, err := cli.StartSession(ctx, provider, identity.Backend, startSessionOpts, resumeID)
+			session, err := cli.ResumeSession(ctx, provider, identity.Backend, startOpts, resumeID)
 			if err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
@@ -2853,13 +2841,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			startSessionOpts := startOpts
-			if resumeID != "" {
-				// Internal resume of the previous phase's session; start-only
-				// options the resume cannot honor would abort the boundary.
-				startSessionOpts = cli.DropStartOnlyOptions(identity.Backend, startOpts)
-			}
-			session, err := cli.StartSession(ctx, provider, identity.Backend, startSessionOpts, resumeID)
+			session, err := cli.ResumeSession(ctx, provider, identity.Backend, startOpts, resumeID)
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
@@ -3625,7 +3607,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 			identity.Agent, identity.Model = fallbackAgent, fallbackModel
 		}
 	}
-	startOpts := runtime.StartOptions{
+	return cli.ResumeSession(ctx, provider, identity.Backend, runtime.StartOptions{
 		Agent:         identity.Agent,
 		AgentProfile:  identity.AgentProfile,
 		Label:         label,
@@ -3637,13 +3619,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		BrokerToken:   brokerToken,
 		LaunchWrapper: identity.LaunchWrapper,
 		Provenance:    runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
-	}
-	if resumeID != "" {
-		// Internal resume of this child's own session; start-only options
-		// the resume cannot honor would abort the attempt.
-		startOpts = cli.DropStartOnlyOptions(identity.Backend, startOpts)
-	}
-	return cli.StartSession(ctx, provider, identity.Backend, startOpts, resumeID)
+	}, resumeID)
 }
 
 // takeFileSnapshot records the set of files (relative paths) in dir for

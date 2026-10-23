@@ -99,7 +99,7 @@ func TestRunRetryDropsStartOnlyOptionsOnAdoptedResume(t *testing.T) {
 
 func TestResumeSessionDropsStartOnlyOptionsForPlainResume(t *testing.T) {
 	p := &plainThinkingProvider{}
-	if _, err := resumeSession(context.Background(), p, "claude", runtime.StartOptions{Thinking: "high", ClaudeMCPWait: 7 * time.Second}, "ses"); err != nil {
+	if _, err := ResumeSession(context.Background(), p, "claude", runtime.StartOptions{Thinking: "high", ClaudeMCPWait: 7 * time.Second}, "ses"); err != nil {
 		t.Fatalf("resumeSession: %v", err)
 	}
 	if p.resumeCalls != 1 || p.startCalls != 0 {
@@ -131,6 +131,42 @@ func TestDropStartOnlyOptionsFollowsThinkingPolicy(t *testing.T) {
 			if dropped := opts.Thinking == ""; dropped != wantDrop {
 				t.Fatalf("%s/%q: dropped = %v, want %v", backend, value, dropped, wantDrop)
 			}
+		}
+	}
+}
+
+func TestResumeSessionGatesTheStartOnlyDrop(t *testing.T) {
+	fresh := &plainThinkingProvider{}
+	if _, err := ResumeSession(context.Background(), fresh, "claude", runtime.StartOptions{Thinking: "high", ClaudeMCPWait: time.Second}, ""); err != nil {
+		t.Fatalf("fresh ResumeSession: %v", err)
+	}
+	if fresh.startCalls != 1 || fresh.resumeCalls != 0 {
+		t.Fatalf("fresh calls = start:%d resume:%d, want one start", fresh.startCalls, fresh.resumeCalls)
+	}
+	if fresh.lastStartOpts.Thinking != "high" || fresh.lastStartOpts.ClaudeMCPWait != time.Second {
+		t.Fatalf("fresh start lost the start-only options: %+v", fresh.lastStartOpts)
+	}
+
+	resumed := &plainThinkingProvider{}
+	if _, err := ResumeSession(context.Background(), resumed, "claude", runtime.StartOptions{Thinking: "high", ClaudeMCPWait: time.Second}, "ses"); err != nil {
+		t.Fatalf("resume ResumeSession: %v", err)
+	}
+	if resumed.resumeCalls != 1 || resumed.startCalls != 0 {
+		t.Fatalf("resume calls = start:%d resume:%d, want one plain resume", resumed.startCalls, resumed.resumeCalls)
+	}
+}
+
+func TestStartSessionClassifiesResumeThinkingByPolicy(t *testing.T) {
+	p := &plainThinkingProvider{}
+	_, err := StartSession(context.Background(), p, "claude", runtime.StartOptions{Thinking: "off"}, "ses")
+	if err == nil || !strings.Contains(err.Error(), `"off"`) {
+		t.Fatalf("claude/off resume error = %v, want the policy value error", err)
+	}
+	for _, level := range []string{"low", "high", "max"} {
+		p := &plainThinkingProvider{}
+		_, err := StartSession(context.Background(), p, "claude", runtime.StartOptions{Thinking: level}, "ses")
+		if err == nil || !strings.Contains(err.Error(), "only when starting a session") || !strings.Contains(err.Error(), `value "`+level+`"`) {
+			t.Fatalf("claude/%s resume error = %v, want the start-only error", level, err)
 		}
 	}
 }

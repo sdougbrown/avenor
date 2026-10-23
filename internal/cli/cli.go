@@ -505,12 +505,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
-		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance}
-		if resumeID != "" {
-			// The phase resumes the previous phase's session, and start-only
-			// options the resume cannot honor would abort the phase boundary.
-			startOptions = DropStartOnlyOptions(selection.Backend, startOptions)
-		}
+		startOptions := DropStartOnlyOptionsForResume(selection.Backend, runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance}, resumeID)
 		return runAttempt(ctx, attemptConfig{
 			startOptions:           startOptions,
 			backend:                selection.Backend,
@@ -965,7 +960,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		if controlServer != nil {
 			state.Update(func(s *control.Snapshot) { s.RetryAttempt = attempt })
 		}
-		opts := startOptions
+		// A retry after an adopted session resumes it, and start-only options
+		// the resume cannot honor would abort the retry at StartSession.
+		opts := DropStartOnlyOptionsForResume(*backend, startOptions, resumeID)
 		opts.Provenance = runtime.DirectLaunchProvenance(runID, *label, attempt)
 		result = runAttempt(runCtx, attemptConfig{
 			startOptions:           opts,
@@ -1004,10 +1001,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 		if result.sessionID != "" {
 			resumeID = result.sessionID
-			// The next attempt resumes the failed session. Keeping start-only
-			// options the resume cannot honor would abort the retry at
-			// StartSession instead of surfacing the provider's own class.
-			startOptions = DropStartOnlyOptions(*backend, startOptions)
 		}
 
 		// A hinted wait this run cannot honor leaves no attempt worth making, so
@@ -1069,10 +1062,9 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 		return resumer.ResumeWithOptions(ctx, resumeID, opts)
 	}
 	if opts.Thinking != "" {
-		if runtime.IsClaudeFamily(backend) {
-			return runtime.Session{}, runtime.NewStartOnlyThinkingError(backend, opts.Thinking)
+		if err := runtime.ValidateThinkingForBackendResume(backend, opts.Thinking); err != nil {
+			return runtime.Session{}, err
 		}
-		return runtime.Session{}, runtime.NewUnsupportedThinkingError(backend)
 	}
 	if opts.ClaudeMCPWait != 0 {
 		return runtime.Session{}, runtime.NewStartOnlyClaudeMCPWaitError(backend, opts.ClaudeMCPWait)
