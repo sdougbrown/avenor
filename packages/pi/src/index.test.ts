@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { createHash } from 'node:crypto'
+import { messageTool as realMessageTool } from '@dougbots/avenor-core'
 import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
@@ -14,28 +15,7 @@ import extensionFactory, {
   statusSupervisorId,
 } from './index.js'
 import { findLiveStatusForTrackedRun } from './types.js'
-import { makeInspectResult, startExtensionHarness } from './test-fixtures.js'
-import * as coreModule from '@dougbots/avenor-core'
-
-// Stub the core askTool and cancelTool (imported directly by the extension, not
-// via deps) so the wiring tests never dial a live supervisor. Everything else in
-// the core module is preserved via the captured original.
-const originalCore = { ...coreModule }
-const askCalls: Array<Record<string, unknown>> = []
-const askToolMock = mock(async (args: Record<string, unknown>) => {
-  askCalls.push(args)
-  return { reply: 'ok', from_run_id: 'run-1' }
-})
-const cancelCalls: Array<Record<string, unknown>> = []
-const cancelToolMock = mock(async (args: Record<string, unknown>) => {
-  cancelCalls.push(args)
-  return { cancelled: true }
-})
-mock.module('@dougbots/avenor-core', () => ({
-  ...originalCore,
-  askTool: askToolMock,
-  cancelTool: cancelToolMock,
-}))
+import { makeInspectResult, makeMessageProvider, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 async function withoutAmbientAgentProfile<T>(run: () => Promise<T>): Promise<T> {
   const previous = process.env.PI_AGENT_PROFILE
@@ -110,49 +90,80 @@ async function createMultiSupervisorHarness(options: {
   return { ...h, confirm, waitPolls, waitPollMatching }
 }
 
+/** Open the watch inspector for a run and send one follow-up through it. */
+async function watchResume(
+  harness: Awaited<ReturnType<typeof startExtensionHarness>>,
+  runId: string,
+  text: string,
+) {
+  let overlay: any
+  await harness.registeredCommands['avenor-watch'].handler(runId, {
+    hasUI: true,
+    ui: {
+      custom: async (factory: any) => {
+        overlay = factory(
+          { terminal: { rows: 24 }, requestRender() {} },
+          {
+            fg: (_color: string, text: string) => text,
+            bg: (_color: string, text: string) => text,
+            bold: (text: string) => text,
+            italic: (text: string) => text,
+          },
+          {},
+          () => {},
+        )
+      },
+    },
+  })
+  await waitFor(() => Boolean(overlay?.state?.status))
+  overlay.submit(text)
+  return overlay
+}
+
 describe('Avenor Pi extension', () => {
   it('exports a function', () => {
     expect(typeof extensionFactory).toBe('function')
   })
 
-  it('wires avenor_ask timeout_ms through to the ask tool', async () => {
-    const harness = await startExtensionHarness({})
-    const result = await harness.registeredTools.avenor_ask.execute(
+  it('routes avenor_message ask and withdraw through the bound provider', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    const harness = await startExtensionHarness({
+      deps: {
+        messageTool: mock(async (args: Record<string, unknown>) => {
+          calls.push(args)
+          return { action: args.action, outcome: 'replied', messageId: 'msg-1', reply: 'ok', text: 'ok' }
+        }),
+      },
+    })
+    const result = await harness.registeredTools.avenor_message.execute(
       'tool-ask',
-      { to_run_id: 'run-1', message: 'hello', timeout_ms: 2500 },
+      { action: 'ask', target: 'run-1', message: 'hello', timeout_ms: 2500 },
     )
-    expect(askCalls.at(-1)).toEqual({ toRunId: 'run-1', message: 'hello', timeoutMs: 2500, supervisorId: undefined })
+    expect(calls.at(-1)).toEqual({ action: 'ask', target: 'run-1', message: 'hello', timeout_ms: 2500 })
     expect(result).toEqual({
-      content: [{ type: 'text', text: 'Reply from run-1:\nok' }],
-      details: { reply: 'ok', from_run_id: 'run-1' },
+      content: [{ type: 'text', text: 'ok' }],
+      details: { action: 'ask', outcome: 'replied', text: 'ok', message_id: 'msg-1', reply: 'ok' },
     })
 
-    // A fractional timeout_ms round-trips through the wiring as-is; schema-level
-    // Integer coercion is TypeBox's concern, not the extension's.
-    await harness.registeredTools.avenor_ask.execute(
-      'tool-ask-fractional',
-      { to_run_id: 'run-1', message: 'hello', timeout_ms: 5.5 },
+    const withdrawn = await harness.registeredTools.avenor_message.execute(
+      'tool-withdraw',
+      { action: 'withdraw', message_id: 'msg-1' },
     )
-    expect(askCalls.at(-1)?.timeoutMs).toBe(5.5)
+    expect(calls.at(-1)).toEqual({ action: 'withdraw', message_id: 'msg-1' })
+    expect(withdrawn.details.action).toBe('withdraw')
   })
 
-  it('wraps a host-mode avenor_cancel in text content and details', async () => {
-    const harness = await startExtensionHarness({ extOptions: { subAgentEnv: null } })
-    const result = await harness.registeredTools.avenor_cancel.execute('tool-cancel', { message_id: 'ask-1' })
-    expect(cancelCalls.at(-1)).toEqual({ messageId: 'ask-1' })
-    expect(result).toEqual({
-      content: [{ type: 'text', text: 'Cancelled ask-1' }],
-      details: { cancelled: true },
+  it('propagates a message tool rejection', async () => {
+    const harness = await startExtensionHarness({
+      deps: {
+        messageTool: mock(async () => {
+          throw new Error('no pending ask')
+        }),
+      },
     })
-  })
-
-  it('propagates a host-mode avenor_cancel rejection', async () => {
-    const harness = await startExtensionHarness({ extOptions: { subAgentEnv: null } })
-    cancelToolMock.mockImplementationOnce(async () => {
-      throw new Error('no pending ask')
-    })
-    await expect(harness.registeredTools.avenor_cancel.execute('tool-cancel', { message_id: 'ask-1' }))
-      .rejects.toThrow('no pending ask')
+    await expect(
+      harness.registeredTools.avenor_message.execute('tool-reply', { action: 'reply', reply_to: 'ask-1', message: 'x' }),
+    ).rejects.toThrow('no pending ask')
   })
 
   it('enriches controller status details with an advisory candidate count', async () => {
@@ -251,7 +262,7 @@ describe('Avenor Pi extension', () => {
       '> final answer',
       'Session: `ses-1`',
       '',
-      'Call `avenor_inspect` with `run_id: "run-1"` for the bounded transcript/snapshot, or `avenor_follow_up` to iterate.',
+      'Call `avenor_inspect` with `run_id: "run-1"` for the bounded transcript/snapshot, or `avenor_message` with `action: "resume"` to iterate.',
     ].join('\n'))
   })
 
@@ -460,6 +471,119 @@ describe('Avenor Pi extension', () => {
     await harness.eventHandlers.session_shutdown()
   })
 
+  it('routes a watch resume through the bound provider and tracks the resumed run', async () => {
+    const resumeSpy = mock(async () => ({
+      outcome: 'resumed' as const,
+      runId: 'run-2',
+      runtimeId: 'rt-2',
+      label: 'follow-up',
+      sentinelFile: '/runs/run-2/sentinel.done',
+      onEvent: '/runs/run-2/events.log',
+    }))
+    const provider = makeMessageProvider({
+      resume: resumeSpy,
+      registerResumed: () => {},
+    })
+    const hostProviderFor = mock(async (_supervisorId?: string) => provider)
+    const statusTool = mock(async (args: { runId?: string } = {}) => args.runId === 'run-2'
+      ? { run_id: 'run-2', label: 'follow-up', status: 'done', runtime_id: 'rt-2' }
+      : { run_id: 'run-1', label: 'demo', status: 'done', runtime_id: 'rt-1' })
+    const harness = await startExtensionHarness({
+      deps: { hostProviderFor, statusTool, messageTool: realMessageTool },
+      extOptions: { subAgentEnv: null },
+    })
+    const overlay = await watchResume(harness, 'run-1', 'continue')
+    await waitFor(() => statusTool.mock.calls.some(call => (call[0] as { runId?: string })?.runId === 'run-2'))
+    expect(hostProviderFor).toHaveBeenCalledWith(undefined)
+    expect(resumeSpy).toHaveBeenCalledWith(expect.objectContaining({ target: 'run-1', message: 'continue' }))
+    overlay.dispose()
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
+  it('closes the client a non-singleton binding dialled when avenor_shutdown stops it', async () => {
+    const OTHER = '/tmp/other.sock'
+    const close = mock(() => {})
+    const otherClient = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-other' })),
+      close,
+    }
+    const getSupervisorClient = mock(async () => ({
+      client: otherClient,
+      isSingleton: false,
+      sup: null,
+      supervisorId: OTHER,
+    }))
+    const harness = await startExtensionHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        spawnTool: mock(async () => ({
+          run_id: 'run_1',
+          label: 'demo',
+          supervisor_id: OTHER,
+          runtime_id: 'rt_1',
+        })),
+      },
+      extOptions: { subAgentEnv: null },
+    })
+    // Only a tracked run's supervisorId reaches a non-default binding, so seed
+    // one and let the watch resume dial it.
+    await harness.registeredTools.avenor_spawn.execute(
+      'tool-1',
+      { agent: 'explore', label: 'demo', supervisor_id: OTHER, wait: false },
+      undefined,
+      undefined,
+      harness.ctx,
+    )
+    const overlay = await watchResume(harness, 'run_1', 'continue')
+    await waitFor(() => getSupervisorClient.mock.calls.length === 1)
+    expect(getSupervisorClient).toHaveBeenCalledWith(OTHER, { owner: true })
+    expect(close).not.toHaveBeenCalled()
+
+    await harness.registeredTools.avenor_shutdown.execute('s', { supervisor_id: OTHER })
+    expect(close).toHaveBeenCalledTimes(1)
+    // The default binding was never dialled, so the shutdown left it alone.
+    expect(getSupervisorClient).toHaveBeenCalledTimes(1)
+    overlay.dispose()
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
+  it('resumes a tracked run through the host binding in a child session', async () => {
+    const resumeSpy = mock(async () => ({
+      outcome: 'resumed' as const,
+      runId: 'run-2',
+      runtimeId: 'rt-2',
+      label: 'follow-up',
+      sentinelFile: '/runs/run-2/sentinel.done',
+      onEvent: '/runs/run-2/events.log',
+    }))
+    const provider = makeMessageProvider({ resume: resumeSpy, registerResumed: () => {} })
+    const hostProviderFor = mock(async (_supervisorId?: string) => provider)
+    const statusTool = mock(async (args: { runId?: string } = {}) => args.runId === 'run-2'
+      ? { run_id: 'run-2', label: 'follow-up', status: 'done', runtime_id: 'rt-2' }
+      : { run_id: 'run-1', label: 'demo', status: 'done', runtime_id: 'rt-1' })
+    const previousFetch = globalThis.fetch
+    // The child poll has no broker here; an empty queue keeps it off the network.
+    globalThis.fetch = mock(async () => Response.json([])) as unknown as typeof fetch
+    const harness = await startExtensionHarness({
+      deps: { hostProviderFor, statusTool, messageTool: realMessageTool },
+      extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
+    })
+    let overlay: any
+    try {
+      overlay = await watchResume(harness, 'run-1', 'continue')
+      // The child provider's resume always throws not_permitted, so a resume
+      // that completes and reaches the tracker proves the host binding ran it.
+      await waitFor(() => statusTool.mock.calls.some(call => (call[0] as { runId?: string })?.runId === 'run-2'))
+      expect(hostProviderFor).toHaveBeenCalledTimes(1)
+      expect(resumeSpy).toHaveBeenCalledWith(expect.objectContaining({ target: 'run-1', message: 'continue' }))
+    } finally {
+      overlay?.dispose()
+      globalThis.fetch = previousFetch
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
   it('registers all expected tools, commands, renderers, and event handlers', async () => {
     const registeredTools: Record<string, any> = {}
     const registeredCommands: Record<string, any> = {}
@@ -520,7 +644,7 @@ describe('Avenor Pi extension', () => {
       statusTool: statusToolMock,
       eventsTool: mock(async () => ({ events: [] })),
       answerPermissionTool: mock(async () => ({ ok: true })),
-      followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
+      messageTool: mock(async () => ({ outcome: 'sent', messageId: 'm-1', text: 'sent' })),
       inspectTool: mock(async (args: { runId?: string } = {}) => {
         const result = makeInspectResult({ status: 'running' })
         result.snapshot = { ...result.snapshot, ended: false, stop_reason: undefined }
@@ -548,7 +672,13 @@ describe('Avenor Pi extension', () => {
     expect(Object.keys(registeredTools)).toContain('avenor_result')
     expect(Object.keys(registeredTools)).toContain('avenor_inspect')
     expect(Object.keys(registeredTools)).toContain('avenor_answer_permission')
-    expect(Object.keys(registeredTools)).toContain('avenor_follow_up')
+    expect(Object.keys(registeredTools)).toContain('avenor_message')
+    expect(Object.keys(registeredTools)).toContain('avenor_peers')
+    expect(Object.keys(registeredTools)).toContain('avenor_workflow_cancel')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_follow_up')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_ask')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_reply')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_cancel')
     expect(Object.keys(registeredTools)).toContain('avenor_events')
     expect(Object.keys(registeredTools)).toContain('avenor_shutdown')
     expect(Object.keys(registeredTools)).toContain('avenor_kill')
@@ -568,7 +698,7 @@ describe('Avenor Pi extension', () => {
       'avenor_result',
       'avenor_inspect',
       'avenor_answer_permission',
-      'avenor_follow_up',
+      'avenor_message',
       'avenor_events',
       'avenor_shutdown',
       'avenor_workflow_controller_status',
@@ -790,7 +920,13 @@ describe('Avenor Pi extension', () => {
     }
     const inspectResult = makeInspectResult({ run_id: 'inspect-run', label: 'inspect worker' })
     const permissionPayload = { ok: true }
-    const followUpPayload = { run_id: 'follow-up-run', label: 'follow-up worker' }
+    const messagePayload = {
+      action: 'resume',
+      outcome: 'resumed',
+      runId: 'follow-up-run',
+      label: 'follow-up worker',
+      text: 'resumed "follow-up worker" as run "follow-up-run"',
+    }
     const eventsPayload = { events: [{ event: 'agent.message', seq: 1, delta: 'hello' }] }
     const shutdownPayload = { ok: true, cleaned_up: ['/tmp/one'] }
     const killPayload = { killed: true, run_id: 'run-1' }
@@ -813,7 +949,8 @@ describe('Avenor Pi extension', () => {
       resultTool: mock(async () => resultPayload),
       inspectTool: mock(async () => inspectResult),
       answerPermissionTool: mock(async () => permissionPayload),
-      followUpTool: mock(async () => followUpPayload),
+      messageTool: mock(async () => messagePayload),
+      hostProviderFor: mock(async () => makeMessageProvider()),
       eventsTool: mock(async () => eventsPayload),
       shutdownTool: mock(async () => shutdownPayload),
       killTool: mock(async (args: Record<string, unknown>) => {
@@ -845,11 +982,17 @@ describe('Avenor Pi extension', () => {
     expect(permission.content[0]?.text).toBe(JSON.stringify(permissionPayload, null, 2))
     expect(permission.details).toEqual(permissionPayload)
 
-    const followUp = await registeredTools.avenor_follow_up.execute('tool-follow-up', {
-      run_id: 'status-run', message: 'continue', label: 'follow-up worker',
+    const resumed = await registeredTools.avenor_message.execute('tool-message', {
+      action: 'resume', target: 'status-run', message: 'continue', label: 'follow-up worker',
     })
-    expect(followUp.content[0]?.text).toBe(JSON.stringify(followUpPayload, null, 2))
-    expect(followUp.details).toEqual(followUpPayload)
+    expect(resumed.content[0]?.text).toBe(messagePayload.text)
+    expect(resumed.details).toEqual({
+      action: 'resume',
+      outcome: 'resumed',
+      run_id: 'follow-up-run',
+      label: 'follow-up worker',
+      text: 'resumed "follow-up worker" as run "follow-up-run"',
+    })
 
     const events = await registeredTools.avenor_events.execute('tool-events', {
       run_id: 'status-run', types: ['agent.message'], limit: 10,
@@ -886,8 +1029,8 @@ describe('Avenor Pi extension', () => {
         statusTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', runtime_id: 'rt-1', final_output: 'answer' })),
         eventsTool: mock(async () => ({ events: [] })),
         answerPermissionTool: mock(async () => ({ ok: true })),
-        followUpTool: mock(async () => ({ run_id: 'run-2', label: 'follow-up' })),
-        inspectTool: mock(async () => makeInspectResult()),
+        messageTool: mock(async () => ({ outcome: 'sent', messageId: 'm-1', text: 'sent' })),
+          inspectTool: mock(async () => makeInspectResult()),
         resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' })),
         shutdownTool: mock(async () => ({ ok: true })),
         observeRun: mock(() => null),

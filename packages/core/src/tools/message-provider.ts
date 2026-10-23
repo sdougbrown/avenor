@@ -126,6 +126,15 @@ function controlWireCode(error: unknown): string | undefined {
   return typeof code === 'string' && code ? code : undefined
 }
 
+/** The broker rejected a receive because the caller's generation is stale. */
+export function isGenerationMismatchError(error: unknown): boolean {
+  if (error instanceof RpcError) {
+    const data = error.data as Record<string, unknown> | null | undefined
+    if (data?.code === 'generation-mismatch' || data?.wire_code === 'generation-mismatch') return true
+  }
+  return error instanceof Error && /generation mismatch/i.test(error.message)
+}
+
 /** Reject an abort exactly the way fetch does, so the ask cleanup path runs. */
 function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise
@@ -246,10 +255,10 @@ export interface HostProviderOptions {
   onResumed?: (result: ProviderResult) => void | Promise<void>
 }
 
-type AskClaims = Map<string, { asker: string, generation: number }>
+export type AskClaims = Map<string, { asker: string, generation: number }>
 
 /** Install the claim/restore pair both factories share, so a restart cannot resurrect a stale ask. */
-function installAskClaims(
+export function installAskClaims(
   provider: MessageProvider,
   claims: AskClaims,
   pendingAsks: Map<string, PendingAsk>,
@@ -268,6 +277,11 @@ function installAskClaims(
     if (claim && claim.generation === (pollGeneration?.() ?? 0)) {
       pendingAsks.set(messageId, { from_run_id: askerRunId, message_id: messageId })
     }
+  }
+  // A surface may own the claim map and install it after the factory did, so
+  // the reply path releases through the pair rather than its local map.
+  provider.releaseAsk = (messageId: string) => {
+    claims.delete(messageId)
   }
 }
 
@@ -480,7 +494,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         if (outcome) return { outcome: outcome as MessageOutcome, messageId: inboundAskId }
         throw authorityError(error)
       }
-      if (sent.outcome === 'replied') claims.delete(inboundAskId)
+      if (sent.outcome === 'replied') provider.releaseAsk?.(inboundAskId)
       return { outcome: sent.outcome as MessageOutcome, messageId: inboundAskId }
     },
 
@@ -704,7 +718,7 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
     ask: (targetRunId, message, timeoutMs, signal) => broker.ask(targetRunId, message, newMsgID(), timeoutMs, signal),
     reply: async (inboundAskId, message, askerRunId) => {
       const result = await broker.reply(askerRunId, inboundAskId, message)
-      if (result.outcome === 'replied') claims.delete(inboundAskId)
+      if (result.outcome === 'replied') provider.releaseAsk?.(inboundAskId)
       return result
     },
     withdraw: messageId => broker.withdraw(messageId),

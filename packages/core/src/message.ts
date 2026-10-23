@@ -118,6 +118,8 @@ export interface MessageProvider {
   recordLastTurn?(text: string, stopReason: string, truncated: boolean): Promise<void>
   claimAsk?(messageId: string): string | undefined
   restoreAsk?(messageId: string, askerRunId: string): void
+  /** Drop a claim once the asker has the answer; the claim map may belong to the surface. */
+  releaseAsk?(messageId: string): void
   onResumed?(result: ProviderResult): void | Promise<void>
   registerResumed?(result: ProviderResult): void | Promise<void>
 }

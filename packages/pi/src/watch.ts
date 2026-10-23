@@ -56,7 +56,7 @@ export interface WatchDeps {
   ): Promise<RunObserver | null>
   cancelRun(run: WatchRunRef, runtimeId: string): Promise<void>
   interruptAndPromptRun(run: WatchRunRef, runtimeId: string, text: string): Promise<void>
-  followUpRun(run: WatchRunRef, text: string): Promise<{ run_id: string; label: string }>
+  resumeRun(run: WatchRunRef, text: string): Promise<{ run_id: string; label: string }>
 }
 
 export interface WatchOpenOptions {
@@ -461,7 +461,7 @@ export class RunInspectorOverlay implements Component, Focusable {
     if (!isFollowUpable(this.state.status, this.state.snapshot)) return
 
     this.runAction(async () => {
-      const next = await this.deps.followUpRun(this.state.run, text)
+      const next = await this.deps.resumeRun(this.state.run, text)
       this.state = {
         ...this.state,
         run: {

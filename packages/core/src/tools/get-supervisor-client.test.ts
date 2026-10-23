@@ -7,14 +7,11 @@ import * as path from 'node:path'
 import { createOwnerGate, respond, type OwnerGateRequest } from '../../test/fixtures/owner-gate.js'
 import { OwnerRecordMissingError } from '../owner-attach.js'
 import { answerPermissionTool } from './answer-permission.js'
-import { askTool } from './ask.js'
 import { brokerReceiveTool } from './broker-receive.js'
 import { brokerReplyTool } from './broker-reply.js'
-import { cancelTool } from './cancel.js'
-import { followUpTool } from './follow-up.js'
 import { getSupervisorClient } from './get-supervisor-client.js'
 import { killTool } from './kill.js'
-import { peersTool } from './peers.js'
+import { shutdownTool } from './shutdown.js'
 import { statusTool } from './status.js'
 
 describe('read-only control clients', () => {
@@ -22,8 +19,10 @@ describe('read-only control clients', () => {
   let previousHome: string | undefined
   let server: net.Server
   let socketPath: string
+  let receivedMessages: unknown[]
 
   beforeEach(async () => {
+    receivedMessages = []
     previousHome = process.env.AVENOR_HOME
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-read-only-'))
     process.env.AVENOR_HOME = home
@@ -39,13 +38,25 @@ describe('read-only control clients', () => {
         buffer = lines.pop() ?? ''
         for (const line of lines) {
           if (!line.trim()) continue
-          const request = JSON.parse(line) as { id: number, method: string }
+          const request = JSON.parse(line) as { id: number, method: string, params?: Record<string, unknown> }
+          if (request.method === 'message_receive' && request.params?.generation !== 'gen-1') {
+            socket.write(JSON.stringify({
+              jsonrpc: '2.0',
+              id: request.id,
+              error: {
+                code: -32000,
+                message: 'messaging: generation mismatch',
+                data: { code: 'generation-mismatch', outcome: 'not-sent', wire_code: 'generation-mismatch' },
+              },
+            }) + '\n')
+            continue
+          }
           const result = request.method === 'list'
             ? []
-            : request.method === 'broker_peers'
-              ? { sessions: [{ run_id: 'peer' }] }
-              : request.method === 'broker_receive'
-                ? []
+            : request.method === 'message_preflight'
+              ? { protocol: 1, generation: 'gen-1' }
+              : request.method === 'message_receive'
+                ? { messages: receivedMessages, generation: 'gen-1' }
                 : undefined
           socket.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n')
         }
@@ -69,9 +80,39 @@ describe('read-only control clients', () => {
     expect(await client.list()).toEqual([])
     client.close()
 
-    expect(await peersTool({ supervisorId: socketPath })).toEqual({ peers: [{ run_id: 'peer' }] })
-    expect(await brokerReceiveTool({ supervisorId: socketPath })).toEqual({ asks: [] })
+    expect(await brokerReceiveTool({ supervisorId: socketPath })).toEqual({ asks: [], generation: 'gen-1' })
+    // A bound poll reuses its generation instead of preflighting every receive.
+    expect(await brokerReceiveTool({ supervisorId: socketPath, generation: 'gen-1' })).toEqual({ asks: [], generation: 'gen-1' })
     expect(await statusTool({ supervisorId: socketPath })).toMatchObject({ runs: [], count: 0 })
+  })
+
+  it('rejects a stale generation as a generation-mismatch RpcError', async () => {
+    await expect(brokerReceiveTool({ supervisorId: socketPath, generation: 'stale' }))
+      .rejects.toMatchObject({
+        name: 'RpcError',
+        data: { code: 'generation-mismatch', wire_code: 'generation-mismatch' },
+      })
+  })
+
+  it('maps real inbound records onto asks', async () => {
+    receivedMessages = [
+      { from_run_id: 'rt-object', message_id: 'msg-object', payload: { message: 'object payload', role: 'agent' } },
+      { from_run_id: 'rt-string', message_id: 'msg-string', payload: JSON.stringify({ message: 'string payload', role: 'reviewer' }) },
+      { from_run_id: 'rt-null', message_id: 'msg-null', payload: null },
+      { from_run_id: 'rt-bare', message_id: 'msg-bare', payload: { kind: 'status' } },
+      { from_run_id: 'rt-malformed', message_id: 'msg-malformed', payload: 'not json' },
+    ]
+
+    expect(await brokerReceiveTool({ supervisorId: socketPath, generation: 'gen-1' })).toEqual({
+      asks: [
+        { from_run_id: 'rt-object', message_id: 'msg-object', message: 'object payload', role: 'agent' },
+        { from_run_id: 'rt-string', message_id: 'msg-string', message: 'string payload', role: 'reviewer' },
+        { from_run_id: 'rt-null', message_id: 'msg-null', message: '', role: undefined },
+        { from_run_id: 'rt-bare', message_id: 'msg-bare', message: '', role: undefined },
+        { from_run_id: 'rt-malformed', message_id: 'msg-malformed', message: '', role: undefined },
+      ],
+      generation: 'gen-1',
+    })
   })
 
   it('requires the published record for an owner attach', async () => {
@@ -104,8 +145,6 @@ describe('owner-gated control tools', () => {
           return [{ run_id: 'run-1', label: 'demo', runtime_id: 'rt-1', session_id: 'ses-1' }]
         case 'status':
           return { run_id: 'run-1', runtime_id: 'rt-1', status: 'running', session_id: 'ses-1' }
-        case 'broker_ask':
-          return { message: 'reply text', from_run_id: 'rt-1' }
         default:
           return { ok: true }
       }
@@ -152,31 +191,6 @@ describe('owner-gated control tools', () => {
     run: (supervisorId: string) => Promise<unknown>
   }> = [
     {
-      name: 'cancel',
-      method: 'broker_cancel',
-      run: supervisorId => cancelTool({ messageId: 'message-1', supervisorId }),
-    },
-    {
-      name: 'ask',
-      method: 'broker_ask',
-      run: supervisorId => askTool({ toRunId: 'run-1', message: 'hello', supervisorId }),
-    },
-    {
-      name: 'broker-reply',
-      method: 'broker_reply',
-      run: supervisorId => brokerReplyTool({
-        toRunId: 'rt-1',
-        replyTo: 'message-1',
-        message: 'hi',
-        supervisorId,
-      }),
-    },
-    {
-      name: 'follow-up',
-      method: 'spawn',
-      run: supervisorId => followUpTool({ runId: 'run-1', message: 'continue', supervisorId }),
-    },
-    {
       name: 'kill',
       method: 'cancel',
       run: supervisorId => killTool({ runId: 'run-1', supervisorId }),
@@ -188,6 +202,21 @@ describe('owner-gated control tools', () => {
         runId: 'run-1',
         optionId: 'allow_once',
         requestId: 'request-1',
+        supervisorId,
+      }),
+    },
+    {
+      name: 'shutdown',
+      method: 'shutdown',
+      run: supervisorId => shutdownTool({ supervisorId }),
+    },
+    {
+      name: 'broker-reply',
+      method: 'broker_reply',
+      run: supervisorId => brokerReplyTool({
+        toRunId: 'rt_1',
+        replyTo: 'msg-1',
+        message: 'answer',
         supervisorId,
       }),
     },

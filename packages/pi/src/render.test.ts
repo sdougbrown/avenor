@@ -5,8 +5,8 @@ import {
   renderAnswerPermissionResult,
   renderEventsCall,
   renderEventsResult,
-  renderFollowUpCall,
-  renderFollowUpResult,
+  renderMessageResumeCall,
+  renderMessageResumeResult,
   renderInspectCall,
   renderInspectResult,
   renderResultCall,
@@ -42,7 +42,12 @@ describe('Avenor Pi renderers', () => {
     expect(text(renderResultCall({ run_id: 'run', wait: false, timeout: '5m', supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_result run_id "run" wait=false timeout "5m" supervisor_id "/tmp/sock"')
     expect(text(renderInspectCall({ run_id: 'run', limit: 10, after_seq: 3, supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_inspect run_id "run" limit=10 after_seq=3 supervisor_id "/tmp/sock"')
     expect(text(renderAnswerPermissionCall({ run_id: 'run', option_id: 'allow', request_id: 'request', message: 'yes', supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_answer_permission run_id "run" option_id "allow" request_id "request" message "yes" supervisor_id "/tmp/sock"')
-    expect(text(renderFollowUpCall({ run_id: 'run', message: 'continue', label: 'again', supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_follow_up run_id "run" message "continue" label "again" supervisor_id "/tmp/sock"')
+    expect(text(renderMessageResumeCall({ action: 'resume', target: 'run', message: 'continue', label: 'again' }, theme))).toBe('avenor_message action "resume" target "run" message "continue" label "again"')
+    expect(text(renderMessageResumeCall({ action: 'tell', target: 'mesh-a', message: 'hi' }, theme))).toBe('avenor_message action "tell" target "mesh-a" message "hi"')
+    expect(text(renderMessageResumeCall({ action: 'reply', reply_to: 'ask-1', message: 'OK' }, theme))).toBe('avenor_message action "reply" reply_to "ask-1" message "OK"')
+    expect(text(renderMessageResumeCall({ action: 'withdraw', message_id: 'av1.w.1' }, theme))).toBe('avenor_message action "withdraw" message_id "av1.w.1"')
+    expect(text(renderMessageResumeCall({ action: 'control_reply', target: 'ctrl-1', payload: { ok: true } }, theme))).toBe('avenor_message action "control_reply" target "ctrl-1" payload "{\\"ok\\":true}"')
+    expect(text(renderMessageResumeCall({ action: 'control_reply', target: 'ctrl-1' }, theme))).toBe('avenor_message action "control_reply" target "ctrl-1"')
     expect(text(renderEventsCall({ run_id: 'run', types: ['agent.message', 'session.end'], limit: 5, supervisor_id: '/tmp/sock' }, theme))).toBe('avenor_events run_id "run" types=["agent.message", "session.end"] limit=5 supervisor_id "/tmp/sock"')
     expect(text(renderShutdownCall({ supervisor_id: '/tmp/sock', force: true }, theme))).toBe('avenor_shutdown supervisor_id "/tmp/sock" force=true')
   })
@@ -121,9 +126,40 @@ describe('Avenor Pi renderers', () => {
       'Guidance: Call avenor_status with run_id "run-1" to verify the permission state.',
     ].join('\n'))
 
-    expect(text(renderFollowUpResult(result({ run_id: 'run-2', label: 'follow-up' }), collapsed, theme, {
-      run_id: 'run-1', message: 'continue',
+    expect(text(renderMessageResumeResult(result({ run_id: 'run-2', label: 'follow-up' }), collapsed, theme, {
+      action: 'resume', target: 'run-1', message: 'continue',
     }))).toContain('Source run: run-1\nRun: run-2\nLabel: follow-up')
+
+    const tell = text(renderMessageResumeResult(result({
+      action: 'tell', outcome: 'sent', message_id: 'av1.t.1', label: 'mesh-a',
+      text: 'message "av1.t.1" delivered to "mesh-a"',
+    }), collapsed, theme, { action: 'tell', target: 'mesh-a', message: 'hi' }))
+    expect(tell).toContain('Tell: sent.')
+    expect(tell).toContain('Target: mesh-a')
+    expect(tell).not.toContain('Resume')
+    expect(tell).not.toContain('Guidance: Call avenor_status')
+
+    const withdraw = text(renderMessageResumeResult(result({
+      action: 'withdraw', outcome: 'withdrawn', message_id: 'av1.w.1',
+      text: 'ask "av1.w.1" was withdrawn',
+    }), collapsed, theme, { action: 'withdraw', message_id: 'av1.w.1' }))
+    expect(withdraw).toContain('Withdraw: withdrawn.')
+    expect(withdraw).not.toContain('dispatched')
+
+    // A reply names no target: its run is implied by the ask it answers, so a
+    // target in the call args never reaches the summary.
+    const reply = text(renderMessageResumeResult(result({
+      action: 'reply', outcome: 'replied', message_id: 'ask-1',
+      text: 'answered ask "ask-1"',
+    }), collapsed, theme, { action: 'reply', reply_to: 'ask-1', target: 'run-9', message: 'OK' }))
+    expect(reply).toContain('Reply: replied.')
+    expect(reply).not.toContain('Target:')
+
+    const tellTarget = text(renderMessageResumeResult(result({
+      action: 'tell', outcome: 'sent', message_id: 'av1.t.2',
+      text: 'message "av1.t.2" delivered',
+    }), collapsed, theme, { action: 'tell', target: 'run-9', message: 'hi' }))
+    expect(tellTarget).toContain('Target: run-9')
 
     const events = { events: [{ event: 'agent.message', seq: '2', delta: 'hello' }, { type: 'session.end', seq: 3 }] }
     expect(text(renderEventsResult(result(events), expanded, theme, { run_id: 'run-1', types: ['agent.message'] }))).toBe([
@@ -171,6 +207,22 @@ describe('Avenor Pi renderers', () => {
       'Guidance: retry avenor_shutdown.',
       'Cleanup path: /tmp/one',
     ].join('\n'))
+  })
+
+  it('renders the reply line for an answered ask and for no other action', () => {
+    const answeredAsk = text(renderMessageResumeResult(result({
+      action: 'ask', outcome: 'replied', message_id: 'ask-1', reply: 'green',
+    }), collapsed, theme, { action: 'ask', target: 'run-2', message: 'colour?' }))
+    expect(answeredAsk).toContain('Ask: replied.')
+    expect(answeredAsk).toContain('Reply: green')
+    expect(answeredAsk).toContain('Target: run-2')
+
+    // A non-ask result that happens to carry a reply field must not print one.
+    const tellWithReply = text(renderMessageResumeResult(result({
+      action: 'tell', outcome: 'sent', message_id: 'av1.t.9', reply: 'green',
+    }), collapsed, theme, { action: 'tell', target: 'mesh-a', message: 'hi' }))
+    expect(tellWithReply).toContain('Tell: sent.')
+    expect(tellWithReply).not.toContain('Reply:')
   })
 
   it('keeps result, event, and shutdown details out of collapsed renderings', () => {
