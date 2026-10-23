@@ -832,26 +832,6 @@ export class Client {
 
   // The merged messaging control verbs. Each decodes the snake_case control DTO
   // internal/control/message_dto.go declares.
-  // Temporary until 356-17: the broker_* verbs stay callable for the surfaces
-  // that still use them. Removed with the verbs themselves.
-  async brokerSend(fromRunId: string, toRunId: string, message: string, role?: string): Promise<void> {
-    await this.call('broker_send', { from_run_id: fromRunId, to_run_id: toRunId, message, role: role ?? 'agent' })
-  }
-
-  async brokerAsk(toRunId: string, message: string, role?: string, timeoutMs?: number): Promise<Record<string, unknown>> {
-    const params: Record<string, unknown> = { to_run_id: toRunId, message, role: role ?? 'agent' }
-    if (timeoutMs !== undefined) params.timeout_ms = timeoutMs
-    return await this.call('broker_ask', params, timeoutMs !== undefined ? { timeoutMs } : undefined) as Record<string, unknown>
-  }
-
-  async brokerCancel(messageId: string): Promise<void> {
-    await this.call('broker_cancel', { message_id: messageId })
-  }
-
-  async brokerReply(toRunId: string, replyTo: string, message: string): Promise<void> {
-    await this.call('broker_reply', { to_run_id: toRunId, reply_to: replyTo, message })
-  }
-
   async messageSend(params: MessageSendParams): Promise<MessageSendResult> {
     return this.call('message_send', params) as Promise<MessageSendResult>
   }

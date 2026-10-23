@@ -6,7 +6,6 @@ import { findAvenorBinary, Supervisor } from '../supervisor.js'
 import { spawnTool } from './spawn.js'
 import { statusTool, translateStatus } from './status.js'
 import { answerPermissionTool } from './answer-permission.js'
-import { followUpTool } from './follow-up.js'
 import { eventsTool } from './events.js'
 import { shutdownTool } from './shutdown.js'
 
@@ -203,55 +202,6 @@ describe('eventsTool reading mock NDJSON log file', () => {
     expect(limited).toHaveLength(limit)
     expect(limited[0].ts).toBe(90)
     expect(limited[limited.length - 1].ts).toBe(99)
-  })
-})
-
-describe('followUpTool parsing sentinel for SESSION=', () => {
-  const tmpdir = os.tmpdir()
-  let sentinelPath: string
-
-  afterEach(() => {
-    if (sentinelPath) {
-      try { fs.unlinkSync(sentinelPath) } catch {}
-    }
-  })
-
-  it('parses SESSION from sentinel file', () => {
-    const runId = 'test-run-followup-parse'
-    sentinelPath = path.join(tmpdir, `avenor-run-${runId}.done`)
-    fs.writeFileSync(sentinelPath, 'DONE\nSESSION=ses_resume_42\n')
-
-    const content = fs.readFileSync(sentinelPath, 'utf-8')
-    const lines = content.trim().split('\n')
-    expect(lines[0]).toBe('DONE')
-
-    const kv: Record<string, string> = {}
-    for (let i = 1; i < lines.length; i++) {
-      const eq = lines[i].indexOf('=')
-      if (eq > 0) {
-        kv[lines[i].substring(0, eq)] = lines[i].substring(eq + 1)
-      }
-    }
-
-    expect(kv.SESSION).toBe('ses_resume_42')
-  })
-
-  it('throws when SESSION is missing from sentinel', () => {
-    const runId = 'test-run-followup-missing'
-    sentinelPath = path.join(tmpdir, `avenor-run-${runId}.done`)
-    fs.writeFileSync(sentinelPath, 'FAILED\n')
-
-    const content = fs.readFileSync(sentinelPath, 'utf-8')
-    const lines = content.trim().split('\n')
-    const kv: Record<string, string> = {}
-    for (let i = 1; i < lines.length; i++) {
-      const eq = lines[i].indexOf('=')
-      if (eq > 0) {
-        kv[lines[i].substring(0, eq)] = lines[i].substring(eq + 1)
-      }
-    }
-
-    expect(kv.SESSION).toBeUndefined()
   })
 })
 

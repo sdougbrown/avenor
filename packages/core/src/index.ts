@@ -61,18 +61,6 @@ export type { ThinkingOutcome } from './thinking-policy.js'
 export { statusTool } from './tools/status.js'
 export type { StatusResult, StatusListResult, StatusToolArgs, StatusView } from './tools/status.js'
 export { resultTool } from './tools/result.js'
-// Temporary until 356-17: the retired tools stay exported until the OpenCode
-// plugin (slice 14) and MCP (slice 15) move to the merged message tool. Both
-// still resume through followUpTool; askTool keeps its own formatAskFailure.
-export { followUpTool } from './tools/follow-up.js'
-export type { FollowUpToolArgs, FollowUpToolResult } from './tools/follow-up.js'
-export { askTool } from './tools/ask.js'
-export type { AskToolArgs, AskResult } from './tools/ask.js'
-export { cancelTool } from './tools/cancel.js'
-export type { CancelToolArgs, CancelResult } from './tools/cancel.js'
-export { brokerReplyTool } from './tools/broker-reply.js'
-export type { BrokerReplyArgs, BrokerReplyResult } from './tools/broker-reply.js'
-
 export type { ResultResult, ResultToolArgs } from './tools/result.js'
 export { answerPermissionTool } from './tools/answer-permission.js'
 export { eventsTool } from './tools/events.js'
