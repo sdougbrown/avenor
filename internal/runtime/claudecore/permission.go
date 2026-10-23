@@ -2,6 +2,7 @@ package claudecore
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,41 +17,59 @@ type TerminalPermission struct {
 type PermissionOption struct {
 	ID    string
 	Label string
+	Kind  string
 }
 
 var tmuxOptionRE = regexp.MustCompile(`^\s*(?:❯\s*)?(\d+)\.\s+(.*)`)
 
+// permissionOptionKind classifies a dialog option by its label. Claude Code
+// starts approving labels with "Yes" and declining labels with "No". Any other
+// label gets no kind, so the resolvers refuse to select it.
+func permissionOptionKind(label string) string {
+	switch {
+	case labelStartsWith(label, "Yes"):
+		return "allow"
+	case labelStartsWith(label, "No"):
+		return "reject"
+	default:
+		return ""
+	}
+}
+
+func labelStartsWith(label, word string) bool {
+	return label == word || strings.HasPrefix(label, word+",") || strings.HasPrefix(label, word+" ")
+}
+
 // ParseTerminalPermission extracts a TerminalPermission from pane text, or nil
-// if the text doesn't represent a Claude permission dialog.
+// if the text does not represent a Claude permission dialog. The pane can show
+// numbered lists above the dialog, so the options are the last list numbered
+// from 1. The prompt is all pane text above that list, numbered lines included.
+// A numbered line in a command preview therefore cannot hide the lines above it.
 func ParseTerminalPermission(text string) *TerminalPermission {
 	text = normalizePane(text)
 	lines := strings.Split(text, "\n")
 	promptLines := make([]string, 0)
 	options := make([]PermissionOption, 0)
+	// above holds every prompt candidate line seen so far.
+	above := make([]string, 0)
 
-	inOptions := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
-		if tmuxOptionRE.MatchString(trimmed) {
-			matches := tmuxOptionRE.FindStringSubmatch(trimmed)
-			if len(matches) == 3 {
-				options = append(options, PermissionOption{ID: matches[1], Label: strings.TrimSpace(matches[2])})
-				inOptions = true
-				continue
+		if matches := tmuxOptionRE.FindStringSubmatch(trimmed); len(matches) == 3 {
+			if matches[1] == "1" {
+				options = options[:0]
+				promptLines = append(promptLines[:0], above...)
 			}
-		}
-		if inOptions {
-			// After options, skip footer lines (Esc to cancel, etc.)
-			if strings.Contains(trimmed, "Esc to cancel") || strings.HasPrefix(trimmed, "Esc ") {
-				continue
+			if matches[1] == strconv.Itoa(len(options)+1) {
+				label := strings.TrimSpace(matches[2])
+				options = append(options, PermissionOption{ID: matches[1], Label: label, Kind: permissionOptionKind(label)})
 			}
-			break
 		}
 		if !strings.HasPrefix(trimmed, "❯") && !strings.HasPrefix(trimmed, "●") && !strings.HasPrefix(trimmed, "✻") && !strings.HasPrefix(trimmed, "✢") {
-			promptLines = append(promptLines, trimmed)
+			above = append(above, trimmed)
 		}
 	}
 

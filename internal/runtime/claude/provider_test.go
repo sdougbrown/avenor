@@ -3,11 +3,14 @@ package claude
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
@@ -569,6 +572,60 @@ func TestAnswerPermissionTerminalRoute(t *testing.T) {
 	sends := s.Term.(*terminal.FakeSession).SendCalls()
 	if len(sends) != 1 || len(sends[0]) != 2 || sends[0][0] != "1" || sends[0][1] != string(terminal.KeyEnter) {
 		t.Fatalf("keys sent = %v, want [[1 Enter]]", sends)
+	}
+}
+
+func TestBrokeredPermissionAnswersThroughFileHandler(t *testing.T) {
+	const editPane = "Do you want to make this edit to README.md?\n ❯ 1. Yes\n   2. Yes, allow all edits during this session\n   3. No\n\n Esc to cancel · Tab to amend"
+	tests := []struct {
+		name     string
+		optionID string
+		wantKeys []string
+	}{
+		{name: "allow", optionID: "2", wantKeys: []string{"2", string(terminal.KeyEnter)}},
+		{name: "reject", optionID: "3", wantKeys: []string{string(terminal.KeyEsc), string(terminal.KeyEnter)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			term := terminal.NewFakeSession("test-term", 1, editPane)
+			s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-file", Term: term, EventsBuf: 8})
+			t.Cleanup(s.CancelFn)
+			s.Prompted = true
+			p := &Provider{sessions: map[string]*claudecore.Session{"ses-file": s}}
+
+			s.ScanTerminalTick()
+			var req events.Event
+			for len(s.Events) > 0 {
+				if ev := <-s.Events; ev.Event == "permission.request" {
+					req = ev
+				}
+			}
+			if req.Event == "" {
+				t.Fatal("no permission.request emitted for the edit dialog")
+			}
+
+			base := filepath.Join(t.TempDir(), "perm")
+			handler := permission.NewFileHandler(base)
+			handler.PollInterval = 5 * time.Millisecond
+			handler.Timeout = 5 * time.Second
+			go func() {
+				for {
+					if _, err := os.Stat(base + ".req"); err == nil {
+						break
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				_ = os.WriteFile(base+".req.response", []byte(`{"outcome":"selected","option_id":"`+tt.optionID+`"}`), 0o600)
+			}()
+			if _, err := handler.Handle(context.Background(), p, req); err != nil {
+				t.Fatalf("file handler: %v", err)
+			}
+
+			sends := term.SendCalls()
+			if len(sends) != 1 || strings.Join(sends[0], " ") != strings.Join(tt.wantKeys, " ") {
+				t.Fatalf("keys sent = %v, want [%v]", sends, tt.wantKeys)
+			}
+		})
 	}
 }
 
