@@ -37,7 +37,7 @@ func (d *statusDiagnostics) note(runtimeID, rawStatus string) {
 // sentinelData is the runstate sentinel this file renders.
 type sentinelData = runstate.Sentinel
 
-// statusRun is the typed shape of one run status in avenor_status structured
+// statusRun is the typed shape of one run status in status structured
 // output. Pointer fields preserve the pass-through presence semantics of the
 // underlying status maps: a key is emitted only when the status source
 // supplied it, including explicit empty strings such as phase_label.
@@ -83,7 +83,7 @@ type statusRun struct {
 	WaitClamped                *bool          `json:"wait_clamped,omitempty"`
 }
 
-// statusToolOutput is the structured output of the avenor_status tool. The
+// statusToolOutput is the structured output of the status tool. The
 // single-run form carries the status fields themselves; the list form (no
 // run_id) carries runs and count. The embedded value keeps the two forms in
 // one type so the SDK can derive the tool's output schema.

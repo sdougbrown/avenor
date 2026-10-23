@@ -15,10 +15,10 @@ import (
 // always speaks as the supervisor session, so no request carries a second
 // identity and the broker stamps the sender's current display name.
 type controlTransport struct {
-	client messageControlClient
+	client ControlClient
 }
 
-func newControlTransport(client messageControlClient) *controlTransport {
+func newControlTransport(client ControlClient) *controlTransport {
 	return &controlTransport{client: client}
 }
 

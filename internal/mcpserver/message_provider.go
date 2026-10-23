@@ -19,33 +19,16 @@ import (
 // are control verbs, and a reply has no inbound delivery to claim here.
 type mcpMessageProvider struct {
 	server         *Server
-	client         messageControlClient
+	client         ControlClient
 	supervisorPath string
 	generationMu   sync.RWMutex
 	generation     string
 	transport      *controlTransport
 }
 
-// messageControlClient is the control surface the messaging provider speaks.
-// Temporary until 356-06, when ControlClient carries these verbs and this
-// interface is deleted with it.
-type messageControlClient interface {
-	ControlClient
-	MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error)
-	MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error)
-	MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error)
-	MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error)
-	MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error)
-	MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error)
-	MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error)
-	ResumeContext(ctx context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error)
-	SessionRenameContext(ctx context.Context, sessionID, name string) (messaging.RenameResult, error)
-	SessionLastContext(ctx context.Context, runtimeID string) (messaging.PeerLast, error)
-}
-
 // newMCPMessageProvider preflights the control store under ctx, so a caller can
 // bound or cancel the constructor's one blocking RPC.
-func newMCPMessageProvider(ctx context.Context, server *Server, client messageControlClient, supervisorPath string) (*mcpMessageProvider, error) {
+func newMCPMessageProvider(ctx context.Context, server *Server, client ControlClient, supervisorPath string) (*mcpMessageProvider, error) {
 	pre, err := client.MessagePreflightContext(ctx)
 	if err != nil {
 		return nil, err

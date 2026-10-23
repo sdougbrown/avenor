@@ -52,7 +52,7 @@ func (s *ControlState) Snapshot() Snapshot {
 	return out
 }
 
-// FinalOutput returns the complete terminal reply retained for avenor_result.
+// FinalOutput returns the complete terminal reply retained for result.
 // It is deliberately not part of Snapshot's JSON status representation.
 func (s *ControlState) FinalOutput() string {
 	s.mu.RLock()

@@ -47,6 +47,17 @@ type ControlClient interface {
 	WorkflowCancel(workflowID, actor, reason string) (map[string]any, error)
 	WorkflowControllerStatus(controllerID string) (map[string]any, error)
 	WorkflowControllerList() (map[string]any, error)
+
+	MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error)
+	MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error)
+	MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error)
+	MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error)
+	MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error)
+	MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error)
+	MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error)
+	ResumeContext(ctx context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error)
+	SessionRenameContext(ctx context.Context, sessionID, name string) (messaging.RenameResult, error)
+	SessionLastContext(ctx context.Context, runtimeID string) (messaging.PeerLast, error)
 }
 
 type messagePermissionControlClient interface {
@@ -93,6 +104,21 @@ type Server struct {
 	// in the control plane, so concurrent MCP calls must share it.
 	supervisorMu sync.Mutex
 	closed       bool
+
+	// messageSupervisorMu guards the outgoing-message binding below. A
+	// withdraw names only a message id, so the supervisor the merged message
+	// tool must reach cannot be derived from the call itself; sending the
+	// message is what learns it. Like the run registry, this is in-process
+	// memory: the binding is not restored with the server, so after an MCP
+	// restart a withdraw of a message sent to a run on a non-default
+	// supervisor before the restart is answered by the default supervisor's
+	// store again.
+	messageSupervisorMu sync.Mutex
+	// messageSupervisors maps an outgoing message id to the supervisor path it
+	// was sent on, and messageSupervisorOrder records the send order so the
+	// oldest binding is evicted first.
+	messageSupervisors     map[string]string
+	messageSupervisorOrder []string
 }
 
 type statusArgs struct {
@@ -190,14 +216,6 @@ type eventsArgs struct {
 	Limit        int      `json:"limit,omitempty" jsonschema:"optional max events to return (default 50)"`
 	AfterSeq     *int64   `json:"after_seq,omitempty" jsonschema:"optional sequence cursor: return only events with seq > after_seq, oldest-first"`
 	SupervisorID string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type followUpArgs struct {
-	RunID          string `json:"run_id" jsonschema:"required prior run ID or label"`
-	Message        string `json:"message" jsonschema:"required follow-up message"`
-	Label          string `json:"label,omitempty" jsonschema:"optional label for the new run (defaults to <prior-label>-followup)"`
-	SupervisorID   string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original follow-up run instead of spawning a second one"`
 }
 
 type workflowStatusArgs struct {
@@ -303,22 +321,23 @@ func NewServer(opts Options) (*Server, error) {
 		clock:         time.Now,
 		sleep:         sleepWithContext,
 		toolNames: []string{
-			"avenor_status",
-			"avenor_result",
-			"avenor_spawn",
-			"avenor_shutdown",
-			"avenor_answer_permission",
-			"avenor_events",
-			"avenor_follow_up",
-			"avenor_kill",
-			"avenor_workflow_status",
-			"avenor_workflow_wait",
-			"avenor_workflow_inspect",
-			"avenor_workflow_events",
-			"avenor_workflow_complete",
-			"avenor_workflow_gate",
-			"avenor_workflow_cancel",
-			"avenor_workflow_controller_status",
+			"status",
+			"result",
+			"spawn",
+			"shutdown",
+			"answer_permission",
+			"message",
+			"peers",
+			"events",
+			"kill",
+			"workflow_status",
+			"workflow_wait",
+			"workflow_inspect",
+			"workflow_events",
+			"workflow_complete",
+			"workflow_gate",
+			"workflow_cancel",
+			"workflow_controller_status",
 		},
 		diag: &statusDiagnostics{stderr: stderrOr(opts.Stderr)},
 	}
@@ -332,82 +351,94 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_status",
+		Name:        "status",
 		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission. Without run_id, returns an object with runs (array of status objects) and count. The wait budget is approximate: a single underlying status poll may add up to its own timeout.",
 	}, s.handleAvenorStatus)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_result",
+		Name:        "result",
 		Description: "Wait for a run to finish and return its complete final output. The wait budget is approximate: a single underlying status poll may add up to its own timeout.",
 	}, s.handleAvenorResult)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_spawn",
+		Name:        "spawn",
 		Description: "Spawn a new avenor run",
 	}, s.handleAvenorSpawn)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_shutdown",
+		Name:        "shutdown",
 		Description: "Shutdown the avenor supervisor and clean up run artifacts",
 	}, s.handleAvenorShutdown)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_kill",
+		Name:        "kill",
 		Description: "Terminate a single run without shutting down the supervisor. Other runs and the supervisor itself keep running.",
 	}, s.handleAvenorKill)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_answer_permission",
+		Name:        "answer_permission",
 		Description: "Answer a pending permission request for a run",
 	}, s.handleAvenorAnswerPermission)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_events",
+		Name:        "events",
 		Description: "Read recent events from a run's event log",
 	}, s.handleAvenorEvents)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_follow_up",
-		Description: "Spawn a follow-up run continuing a prior session",
-	}, s.handleAvenorFollowUp)
+	// The merged tools publish the flat object schema compiled from the shared
+	// contract's per-action union, and register through the raw-arguments
+	// handler: admission belongs to the router on every surface, so the SDK's own
+	// schema validation must not answer first with an error shape the other
+	// surfaces never produce.
+	mcpServer.AddTool(&mcp.Tool{
+		Name:        "message",
+		Description: "Send, ask, reply to, resume or withdraw a message between agent runs; control replies are not available on this surface. The call is bound to the supervisor this server knows the addressed run on, so a run on a non-default supervisor is addressable only once this server has registered it: call status with that supervisor_id first, for example after an MCP restart.",
+		InputSchema: messaging.MessageInputFlatSchema(),
+	}, s.handleAvenorMessage)
+
+	mcpServer.AddTool(&mcp.Tool{
+		Name:        "peers",
+		Description: "List connected agent sessions, rename a run's display name, or read a peer's last agent message. A peer on a non-default supervisor is addressable only once this server has registered a run there (call status with that supervisor_id).",
+		InputSchema: messaging.PeersInputFlatSchema(),
+	}, s.handleAvenorPeers)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_status",
+		Name:        "workflow_status",
 		Description: "Get lightweight status for a workflow instance",
 	}, s.handleAvenorWorkflowStatus)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_wait",
+		Name:        "workflow_wait",
 		Description: "Wait for a workflow to reach a terminal state or until timeout. The wait budget is approximate: a single underlying wait may add up to its own timeout.",
 	}, s.handleAvenorWorkflowWait)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_inspect",
+		Name:        "workflow_inspect",
 		Description: "Return the full instance detail for a workflow",
 	}, s.handleAvenorWorkflowInspect)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_events",
+		Name:        "workflow_events",
 		Description: "Read log events from a workflow instance's event log",
 	}, s.handleAvenorWorkflowEvents)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_complete",
+		Name:        "workflow_complete",
 		Description: "Atomically complete a machine/external handoff activation",
 	}, s.handleAvenorWorkflowComplete)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_gate",
+		Name:        "workflow_gate",
 		Description: "Record a gate decision on a parked awaiting_gate activation",
 	}, s.handleAvenorWorkflowGate)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_cancel",
+		Name:        "workflow_cancel",
 		Description: "Cancel a workflow instance: records the attributed cancel event (actor, reason), releases leases, parks non-terminal activations, and terminates the instance's in-flight attempt runtimes. The instance becomes terminal (canceled); re-canceling is an idempotent no-op, and a completed or failed instance cannot be canceled.",
 	}, s.handleAvenorWorkflowCancel)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "avenor_workflow_controller_status",
+		Name:        "workflow_controller_status",
 		Description: "Show workflow controller status. With controller_id, returns that controller's full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).",
 	}, s.handleAvenorWorkflowControllerStatus)
 
@@ -945,14 +976,16 @@ func (s *Server) recoverFinalOutput(supervisorPath, runID string) (string, bool)
 	return output, found
 }
 
+// resultSupervisorID resolves the supervisor a status or result call should
+// bind to: the caller's explicit choice, else the one supervisor that owns the
+// run id or label. The run-key ladder is shared with the peers and message
+// surface; runtime ids are deliberately not a key here, because these tools
+// document run_id as a run id or label.
 func (s *Server) resultSupervisorID(runID, requestedSupervisorID string) string {
 	if requestedSupervisorID != "" {
 		return requestedSupervisorID
 	}
-	if ri := s.registry.LookupUnique(runID); ri != nil {
-		return ri.SupervisorID
-	}
-	return ""
+	return s.supervisorForRunKey(runID)
 }
 
 func (s *Server) retrieveFinalOutput(cl ControlClient, supervisorPath, runID string, status map[string]any) {
@@ -1569,219 +1602,6 @@ func (s *Server) registerResumed(cl ControlClient, supervisorPath string, res me
 		info.AutoApprove, _ = status["auto_approve"].(bool)
 	}
 	return s.registry.Store(info)
-}
-
-func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {
-	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
-
-	// Resolve the supervisor's control client once and store it in cl.
-	// The status lookup and follow-up Spawn call both use cl.
-	// They therefore reuse one control-client connection.
-	cl, cleanup, err := s.getClientForSupervisor(supervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-
-	ri, err := s.lookupRun(cl, s.getSupervisorPath(supervisorID), args.RunID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if ri == nil {
-		return nil, nil, fmt.Errorf("run not found in registry")
-	}
-
-	sessionID, err := runstate.ReadSentinelSession(ri.SentinelPath)
-	if err != nil {
-		// Return errors for failed or non-resumable sentinel files unchanged. A
-		// missing file may mean the run is not terminal. Query supervisor status for
-		// the adopted session ID. If status has no usable ID, re-read the sentinel
-		// before using the spawn-time registry value.
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, nil, fmt.Errorf("read sentinel session: %w", err)
-		}
-		if ri.RuntimeID != "" {
-			if status, statusErr := cl.Status(ri.RuntimeID); statusErr == nil {
-				if currentID, _ := status["session_id"].(string); currentID != "" {
-					sessionID = currentID
-				}
-			}
-		}
-		if sessionID == "" {
-			// If status yields no session ID, retry the sentinel because the
-			// supervisor may have written it since the initial read.
-			retryID, retryErr := runstate.ReadSentinelSession(ri.SentinelPath)
-			if retryErr == nil {
-				sessionID = retryID
-			} else if !errors.Is(retryErr, os.ErrNotExist) {
-				return nil, nil, fmt.Errorf("read sentinel session: %w", retryErr)
-			}
-		}
-		if sessionID == "" {
-			if ri.SessionID == "" {
-				return nil, nil, fmt.Errorf("read sentinel session: %w", err)
-			}
-			sessionID = ri.SessionID
-		}
-	}
-
-	identity := resolvedSpawnIdentity{
-		Agent: ri.Agent, Model: ri.Model, Backend: ri.Backend,
-		RosterFile: ri.RosterFile, RosterEntry: ri.RosterEntry,
-		EffectiveAgent: ri.EffectiveAgent, EffectiveModel: ri.EffectiveModel,
-		EffectiveBackend: ri.EffectiveBackend, AgentProfile: ri.AgentProfile,
-	}
-	// A completed workflow's authoritative identity belongs to its final phase,
-	// not its run-level selector. Refresh from the stable tombstone before
-	// follow-up and never reread the roster file.
-	var liveIdentityStatus map[string]any
-	if ri.RuntimeID != "" {
-		if status, statusErr := cl.Status(ri.RuntimeID); statusErr == nil {
-			liveIdentityStatus = status
-			applySpawnIdentity(status, &identity)
-			if currentID, _ := status["session_id"].(string); currentID != "" {
-				sessionID = currentID
-			}
-		}
-	}
-
-	runID := uuid.New().String()
-	priorLabel := ri.Label
-	// The default is the current display name, so a rename reaches the
-	// follow-up instead of the launch-time label.
-	if liveIdentityStatus != nil {
-		if current, ok := liveIdentityStatus["label"].(string); ok && current != "" {
-			priorLabel = current
-		}
-	}
-	followupLabel := args.Label
-	if followupLabel == "" {
-		followupLabel = priorLabel + runstate.FollowUpLabelSuffix
-	}
-
-	sentinelPath, eventLogPath := runArtifactPaths(runID)
-
-	effectiveAgent := identity.EffectiveAgent
-	if effectiveAgent == "" {
-		effectiveAgent = identity.Agent
-	}
-	effectiveModel := identity.EffectiveModel
-	if effectiveModel == "" {
-		effectiveModel = identity.Model
-	}
-	effectiveBackend := identity.EffectiveBackend
-	if effectiveBackend == "" {
-		effectiveBackend = identity.Backend
-	}
-	agentProfile := identity.AgentProfile
-	// Presence is authoritative even for an empty string. This clears stale
-	// run-level fields when the final workflow phase is agent-only/model-only.
-	if liveIdentityStatus != nil {
-		exact := func(effectiveKey, directKey string) (string, bool) {
-			if value, ok := liveIdentityStatus[effectiveKey].(string); ok {
-				return value, true
-			}
-			value, ok := liveIdentityStatus[directKey].(string)
-			return value, ok
-		}
-		if value, ok := exact("effective_agent", "agent"); ok {
-			effectiveAgent = value
-		}
-		if value, ok := exact("effective_model", "model"); ok {
-			effectiveModel = value
-		}
-		if value, ok := exact("effective_backend", "backend"); ok {
-			effectiveBackend = value
-		}
-		if value, ok := liveIdentityStatus["agent_profile"].(string); ok {
-			agentProfile = value
-		}
-	}
-	params := map[string]any{
-		"dir":           ri.Dir,
-		"prompt":        args.Message,
-		"label":         followupLabel,
-		"session_id":    sessionID,
-		"sentinel_file": sentinelPath,
-		"on_event":      eventLogPath,
-	}
-	if args.IdempotencyKey != "" {
-		params["idempotency_key"] = runstate.FollowUpIdempotencyKeyPrefix + args.IdempotencyKey
-	}
-	if effectiveAgent != "" {
-		params["agent"] = effectiveAgent
-	}
-	if effectiveModel != "" {
-		params["model"] = effectiveModel
-	}
-	if effectiveBackend != "" {
-		params["backend"] = effectiveBackend
-	}
-	if ri.Thinking != "" {
-		params["thinking"] = ri.Thinking
-	}
-	if agentProfile != "" {
-		params["agent_profile"] = agentProfile
-	}
-	if ri.AutoApprove {
-		params["auto_approve"] = true
-	}
-
-	if followupLabel != "" && args.IdempotencyKey == "" {
-		// Same keyed-spawn rule as spawn: a retry reaches the idempotency gate.
-		if err := s.checkLabelAvailable(cl, s.getSupervisorPath(supervisorID), followupLabel); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	result, err := cl.Spawn(params)
-	if err != nil {
-		return nil, nil, fmt.Errorf("spawn: %w", err)
-	}
-
-	if args.IdempotencyKey != "" {
-		if sent, ok := result["sentinel_file"].(string); ok && sent != "" {
-			sentinelPath = sent
-			if id := runstate.RunIDFromSentinel(sent); id != "" {
-				runID = id
-			}
-		}
-		if ev, ok := result["on_event"].(string); ok && ev != "" {
-			eventLogPath = ev
-		}
-	}
-
-	runtimeID, _ := result["runtime_id"].(string)
-	newSessionID, _ := result["session_id"].(string)
-
-	supervisorPath := s.getSupervisorPath(supervisorID)
-
-	stored := identity
-	stored.EffectiveAgent = effectiveAgent
-	stored.EffectiveModel = effectiveModel
-	stored.EffectiveBackend = effectiveBackend
-	stored.AgentProfile = agentProfile
-	info := newRunInfo(runInfoBase{
-		RunID:        runID,
-		Label:        followupLabel,
-		RuntimeID:    runtimeID,
-		SessionID:    newSessionID,
-		SupervisorID: supervisorPath,
-		SentinelPath: sentinelPath,
-		EventLogPath: eventLogPath,
-		Identity:     stored,
-	})
-	info.Thinking = ri.Thinking
-	info.Dir = ri.Dir
-	info.AutoApprove = ri.AutoApprove
-	if err := s.registry.Store(info); err != nil {
-		return nil, nil, fmt.Errorf("registry store: %w", err)
-	}
-
-	return nil, map[string]any{
-		"run_id": runID,
-		"label":  followupLabel,
-	}, nil
 }
 
 // handleAvenorWorkflowStatus mirrors the workflow.status control verb against

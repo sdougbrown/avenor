@@ -1,38 +1,49 @@
 package mcpserver
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 )
 
-// tsToolNames lists the eight MCP tools from the TypeScript reference
-// (packages/mcp/src/mcp.ts).
+// tsToolNames lists the unprefixed owner-surface tool names the shared contract
+// defines, which the TypeScript MCP server adopts in slice 15 of the 356 stack.
+// TestToolNameParity checks this Go server's own registration against this list,
+// not against the TypeScript source.
+//
+// The owner MCP surface registers the unprefixed contract names, while the child
+// channel servers publish avenor_message/avenor_peers into their backends' own
+// tool namespace and keep the prefix, and the extension surfaces keep the prefix
+// because they share a flat namespace.
 var tsToolNames = []string{
-	"avenor_spawn",
-	"avenor_status",
-	"avenor_result",
-	"avenor_answer_permission",
-	"avenor_follow_up",
-	"avenor_events",
-	"avenor_kill",
-	"avenor_shutdown",
+	"spawn",
+	"status",
+	"result",
+	"answer_permission",
+	"message",
+	"peers",
+	"events",
+	"kill",
+	"shutdown",
+	"workflow_cancel",
 }
 
 // workflowToolNames lists the Go-only MCP workflow tools (Stage 14) plus the
-// read-only MCP workflow-controller status tool and the instance-cancel tool.
+// read-only MCP workflow-controller status tool.
 var workflowToolNames = []string{
-	"avenor_workflow_status",
-	"avenor_workflow_wait",
-	"avenor_workflow_inspect",
-	"avenor_workflow_events",
-	"avenor_workflow_complete",
-	"avenor_workflow_gate",
-	"avenor_workflow_cancel",
-	"avenor_workflow_controller_status",
+	"workflow_status",
+	"workflow_wait",
+	"workflow_inspect",
+	"workflow_events",
+	"workflow_complete",
+	"workflow_gate",
+	"workflow_controller_status",
 }
 
 func TestToolNameParity(t *testing.T) {
@@ -85,7 +96,7 @@ func TestToolNameParity(t *testing.T) {
 // contracts via json and jsonschema struct tags. This test verifies both
 // the property names and the required fields match the expected contracts.
 func TestSchemaFieldParity(t *testing.T) {
-	t.Run("avenor_spawn", func(t *testing.T) {
+	t.Run("spawn", func(t *testing.T) {
 		// spawnArgs — repo_dir is required.
 		// agent and model are independently optional; omitting both uses runtime defaults.
 		// All remaining fields are optional.
@@ -94,20 +105,20 @@ func TestSchemaFieldParity(t *testing.T) {
 		assertFields(t, "spawnArgs", allowed, required)
 	})
 
-	t.Run("avenor_status", func(t *testing.T) {
+	t.Run("status", func(t *testing.T) {
 		// statusArgs — all optional: run_id, view, wait_for, timeout, supervisor_id
 		allowed := []string{"run_id", "view", "wait_for", "timeout", "supervisor_id"}
 		assertFields(t, "statusArgs", allowed, nil)
 	})
 
-	t.Run("avenor_result", func(t *testing.T) {
+	t.Run("result", func(t *testing.T) {
 		// resultArgs — required: run_id; optional: wait, timeout, supervisor_id
 		allowed := []string{"run_id", "wait", "timeout", "supervisor_id"}
 		required := []string{"run_id"}
 		assertFields(t, "resultArgs", allowed, required)
 	})
 
-	t.Run("avenor_answer_permission", func(t *testing.T) {
+	t.Run("answer_permission", func(t *testing.T) {
 		// permissionArgs — required: run_id, option_id
 		// optional: request_id, supervisor_id, message
 		allowed := []string{"run_id", "option_id", "request_id", "supervisor_id", "message"}
@@ -115,15 +126,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		assertFields(t, "permissionArgs", allowed, required)
 	})
 
-	t.Run("avenor_follow_up", func(t *testing.T) {
-		// followUpArgs — required: run_id, message
-		// optional: label, supervisor_id
-		allowed := []string{"run_id", "message", "label", "supervisor_id", "idempotency_key"}
-		required := []string{"run_id", "message"}
-		assertFields(t, "followUpArgs", allowed, required)
-	})
-
-	t.Run("avenor_events", func(t *testing.T) {
+	t.Run("events", func(t *testing.T) {
 		// eventsArgs — required: run_id
 		// optional: types, limit, after_seq, supervisor_id
 		allowed := []string{"run_id", "types", "limit", "after_seq", "supervisor_id"}
@@ -131,44 +134,44 @@ func TestSchemaFieldParity(t *testing.T) {
 		assertFields(t, "eventsArgs", allowed, required)
 	})
 
-	t.Run("avenor_kill", func(t *testing.T) {
+	t.Run("kill", func(t *testing.T) {
 		// killArgs — required: run_id; optional: supervisor_id
 		allowed := []string{"run_id", "supervisor_id"}
 		required := []string{"run_id"}
 		assertFields(t, "killArgs", allowed, required)
 	})
 
-	t.Run("avenor_shutdown", func(t *testing.T) {
+	t.Run("shutdown", func(t *testing.T) {
 		// shutdownArgs — all optional: supervisor_id, force
 		allowed := []string{"supervisor_id", "force"}
 		assertFields(t, "shutdownArgs", allowed, nil)
 	})
 
-	t.Run("avenor_workflow_status", func(t *testing.T) {
+	t.Run("workflow_status", func(t *testing.T) {
 		// workflowStatusArgs — required: workflow_id; optional: supervisor_id
 		allowed := []string{"workflow_id", "supervisor_id"}
 		assertFields(t, "workflowStatusArgs", allowed, []string{"workflow_id"})
 	})
 
-	t.Run("avenor_workflow_wait", func(t *testing.T) {
+	t.Run("workflow_wait", func(t *testing.T) {
 		// workflowWaitArgs — required: workflow_id; optional: timeout, supervisor_id
 		allowed := []string{"workflow_id", "timeout", "supervisor_id"}
 		assertFields(t, "workflowWaitArgs", allowed, []string{"workflow_id"})
 	})
 
-	t.Run("avenor_workflow_inspect", func(t *testing.T) {
+	t.Run("workflow_inspect", func(t *testing.T) {
 		// workflowInspectArgs — required: workflow_id; optional: supervisor_id
 		allowed := []string{"workflow_id", "supervisor_id"}
 		assertFields(t, "workflowInspectArgs", allowed, []string{"workflow_id"})
 	})
 
-	t.Run("avenor_workflow_events", func(t *testing.T) {
+	t.Run("workflow_events", func(t *testing.T) {
 		// workflowEventsArgs — required: workflow_id; optional: after_seq, limit, supervisor_id
 		allowed := []string{"workflow_id", "after_seq", "limit", "supervisor_id"}
 		assertFields(t, "workflowEventsArgs", allowed, []string{"workflow_id"})
 	})
 
-	t.Run("avenor_workflow_complete", func(t *testing.T) {
+	t.Run("workflow_complete", func(t *testing.T) {
 		// workflowCompleteArgs — required: workflow_id, node_id, activation_id,
 		// attempt_id, lease_id, owner_token, outcome; optional: outputs,
 		// artifacts, supervisor_id
@@ -177,7 +180,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		assertFields(t, "workflowCompleteArgs", allowed, required)
 	})
 
-	t.Run("avenor_workflow_gate", func(t *testing.T) {
+	t.Run("workflow_gate", func(t *testing.T) {
 		// workflowGateArgs — required: workflow_id, node_id, gate_id,
 		// activation_id, operation; operation-specific fields are optional
 		allowed := []string{"workflow_id", "node_id", "gate_id", "activation_id", "operation", "actor", "reason", "outcome", "subject", "poll_id", "source", "result", "response_hash", "observed_at", "evidence_ids", "supervisor_id"}
@@ -185,7 +188,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		assertFields(t, "workflowGateArgs", allowed, required)
 	})
 
-	t.Run("avenor_workflow_cancel", func(t *testing.T) {
+	t.Run("workflow_cancel", func(t *testing.T) {
 		// workflowCancelArgs — required: workflow_id, reason; optional: actor,
 		// supervisor_id
 		allowed := []string{"workflow_id", "reason", "actor", "supervisor_id"}
@@ -193,7 +196,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		assertFields(t, "workflowCancelArgs", allowed, required)
 	})
 
-	t.Run("avenor_workflow_controller_status", func(t *testing.T) {
+	t.Run("workflow_controller_status", func(t *testing.T) {
 		// workflowControllerStatusArgs — all optional: controller_id, supervisor_id
 		allowed := []string{"controller_id", "supervisor_id"}
 		assertFields(t, "workflowControllerStatusArgs", allowed, nil)
@@ -402,16 +405,6 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if a.RunID != "r" || a.OptionID != "o" || a.RequestID != "req" || a.SupervisorID != "s" || a.Message != "typed" {
 			t.Errorf("%s: fields not populated correctly", structName)
 		}
-	case "followUpArgs":
-		data := map[string]any{"run_id": "r", "message": "m", "label": "l", "supervisor_id": "s"}
-		b, _ := json.Marshal(data)
-		var a followUpArgs
-		if err := json.Unmarshal(b, &a); err != nil {
-			t.Fatalf("%s: unmarshal: %v", structName, err)
-		}
-		if a.RunID != "r" || a.Message != "m" || a.Label != "l" || a.SupervisorID != "s" {
-			t.Errorf("%s: fields not populated correctly", structName)
-		}
 	case "eventsArgs":
 		data := map[string]any{"run_id": "r", "types": []string{"a"}, "limit": float64(10), "supervisor_id": "s"}
 		b, _ := json.Marshal(data)
@@ -588,8 +581,6 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 		typ = reflect.TypeOf(resultArgs{})
 	case "permissionArgs":
 		typ = reflect.TypeOf(permissionArgs{})
-	case "followUpArgs":
-		typ = reflect.TypeOf(followUpArgs{})
 	case "eventsArgs":
 		typ = reflect.TypeOf(eventsArgs{})
 	case "killArgs":
@@ -683,6 +674,68 @@ func TestMCPStdioHandshake(t *testing.T) {
 	for _, name := range expected {
 		if !registeredNames[name] {
 			t.Errorf("missing tool: %s", name)
+		}
+	}
+}
+
+// TestMessageSchemaPublished pins the property names the two merged tools
+// publish against an explicit literal list, so the published surface is checked
+// independently of the shared contract that compiles it.
+func TestMessageSchemaPublished(t *testing.T) {
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: &fakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
+	serverSession, err := s.mcpServer.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("connect server: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "dev"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect client: %v", err)
+	}
+	defer clientSession.Close()
+
+	tools, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	published := map[string]any{}
+	for _, tool := range tools.Tools {
+		switch tool.Name {
+		case "message", "peers":
+			published[tool.Name] = tool.InputSchema
+		}
+	}
+	for name, want := range map[string][]string{
+		"message": {"action", "idempotency_key", "label", "message", "message_id", "payload", "reply_to", "target", "timeout_ms"},
+		"peers":   {"action", "name", "session_id", "target"},
+	} {
+		schema, ok := published[name].(map[string]any)
+		if !ok {
+			t.Fatalf("%s tool not published with an object schema", name)
+		}
+		if got := schema["type"]; got != "object" {
+			t.Errorf("%s schema type = %v, want object", name, got)
+		}
+		properties, ok := schema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s schema has no properties object", name)
+		}
+		got := make([]string, 0, len(properties))
+		for property := range properties {
+			got = append(got, property)
+		}
+		sort.Strings(got)
+		sort.Strings(want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s published properties = %v, want %v", name, got, want)
 		}
 	}
 }

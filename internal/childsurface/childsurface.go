@@ -6,7 +6,6 @@ package childsurface
 
 import (
 	"context"
-	"errors"
 
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
@@ -48,9 +47,8 @@ func Router(ctx context.Context, provider Provider) (*router.Router, error) {
 func Route(call func() (router.Result, error), render func(router.Result) (map[string]any, string)) (any, error) {
 	result, err := call()
 	if err != nil {
-		var toolErr *router.ToolError
-		if errors.As(err, &toolErr) {
-			return Envelope(toolErr.Output(), toolErr.Message, true), nil
+		if object, text, ok := router.ToolFailure(err); ok {
+			return Envelope(object, text, true), nil
 		}
 		return nil, err
 	}
