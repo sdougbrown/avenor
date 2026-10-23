@@ -998,6 +998,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 		if result.sessionID != "" {
 			resumeID = result.sessionID
+			// The next attempt resumes the failed session. Keeping start-only
+			// options the resume cannot honor would abort the retry at
+			// StartSession instead of surfacing the provider's own class.
+			startOptions = dropStartOnlyOptions(*backend, startOptions)
 		}
 
 		// A hinted wait this run cannot honor leaves no attempt worth making, so
