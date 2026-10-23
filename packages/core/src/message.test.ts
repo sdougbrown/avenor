@@ -717,6 +717,41 @@ describe('router invariants', () => {
     expect(resumedHook).toBe(0)
   })
 
+  it('reports the resumed outcome whatever the provider returned', async () => {
+    const providerResults = [
+      { runId: 'run-77', label: 'mesh-b-2' } as ProviderResult,
+      { outcome: 'failed', runId: 'run-77', label: 'mesh-b-2' },
+    ]
+    for (const providerResult of providerResults) {
+      const label = String(providerResult.outcome)
+      const provider: MessageProvider = {
+        caller: () => ({ kind: 'owner', runId: 'supervisor' }),
+        surface: () => 'mcp-ts',
+        role: () => 'host',
+        resolve: async () => ({ runId: 'rt_9', label: 'mesh-b', match: 'unique' }),
+        state: async () => ({ live: false, resumable: true, status: 'done' }),
+        tell: async () => ({ outcome: 'sent' }),
+        ask: async () => ({ outcome: 'sent' }),
+        reply: async () => ({ outcome: 'sent' }),
+        withdraw: async () => ({ outcome: 'withdrawn' }),
+        resume: async () => providerResult,
+        rename: async () => ({ outcome: 'renamed' }),
+        last: async () => ({ outcome: 'sent' }),
+        peers: async () => ({ peers: [] }),
+      }
+      const output = resultOutput(await executeMessage(provider, {
+        action: 'resume',
+        target: 'mesh-b',
+        message: 'again',
+      }))
+      expect(output.outcome, label).toBe('resumed')
+      expect(output.text, label).toBe(renderOutcome('resume', 'resumed', {
+        run_id: quote('run-77'),
+        label: quote('mesh-b-2'),
+      }))
+    }
+  })
+
   it('reports a filesystem error from run state as a refused read', async () => {
     const failingState = (thrown: unknown): MessageProvider => ({
       caller: () => ({ kind: 'broker', runId: 'run-caller' }),
