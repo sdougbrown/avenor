@@ -82,6 +82,23 @@ func RefuseRedirect(req *http.Request, _ []*http.Request) error {
 	return fmt.Errorf("%w: %s", ErrRedirect, req.URL.Redacted())
 }
 
+// UseHTTPClient adopts the transport and per-request timeout of a caller-owned
+// client, so an adapter sends through the plumbing its surface configured. It
+// must run before the client's first request. The caller's CheckRedirect is not
+// adopted: an adapter never follows a redirect, so credentials cannot be
+// offered to another host.
+func (c *Client) UseHTTPClient(hc *http.Client) {
+	if hc == nil {
+		return
+	}
+	if hc.Transport != nil {
+		c.http.Transport = hc.Transport
+	}
+	if hc.Timeout > 0 {
+		c.timeout = hc.Timeout
+	}
+}
+
 // SetTransport replaces the round tripper the client sends with.
 func (c *Client) SetTransport(rt http.RoundTripper) {
 	c.http.Transport = rt
