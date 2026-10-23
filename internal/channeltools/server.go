@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/childmessaging"
+	"github.com/sdougbrown/avenor/internal/childsurface"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
@@ -133,19 +134,10 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 	}
 }
 
-// messageRouter binds the shared child provider to one generation and hands the
-// call to the shared router.
-func (s *Server) messageRouter(ctx context.Context) (*router.Router, error) {
-	if err := s.provider.Prepare(ctx); err != nil {
-		return nil, err
-	}
-	return router.NewRouter(s.provider)
-}
-
 func (s *Server) message(ctx context.Context, args json.RawMessage) (any, error) {
-	return routeResult(
+	return childsurface.Route(
 		func() (router.Result, error) {
-			rt, err := s.messageRouter(ctx)
+			rt, err := childsurface.Router(ctx, s.provider)
 			if err != nil {
 				return router.Result{}, err
 			}
@@ -161,7 +153,7 @@ func (s *Server) peers(ctx context.Context, args json.RawMessage) (any, error) {
 	if err := s.provider.Prepare(ctx); err != nil {
 		return nil, err
 	}
-	return routeResult(
+	return childsurface.Route(
 		func() (router.Result, error) {
 			return router.ExecutePeers(ctx, s.provider, args)
 		},
@@ -169,36 +161,6 @@ func (s *Server) peers(ctx context.Context, args json.RawMessage) (any, error) {
 			return router.PeersDetails(result), router.PeersContent(result)
 		},
 	)
-}
-
-// routeResult maps one router outcome into the MCP envelope, so both tools
-// answer a refusal the same way: a router refusal becomes an isError result
-// carrying the router's output and message, any other error goes back to the
-// JSON-RPC layer, and render turns a successful result into the structured
-// object and its rendered text.
-func routeResult(call func() (router.Result, error), render func(router.Result) (map[string]any, string)) (any, error) {
-	result, err := call()
-	if err != nil {
-		var toolErr *router.ToolError
-		if errors.As(err, &toolErr) {
-			return structuredToolResult(toolErr.Output(), toolErr.Message, true), nil
-		}
-		return nil, err
-	}
-	object, text := render(result)
-	return structuredToolResult(object, text, false), nil
-}
-
-// structuredToolResult wraps one tool outcome in the MCP envelope: content
-// carries the rendered sentence as its single text part, structuredContent
-// carries the shared snake_case result object, and isError marks a router
-// refusal.
-func structuredToolResult(object map[string]any, text string, isError bool) map[string]any {
-	return map[string]any{
-		"content":           []map[string]any{{"type": "text", "text": text}},
-		"structuredContent": object,
-		"isError":           isError,
-	}
 }
 
 func toolSchemas() []map[string]any {
