@@ -1,5 +1,12 @@
-import { extractEventText } from '@dougbots/avenor-core'
-import type { InspectResult, ResultResult, StatusListResult, StatusResult } from '@dougbots/avenor-core'
+import { extractEventText, peersDetails, renderPeerList, resultOutput } from '@dougbots/avenor-core'
+import type {
+  InspectResult,
+  PeersRouterResult,
+  ProviderResult,
+  ResultResult,
+  StatusListResult,
+  StatusResult,
+} from '@dougbots/avenor-core'
 
 const FINAL_OUTPUT_CHARS = 1_500
 const SCALAR_CHARS = 240
@@ -23,7 +30,18 @@ type StatusArgs = { run_id?: string; view?: string; supervisor_id?: string }
 type ResultArgs = { run_id?: string; wait?: boolean; timeout?: string; supervisor_id?: string }
 type InspectArgs = { run_id?: string; limit?: number; after_seq?: number; supervisor_id?: string }
 type PermissionArgs = { run_id?: string; option_id?: string; request_id?: string; message?: string; supervisor_id?: string }
-type FollowUpArgs = { run_id?: string; message?: string; label?: string; supervisor_id?: string }
+type MessageArgs = {
+  action?: string
+  target?: string
+  message?: string
+  reply_to?: string
+  message_id?: string
+  timeout_ms?: number
+  label?: string
+  idempotency_key?: string
+  payload?: unknown
+}
+type PeersArgs = { action?: string; name?: string; session_id?: string; target?: string }
 type EventsArgs = { run_id?: string; types?: string[]; limit?: number; supervisor_id?: string }
 type ShutdownArgs = { supervisor_id?: string; force?: boolean }
 type WorkflowControllerStatusArgs = { controller_id?: string; supervisor_id?: string }
@@ -173,7 +191,7 @@ function guidance(status: string, pending: RecordValue | undefined, runId: strin
     if (pending) {
       return `Guidance: Permission input is required, but no options are available; call avenor_inspect with run_id "${runId}".`
     }
-    return `Guidance: Call avenor_follow_up or avenor_status with run_id "${runId}".`
+    return `Guidance: Call avenor_message with action "resume" or avenor_status with run_id "${runId}".`
   }
   if (isTerminal(status)) return `Guidance: Call avenor_result or avenor_events with run_id "${runId}".`
   return `Guidance: Call avenor_result with run_id "${runId}".`
@@ -282,14 +300,13 @@ function permissionLines(details: unknown, args: PermissionArgs): string[] | und
   ]
 }
 
-function followUpLines(details: unknown, args: FollowUpArgs): string[] | undefined {
-  const result = asRecord(details)
-  if (!result || !stringValue(result.run_id) || !stringValue(result.label)) return undefined
-  const runId = selected(result, 'run_id', args.run_id)
-  const label = selected(result, 'label', args.label, runId)
+function messageResumeLines(result: ProviderResult, args: MessageArgs): string[] | undefined {
+  const runId = stringValue(result.runId)
+  const label = stringValue(result.label)
+  if (!runId || !label) return undefined
   return [
-    `Follow-up: ${label} — dispatched.`,
-    `Source run: ${scalar(args.run_id)}`,
+    `Message: ${label} — resumed.`,
+    `Source run: ${scalar(args.target)}`,
     `Run: ${runId}`,
     `Label: ${label}`,
     `Guidance: Call avenor_status with run_id "${runId}".`,
@@ -457,14 +474,37 @@ export function formatAnswerPermissionOutput(args: PermissionArgs, result: { ok:
   }
 }
 
-export function formatFollowUpOutput(args: FollowUpArgs, result: { run_id: string; label: string }): RichToolResult {
-  const record = result as RecordValue
-  const runId = selected(record, 'run_id', args.run_id)
-  const label = selected(record, 'label', args.label, runId)
+export function formatMessageResumeOutput(args: MessageArgs, result: ProviderResult): RichToolResult {
+  const runId = stringValue(result.runId) ?? scalar(args.target)
+  const label = stringValue(result.label) ?? scalar(args.label) ?? runId
   return {
-    title: `${label} — dispatched`,
-    output: output(followUpLines(result, args), 'follow_up'),
-    metadata: { ...result, source_run_id: args.run_id },
+    title: `${label} — resumed`,
+    output: output(messageResumeLines(result, args), 'message'),
+    metadata: resultOutput(result),
+  }
+}
+
+/** Every message action's prose comes from the contract's `text`; only a resume
+ * keeps the structured acknowledgement lines the old follow-up tool rendered. */
+export function formatMessageOutput(args: MessageArgs, result: ProviderResult): RichToolResult {
+  if (args.action === 'resume') return formatMessageResumeOutput(args, result)
+  const action = stringValue(result.action) ?? scalar(args.action)
+  const outcome = stringValue(result.outcome) ?? 'unknown'
+  return {
+    title: `Avenor ${action} — ${outcome}`,
+    output: stringValue(result.text) ?? output(undefined, 'message'),
+    metadata: resultOutput(result),
+  }
+}
+
+export function formatPeersOutput(args: PeersArgs, result: PeersRouterResult): RichToolResult {
+  const text = result.action === 'list'
+    ? [result.text, renderPeerList(result.peers)].filter(part => part !== '').join('\n\n')
+    : result.text
+  return {
+    title: `Avenor peers — ${result.action}`,
+    output: text || output(undefined, 'peers'),
+    metadata: peersDetails(result),
   }
 }
 
