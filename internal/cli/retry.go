@@ -57,16 +57,10 @@ type attemptDeps struct {
 // Internal resume call sites call it instead of StartSession so a new resume
 // path cannot reintroduce the start-only abort.
 func ResumeSession(ctx context.Context, provider runtime.Provider, backend string, opts runtime.StartOptions, sessionID string) (runtime.Session, error) {
-	return StartSession(ctx, provider, backend, DropStartOnlyOptionsForResume(backend, opts, sessionID), sessionID)
-}
-
-// DropStartOnlyOptionsForResume drops start-only options when the call
-// resumes an existing session; fresh starts keep them.
-func DropStartOnlyOptionsForResume(backend string, opts runtime.StartOptions, resumeID string) runtime.StartOptions {
-	if resumeID == "" {
-		return opts
+	if sessionID != "" {
+		opts = runtime.DropStartOnlyOptions(backend, opts)
 	}
-	return runtime.DropStartOnlyOptions(backend, opts)
+	return StartSession(ctx, provider, backend, opts, sessionID)
 }
 
 // settledResultText is the text --result-file may publish: the final message of

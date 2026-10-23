@@ -20,7 +20,7 @@ func DropStartOnlyOptions(backend string, opts StartOptions) StartOptions {
 	if thinkingpolicy.Evaluate(backend, opts.Thinking, true) == thinkingpolicy.StartOnly {
 		opts.Thinking = ""
 	}
-	if IsClaudeFamily(backend) {
+	if ClaudeMCPWaitStartOnly(backend) {
 		opts.ClaudeMCPWait = 0
 	}
 	return opts

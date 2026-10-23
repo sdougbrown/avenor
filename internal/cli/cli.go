@@ -1080,7 +1080,7 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 			return runtime.Session{}, err
 		}
 	}
-	if opts.ClaudeMCPWait != 0 {
+	if opts.ClaudeMCPWait != 0 && runtime.ClaudeMCPWaitStartOnly(backend) {
 		return runtime.Session{}, runtime.NewStartOnlyClaudeMCPWaitError(backend, opts.ClaudeMCPWait)
 	}
 	return provider.Resume(ctx, resumeID)

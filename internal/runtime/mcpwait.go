@@ -10,6 +10,14 @@ import (
 // slow connect; it only stalls a run whose server is down.
 const MaxClaudeMCPWait = 60 * time.Second
 
+// ClaudeMCPWaitStartOnly reports whether the backend treats the MCP wait as
+// start-only on an explicit resume. The wait is supported only by the
+// claude family, whose resume takes no per-call options, so every supported
+// backend is start-only.
+func ClaudeMCPWaitStartOnly(backend string) bool {
+	return IsClaudeFamily(backend)
+}
+
 // ValidateClaudeMCPWait checks a startup MCP wait for a backend. Zero means
 // no wait and is valid everywhere; only the claude backends hold the first
 // prompt for MCP servers, so any other backend rejects a wait instead of
