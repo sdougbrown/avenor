@@ -2,6 +2,7 @@ import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor
 import { findExternalRun } from './run-registry.js'
 import { findLocalRunByReference } from './run-resolution.js'
 import { RpcError } from '../client.js'
+import { extractReplyMessage, normalizeAskTimeoutMs } from '../messaging-text.js'
 
 export interface AskToolArgs {
   toRunId: string
@@ -15,17 +16,6 @@ export interface AskResult {
   from_run_id: string
 }
 
-export function extractReplyMessage(result: Record<string, unknown>): string {
-  if (result.timeout === true) return '(timeout: no reply received)'
-  if (result.cancelled === true) return '(cancelled)'
-  const payload = result.payload
-  if (payload && typeof payload === 'object') {
-    const msg = (payload as Record<string, unknown>).message
-    if (typeof msg === 'string' && msg) return msg
-  }
-  return JSON.stringify(result)
-}
-
 /**
  * Build the failure message every ask path reports: the broker message id plus
  * whether the ask edge is still pending (withdrawable via avenor_cancel) or
@@ -35,14 +25,6 @@ export function formatAskFailure(messageId: string, pending: boolean, detail: st
   return pending
     ? `ask failed (message_id: ${messageId} — pass to avenor_cancel to withdraw): ${detail}`
     : `ask failed (message_id: ${messageId} — the pending ask was already withdrawn): ${detail}`
-}
-
-/**
- * Reduce a caller-supplied ask timeout to what the broker accepts: a positive
- * finite number of milliseconds, or undefined to keep the broker's own wait.
- */
-export function normalizeAskTimeoutMs(timeoutMs: number | undefined): number | undefined {
-  return timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined
 }
 
 async function executeAskTool(

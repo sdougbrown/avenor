@@ -70,3 +70,9 @@ func TestBoundFinalOutputUsesRuneLimitWithoutMutatingInput(t *testing.T) {
 		t.Fatal("BoundFinalOutput mutated the input metadata")
 	}
 }
+
+func TestFinalOutputBoundIsPinned(t *testing.T) {
+	if MaxFinalOutputRunes != 4096 {
+		t.Fatalf("MaxFinalOutputRunes = %d, want 4096, the bound packages/core/src/messaging-text.ts applies", MaxFinalOutputRunes)
+	}
+}
