@@ -10,20 +10,16 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/childmessaging"
 	"github.com/sdougbrown/avenor/internal/messaging"
-	"github.com/sdougbrown/avenor/internal/messaging/askclient"
-	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
 type Options struct {
-	RunID string
-	// Sender is the run's registered display name. An empty value leaves the
-	// name to the broker, which reports the run ID.
-	Sender     string
+	RunID      string
 	Token      string
 	BrokerURL  string
 	Stdin      io.Reader
@@ -33,10 +29,9 @@ type Options struct {
 }
 
 type Server struct {
-	opts   Options
-	client *http.Client
-	ask    *askclient.Client
-	outMu  sync.Mutex
+	opts     Options
+	provider *childmessaging.MessageProvider
+	outMu    sync.Mutex
 }
 
 type rpcMessage struct {
@@ -62,21 +57,18 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	transport, err := localhttp.New("", messaging.LocalCredentials{
-		RunID:   opts.RunID,
-		Token:   opts.Token,
-		BaseURL: opts.BrokerURL,
+	provider, err := childmessaging.NewMessageProvider(messaging.SurfaceChanneltools, childmessaging.Options{
+		RunID:      opts.RunID,
+		Token:      opts.Token,
+		BrokerURL:  opts.BrokerURL,
+		HTTPClient: opts.HTTPClient,
 	})
 	if err != nil {
 		return fmt.Errorf("local broker messaging: %w", err)
 	}
-	defer func() { _ = transport.Close() }()
+	defer func() { _ = provider.Close() }()
 
-	s := &Server{
-		opts:   opts,
-		client: opts.HTTPClient,
-		ask:    askclient.New(transport, askclient.Options{}),
-	}
+	s := &Server{opts: opts, provider: provider}
 	scanner := bufio.NewScanner(opts.Stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -132,216 +124,96 @@ func (s *Server) handleRequest(ctx context.Context, method string, params json.R
 
 func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage) (any, error) {
 	switch name {
-	case "avenor_send":
-		var p struct {
-			ToRunID string `json:"to_run_id"`
-			Message string `json:"message"`
-			Role    string `json:"role"`
-		}
-		if err := json.Unmarshal(args, &p); err != nil {
-			return nil, err
-		}
-		if p.ToRunID == "" || p.Message == "" {
-			return nil, fmt.Errorf("to_run_id and message are required")
-		}
-		role := p.Role
-		if role == "" {
-			role = "agent"
-		}
-		body, err := messaging.SendBody(s.opts.RunID, p.ToRunID, p.Message, role)
-		if err != nil {
-			return nil, err
-		}
-		sent, err := s.ask.Send(ctx, messaging.SendRequest{
-			From:    messaging.Identity{RunID: s.opts.RunID, Sender: s.opts.Sender},
-			To:      messaging.Identity{RunID: p.ToRunID, Sender: p.ToRunID},
-			Body:    string(body),
-			NoReply: true,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("send to %s: %w", p.ToRunID, err)
-		}
-		if sent.Outcome != messaging.OutcomeSent {
-			return nil, fmt.Errorf("send to %s: %s", p.ToRunID, sent.Outcome)
-		}
-		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("sent message to run %q", p.ToRunID)}}}, nil
-	case "avenor_ask":
-		var p struct {
-			ToRunID string `json:"to_run_id"`
-			Message string `json:"message"`
-			Role    string `json:"role,omitempty"`
-		}
-		if err := json.Unmarshal(args, &p); err != nil {
-			return nil, err
-		}
-		if p.ToRunID == "" || p.Message == "" {
-			return nil, fmt.Errorf("to_run_id and message are required")
-		}
-		role := p.Role
-		if role == "" {
-			role = "agent"
-		}
-		sender := messaging.Identity{RunID: s.opts.RunID, Sender: s.opts.Sender}
-		send, wait, err := s.ask.AskRequest(sender, s.opts.RunID, p.ToRunID, p.Message, role)
-		if err != nil {
-			return nil, err
-		}
-		result, err := s.ask.Ask(ctx, send, wait)
-		if err != nil {
-			return nil, result.Failure(err)
-		}
-		replyText, err := result.Text()
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("Reply from %s:\n%s", p.ToRunID, replyText)}}}, nil
+	case "avenor_message":
+		return s.message(ctx, args)
 	case "avenor_peers":
-		var sessionsResult map[string]any
-		if err := s.brokerGet(ctx, "/sessions", &sessionsResult); err != nil {
-			return nil, err
-		}
-		sessions, _ := sessionsResult["sessions"].([]any)
-		var lines []string
-		for _, s := range sessions {
-			if entry, ok := s.(map[string]any); ok {
-				id, _ := entry["run_id"].(string)
-				label, _ := entry["label"].(string)
-				status, _ := entry["status"].(string)
-				backend, _ := entry["backend"].(string)
-				model, _ := entry["model"].(string)
-				line := "  " + id
-				if label != "" {
-					line = fmt.Sprintf("  %s (%s)", label, id)
-				}
-				if status != "" {
-					line += " [" + status
-					if backend != "" {
-						line += ", " + backend
-					}
-					if model != "" {
-						line += ", " + model
-					}
-					line += "]"
-				}
-				lines = append(lines, line)
-			}
-		}
-		if len(lines) == 0 {
-			return map[string]any{"content": []map[string]any{{"type": "text", "text": "No other agent sessions connected."}}}, nil
-		}
-		result := "**Active sessions:**\n" + strings.Join(lines, "\n")
-		return map[string]any{"content": []map[string]any{{"type": "text", "text": result}}}, nil
-	case "avenor_cancel":
-		var p struct {
-			MessageID string `json:"message_id"`
-		}
-		if err := json.Unmarshal(args, &p); err != nil {
-			return nil, err
-		}
-		if p.MessageID == "" {
-			return nil, fmt.Errorf("message_id is required")
-		}
-		withdrawn, err := s.ask.Withdraw(ctx, messaging.WithdrawRequest{
-			Sender:    messaging.Identity{RunID: s.opts.RunID, Sender: s.opts.Sender},
-			MessageID: p.MessageID,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("cancel %s: %w", p.MessageID, err)
-		}
-		if withdrawn.Outcome == messaging.OutcomeEdgeAbsent {
-			return nil, fmt.Errorf("no pending ask for %s", p.MessageID)
-		}
-		return map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("Cancellation requested for %s", p.MessageID)}}}, nil
+		return s.peers(ctx, args)
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
+	}
+}
+
+// messageRouter binds the shared child provider to one generation and hands the
+// call to the shared router.
+func (s *Server) messageRouter(ctx context.Context) (*router.Router, error) {
+	if err := s.provider.Prepare(ctx); err != nil {
+		return nil, err
+	}
+	return router.NewRouter(s.provider)
+}
+
+func (s *Server) message(ctx context.Context, args json.RawMessage) (any, error) {
+	return routeResult(
+		func() (router.Result, error) {
+			rt, err := s.messageRouter(ctx)
+			if err != nil {
+				return router.Result{}, err
+			}
+			return rt.Execute(ctx, args)
+		},
+		func(result router.Result) (map[string]any, string) {
+			return result.Output(), result.Text
+		},
+	)
+}
+
+func (s *Server) peers(ctx context.Context, args json.RawMessage) (any, error) {
+	if err := s.provider.Prepare(ctx); err != nil {
+		return nil, err
+	}
+	return routeResult(
+		func() (router.Result, error) {
+			return router.ExecutePeers(ctx, s.provider, args)
+		},
+		func(result router.Result) (map[string]any, string) {
+			return router.PeersDetails(result), router.PeersContent(result)
+		},
+	)
+}
+
+// routeResult maps one router outcome into the MCP envelope, so both tools
+// answer a refusal the same way: a router refusal becomes an isError result
+// carrying the router's output and message, any other error goes back to the
+// JSON-RPC layer, and render turns a successful result into the structured
+// object and its rendered text.
+func routeResult(call func() (router.Result, error), render func(router.Result) (map[string]any, string)) (any, error) {
+	result, err := call()
+	if err != nil {
+		var toolErr *router.ToolError
+		if errors.As(err, &toolErr) {
+			return structuredToolResult(toolErr.Output(), toolErr.Message, true), nil
+		}
+		return nil, err
+	}
+	object, text := render(result)
+	return structuredToolResult(object, text, false), nil
+}
+
+// structuredToolResult wraps one tool outcome in the MCP envelope: content
+// carries the rendered sentence as its single text part, structuredContent
+// carries the shared snake_case result object, and isError marks a router
+// refusal.
+func structuredToolResult(object map[string]any, text string, isError bool) map[string]any {
+	return map[string]any{
+		"content":           []map[string]any{{"type": "text", "text": text}},
+		"structuredContent": object,
+		"isError":           isError,
 	}
 }
 
 func toolSchemas() []map[string]any {
 	return []map[string]any{
 		{
-			"name":        "avenor_send",
-			"description": "Send a message to another agent run (fire-and-forget)",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"to_run_id": map[string]any{"type": "string"},
-					"message":   map[string]any{"type": "string"},
-					"role":      map[string]any{"type": "string", "description": "Role to display on the receiving side (defaults to agent)"},
-				},
-				"required": []string{"to_run_id", "message"},
-			},
-		},
-		{
-			"name":        "avenor_ask",
-			"description": "Ask another agent run a question and wait for a reply (blocks until answer arrives or times out)",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"to_run_id": map[string]any{"type": "string", "description": "Target run ID"},
-					"message":   map[string]any{"type": "string", "description": "Question to ask"},
-					"role":      map[string]any{"type": "string", "description": "Role to display (defaults to agent)"},
-				},
-				"required": []string{"to_run_id", "message"},
-			},
+			"name":        "avenor_message",
+			"description": "Tell, ask or withdraw a message between agent runs; reply, resume and control replies are not available on this surface",
+			"inputSchema": messaging.MessageInputFlatSchema(),
 		},
 		{
 			"name":        "avenor_peers",
-			"description": "List all connected agent sessions with their status, backend, and model",
-			"inputSchema": map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
-			},
-		},
-		{
-			"name":        "avenor_cancel",
-			"description": "Cancel a pending ask message by its message ID",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"message_id": map[string]any{"type": "string", "description": "Message ID of the pending ask to cancel"},
-				},
-				"required": []string{"message_id"},
-			},
+			"description": "List connected agent sessions, rename a run's display name, or read a peer's last agent message",
+			"inputSchema": messaging.PeersInputFlatSchema(),
 		},
 	}
-}
-
-func (s *Server) brokerGet(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.opts.BrokerURL+path, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set(messaging.HeaderRunID, s.opts.RunID)
-	req.Header.Set(messaging.HeaderRunToken, s.opts.Token)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		text, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return brokerError(path, resp.Status, text)
-	}
-	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
-	}
-	return nil
-}
-
-// brokerError renders a broker failure with the message text a JSON error body
-// carries, falling back to the raw body when it is not JSON.
-func brokerError(path, status string, body []byte) error {
-	body = bytes.TrimSpace(body)
-	var envelope struct {
-		Error string `json:"error"`
-	}
-	if len(body) > 0 && body[0] == '{' {
-		if err := json.Unmarshal(body, &envelope); err == nil && envelope.Error != "" {
-			return fmt.Errorf("broker %s: %s: %s", path, status, envelope.Error)
-		}
-	}
-	return fmt.Errorf("broker %s: %s: %s", path, status, body)
 }
 
 func (s *Server) writeResult(id json.RawMessage, result any) error {
