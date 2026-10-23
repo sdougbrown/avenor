@@ -29,17 +29,19 @@ func TestValidateClaudeMCPWait(t *testing.T) {
 	}
 }
 
-func TestResumesWithoutOptions(t *testing.T) {
+func TestIsClaudeFamily(t *testing.T) {
 	for _, tc := range []struct {
 		backend string
 		want    bool
 	}{
 		{"claude", true},
 		{"claude-channel", true},
+		{"pony", false},
+		{"opencode-http", false},
 		{"codex-app-server", false},
 		{"pi", false},
 	} {
-		if got := ResumesWithoutOptions(tc.backend); got != tc.want {
+		if got := IsClaudeFamily(tc.backend); got != tc.want {
 			t.Errorf("ResumesWithoutOptions(%q) = %v, want %v", tc.backend, got, tc.want)
 		}
 	}

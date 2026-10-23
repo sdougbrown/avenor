@@ -10,11 +10,13 @@ import (
 // slow connect; it only stalls a run whose server is down.
 const MaxClaudeMCPWait = 60 * time.Second
 
-// ResumesWithoutOptions reports whether the backend's explicit resume takes
-// no per-call options. Those backends hold start-only options in the process
-// they spawn, so callers resuming one of their sessions must drop start-only
-// options instead of passing them back.
-func ResumesWithoutOptions(backend string) bool {
+// IsClaudeFamily reports whether the backend is one of the claude-family
+// backends. They are the only backends the MCP wait applies to, and the only
+// ones that hold start-only options (the thinking level and the MCP wait) in
+// the process they spawn: their explicit resume takes no per-call options.
+// Other bare-Resume backends (pony, opencode-http) reject start-only options
+// at start, so their resumes never carry any.
+func IsClaudeFamily(backend string) bool {
 	return backend == "claude" || backend == "claude-channel"
 }
 
@@ -32,7 +34,7 @@ func ValidateClaudeMCPWait(backend string, wait time.Duration) error {
 	if wait > MaxClaudeMCPWait {
 		return fmt.Errorf("--claude-mcp-wait %s exceeds the %s limit", wait, MaxClaudeMCPWait)
 	}
-	if backend != "claude" && backend != "claude-channel" {
+	if !IsClaudeFamily(backend) {
 		return fmt.Errorf("backend %q does not support parameter %q", backend, "claude-mcp-wait")
 	}
 	return nil

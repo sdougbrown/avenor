@@ -1069,7 +1069,7 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 		return resumer.ResumeWithOptions(ctx, resumeID, opts)
 	}
 	if opts.Thinking != "" {
-		if runtime.ResumesWithoutOptions(backend) {
+		if runtime.IsClaudeFamily(backend) {
 			return runtime.Session{}, runtime.NewStartOnlyThinkingError(backend, opts.Thinking)
 		}
 		return runtime.Session{}, runtime.NewUnsupportedThinkingError(backend)
