@@ -31,8 +31,10 @@
 //     properties an action admits, a property's presence, type or constraint, a
 //     repair sentence, an outcome's flags or rendered text. The conformance
 //     fixture is also read at run time by the two case loaders, so a test can
-//     hold the checked-in file and the compiled artifact against each other, and
-//     the input schemas are what the Go surfaces publish to their SDK.
+//     hold the checked-in file and the compiled artifact against each other. The
+//     per-action union is the contract source, and this package compiles the flat
+//     object schema a surface publishes, because a `oneOf` union loses the
+//     integer and object types in at least one real client.
 //
 // Nothing in this package imports a surface package: the router lives in
 // internal/messaging/router so it may import this package and askclient
@@ -40,4 +42,4 @@
 package messaging
 
 //go:generate go run github.com/umpire-tools/umpire-go-gen@v0.1.1 -i ../../schemas/message_route.umpire.json -output-file message_route.gen.go -pkg messaging
-//go:generate go run ./cmd/genschema -message-input ../../schemas/message.input.json -peers-input ../../schemas/peers.input.json -conformance ../../schemas/message_route.conformance.json -outcome ../../schemas/message.outcome.json -out schema.gen.go
+//go:generate go run ./cmd/genschema -message-input ../../schemas/message.input.json -peers-input ../../schemas/peers.input.json -message-flat-out ../../schemas/message.input.flat.json -peers-flat-out ../../schemas/peers.input.flat.json -conformance ../../schemas/message_route.conformance.json -outcome ../../schemas/message.outcome.json -out schema.gen.go

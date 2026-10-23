@@ -215,6 +215,217 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 	}
 }
 
+// TestFlatSchemaAcceptsEveryValidInput proves the flat schema MCP surfaces
+// publish admits every input the router admits, the valid conformance cases'
+// integer and object arguments included, so publishing it cannot turn a valid
+// call into a client-side schema error. The other half of the fixture — that
+// every invalid case is still refused by the router — is pinned by the router's
+// own conformance suite over the same cases.
+func TestFlatSchemaAcceptsEveryValidInput(t *testing.T) {
+	for _, fixture := range []struct {
+		name   string
+		schema func() map[string]any
+		load   func(string) ([]ConformanceCase, error)
+	}{
+		{"message", MessageInputFlatSchema, LoadConformanceCases},
+		{"peers", PeersInputFlatSchema, LoadPeersConformanceCases},
+	} {
+		cases, err := fixture.load("../../schemas/message_route.conformance.json")
+		if err != nil {
+			t.Fatalf("load fixture: %v", err)
+		}
+		valid := 0
+		for _, c := range cases {
+			if c.Schema || c.Expect.Code != "" {
+				continue
+			}
+			valid++
+			t.Run(fixture.name+"/"+c.Name, func(t *testing.T) {
+				if err := validateAgainst(t, fixture.schema(), c.Input); err != nil {
+					t.Fatalf("flat schema rejected the valid input %s: %v", c.Input, err)
+				}
+			})
+		}
+		if valid == 0 {
+			t.Fatalf("%s: fixture carries no valid case", fixture.name)
+		}
+	}
+}
+
+// TestFlatSchemaIsTheUnion pins the flat schema to the union it is compiled
+// from: every action's properties, each keeping the type and limits its actions
+// declare, an action enum, no union keyword, and only a key every action
+// requires. A generator change that drops a property, a limit or the required
+// intersection fails here.
+func TestFlatSchemaIsTheUnion(t *testing.T) {
+	for _, fixture := range []struct {
+		name  string
+		union func() map[string]any
+		flat  func() map[string]any
+	}{
+		{"message", MessageInputSchema, MessageInputFlatSchema},
+		{"peers", PeersInputSchema, PeersInputFlatSchema},
+	} {
+		union, flat := fixture.union(), fixture.flat()
+		for _, banned := range []string{"oneOf", "anyOf"} {
+			if _, ok := flat[banned]; ok {
+				t.Fatalf("%s: flat schema carries %s", fixture.name, banned)
+			}
+		}
+		if flat["type"] != "object" {
+			t.Fatalf("%s: flat type = %v, want object", fixture.name, flat["type"])
+		}
+		if additional, ok := flat["additionalProperties"].(bool); !ok || additional {
+			t.Fatalf("%s: flat additionalProperties must be false", fixture.name)
+		}
+		flatProperties, ok := flat["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: flat properties is not an object", fixture.name)
+		}
+
+		var actions []any
+		var flatRequired []string
+		declaring := map[string][]string{}
+		declared := map[string][]map[string]any{}
+		variants, _ := union["oneOf"].([]any)
+		for i, rawVariant := range variants {
+			variant, _ := rawVariant.(map[string]any)
+			properties, _ := variant["properties"].(map[string]any)
+			action, _ := properties["action"].(map[string]any)["const"].(string)
+			actions = append(actions, action)
+			required := stringList(variant["required"])
+			if i == 0 {
+				flatRequired = required
+			} else {
+				flatRequired = intersectStrings(flatRequired, required)
+			}
+			for name, rawProperty := range properties {
+				property, _ := rawProperty.(map[string]any)
+				if name == "action" {
+					continue
+				}
+				declaring[name] = append(declaring[name], action)
+				declared[name] = append(declared[name], withoutKey(property, "description"))
+			}
+		}
+		// The flat schema publishes one required set, so only a key every action
+		// requires may appear; here that is the action itself for message and
+		// nothing for peers, whose list action takes no arguments.
+		for _, name := range flatRequired {
+			if name != "action" {
+				t.Fatalf("%s: flat schema would require %q, which is not the action", fixture.name, name)
+			}
+		}
+		if got := stringList(flat["required"]); !slices.Equal(got, flatRequired) {
+			t.Fatalf("%s: flat required = %v, the union's intersection = %v", fixture.name, got, flatRequired)
+		}
+
+		names := make([]string, 0, len(flatProperties))
+		for name := range flatProperties {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		wantNames := make([]string, 0, len(declared)+1)
+		for name := range declared {
+			wantNames = append(wantNames, name)
+		}
+		wantNames = append(wantNames, "action")
+		sort.Strings(wantNames)
+		if !slices.Equal(names, wantNames) {
+			t.Fatalf("%s: flat properties = %v, the union's = %v", fixture.name, names, wantNames)
+		}
+
+		for name, declarations := range declared {
+			flatProperty, _ := flatProperties[name].(map[string]any)
+			got := withoutKey(flatProperty, "description")
+			for i, want := range declarations {
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("%s/%s: flat declaration = %v, union declaration = %v", fixture.name, declaring[name][i], got, want)
+				}
+			}
+		}
+		actionProperty, _ := flatProperties["action"].(map[string]any)
+		if !reflect.DeepEqual(actionProperty["enum"], actions) {
+			t.Fatalf("%s: flat action enum = %v, want %v", fixture.name, actionProperty["enum"], actions)
+		}
+	}
+}
+
+// TestFlatSchemaKeepsTheActionDeclarations pins the two action declarations the
+// union carries into the published flat schema: the default a client prefills
+// from, and a description that names every action and what it does. Only the
+// summary can survive flattening, and dropping it drops the only in-schema
+// warning that an action is backend-only.
+func TestFlatSchemaKeepsTheActionDeclarations(t *testing.T) {
+	for _, fixture := range []struct {
+		name  string
+		union func() map[string]any
+		flat  func() map[string]any
+	}{
+		{"message", MessageInputSchema, MessageInputFlatSchema},
+		{"peers", PeersInputSchema, PeersInputFlatSchema},
+	} {
+		union, flat := fixture.union(), fixture.flat()
+		flatProperties, _ := flat["properties"].(map[string]any)
+		flatAction, _ := flatProperties["action"].(map[string]any)
+		flatDescription, _ := flatAction["description"].(string)
+
+		var declaredDefault any
+		variants, _ := union["oneOf"].([]any)
+		for _, rawVariant := range variants {
+			variant, _ := rawVariant.(map[string]any)
+			properties, _ := variant["properties"].(map[string]any)
+			action, _ := properties["action"].(map[string]any)
+			name, _ := action["const"].(string)
+			if !strings.Contains(flatDescription, name) {
+				t.Fatalf("%s: flat action description %q does not name %q", fixture.name, flatDescription, name)
+			}
+			if description, _ := action["description"].(string); description != "" {
+				if !strings.Contains(flatDescription, strings.TrimSuffix(description, ".")) {
+					t.Fatalf("%s: flat action description %q does not carry action %q's own", fixture.name, flatDescription, name)
+				}
+			}
+			if value, ok := action["default"]; ok {
+				declaredDefault = value
+			}
+		}
+		if got := flatAction["default"]; !reflect.DeepEqual(got, declaredDefault) {
+			t.Fatalf("%s: flat action default = %v, the union's = %v", fixture.name, got, declaredDefault)
+		}
+	}
+}
+
+func withoutKey(spec map[string]any, key string) map[string]any {
+	out := make(map[string]any, len(spec))
+	for name, value := range spec {
+		if name == key {
+			continue
+		}
+		out[name] = value
+	}
+	return out
+}
+
+func stringList(value any) []string {
+	items, _ := value.([]any)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		name, _ := item.(string)
+		out = append(out, name)
+	}
+	return out
+}
+
+func intersectStrings(first, second []string) []string {
+	out := make([]string, 0, len(first))
+	for _, name := range first {
+		if slices.Contains(second, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 func schemaInt(value any) int {
 	number, _ := value.(float64)
 	return int(number)
@@ -228,6 +439,12 @@ func TestSchemaFilesCompiled(t *testing.T) {
 	}
 	if got, want := PeersInputSchema(), readSchemaFile(t, "../../schemas/peers.input.json"); !reflect.DeepEqual(got, want) {
 		t.Fatal("peers.input.json and schema.gen.go disagree; run go generate ./internal/messaging/...")
+	}
+	if got, want := MessageInputFlatSchema(), readSchemaFile(t, "../../schemas/message.input.flat.json"); !reflect.DeepEqual(got, want) {
+		t.Fatal("message.input.flat.json and schema.gen.go disagree; run go generate ./internal/messaging/...")
+	}
+	if got, want := PeersInputFlatSchema(), readSchemaFile(t, "../../schemas/peers.input.flat.json"); !reflect.DeepEqual(got, want) {
+		t.Fatal("peers.input.flat.json and schema.gen.go disagree; run go generate ./internal/messaging/...")
 	}
 }
 

@@ -1,7 +1,8 @@
 // Command genschema compiles the shared schema files into internal/messaging's
 // generated Go artifacts: the two input JSON Schemas as string constants, the
-// per-action applicability tables, the repair templates, the outcome rows with
-// their render templates, and the peers `last` templates.
+// flat object schema each MCP surface publishes, the per-action applicability
+// tables, the repair templates, the outcome rows with their render templates,
+// and the peers `last` templates.
 //
 // It runs from internal/messaging (go generate sets the working directory to
 // the directory of the file holding the directive), so every input path is
@@ -10,10 +11,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"go/format"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,19 +78,23 @@ type outcomeFixture struct {
 
 func main() {
 	var (
-		messageInput = flag.String("message-input", "", "path to schemas/message.input.json")
-		peersInput   = flag.String("peers-input", "", "path to schemas/peers.input.json")
-		conformance  = flag.String("conformance", "", "path to schemas/message_route.conformance.json")
-		outcome      = flag.String("outcome", "", "path to schemas/message.outcome.json")
-		out          = flag.String("out", "schema.gen.go", "output file")
+		messageInput   = flag.String("message-input", "", "path to schemas/message.input.json")
+		peersInput     = flag.String("peers-input", "", "path to schemas/peers.input.json")
+		messageFlatOut = flag.String("message-flat-out", "", "path to write the flat message input schema")
+		peersFlatOut   = flag.String("peers-flat-out", "", "path to write the flat peers input schema")
+		conformance    = flag.String("conformance", "", "path to schemas/message_route.conformance.json")
+		outcome        = flag.String("outcome", "", "path to schemas/message.outcome.json")
+		out            = flag.String("out", "schema.gen.go", "output file")
 	)
 	flag.Parse()
 	for name, value := range map[string]string{
-		"-message-input": *messageInput,
-		"-peers-input":   *peersInput,
-		"-conformance":   *conformance,
-		"-outcome":       *outcome,
-		"-out":           *out,
+		"-message-input":    *messageInput,
+		"-peers-input":      *peersInput,
+		"-message-flat-out": *messageFlatOut,
+		"-peers-flat-out":   *peersFlatOut,
+		"-conformance":      *conformance,
+		"-outcome":          *outcome,
+		"-out":              *out,
 	} {
 		if value == "" {
 			fail("missing required flag %s", name)
@@ -96,13 +103,27 @@ func main() {
 
 	messageSchema := readFile(*messageInput)
 	peersSchema := readFile(*peersInput)
+	messageFlat, err := flattenInput(messageSchema, messageFlatSchemaMeta)
+	if err != nil {
+		fail("flatten %s: %v", *messageInput, err)
+	}
+	peersFlat, err := flattenInput(peersSchema, peersFlatSchemaMeta)
+	if err != nil {
+		fail("flatten %s: %v", *peersInput, err)
+	}
+	if err := os.WriteFile(*messageFlatOut, messageFlat, 0o644); err != nil {
+		fail("write %s: %v", *messageFlatOut, err)
+	}
+	if err := os.WriteFile(*peersFlatOut, peersFlat, 0o644); err != nil {
+		fail("write %s: %v", *peersFlatOut, err)
+	}
 
 	var conformanceDoc conformanceFixture
 	mustDecode(*conformance, &conformanceDoc)
 	var outcomeDoc outcomeFixture
 	mustDecode(*outcome, &outcomeDoc)
 
-	source, err := generate(messageSchema, peersSchema, conformanceDoc, outcomeDoc)
+	source, err := generate(messageSchema, peersSchema, messageFlat, peersFlat, conformanceDoc, outcomeDoc)
 	if err != nil {
 		fail("%v", err)
 	}
@@ -116,7 +137,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "generated %s\n", *out)
 }
 
-func generate(messageSchema, peersSchema []byte, conformance conformanceFixture, outcome outcomeFixture) (string, error) {
+func generate(messageSchema, peersSchema, messageFlat, peersFlat []byte, conformance conformanceFixture, outcome outcomeFixture) (string, error) {
 	messageConstraints, err := constraintsFromSchema(messageSchema)
 	if err != nil {
 		return "", err
@@ -131,6 +152,8 @@ func generate(messageSchema, peersSchema []byte, conformance conformanceFixture,
 
 	fmt.Fprintf(&b, "// messageInputSchemaJSON is schemas/message.input.json verbatim.\nconst messageInputSchemaJSON = %s\n\n", strconv.Quote(string(messageSchema)))
 	fmt.Fprintf(&b, "// peersInputSchemaJSON is schemas/peers.input.json verbatim.\nconst peersInputSchemaJSON = %s\n\n", strconv.Quote(string(peersSchema)))
+	fmt.Fprintf(&b, "// messageInputFlatSchemaJSON is schemas/message.input.flat.json verbatim: the flat\n// object schema MCP surfaces publish, compiled from the per-action union.\nconst messageInputFlatSchemaJSON = %s\n\n", strconv.Quote(string(messageFlat)))
+	fmt.Fprintf(&b, "// peersInputFlatSchemaJSON is schemas/peers.input.flat.json verbatim: the flat\n// object schema MCP surfaces publish, compiled from the per-action union.\nconst peersInputFlatSchemaJSON = %s\n\n", strconv.Quote(string(peersFlat)))
 
 	b.WriteString("// repairsTemplates is the per-error-code render template table.\nvar repairsTemplates = map[string]string{\n")
 	for _, code := range sortedKeys(conformance.Repairs) {
@@ -259,6 +282,225 @@ func writeApplicability(b *strings.Builder, name, description string, table map[
 		b.WriteString("},\n")
 	}
 	b.WriteString("}\n\n")
+}
+
+// flatSchemaMeta is the header of one generated flat input schema.
+type flatSchemaMeta struct {
+	Title       string
+	ID          string
+	Description string
+}
+
+var messageFlatSchemaMeta = flatSchemaMeta{
+	Title: "avenor_message flat input",
+	ID:    "https://avenor.dev/schemas/message.input.flat.json",
+	Description: "Flat input schema for the avenor_message tool, compiled from " +
+		"schemas/message.input.json's per-action union so an MCP client publishes one " +
+		"object whose property types survive: an integer stays an integer and an object " +
+		"stays an object. Every action's properties appear here, so a field belonging to " +
+		"another action is not a schema error. Per-action admission (required fields, " +
+		"unknown properties, types and limits) belongs to the router, which answers a " +
+		"mismatch at once with the contract's typed invalid_request and its repair text. " +
+		"Generated by internal/messaging/cmd/genschema; do not edit.",
+}
+
+var peersFlatSchemaMeta = flatSchemaMeta{
+	Title: "avenor_peers flat input",
+	ID:    "https://avenor.dev/schemas/peers.input.flat.json",
+	Description: "Flat input schema for the avenor_peers tool, compiled from " +
+		"schemas/peers.input.json's per-action union so an MCP client publishes one " +
+		"object whose property types survive. Every action's properties appear here, so " +
+		"a field belonging to another action is not a schema error. Per-action admission " +
+		"belongs to the router, which answers a mismatch at once with the contract's " +
+		"typed error and its repair text. Generated by " +
+		"internal/messaging/cmd/genschema; do not edit.",
+}
+
+// flattenInput compiles a per-action `oneOf` input schema into the single flat
+// object schema the MCP surfaces publish. It keeps every action's properties
+// with their declared types and limits, requires only the keys every action
+// requires (the action for message, nothing for peers), and stops when two
+// actions declare one property differently, because one flat property cannot
+// carry both declarations. The union's `action` declarations are kept too: its
+// default verbatim, and its per-action descriptions as one summary naming each
+// action.
+func flattenInput(raw []byte, meta flatSchemaMeta) ([]byte, error) {
+	var union struct {
+		OneOf []struct {
+			Properties map[string]map[string]any `json:"properties"`
+			Required   []string                  `json:"required"`
+		} `json:"oneOf"`
+	}
+	if err := json.Unmarshal(raw, &union); err != nil {
+		return nil, fmt.Errorf("decode input schema: %w", err)
+	}
+	if len(union.OneOf) == 0 {
+		return nil, errors.New("input schema declares no action variant")
+	}
+	properties := make(map[string]any, len(union.OneOf)+4)
+	declarations := map[string]map[string]any{}
+	declaredBy := map[string]string{}
+	actions := make([]string, 0, len(union.OneOf))
+	// A flat schema can express only one required set, so it keeps the
+	// intersection: a key any chosen action may omit must stay optional, or the
+	// published schema would refuse a call the router admits.
+	required := append([]string{}, union.OneOf[0].Required...)
+	var actionDeclarations []actionDeclaration
+	actionDefault := ""
+	for i, variant := range union.OneOf {
+		action, _ := variant.Properties["action"]["const"].(string)
+		if action == "" {
+			return nil, errors.New("an input schema variant declares no action const")
+		}
+		actions = append(actions, action)
+		actionDeclarations = append(actionDeclarations, actionDeclaration{
+			name:        action,
+			description: stringValue(variant.Properties["action"]["description"]),
+		})
+		if declared, ok := variant.Properties["action"]["default"]; ok {
+			value := stringValue(declared)
+			if actionDefault != "" && actionDefault != value {
+				return nil, fmt.Errorf("actions declare different defaults (%q and %q); the flat schema cannot keep both", actionDefault, value)
+			}
+			actionDefault = value
+		}
+		if i > 0 {
+			required = intersectRequired(required, variant.Required)
+		}
+		for name, spec := range variant.Properties {
+			if name == "action" {
+				continue
+			}
+			declared := withoutDescription(spec)
+			existing, seen := properties[name].(map[string]any)
+			if !seen {
+				properties[name] = copyMap(spec)
+				declarations[name] = declared
+				declaredBy[name] = action
+				continue
+			}
+			if err := compareDeclaration(name, declaredBy[name], action, declarations[name], declared); err != nil {
+				return nil, err
+			}
+			existing["description"] = mergeDescription(existing["description"], spec["description"])
+		}
+	}
+	properties["action"] = map[string]any{
+		"type":        "string",
+		"enum":        actions,
+		"description": describeActions(actionDeclarations, actionDefault),
+	}
+	if actionDefault != "" {
+		properties["action"].(map[string]any)["default"] = actionDefault
+	}
+	required = intersectRequired(required, []string{"action"})
+	doc := map[string]any{
+		"$schema":              "https://json-schema.org/draft/2020-12/schema",
+		"$id":                  meta.ID,
+		"title":                meta.Title,
+		"description":          meta.Description,
+		"type":                 "object",
+		"properties":           properties,
+		"required":             required,
+		"additionalProperties": false,
+	}
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode flat schema: %w", err)
+	}
+	return append(out, '\n'), nil
+}
+
+// actionDeclaration is one action's own declaration on the union's `action`
+// property: the action and the description attached to its variant.
+type actionDeclaration struct {
+	name        string
+	description string
+}
+
+// describeActions renders the flat `action` property's description. The union
+// carries one description per action and one flat property cannot keep them
+// separately, so each action is named with what it does; the action declaring
+// the union's default says so, because a client prefills from it. A union that
+// describes no action keeps the bare list.
+func describeActions(declarations []actionDeclaration, defaultAction string) string {
+	parts := make([]string, 0, len(declarations))
+	described := 0
+	for _, declaration := range declarations {
+		part := declaration.name
+		if summary := strings.TrimSuffix(strings.TrimSpace(declaration.description), "."); summary != "" {
+			part += " — " + summary
+			described++
+		}
+		if declaration.name == defaultAction {
+			part += " (the default)"
+		}
+		parts = append(parts, part)
+	}
+	separator := ", "
+	if described > 0 {
+		separator = "; "
+	}
+	return "Action to perform: " + strings.Join(parts, separator) + "."
+}
+
+// compareDeclaration reports why one flat property cannot carry two actions'
+// declarations. The type disagreement is named as such, because that is the
+// case a surface would have to resolve with the owner rather than the generator.
+func compareDeclaration(name, firstAction, action string, declared, incoming map[string]any) error {
+	if reflect.DeepEqual(declared, incoming) {
+		return nil
+	}
+	if !reflect.DeepEqual(declared["type"], incoming["type"]) {
+		return fmt.Errorf("property %q is declared as type %v by action %q and as type %v by action %q; the flat schema cannot keep both", name, declared["type"], firstAction, incoming["type"], action)
+	}
+	return fmt.Errorf("property %q carries different constraints for action %q and action %q; the flat schema cannot keep both", name, firstAction, action)
+}
+
+// intersectRequired keeps the keys both sets require, in the first set's order.
+func intersectRequired(first, second []string) []string {
+	out := make([]string, 0, len(first))
+	for _, name := range first {
+		for _, other := range second {
+			if name == other {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func withoutDescription(spec map[string]any) map[string]any {
+	declared := copyMap(spec)
+	delete(declared, "description")
+	return declared
+}
+
+func copyMap(spec map[string]any) map[string]any {
+	out := make(map[string]any, len(spec))
+	for key, value := range spec {
+		out[key] = value
+	}
+	return out
+}
+
+// stringValue reads a JSON string keyword, treating any other value as absent.
+func stringValue(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func mergeDescription(existing, incoming any) string {
+	first, _ := existing.(string)
+	next, _ := incoming.(string)
+	switch {
+	case first == "":
+		return next
+	case next == "" || next == first:
+		return first
+	}
+	return first + " " + next
 }
 
 // constraintsFromSchema reads each variant's string length and pattern limits,

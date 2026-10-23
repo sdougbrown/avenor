@@ -107,6 +107,7 @@ type RenameResult struct {
 type PeerRecord struct {
 	RunID   string `json:"run_id"`
 	Label   string `json:"label,omitempty"`
+	Kind    string `json:"kind,omitempty"` // "supervisor" | "agent", from the broker's SessionInfo
 	Status  string `json:"status,omitempty"`
 	Backend string `json:"backend,omitempty"`
 	Model   string `json:"model,omitempty"`

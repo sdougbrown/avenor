@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -70,6 +71,9 @@ func assertPeersResult(t *testing.T, c messaging.ConformanceCase, provider *fake
 			}
 			if got, want := result.Peers[index].Label, stringOf(record["label"]); got != want {
 				t.Fatalf("peer %d label = %q, want %q", index, got, want)
+			}
+			if got, want := result.Peers[index].Kind, stringOf(record["kind"]); got != want {
+				t.Fatalf("peer %d kind = %q, want %q", index, got, want)
 			}
 			if got, want := result.Peers[index].Status, stringOf(record["status"]); got != want {
 				t.Fatalf("peer %d status = %q, want %q", index, got, want)
@@ -259,4 +263,206 @@ func TestPeersListIncompleteListingKeepsPeers(t *testing.T) {
 	if !strings.Contains(result.Text, messaging.Repair("refused_io", nil)) {
 		t.Fatalf("text = %q, want the classified read failure", result.Text)
 	}
+}
+
+// TestPeersDetailsKeepsPeerDir pins the `dir` key the structured list result
+// carries: the working directory a peer session runs in is the only field that
+// says where it is working, and a dropped or renamed key is invisible unless a
+// record actually sets it.
+func TestPeersDetailsKeepsPeerDir(t *testing.T) {
+	result := Result{Action: "list", Peers: []messaging.PeerRecord{
+		{RunID: "rt_7", Label: "child-a", Dir: "/home/u/Code/child-a"},
+	}}
+	details := PeersDetails(result)
+	raw, err := json.Marshal(details)
+	if err != nil {
+		t.Fatalf("encode peers details: %v", err)
+	}
+	var decoded struct {
+		Peers []map[string]any `json:"peers"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode peers details: %v", err)
+	}
+	if len(decoded.Peers) != 1 {
+		t.Fatalf("peers details = %s, want one peer record", raw)
+	}
+	got, ok := decoded.Peers[0]["dir"]
+	if !ok {
+		t.Fatalf("peer record %s carries no dir key", raw)
+	}
+	if want := "/home/u/Code/child-a"; got != want {
+		t.Fatalf("peer record dir = %v, want %q", got, want)
+	}
+}
+
+// TestPeersContentComposesTheListBlock pins the text a peers call returns: a
+// `list` result is the shared list block, under the router's incomplete-listing
+// sentence when the result carries one, and `rename`/`last` keep the router's
+// text unchanged.
+func TestPeersContentComposesTheListBlock(t *testing.T) {
+	records := []messaging.PeerRecord{
+		{RunID: "rt_7", Label: "child-a", Kind: "agent", Status: "running"},
+	}
+	list := RenderPeers(records)
+	if got := PeersContent(Result{Action: "list", Peers: records}); got != list {
+		t.Fatalf("list content = %q, want %q", got, list)
+	}
+	partial := "Listed 1 peer; the listing was incomplete."
+	if got, want := PeersContent(Result{Action: "list", Peers: records, Text: partial}), partial+"\n\n"+list; got != want {
+		t.Fatalf("incomplete list content = %q, want %q", got, want)
+	}
+	for _, action := range []string{"rename", "last"} {
+		result := Result{Action: action, Text: "router text"}
+		if got := PeersContent(result); got != result.Text {
+			t.Fatalf("%s content = %q, want the router text %q", action, got, result.Text)
+		}
+	}
+}
+
+func TestRenderPeersIncludesKind(t *testing.T) {
+	got := RenderPeers([]messaging.PeerRecord{
+		{RunID: "supervisor", Label: "supervisor", Kind: "supervisor", Status: "running", Backend: "pi"},
+		{RunID: "rt_7", Label: "child-a", Kind: "agent", Status: "running"},
+	})
+	want := "**Active sessions:**\n" +
+		"  supervisor (supervisor) [supervisor, running, pi]\n" +
+		"  child-a (rt_7) [agent, running]"
+	if got != want {
+		t.Fatalf("RenderPeers = %q, want %q", got, want)
+	}
+	if got, want := RenderPeers(nil), "No other agent sessions connected."; got != want {
+		t.Fatalf("empty RenderPeers = %q, want %q", got, want)
+	}
+}
+
+// TestRenderPeersOmitsMissingLabelAndAttributes pins the two branches a sparse
+// record takes: a peer with no label renders as its bare run id rather than with
+// empty parentheses, and a peer with no kind, status, backend or model renders
+// with no attribute block at all instead of an empty ` []`.
+func TestRenderPeersOmitsMissingLabelAndAttributes(t *testing.T) {
+	got := RenderPeers([]messaging.PeerRecord{
+		{RunID: "rt_8", Kind: "agent"},
+		{RunID: "rt_9"},
+	})
+	want := "**Active sessions:**\n" +
+		"  rt_8 [agent]\n" +
+		"  rt_9"
+	if got != want {
+		t.Fatalf("RenderPeers = %q, want %q", got, want)
+	}
+}
+
+func TestToolOutputObject(t *testing.T) {
+	tell := Result{Action: "tell", Outcome: messaging.OutcomeSent, MessageID: "msg_1", Label: "peer", Text: "sent"}
+	want := map[string]any{"action": "tell", "outcome": "sent", "text": "sent", "message_id": "msg_1", "label": "peer"}
+	if got := tell.Output(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("tell output = %#v, want %#v", got, want)
+	}
+	reply := Result{Action: "ask", Outcome: messaging.OutcomeReplied, MessageID: "msg_2", Text: "ok", Reply: "answer"}
+	if got := reply.Output()["reply"]; got != "answer" {
+		t.Fatalf("ask output reply = %v, want answer", got)
+	}
+	failure := (&ToolError{Code: "not_permitted", Message: "no"}).Output()
+	wantFailure := map[string]any{"code": "not_permitted", "text": "no"}
+	if !reflect.DeepEqual(failure, wantFailure) {
+		t.Fatalf("tool error output = %#v, want %#v", failure, wantFailure)
+	}
+}
+
+// sameJSON compares two result objects by their JSON encoding, so a fixture
+// decoded into []any compares with a Go-native []map[string]any.
+func sameJSON(t *testing.T, name string, got, want any) {
+	t.Helper()
+	gotRaw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("%s: encode got: %v", name, err)
+	}
+	wantRaw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("%s: encode want: %v", name, err)
+	}
+	if string(gotRaw) != string(wantRaw) {
+		t.Fatalf("%s = %s, want %s", name, gotRaw, wantRaw)
+	}
+}
+
+// jsonValue decodes a value by way of its JSON encoding: a typed struct marshals
+// its fields in declaration order while the shared fixture's maps marshal in key
+// order, so the two only compare once both are decoded into the same shape.
+func jsonValue(t *testing.T, name string, value any) any {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("%s: encode: %v", name, err)
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("%s: decode: %v", name, err)
+	}
+	return decoded
+}
+
+// TestSurfaceResultFixture pins the result objects the Go host returns to the
+// same shared fixture the TypeScript MCP host and the OpenCode plugin assert
+// against, so no surface can drift in keys, nesting or casing.
+func TestSurfaceResultFixture(t *testing.T) {
+	raw, err := os.ReadFile("../../../schemas/message_route.result.json")
+	if err != nil {
+		t.Fatalf("read shared result fixture: %v", err)
+	}
+	var fixture struct {
+		Message map[string]map[string]any `json:"message"`
+		Peers   map[string]map[string]any `json:"peers"`
+		Error   map[string]any            `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode shared result fixture: %v", err)
+	}
+
+	tell := Result{
+		Action:    "tell",
+		Outcome:   messaging.OutcomeSent,
+		MessageID: "m-1",
+		Label:     "mesh-a",
+		Text:      `message "m-1" delivered to "mesh-a"`,
+	}
+	sameJSON(t, "tell output", tell.Output(), fixture.Message["tell"])
+
+	edgeAbsent := Result{
+		Action:    "reply",
+		Outcome:   messaging.OutcomeEdgeAbsent,
+		MessageID: "a-1",
+		Text:      `no ask "a-1" is pending on this surface; nothing was sent`,
+	}
+	sameJSON(t, "reply edge-absent output", edgeAbsent.Output(), fixture.Message["reply_edge_absent"])
+
+	resumed := Result{
+		Action:       "resume",
+		Outcome:      outcomeResumed,
+		RunID:        "run-2",
+		Label:        "again",
+		Text:         `resumed "again" as run "run-2"`,
+		SentinelFile: "/runs/run-2/sentinel.done",
+		OnEvent:      "/runs/run-2/events.log",
+	}
+	sameJSON(t, "resume output", resumed.Output(), fixture.Message["resume"])
+
+	refused := &ToolError{Code: "unknown_target", Message: `no run matches "ghost"`}
+	sameJSON(t, "tool error output", refused.Output(), fixture.Error)
+
+	list := Result{Action: "list", Peers: []messaging.PeerRecord{
+		{RunID: "rt_2", Label: "mesh-a", Kind: "agent", Status: "running"},
+		{RunID: "rt_3"},
+	}}
+	sameJSON(t, "peers list details", jsonValue(t, "peers list details", PeersDetails(list)), fixture.Peers["list"])
+
+	rename := Result{Action: "rename", RunID: "rt_2", Label: "mesh-renamed", PreviousLabel: "mesh-a"}
+	sameJSON(t, "peers rename details", PeersDetails(rename), fixture.Peers["rename"])
+
+	last := Result{
+		Action: "last", RunID: "rt_7", RuntimeID: "rt_7", Label: "mesh-a",
+		FinalOutput: "OK", StopReason: "end_turn",
+	}
+	sameJSON(t, "peers last details", PeersDetails(last), fixture.Peers["last"])
 }
