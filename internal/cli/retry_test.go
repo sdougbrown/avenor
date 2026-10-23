@@ -156,10 +156,15 @@ func TestRunSingleAttemptResumesForInterruptQueuedBeforeStart(t *testing.T) {
 func TestRunSingleAttemptResumesForMidWaitInterrupt(t *testing.T) {
 	provider, result := runSingleAttemptWithControl(t, func(p *scriptedProvider, cs *control.ControlServer) {
 		started := make(chan struct{})
+		release := make(chan struct{})
 		p.promptStarted = started
+		p.release = release
+		// The interrupt lands before turn 1's end event is queued, so the
+		// post-wait ConsumeInterrupt deterministically finds it.
 		go func() {
 			<-started
 			cs.InterruptPrompt("interrupted!", false)
+			close(release)
 		}()
 	})
 	if result.exitCode != 0 {
@@ -179,5 +184,32 @@ func TestRunSingleAttemptResumesForQueuedPromptAfterEndTurn(t *testing.T) {
 	}
 	if provider.resumeCalls != 1 {
 		t.Fatalf("resume calls = %d, want 1 (the queued prompt resumes the session)", provider.resumeCalls)
+	}
+}
+
+func TestRunResumeNotifiesForStartOnlyOptions(t *testing.T) {
+	provider := newScriptedProvider()
+	provider.turns = []scriptedTurn{{stopReason: "end_turn"}}
+	// Seed the prior session so the resume finds it.
+	if _, err := provider.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir()}); err != nil {
+		t.Fatalf("seed prior session: %v", err)
+	}
+	oldNewProvider := newProvider
+	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	t.Cleanup(func() { newProvider = oldNewProvider })
+
+	var stderr strings.Builder
+	if got := run([]string{
+		"--dir", t.TempDir(),
+		"--backend", "claude",
+		"--thinking", "high",
+		"--claude-mcp-wait", "7s",
+		"--resume", "ses_1",
+		"--prompt", "continue",
+	}, func(string) string { return "" }, &stderr); got != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "start-only") || !strings.Contains(stderr.String(), "--thinking high") || !strings.Contains(stderr.String(), "--claude-mcp-wait 7s") {
+		t.Fatalf("stderr = %q, want a start-only notice naming both options", stderr.String())
 	}
 }

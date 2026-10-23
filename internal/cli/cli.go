@@ -943,6 +943,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	defer stopPID()
 
 	resumeID := *resume
+	if resumeID != "" && runtime.IsClaudeFamily(*backend) {
+		var dropped []string
+		if *thinking != "" {
+			dropped = append(dropped, "--thinking "+*thinking)
+		}
+		if *claudeMCPWait != 0 {
+			dropped = append(dropped, "--claude-mcp-wait "+(*claudeMCPWait).String())
+		}
+		if len(dropped) > 0 {
+			// The resumed session cannot re-apply start-only options; say so
+			// instead of silently ignoring the user's flags.
+			fmt.Fprintf(stderr, "avenor: ignoring start-only options on resume: %s\n", strings.Join(dropped, " "))
+		}
+	}
 	// A cancelled or timed-out run stopped mid-answer, so the reply collected so
 	// far is not the run's final message and must not be published.
 	exitForRunContext := func(code int, stopReason string) int {
