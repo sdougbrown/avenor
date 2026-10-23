@@ -151,7 +151,8 @@ type connState struct {
 	isOwner bool
 
 	// ctx is cancelled when the connection drops or the server stops, so
-	// long-running handlers (broker asks, wait_turn) do not outlive their client.
+	// long-running handlers (message_wait, message_receive, wait_turn) do not
+	// outlive their client.
 	ctx    context.Context
 	cancel context.CancelFunc
 

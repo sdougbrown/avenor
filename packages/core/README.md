@@ -115,15 +115,26 @@ await answerPermissionTool({ runId: 'my-run', optionId: 'allow-once' })
 // { ok: true }
 ```
 
-### `followUpTool`
+### `messageTool`
 
-Resumes a completed run by spawning a follow-up run on the same session, preserving conversation context.
+One tool for every message between runs: `tell`, `ask`, `reply`, `resume`, `withdraw` and `control_reply`. It takes a bound `MessageProvider`, which supplies who the call speaks as, how a target resolves, and only the actions that surface can perform.
 
 ```ts
-import { followUpTool } from '@dougbots/avenor-core'
+import { messageTool } from '@dougbots/avenor-core'
 
-await followUpTool({ runId: 'reverse-string', message: 'Now optimize it for speed' })
-// { run_id: '...', label: 'reverse-string-followup' }
+await messageTool({ action: 'resume', target: 'reverse-string', message: 'Now optimize it for speed' }, provider)
+// { action: 'resume', outcome: 'resumed', text: '...', runId: '...', label: '...' }
+```
+
+### `peersTool`
+
+Lists connected runs, renames a run's display label, or reads a peer's last agent message. Like `messageTool`, it reads through the bound provider.
+
+```ts
+import { peersTool } from '@dougbots/avenor-core'
+
+const result = await peersTool({ action: 'list' }, provider)
+console.log(result.text)
 ```
 
 ### `eventsTool`
@@ -184,6 +195,7 @@ await shutdownTool()
 | `statusTool` | function | Query run lifecycle status (single or all) |
 | `resultTool` | function | Wait for and retrieve one run's complete final output |
 | `answerPermissionTool` | function | Answer a pending permission request |
-| `followUpTool` | function | Resume a session with a follow-up prompt |
+| `peersTool` | function | List runs, rename a run's display label, or read a peer's last message |
+| `messageTool` | function | Tell, ask, reply, resume, withdraw or answer a control message |
 | `eventsTool` | function | Read recent events from a run's event log |
 | `shutdownTool` | function | Stop the avenor daemon and clean up |

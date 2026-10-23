@@ -211,7 +211,7 @@ Status values:
 
 Exit codes appear once the runtime has ended.
 
-Consumers such as `avenor_status` (MCP) and `avenor await` translate these raw
+Consumers such as `status` (MCP) and `avenor await` translate these raw
 statuses into their own lifecycle vocabulary. A raw status a consumer does not
 recognize reads as `unknown`, which is not a finished state: waiters keep
 waiting until an existing completion, permission, or timeout rule applies. An
@@ -307,7 +307,7 @@ max runtimes (16) reached
 
 The limit prevents resource exhaustion and gives you a predictable constraint for scheduling.
 
-A runtime that finishes its turn successfully does not keep its slot: it parks (holding its backend process open for a potential follow-up prompt) and stops counting against the limit. A parked runtime is reaped after `--parked-timeout` (default 30m). Whether a reaped runtime's session can still be continued depends on the backend: codex persists threads and `avenor_follow_up` resumes them by ID, while pi and claude sessions live only in their host process, so a follow-up after the reap fails with an explicit error instead of silently resuming a fresh session.
+A runtime that finishes its turn successfully does not keep its slot: it parks (holding its backend process open for a potential follow-up prompt) and stops counting against the limit. A parked runtime is reaped after `--parked-timeout` (default 30m). Whether a reaped runtime's session can still be continued depends on the backend: codex persists threads and the message tool's `resume` action continues them by ID, while pi and claude sessions live only in their host process, so a resume after the reap fails with an explicit error instead of silently resuming a fresh session.
 
 ### Tree descendant budget
 
@@ -406,7 +406,7 @@ This is convenient for interactive development — you don't have to manually st
 
 ## Workflow Controllers
 
-A workflow controller is an optional in-process reconciler that keeps opted-in workflow nodes moving without an agent or human claiming each one. A node opts in by declaring a `dispatch` policy (`mode: auto`, `controller_id`) in its workflow template; every node without that declaration stays manual, and ordinary `avenor_spawn` behavior is unaffected. See [Workflows](workflow.md) for the dispatch policy schema. The controller's desired state, leader lease, and external-gate poll cursors persist under the workflow root, so a replacement supervisor resumes without coordinator memory.
+A workflow controller is an optional in-process reconciler that keeps opted-in workflow nodes moving without an agent or human claiming each one. A node opts in by declaring a `dispatch` policy (`mode: auto`, `controller_id`) in its workflow template; every node without that declaration stays manual, and ordinary spawn behavior is unaffected. See [Workflows](workflow.md) for the dispatch policy schema. The controller's desired state, leader lease, and external-gate poll cursors persist under the workflow root, so a replacement supervisor resumes without coordinator memory.
 
 Controllers are created disabled and must be enabled before they dispatch or poll:
 
@@ -420,7 +420,7 @@ avenor workflow controller list
 avenor workflow controller disable software-factory --reason "maintenance"
 ```
 
-Status and list are readable through the MCP `avenor_workflow_controller_status` tool (pass `controller_id` for a single controller, omit it to list all); create, enable, and disable are CLI and control-protocol only, via the commands above and the control protocol's `workflow.controller.*` methods (see [Control Protocol](control-protocol.md)).
+Status and list are readable through the MCP `workflow_controller_status` tool (pass `controller_id` for a single controller, omit it to list all); create, enable, and disable are CLI and control-protocol only, via the commands above and the control protocol's `workflow.controller.*` methods (see [Control Protocol](control-protocol.md)).
 
 Pass `--workflow-adapter-dir` to the stable command to point the supervisor at a directory of external-gate adapter manifests (default: `$XDG_CONFIG_HOME/avenor/workflow-adapters`, falling back to `~/.config/avenor/workflow-adapters`).
 

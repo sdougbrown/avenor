@@ -37,8 +37,9 @@ display label.
 | Spawned child | its runtime ID (`rt_N`) | Before the child's backend starts, so it can poll and reply. |
 
 A spawned `pi` child asks through its inherited broker credentials. That path
-sends `to_run_id` unchanged: unlike the host's `avenor_ask`, it does not resolve
-a public spawn ID or a label first. A child asking its supervisor therefore has
+sends `to_run_id` after resolving a label through the broker's visible peers,
+the same ladder the host's message tool ask uses, but it never resolves a
+public spawn ID first. A child asking its supervisor therefore has
 to use `supervisor`. Asking `rt_N` addresses that child, not the supervisor. A
 child asking a sibling uses the sibling's `rt_N`.
 
@@ -105,10 +106,14 @@ messages.
 | `lost` | The ask is provably gone and cannot appear later. |
 
 A failed ask reaches tool surfaces as a JSON-RPC error whose `data` carries
-`message_id`, `pending`, and — when known — `outcome`. `pending` is true exactly
-when the outcome is `possibly-pending`: a wait that failed but whose cleanup
-withdrawal confirmed a terminal fence is no longer pending, and
-`broker_cancel` accepts the retained ID.
+`code` (the typed tool code), `outcome`, `message_id` and `wire_code`, omitting
+the last three where the failure does not know them; `resume` and the
+`session_*` verbs report the authority's decision and send `code` alone. What a
+caller does next follows from `outcome`: `not-sent` may be re-sent, while
+`possibly-pending` means retain the message ID and never re-send it — a wait
+whose cleanup withdrawal confirmed a terminal fence is not `possibly-pending`.
+Withdrawal is `message_withdraw` (or the message tool's `withdraw` action),
+which accepts the retained ID.
 
 Two rules follow from the table and are enforced everywhere:
 
@@ -118,6 +123,26 @@ Two rules follow from the table and are enforced everywhere:
 - **A withdrawal fences first.** Withdrawal installs a terminal fence before it
   reports absence, so a send that is still in flight cannot land afterwards. A
   missing edge or a bare HTTP 404 is never proof of terminal absence.
+
+## Tool input schemas
+
+`schemas/message.input.json` and `schemas/peers.input.json` are the contract
+source: one `oneOf` variant per action, each a complete object, and the router's
+admission table is compiled from them. MCP surfaces do not publish that union.
+They publish `schemas/message.input.flat.json` and
+`schemas/peers.input.flat.json`, which `internal/messaging/cmd/genschema`
+compiles from the same union: one `type: object` with the action enum, the
+union's action default and its per-action descriptions as one summary, every
+action's properties with their declared types and limits, no `oneOf`/`anyOf`,
+and only a required key that every action requires — `action` for `message`,
+nothing for `peers`, whose `list` action takes no arguments.
+
+The split exists because a real MCP client loses argument types from a union:
+OpenCode 1.15.5 sends `timeout_ms` and a `payload` object as JSON strings when
+the published schema is `oneOf`, and keeps them typed when it is flat. Admission
+is unchanged — the router still refuses a field outside the chosen action's set,
+a missing field, a wrong type and an out-of-range value with the contract's own
+sentence. The flat schema is client guidance; the union stays the contract.
 
 ## Wire errors
 
@@ -166,6 +191,8 @@ The local adapter drives the broker's own router:
 | `/wait_reply` | Wait for the ask's terminal state. |
 | `/cancel_message` | Withdraw an ask. |
 | `/poll-control` | Drain queued control and agent messages. |
+| `/rename` | Change a display name. The body's `run_id` must be the authenticated caller, and `session_id` is forwarded to the supervisor's one rename authority, so the supervisor decides whether the caller may rename that target. Answers `{run_id, label, previous_label}`. |
+| `/last_message` | Read one run's recorded last agent turn: `{run_id, label, has_record, final_output, stop_reason, final_output_truncated, at}`. It is the one read endpoint whose target need not be the caller — any authenticated run may read any known run — and an unknown target is `target-unavailable`. |
 
 Before the first send on a connection it calls `/sessions` and requires
 `messaging_protocol: 1`. A broker that predates the marker, or answers a

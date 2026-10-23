@@ -4,7 +4,7 @@
  *
  * Starts an MCP stdio server that:
  * - declares experimental claude/channel capability
- * - exposes avenor_report, avenor_finish, avenor_reply
+ * - exposes avenor_report, avenor_finish, avenor_message
  * - pushes channel events from a local HTTP endpoint
  *
  * This is script-only; do not import from production code.
@@ -30,7 +30,7 @@ const mcp = new Server(
     },
     instructions:
       "Messages arrive as <channel source=\"avenor-probe\">. " +
-      "Reply by calling avenor_reply with the control message ID.",
+      "Reply by calling avenor_message with action=\"control_reply\" and the control message ID.",
   }
 );
 
@@ -76,22 +76,34 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: "avenor_reply",
-      description: "Reply to a specific control message",
+      name: "avenor_message",
+      description: "Reply to, ask, tell, resume or withdraw a message between agent runs",
       inputSchema: {
         type: "object",
         properties: {
-          to: { type: "string" },
+          action: {
+            type: "string",
+            enum: ["tell", "ask", "reply", "resume", "withdraw", "control_reply"],
+          },
+          target: { type: "string" },
+          message: { type: "string" },
+          reply_to: { type: "string" },
+          message_id: { type: "string" },
+          timeout_ms: {
+            type: "integer",
+            minimum: 0,
+            maximum: 600000,
+          },
           payload: { type: "object" },
         },
-        required: ["to"],
+        required: ["action"],
       },
     },
   ],
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
-  if (req.params.name === "avenor_report" || req.params.name === "avenor_finish" || req.params.name === "avenor_reply") {
+  if (req.params.name === "avenor_report" || req.params.name === "avenor_finish" || req.params.name === "avenor_message") {
     console.error(`PROBE_TOOL_CALL: ${req.params.name} ${JSON.stringify(req.params.arguments)}`);
     return { content: [{ type: "text", text: "ok" }] };
   }

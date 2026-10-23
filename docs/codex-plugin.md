@@ -57,7 +57,7 @@ List the installed plugins:
 codex plugin list
 ```
 
-Confirm that Avenor appears as an installed plugin from the `avenor` marketplace. In a new Codex task, asking Codex to delegate explicitly through Avenor should make the `avenor_` MCP tools available. Avenor delegation remains opt-in; the bundled skill does not dispatch ordinary work without an explicit request.
+Confirm that Avenor appears as an installed plugin from the `avenor` marketplace. In a new Codex task, asking Codex to delegate explicitly through Avenor should make the MCP tools (`spawn`, `status`, `message`, `peers`, and so on) available. Avenor delegation remains opt-in; the bundled skill does not dispatch ordinary work without an explicit request.
 
 ## Troubleshooting
 
