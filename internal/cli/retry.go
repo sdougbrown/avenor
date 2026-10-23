@@ -12,6 +12,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
+	"github.com/sdougbrown/avenor/internal/thinkingpolicy"
 )
 
 var newProvider = factory.NewProvider
@@ -58,13 +59,15 @@ func resumeSession(ctx context.Context, provider runtime.Provider, backend strin
 	return StartSession(ctx, provider, backend, DropStartOnlyOptions(backend, opts), sessionID)
 }
 
-// DropStartOnlyOptions removes options a resumed session cannot honor. Only
-// the claude-family backends hold start-only options and resume without
-// per-call options, so they drop them and internal resumes are not aborted;
-// backends that resume with options keep them.
+// DropStartOnlyOptions removes options a resumed session cannot honor. The
+// thinking drop follows the thinking policy's resume verdict, so a new
+// start-only backend is honored without edits here. The MCP wait stays keyed
+// on the claude family, which owns the wait's backend support.
 func DropStartOnlyOptions(backend string, opts runtime.StartOptions) runtime.StartOptions {
-	if runtime.IsClaudeFamily(backend) {
+	if thinkingpolicy.Evaluate(backend, opts.Thinking, true) == thinkingpolicy.StartOnly {
 		opts.Thinking = ""
+	}
+	if runtime.IsClaudeFamily(backend) {
 		opts.ClaudeMCPWait = 0
 	}
 	return opts

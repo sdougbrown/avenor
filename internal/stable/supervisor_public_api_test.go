@@ -549,6 +549,7 @@ type itestProvider struct {
 	starts      int
 	resumes     int
 	cancels     int
+	startOpts   []runtime.StartOptions
 	answers     []runtime.PermissionResponse
 	resumeCalls []string
 	promptTexts []string
@@ -564,6 +565,7 @@ func newItestProvider(attempts ...stableScriptedAttempt) *itestProvider {
 func (p *itestProvider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	p.mu.Lock()
 	p.starts++
+	p.startOpts = append(p.startOpts, opts)
 	onStart := p.onStart
 	p.mu.Unlock()
 	if onStart != nil {

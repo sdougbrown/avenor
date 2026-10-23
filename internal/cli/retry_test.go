@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/thinkingpolicy"
 )
 
 func TestBackoffDelay(t *testing.T) {
@@ -116,5 +117,20 @@ func TestDropStartOnlyOptionsKeysOnResumeCapability(t *testing.T) {
 	withOptions := DropStartOnlyOptions("codex-app-server", runtime.StartOptions{Thinking: "max", ClaudeMCPWait: time.Second})
 	if withOptions.Thinking != "max" || withOptions.ClaudeMCPWait != time.Second {
 		t.Fatalf("resume-with-options backend lost options: %+v", withOptions)
+	}
+}
+
+func TestDropStartOnlyOptionsFollowsThinkingPolicy(t *testing.T) {
+	for _, backend := range []string{"claude", "claude-channel", "codex-app-server", "pi", "pony", "opencode-http"} {
+		for _, value := range []string{"", "off", "low", "medium", "high", "xhigh", "max"} {
+			opts := DropStartOnlyOptions(backend, runtime.StartOptions{Thinking: value, ClaudeMCPWait: time.Second})
+			if value == "" {
+				continue
+			}
+			wantDrop := thinkingpolicy.Evaluate(backend, value, true) == thinkingpolicy.StartOnly
+			if dropped := opts.Thinking == ""; dropped != wantDrop {
+				t.Fatalf("%s/%q: dropped = %v, want %v", backend, value, dropped, wantDrop)
+			}
+		}
 	}
 }

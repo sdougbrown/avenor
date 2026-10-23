@@ -614,6 +614,14 @@ func TestSupervisorPublicAPILoopPhaseResumeDropsStartOnlyOptions(t *testing.T) {
 	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
 		t.Fatalf("provider starts/resumes = %d/%d, want 1/1 (the second phase resumes)", starts, resumes)
 	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if len(provider.startOpts) != 1 {
+		t.Fatalf("provider starts recorded = %d, want 1", len(provider.startOpts))
+	}
+	if provider.startOpts[0].Thinking != "high" {
+		t.Fatalf("fresh first phase lost thinking: %+v", provider.startOpts[0])
+	}
 }
 
 // TestSupervisorPublicAPILoopRequiresNudgeResumesOwnSession proves a loop

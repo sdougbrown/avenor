@@ -137,12 +137,17 @@ func TestAttemptSessionRetainsThinkingOnResume(t *testing.T) {
 	}
 }
 
-type plainResumeProvider struct{}
+type plainResumeProvider struct {
+	startOpts   []runtime.StartOptions
+	resumeCalls int
+}
 
-func (p *plainResumeProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+func (p *plainResumeProvider) Start(_ context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	p.startOpts = append(p.startOpts, opts)
 	return runtime.Session{SessionID: "plain-started"}, nil
 }
 func (p *plainResumeProvider) Resume(context.Context, string) (runtime.Session, error) {
+	p.resumeCalls++
 	return runtime.Session{SessionID: "plain-resumed"}, nil
 }
 func (*plainResumeProvider) Prompt(context.Context, string, string) error { return nil }
@@ -163,5 +168,20 @@ func TestAttemptSessionDropsStartOnlyOptionsOnClaudeResume(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-resume-claude.sock", MaxRuntimes: 1})
 	if _, err := sup.attemptSession(context.Background(), child, "session", 1); err != nil {
 		t.Fatalf("attemptSession: %v", err)
+	}
+	if provider.resumeCalls != 1 {
+		t.Fatalf("resume calls = %d, want 1", provider.resumeCalls)
+	}
+}
+
+func TestAttemptSessionRetainsStartOnlyOptionsOnFreshStart(t *testing.T) {
+	provider := &plainResumeProvider{}
+	child := &childRuntime{provider: provider, backend: "claude", thinking: "max", agent: "agent", model: "model", dir: "/work"}
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-fresh-claude.sock", MaxRuntimes: 1})
+	if _, err := sup.attemptSession(context.Background(), child, "", 1); err != nil {
+		t.Fatalf("attemptSession: %v", err)
+	}
+	if len(provider.startOpts) != 1 || provider.startOpts[0].Thinking != "max" {
+		t.Fatalf("fresh start options = %+v, want thinking retained", provider.startOpts)
 	}
 }

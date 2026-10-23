@@ -2555,7 +2555,13 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			session, err := cli.StartSession(ctx, provider, identity.Backend, cli.DropStartOnlyOptions(identity.Backend, startOpts), resumeID)
+			startSessionOpts := startOpts
+			if resumeID != "" {
+				// Internal resume of the previous phase's session; start-only
+				// options the resume cannot honor would abort the boundary.
+				startSessionOpts = cli.DropStartOnlyOptions(identity.Backend, startOpts)
+			}
+			session, err := cli.StartSession(ctx, provider, identity.Backend, startSessionOpts, resumeID)
 			if err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
@@ -2841,7 +2847,13 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			session, err := cli.StartSession(ctx, provider, identity.Backend, cli.DropStartOnlyOptions(identity.Backend, startOpts), resumeID)
+			startSessionOpts := startOpts
+			if resumeID != "" {
+				// Internal resume of the previous phase's session; start-only
+				// options the resume cannot honor would abort the boundary.
+				startSessionOpts = cli.DropStartOnlyOptions(identity.Backend, startOpts)
+			}
+			session, err := cli.StartSession(ctx, provider, identity.Backend, startSessionOpts, resumeID)
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
@@ -3607,7 +3619,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 			identity.Agent, identity.Model = fallbackAgent, fallbackModel
 		}
 	}
-	return cli.StartSession(ctx, provider, identity.Backend, cli.DropStartOnlyOptions(identity.Backend, runtime.StartOptions{
+	startOpts := runtime.StartOptions{
 		Agent:         identity.Agent,
 		AgentProfile:  identity.AgentProfile,
 		Label:         label,
@@ -3619,7 +3631,13 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		BrokerToken:   brokerToken,
 		LaunchWrapper: identity.LaunchWrapper,
 		Provenance:    runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
-	}), resumeID)
+	}
+	if resumeID != "" {
+		// Internal resume of this child's own session; start-only options
+		// the resume cannot honor would abort the attempt.
+		startOpts = cli.DropStartOnlyOptions(identity.Backend, startOpts)
+	}
+	return cli.StartSession(ctx, provider, identity.Backend, startOpts, resumeID)
 }
 
 // takeFileSnapshot records the set of files (relative paths) in dir for
