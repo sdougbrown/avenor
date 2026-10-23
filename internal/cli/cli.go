@@ -943,17 +943,19 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	defer stopPID()
 
 	resumeID := *resume
-	if resumeID != "" && runtime.IsClaudeFamily(*backend) {
+	if resumeID != "" {
+		// The notice derives from the drop itself, so the two cannot drift:
+		// anything the resume path will silently ignore is named here.
+		before := runtime.StartOptions{Thinking: *thinking, ClaudeMCPWait: *claudeMCPWait}
+		after := runtime.DropStartOnlyOptions(*backend, before)
 		var dropped []string
-		if *thinking != "" {
-			dropped = append(dropped, "--thinking "+*thinking)
+		if after.Thinking != before.Thinking {
+			dropped = append(dropped, "--thinking "+before.Thinking)
 		}
-		if *claudeMCPWait != 0 {
-			dropped = append(dropped, "--claude-mcp-wait "+(*claudeMCPWait).String())
+		if after.ClaudeMCPWait != before.ClaudeMCPWait {
+			dropped = append(dropped, "--claude-mcp-wait "+before.ClaudeMCPWait.String())
 		}
 		if len(dropped) > 0 {
-			// The resumed session cannot re-apply start-only options; say so
-			// instead of silently ignoring the user's flags.
 			fmt.Fprintf(stderr, "avenor: ignoring start-only options on resume: %s\n", strings.Join(dropped, " "))
 		}
 	}

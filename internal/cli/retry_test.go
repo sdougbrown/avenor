@@ -213,3 +213,30 @@ func TestRunResumeNotifiesForStartOnlyOptions(t *testing.T) {
 		t.Fatalf("stderr = %q, want a start-only notice naming both options", stderr.String())
 	}
 }
+
+func TestRunResumeNoticeFollowsTheDrop(t *testing.T) {
+	// A backend whose resume honors thinking gets no notice: the drop would
+	// not fire, so the notice must not either.
+	provider := newScriptedProvider()
+	provider.turns = []scriptedTurn{{stopReason: "end_turn"}}
+	if _, err := provider.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir()}); err != nil {
+		t.Fatalf("seed prior session: %v", err)
+	}
+	oldNewProvider := newProvider
+	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	t.Cleanup(func() { newProvider = oldNewProvider })
+
+	var stderr strings.Builder
+	if got := run([]string{
+		"--dir", t.TempDir(),
+		"--backend", "pi",
+		"--thinking", "high",
+		"--resume", "ses_1",
+		"--prompt", "continue",
+	}, func(string) string { return "" }, &stderr); got != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "start-only") {
+		t.Fatalf("stderr = %q, want no notice when the resume honors the options", stderr.String())
+	}
+}
