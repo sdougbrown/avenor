@@ -108,12 +108,12 @@ func TestResumeSessionDropsStartOnlyOptionsForPlainResume(t *testing.T) {
 
 func TestDropStartOnlyOptionsKeysOnResumeCapability(t *testing.T) {
 	for _, backend := range []string{"claude", "claude-channel"} {
-		plain := dropStartOnlyOptions(backend, runtime.StartOptions{Thinking: "high", ClaudeMCPWait: 7 * time.Second})
+		plain := DropStartOnlyOptions(backend, runtime.StartOptions{Thinking: "high", ClaudeMCPWait: 7 * time.Second})
 		if plain.Thinking != "" || plain.ClaudeMCPWait != 0 {
 			t.Fatalf("%s start-only options not dropped: %+v", backend, plain)
 		}
 	}
-	withOptions := dropStartOnlyOptions("codex-app-server", runtime.StartOptions{Thinking: "max", ClaudeMCPWait: time.Second})
+	withOptions := DropStartOnlyOptions("codex-app-server", runtime.StartOptions{Thinking: "max", ClaudeMCPWait: time.Second})
 	if withOptions.Thinking != "max" || withOptions.ClaudeMCPWait != time.Second {
 		t.Fatalf("resume-with-options backend lost options: %+v", withOptions)
 	}

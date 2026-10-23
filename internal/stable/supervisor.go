@@ -2555,7 +2555,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			session, err := cli.StartSession(ctx, provider, identity.Backend, startOpts, resumeID)
+			session, err := cli.StartSession(ctx, provider, identity.Backend, cli.DropStartOnlyOptions(identity.Backend, startOpts), resumeID)
 			if err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
@@ -2841,7 +2841,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			session, err := cli.StartSession(ctx, provider, identity.Backend, startOpts, resumeID)
+			session, err := cli.StartSession(ctx, provider, identity.Backend, cli.DropStartOnlyOptions(identity.Backend, startOpts), resumeID)
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
@@ -3607,7 +3607,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 			identity.Agent, identity.Model = fallbackAgent, fallbackModel
 		}
 	}
-	return cli.StartSession(ctx, provider, identity.Backend, runtime.StartOptions{
+	return cli.StartSession(ctx, provider, identity.Backend, cli.DropStartOnlyOptions(identity.Backend, runtime.StartOptions{
 		Agent:         identity.Agent,
 		AgentProfile:  identity.AgentProfile,
 		Label:         label,
@@ -3619,7 +3619,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		BrokerToken:   brokerToken,
 		LaunchWrapper: identity.LaunchWrapper,
 		Provenance:    runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
-	}, resumeID)
+	}), resumeID)
 }
 
 // takeFileSnapshot records the set of files (relative paths) in dir for

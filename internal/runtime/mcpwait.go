@@ -10,16 +10,6 @@ import (
 // slow connect; it only stalls a run whose server is down.
 const MaxClaudeMCPWait = 60 * time.Second
 
-// IsClaudeFamily reports whether the backend is one of the claude-family
-// backends. They are the only backends the MCP wait applies to, and the only
-// ones that hold start-only options (the thinking level and the MCP wait) in
-// the process they spawn: their explicit resume takes no per-call options.
-// Other bare-Resume backends (pony, opencode-http) reject start-only options
-// at start, so their resumes never carry any.
-func IsClaudeFamily(backend string) bool {
-	return backend == "claude" || backend == "claude-channel"
-}
-
 // ValidateClaudeMCPWait checks a startup MCP wait for a backend. Zero means
 // no wait and is valid everywhere; only the claude backends hold the first
 // prompt for MCP servers, so any other backend rejects a wait instead of

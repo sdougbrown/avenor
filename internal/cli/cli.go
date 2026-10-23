@@ -509,7 +509,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		if resumeID != "" {
 			// The phase resumes the previous phase's session, and start-only
 			// options the resume cannot honor would abort the phase boundary.
-			startOptions = dropStartOnlyOptions(selection.Backend, startOptions)
+			startOptions = DropStartOnlyOptions(selection.Backend, startOptions)
 		}
 		return runAttempt(ctx, attemptConfig{
 			startOptions:           startOptions,
@@ -1007,7 +1007,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			// The next attempt resumes the failed session. Keeping start-only
 			// options the resume cannot honor would abort the retry at
 			// StartSession instead of surfacing the provider's own class.
-			startOptions = dropStartOnlyOptions(*backend, startOptions)
+			startOptions = DropStartOnlyOptions(*backend, startOptions)
 		}
 
 		// A hinted wait this run cannot honor leaves no attempt worth making, so

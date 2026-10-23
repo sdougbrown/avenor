@@ -55,14 +55,14 @@ type attemptDeps struct {
 // resumeSession resumes an existing session after cancellation so a follow-up
 // prompt can be sent without respawning the provider.
 func resumeSession(ctx context.Context, provider runtime.Provider, backend string, opts runtime.StartOptions, sessionID string) (runtime.Session, error) {
-	return StartSession(ctx, provider, backend, dropStartOnlyOptions(backend, opts), sessionID)
+	return StartSession(ctx, provider, backend, DropStartOnlyOptions(backend, opts), sessionID)
 }
 
-// dropStartOnlyOptions removes options a resumed session cannot honor. Only
+// DropStartOnlyOptions removes options a resumed session cannot honor. Only
 // the claude-family backends hold start-only options and resume without
 // per-call options, so they drop them and internal resumes are not aborted;
 // backends that resume with options keep them.
-func dropStartOnlyOptions(backend string, opts runtime.StartOptions) runtime.StartOptions {
+func DropStartOnlyOptions(backend string, opts runtime.StartOptions) runtime.StartOptions {
 	if runtime.IsClaudeFamily(backend) {
 		opts.Thinking = ""
 		opts.ClaudeMCPWait = 0
