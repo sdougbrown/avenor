@@ -123,7 +123,7 @@ One tool for every message between runs: `tell`, `ask`, `reply`, `resume`, `with
 import { messageTool } from '@dougbots/avenor-core'
 
 await messageTool({ action: 'resume', target: 'reverse-string', message: 'Now optimize it for speed' }, provider)
-// { action: 'resume', outcome: 'resumed', text: '...', run_id: '...', label: '...' }
+// { action: 'resume', outcome: 'resumed', text: '...', runId: '...', label: '...' }
 ```
 
 ### `peersTool`
