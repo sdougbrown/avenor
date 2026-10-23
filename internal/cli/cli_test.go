@@ -259,9 +259,10 @@ func scriptedChunk(sessionID, text string) events.Event {
 }
 
 type scriptedProvider struct {
-	mu       sync.Mutex
-	nextID   int
-	sessions map[string]*scriptedSession
+	mu          sync.Mutex
+	nextID      int
+	resumeCalls int
+	sessions    map[string]*scriptedSession
 	// turns, when set, serves one scripted turn per Prompt, in order.
 	turns []scriptedTurn
 	next  int
@@ -304,6 +305,7 @@ func (p *scriptedProvider) Start(ctx context.Context, opts runtime.StartOptions)
 func (p *scriptedProvider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.resumeCalls++
 	session, ok := p.sessions[sessionID]
 	if !ok {
 		return runtime.Session{}, fmt.Errorf("unknown session %q", sessionID)
@@ -6888,14 +6890,14 @@ func TestWaitForSessionFailsWhenAuthoritativeConversationIDIsRejected(t *testing
 }
 
 func TestRunLoopPhaseResumeDropsStartOnlyOptions(t *testing.T) {
-	oldRunAttempt := runAttempt
-	t.Cleanup(func() { runAttempt = oldRunAttempt })
-
-	var opts []runtime.StartOptions
-	runAttempt = func(ctx context.Context, cfg attemptConfig, deps attemptDeps) attemptResult {
-		opts = append(opts, cfg.startOptions)
-		return attemptResult{exitCode: 0, sessionID: fmt.Sprintf("ses_%d", len(opts))}
+	provider := newScriptedProvider()
+	provider.turns = []scriptedTurn{
+		{stopReason: "end_turn"},
+		{stopReason: "end_turn"},
 	}
+	oldNewProvider := newProvider
+	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	t.Cleanup(func() { newProvider = oldNewProvider })
 
 	dir := t.TempDir()
 	loopPath := filepath.Join(dir, "loop.json")
@@ -6913,13 +6915,11 @@ func TestRunLoopPhaseResumeDropsStartOnlyOptions(t *testing.T) {
 	}, func(string) string { return "" }, &stderr); got != 0 {
 		t.Fatalf("run() = %d, want 0; stderr=%s", got, stderr.String())
 	}
-	if len(opts) != 2 {
-		t.Fatalf("attempts = %d, want 2", len(opts))
+	if provider.resumeCalls != 1 {
+		t.Fatalf("resume calls = %d, want 1 (the second phase resumes)", provider.resumeCalls)
 	}
-	if opts[0].Thinking != "high" {
-		t.Fatalf("first phase lost thinking: %+v", opts[0])
-	}
-	if opts[1].Thinking != "" {
-		t.Fatalf("phase resume carried thinking: %+v", opts[1])
+	sessions := provider.snapshotSessions()
+	if len(sessions) != 1 || sessions[0].opts.Thinking != "high" {
+		t.Fatalf("fresh first phase lost thinking: %+v", sessions)
 	}
 }

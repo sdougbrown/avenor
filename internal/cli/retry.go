@@ -129,7 +129,7 @@ func runSingleAttempt(
 	providerLifecycle := NewProviderLifecycle(provider)
 	defer providerLifecycle.RequestClose()
 
-	session, err := StartSession(ctx, provider, cfg.backend, cfg.startOptions, cfg.resumeID)
+	session, err := ResumeSession(ctx, provider, cfg.backend, cfg.startOptions, cfg.resumeID)
 	if err != nil {
 		fmt.Fprintf(deps.stderr, "avenor: start session: %v\n", err)
 		return attemptResult{exitCode: 1}

@@ -505,7 +505,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
-		startOptions := DropStartOnlyOptionsForResume(selection.Backend, runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance}, resumeID)
+		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance}
 		return runAttempt(ctx, attemptConfig{
 			startOptions:           startOptions,
 			backend:                selection.Backend,
@@ -960,9 +960,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		if controlServer != nil {
 			state.Update(func(s *control.Snapshot) { s.RetryAttempt = attempt })
 		}
-		// A retry after an adopted session resumes it, and start-only options
-		// the resume cannot honor would abort the retry at StartSession.
-		opts := DropStartOnlyOptionsForResume(*backend, startOptions, resumeID)
+		opts := startOptions
 		opts.Provenance = runtime.DirectLaunchProvenance(runID, *label, attempt)
 		result = runAttempt(runCtx, attemptConfig{
 			startOptions:           opts,
