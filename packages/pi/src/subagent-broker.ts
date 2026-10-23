@@ -3,13 +3,13 @@
 // When the avenor pi provider launches a pi sub-process it injects broker
 // credentials via AVENOR_BROKER_URL / AVENOR_RUN_ID / AVENOR_BROKER_TOKEN. In
 // that mode the extension polls its own run for inbound asks (a host calling
-// avenor_ask on it), can reply as its own run, and asks its parent through the
-// same broker. These helpers are kept free of extension-context dependencies so
-// they can be exercised by unit tests.
+// the message tool on it), and the child broker below carries those actions to
+// the broker; 356-13 moves the per-action tools onto it, and until then they
+// still go through the legacy path. These helpers are kept free of
+// extension-context dependencies so they can be exercised by unit tests.
 
-import { randomUUID } from 'node:crypto'
-import { extractReplyMessage, formatAskFailure, normalizeAskTimeoutMs } from '@dougbots/avenor-core'
-import type { AskResult } from '@dougbots/avenor-core'
+import { extractReplyMessage, normalizeAskTimeoutMs, type MessageOutcome } from '@dougbots/avenor-core'
+import type { ChildBroker, PeerRecord, ProviderResult } from '@dougbots/avenor-core'
 
 /** Deadline for a cleanup call whose caller's own deadline has already expired. */
 const ASK_CLEANUP_TIMEOUT_MS = 5000
@@ -32,6 +32,7 @@ export interface InboundAsk {
   from_run_id: string
   message_id: string
   message: string
+  role?: string
 }
 
 /** Parse a broker control message that is an agent_message into an InboundAsk. */
@@ -57,23 +58,48 @@ export function parseControlMessage(msg: Record<string, unknown>): InboundAsk | 
     from_run_id: fromRunId,
     message_id: messageId,
     message: p.message,
+    role: typeof p.role === 'string' ? p.role : undefined,
   }
 }
 
-export function formatInboundAskBody(ask: InboundAsk): string {
-  const from = ask.from_run_id ? ` from \`${ask.from_run_id}\`` : ''
-  return `**📨 Inbound ask**${from}\n\n${ask.message}\n\nTo answer, use avenor_reply({ reply_to_message_id: ${JSON.stringify(ask.message_id)}, message: "..." }).`
+export interface InboundAskBodyOptions {
+  /** Which surface received the ask; the two modes have different readers. */
+  heading: 'Ask from sub-agent' | 'Inbound ask'
+  role?: string
+}
+
+/**
+ * Format an inbound ask as a steer body. Both modes share the formatter; only
+ * the heading and the optional role metadata differ.
+ */
+export function formatInboundAskBody(ask: InboundAsk, options: InboundAskBodyOptions): string {
+  const sender = ask.from_run_id
+  const role = options.role ?? ask.role
+  const from = sender
+    ? role && role !== 'agent'
+      ? ` from \`${sender}\` (${role})`
+      : ` from \`${sender}\``
+    : ''
+  return (
+    `**📨 ${options.heading}**${from}\n\n` +
+    `${ask.message}\n\n` +
+    `To answer, use avenor_message({ action: "reply", reply_to: ${JSON.stringify(ask.message_id)}, message: "..." }).`
+  )
 }
 
 /** A broker HTTP response error, so callers can classify by status instead of
  * matching digits in the request text. */
 export class BrokerHttpError extends Error {
   readonly status: number
+  readonly code: string
+  readonly body: string
 
-  constructor(path: string, status: number, body: string) {
+  constructor(path: string, status: number, body: string, code = '') {
     super(`broker ${path}: ${status} ${body}`)
     this.name = 'BrokerHttpError'
     this.status = status
+    this.code = code
+    this.body = body
   }
 }
 
@@ -87,11 +113,14 @@ export interface AgentMessageFields {
   replyTo?: string
   /** Set only on an ask, so the broker tracks the waiting reply. */
   expectsReply?: boolean
+  /** The pinned broker generation a versioned message id was minted for. */
+  generation?: string
 }
 
 /** Build the `/send` body for one agent_message, as the broker child tools do. */
 export function buildAgentMessage(fields: AgentMessageFields): Record<string, unknown> {
   return {
+    ...(fields.generation !== undefined ? { generation: fields.generation } : {}),
     from_run_id: fields.fromRunId,
     to_run_id: fields.toRunId,
     type: 'agent_message',
@@ -108,6 +137,18 @@ export function buildAgentMessage(fields: AgentMessageFields): Record<string, un
   }
 }
 
+async function codedError(path: string, response: Response): Promise<BrokerHttpError> {
+  const body = (await response.text()).trim()
+  let code = ''
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>
+    if (typeof parsed.code === 'string') code = parsed.code
+  } catch {
+    // A non-JSON body carries no wire code.
+  }
+  return new BrokerHttpError(path, response.status, body, code)
+}
+
 export async function postBroker(
   env: SubAgentEnv,
   path: string,
@@ -122,41 +163,64 @@ export async function postBroker(
     body: JSON.stringify({ ...body, run_id: env.runId, token: env.token }),
     ...(signal ? { signal } : {}),
   })
-  if (!res.ok) throw new BrokerHttpError(path, res.status, (await res.text()).trim())
+  if (!res.ok) throw await codedError(path, res)
   return res.json()
 }
 
+/** Authenticated GET; broker credentials travel in headers, never the URL. */
+export async function getBroker(
+  env: SubAgentEnv,
+  path: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const res = await fetchImpl(`${env.brokerUrl}${path}`, {
+    method: 'GET',
+    headers: {
+      'X-Avenor-Run-Id': env.runId,
+      'X-Avenor-Run-Token': env.token,
+    },
+    ...(signal ? { signal } : {}),
+  })
+  if (!res.ok) throw await codedError(path, res)
+  return res.json()
+}
+
+/** The broker generation a child pins once, read the way the Go child's Prepare reads it. */
+export type BrokerGenerationPin = () => Promise<string>
+
+/** Read the ask generation `/sessions` advertises, or empty for none. */
+async function readGeneration(env: SubAgentEnv, fetchImpl: typeof fetch): Promise<string> {
+  const body = await getBroker(env, '/sessions', fetchImpl) as Record<string, unknown> | null
+  return typeof body?.generation === 'string' ? body.generation : ''
+}
+
 /**
- * Resolve which pending ask to answer. Prefers an explicit message id (and its
- * asker); otherwise the most recent pending ask matching fromRunId.
+ * Pin the generation on first use and reuse it, so one child binds to one broker
+ * generation. The broker rotates it when its ask store resets; a pinned child is
+ * then refused instead of being retargeted. A broker that advertises no
+ * generation is not pinned, so the next call reads it again.
  */
-export function resolveReplyTarget(
-  pending: Map<string, { from_run_id: string; message_id: string }>,
-  fromRunId: string | undefined,
-  replyToMessageId: string | undefined,
-): { from_run_id: string; message_id: string } | null {
-  if (replyToMessageId) {
-    // The id must be a pending ask; answering an unknown id would be sent
-    // fire-and-forget and never reach a waiting asker.
-    const hit = pending.get(replyToMessageId)
-    if (!hit) return null
-    const from = fromRunId ?? hit.from_run_id
-    if (!from) return null
-    return { from_run_id: from, message_id: replyToMessageId }
+function pinGeneration(env: SubAgentEnv, fetchImpl: typeof fetch): BrokerGenerationPin {
+  let pinned: Promise<string> | undefined
+  return () => {
+    pinned ??= readGeneration(env, fetchImpl).then(
+      generation => {
+        if (!generation) pinned = undefined
+        return generation
+      },
+      error => {
+        pinned = undefined
+        throw error
+      },
+    )
+    return pinned
   }
-  // Message ids are random tokens, so recency comes from Map insertion
-  // order: the last inserted match is the most recent ask.
-  let match: { from_run_id: string; message_id: string } | undefined
-  for (const [, entry] of pending) {
-    if (!fromRunId || entry.from_run_id === fromRunId) match = entry
-  }
-  return match ?? null
 }
 
 export interface BrokerAskArgs {
   toRunId: string
   message: string
-  role?: string
   /** Bound on the wait for a reply; ignores a non-positive or non-finite value. */
   timeoutMs?: number
   /** Caller cancellation; an abort withdraws the ask before reporting. */
@@ -170,15 +234,6 @@ function combineSignals(...signals: Array<AbortSignal | undefined>): AbortSignal
   return AbortSignal.any(active)
 }
 
-function describeFailure(error: unknown): string {
-  if (error instanceof Error) {
-    if (error.name === 'TimeoutError') return 'timed out'
-    if (error.name === 'AbortError') return 'cancelled'
-    return error.message || error.name
-  }
-  return String(error)
-}
-
 /**
  * Withdraw a pending ask through the broker as this run. The broker's own error
  * propagates so a caller reporting to a model shows its exact text.
@@ -186,17 +241,22 @@ function describeFailure(error: unknown): string {
 export async function withdrawPendingAsk(
   env: SubAgentEnv,
   messageId: string,
+  generation: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<void> {
+): Promise<{ outcome: MessageOutcome }> {
   // A fresh deadline: the caller's own signal may already have aborted the
   // wait this cleanup follows, and abandoning cleanup would lose the ask.
-  await postBroker(
+  const body = await postBroker(
     env,
     '/cancel_message',
-    { cancel_message_id: messageId },
+    { cancel_message_id: messageId, generation },
     fetchImpl,
     AbortSignal.timeout(ASK_CLEANUP_TIMEOUT_MS),
-  )
+  ) as Record<string, unknown> | null
+  if (typeof body?.outcome === 'string' && body.outcome) {
+    return { outcome: body.outcome as MessageOutcome }
+  }
+  return { outcome: 'withdrawn' }
 }
 
 /**
@@ -206,20 +266,22 @@ export async function withdrawPendingAsk(
 async function withdrawAsk(
   env: SubAgentEnv,
   messageId: string,
+  generation: string,
   fetchImpl: typeof fetch,
-): Promise<boolean> {
+): Promise<{ pending: boolean; outcome: MessageOutcome }> {
   try {
-    await withdrawPendingAsk(env, messageId, fetchImpl)
-    return false
+    const withdrawn = await withdrawPendingAsk(env, messageId, generation, fetchImpl)
+    return { pending: false, outcome: withdrawn.outcome }
   } catch (error) {
     // The broker clears the edge itself when a cancelled wait_reply request
     // disconnects, so a 404 from /cancel_message means the ask is already gone.
-    // Anything else, including a transport failure that drew no response, may
-    // leave the edge behind.
+    // A fence-capacity failure means a delayed send can still be admitted.
     if (error instanceof BrokerHttpError) {
-      return error.status !== 404
+      if (error.code === 'fence-capacity') return { pending: true, outcome: 'possibly-pending' }
+      if (error.status === 404) return { pending: false, outcome: 'edge-absent' }
+      return { pending: true, outcome: 'possibly-pending' }
     }
-    return true
+    return { pending: true, outcome: 'possibly-pending' }
   }
 }
 
@@ -280,12 +342,10 @@ async function brokerReachable(env: SubAgentEnv, fetchImpl: typeof fetch): Promi
 }
 
 /**
- * Whether a failed send provably never reached the broker, mirroring the host's
- * rule: a dial that never opened or an unusable broker address carries no
- * request, and a send that drew no HTTP response while the broker no longer
- * accepts a dial cannot have left its edge in a broker that is gone. An HTTP
- * response, a reset, or an abort against a broker that answers at all may have
- * been processed and still needs a withdraw.
+ * Whether a failed send provably never reached the broker: a dial that never
+ * opened or an unusable broker address carries no request, and a send that drew
+ * no HTTP response while the broker no longer accepts a dial cannot have left
+ * its edge in a broker that is gone.
  */
 async function sendNeverReachedBroker(
   error: unknown,
@@ -298,25 +358,102 @@ async function sendNeverReachedBroker(
   return !(await brokerReachable(env, fetchImpl))
 }
 
+function brokerOutcome(body: unknown): MessageOutcome {
+  const record = body !== null && typeof body === 'object' ? body as Record<string, unknown> : {}
+  return typeof record.outcome === 'string' && record.outcome
+    ? record.outcome as MessageOutcome
+    : 'sent'
+}
+
 /**
- * Ask another run through the inherited broker as this run, then wait for the
- * correlated reply. A failed send, wait, timeout, or abort withdraws the ask
- * and reports its message id plus whether it is still pending, matching the
- * host-side ask tool's contract.
+ * The outcome the wire contract documents for a known code, or undefined for a
+ * code outside it. This mirrors the Go transport's wireErrorClasses table: a
+ * code whose documented outcome is a credential or edge refusal keeps it, and
+ * every other code names a request that was never admitted.
  */
-export async function askViaBroker(
+function knownCodeOutcome(code: string): MessageOutcome | undefined {
+  switch (code) {
+    case 'auth-rejected':
+    case 'sender-mismatch':
+      return 'auth-rejected'
+    case 'not-ask-sender':
+    case 'not-ask-target':
+      return 'edge-absent'
+    case 'invalid-request':
+    case 'generation-mismatch':
+    case 'unsupported-protocol':
+    case 'malformed-message-id':
+    case 'message-id-expired':
+    case 'message-id-horizon':
+    case 'duplicate-message-id':
+    case 'mutual-ask':
+    case 'fence-capacity':
+    case 'target-unavailable':
+    case 'transport-closed':
+    case 'unsupported-operation':
+      return 'not-sent'
+    default:
+      return undefined
+  }
+}
+
+/**
+ * The outcome of a response the messaging envelope does not describe, as the Go
+ * local transport classifies it: only a 401 there is a credential rejection, a
+ * code-less 403 is the router's not-ask-target refusal, and every other status
+ * leaves transmission uncertain.
+ */
+function unenvelopedOutcome(status: number): MessageOutcome {
+  if (status === 401) return 'auth-rejected'
+  if (status === 403) return 'edge-absent'
+  return 'possibly-pending'
+}
+
+/**
+ * Classify a broker HTTP rejection the way the Go local transport does: the
+ * body's outcome wins, then a known wire code, then the status. A rejection that
+ * names neither leaves transmission uncertain, so it is never reported
+ * `not-sent`; only a send that provably never left the surface is.
+ */
+function brokerErrorOutcome(error: unknown): MessageOutcome | undefined {
+  if (!(error instanceof BrokerHttpError)) return undefined
+  try {
+    const parsed = JSON.parse(error.body) as Record<string, unknown> | null
+    if (parsed && typeof parsed.outcome === 'string' && parsed.outcome) {
+      return parsed.outcome as MessageOutcome
+    }
+  } catch {
+    // A body that is not JSON carries no envelope of its own.
+  }
+  if (error.code) return knownCodeOutcome(error.code) ?? 'possibly-pending'
+  return unenvelopedOutcome(error.status)
+}
+
+/**
+ * The outcome of a generation pin that failed before any message was sent: no
+ * request reached the send route, so only a credential refusal keeps its own
+ * outcome and everything else is a message that was never sent.
+ */
+function pinFailureOutcome(error: unknown): MessageOutcome {
+  return brokerErrorOutcome(error) === 'auth-rejected' ? 'auth-rejected' : 'not-sent'
+}
+
+async function brokerAsk(
   env: SubAgentEnv,
   args: BrokerAskArgs,
-  fetchImpl: typeof fetch = fetch,
-): Promise<AskResult> {
-  const messageId = randomUUID()
-  const role = args.role ?? 'agent'
+  messageId: string,
+  fetchImpl: typeof fetch,
+  pin: BrokerGenerationPin,
+): Promise<ProviderResult> {
+  const role = 'agent'
   const timeoutMs = normalizeAskTimeoutMs(args.timeoutMs)
   const signal = combineSignals(args.signal, timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined)
 
-  const fail = async (detail: string): Promise<never> => {
-    const pending = await withdrawAsk(env, messageId, fetchImpl)
-    throw new Error(formatAskFailure(messageId, pending, detail))
+  let generation: string
+  try {
+    generation = await pin()
+  } catch (error) {
+    return { outcome: pinFailureOutcome(error), messageId }
   }
 
   try {
@@ -330,29 +467,248 @@ export async function askViaBroker(
         message: args.message,
         role,
         expectsReply: true,
+        generation,
       }),
       fetchImpl,
       signal,
     )
   } catch (error) {
     // A send that never reached the broker cannot have registered an edge, so
-    // report it withdrawn instead of spending a cancel on it.
+    // report it not-sent instead of spending a cancel on it.
     if (await sendNeverReachedBroker(error, env, fetchImpl)) {
-      throw new Error(formatAskFailure(messageId, false, `send ask: ${describeFailure(error)}`))
+      return { outcome: 'not-sent', messageId }
     }
-    return fail(`send ask: ${describeFailure(error)}`)
+    // A broker that rejected the send classified it itself; Go's ask client
+    // reports that rejection rather than the outcome of withdrawing an edge
+    // the rejected send never created.
+    const rejected = brokerErrorOutcome(error)
+    if (rejected) return { outcome: rejected, messageId }
+    const cleaned = await withdrawAsk(env, messageId, generation, fetchImpl)
+    return { outcome: cleaned.outcome, messageId }
   }
 
   let reply: unknown
   try {
-    reply = await postBroker(env, '/wait_reply', { waiting_for: messageId }, fetchImpl, signal)
+    reply = await postBroker(env, '/wait_reply', { waiting_for: messageId, generation }, fetchImpl, signal)
   } catch (error) {
-    return fail(`wait for reply: ${describeFailure(error)}`)
+    const timedOut = (error instanceof Error && error.name === 'TimeoutError')
+      || brokerErrorOutcome(error) === 'timed-out'
+    const cleaned = await withdrawAsk(env, messageId, generation, fetchImpl)
+    if (timedOut) return { outcome: 'timed-out', messageId }
+    const outcome = brokerErrorOutcome(error)
+    if (outcome) return { outcome, messageId }
+    if (cleaned.pending) return { outcome: 'possibly-pending', messageId }
+    return { outcome: cleaned.outcome, messageId }
   }
 
-  const record = reply && typeof reply === 'object' ? (reply as Record<string, unknown>) : {}
+  const record = reply !== null && typeof reply === 'object' ? reply as Record<string, unknown> : {}
+  const outcome = brokerOutcome(record)
+  const result: ProviderResult = { outcome, messageId }
+  if (outcome === 'replied') {
+    result.reply = extractReplyMessage(record)
+  }
+  return result
+}
+
+function peerRecords(body: unknown): PeerRecord[] {
+  const sessions = body !== null && typeof body === 'object'
+    ? ((body as Record<string, unknown>).sessions ?? [])
+    : []
+  if (!Array.isArray(sessions)) return []
+  return sessions.map(raw => {
+    const session = raw !== null && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const record: PeerRecord = { run_id: typeof session.run_id === 'string' ? session.run_id : '' }
+    for (const key of ['label', 'kind', 'status', 'backend', 'model', 'dir'] as const) {
+      const value = session[key]
+      if (typeof value === 'string' && value) record[key] = value
+    }
+    return record
+  }).filter(record => record.run_id !== '')
+}
+
+function wireCode(code: string): string | undefined {
+  switch (code) {
+    case 'not-permitted':
+      return 'not_permitted'
+    case 'invalid-name':
+      return 'invalid_name'
+    case 'unknown-target':
+      return 'unknown_target'
+    case 'ambiguous-name':
+      return 'ambiguous_name'
+    default:
+      return undefined
+  }
+}
+
+/** A broker refusal as the router's typed tool error. */
+function brokerToolError(error: unknown): Error {
+  if (error instanceof BrokerHttpError) {
+    const code = wireCode(error.code)
+      ?? (error.status === 403 ? 'not_permitted' : error.status === 404 ? 'unknown_target' : error.status === 409 ? 'ambiguous_name' : 'refused')
+    const text = (() => {
+      try {
+        const parsed = JSON.parse(error.body) as Record<string, unknown>
+        if (typeof parsed.error === 'string') return parsed.error
+      } catch {
+        // Fall through to the raw body.
+      }
+      return error.body || error.message
+    })()
+    const typed = new Error(text) as Error & { code: string; facts: Record<string, string> }
+    typed.name = 'ToolError'
+    typed.code = code
+    typed.facts = {}
+    return typed
+  }
+  return error instanceof Error ? error : new Error(String(error))
+}
+
+/**
+ * The inherited-broker implementation of the core ChildBroker contract. Every
+ * request authenticates as this run; a transport failure keeps its own text and
+ * becomes a refusal at the router boundary.
+ */
+export function createBrokerChildBroker(
+  env: SubAgentEnv,
+  fetchImpl: typeof fetch = fetch,
+): ChildBroker {
+  const pin = pinGeneration(env, fetchImpl)
   return {
-    reply: extractReplyMessage(record),
-    from_run_id: (record.from_run_id as string) ?? '',
+    async tell(targetRunId, message, messageId) {
+      let generation: string
+      try {
+        generation = await pin()
+      } catch (error) {
+        return { outcome: pinFailureOutcome(error), messageId }
+      }
+      let body: Record<string, unknown> | null
+      try {
+        body = await postBroker(
+          env,
+          '/send',
+          buildAgentMessage({
+            fromRunId: env.runId,
+            toRunId: targetRunId,
+            messageId,
+            message,
+            role: 'agent',
+            generation,
+          }),
+          fetchImpl,
+        ) as Record<string, unknown> | null
+      } catch (error) {
+        const outcome = brokerErrorOutcome(error)
+          ?? (await sendNeverReachedBroker(error, env, fetchImpl) ? 'not-sent' : 'possibly-pending')
+        return { outcome, messageId }
+      }
+      return {
+        outcome: brokerOutcome(body),
+        messageId: typeof body?.message_id === 'string' && body.message_id ? body.message_id : messageId,
+      }
+    },
+
+    ask(targetRunId, message, messageId, timeoutMs, signal) {
+      return brokerAsk(env, { toRunId: targetRunId, message, timeoutMs, signal }, messageId, fetchImpl, pin)
+    },
+
+    // A reply carries no generation: the broker completes the edge by looking it
+    // up in its own current generation, exactly as the Go transport's Reply does.
+    async reply(askerRunId, inboundAskId, message) {
+      let body: Record<string, unknown> | null
+      try {
+        body = await postBroker(
+          env,
+          '/send',
+          buildAgentMessage({
+            fromRunId: env.runId,
+            toRunId: askerRunId,
+            messageId: `${inboundAskId}.reply`,
+            message,
+            role: 'agent',
+            replyTo: inboundAskId,
+          }),
+          fetchImpl,
+        ) as Record<string, unknown> | null
+      } catch (error) {
+        const outcome = brokerErrorOutcome(error)
+          ?? (await sendNeverReachedBroker(error, env, fetchImpl) ? 'not-sent' : 'possibly-pending')
+        return { outcome, messageId: inboundAskId }
+      }
+      return { outcome: brokerOutcome(body), messageId: inboundAskId }
+    },
+
+    async withdraw(messageId) {
+      let generation: string
+      try {
+        generation = await pin()
+      } catch (error) {
+        throw brokerToolError(error)
+      }
+      try {
+        const body = await postBroker(
+          env,
+          '/cancel_message',
+          { cancel_message_id: messageId, generation },
+          fetchImpl,
+        ) as Record<string, unknown> | null
+        return { outcome: brokerOutcome(body) }
+      } catch (error) {
+        if (error instanceof BrokerHttpError) {
+          if (error.code === 'fence-capacity') return { outcome: 'possibly-pending' }
+          if (error.status === 404) {
+            try {
+              const parsed = JSON.parse(error.body) as Record<string, unknown>
+              if (typeof parsed.outcome === 'string' && parsed.outcome) {
+                return { outcome: parsed.outcome as MessageOutcome }
+              }
+            } catch {
+              // A 404 without a body is still an absent edge.
+            }
+            return { outcome: 'edge-absent' }
+          }
+        }
+        throw brokerToolError(error)
+      }
+    },
+
+    async peers() {
+      return { peers: peerRecords(await getBroker(env, '/sessions', fetchImpl)) }
+    },
+
+    async rename(req) {
+      try {
+        const body = await postBroker(
+          env,
+          '/rename',
+          { session_id: req.sessionId ?? '', name: req.name },
+          fetchImpl,
+        ) as Record<string, unknown> | null
+        return {
+          outcome: 'renamed',
+          runId: typeof body?.run_id === 'string' ? body.run_id : '',
+          label: typeof body?.label === 'string' ? body.label : '',
+          previousLabel: typeof body?.previous_label === 'string' ? body.previous_label : '',
+        }
+      } catch (error) {
+        throw brokerToolError(error)
+      }
+    },
+
+    async last(runId) {
+      try {
+        const body = await getBroker(env, `/last_message?target=${encodeURIComponent(runId)}`, fetchImpl) as Record<string, unknown> | null
+        return {
+          outcome: 'sent',
+          label: typeof body?.label === 'string' ? body.label : undefined,
+          hasRecord: body?.has_record === true,
+          finalOutput: typeof body?.final_output === 'string' ? body.final_output : '',
+          stopReason: typeof body?.stop_reason === 'string' ? body.stop_reason : undefined,
+          truncated: body?.final_output_truncated === true,
+        }
+      } catch (error) {
+        throw brokerToolError(error)
+      }
+    },
   }
 }

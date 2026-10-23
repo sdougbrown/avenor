@@ -3,16 +3,20 @@ import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import { randomUUID } from 'node:crypto'
 import {
-  askViaBroker,
   buildAgentMessage,
-  formatInboundAskBody,
   parseControlMessage,
   postBroker,
   readSubAgentEnv,
-  resolveReplyTarget,
-  withdrawPendingAsk,
   type SubAgentEnv,
 } from './subagent-broker.js'
+// Temporary until 356-13: the retired per-action tools still ask through the
+// legacy child-ask path.
+import {
+  askViaBroker,
+  formatInboundAskBody,
+  resolveReplyTarget,
+  withdrawPendingAsk,
+} from './subagent-legacy.js'
 import {
   answerPermissionTool,
   askTool,
@@ -506,7 +510,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // sub-process it injects broker credentials via AVENOR_BROKER_URL /
     // AVENOR_RUN_ID / AVENOR_BROKER_TOKEN. In that mode this extension polls
     // its own run for inbound asks (a host calling avenor_ask on it) and lets
-    // the sub-agent reply as its own run, instead of acting as a top-level host.
+    // the sub-agent answer an inbound ask, instead of acting as a top-level
+    // host; 356-13 moves those answers onto the child broker, and until then
+    // the reply still goes through the legacy avenor_reply postBroker call.
     const subAgentEnv = options.subAgentEnv !== undefined ? options.subAgentEnv : readSubAgentEnv()
     const isSubAgentBrokerMode = subAgentEnv !== null
     let subAgentPollTimer: ReturnType<typeof setTimeout> | null = null
