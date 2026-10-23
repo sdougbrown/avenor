@@ -42,7 +42,7 @@ func TestIsClaudeFamily(t *testing.T) {
 		{"pi", false},
 	} {
 		if got := IsClaudeFamily(tc.backend); got != tc.want {
-			t.Errorf("ResumesWithoutOptions(%q) = %v, want %v", tc.backend, got, tc.want)
+			t.Errorf("IsClaudeFamily(%q) = %v, want %v", tc.backend, got, tc.want)
 		}
 	}
 }
