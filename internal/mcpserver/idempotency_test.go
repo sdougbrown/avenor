@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/stable"
 )
 
@@ -20,31 +21,21 @@ import (
 // The MCP server forwards an idempotency key to the supervisor and re-derives
 // the run identity from the returned result. These tests drive the MCP server
 // against a fake supervisor that emulates the stable supervisor's idempotency
-// gate (stored hits, hash conflicts, and in-flight reservations) so the
-// server-side contract is verified without a real runtime.
+// gate (stored hits and hash conflicts) so the server-side contract is verified
+// without a real runtime.
 
 // fakeIdempotentSupervisor emulates the stable supervisor's idempotency gate
 // for the MCP spawn/follow-up path. It keeps a per-key store of (hash, result)
-// plus in-flight reservations so concurrent duplicate spawns observe the
-// holder's single result.
+// and replays the stored result on a key hit.
 type fakeIdempotentSupervisor struct {
 	mu       sync.Mutex
 	entries  map[string]fakeIdemEntry
-	inflight map[string]*fakeIdemFlight
 	nextRT   int
 	runtimes int
 	// spawnCalls counts Spawn invocations, one per attempt that reached the
-	// supervisor (hits, waiters, and rejected conflicts included).
+	// supervisor (hits and rejected conflicts included).
 	spawnCalls int
 	listRuns   []map[string]any
-	// gate, when non-nil, blocks the holder's doSpawn until the test closes
-	// it, so concurrent duplicates overlap the holder's in-flight spawn
-	// instead of serializing into completed-cache hits.
-	gate chan struct{}
-	// waiterSignal, when non-nil, receives one token per waiter just before
-	// it blocks on a flight's done channel, letting tests order a release
-	// after waiters are parked.
-	waiterSignal chan<- struct{}
 }
 
 type fakeIdemEntry struct {
@@ -52,17 +43,9 @@ type fakeIdemEntry struct {
 	hash   string
 }
 
-type fakeIdemFlight struct {
-	hash   string
-	done   chan struct{}
-	result map[string]any
-	err    error
-}
-
 func newFakeIdempotentSupervisor() *fakeIdempotentSupervisor {
 	return &fakeIdempotentSupervisor{
-		entries:  map[string]fakeIdemEntry{},
-		inflight: map[string]*fakeIdemFlight{},
+		entries: map[string]fakeIdemEntry{},
 	}
 }
 
@@ -98,58 +81,21 @@ func (f *fakeIdempotentSupervisor) spawn(params map[string]any) (map[string]any,
 	if err != nil {
 		return nil, err
 	}
-	result, flight, err := f.begin(key, hash)
-	if err != nil {
-		return nil, err
-	}
-	if flight == nil {
-		return result, nil
-	}
-	if f.gate != nil {
-		<-f.gate
-	}
-	res := f.doSpawn(params)
-	f.commit(key, flight, res)
-	return res, nil
-}
-
-func (f *fakeIdempotentSupervisor) begin(key, hash string) (map[string]any, *fakeIdemFlight, error) {
 	f.mu.Lock()
 	if e, ok := f.entries[key]; ok {
 		if e.hash != hash {
 			f.mu.Unlock()
-			return nil, nil, errors.New("idempotency key reused with different parameters")
+			return nil, errors.New("idempotency key reused with different parameters")
 		}
 		f.mu.Unlock()
-		return e.result, nil, nil
+		return e.result, nil
 	}
-	if fl, ok := f.inflight[key]; ok {
-		if fl.hash != hash {
-			f.mu.Unlock()
-			return nil, nil, errors.New("idempotency key reused with different parameters")
-		}
-		if f.waiterSignal != nil {
-			f.waiterSignal <- struct{}{}
-		}
-		f.mu.Unlock()
-		<-fl.done
-		return fl.result, nil, fl.err
-	}
-	fl := &fakeIdemFlight{hash: hash, done: make(chan struct{})}
-	f.inflight[key] = fl
 	f.mu.Unlock()
-	return nil, fl, nil
-}
-
-func (f *fakeIdempotentSupervisor) commit(key string, fl *fakeIdemFlight, result map[string]any) {
+	res := f.doSpawn(params)
 	f.mu.Lock()
-	fl.result = result
-	f.entries[key] = fakeIdemEntry{result: result, hash: fl.hash}
-	if cur, ok := f.inflight[key]; ok && cur == fl {
-		delete(f.inflight, key)
-	}
+	f.entries[key] = fakeIdemEntry{result: res, hash: hash}
 	f.mu.Unlock()
-	close(fl.done)
+	return res, nil
 }
 
 // doSpawn "spawns" a new runtime, recording a list entry so a fresh MCP server
@@ -250,6 +196,37 @@ func (f *fakeIdempotentSupervisor) WorkflowCancel(workflowID, actor, reason stri
 func (f *fakeIdempotentSupervisor) WorkflowControllerStatus(controllerID string) (map[string]any, error) {
 	return nil, nil
 }
+func (f *fakeIdempotentSupervisor) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{}, nil
+}
+func (f *fakeIdempotentSupervisor) MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	return messaging.WaitResult{}, nil
+}
+func (f *fakeIdempotentSupervisor) MessageReplyContext(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{}, nil
+}
+func (f *fakeIdempotentSupervisor) MessageWithdrawContext(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	return messaging.WithdrawResult{}, nil
+}
+func (f *fakeIdempotentSupervisor) MessageReceiveContext(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return messaging.ReceiveResult{}, nil
+}
+func (f *fakeIdempotentSupervisor) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
+	return messaging.PeersResult{}, nil
+}
+func (f *fakeIdempotentSupervisor) MessagePreflightContext(ctx context.Context) (messaging.PreflightResult, error) {
+	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-test"}, nil
+}
+func (f *fakeIdempotentSupervisor) ResumeContext(_ context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error) {
+	return messaging.ResumeResult{}, nil
+}
+func (f *fakeIdempotentSupervisor) SessionRenameContext(_ context.Context, sessionID, name string) (messaging.RenameResult, error) {
+	return messaging.RenameResult{}, nil
+}
+func (f *fakeIdempotentSupervisor) SessionLastContext(_ context.Context, runtimeID string) (messaging.PeerLast, error) {
+	return messaging.PeerLast{}, nil
+}
+
 func (f *fakeIdempotentSupervisor) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
 }
@@ -475,242 +452,49 @@ func TestIdempotencyKeyLengthValidation(t *testing.T) {
 	}
 }
 
-func TestIdempotencyFollowUpRetrySequential(t *testing.T) {
+// TestSpawnKeySpaceIsolatedFromResume pins the MCP spawn surface's "spawn:" key
+// prefix: a spawn keyed "follow_up:k" reaches the supervisor as
+// "spawn:follow_up:k". The supervisor namespaces resume keys with
+// runstate.FollowUpIdempotencyKeyPrefix, so without the spawn prefix a resume
+// keyed k would hit the spawn's stored result.
+func TestSpawnKeySpaceIsolatedFromResume(t *testing.T) {
 	sup := newFakeIdempotentSupervisor()
-
-	// Seed a parent run.
-	s0 := newIdempotencyServer(t, sup)
-	_, parent, err := s0.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	parentID, _ := parent.(map[string]any)["run_id"].(string)
-
-	// First follow-up with a key.
-	s1 := newIdempotencyServer(t, sup)
-	_, r1, err := s1.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:          parentID,
-		Message:        "continue",
-		IdempotencyKey: "fk",
+	s := newIdempotencyServer(t, sup)
+	_, spawnRes, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
+		RepoDir:        "/tmp/repo",
+		Prompt:         "start",
+		IdempotencyKey: "follow_up:k",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	m1 := r1.(map[string]any)
-	fuID1, _ := m1["run_id"].(string)
-	if fuID1 == "" {
-		t.Fatal("expected non-empty follow-up run_id")
+	spawnID, _ := spawnRes.(map[string]any)["run_id"].(string)
+	if spawnID == "" {
+		t.Fatal("expected a non-empty spawn run_id")
 	}
-
-	// Retry the follow-up with the same key (fresh server).
-	s2 := newIdempotencyServer(t, sup)
-	_, r2, err := s2.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:          parentID,
-		Message:        "continue",
-		IdempotencyKey: "fk",
-	})
+	runs, err := sup.List()
 	if err != nil {
 		t.Fatal(err)
 	}
-	m2 := r2.(map[string]any)
-	if m2["run_id"] != fuID1 {
-		t.Fatalf("retry follow-up run_id = %v, want the original %v", m2["run_id"], fuID1)
-	}
-	if m2["label"] != m1["label"] {
-		t.Fatalf("retry follow-up label = %v, want the original %v", m2["label"], m1["label"])
-	}
-	// The registry records the follow-up's artifact paths, not the retry's
-	// freshly generated temp paths.
-	ri := s2.registry.LookupUnique(fuID1)
-	if ri == nil {
-		t.Fatal("expected the follow-up's registry entry")
-	}
-	if got, want := ri.SentinelPath, filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", fuID1)); got != want {
-		t.Fatalf("follow-up sentinel = %s, want %s", got, want)
-	}
-	if got, want := ri.EventLogPath, filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", fuID1)); got != want {
-		t.Fatalf("follow-up event log = %s, want %s", got, want)
-	}
-	// One parent runtime + one follow-up runtime = 2 total; the retry was a
-	// hit that still reached the supervisor.
-	if n := sup.RuntimeCount(); n != 2 {
-		t.Fatalf("runtimes = %d, want 2 (parent + one follow-up)", n)
-	}
-	if n := sup.SpawnCallCount(); n != 3 {
-		t.Fatalf("supervisor Spawn calls = %d, want 3 (parent + both follow-up attempts)", n)
+	spawnRuntime, _ := runs[0]["runtime_id"].(string)
+	if spawnRuntime == "" {
+		t.Fatal("expected the spawn to record a runtime")
 	}
 
-	// A same-server retry (third follow-up attempt on s2) is also a stored
-	// hit that reaches the supervisor.
-	_, r3, err := s2.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-		RunID:          parentID,
-		Message:        "continue",
-		IdempotencyKey: "fk",
+	// Drive the supervisor-side gate exactly as a keyed resume does: the
+	// resume namespaces the caller key with the follow_up: prefix.
+	resumed, err := sup.Spawn(map[string]any{
+		"prompt":          "continue",
+		"dir":             "/tmp/repo",
+		"idempotency_key": runstate.FollowUpIdempotencyKeyPrefix + "k",
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("resume reused the spawn's key space: %v", err)
 	}
-	if r3.(map[string]any)["run_id"] != fuID1 {
-		t.Fatalf("same-server retry follow-up run_id = %v, want the original %s", r3.(map[string]any)["run_id"], fuID1)
-	}
-	if n := sup.SpawnCallCount(); n != 4 {
-		t.Fatalf("supervisor Spawn calls = %d, want 4 after the same-server retry", n)
+	if id, _ := resumed["runtime_id"].(string); id == "" || id == spawnRuntime {
+		t.Fatalf("resume runtime = %v, want a new runtime distinct from the spawn %s", resumed["runtime_id"], spawnRuntime)
 	}
 	if n := sup.RuntimeCount(); n != 2 {
-		t.Fatalf("runtimes = %d, want 2 after the same-server retry", n)
+		t.Fatalf("runtimes = %d, want 2 (spawn plus resume)", n)
 	}
-}
-
-func TestIdempotencyFollowUpRetryConcurrent(t *testing.T) {
-	sup := newFakeIdempotentSupervisor()
-	sup.gate = make(chan struct{})
-
-	// Seed a parent run.
-	s0 := newIdempotencyServer(t, sup)
-	_, parent, err := s0.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	parentID, _ := parent.(map[string]any)["run_id"].(string)
-
-	// Two concurrent follow-ups with the same key: both observe the holder's
-	// single result and only one runtime is spawned. The holder's follow-up
-	// spawn is held on the gate until the other parks inside the in-flight
-	// wait, so the second attempt exercises the waiter path rather than
-	// serializing into a completed-cache hit.
-	parked := make(chan struct{}, 1)
-	sup.waiterSignal = parked
-
-	var wg sync.WaitGroup
-	results := make([]map[string]any, 2)
-	errs := make([]error, 2)
-	servers := []*Server{newIdempotencyServer(t, sup), newIdempotencyServer(t, sup)}
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			s := servers[i]
-			_, r, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-				RunID:          parentID,
-				Message:        "continue",
-				IdempotencyKey: "fk",
-			})
-			if err != nil {
-				errs[i] = err
-				return
-			}
-			results[i] = r.(map[string]any)
-		}(i)
-	}
-	// Wait for the second attempt to park inside the in-flight wait before
-	// releasing the holder.
-	select {
-	case <-parked:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the second follow-up did not park inside the in-flight wait")
-	}
-	close(sup.gate)
-	wg.Wait()
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("concurrent follow-up %d: %v", i, err)
-		}
-	}
-	id0, _ := results[0]["run_id"].(string)
-	id1, _ := results[1]["run_id"].(string)
-	if id0 == "" || id1 == "" {
-		t.Fatalf("expected non-empty run_ids, got %v / %v", id0, id1)
-	}
-	if id0 != id1 {
-		t.Fatalf("concurrent follow-ups returned different run_ids: %s vs %s", id0, id1)
-	}
-	// One parent runtime + one follow-up runtime = 2 total; both keyed
-	// attempts reached the supervisor.
-	if n := sup.RuntimeCount(); n != 2 {
-		t.Fatalf("runtimes = %d, want 2 (parent + one follow-up)", n)
-	}
-	if n := sup.SpawnCallCount(); n != 3 {
-		t.Fatalf("supervisor Spawn calls = %d, want 3 (parent + both follow-up attempts)", n)
-	}
-	// The registry records the follow-up's artifact paths, not the retry's
-	// freshly generated temp paths.
-	ri := servers[0].registry.LookupUnique(id0)
-	if ri == nil {
-		t.Fatal("expected the follow-up's registry entry")
-	}
-	if got, want := ri.SentinelPath, filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", id0)); got != want {
-		t.Fatalf("follow-up sentinel = %s, want %s", got, want)
-	}
-	if got, want := ri.EventLogPath, filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", id0)); got != want {
-		t.Fatalf("follow-up event log = %s, want %s", got, want)
-	}
-}
-
-func TestIdempotencySpawnAndFollowUpKeysDoNotCollide(t *testing.T) {
-	// (a) A follow-up with key k must not be treated as a retry of a spawn with
-	// key k: the "spawn:" / "follow_up:" prefixes keep the key spaces apart.
-	t.Run("spawn k then follow-up k", func(t *testing.T) {
-		sup := newFakeIdempotentSupervisor()
-		s := newIdempotencyServer(t, sup)
-		_, spawnRes, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-			RepoDir:        "/tmp/repo",
-			IdempotencyKey: "k",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		spawnID, _ := spawnRes.(map[string]any)["run_id"].(string)
-
-		_, fuRes, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-			RunID:          spawnID,
-			Message:        "continue",
-			IdempotencyKey: "k",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		fuID, _ := fuRes.(map[string]any)["run_id"].(string)
-		if fuID == spawnID {
-			t.Fatalf("follow-up run_id %s equals the spawn run_id; the key spaces collided", fuID)
-		}
-		if n := sup.RuntimeCount(); n != 2 {
-			t.Fatalf("runtimes = %d, want 2 (the follow-up must spawn a new runtime)", n)
-		}
-		if n := sup.SpawnCallCount(); n != 2 {
-			t.Fatalf("supervisor Spawn calls = %d, want 2", n)
-		}
-	})
-
-	// (b) A spawn keyed "follow_up:k" must not be hit by a follow-up keyed k.
-	t.Run("spawn follow_up:k then follow-up k", func(t *testing.T) {
-		sup := newFakeIdempotentSupervisor()
-		s := newIdempotencyServer(t, sup)
-		_, spawnRes, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-			RepoDir:        "/tmp/repo",
-			IdempotencyKey: "follow_up:k",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		spawnID, _ := spawnRes.(map[string]any)["run_id"].(string)
-
-		_, fuRes, err := s.handleAvenorFollowUp(context.Background(), nil, followUpArgs{
-			RunID:          spawnID,
-			Message:        "continue",
-			IdempotencyKey: "k",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		fuID, _ := fuRes.(map[string]any)["run_id"].(string)
-		if fuID == spawnID {
-			t.Fatalf("follow-up run_id %s equals the spawn run_id; a false hit across the prefix", fuID)
-		}
-		if n := sup.RuntimeCount(); n != 2 {
-			t.Fatalf("runtimes = %d, want 2", n)
-		}
-		if n := sup.SpawnCallCount(); n != 2 {
-			t.Fatalf("supervisor Spawn calls = %d, want 2", n)
-		}
-	})
 }
