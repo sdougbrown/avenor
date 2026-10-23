@@ -5,15 +5,27 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { spawnInputShape } from './spawn-schema.js'
+import { routerAdmittedSchema } from './router-schema.js'
+import messageFlatContract from '../../../schemas/message.input.flat.json'
+import peersFlatContract from '../../../schemas/peers.input.flat.json'
 import {
   spawnTool,
   statusTool,
   resultTool,
   answerPermissionTool,
-  followUpTool,
   eventsTool,
   killTool,
   shutdownTool,
+  createHostMessageProvider,
+  getSupervisorClient,
+  isGenerationMismatchError,
+  messageTool,
+  peersDetails,
+  peersTool,
+  renderPeerList,
+  resultOutput,
+  ToolError,
+  workflowCancelTool,
   workflowStatusTool,
   workflowWaitTool,
   workflowInspectTool,
@@ -21,6 +33,8 @@ import {
   workflowCompleteTool,
   workflowGateTool,
   workflowControllerStatusTool,
+  type MessageProvider,
+  type PeersRouterResult,
   validateSpawnSelection,
 } from '@dougbots/avenor-core'
 
@@ -68,7 +82,7 @@ export function getMcpAuthToken(): string {
 
 export const server = new McpServer({ name: 'avenor', version: '0.1.0' })
 
-server.registerTool('avenor_spawn', {
+server.registerTool('spawn', {
   description: 'Spawn a new agent run with an optional canonical thinking level; unsupported backends reject explicit values',
   inputSchema: spawnInputShape,
 }, async ({
@@ -111,7 +125,7 @@ server.registerTool('avenor_spawn', {
   })
 })
 
-server.registerTool('avenor_status', {
+server.registerTool('status', {
   description: 'Get lifecycle status of one or all runs. Use lifecycle view for compact polling. Without run_id, returns an object with runs (array of status objects) and count.',
   inputSchema: {
     run_id: z.string().optional().describe('Run ID or label to query'),
@@ -122,7 +136,7 @@ server.registerTool('avenor_status', {
   return statusTool({ runId: run_id, supervisorId: supervisor_id, view })
 })
 
-server.registerTool('avenor_result', {
+server.registerTool('result', {
   description: 'Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking',
   inputSchema: {
     run_id: z.string().describe('Run ID or label'),
@@ -134,7 +148,7 @@ server.registerTool('avenor_result', {
   return resultTool({ runId: run_id, supervisorId: supervisor_id, wait, timeout })
 })
 
-server.registerTool('avenor_answer_permission', {
+server.registerTool('answer_permission', {
   description: 'Answer a pending permission request',
   inputSchema: {
     run_id: z.string().describe('Run ID or label'),
@@ -153,19 +167,126 @@ server.registerTool('avenor_answer_permission', {
   })
 })
 
-server.registerTool('avenor_follow_up', {
-  description: 'Resume a completed run with a follow-up message',
+/**
+ * The message and peers tools publish the flat schema compiled from the
+ * shared contract's per-action union, but admit through the shared router:
+ * admission belongs to the router on every surface, so the SDK's own validation
+ * must not answer first. The union itself is not published here because a
+ * `oneOf` input schema loses an integer's and an object's type in at least one
+ * real MCP client.
+ */
+const messageInputSchema = routerAdmittedSchema(messageFlatContract)
+const peersInputSchema = routerAdmittedSchema(peersFlatContract)
+
+/**
+ * The bound host provider: one supervisor and one generation at a time. It is
+ * rebuilt when the supervisor's client changes (a shutdown followed by a fresh
+ * singleton), so a revoked generation is never reused. This surface never
+ * publishes a turn of its own, so the provider has no `recordLastTurn` caller.
+ */
+let hostProvider: { client: unknown; provider: MessageProvider } | undefined
+
+async function messageProvider(): Promise<MessageProvider> {
+  const { client, supervisorId } = await getSupervisorClient(undefined, { owner: true })
+  if (hostProvider && hostProvider.client === client) return hostProvider.provider
+  const preflight = await client.messagePreflight()
+  const provider = createHostMessageProvider({
+    surface: 'mcp-ts',
+    supervisorId,
+    generation: preflight.generation,
+    client,
+  })
+  hostProvider = { client, provider }
+  return provider
+}
+
+/**
+ * Run one call through the bound provider, retrying once after a re-preflight
+ * when the supervisor says the cached generation is stale. This is the policy
+ * the Go host already applies inside a single call, so a restarted supervisor
+ * does not fail the call that discovers it.
+ */
+async function withProvider<T>(run: (provider: MessageProvider) => Promise<T>): Promise<T> {
+  try {
+    return await run(await messageProvider())
+  } catch (error) {
+    if (!isGenerationMismatchError(error)) throw error
+    hostProvider = undefined
+    return run(await messageProvider())
+  }
+}
+
+type ToolReply = {
+  content: Array<{ type: 'text'; text: string }>
+  structuredContent?: Record<string, unknown>
+  isError?: true
+}
+
+/** A router tool error is a failure result on every surface; anything else is the transport's to report. */
+function toolFailure(error: unknown): ToolReply {
+  if (!(error instanceof ToolError)) throw error
+  const text = error.message
+  return {
+    content: [{ type: 'text', text }],
+    structuredContent: { code: error.code, text },
+    isError: true,
+  }
+}
+
+async function messageCall(args: unknown): Promise<ToolReply> {
+  try {
+    const result = await withProvider(provider => messageTool(args, provider))
+    const output = resultOutput(result)
+    return {
+      content: [{ type: 'text', text: result.text ?? '' }],
+      structuredContent: output,
+    }
+  } catch (error) {
+    return toolFailure(error)
+  }
+}
+
+function peersText(result: PeersRouterResult): string {
+  return result.action === 'list'
+    ? [result.text, renderPeerList(result.peers)].filter(part => part !== '').join('\n\n')
+    : result.text
+}
+
+async function peersCall(args: unknown): Promise<ToolReply> {
+  try {
+    const result = await withProvider(provider => peersTool(args, provider))
+    return {
+      content: [{ type: 'text', text: peersText(result) }],
+      structuredContent: peersDetails(result),
+    }
+  } catch (error) {
+    return toolFailure(error)
+  }
+}
+
+server.registerTool('message', {
+  description: 'Send a message to another agent run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn. `reply` always reports edge-absent here: this server receives no inbound asks, so nothing is sent. This tool is bound to the default supervisor and takes no `supervisor_id`.',
+  inputSchema: messageInputSchema,
+}, async args => messageCall(args))
+
+server.registerTool('peers', {
+  description: "List the visible agent sessions, rename a run, or read a run's last agent message. `last` returns the target's final text with its stop reason, or an empty result when the target has no completed turn yet. This tool is bound to the default supervisor and takes no `supervisor_id`.",
+  inputSchema: peersInputSchema,
+}, async args => peersCall(args))
+
+server.registerTool('workflow_cancel', {
+  description: 'Cancel a workflow instance. The actor and reason are required.',
   inputSchema: {
-    run_id: z.string().describe('Run ID or label to follow up on'),
-    message: z.string().describe('Follow-up message'),
-    label: z.string().optional().describe('Label for the follow-up run'),
+    workflow_id: z.string().describe('Workflow ID'),
+    actor: z.string().describe('Who is cancelling'),
+    reason: z.string().describe('Why the workflow is being cancelled'),
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
-}, async ({ run_id, message, label, supervisor_id }) => {
-  return followUpTool({ runId: run_id, message, label, supervisorId: supervisor_id })
+}, async ({ workflow_id, actor, reason, supervisor_id }) => {
+  return workflowCancelTool({ workflow_id, actor, reason, supervisorId: supervisor_id })
 })
 
-server.registerTool('avenor_events', {
+server.registerTool('events', {
   description: 'Get event log for a run',
   inputSchema: {
     run_id: z.string().describe('Run ID or label'),
@@ -177,7 +298,7 @@ server.registerTool('avenor_events', {
   return eventsTool({ runId: run_id, types, limit, supervisorId: supervisor_id })
 })
 
-server.registerTool('avenor_kill', {
+server.registerTool('kill', {
   description: 'Terminate a run without shutting down the supervisor. Other runs and the supervisor itself keep running.',
   inputSchema: {
     run_id: z.string().min(1).describe('Run ID or label'),
@@ -187,7 +308,7 @@ server.registerTool('avenor_kill', {
   return killTool({ runId: run_id, supervisorId: supervisor_id })
 })
 
-server.registerTool('avenor_shutdown', {
+server.registerTool('shutdown', {
   description: 'Shut down the supervisor',
   inputSchema: {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
@@ -197,7 +318,7 @@ server.registerTool('avenor_shutdown', {
   return shutdownTool({ supervisorId: supervisor_id, force })
 })
 
-server.registerTool('avenor_workflow_status', {
+server.registerTool('workflow_status', {
   description: 'Get lightweight status for a workflow instance',
   inputSchema: {
     workflow_id: z.string().describe('Workflow ID'),
@@ -207,7 +328,7 @@ server.registerTool('avenor_workflow_status', {
   return workflowStatusTool({ workflowId: workflow_id, supervisorId: supervisor_id })
 })
 
-server.registerTool('avenor_workflow_wait', {
+server.registerTool('workflow_wait', {
   description: 'Wait for a workflow to reach a terminal state or until timeout',
   inputSchema: {
     workflow_id: z.string().describe('Workflow ID'),
@@ -218,7 +339,7 @@ server.registerTool('avenor_workflow_wait', {
   return workflowWaitTool({ workflowId: workflow_id, timeout, supervisorId: supervisor_id })
 })
 
-server.registerTool('avenor_workflow_inspect', {
+server.registerTool('workflow_inspect', {
   description: 'Return the full instance detail for a workflow',
   inputSchema: {
     workflow_id: z.string().describe('Workflow ID'),
@@ -228,7 +349,7 @@ server.registerTool('avenor_workflow_inspect', {
   return workflowInspectTool({ workflowId: workflow_id, supervisorId: supervisor_id })
 })
 
-server.registerTool('avenor_workflow_events', {
+server.registerTool('workflow_events', {
   description: 'Read log events from a workflow instance\'s event log',
   inputSchema: {
     workflow_id: z.string().describe('Workflow ID'),
@@ -240,7 +361,7 @@ server.registerTool('avenor_workflow_events', {
   return workflowEventsTool({ workflowId: workflow_id, afterSeq: after_seq, limit, supervisorId: supervisor_id })
 })
 
-server.registerTool('avenor_workflow_complete', {
+server.registerTool('workflow_complete', {
   description: 'Atomically complete a machine/external handoff activation',
   inputSchema: {
     workflow_id: z.string().describe('Workflow ID'),
@@ -259,7 +380,7 @@ server.registerTool('avenor_workflow_complete', {
   return workflowCompleteTool({ ...rest, supervisorId: supervisor_id })
 })
 
-server.registerTool('avenor_workflow_gate', {
+server.registerTool('workflow_gate', {
   description: 'Record a gate decision on a parked awaiting_gate activation',
   inputSchema: {
     workflow_id: z.string().describe('Workflow ID'),
@@ -284,7 +405,7 @@ server.registerTool('avenor_workflow_gate', {
   return workflowGateTool({ ...rest, supervisorId: supervisor_id })
 })
 
-server.registerTool('avenor_workflow_controller_status', {
+server.registerTool('workflow_controller_status', {
   description: 'Show workflow controller status. With controller_id, returns that controller\'s full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).',
   inputSchema: {
     controller_id: z.string().optional().describe('Controller ID; omit to list all controllers'),

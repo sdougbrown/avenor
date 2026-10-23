@@ -6,7 +6,7 @@ MCP server that makes [avenor](https://github.com/dougbots/avenor) agent runs av
 
 ## When you need this
 
-You have `avenor` installed and you want Claude (or another MCP host) to spawn and manage agent runs — kicking off a Codex or Gemini session, checking its status, answering permission prompts, tailing event logs, and resuming completed runs with a follow-up.
+You have `avenor` installed and you want Claude (or another MCP host) to spawn and manage agent runs — kicking off a Codex or Gemini session, checking its status, answering permission prompts, tailing event logs, and resuming completed runs.
 
 This package is the MCP layer. It depends on `@dougbots/avenor-core` for all the actual wiring (supervisor lifecycle, binary discovery, socket protocol). You don't need to know the internals to use it.
 
@@ -86,9 +86,9 @@ SSE mode restricts incoming requests to `localhost` / `127.0.0.1` / `[::1]` orig
 
 ## Tools
 
-All seven tools register under the `avenor_` prefix to avoid collisions with other MCP servers.
+This surface registers tool names **without** the `avenor_` prefix — `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown`, and the `workflow_*` set. MCP clients namespace their own servers (Claude Code shows them as `mcp__avenor__spawn`, for example), so the prefix would only repeat itself. The `avenor` binary's own MCP server uses the same names.
 
-### `avenor_spawn`
+### `spawn`
 
 Start a new agent run.
 
@@ -125,7 +125,7 @@ Use both `roster_file` and `roster_entry` for roster mode. A roster entry requir
 
 The roster map is strict and currently supports only `backend`, `agent`, and `model` in each entry. `system` and `thinking` are not roster fields. The `thinking` argument remains run-level and is validated against the effective backend chosen by the direct request or roster entry. A resumed session cannot switch to a different backend.
 
-### `avenor_status`
+### `status`
 
 Get the status of one run, or list all runs. Use the compact `lifecycle` view for progress and pending permission checks; `full` remains the compatibility default.
 
@@ -137,7 +137,7 @@ Get the status of one run, or list all runs. Use the compact `lifecycle` view fo
 
 Returns a status object (or array) with `status` being one of `running`, `done`, `failed`, `timeout`, or `killed`. When a run is blocked on a permission request, the response includes a `pending_permission` field with the available options.
 
-### `avenor_result`
+### `result`
 
 Wait for a run to finish and return its complete final output without transcript or event details.
 
@@ -150,33 +150,50 @@ Wait for a run to finish and return its complete final output without transcript
 
 Terminal responses include `ready: true` and `output` when the backend exposed one. A pending permission returns immediately. If the result wait itself expires, the response has `ready: false` and `timed_out: true` without changing the run.
 
-### `avenor_answer_permission`
+### `answer_permission`
 
 Respond to a permission prompt that paused a run.
 
 | Parameter | Required | Description |
 |---|---|---|
 | `run_id` | yes | Run ID or label |
-| `option_id` | yes | The option to select (from the `pending_permission` shown by `avenor_status`) |
+| `option_id` | yes | The option to select (from the `pending_permission` shown by `status`) |
 | `request_id` | no | Specific permission request ID. Auto-detected from the pending request if omitted. |
+| `message` | no | Write-in response text, required only when the selected option declares `requiresMessage: true` |
 | `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
 
 Returns `{ ok: true }` on success. Throws if no permission request is pending for the given run.
 
-### `avenor_follow_up`
+### `message`
 
-Resume a completed run with a new message. The agent picks up from the same session, so it retains context from the original run.
+Send a message to another run, withdraw a pending ask, resume a completed run, or deliver a control reply. Cross-variant argument rules are enforced by the shared router, so an argument outside the chosen action's field set is an error rather than a silent no-op.
 
-| Parameter | Required | Description |
+| `action` | Required fields | What it does |
 |---|---|---|
-| `run_id` | yes | Run ID or label of the *completed* run to resume |
-| `message` | yes | Follow-up prompt |
-| `label` | no | Label for the follow-up run (defaults to `<original-label>-followup`) |
-| `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
+| `tell` | `target`, `message` | Deliver a message without creating an ask edge |
+| `ask` | `target`, `message`, optional `timeout_ms` | Deliver a message and wait for a reply |
+| `reply` | `reply_to`, `message` | Answer an inbound ask. This server receives no inbound delivery, so the result is always `edge-absent` and nothing is sent |
+| `resume` | `target`, `message`, optional `label`, `idempotency_key` | Resume a completed run from its persisted session |
+| `withdraw` | `message_id` | Withdraw a pending ask |
+| `control_reply` | `target`, optional `payload` | Deliver a control reply where the provider supports it |
 
-Returns `{ run_id, label }` for the new follow-up run. Throws if the original run has no persisted session.
+`target` is a run id, a peer label, or `"self"`. `timeout_ms` must be an integer no greater than the shared ask cap. This tool does not take `supervisor_id`; it is bound to the default supervisor. A router tool error is returned as an MCP error result carrying the contract sentence and a `code`.
 
-### `avenor_events`
+Every successful result is the shared contract object in snake_case (`action`, `outcome`, `text`, and `message_id`, `run_id`, `label`, `reply`, `sentinel_file`, `on_event` when the outcome carries them), returned as the structured content, with the contract sentence as the text content, exactly like the Go MCP host.
+
+### `peers`
+
+List the visible agent sessions, rename a run, or read a run's last agent message.
+
+| `action` | Fields | What it does |
+|---|---|---|
+| `list` (default) | — | List the visible peers |
+| `rename` | `name`, optional `session_id` | Change a display name, self by default |
+| `last` | `target` | Read the target's last agent message with its stop reason |
+
+`last` is read-only. This surface never publishes a turn of its own, so `last` of the server's own session returns the shared empty result. This tool does not take `supervisor_id`; it is bound to the default supervisor. The structured result is `{peers}`, `{renamed}` or `{last}` in snake_case, the same object the Go MCP host returns.
+
+### `events`
 
 Fetch the event log for a run. Useful for inspecting what an agent did.
 
@@ -189,7 +206,16 @@ Fetch the event log for a run. Useful for inspecting what an agent did.
 
 Returns an array of event objects (`{ type, ts, ... }`) in chronological order.
 
-### `avenor_shutdown`
+### `kill`
+
+Terminate a run without shutting down the supervisor. Other runs and the supervisor itself keep running.
+
+| Parameter | Required | Description |
+|---|---|---|
+| `run_id` | yes | Run ID or label of the run to terminate |
+| `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
+
+### `shutdown`
 
 Stop the avenor supervisor and clean up sentinel files.
 
@@ -200,15 +226,40 @@ Stop the avenor supervisor and clean up sentinel files.
 
 Returns `{ ok: true, cleaned_up: [...] }`. Use this when you're done with avenor in your session or when the supervisor crashes and needs to be restarted.
 
+### `workflow_cancel`
+
+Cancel a workflow instance. Both `actor` and `reason` are required; the manager rejects a missing actor before it looks at the reason.
+
+| Parameter | Required | Description |
+|---|---|---|
+| `workflow_id` | yes | Workflow ID |
+| `actor` | yes | Who is cancelling |
+| `reason` | yes | Why the workflow is being cancelled |
+| `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
+
+### Workflow tools
+
+The remaining workflow tools read or drive workflow instances. Their argument lists are in [`docs/control-protocol.md`](../../docs/control-protocol.md).
+
+| Tool | Purpose |
+|---|---|
+| `workflow_status` | Lightweight instance status |
+| `workflow_wait` | Wait for a terminal state or a timeout |
+| `workflow_inspect` | Full instance detail |
+| `workflow_events` | The instance's log events |
+| `workflow_complete` | Complete a machine/external handoff activation |
+| `workflow_gate` | Record a gate decision on a parked awaiting_gate activation |
+| `workflow_controller_status` | Controller status, with summary state |
+
 ## Typical workflow
 
-1. **Spawn a run:** `avenor_spawn(agent: "codex", repo_dir: "/path/to/project", prompt: "audit the API routes for auth gaps")`
-2. **Check lifecycle when needed:** `avenor_status(run_id: "<id>", view: "lifecycle")` for progress or pending permissions.
-3. **If permission requested:** run `avenor_answer_permission` with the offered option.
-4. **Retrieve the result:** `avenor_result(run_id: "<id>")` waits and returns the complete final output.
-5. **Inspect history when needed:** `avenor_events(run_id: "<id>")` returns raw recent events.
-6. **Optional follow-up:** `avenor_follow_up(run_id: "<id>", message: "now write tests for that")`
-7. **Clean up:** `avenor_shutdown()` when you're finished.
+1. **Spawn a run:** `spawn(agent: "codex", repo_dir: "/path/to/project", prompt: "audit the API routes for auth gaps")`
+2. **Check lifecycle when needed:** `status(run_id: "<id>", view: "lifecycle")` for progress or pending permissions.
+3. **If permission requested:** run `answer_permission` with the offered option.
+4. **Retrieve the result:** `result(run_id: "<id>")` waits and returns the complete final output.
+5. **Inspect history when needed:** `events(run_id: "<id>")` returns raw recent events.
+6. **Iterate:** `message(action: "resume", target: "<id>", message: "now write tests for that")`
+7. **Clean up:** `shutdown()` when you're finished.
 
 ## Package structure
 
