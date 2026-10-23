@@ -7,6 +7,8 @@ import {
   parseControlMessage,
   postBroker,
   readSubAgentEnv,
+  type InboundAsk,
+  type InboundAskBodyOptions,
   type SubAgentEnv,
 } from './subagent-broker.js'
 import {
@@ -426,8 +428,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     }
     const pendingWaits = new Set<PendingWait>()
 
-    /** The agent-facing clause for a stopping point. A synthetic status such as
-     * `asking` has no run-status spelling, so it must never reach the model raw. */
+    /** The agent-facing prose clause for a stopping point. A synthetic status
+     * such as `asking` has no run-status spelling, so it must not appear raw in
+     * this prose. Structured payloads still carry the raw status (the
+     * avenor_result JSON reports it as `interrupted_by.status`) so consumers can
+     * check it. */
     function describeStoppingPoint(stop: StoppingPoint): string {
       if (stop.status === 'waiting') return 'reached a permission request'
       if (stop.status === 'asking') return 'asked a question for you'
@@ -452,6 +457,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * answered, so every blocking wait returns, the asker's own wait included. */
     function interruptWaitsForAsk(ask: { from_run_id: string }): void {
       interruptPendingWaits({ runId: ask.from_run_id, status: 'asking' })
+    }
+
+    /** Surface one inbound ask: hand the body to the session, remember it so a
+     * reply can reach the asker, then let every blocking wait return. Delivery
+     * comes first so a throw leaves the waits waiting on an ask the agent never
+     * saw, rather than reporting an ask it cannot answer. */
+    function surfaceInboundAsk(
+      pending: Map<string, { from_run_id: string; message_id: string }>,
+      ask: InboundAsk,
+      heading: InboundAskBodyOptions['heading'],
+    ): void {
+      pi.sendUserMessage(formatInboundAskBody(ask, { heading, role: ask.role }), { deliverAs: 'steer' as const })
+      pending.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
+      interruptWaitsForAsk(ask)
     }
 
     interface InterruptibleWait {
@@ -573,9 +592,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           for (const msg of msgs) {
             const ask = parseControlMessage(msg)
             if (!ask) continue
-            subAgentPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
-            interruptWaitsForAsk(ask)
-            pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Inbound ask' }), { deliverAs: 'steer' as const })
+            surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
           }
         } catch (error) {
           // Broker unreachable while it is starting up is expected; persistent
@@ -642,12 +659,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (generation !== hostPollGeneration) return
           if (received.generation) hostReceiveGeneration = received.generation
           for (const ask of received.asks) {
-            hostPendingAsks.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
-            interruptWaitsForAsk(ask)
-            pi.sendUserMessage(
-              formatInboundAskBody(ask, { heading: 'Ask from sub-agent', role: ask.role }),
-              { deliverAs: 'steer' as const },
-            )
+            surfaceInboundAsk(hostPendingAsks, ask, 'Ask from sub-agent')
           }
         } catch {
           // No supervisor/broker yet — this is expected until a supervisor starts a broker.
