@@ -36,7 +36,7 @@ func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name stri
 	actor := "self"
 	switch caller.Kind {
 	case messaging.CallerOwner:
-		if runID != "supervisor" {
+		if runID != messaging.SupervisorRunID {
 			return messaging.RenameResult{}, &router.ToolError{Code: "not_permitted", Message: renameOwnerDenied}
 		}
 		actor = "owner"
@@ -94,9 +94,9 @@ func (s *Supervisor) resolveRenameTarget(caller messaging.Caller, sessionID stri
 			}
 			return caller.RunID, nil
 		}
-		return "supervisor", nil
-	case sessionID == "supervisor":
-		return "supervisor", nil
+		return messaging.SupervisorRunID, nil
+	case sessionID == messaging.SupervisorRunID:
+		return messaging.SupervisorRunID, nil
 	}
 	return s.resolveRunReference(sessionID)
 }

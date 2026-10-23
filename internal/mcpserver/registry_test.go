@@ -170,3 +170,53 @@ func TestRunRegistryAll(t *testing.T) {
 		t.Fatalf("expected 3 entries, got %d", len(all))
 	}
 }
+
+func TestRunRegistryLookupRuntimeIsScopedBySupervisor(t *testing.T) {
+	r := NewRunRegistry()
+	if err := r.Store(&RunInfo{RunID: "run-a", RuntimeID: "rt_1", Label: "alpha", SupervisorID: "/tmp/a.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Store(&RunInfo{RunID: "run-b", RuntimeID: "rt_1", Label: "beta", SupervisorID: "/tmp/b.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Store(&RunInfo{RunID: "run-c", RuntimeID: "rt_9", Label: "gamma", SupervisorID: "/tmp/b.sock"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if ri := r.LookupRuntime("/tmp/a.sock", "rt_1"); ri == nil || ri.RunID != "run-a" {
+		t.Fatalf("runtime lookup on a.sock = %#v, want run-a", ri)
+	}
+	if ri := r.LookupRuntime("/tmp/b.sock", "rt_1"); ri == nil || ri.RunID != "run-b" {
+		t.Fatalf("runtime lookup on b.sock = %#v, want run-b", ri)
+	}
+	if ri := r.LookupRuntime("/tmp/c.sock", "rt_1"); ri != nil {
+		t.Fatalf("runtime lookup on an unregistered supervisor = %#v, want nil", ri)
+	}
+	if ri := r.LookupRuntime("/tmp/a.sock", ""); ri != nil {
+		t.Fatalf("runtime lookup of an empty id = %#v, want nil", ri)
+	}
+
+	if ri := r.LookupRuntimeUnique("rt_1"); ri != nil {
+		t.Fatalf("runtime id owned by two supervisors = %#v, want nil", ri)
+	}
+	if ri := r.LookupRuntimeUnique("rt_9"); ri == nil || ri.RunID != "run-c" {
+		t.Fatalf("runtime id owned by one supervisor = %#v, want run-c", ri)
+	}
+	if ri := r.LookupRuntimeUnique(""); ri != nil {
+		t.Fatalf("unique lookup of an empty id = %#v, want nil", ri)
+	}
+
+	// A supervisor restart mints rt_1 again while the pre-restart entry stays
+	// registered, so two entries under one supervisor can share a runtime id.
+	// That ambiguity answers nil rather than whichever entry the map iteration
+	// reached first.
+	if err := r.Store(&RunInfo{RunID: "run-d", RuntimeID: "rt_7", SupervisorID: "/tmp/a.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Store(&RunInfo{RunID: "run-e", RuntimeID: "rt_7", SupervisorID: "/tmp/a.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	if ri := r.LookupRuntime("/tmp/a.sock", "rt_7"); ri != nil {
+		t.Fatalf("runtime id owned by two runs under one supervisor = %#v, want nil", ri)
+	}
+}

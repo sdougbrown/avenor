@@ -44,9 +44,12 @@ type Provider interface {
 	// Last reads the target's recorded last agent message. It is the peers
 	// `last` action's only provider call and performs no write.
 	Last(ctx context.Context, runID string) (messaging.PeerLast, error)
-	// Generation is the bound generation the provider read once at
-	// construction. Every request carries it, so a provider is never retargeted
-	// to a different generation mid-call.
+	// Generation reports the generation the provider is currently bound to; the
+	// router reads it on every request and never writes it, so it never
+	// retargets a provider mid-call. Staleness is provider-owned policy: the
+	// child provider pins the generation it read at construction, and the Go
+	// host provider re-preflights after the store reports a mismatch, since the
+	// control store mints a new generation on every restart.
 	Generation() string
 }
 

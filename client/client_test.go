@@ -990,14 +990,14 @@ func TestCallErrorPreservesData(t *testing.T) {
 		if json.Unmarshal(line, &req) != nil {
 			return
 		}
-		data, _ := json.Marshal(map[string]any{"message_id": "ask123", "pending": false})
+		data, _ := json.Marshal(map[string]any{"code": "possibly-pending", "outcome": "possibly-pending", "message_id": "ask123"})
 		resp, _ := json.Marshal(Response{JSONRPC: "2.0", ID: req.ID, Error: &RespError{
 			Code: -32000, Message: "wait for reply: context deadline exceeded", Data: data,
 		}})
 		_, _ = serverConn.Write(append(resp, '\n'))
 	}()
 
-	err := c.Call("broker_ask", map[string]any{"to_run_id": "rt_1", "message": "hi"}, nil)
+	err := c.Call("message_wait", map[string]any{"message_id": "ask123", "generation": "g"}, nil)
 	var rpcErr *RPCError
 	if err == nil || !errors.As(err, &rpcErr) {
 		t.Fatalf("error type = %T (%v), want *RPCError", err, err)
@@ -1012,8 +1012,8 @@ func TestCallErrorPreservesData(t *testing.T) {
 	if id, _ := payload["message_id"].(string); id != "ask123" {
 		t.Errorf("message_id = %v, want ask123", payload["message_id"])
 	}
-	if pending, _ := payload["pending"].(bool); pending {
-		t.Errorf("pending = %v, want false", payload["pending"])
+	if outcome, _ := payload["outcome"].(string); outcome != "possibly-pending" {
+		t.Errorf("outcome = %v, want possibly-pending", payload["outcome"])
 	}
 	if got := rpcErr.Error(); got != "rpc error [-32000]: wait for reply: context deadline exceeded" {
 		t.Errorf("Error() = %q", got)
@@ -1266,7 +1266,7 @@ func TestClientClosedStateByFailureKind(t *testing.T) {
 		defer c.Close()
 		// A short wait bounds the response wait so the test stays fast; the
 		// timeout path must not mark the connection closed.
-		err = c.call("hang", nil, nil, 200*time.Millisecond)
+		err = c.call(context.Background(), "hang", nil, nil, 200*time.Millisecond)
 		if err == nil {
 			t.Fatal("expected a timeout error")
 		}
@@ -1391,4 +1391,145 @@ func TestMessageReceiveOutlivesServerMaximumWait(t *testing.T) {
 			t.Fatal("the receive never observed the late response")
 		}
 	})
+}
+
+// TestCallContextStopsWaitingWhenCancelled proves a cancelled request releases
+// the caller instead of holding it for the server's full wait, and leaves the
+// connection usable for the next call.
+func TestCallContextStopsWaitingWhenCancelled(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	// Read requests so the synchronous pipe write completes. The first one is
+	// never answered: the caller must be released by cancellation alone. Every
+	// later request is answered, which is only observable while the connection
+	// and its pending table are still intact.
+	go func() {
+		reader := bufio.NewReader(serverConn)
+		first := true
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if first {
+				first = false
+				continue
+			}
+			var raw map[string]any
+			if err := json.Unmarshal([]byte(line), &raw); err != nil {
+				return
+			}
+			data, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      raw["id"],
+				"result":  map[string]any{"status": "running"},
+			})
+			if _, err := serverConn.Write(append(data, '\n')); err != nil {
+				return
+			}
+			return
+		}
+	}()
+	c := newClient(clientConn)
+	defer c.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	err := c.CallContext(ctx, "message_wait", nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CallContext = %v, want context.Canceled", err)
+	}
+	if c.Closed() {
+		t.Fatal("cancelling a call closed the connection")
+	}
+	c.mu.Lock()
+	pending := len(c.pending)
+	c.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending entries after cancellation = %d, want 0", pending)
+	}
+
+	// The same client must still serve a normal call: a cancellation that
+	// closed the connection or left its waiter behind fails here.
+	var result map[string]any
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Call("status", map[string]any{"runtime_id": "rt_1"}, &result)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Call after cancelled CallContext: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Call after cancelled CallContext never completed")
+	}
+	if got, _ := result["status"].(string); got != "running" {
+		t.Fatalf("result after cancelled CallContext = %#v, want status running", result)
+	}
+}
+
+// TestControlVerbContextStopsWaitingWhenCancelled proves the ctx-carrying
+// control verbs for resume, rename and last are released by cancellation
+// instead of waiting for the verb to settle server-side.
+func TestControlVerbContextStopsWaitingWhenCancelled(t *testing.T) {
+	verbs := []struct {
+		name string
+		call func(ctx context.Context, c *Client) error
+	}{
+		{"resume", func(ctx context.Context, c *Client) error {
+			_, err := c.ResumeContext(ctx, messaging.ResumeRequest{Target: "agent"})
+			return err
+		}},
+		{"session_rename", func(ctx context.Context, c *Client) error {
+			_, err := c.SessionRenameContext(ctx, "run_1", "renamed")
+			return err
+		}},
+		{"session_last", func(ctx context.Context, c *Client) error {
+			_, err := c.SessionLastContext(ctx, "run_1")
+			return err
+		}},
+	}
+	for _, verb := range verbs {
+		t.Run(verb.name, func(t *testing.T) {
+			serverConn, clientConn := net.Pipe()
+			defer serverConn.Close()
+			// Read requests so the synchronous pipe write completes, and never
+			// answer: only cancellation can release the caller.
+			go func() {
+				reader := bufio.NewReader(serverConn)
+				for {
+					if _, err := reader.ReadString('\n'); err != nil {
+						return
+					}
+				}
+			}()
+			c := newClient(clientConn)
+			defer c.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				cancel()
+			}()
+
+			done := make(chan error, 1)
+			go func() { done <- verb.call(ctx, c) }()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("%s = %v, want context.Canceled", verb.name, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s ignored cancellation and kept waiting", verb.name)
+			}
+			if c.Closed() {
+				t.Fatal("cancelling the call closed the connection")
+			}
+		})
+	}
 }

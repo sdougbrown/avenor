@@ -26,7 +26,7 @@ func (s *Supervisor) SessionLast(rtID string) (broker.LastAgentMessage, bool, er
 // turn producer's only write path and accepts nothing but the supervisor
 // session from an owner caller.
 func (s *Supervisor) SessionLastSet(caller messaging.Caller, rtID, finalOutput, stopReason string, truncated bool) error {
-	if caller.Kind != messaging.CallerOwner || rtID != "supervisor" {
+	if caller.Kind != messaging.CallerOwner || rtID != messaging.SupervisorRunID {
 		return &router.ToolError{
 			Code:    "not_permitted",
 			Message: "the control owner may publish only the supervisor session's last turn",

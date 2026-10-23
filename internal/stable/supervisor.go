@@ -1954,14 +1954,14 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 	// EnsureRun is idempotent, so concurrent first-use calls settle on the
 	// same run and token instead of racing CreateRun and failing "already
 	// registered" on the second call.
-	token, _ := s.broker.EnsureRun("supervisor", "supervisor")
+	token, _ := s.broker.EnsureRun(messaging.SupervisorRunID, "supervisor")
 	if token == "" {
 		return "", ""
 	}
 	// Metadata only: the label was fixed by EnsureRun and only RenameRun
 	// changes it, so this write can never undo a rename.
-	s.broker.UpdateSessionInfo("supervisor", &broker.SessionInfo{Kind: "supervisor", Status: "running"})
-	s.brokerRunID = "supervisor"
+	s.broker.UpdateSessionInfo(messaging.SupervisorRunID, &broker.SessionInfo{Kind: "supervisor", Status: "running"})
+	s.brokerRunID = messaging.SupervisorRunID
 	s.brokerToken = token
 	return s.brokerRunID, token
 }

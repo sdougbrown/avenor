@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
@@ -655,6 +656,37 @@ func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunIn
 	return nil, nil
 }
 
+// lookupRunByPublicID rehydrates the registry from the supervisor's list on a
+// miss and resolves one public run id only. Unlike lookupRun it never matches a
+// label, a runtime id or a sentinel path fragment, so the message provider
+// keeps the two resolution planes while still resolving a public run id that
+// outlived this MCP server process. It reaps a stale label mapping before the
+// store exactly as lookupRun does, so a supervisor restart cannot leave the
+// rehydrated entry rejected by a pre-restart mapping of the same label.
+func (s *Server) lookupRunByPublicID(cl ControlClient, supervisorPath, runID string) (*RunInfo, error) {
+	// Public run ids are UUIDs the surface minted; anything else is a label or
+	// a runtime id and belongs to the broker listing, so no list is issued.
+	if _, err := uuid.Parse(runID); err != nil {
+		return nil, nil
+	}
+	if ri := s.registry.Lookup(supervisorPath, runID); ri != nil {
+		return ri, nil
+	}
+	entries, err := cl.List()
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	for _, entry := range entries {
+		sentinelFile, _ := entry["sentinel_file"].(string)
+		if runstate.RunIDFromSentinel(sentinelFile) != runID {
+			continue
+		}
+		s.reapStaleLabel(supervisorPath, entries, entry)
+		return s.runInfoFromListEntry(entry, supervisorPath)
+	}
+	return nil, nil
+}
+
 // reapStaleLabel unlinks a cached label mapping that claims the same label
 // under the same supervisor but whose runtime is no longer in the live list.
 // The live supervisor's list is authoritative for liveness: a supervisor
@@ -738,6 +770,49 @@ func (s *Server) checkLabelAvailable(cl ControlClient, supervisorPath, label str
 	return nil
 }
 
+// runInfoBase carries the identity and base fields every registry entry build
+// site supplies. Callers set the path-specific fields (Thinking, Dir,
+// AutoApprove, resume status fields) on the returned entry.
+type runInfoBase struct {
+	RunID        string
+	Label        string
+	RuntimeID    string
+	SessionID    string
+	SupervisorID string
+	SentinelPath string
+	EventLogPath string
+	Identity     resolvedSpawnIdentity
+	CreatedAt    time.Time
+}
+
+// newRunInfo builds a registry entry from base so every identity field is
+// copied from base.Identity in one place. An unset CreatedAt defaults to now.
+func newRunInfo(base runInfoBase) *RunInfo {
+	info := &RunInfo{
+		RunID:            base.RunID,
+		Label:            base.Label,
+		RuntimeID:        base.RuntimeID,
+		SessionID:        base.SessionID,
+		SupervisorID:     base.SupervisorID,
+		SentinelPath:     base.SentinelPath,
+		EventLogPath:     base.EventLogPath,
+		Agent:            base.Identity.EffectiveAgent,
+		Model:            base.Identity.EffectiveModel,
+		Backend:          base.Identity.EffectiveBackend,
+		RosterFile:       base.Identity.RosterFile,
+		RosterEntry:      base.Identity.RosterEntry,
+		EffectiveAgent:   base.Identity.EffectiveAgent,
+		EffectiveModel:   base.Identity.EffectiveModel,
+		EffectiveBackend: base.Identity.EffectiveBackend,
+		AgentProfile:     base.Identity.AgentProfile,
+		CreatedAt:        base.CreatedAt,
+	}
+	if info.CreatedAt.IsZero() {
+		info.CreatedAt = time.Now()
+	}
+	return info
+}
+
 // runInfoFromListEntry converts a stable supervisor list entry into a registry
 // entry scoped to supervisorPath. The supervisor-wide run_id is never used as
 // the MCP run ID.
@@ -749,32 +824,24 @@ func (s *Server) runInfoFromListEntry(entry map[string]any, supervisorPath strin
 		runID = runtimeID
 	}
 	label, _ := entry["label"].(string)
-	info := &RunInfo{
+	var identity resolvedSpawnIdentity
+	applySpawnIdentity(entry, &identity)
+	info := newRunInfo(runInfoBase{
 		RunID:        runID,
 		Label:        label,
 		RuntimeID:    runtimeID,
+		SessionID:    stringField(entry, "session_id"),
 		SupervisorID: supervisorPath,
 		SentinelPath: sentinelFile,
-		Dir:          stringField(entry, "dir"),
 		EventLogPath: stringField(entry, "on_event"),
-		Thinking:     stringField(entry, "thinking"),
-	}
-	info.SessionID = stringField(entry, "session_id")
+		Identity:     identity,
+	})
+	info.Dir = stringField(entry, "dir")
+	info.Thinking = stringField(entry, "thinking")
 	info.AutoApprove, _ = entry["auto_approve"].(bool)
 	if ms, ok := entry["started_at"].(float64); ok && ms > 0 {
 		info.CreatedAt = time.UnixMilli(int64(ms))
 	}
-	var identity resolvedSpawnIdentity
-	applySpawnIdentity(entry, &identity)
-	info.Agent = identity.EffectiveAgent
-	info.Model = identity.EffectiveModel
-	info.Backend = identity.EffectiveBackend
-	info.RosterFile = identity.RosterFile
-	info.RosterEntry = identity.RosterEntry
-	info.EffectiveAgent = identity.EffectiveAgent
-	info.EffectiveModel = identity.EffectiveModel
-	info.EffectiveBackend = identity.EffectiveBackend
-	info.AgentProfile = identity.AgentProfile
 	if err := s.registry.Store(info); err != nil {
 		return nil, fmt.Errorf("registry store: %w", err)
 	}
@@ -1085,8 +1152,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		label = runID
 	}
 
-	sentinelPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
-	eventLogPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", runID))
+	sentinelPath, eventLogPath := runArtifactPaths(runID)
 
 	params := map[string]any{
 		"dir":           args.RepoDir,
@@ -1197,28 +1263,20 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	sessionID, _ := result["session_id"].(string)
 	identity := resolveSpawnIdentity(cl, runtimeID, result, args)
 
-	if err := s.registry.Store(&RunInfo{
-		RunID:            runID,
-		Label:            label,
-		RuntimeID:        runtimeID,
-		SessionID:        sessionID,
-		SupervisorID:     supervisorPath,
-		SentinelPath:     sentinelPath,
-		EventLogPath:     eventLogPath,
-		Agent:            identity.EffectiveAgent,
-		Model:            identity.EffectiveModel,
-		Backend:          identity.EffectiveBackend,
-		RosterFile:       identity.RosterFile,
-		RosterEntry:      identity.RosterEntry,
-		EffectiveAgent:   identity.EffectiveAgent,
-		EffectiveModel:   identity.EffectiveModel,
-		EffectiveBackend: identity.EffectiveBackend,
-		AgentProfile:     identity.AgentProfile,
-		Thinking:         args.Thinking,
-		Dir:              args.RepoDir,
-		AutoApprove:      args.AutoApprove,
-		CreatedAt:        time.Now(),
-	}); err != nil {
+	info := newRunInfo(runInfoBase{
+		RunID:        runID,
+		Label:        label,
+		RuntimeID:    runtimeID,
+		SessionID:    sessionID,
+		SupervisorID: supervisorPath,
+		SentinelPath: sentinelPath,
+		EventLogPath: eventLogPath,
+		Identity:     identity,
+	})
+	info.Thinking = args.Thinking
+	info.Dir = args.RepoDir
+	info.AutoApprove = args.AutoApprove
+	if err := s.registry.Store(info); err != nil {
 		return nil, nil, fmt.Errorf("registry store: %w", err)
 	}
 
@@ -1481,6 +1539,38 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 	return nil, map[string]any{"events": events, "latest_seq": latestSeq}, nil
 }
 
+// registerResumed records the run a resume produced in the same registry the
+// spawn and status paths read, so the resumed run is resolvable by label and
+// its event log is readable. Identity comes from the new runtime's status, the
+// same way a follow-up read it; a status miss leaves the identity empty instead
+// of failing a resume that already succeeded. The run is never killed here.
+func (s *Server) registerResumed(cl ControlClient, supervisorPath string, res messaging.ResumeResult) error {
+	identity := resolvedSpawnIdentity{}
+	var status map[string]any
+	if res.RuntimeID != "" {
+		if live, err := cl.Status(res.RuntimeID); err == nil {
+			status = live
+			applySpawnIdentity(live, &identity)
+		}
+	}
+	info := newRunInfo(runInfoBase{
+		RunID:        res.RunID,
+		Label:        res.Label,
+		RuntimeID:    res.RuntimeID,
+		SessionID:    res.SessionID,
+		SupervisorID: supervisorPath,
+		SentinelPath: res.SentinelFile,
+		EventLogPath: res.OnEvent,
+		Identity:     identity,
+	})
+	if status != nil {
+		info.Thinking, _ = status["thinking"].(string)
+		info.Dir, _ = status["dir"].(string)
+		info.AutoApprove, _ = status["auto_approve"].(bool)
+	}
+	return s.registry.Store(info)
+}
+
 func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequest, args followUpArgs) (*mcp.CallToolResult, any, error) {
 	supervisorID := s.resultSupervisorID(args.RunID, args.SupervisorID)
 
@@ -1569,8 +1659,7 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 		followupLabel = priorLabel + runstate.FollowUpLabelSuffix
 	}
 
-	sentinelPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.done", runID))
-	eventLogPath := filepath.Join(os.TempDir(), fmt.Sprintf("avenor-run-%s.log", runID))
+	sentinelPath, eventLogPath := runArtifactPaths(runID)
 
 	effectiveAgent := identity.EffectiveAgent
 	if effectiveAgent == "" {
@@ -1667,28 +1756,25 @@ func (s *Server) handleAvenorFollowUp(ctx context.Context, req *mcp.CallToolRequ
 
 	supervisorPath := s.getSupervisorPath(supervisorID)
 
-	if err := s.registry.Store(&RunInfo{
-		RunID:            runID,
-		Label:            followupLabel,
-		RuntimeID:        runtimeID,
-		SessionID:        newSessionID,
-		SupervisorID:     supervisorPath,
-		SentinelPath:     sentinelPath,
-		EventLogPath:     eventLogPath,
-		Agent:            effectiveAgent,
-		Model:            effectiveModel,
-		Backend:          effectiveBackend,
-		RosterFile:       identity.RosterFile,
-		RosterEntry:      identity.RosterEntry,
-		EffectiveAgent:   effectiveAgent,
-		EffectiveModel:   effectiveModel,
-		EffectiveBackend: effectiveBackend,
-		AgentProfile:     agentProfile,
-		Thinking:         ri.Thinking,
-		Dir:              ri.Dir,
-		AutoApprove:      ri.AutoApprove,
-		CreatedAt:        time.Now(),
-	}); err != nil {
+	stored := identity
+	stored.EffectiveAgent = effectiveAgent
+	stored.EffectiveModel = effectiveModel
+	stored.EffectiveBackend = effectiveBackend
+	stored.AgentProfile = agentProfile
+	info := newRunInfo(runInfoBase{
+		RunID:        runID,
+		Label:        followupLabel,
+		RuntimeID:    runtimeID,
+		SessionID:    newSessionID,
+		SupervisorID: supervisorPath,
+		SentinelPath: sentinelPath,
+		EventLogPath: eventLogPath,
+		Identity:     stored,
+	})
+	info.Thinking = ri.Thinking
+	info.Dir = ri.Dir
+	info.AutoApprove = ri.AutoApprove
+	if err := s.registry.Store(info); err != nil {
 		return nil, nil, fmt.Errorf("registry store: %w", err)
 	}
 

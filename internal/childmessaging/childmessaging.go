@@ -6,7 +6,6 @@ package childmessaging
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -14,7 +13,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
-	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 // Options is what one child surface supplies. RunID and Token are the run's own
@@ -120,9 +118,9 @@ func (p *MessageProvider) Preflight(ctx context.Context) (messaging.PreflightRes
 	return p.transport.Preflight(ctx)
 }
 
-// listedPeers reads the broker's visible peers for this caller. It decodes the
-// session with the router's own peer record, so a field added to the peer
-// contract reaches Resolve and RunState instead of stopping at a local copy.
+// listedPeers reads the broker's visible peers for this caller. It decodes them
+// with the contract's own peer decoder, so a field added to the peer contract
+// reaches Resolve and RunState instead of stopping at a local copy.
 func (p *MessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerRecord, error) {
 	peers, err := p.transport.Peers(ctx, messaging.PeersRequest{
 		Sender:     messaging.Identity{RunID: p.opts.RunID},
@@ -131,20 +129,7 @@ func (p *MessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerReco
 	if err != nil {
 		return nil, err
 	}
-	records := make([]messaging.PeerRecord, 0, len(peers.Peers))
-	for _, peer := range peers.Peers {
-		var record messaging.PeerRecord
-		if len(peer.Session) > 0 {
-			if err := json.Unmarshal(peer.Session, &record); err != nil {
-				return nil, err
-			}
-		}
-		if record.RunID == "" {
-			record.RunID = peer.RunID
-		}
-		records = append(records, record)
-	}
-	return records, nil
+	return messaging.DecodePeerRecords(peers.Peers)
 }
 
 // Resolve is the child ladder: the run's own id, then a runtime id, then an
@@ -170,14 +155,7 @@ func (p *MessageProvider) Resolve(ctx context.Context, ref string) (messaging.Re
 			}, nil
 		}
 	}
-	var candidates []string
-	label := ""
-	for _, session := range sessions {
-		if session.Label == ref {
-			candidates = append(candidates, session.RunID)
-			label = session.Label
-		}
-	}
+	candidates, label := messaging.LabelCandidates(sessions, ref)
 	switch len(candidates) {
 	case 1:
 		return messaging.Resolution{RunID: candidates[0], Label: label, Match: messaging.MatchUnique}, nil
@@ -200,14 +178,7 @@ func (p *MessageProvider) RunState(ctx context.Context, runID string) (messaging
 		if session.RunID != runID {
 			continue
 		}
-		translation := runstate.Translate(runstate.RuntimeStatus(session.Status), runstate.PhaseNone)
-		return messaging.RunFacts{
-			RunID:     runID,
-			Status:    translation.Status,
-			Phase:     runstate.PhaseNone,
-			Live:      !translation.TurnComplete,
-			Resumable: false,
-		}, nil
+		return messaging.PeerRunFacts(session), nil
 	}
 	return messaging.RunFacts{}, messaging.ErrTargetUnavailable
 }
