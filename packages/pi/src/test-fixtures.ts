@@ -118,6 +118,24 @@ export async function waitFor(predicate: () => boolean, timeoutMs = 2000, interv
   }
 }
 
+/** Fail fast on a blocking tool call that never returns: resolves the promise
+ * or rejects with `message` after `timeoutMs`, so a missing interrupt surfaces
+ * as a test failure instead of hanging the suite. */
+export async function settleWithin<T>(promise: Promise<T>, message: string, timeoutMs = 1000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+        timer.unref?.()
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** Reject the way fetch does when its signal aborts, so abort paths are real. */
 export function waitUntilAborted(init: RequestInit | undefined): Promise<Response> {
   return new Promise((_resolve, reject) => {

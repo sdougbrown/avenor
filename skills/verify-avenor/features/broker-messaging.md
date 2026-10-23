@@ -6,6 +6,9 @@
   (`avenor_message` action `ask`, target `supervisor`)
 - The supervisor host drains an inbound ask (the extension's `message_receive`
   poll) and answers it (`avenor_message` action `reply`)
+- A host blocked in `avenor_result` on a child gets that wait back with
+  `interrupted_by` status `asking` when the child asks it a question, so the
+  host answers without the user pressing `esc`
 - Broker run addressing: the supervisor is `supervisor`; a child is its runtime
   ID (`rt_N`). Public spawn run IDs and labels are not broker targets.
 
@@ -82,6 +85,36 @@ it flushes nothing, so a successful drive can leave `host.out` empty.
 reaches the host through the extension's `message_receive` poll, which is what
 surfaces it in the host session.
 
+### Blocking `avenor_result` drive
+
+This drive reuses the same `$SCRATCH`, binary, and extension. Its host spawns a
+`pi` child with `wait=false`, then blocks in `avenor_result` on that child. The
+wait must return with the child named as the stopping point once the child
+asks:
+
+```sh
+AVENOR_BIN=$SCRATCH/avenor timeout -k 10 300 pi --no-session --no-extensions \
+  --extension "$PWD/packages/pi/dist/index.js" \
+  --no-skills --no-prompt-templates --no-mcp --no-context-files --print \
+  "Spawn a pi child with avenor_spawn (wait false, backend pi, dir $SCRATCH/work) whose prompt is: Call avenor_message once with action \"ask\", target \"supervisor\", message \"PING-FROM-CHILD\", timeout_ms 120000, then report the answer and finish. Then call avenor_result on that spawned run id and block. Do not press esc: the extension interrupts the wait when the child's ask arrives, returning interrupted_by with status \"asking\". Answer the delivered ask with avenor_message action \"reply\", using the reply_to message id the ask names, and message \"PONG-FROM-SUPERVISOR\". Report the interrupted_by payload and the child's final output." \
+  > "$SCRATCH/evidence/host-blocking.out" 2> "$SCRATCH/evidence/host-blocking.err"
+```
+
+**Observable end state (the proof):** the host's `avenor_result` tool result in
+`$SCRATCH/evidence/host-blocking.out` carries `interrupted_by.run_id` equal to
+the child's `rt_N`, `interrupted_by.status` `"asking"`, and `ready` `false`,
+instead of leaving the host parked. The child's event log
+(`$AVENOR_HOME/runs/<spawn-run-id>/events.log`) contains the `avenor_message`
+`tool.call` with `"action": "ask"` and `"target": "supervisor"`, a successful
+tool result whose text is the bare reply `PONG-FROM-SUPERVISOR`, and a terminal
+`session.end` whose `final_output` contains `PONG-FROM-SUPERVISOR`. The child's
+sentinel (`$AVENOR_HOME/runs/<spawn-run-id>/sentinel.done`) carries `DONE` and
+`STOP_REASON=end_turn`.
+
+Without the interrupt, the host stays parked in `avenor_result` until `timeout`
+sends it SIGTERM, so `host-blocking.out` carries no `interrupted_by` payload and
+the child times out waiting for its answer.
+
 Tear the drive down: shut the supervisor down through its socket, unset the
 scratch env, and remove the scratch alone.
 
@@ -126,6 +159,11 @@ startup failure, or a permission error instead of `PONG-FROM-SUPERVISOR`. Update
 `@dougbots/avenor-pi` (or install this checkout's built `packages/pi/dist`)
 before relying on this drive; do not reintroduce credential copying to work
 around it.
+
+The blocking `avenor_result` drive depends on the same child ask leg, so it
+cannot run end to end with an installed extension that predates broker mode
+either. With a broker-aware install, the wait still has to return
+`interrupted_by` status `asking`; that assertion does not weaken.
 
 ## Gotchas
 

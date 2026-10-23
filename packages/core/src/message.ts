@@ -686,6 +686,7 @@ async function resume(
     throw asToolError(err)
   }
   result.action = 'resume'
+  result.outcome = 'resumed'
   result.text = renderOutcome('resume', 'resumed', {
     run_id: quote(result.runId ?? ''),
     label: quote(result.label ?? ''),
