@@ -6886,3 +6886,40 @@ func TestWaitForSessionFailsWhenAuthoritativeConversationIDIsRejected(t *testing
 		t.Fatal("rejected authoritative ID reached adoption callback")
 	}
 }
+
+func TestRunLoopPhaseResumeDropsStartOnlyOptions(t *testing.T) {
+	oldRunAttempt := runAttempt
+	t.Cleanup(func() { runAttempt = oldRunAttempt })
+
+	var opts []runtime.StartOptions
+	runAttempt = func(ctx context.Context, cfg attemptConfig, deps attemptDeps) attemptResult {
+		opts = append(opts, cfg.startOptions)
+		return attemptResult{exitCode: 0, sessionID: fmt.Sprintf("ses_%d", len(opts))}
+	}
+
+	dir := t.TempDir()
+	loopPath := filepath.Join(dir, "loop.json")
+	phases := `[{"name":"a","prompt":"one"},{"name":"b","prompt":"two","resume_from_previous":true}]`
+	if err := os.WriteFile(loopPath, []byte(`{"pre":`+phases+`}`), 0o600); err != nil {
+		t.Fatalf("write loop config: %v", err)
+	}
+
+	var stderr strings.Builder
+	if got := run([]string{
+		"--backend", "claude",
+		"--thinking", "high",
+		"--loop-file", loopPath,
+		"--run-id", "run_1",
+	}, func(string) string { return "" }, &stderr); got != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", got, stderr.String())
+	}
+	if len(opts) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(opts))
+	}
+	if opts[0].Thinking != "high" {
+		t.Fatalf("first phase lost thinking: %+v", opts[0])
+	}
+	if opts[1].Thinking != "" {
+		t.Fatalf("phase resume carried thinking: %+v", opts[1])
+	}
+}

@@ -10,6 +10,14 @@ import (
 // slow connect; it only stalls a run whose server is down.
 const MaxClaudeMCPWait = 60 * time.Second
 
+// ResumesWithoutOptions reports whether the backend's explicit resume takes
+// no per-call options. Those backends hold start-only options in the process
+// they spawn, so callers resuming one of their sessions must drop start-only
+// options instead of passing them back.
+func ResumesWithoutOptions(backend string) bool {
+	return backend == "claude" || backend == "claude-channel"
+}
+
 // ValidateClaudeMCPWait checks a startup MCP wait for a backend. Zero means
 // no wait and is valid everywhere; only the claude backends hold the first
 // prompt for MCP servers, so any other backend rejects a wait instead of

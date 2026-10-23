@@ -505,8 +505,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
+		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance}
+		if resumeID != "" {
+			// The phase resumes the previous phase's session, and start-only
+			// options the resume cannot honor would abort the phase boundary.
+			startOptions = dropStartOnlyOptions(selection.Backend, startOptions)
+		}
 		return runAttempt(ctx, attemptConfig{
-			startOptions:           runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance},
+			startOptions:           startOptions,
 			backend:                selection.Backend,
 			resumeID:               resumeID,
 			sessionBackends:        sessionBackends,
@@ -1063,7 +1069,7 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 		return resumer.ResumeWithOptions(ctx, resumeID, opts)
 	}
 	if opts.Thinking != "" {
-		if backend == "claude" || backend == "claude-channel" {
+		if runtime.ResumesWithoutOptions(backend) {
 			return runtime.Session{}, runtime.NewStartOnlyThinkingError(backend, opts.Thinking)
 		}
 		return runtime.Session{}, runtime.NewUnsupportedThinkingError(backend)

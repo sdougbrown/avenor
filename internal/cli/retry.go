@@ -59,11 +59,11 @@ func resumeSession(ctx context.Context, provider runtime.Provider, backend strin
 }
 
 // dropStartOnlyOptions removes options a resumed session cannot honor. Only
-// the claude backends resume without per-call options: they drop their
-// start-only options so an internal resume is not aborted. Backends that
-// resume with options keep them.
+// backends that resume without per-call options hold start-only options, so
+// they drop them and internal resumes are not aborted; backends that resume
+// with options keep them.
 func dropStartOnlyOptions(backend string, opts runtime.StartOptions) runtime.StartOptions {
-	if backend == backendClaude || backend == backendClaudeChannel {
+	if runtime.ResumesWithoutOptions(backend) {
 		opts.Thinking = ""
 		opts.ClaudeMCPWait = 0
 	}
