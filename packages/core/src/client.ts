@@ -145,6 +145,126 @@ export interface WorkflowControllerCreateParams {
   max_inflight: number
 }
 
+/** The shared wait window a zero message timeout means, in milliseconds. */
+export const MESSAGE_MAX_WAIT_MS = 600_000
+
+export interface MessageSendParams {
+  to_run_id: string
+  message_id: string
+  generation: string
+  body: string
+  no_reply?: boolean
+}
+
+export interface MessageSendResult {
+  outcome: string
+  message_id?: string
+  generation?: string
+}
+
+export interface MessageWaitParams {
+  message_id: string
+  generation: string
+  timeout_ms?: number
+}
+
+export interface MessageInbound {
+  message_id: string
+  from_run_id: string
+  sender?: string
+  kind?: string
+  payload?: unknown
+}
+
+export interface MessageWaitResult {
+  outcome: string
+  message_id?: string
+  reply?: MessageInbound
+}
+
+export interface MessageWithdrawParams {
+  message_id: string
+  generation: string
+}
+
+export interface MessageFence {
+  sender: string
+  message_id: string
+  generation: string
+  deadline: number
+  terminal: boolean
+}
+
+export interface MessageWithdrawResult {
+  outcome: string
+  fence?: MessageFence
+}
+
+export interface MessageReceiveParams {
+  generation: string
+  timeout_ms?: number
+  limit?: number
+}
+
+export interface MessageReceiveResult {
+  messages: MessageInbound[]
+  generation?: string
+}
+
+export interface MessagePeersParams {
+  generation: string
+}
+
+export interface MessagePeer {
+  run_id: string
+  session?: unknown
+}
+
+export interface MessagePeersResult {
+  peers: MessagePeer[]
+  generation?: string
+}
+
+export interface MessagePreflightResult {
+  protocol: number
+  generation: string
+}
+
+export interface ResumeParams {
+  run_id: string
+  target: string
+  message: string
+  label?: string
+  idempotency_key?: string
+  sentinel_file?: string
+  on_event?: string
+}
+
+export interface ResumeResult {
+  run_id: string
+  label: string
+  runtime_id: string
+  session_id: string
+  sentinel_file: string
+  on_event: string
+}
+
+export interface SessionRenameResult {
+  run_id: string
+  label: string
+  previous_label: string
+}
+
+export interface SessionLastResult {
+  run_id: string
+  label?: string
+  has_record: boolean
+  final_output: string
+  stop_reason?: string
+  final_output_truncated?: boolean
+  at?: number
+}
+
 type PendingCall = {
   resolve: (value: unknown) => void
   reject: (reason: Error) => void
@@ -710,6 +830,10 @@ export class Client {
     return this.call('workflow.controller.disable', { controller_id: controllerId, reason }) as Promise<Record<string, unknown>>
   }
 
+  // The merged messaging control verbs. Each decodes the snake_case control DTO
+  // internal/control/message_dto.go declares.
+  // Temporary until 356-17: the broker_* verbs stay callable for the surfaces
+  // that still use them. Removed with the verbs themselves.
   async brokerSend(fromRunId: string, toRunId: string, message: string, role?: string): Promise<void> {
     await this.call('broker_send', { from_run_id: fromRunId, to_run_id: toRunId, message, role: role ?? 'agent' })
   }
@@ -735,6 +859,85 @@ export class Client {
 
   async brokerReply(toRunId: string, replyTo: string, message: string): Promise<void> {
     await this.call('broker_reply', { to_run_id: toRunId, reply_to: replyTo, message })
+  }
+
+  async messageSend(params: MessageSendParams): Promise<MessageSendResult> {
+    return this.call('message_send', params) as Promise<MessageSendResult>
+  }
+
+  // A blocking message verb answers after at most MESSAGE_MAX_WAIT_MS; the
+  // client must not fire before the server's own bounded wait can.
+  async messageWait(params: MessageWaitParams): Promise<MessageWaitResult> {
+    const requested = params.timeout_ms !== undefined && params.timeout_ms > 0
+      ? params.timeout_ms
+      : MESSAGE_MAX_WAIT_MS
+    return this.call('message_wait', params, { timeoutMs: requested }) as Promise<MessageWaitResult>
+  }
+
+  async messageReply(params: {
+    to_run_id: string
+    message_id: string
+    correlation_id?: string
+    body: string
+  }): Promise<MessageSendResult> {
+    return this.call('message_reply', params) as Promise<MessageSendResult>
+  }
+
+  async messageWithdraw(params: MessageWithdrawParams): Promise<MessageWithdrawResult> {
+    return this.call('message_withdraw', params) as Promise<MessageWithdrawResult>
+  }
+
+  async messageReceive(params: MessageReceiveParams): Promise<MessageReceiveResult> {
+    const requested = params.timeout_ms !== undefined && params.timeout_ms > 0
+      ? params.timeout_ms
+      : MESSAGE_MAX_WAIT_MS
+    return this.call('message_receive', params, { timeoutMs: requested }) as Promise<MessageReceiveResult>
+  }
+
+  async messagePeers(params: MessagePeersParams): Promise<MessagePeersResult> {
+    return this.call('message_peers', params) as Promise<MessagePeersResult>
+  }
+
+  async messagePreflight(): Promise<MessagePreflightResult> {
+    return this.call('message_preflight') as Promise<MessagePreflightResult>
+  }
+
+  async resume(params: ResumeParams): Promise<ResumeResult> {
+    return this.call('resume', params) as Promise<ResumeResult>
+  }
+
+  async sessionRename(sessionId: string, name: string): Promise<SessionRenameResult> {
+    return this.call('session_rename', { session_id: sessionId, name }) as Promise<SessionRenameResult>
+  }
+
+  async sessionLast(runtimeId: string): Promise<SessionLastResult> {
+    return this.call('session_last', { runtime_id: runtimeId }) as Promise<SessionLastResult>
+  }
+
+  async sessionLastSet(
+    runtimeId: string,
+    finalOutput: string,
+    stopReason: string,
+    truncated: boolean,
+  ): Promise<void> {
+    await this.call('session_last_set', {
+      runtime_id: runtimeId,
+      final_output: finalOutput,
+      stop_reason: stopReason,
+      final_output_truncated: truncated,
+    })
+  }
+
+  async workflowCancel(
+    workflowId: string,
+    actor: string,
+    reason: string,
+  ): Promise<Record<string, unknown>> {
+    return this.call('workflow.cancel', {
+      workflow_id: workflowId,
+      actor,
+      reason,
+    }) as Promise<Record<string, unknown>>
   }
 
   isClosed(): boolean {

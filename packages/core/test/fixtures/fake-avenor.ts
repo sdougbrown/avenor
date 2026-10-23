@@ -19,6 +19,12 @@ type Runtime = {
   on_event?: string
   sentinel_file?: string
   auto_approve: boolean
+  agent?: string
+  model?: string
+  backend?: string
+  dir?: string
+  thinking?: string
+  agent_profile?: string
 }
 
 function argValue(name: string): string | undefined {
@@ -110,9 +116,12 @@ const server = net.createServer((socket) => {
           socket.write(respond(req.id, Array.from(runtimes.values())))
           break
 
-        case 'cancel':
+        case 'cancel': {
+          const runtime = runtimes.get(String(req.params?.runtime_id ?? ''))
+          if (runtime) runtime.status = 'done'
           socket.write(respond(req.id, { ok: true }))
           break
+        }
 
         case 'spawn': {
           nextRuntime++
@@ -126,6 +135,12 @@ const server = net.createServer((socket) => {
             on_event: req.params?.on_event,
             sentinel_file: req.params?.sentinel_file,
             auto_approve: req.params?.auto_approve === true,
+            agent: req.params?.agent,
+            model: req.params?.model,
+            backend: req.params?.backend,
+            dir: req.params?.dir,
+            thinking: req.params?.thinking,
+            agent_profile: req.params?.agent_profile,
           }
           runtimes.set(runtimeId, runtime)
           if (runtime.on_event) {
@@ -140,6 +155,46 @@ const server = net.createServer((socket) => {
             )
           }
           socket.write(respond(req.id, runtime))
+          break
+        }
+
+        case 'message_preflight':
+          socket.write(respond(req.id, { protocol: 1, generation: 'gen_fake' }))
+          break
+
+        case 'session_last_set':
+          socket.write(respond(req.id, { ok: true }))
+          break
+
+        case 'resume': {
+          const target = runtimes.get(String(req.params?.target ?? ''))
+          nextRuntime++
+          const runtimeId = `rt_${nextRuntime}`
+          const runId = req.params?.run_id ?? `run_${nextRuntime}`
+          const runtime: Runtime = {
+            runtime_id: runtimeId,
+            session_id: target?.session_id ?? req.params?.session_id ?? `ses_${nextRuntime}`,
+            label: req.params?.label ?? target?.label ?? runId,
+            status: 'running',
+            on_event: req.params?.on_event,
+            sentinel_file: req.params?.sentinel_file,
+            auto_approve: target?.auto_approve === true,
+            agent: target?.agent,
+            model: target?.model,
+            backend: target?.backend,
+            dir: target?.dir,
+            thinking: target?.thinking,
+            agent_profile: target?.agent_profile,
+          }
+          runtimes.set(runtimeId, runtime)
+          socket.write(respond(req.id, {
+            run_id: runId,
+            label: runtime.label,
+            runtime_id: runtimeId,
+            session_id: runtime.session_id,
+            sentinel_file: runtime.sentinel_file,
+            on_event: runtime.on_event,
+          }))
           break
         }
 

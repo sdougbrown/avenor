@@ -13,8 +13,9 @@ import {
 } from './supervisor.js'
 import { RpcError, OwnerAuthError } from './client.js'
 import { loadOwnerRecord, OwnerRecordMissingError, probeControlSocket } from './owner-attach.js'
-import { followUpTool } from './tools/follow-up.js'
 import { getSupervisorClient } from './tools/get-supervisor-client.js'
+import { createHostMessageProvider } from './tools/message-provider.js'
+import { messageTool } from './tools/message.js'
 import { shutdownTool } from './tools/shutdown.js'
 import { socketsRoot } from './paths.js'
 
@@ -189,7 +190,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
     expect(originalRun.autoApprove).toBe(true)
   }, 15_000)
 
-  it('retains auto-approval across singleton follow-ups when no sentinel exists', async () => {
+  it('retains auto-approval across singleton resumes when no sentinel exists', async () => {
     // The run must be complete before each follow-up: resuming a still-running
     // session is rejected by the supervisor's session-ownership guard. Against
     // the real binary, wait for the sentinel, then remove it to exercise the
@@ -204,28 +205,41 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
       fs.rmSync(sentinelPath, { force: true })
     }
     await awaitSentinel(originalRun.sentinelPath)
+    if (process.env.AVENOR_REAL_INTEGRATION !== '1' && originalRun.runtimeId) {
+      // The fake runtime never completes on its own; settle it so the resume
+      // state rule sees a finished turn.
+      await supervisor.getClient().cancel(originalRun.runtimeId)
+    }
 
-    const result = await followUpTool({
-      runId: originalRun.runId,
-      message: 'continue',
+    const makeProvider = async () => createHostMessageProvider({
+      surface: 'pi-host',
+      supervisorId: supervisor.supervisorId,
+      generation: (await supervisor.getClient().messagePreflight()).generation,
+      client: supervisor.getClient(),
     })
-    const followUpRun = (supervisor as any).runs.get(result.run_id) as RunInfo
+    const resume = async (target: string, message: string) => messageTool(
+      { action: 'resume', target, message },
+      await makeProvider(),
+    )
 
-    expect(followUpRun.sessionId).toBe(originalRun.sessionId)
-    expect(followUpRun.agent).toBe('explore')
-    expect(followUpRun.backend).toBe('pi')
-    expect(followUpRun.dir).toBe('/tmp/original-repo')
-    expect(followUpRun.autoApprove).toBe(true)
-    await awaitSentinel(followUpRun.sentinelPath)
-    expect(await supervisor.getClient().status(followUpRun.runtimeId)).toMatchObject({
+    const result = await resume(originalRun.runId, 'continue')
+    const resumedRun = supervisor.getRunById(result.runId ?? '') as RunInfo
+
+    expect(resumedRun.sessionId).toBe(originalRun.sessionId)
+    expect(resumedRun.agent).toBe('explore')
+    expect(resumedRun.backend).toBe('pi')
+    expect(resumedRun.dir).toBe('/tmp/original-repo')
+    expect(resumedRun.autoApprove).toBe(true)
+    await awaitSentinel(resumedRun.sentinelPath)
+    if (process.env.AVENOR_REAL_INTEGRATION !== '1' && resumedRun.runtimeId) {
+      await supervisor.getClient().cancel(resumedRun.runtimeId)
+    }
+    expect(await supervisor.getClient().status(resumedRun.runtimeId)).toMatchObject({
       auto_approve: true,
     })
 
-    const chainedResult = await followUpTool({
-      runId: followUpRun.runId,
-      message: 'continue again',
-    })
-    const chainedRun = (supervisor as any).runs.get(chainedResult.run_id) as RunInfo
+    const chainedResult = await resume(resumedRun.runId, 'continue again')
+    const chainedRun = supervisor.getRunById(chainedResult.runId ?? '') as RunInfo
 
     expect(chainedRun.autoApprove).toBe(true)
     expect(await supervisor.getClient().status(chainedRun.runtimeId)).toMatchObject({
