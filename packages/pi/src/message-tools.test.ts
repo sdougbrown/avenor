@@ -248,6 +248,52 @@ describe('Pi host turn producer', () => {
     await expect(harness.eventHandlers.turn_end(turnEnd({ content: 'turn', stopReason: 'stop' }))).resolves.toBeUndefined()
     await harness.eventHandlers.session_shutdown({}, {})
   })
+
+  it('logs a closed control socket once and stops retrying until session_start', async () => {
+    const record = mock(async () => {
+      throw new Error('control socket is closed')
+    })
+    const errorLog = mock((_message?: unknown, ..._rest: unknown[]) => {})
+    const originalError = console.error
+    console.error = errorLog
+    const harness = await startHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
+    try {
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+      expect(record).toHaveBeenCalledTimes(1)
+      expect(errorLog).toHaveBeenCalledTimes(1)
+      // A closed socket is terminal: the next turn end is skipped without logging.
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+      expect(record).toHaveBeenCalledTimes(1)
+      expect(errorLog).toHaveBeenCalledTimes(1)
+      // A new session re-establishes the host providers: the next turn end retries.
+      await harness.eventHandlers.session_start({}, harness.ctx)
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
+      expect(record).toHaveBeenCalledTimes(2)
+      expect(errorLog).toHaveBeenCalledTimes(2)
+    } finally {
+      console.error = originalError
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('keeps retrying a transient session_last_set failure on every turn end', async () => {
+    const record = mock(async () => {
+      throw new Error('broker down')
+    })
+    const errorLog = mock((_message?: unknown, ..._rest: unknown[]) => {})
+    const originalError = console.error
+    console.error = errorLog
+    const harness = await startHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
+    try {
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+      expect(record).toHaveBeenCalledTimes(2)
+      expect(errorLog).toHaveBeenCalledTimes(2)
+    } finally {
+      console.error = originalError
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
 })
 
 describe('Pi resumed-run tracking', () => {

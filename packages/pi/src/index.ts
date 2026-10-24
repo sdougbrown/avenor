@@ -407,6 +407,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let pollingErrorCount = 0
     const pollingErrors: PollErrorPayload[] = []
     let lastStatusEntries: RunStatusEntry[] = []
+    // The host's last-turn publishing is terminal once its control socket is
+    // closed: the supervisor is gone or the provider was disposed. One log is
+    // enough; per-turn retries would only spam. Cleared when the host providers
+    // are re-established (session_start, or the redial after a generation
+    // mismatch).
+    let lastTurnSocketClosed = false
 
     // Registry of in-flight blocking waits (avenor_result, spawn with
     // wait=true). When any run reaches a stopping point — a terminal state, a
@@ -654,6 +660,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             // The cached providers carry the old generation, so a send through
             // them would be refused as not-sent; drop them and redial instead.
             disposeHostProviders()
+            // The redial re-establishes the host providers, so a last-turn
+            // record may succeed again.
+            lastTurnSocketClosed = false
             received = await receive()
           }
           if (generation !== hostPollGeneration) return
@@ -1385,12 +1394,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return hostMessageProvider(supervisorId)
     }
 
+    // The core client's refusal for a send on an already-closed socket.
+    function isClosedSocketError(error: unknown): boolean {
+      return error instanceof Error && error.message === 'control socket is closed'
+    }
+
     // The host's own last-turn producer. Every turn's end is recorded, including
     // cancelled and error turns; a run-level end is not a turn (DS-1). A child's
     // turn is recorded by the broker recorder, so child mode publishes nothing
     // from here.
     pi.on('turn_end', async event => {
       if (isSubAgentBrokerMode) return
+      // A closed control socket is terminal until the host providers are
+      // re-established: skip the attempt and stop the per-turn log spam.
+      if (lastTurnSocketClosed) return
       // Nobody can read a last-turn record while no supervisor exists, and
       // recording one must not start a supervisor (plus its broker) in a
       // session that never delegates.
@@ -1406,6 +1423,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           turn.text.length > bounded.length,
         )
       } catch (error) {
+        if (isClosedSocketError(error)) lastTurnSocketClosed = true
         console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
       }
     })
@@ -1413,6 +1431,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     pi.on('session_start', async (_event, ctx) => {
       sessionCtx = ctx
       lastStatusEntries = []
+      lastTurnSocketClosed = false
       pollingErrorCount = 0
       pollingErrors.length = 0
       if (!isSubAgentBrokerMode) startHostAskPoll()
