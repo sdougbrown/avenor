@@ -114,7 +114,10 @@ type LastAgentMessage struct {
 
 // RunState holds all per-run broker state.
 type RunState struct {
-	RunID               string
+	RunID string
+	// Token is the credential this run authenticates with. A replacement branch
+	// claim rotates it, so it is guarded by the broker's own mutex, not by Mu:
+	// read it through Broker.RunToken or Broker.runStateFor.
 	Token               string
 	ControlQueue        []*ControlMessage
 	RegisteredAt        time.Time
@@ -589,10 +592,8 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized: missing run_id or token", http.StatusUnauthorized)
 			return
 		}
-		b.mu.RLock()
-		st, ok := b.runs[cred.RunID]
-		b.mu.RUnlock()
-		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(st.Token)) != 1 {
+		want, ok := b.runToken(cred.RunID)
+		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(want)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -637,9 +638,10 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		st.RegisteredAt = time.Now()
 		st.LastSeen = time.Now()
 		st.Mu.Unlock()
+		respToken := st.Token
 		b.mu.Unlock()
 		resp := map[string]string{
-			"token":  st.Token,
+			"token":  respToken,
 			"run_id": st.RunID,
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -665,7 +667,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"token":  st.Token,
+		"token":  token,
 		"run_id": st.RunID,
 	})
 }
@@ -871,14 +873,12 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Validate that the authenticated caller matches from_run_id's token.
-	b.mu.RLock()
-	fromSt, ok := b.runs[fullBody.FromRunID]
-	b.mu.RUnlock()
+	fromSt, fromToken, ok := b.runStateFor(fullBody.FromRunID)
 	if !ok {
 		writeCodedError(w, http.StatusNotFound, "from run not found", "invalid-request")
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(fullBody.Token), []byte(fromSt.Token)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(fullBody.Token), []byte(fromToken)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -1596,16 +1596,29 @@ func (b *Broker) sessions() []SessionInfo {
 	return sessions
 }
 
-// RunToken reports the credential this broker authenticates runID with.
-func (b *Broker) RunToken(runID string) (string, bool) {
+// runStateFor reports runID's record and the credential it authenticates with,
+// both read under one lock. A replacement branch claim rotates the credential, so
+// a reader that dropped the broker mutex between the lookup and the comparison
+// would race the refresh and could authenticate against a credential that is
+// already gone.
+func (b *Broker) runStateFor(runID string) (*RunState, string, bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	st, ok := b.runs[runID]
 	if !ok {
-		return "", false
+		return nil, "", false
 	}
-	return st.Token, true
+	return st, st.Token, true
 }
+
+// runToken reports the credential this broker authenticates runID with.
+func (b *Broker) runToken(runID string) (string, bool) {
+	_, token, ok := b.runStateFor(runID)
+	return token, ok
+}
+
+// RunToken reports the credential this broker authenticates runID with.
+func (b *Broker) RunToken(runID string) (string, bool) { return b.runToken(runID) }
 
 // Sessions returns the runs this broker owns with the metadata its peers see.
 func (b *Broker) Sessions() []SessionInfo { return b.sessions() }
@@ -1779,9 +1792,10 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 	}
 	st := newRunState(runID, name)
 	b.runs[runID] = st
+	token := st.Token
 	b.mu.Unlock()
 	b.runSetChanged()
-	return st.Token, nil
+	return token, nil
 }
 
 // EnsureRun registers a new run under name if one does not already exist for
@@ -1791,14 +1805,16 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 	b.mu.Lock()
 	if st, exists := b.runs[runID]; exists {
+		token := st.Token
 		b.mu.Unlock()
-		return st.Token, false
+		return token, false
 	}
 	st := newRunState(runID, name)
 	b.runs[runID] = st
+	token := st.Token
 	b.mu.Unlock()
 	b.runSetChanged()
-	return st.Token, true
+	return token, true
 }
 
 // ownRun adopts a run a registered child broker owns, under the run ID this
@@ -1955,6 +1971,25 @@ func (b *Broker) DeleteRun(runID string) {
 	// addressed to it can never be answered.
 	b.store.RemoveRun(runID)
 	b.runSetChanged()
+}
+
+// DeleteRunIfToken removes a run from the broker only while it still
+// authenticates with token, and reports whether it did. A relay that could not
+// reach a branch retires the record it failed on, but a replacement branch may
+// have registered with a fresh credential while the refusal was in flight; that
+// record belongs to the healthy replacement and survives.
+func (b *Broker) DeleteRunIfToken(runID, token string) bool {
+	b.mu.Lock()
+	st, ok := b.runs[runID]
+	if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(st.Token)) != 1 {
+		b.mu.Unlock()
+		return false
+	}
+	delete(b.runs, runID)
+	b.mu.Unlock()
+	b.store.RemoveRun(runID)
+	b.runSetChanged()
+	return true
 }
 
 func (b *Broker) RunCount() int {
