@@ -31,7 +31,7 @@ func TestDelayedRefusalKeepsTheReplacementRouted(t *testing.T) {
 	}))
 	t.Cleanup(replacement.Close)
 
-	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "token-old")
+	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
 	if !parent.link.Registry().Owns("target") {
 		t.Fatal("the parent never adopted the run the fake branch claimed")
 	}
@@ -39,7 +39,7 @@ func TestDelayedRefusalKeepsTheReplacementRouted(t *testing.T) {
 	// One ask is relayed to the endpoint the branch registered first, and that
 	// endpoint holds the refusal until the replacement has registered.
 	refusal := relayAsk(t, parent, "target", stale)
-	registerDescendant(t, parent, "branch-delta", replacement.URL, "gen-new", "token-new")
+	registerDescendant(t, parent, "branch-delta", replacement.URL, "gen-new", "target", "token-new")
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
@@ -81,11 +81,11 @@ func TestDelayedRefusalKeepsARestartedRunsCredential(t *testing.T) {
 	parent := startBranch(t, "", "orchestrator")
 	stale := newBlockingEndpoint(t)
 
-	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "token-old")
+	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
 	refusal := relayAsk(t, parent, "target", stale)
 	// The same branch instance, the same endpoint and generation, a new credential:
 	// this is one run restarting inside a live branch.
-	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "token-new")
+	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-new")
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
@@ -113,6 +113,45 @@ func TestDelayedRefusalKeepsARestartedRunsCredential(t *testing.T) {
 	case <-stale.relayed:
 	case <-time.After(awaitDeadline):
 		t.Fatal("the restarted run's branch never received an ask")
+	}
+}
+
+// TestOneGenerationRefusalRetiresTheWholeClaim pins the branch half of the
+// retirement rule: a generation refusal is a verdict about the registration, not
+// about one run, so one refusal retires every claim the registration carried —
+// without costing one failing hop per run the branch owns. The refusal still
+// names the registration it failed on: a claim the relay no longer resolves to is
+// left alone, which the replacement and restarted-run tests above pin.
+func TestOneGenerationRefusalRetiresTheWholeClaim(t *testing.T) {
+	parent := startBranch(t, "", "orchestrator")
+	stale := newBlockingEndpoint(t)
+
+	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old",
+		"target", "token-a", "second", "token-b")
+	if !parent.link.Registry().Owns("second") {
+		t.Fatal("the parent never adopted the second run the branch claimed")
+	}
+
+	refusal := relayAsk(t, parent, "target", stale)
+	stale.release()
+	expectRefusedAsk(t, <-refusal)
+
+	for _, runID := range []string{"target", "second"} {
+		if parent.link.Registry().Owns(runID) {
+			t.Fatalf("the generation refusal left run %q claimed by a registration it refused", runID)
+		}
+		if st := parent.broker.GetRun(runID); st != nil {
+			t.Fatalf("the generation refusal left run %q served locally", runID)
+		}
+	}
+
+	// The runs are claimable again once the branch re-registers.
+	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-new",
+		"target", "token-a2", "second", "token-b2")
+	for _, runID := range []string{"target", "second"} {
+		if !parent.link.Registry().Owns(runID) {
+			t.Fatalf("run %q was not claimable after the branch re-registered", runID)
+		}
 	}
 }
 
@@ -196,15 +235,23 @@ func (e *blockingEndpoint) url() string { return e.server.URL }
 
 func (e *blockingEndpoint) release() { close(e.released) }
 
-// registerDescendant claims one run for a child broker the way a branch's link
-// publishes its run set, so a test can register an endpoint it controls.
-func registerDescendant(t *testing.T, parent *branch, childID, endpoint, generation, token string) {
+// registerDescendant claims runs for a child broker the way a branch's link
+// publishes its run set, so a test can register an endpoint it controls. Each
+// run is a run ID followed by the credential the branch hands the parent for it.
+func registerDescendant(t *testing.T, parent *branch, childID, endpoint, generation string, runs ...string) {
 	t.Helper()
+	if len(runs)%2 != 0 {
+		t.Fatalf("register descendant needs a run ID and token per run, got %d arguments", len(runs))
+	}
+	claims := make([]map[string]string, 0, len(runs)/2)
+	for i := 0; i < len(runs); i += 2 {
+		claims = append(claims, map[string]string{"run_id": runs[i], "label": runs[i], "token": runs[i+1]})
+	}
 	raw, err := json.Marshal(map[string]any{
 		"child_id":   childID,
 		"endpoint":   endpoint,
 		"generation": generation,
-		"runs":       []map[string]string{{"run_id": "target", "label": "target", "token": token}},
+		"runs":       claims,
 	})
 	if err != nil {
 		t.Fatalf("marshal registration: %v", err)

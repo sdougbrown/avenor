@@ -226,6 +226,39 @@ func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 	return true
 }
 
+// ForgetChildIfStale drops every claim one child broker holds — its whole
+// registration — and reports the run keys it retired with the credential each
+// claim was registered with. It applies only while the registration is still the
+// one the failed relay was posted against: the child's endpoint and pinned
+// generation must resolve to the hop, and the claim the relay failed on must
+// still carry the run ID and credential that hop named. A generation refusal is
+// a verdict about the branch, not about one run — the child answered that it no
+// longer carries the generation its registration pinned, so every claim of that
+// registration is equally stale and one refusal retires them together instead of
+// costing one doomed hop per run. A registration a replacement refreshed while
+// the refusal was in flight resolves to a different endpoint or generation, and
+// a run that restarted inside a live branch rotated its credential; either way
+// the failed claim no longer matches and nothing of the registration is touched.
+func (r *Registry) ForgetChildIfStale(childID, failed string, hop Hop) map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.children[childID]
+	if !ok ||
+		current.endpoint != hop.Endpoint ||
+		current.generation != hop.Generation ||
+		current.runs[failed] != hop.RunID ||
+		current.tokens[failed] != hop.Token {
+		return nil
+	}
+	delete(r.children, childID)
+	retired := make(map[string]string, len(current.runs))
+	for key := range current.runs {
+		delete(r.owners, key)
+		retired[key] = current.tokens[key]
+	}
+	return retired
+}
+
 // Owns reports whether runID belongs to a registered child broker.
 func (r *Registry) Owns(runID string) bool {
 	r.mu.RLock()
