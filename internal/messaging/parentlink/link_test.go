@@ -289,6 +289,83 @@ func TestLinkSendClassifiesAFailedTransmission(t *testing.T) {
 	}
 }
 
+// TestLinkRecordsTheHopWhenTheParentAnswersPossiblyPending pins the uncertain
+// verdict the parent can send: a 500 that carries the possibly-pending outcome
+// says the ask's fate is unknown, so the hop is recorded and a later wait
+// follows the parent edge instead of this branch's empty store.
+func TestLinkRecordsTheHopWhenTheParentAnswersPossiblyPending(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSend:
+			return http.StatusInternalServerError, `{"outcome":"possibly-pending"}`
+		case pathWait:
+			return http.StatusOK, `{"outcome":"replied","message_id":"msg-1","from_run_id":"run-b",` +
+				`"sender":"bob","kind":"agent_message","payload":{"message":"pong"}}`
+		}
+		return http.StatusOK, `{}`
+	})
+	ctx := testContext(t)
+	link := newTestLink(t, stub, "gen-a")
+
+	sent, err := link.Send(ctx, askRequest("msg-1"))
+	if sent.Outcome != messaging.OutcomePossiblyPending {
+		t.Fatalf("Send outcome = %q, want %q", sent.Outcome, messaging.OutcomePossiblyPending)
+	}
+	if err != nil {
+		t.Fatalf("Send error = %v, want no error beside the outcome", err)
+	}
+
+	// The hop is recorded, so the wait reaches the parent edge.
+	waited, err := link.Wait(ctx, waitRequest("msg-1"))
+	if err != nil {
+		t.Fatalf("Wait error = %v, want no error", err)
+	}
+	if waited.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Wait outcome = %q, want the parent edge to answer %q", waited.Outcome, messaging.OutcomeReplied)
+	}
+	if stub.countPath(pathWait) != 1 {
+		t.Fatalf("the parent saw %d waits, want the recorded hop to carry it", stub.countPath(pathWait))
+	}
+}
+
+// TestLinkKeepsANoReplySendOffTheRouteLedger pins the tell's bookkeeping: a
+// NoReply send owns no reply edge, so even a transmission that failed after it
+// left records no hop and a wait reports the edge absent without asking the
+// parent.
+func TestLinkKeepsANoReplySendOffTheRouteLedger(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSend:
+			return -1, ""
+		}
+		return http.StatusOK, `{}`
+	})
+	ctx := testContext(t)
+	link := newTestLink(t, stub, "gen-a")
+
+	tell := askRequest("msg-tell")
+	tell.NoReply = true
+	sent, err := link.Send(ctx, tell)
+	if !errors.Is(err, ErrParentUnavailable) {
+		t.Fatalf("Send error = %v, want ErrParentUnavailable", err)
+	}
+	if sent.Outcome != messaging.OutcomePossiblyPending {
+		t.Fatalf("Send outcome = %q, want %q", sent.Outcome, messaging.OutcomePossiblyPending)
+	}
+
+	waited, err := link.Wait(ctx, waitRequest("msg-tell"))
+	if waited.Outcome != messaging.OutcomeEdgeAbsent || err != nil {
+		t.Fatalf("Wait = (%+v, %v), want the edge absent", waited, err)
+	}
+	if stub.countPath(pathWait) != 0 {
+		t.Fatal("a wait behind a NoReply send reached the parent")
+	}
+}
+
 // TestLinkPeersSyncsBeforeItLists pins the listing's recovery: a Peers call
 // before the first successful registration syncs this branch's claim once and
 // then lists, instead of answering a silent empty list.
