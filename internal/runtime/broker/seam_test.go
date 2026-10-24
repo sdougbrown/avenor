@@ -518,7 +518,7 @@ func TestStoreOnlyTransportAndLocalMessengerAgree(t *testing.T) {
 	gen := b.Store().Generation()
 	now := time.Now().UTC()
 
-	outcomes := func(t *testing.T, ask string) [3]messaging.Outcome {
+	outcomes := func(t *testing.T, ask string) ([3]messaging.Outcome, string) {
 		t.Helper()
 		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
 		if err != nil {
@@ -543,10 +543,14 @@ func TestStoreOnlyTransportAndLocalMessengerAgree(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s wait: %v", ask, err)
 		}
-		return [3]messaging.Outcome{sent.Outcome, replied.Outcome, waited.Outcome}
+		payload := ""
+		if waited.Reply != nil {
+			payload = string(waited.Reply.Payload)
+		}
+		return [3]messaging.Outcome{sent.Outcome, replied.Outcome, waited.Outcome}, payload
 	}
 
-	seamOutcomes := func(t *testing.T, ask string) [3]messaging.Outcome {
+	seamOutcomes := func(t *testing.T, ask string) ([3]messaging.Outcome, string) {
 		t.Helper()
 		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
 		if err != nil {
@@ -571,13 +575,23 @@ func TestStoreOnlyTransportAndLocalMessengerAgree(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s wait: %v", ask, err)
 		}
-		return [3]messaging.Outcome{sent.Outcome, replied, waited.Outcome}
+		payload := ""
+		if waited.Reply != nil {
+			payload = string(waited.Reply.Payload)
+		}
+		return [3]messaging.Outcome{sent.Outcome, replied, waited.Outcome}, payload
 	}
 
-	fromStore := outcomes(t, "store-only")
-	fromSeam := seamOutcomes(t, "local messenger")
+	fromStore, storePayload := outcomes(t, "store-only")
+	fromSeam, seamPayload := seamOutcomes(t, "local messenger")
 	if fromStore != fromSeam {
 		t.Fatalf("store-only outcomes = %v, local messenger outcomes = %v, want the same", fromStore, fromSeam)
+	}
+	if storePayload != seamPayload {
+		t.Fatalf("store-only payload = %q, local messenger payload = %q, want the same", storePayload, seamPayload)
+	}
+	if storePayload != `{"message":"pong"}` {
+		t.Fatalf("reply payload = %q, want the reply body the caller sent", storePayload)
 	}
 	if fromStore[0] != messaging.OutcomeSent || fromStore[1] != messaging.OutcomeReplied ||
 		fromStore[2] != messaging.OutcomeReplied {
