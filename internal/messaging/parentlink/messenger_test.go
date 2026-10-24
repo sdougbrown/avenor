@@ -143,6 +143,49 @@ func TestMessengerReachableFollowsTheParent(t *testing.T) {
 	}
 }
 
+// TestMessengerForwardsAReplyWhenTheLocalEdgeIsAbsent pins the reply's
+// upward fallback: a reply to an ask no local edge owns follows the relay
+// route it arrived on, so the asker in the ancestor branch sees its edge
+// complete.
+func TestMessengerForwardsAReplyWhenTheLocalEdgeIsAbsent(t *testing.T) {
+	parent := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSend:
+			return http.StatusOK, `{"outcome":"replied"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	local := newStubMessenger()
+	messenger := newTestMessenger(t, local, parent)
+	ctx := testContext(t)
+	if err := messenger.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := messenger.RecordRelay(messaging.RelayRoute{
+		MessageID:      "msg-1",
+		AskerRunID:     "run-x",
+		EdgeGeneration: "gen-a",
+	}); err != nil {
+		t.Fatalf("RecordRelay: %v", err)
+	}
+
+	outcome, err := messenger.Reply(ctx, messaging.ReplyRequest{
+		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
+		ToRunID:   "run-x",
+		MessageID: "msg-1",
+		Body:      `{"message":"pong"}`,
+	})
+	if err != nil || outcome != messaging.OutcomeReplied {
+		t.Fatalf("Reply = (%q, %v), want the relayed edge completed", outcome, err)
+	}
+	forwarded := parent.lastRequest(t, pathSend)
+	if forwarded.Body["reply_to"] != "msg-1" {
+		t.Fatalf("forwarded reply = %v, want a reply to the relayed ask", forwarded.Body)
+	}
+}
+
 // TestMessengerPeersJoinsTheParentsIncompleteListing pins the join at the
 // messenger: a parent listing that failed still contributes the peers it
 // reached, and the failure is joined onto the listing's error.
