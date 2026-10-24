@@ -60,6 +60,35 @@ func TestMessengerWithdrawsTheEdgeWhenTheRelayFails(t *testing.T) {
 	}
 }
 
+// TestMessengerRegisterRefusesARunThisBrokerOwns pins the claim guard's
+// other half: a descendant may not claim a run the local ask store serves,
+// so the registration is refused with nothing applied instead of routing
+// locally owned runs into the child's queue.
+func TestMessengerRegisterRefusesARunThisBrokerOwns(t *testing.T) {
+	local := newStubMessenger()
+	local.reachable["run-local"] = true
+	messenger := newTestMessenger(t, local, nil)
+
+	claim, err := messenger.Register(messaging.DescendantRegistration{
+		ChildID:    "child-one",
+		Endpoint:   "http://child-one",
+		Generation: "gen-a",
+		Runs: []messaging.RunClaim{
+			{RunID: "run-local", Token: "tok-l"},
+			{RunID: "run-child", Token: "tok-c"},
+		},
+	})
+	if !errors.Is(err, ErrRunLocallyOwned) {
+		t.Fatalf("Register error = %v, want ErrRunLocallyOwned", err)
+	}
+	if claim.Adopted != nil || claim.Retired != nil {
+		t.Fatalf("Register claim = %+v, want nothing applied", claim)
+	}
+	if messenger.Owns("run-child") {
+		t.Fatal("the refused registration left a claim behind")
+	}
+}
+
 // TestMessengerRoutesALocalTargetLocally pins the routing rule: a target this
 // broker can answer stays here, so nothing reaches the parent.
 func TestMessengerRoutesALocalTargetLocally(t *testing.T) {
