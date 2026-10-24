@@ -2,7 +2,6 @@ package broker
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -385,7 +384,7 @@ func TestLastAgentMessageReportsCurrentLabelAfterRename(t *testing.T) {
 func renameRequestWithCaller(t *testing.T, caller, body string) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/rename", strings.NewReader(body))
-	return req.WithContext(context.WithValue(req.Context(), authenticatedCallerKey{}, caller))
+	return req.WithContext(messaging.WithCallerRun(req.Context(), caller))
 }
 
 func TestRenameEndpointRefusesAnotherRunsRunID(t *testing.T) {

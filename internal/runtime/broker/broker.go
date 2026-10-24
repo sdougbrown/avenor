@@ -516,12 +516,11 @@ func (b *Broker) withMethod(method string, next http.HandlerFunc) http.HandlerFu
 	}
 }
 
-// authenticatedCallerKey carries the run ID withAuth verified into a handler,
-// so a handler never has to trust the request body for the caller's identity.
-type authenticatedCallerKey struct{}
-
+// authenticatedCaller reports the run ID withAuth verified, which travels on
+// the messaging leaf's caller-run key so a handler never has to trust the
+// request body for the caller's identity and one key serves every reader.
 func authenticatedCaller(r *http.Request) string {
-	caller, _ := r.Context().Value(authenticatedCallerKey{}).(string)
+	caller, _ := messaging.CallerRun(r.Context())
 	return caller
 }
 
@@ -589,11 +588,9 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		ctx := context.WithValue(r.Context(), authenticatedCallerKey{}, cred.RunID)
-		// The peer export a parent-aware messenger performs is narrowed to what
-		// the authenticated caller may see, so it travels on a key the messaging
-		// leaf owns instead of the router's own.
-		ctx = messaging.WithCallerRun(ctx, cred.RunID)
+		// The authenticated run travels on the messaging leaf's caller-run key,
+		// the one key the peer export and the router's own handlers read.
+		ctx := messaging.WithCallerRun(r.Context(), cred.RunID)
 		next(w, r.WithContext(ctx))
 	}
 }
