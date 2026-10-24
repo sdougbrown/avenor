@@ -394,10 +394,6 @@ func (b *Broker) runSetChanged() {
 	}
 }
 
-// SetAskRoute installs an ask-only seam: ask operations delegate to route and
-// every other publication stays local. It is the composition a host that owns
-// a parent link builds on through SetMessenger.
-
 // RenameHandler is the authority a rename delegates to. It persists the name
 // and returns the resolved run and the label before and after the write. The
 // broker installs one only when a supervisor owns it; a broker without one
@@ -1411,6 +1407,8 @@ func incompletePeerListing(unreadable int) string {
 	if unreadable == 0 {
 		return messaging.IncompletePeerListing
 	}
+	return fmt.Sprintf("%s: %s", messaging.IncompletePeerListing, messaging.UnreadablePeerRecordsDetail(unreadable))
+}
 	return fmt.Sprintf("%s: %s", messaging.IncompletePeerListing, messaging.UnreadablePeerRecordsDetail(unreadable))
 }
 // --- parent link ---
