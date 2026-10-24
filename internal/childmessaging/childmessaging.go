@@ -129,14 +129,7 @@ func (p *MessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerReco
 		Sender:     messaging.Identity{RunID: p.opts.RunID},
 		Generation: p.Generation(),
 	})
-	records, decodeErr := messaging.DecodePeerRecords(peers.Peers)
-	if decodeErr != nil {
-		return nil, decodeErr
-	}
-	if err != nil && len(peers.Peers) == 0 {
-		return nil, err
-	}
-	return records, err
+	return messaging.PeerListing(peers.Peers, err)
 }
 
 // Resolve is the child ladder: the run's own id, then a runtime id, then an

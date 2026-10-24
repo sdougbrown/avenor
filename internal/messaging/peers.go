@@ -31,6 +31,23 @@ func DecodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 	return records, nil
 }
 
+// PeerListing decodes a peer listing a transport read. A transport that could
+// not read every peer returns the peers it did read together with an error:
+// those peers are decoded and kept, and the error travels with them, so a
+// caller answers for a peer it can see and refuses to answer for a peer it
+// cannot. A listing that could not be read at all returns no peers and the
+// error alone.
+func PeerListing(peers []Peer, err error) ([]PeerRecord, error) {
+	records, decodeErr := DecodePeerRecords(peers)
+	if decodeErr != nil {
+		return nil, decodeErr
+	}
+	if err != nil && len(peers) == 0 {
+		return nil, err
+	}
+	return records, err
+}
+
 // LabelCandidates collects the run ids in records whose broker label equals
 // ref, in the records' order (the broker listing order), together with the
 // matched label. Both resolution planes switch on the candidate count with
