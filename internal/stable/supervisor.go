@@ -1969,7 +1969,7 @@ func (s *Supervisor) installParentLink() {
 	options := parentlink.Options{
 		ParentURL:  s.config.BrokerParentURL,
 		Token:      s.config.BrokerParentToken,
-		Endpoint:   "http://" + s.broker.Addr(),
+		Endpoint:   s.brokerURL(),
 		Generation: s.broker.Store().Generation,
 		Runs:       s.parentRunClaims,
 	}
@@ -1979,9 +1979,9 @@ func (s *Supervisor) installParentLink() {
 		return
 	}
 	s.parentLink = link
+	s.broker.SetMessenger(link)
 	s.broker.SetParentLink(link)
 	s.broker.SetParentLinkToken(s.config.BrokerParentToken)
-	s.broker.SetMessenger(link)
 	s.broker.SetRunObserver(link.RunChanged)
 	if options.ParentURL == "" {
 		return
