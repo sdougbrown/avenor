@@ -855,12 +855,16 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 
 		target := fullBody.ToRunID
 
-		if !b.seam().Reachable(target) {
+		// One request reaches one seam, so a messenger installed while the
+		// request is in flight cannot answer the reachability check with one
+		// implementation and admit the ask with another.
+		seam := b.seam()
+		if !seam.Reachable(target) {
 			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 			return
 		}
 
-		res, err := b.seam().Send(r.Context(), messaging.SendRequest{
+		res, err := seam.Send(r.Context(), messaging.SendRequest{
 			From:       messaging.Identity{RunID: fullBody.FromRunID, Sender: senderName},
 			To:         messaging.Identity{RunID: target, Sender: target},
 			MessageID:  msgID,
@@ -893,7 +897,8 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		// this layer can do because it owns the queues. The reply carries no
 		// generation, so the messenger looks the edge up in the store's current
 		// generation.
-		outcome, err := b.seam().Reply(r.Context(), messaging.ReplyRequest{
+		seam := b.seam()
+		outcome, err := seam.Reply(r.Context(), messaging.ReplyRequest{
 			From:          messaging.Identity{RunID: fullBody.FromRunID},
 			ToRunID:       fullBody.ToRunID,
 			MessageID:     replyTo,
@@ -911,7 +916,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		if outcome == messaging.OutcomeEdgeAbsent {
 			// No live edge owns this ID, so the reply degrades to a delivery
 			// rather than completing an edge the store already retired.
-			err = b.seam().Deliver(r.Context(), messaging.DeliverRequest{
+			err = seam.Deliver(r.Context(), messaging.DeliverRequest{
 				FromRunID: fullBody.FromRunID,
 				ToRunID:   fullBody.ToRunID,
 				Kind:      fullBody.Type,
