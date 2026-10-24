@@ -13,7 +13,10 @@ import (
 
 // Transport is the in-process messaging transport.
 type Transport struct {
-	store    *askstore.Store
+	store *askstore.Store
+	// resolve names the messenger ask, reply and peer operations delegate to.
+	// It is nil when the transport serves them from the store alone.
+	resolve  func() messaging.Messenger
 	ctx      context.Context
 	cancel   context.CancelFunc
 	inflight sync.WaitGroup
@@ -21,10 +24,30 @@ type Transport struct {
 	closed   bool
 }
 
-// New builds a transport over store.
+// New builds a transport that serves messaging from store alone.
 func New(store *askstore.Store) messaging.Transport {
+	return newTransport(store, nil)
+}
+
+// NewRouted builds a transport over store whose ask, reply and peer operations
+// delegate to the messenger resolve returns. Resolution happens per call, so a
+// transport built before its host installs a messenger still reaches it.
+func NewRouted(store *askstore.Store, resolve func() messaging.Messenger) messaging.Transport {
+	return newTransport(store, resolve)
+}
+
+func newTransport(store *askstore.Store, resolve func() messaging.Messenger) messaging.Transport {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Transport{store: store, ctx: ctx, cancel: cancel}
+	return &Transport{store: store, resolve: resolve, ctx: ctx, cancel: cancel}
+}
+
+// messenger returns the installed messenger, or nil when the transport serves
+// messaging from the store alone.
+func (t *Transport) messenger() messaging.Messenger {
+	if t.resolve == nil {
+		return nil
+	}
+	return t.resolve()
 }
 
 func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
@@ -36,6 +59,10 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: req.Generation}, messaging.ErrTransportClosed
 	}
 	defer cancel()
+	if m := t.messenger(); m != nil {
+		res, err := m.Send(child, req, false)
+		return sendResult(res, err), err
+	}
 	res, err := t.store.Admit(child, askstore.AdmitRequest{
 		Sender:     req.From,
 		Target:     req.To.RunID,
@@ -44,12 +71,17 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		Body:       req.Body,
 		NoReply:    req.NoReply,
 	})
-	out := messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}
-	if err != nil && !messaging.IsSendOutcome(out.Outcome) {
-		// A terminal fence reports its own outcome, which a send cannot carry.
-		out.Outcome = messaging.OutcomeNotSent
-	}
+	out := sendResult(messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err)
 	return out, err
+}
+
+// sendResult keeps the verdict a send already reached. Only a fence outcome a
+// send cannot carry is re-reported as not-sent.
+func sendResult(res messaging.SendResult, err error) messaging.SendResult {
+	if err != nil && !messaging.IsSendOutcome(res.Outcome) {
+		res.Outcome = messaging.OutcomeNotSent
+	}
+	return res
 }
 
 func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
@@ -61,6 +93,10 @@ func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messag
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
 	}
 	defer cancel()
+	if m := t.messenger(); m != nil {
+		res, err := m.Wait(child, req)
+		return waitResult(res, err, t.isClosed())
+	}
 	res, err := t.store.Wait(child, t.key(req.Sender, req.MessageID, req.Generation), req.Timeout)
 	return waitResult(res, err, t.isClosed())
 }
@@ -79,6 +115,10 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 	if t.isClosed() {
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID}, messaging.ErrTransportClosed
 	}
+	if m := t.messenger(); m != nil {
+		outcome, err := m.Reply(ctx, req)
+		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
+	}
 	outcome, err := t.store.Reply(
 		t.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, t.store.Generation()),
 		req.From.RunID,
@@ -90,6 +130,9 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 func (t *Transport) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	if err := t.open(req.Generation); err != nil {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
+	}
+	if m := t.messenger(); m != nil {
+		return m.Withdraw(ctx, req)
 	}
 	return t.store.Withdraw(t.key(req.Sender, req.MessageID, req.Generation))
 }
@@ -105,6 +148,10 @@ func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (
 func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	if err := t.open(req.Generation); err != nil {
 		return messaging.PeersResult{}, err
+	}
+	if m := t.messenger(); m != nil {
+		peers, err := m.Peers(ctx)
+		return messaging.PeersResult{Peers: peers, Generation: t.store.Generation()}, err
 	}
 	peers, err := t.store.Peers()
 	return messaging.PeersResult{Peers: peers, Generation: t.store.Generation()}, err
