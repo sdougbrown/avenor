@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -115,22 +116,28 @@ func TestTransportCloseUnblocksWait(t *testing.T) {
 	}
 }
 
-// blockingMessenger implements only the delegated operations, each of which
-// reports that it started and then waits for the context the transport hands
-// it. A shutdown-cancelled call returns that context's error, so a test can
-// prove the transport cancels and joins it instead of abandoning it.
+// blockingMessenger holds cleanup after observing shutdown cancellation.
 type blockingMessenger struct {
 	messaging.Messenger
-	entered chan struct{}
+	entered        chan struct{}
+	canceled       chan struct{}
+	releaseCleanup chan struct{}
 }
 
 func (m blockingMessenger) block(ctx context.Context) error {
-	select {
-	case m.entered <- struct{}{}:
-	default:
-	}
+	m.entered <- struct{}{}
 	<-ctx.Done()
+	close(m.canceled)
+	<-m.releaseCleanup
 	return ctx.Err()
+}
+
+func (m blockingMessenger) Send(ctx context.Context, _ messaging.SendRequest, _ bool) (messaging.SendResult, error) {
+	return messaging.SendResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
+}
+
+func (m blockingMessenger) Wait(ctx context.Context, _ messaging.WaitRequest) (messaging.WaitResult, error) {
+	return messaging.WaitResult{Outcome: messaging.OutcomeEdgeAbsent}, m.block(ctx)
 }
 
 func (m blockingMessenger) Reply(ctx context.Context, _ messaging.ReplyRequest) (messaging.Outcome, error) {
@@ -163,6 +170,26 @@ func TestDelegatedOperationsJoinClose(t *testing.T) {
 		call          func(context.Context, messaging.Transport) (messaging.Outcome, error)
 	}{
 		{
+			name:          "send",
+			closedOutcome: messaging.OutcomeNotSent,
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				res, err := tr.Send(ctx, messaging.SendRequest{
+					From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{}`,
+				})
+				return res.Outcome, err
+			},
+		},
+		{
+			name:          "wait",
+			closedOutcome: messaging.OutcomeEdgeAbsent,
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				res, err := tr.Wait(ctx, messaging.WaitRequest{
+					Sender: alice, MessageID: msgID, Generation: gen, Timeout: time.Minute,
+				})
+				return res.Outcome, err
+			},
+		},
+		{
 			name:          "reply",
 			closedOutcome: messaging.OutcomeNotSent,
 			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
@@ -192,52 +219,115 @@ func TestDelegatedOperationsJoinClose(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			entered := make(chan struct{}, 1)
-			tr := NewRouted(store, func() messaging.Messenger {
-				return blockingMessenger{entered: entered}
-			})
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			synctest.Test(t, func(t *testing.T) {
+				entered := make(chan struct{}, 1)
+				canceled := make(chan struct{})
+				releaseCleanup := make(chan struct{})
+				defer func() {
+					if releaseCleanup != nil {
+						close(releaseCleanup)
+					}
+				}()
+				tr := NewRouted(store, func() messaging.Messenger {
+					return blockingMessenger{entered: entered, canceled: canceled, releaseCleanup: releaseCleanup}
+				})
+				called := make(chan opOutcome, 1)
+				go func() {
+					outcome, err := tc.call(context.Background(), tr)
+					called <- opOutcome{outcome: outcome, err: err}
+				}()
+				<-entered
 
-			called := make(chan opOutcome, 1)
-			go func() {
-				outcome, err := tc.call(ctx, tr)
-				called <- opOutcome{outcome: outcome, err: err}
-			}()
-			select {
-			case <-entered:
-			case <-time.After(2 * time.Second):
-				t.Fatal("delegated call never reached the messenger")
-			}
+				closed := make(chan error, 1)
+				go func() { closed <- tr.Close() }()
+				<-canceled
+				synctest.Wait()
+				select {
+				case err := <-closed:
+					t.Fatalf("Close returned before delegated cleanup finished: %v", err)
+				default:
+				}
+				assertRefused := func() {
+					t.Helper()
+					outcome, err := tc.call(context.Background(), tr)
+					if !errors.Is(err, messaging.ErrTransportClosed) || outcome != tc.closedOutcome {
+						t.Fatalf("%s after shutdown = (%q, %v), want (%q, ErrTransportClosed)", tc.name, outcome, err, tc.closedOutcome)
+					}
+					select {
+					case <-entered:
+						t.Fatal("delegated method started after shutdown")
+					default:
+					}
+				}
+				assertRefused()
+				closedAgain := make(chan error, 1)
+				go func() { closedAgain <- tr.Close() }()
+				synctest.Wait()
+				select {
+				case err := <-closedAgain:
+					t.Fatalf("concurrent Close returned before delegated cleanup finished: %v", err)
+				default:
+				}
 
-			closed := make(chan error, 1)
-			go func() { closed <- tr.Close() }()
-			select {
-			case err := <-closed:
-				if err != nil {
+				close(releaseCleanup)
+				releaseCleanup = nil
+				if err := <-closed; err != nil {
 					t.Fatalf("Close: %v", err)
 				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("Close did not join the delegated call")
-			}
-			select {
-			case out := <-called:
-				if !errors.Is(out.err, context.Canceled) {
-					t.Fatalf("delegated %s error = %v, want the shutdown cancellation", tc.name, out.err)
+				if err := <-closedAgain; err != nil {
+					t.Fatalf("concurrent Close: %v", err)
 				}
-			case <-time.After(2 * time.Second):
-				t.Fatalf("delegated %s did not unblock on Close", tc.name)
-			}
-
-			outcome, err := tc.call(context.Background(), tr)
-			if !errors.Is(err, messaging.ErrTransportClosed) {
-				t.Fatalf("%s after Close = (%q, %v), want ErrTransportClosed", tc.name, outcome, err)
-			}
-			if tc.closedOutcome != "" && outcome != tc.closedOutcome {
-				t.Fatalf("%s after Close outcome = %q, want %q", tc.name, outcome, tc.closedOutcome)
-			}
+				if out := <-called; !errors.Is(out.err, context.Canceled) {
+					t.Fatalf("delegated %s error = %v, want shutdown cancellation", tc.name, out.err)
+				}
+				assertRefused()
+			})
 		})
 	}
+}
+
+func TestRoutedResolutionJoinsClose(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store, _ := messagetest.NewMemoryStore(t)
+		entered := make(chan error, 1)
+		release := make(chan struct{})
+		defer func() {
+			if release != nil {
+				close(release)
+			}
+		}()
+		var tr messaging.Transport
+		tr = NewRouted(store, func() messaging.Messenger {
+			_, err := tr.Preflight(context.Background())
+			entered <- err
+			<-release
+			return nil
+		})
+		called := make(chan error, 1)
+		go func() {
+			_, err := tr.Peers(context.Background(), messaging.PeersRequest{Generation: store.Generation()})
+			called <- err
+		}()
+		if err := <-entered; err != nil {
+			t.Fatalf("resolver's local Preflight: %v", err)
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- tr.Close() }()
+		synctest.Wait()
+		select {
+		case err := <-closed:
+			t.Fatalf("Close returned before admitted resolution finished: %v", err)
+		default:
+		}
+		close(release)
+		release = nil
+		if err := <-closed; err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if err := <-called; err != nil {
+			t.Fatalf("Peers: %v", err)
+		}
+	})
 }
 
 // TestAskEpochLost pins the confirmed-generation-loss path: a replaced

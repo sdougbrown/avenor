@@ -307,15 +307,25 @@ func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preflight: %v", err)
 	}
+	if pre.Generation == "" || pre.Generation != b.Store().Generation() {
+		t.Fatalf("preflight generation = %q, want %q", pre.Generation, b.Store().Generation())
+	}
 	listed, err := child.Peers(ctx, messaging.PeersRequest{
 		Sender:     messaging.Identity{RunID: "sender"},
 		Generation: pre.Generation,
 	})
-	if err == nil {
-		t.Fatalf("peers = %+v, want the failed listing reported", listed.Peers)
+	if !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("peers = (%+v, %v), want ErrTargetUnavailable for the incomplete listing", listed, err)
 	}
-	if len(listed.Peers) != 0 {
-		t.Fatalf("peers = %+v, want no peers from a failed listing", listed.Peers)
+	if listed.Generation != pre.Generation {
+		t.Fatalf("peers generation = %q, want %q", listed.Generation, pre.Generation)
+	}
+	if len(listed.Peers) != 1 || listed.Peers[0].RunID != "only-peer" {
+		t.Fatalf("peers = %+v, want the retained partial peer", listed.Peers)
+	}
+	var record messaging.PeerRecord
+	if err := json.Unmarshal(listed.Peers[0].Session, &record); err != nil || record.RunID != "only-peer" {
+		t.Fatalf("partial peer session = %s (%v), want only-peer", listed.Peers[0].Session, err)
 	}
 }
 

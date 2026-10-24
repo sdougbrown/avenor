@@ -177,15 +177,13 @@ func (t *Transport) Preflight(ctx context.Context) (messaging.PreflightResult, e
 }
 
 // Close releases client-side resources, unblocks in-flight waits with a
-// possibly-pending outcome and joins its goroutines.
+// possibly-pending outcome and joins its watchers and admitted routed calls.
 func (t *Transport) Close() error {
 	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return nil
+	if !t.closed {
+		t.closed = true
+		t.cancel()
 	}
-	t.closed = true
-	t.cancel()
 	t.mu.Unlock()
 	t.inflight.Wait()
 	return nil
@@ -207,16 +205,21 @@ func (t *Transport) open(generation string) error {
 	return nil
 }
 
-// child returns a context cancelled by either ctx or transport shutdown, and
-// registers the watcher so Close can join it. Registration happens under the
-// transport lock, so Close can never observe an unregistered in-flight call.
-func (t *Transport) child(ctx context.Context) (context.Context, context.CancelFunc, bool) {
+// child admits a context watcher and, for routed transports, the entire call.
+// Its completion function must be deferred by the caller. Admission precedes
+// messenger resolution and is locked against Close; resolution runs unlocked.
+// Store-only calls join just their watcher so Close never waits on a store lock.
+func (t *Transport) child(ctx context.Context) (context.Context, func(), bool) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
 		return nil, nil, false
 	}
+	joined := t.resolve != nil
 	t.inflight.Add(1)
+	if joined {
+		t.inflight.Add(1)
+	}
 	t.mu.Unlock()
 	child, cancel := context.WithCancel(ctx)
 	go func() {
@@ -227,7 +230,12 @@ func (t *Transport) child(ctx context.Context) (context.Context, context.CancelF
 		case <-child.Done():
 		}
 	}()
-	return child, cancel, true
+	return child, func() {
+		cancel()
+		if joined {
+			t.inflight.Done()
+		}
+	}, true
 }
 
 func (t *Transport) key(sender messaging.Identity, messageID, generation string) messaging.FenceKey {
