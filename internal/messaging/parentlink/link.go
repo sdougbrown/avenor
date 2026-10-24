@@ -336,9 +336,11 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 		return fail(messaging.OutcomePossiblyPending,
 			fmt.Errorf("%w: parent broker answered without a send outcome", ErrUnsupportedParentProtocol))
 	}
-	if !req.NoReply && (outcome == messaging.OutcomeSent || outcome == messaging.OutcomeWithdrawn) {
-		// The edge exists in the parent's store, so every later operation on this
-		// ask follows the hop it was admitted on.
+	if !req.NoReply && (outcome == messaging.OutcomeSent || outcome == messaging.OutcomeWithdrawn ||
+		outcome == messaging.OutcomePossiblyPending) {
+		// The edge exists, or the parent answered without saying whether it
+		// admitted it: either way a later wait or withdrawal follows the hop it
+		// was admitted on instead of this branch's empty store.
 		l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation})
 	}
 	if outcome != messaging.OutcomeSent && outcome != messaging.OutcomeWithdrawn {
