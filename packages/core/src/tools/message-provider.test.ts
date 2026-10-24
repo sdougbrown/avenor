@@ -514,6 +514,22 @@ describe('child message provider', () => {
     expect((await child.resolve('ghost')).match).toBe('none')
   })
 
+  it('keeps the peers a partial listing read and refuses the rest', async () => {
+    const child = createChildMessageProvider({
+      surface: 'pi-child',
+      runId: 'rt_child',
+      broker: childBroker({
+        peers: mock(async () => ({
+          peers: [{ run_id: 'rt_2', label: 'mesh-a', status: 'done' }],
+          detail: 'the broker could not read every peer',
+        })),
+      }),
+    })
+    expect((await child.resolve('rt_2'))).toMatchObject({ runId: 'rt_2', match: 'unique' })
+    await expect(child.resolve('ghost')).rejects.toThrow('the peer listing is incomplete')
+    await expect(child.state('ghost')).rejects.toThrow('the peer listing is incomplete')
+  })
+
   it('is never resumable and denies a resume defensively', async () => {
     const child = createChildMessageProvider({ surface: 'pi-child', runId: 'rt_child', broker: childBroker() })
     expect((await child.state('rt_2')).resumable).toBe(false)
