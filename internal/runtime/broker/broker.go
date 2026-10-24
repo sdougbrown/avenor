@@ -1202,9 +1202,9 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 // authenticated run and, through the local adapter, a model's context.
 func incompletePeerListing(unreadable int) string {
 	if unreadable == 0 {
-		return "the broker could not read every peer"
+		return messaging.IncompletePeerListing
 	}
-	return fmt.Sprintf("the broker could not read every peer: %d session records unreadable", unreadable)
+	return fmt.Sprintf("%s: %d session records unreadable", messaging.IncompletePeerListing, unreadable)
 }
 
 // handleRename renames one run's display name. It rejects a malformed request

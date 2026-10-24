@@ -191,7 +191,7 @@ func TestMessageRPCDispatch(t *testing.T) {
 func TestMessagePeersKeepsAPartialListing(t *testing.T) {
 	state := NewState("run_1", "", 0)
 	s, cap := NewTestServer(state)
-	tr := &recordingTransport{peersErr: fmt.Errorf("%w: the broker could not read every peer", messaging.ErrIncompleteListing)}
+	tr := &recordingTransport{peersErr: fmt.Errorf("%w: /private/host/endpoint failed", messaging.ErrIncompleteListing)}
 	handler := &mockStableHandler{messageTransport: tr}
 	s.SetStableHandler(handler)
 	path := testSocketPath(t)
@@ -215,6 +215,13 @@ func TestMessagePeersKeepsAPartialListing(t *testing.T) {
 	}
 	if result["peers_error"] == nil || result["peers_error"] == "" {
 		t.Fatalf("message_peers result = %#v, want the incomplete listing reported", result)
+	}
+	reason, _ := result["peers_error"].(string)
+	if strings.Contains(reason, "/private/host/endpoint") {
+		t.Fatalf("message_peers reason = %q, want the failure's own text kept out of the served reason", reason)
+	}
+	if reason != messaging.IncompletePeerListing {
+		t.Fatalf("message_peers reason = %q, want the shared incomplete-listing reason", reason)
 	}
 }
 

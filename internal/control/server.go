@@ -1743,8 +1743,9 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			}
 			// The listing read only part of the peer set. The peers it did
 			// read are returned with the reason, so the caller keeps them and
-			// reports the listing as incomplete.
-			out.PeersError = err.Error()
+			// reports the listing as incomplete. The reason is the listing's
+			// own: the transport's error can carry a path or an endpoint.
+			out.PeersError = messaging.IncompletePeerListing
 		}
 		return success(req.ID, out)
 	case "message_preflight":
