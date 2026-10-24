@@ -387,6 +387,11 @@ type peerListingTransport struct {
 
 func (t peerListingTransport) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	res, err := t.Transport.Peers(ctx, req)
+	if err != nil && !errors.Is(err, messaging.ErrIncompleteListing) {
+		// The listing could not be read, which is a failure and not a partial
+		// listing, so the failure's own class reaches the caller.
+		return res, err
+	}
 	peers, unreadable := t.broker.peerListing(res.Peers)
 	res.Peers = peers
 	if unreadable > 0 {
@@ -1195,40 +1200,35 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 // peerListing is the peer set every listing the broker serves names: the
-// peers the seam can see and the runs the broker owns. A host that lists only
-// the peers it reaches cannot hide the local runs, the supervisor's own
-// included, from the children that address them. A record that cannot be read
-// is dropped and counted, so every listing carries the same records and a
-// malformed record cannot break a response.
+// runs the broker owns and the peers the seam can see. A host that lists
+// only the peers it reaches cannot hide the local runs, the supervisor's own
+// included, from the children that address them, and a host that reports a
+// peer under a local run's id cannot replace the broker's own record for it.
+// A record that cannot be read is dropped and counted, so every listing
+// carries the same records and a malformed record cannot break a response.
 func (b *Broker) peerListing(peers []messaging.Peer) ([]messaging.Peer, int) {
 	seen := make(map[string]bool, len(peers))
 	out := make([]messaging.Peer, 0, len(peers))
 	unreadable := 0
-	for _, peer := range peers {
+	add := func(peer messaging.Peer) {
 		if peer.RunID != "" {
 			if seen[peer.RunID] {
-				continue
+				return
 			}
 			seen[peer.RunID] = true
 		}
 		record, err := peerRecord(peer)
 		if err != nil {
 			unreadable++
-			continue
+			return
 		}
 		out = append(out, record)
 	}
 	for _, peer := range b.localPeers() {
-		if seen[peer.RunID] {
-			continue
-		}
-		seen[peer.RunID] = true
-		record, err := peerRecord(peer)
-		if err != nil {
-			unreadable++
-			continue
-		}
-		out = append(out, record)
+		add(peer)
+	}
+	for _, peer := range peers {
+		add(peer)
 	}
 	return out, unreadable
 }

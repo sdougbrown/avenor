@@ -1738,8 +1738,11 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		res, err := tr.Peers(c.ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
 		out := newMessagePeersResult(res)
 		if err != nil {
-			if len(res.Peers) == 0 {
-				return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+			if !errors.Is(err, messaging.ErrIncompleteListing) || len(res.Peers) == 0 {
+				// The listing could not be read. The failure's own text can
+				// carry a path or an endpoint, so the answer names the reason
+				// and the class rather than the error.
+				return failure(req.ID, -32000, "the peer listing could not be read", messageErrorData(err, "", ""))
 			}
 			// The listing read only part of the peer set. The peers it did
 			// read are returned with the reason, so the caller keeps them and

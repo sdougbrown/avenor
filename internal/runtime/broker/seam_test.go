@@ -406,18 +406,19 @@ func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
 	if len(listed.Peers) == 0 {
 		t.Fatalf("peers = %+v, want the retained partial peer", listed.Peers)
 	}
+	var record messaging.PeerRecord
 	retained := false
 	for _, peer := range listed.Peers {
-		if peer.RunID == "only-peer" {
-			retained = true
+		if peer.RunID != "only-peer" {
+			continue
+		}
+		retained = true
+		if err := json.Unmarshal(peer.Session, &record); err != nil {
+			t.Fatalf("partial peer session = %s (%v)", peer.Session, err)
 		}
 	}
-	if !retained {
-		t.Fatalf("peers = %+v, want the retained partial peer", listed.Peers)
-	}
-	var record messaging.PeerRecord
-	if err := json.Unmarshal(listed.Peers[0].Session, &record); err != nil || record.RunID != "only-peer" {
-		t.Fatalf("partial peer session = %s (%v), want only-peer", listed.Peers[0].Session, err)
+	if !retained || record.RunID != "only-peer" {
+		t.Fatalf("partial peer session = %+v, want only-peer", listed.Peers)
 	}
 	if strings.Contains(err.Error(), "parent link down") {
 		t.Fatalf("peers error = %v, want the seam's own failure text kept out of the served listing", err)
