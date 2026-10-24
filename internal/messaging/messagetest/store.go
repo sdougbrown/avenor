@@ -41,6 +41,17 @@ func NewStoreMessenger(store *askstore.Store, backend *MemoryBackend) messaging.
 	return storeMessenger{asks: askstore.NewAsker(store), backend: backend}
 }
 
+// PeersMessenger reports a fixed peer set beside the messenger it wraps, so a
+// test can tell a listing that came from the messenger from one that came
+// from the store behind it.
+type PeersMessenger struct {
+	messaging.Messenger
+	// Reported is the peer set this messenger reports.
+	Reported []messaging.Peer
+}
+
+func (m PeersMessenger) Peers(context.Context) ([]messaging.Peer, error) { return m.Reported, nil }
+
 // storeMessenger serves the messaging seam from a store and a memory backend.
 type storeMessenger struct {
 	asks    *askstore.Asker
