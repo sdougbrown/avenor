@@ -93,3 +93,57 @@ func TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch(t *testing.T) {
 		})
 	}
 }
+
+// TestRelayRefusesARunWithoutACredential pins the pre-flight guard: a run
+// whose claim handed over no credential has a next hop the relay cannot
+// authenticate against, so the relay refuses before any HTTP call, the claim
+// stays registered, and a credentialed sibling run still routes.
+func TestRelayRefusesARunWithoutACredential(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		return http.StatusOK, `{}`
+	})
+	registry := NewRegistry()
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID:    "child-one",
+		Endpoint:   stub.URL(),
+		Generation: "gen-a",
+		Runs: []messaging.RunClaim{
+			{RunID: "run-b", Token: "tok-b"},
+			{RunID: "run-c"},
+		},
+	}); err != nil {
+		t.Fatalf("register child: %v", err)
+	}
+	relay, err := newRelay(Options{Generation: func() string { return "gen-a" }}, registry)
+	if err != nil {
+		t.Fatalf("newRelay: %v", err)
+	}
+	t.Cleanup(func() { _ = relay.Close() })
+	ctx := testContext(t)
+
+	err = relay.Ask(ctx, messaging.SendRequest{
+		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
+		To:        messaging.Identity{RunID: "run-c", Sender: "bob"},
+		MessageID: "msg-1",
+	})
+	if !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("Ask without a credential = %v, want ErrTargetUnavailable", err)
+	}
+	if got := stub.countPath(pathRelay); got != 0 {
+		t.Fatalf("the credential-less run saw %d relays, want the pre-flight guard to fire before any HTTP call", got)
+	}
+	if _, ok := registry.Hop("run-c"); !ok {
+		t.Fatal("the claim without a credential was forgotten, want it kept for a replacement registration")
+	}
+
+	if err := relay.Ask(ctx, messaging.SendRequest{
+		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
+		To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
+		MessageID: "msg-2",
+	}); err != nil {
+		t.Fatalf("Ask the credentialed sibling = %v, want the relay delivered", err)
+	}
+	if got := stub.countPath(pathRelay); got != 1 {
+		t.Fatalf("the credentialed sibling saw %d relays, want one", got)
+	}
+}
