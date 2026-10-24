@@ -505,8 +505,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
+		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance}
 		return runAttempt(ctx, attemptConfig{
-			startOptions:           runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance},
+			startOptions:           startOptions,
 			backend:                selection.Backend,
 			resumeID:               resumeID,
 			sessionBackends:        sessionBackends,
@@ -942,6 +943,22 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	defer stopPID()
 
 	resumeID := *resume
+	if resumeID != "" {
+		// The notice derives from the drop itself, so the two cannot drift:
+		// anything the resume path will silently ignore is named here.
+		before := runtime.StartOptions{Thinking: *thinking, ClaudeMCPWait: *claudeMCPWait}
+		after := runtime.DropStartOnlyOptions(*backend, before)
+		var dropped []string
+		if after.Thinking != before.Thinking {
+			dropped = append(dropped, "--thinking "+before.Thinking)
+		}
+		if after.ClaudeMCPWait != before.ClaudeMCPWait {
+			dropped = append(dropped, "--claude-mcp-wait "+before.ClaudeMCPWait.String())
+		}
+		if len(dropped) > 0 {
+			fmt.Fprintf(stderr, "avenor: ignoring start-only options on resume: %s\n", strings.Join(dropped, " "))
+		}
+	}
 	// A cancelled or timed-out run stopped mid-answer, so the reply collected so
 	// far is not the run's final message and must not be published.
 	exitForRunContext := func(code int, stopReason string) int {
@@ -1049,6 +1066,9 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 	if err := runtime.ValidateThinkingForBackend(backend, opts.Thinking); err != nil {
 		return runtime.Session{}, err
 	}
+	if err := runtime.ValidateClaudeMCPWait(backend, opts.ClaudeMCPWait); err != nil {
+		return runtime.Session{}, err
+	}
 	if resumeID == "" {
 		return provider.Start(ctx, opts)
 	}
@@ -1056,10 +1076,12 @@ func StartSession(ctx context.Context, provider runtime.Provider, backend string
 		return resumer.ResumeWithOptions(ctx, resumeID, opts)
 	}
 	if opts.Thinking != "" {
-		if backend == "claude" || backend == "claude-channel" {
-			return runtime.Session{}, runtime.NewStartOnlyThinkingError(backend, opts.Thinking)
+		if err := runtime.ValidateThinkingForBackendResume(backend, opts.Thinking); err != nil {
+			return runtime.Session{}, err
 		}
-		return runtime.Session{}, runtime.NewUnsupportedThinkingError(backend)
+	}
+	if opts.ClaudeMCPWait != 0 && runtime.ClaudeMCPWaitStartOnly(backend) {
+		return runtime.Session{}, runtime.NewStartOnlyClaudeMCPWaitError(backend, opts.ClaudeMCPWait)
 	}
 	return provider.Resume(ctx, resumeID)
 }

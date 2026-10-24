@@ -590,6 +590,40 @@ func TestSupervisorPublicAPILoopPhaseResumesPreviousSession(t *testing.T) {
 	}
 }
 
+// TestSupervisorPublicAPILoopPhaseResumeDropsStartOnlyOptions proves a loop
+// phase that resumes the previous phase's session does not carry start-only
+// options into the claude resume, which takes no per-call options.
+func TestSupervisorPublicAPILoopPhaseResumeDropsStartOnlyOptions(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_c1", itestSessionEnd("ses_loop_c1", "end_turn", "first phase")),
+		itestAttempt("ses_loop_c2", itestSessionEnd("ses_loop_c2", "end_turn", "second phase")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop": []map[string]any{
+			{"name": "first", "prompt": "first work"},
+			{"name": "second", "prompt": "second work", "resume_from_previous": true},
+		},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-resume-claude", "backend": "claude", "thinking": "high"})
+
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/1 (the second phase resumes)", starts, resumes)
+	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if len(provider.startOpts) != 1 {
+		t.Fatalf("provider starts recorded = %d, want 1", len(provider.startOpts))
+	}
+	if provider.startOpts[0].Thinking != "high" {
+		t.Fatalf("fresh first phase lost thinking: %+v", provider.startOpts[0])
+	}
+}
+
 // TestSupervisorPublicAPILoopRequiresNudgeResumesOwnSession proves a loop
 // phase whose required files stay missing is nudged as a resume of its own
 // attempt: the provider sees one Resume carrying the first attempt's session

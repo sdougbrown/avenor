@@ -52,9 +52,14 @@ type attemptDeps struct {
 	stderr        io.Writer
 }
 
-// resumeSession resumes an existing session after cancellation so a follow-up
-// prompt can be sent without respawning the provider.
-func resumeSession(ctx context.Context, provider runtime.Provider, backend string, opts runtime.StartOptions, sessionID string) (runtime.Session, error) {
+// ResumeSession starts or resumes a session, dropping start-only options when
+// the call resumes an existing session so internal resumes are not aborted.
+// Internal resume call sites call it instead of StartSession so a new resume
+// path cannot reintroduce the start-only abort.
+func ResumeSession(ctx context.Context, provider runtime.Provider, backend string, opts runtime.StartOptions, sessionID string) (runtime.Session, error) {
+	if sessionID != "" {
+		opts = runtime.DropStartOnlyOptions(backend, opts)
+	}
 	return StartSession(ctx, provider, backend, opts, sessionID)
 }
 
@@ -103,7 +108,7 @@ func runSingleAttempt(
 	providerLifecycle := NewProviderLifecycle(provider)
 	defer providerLifecycle.RequestClose()
 
-	session, err := StartSession(ctx, provider, cfg.backend, cfg.startOptions, cfg.resumeID)
+	session, err := ResumeSession(ctx, provider, cfg.backend, cfg.startOptions, cfg.resumeID)
 	if err != nil {
 		fmt.Fprintf(deps.stderr, "avenor: start session: %v\n", err)
 		return attemptResult{exitCode: 1}
@@ -123,7 +128,7 @@ func runSingleAttempt(
 	if deps.controlServer != nil {
 		if text := deps.controlServer.ConsumeInterrupt(); text != "" {
 			prompt = text
-			if _, err := resumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
+			if _, err := ResumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
 				fmt.Fprintf(deps.stderr, "avenor: resume for interrupt: %v\n", err)
 				return attemptResult{exitCode: 1, sessionID: session.SessionID}
 			}
@@ -211,7 +216,7 @@ func runSingleAttempt(
 			// Check interrupt first (priority over queued prompts) to avoid
 			// losing the interrupt when exitCode==0 overlaps with a queued prompt.
 			if interruptText := deps.controlServer.ConsumeInterrupt(); interruptText != "" {
-				if _, err := resumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
+				if _, err := ResumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
 					fmt.Fprintf(deps.stderr, "avenor: resume after cancel: %v\n", err)
 					// A failed resume leaves the interrupted reply a prefix, not a
 					// final message.
@@ -222,7 +227,7 @@ func runSingleAttempt(
 			}
 			if exitCode == 0 {
 				if nextPrompt := deps.controlServer.DequeuePrompt(); nextPrompt != "" {
-					if _, err := resumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
+					if _, err := ResumeSession(ctx, provider, cfg.backend, cfg.startOptions, session.SessionID); err != nil {
 						fmt.Fprintf(deps.stderr, "avenor: resume after end_turn: %v\n", err)
 						return attemptResult{exitCode: 1, sessionID: session.SessionID, stopReason: stopReason, loopDirective: accDirective, loopLabel: accLabel, output: result.Output, finalReply: result.FinalReply, usage: result.Usage}
 					}

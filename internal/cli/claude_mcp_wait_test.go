@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,43 @@ func TestRunClaudeMCPWaitValidation(t *testing.T) {
 				t.Fatalf("called=%v stderr=%q, want %q", called, stderr.String(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestStartSessionValidatesClaudeMCPWait(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backend string
+		wait    time.Duration
+		wantErr string
+	}{
+		{"negative", "claude", -time.Second, "negative"},
+		{"over cap", "claude", runtime.MaxClaudeMCPWait + time.Nanosecond, "limit"},
+		{"unsupported backend", "pi", time.Second, "claude-mcp-wait"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &plainThinkingProvider{}
+			_, err := StartSession(context.Background(), p, tc.backend, runtime.StartOptions{ClaudeMCPWait: tc.wait}, "")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("%s error = %v, want it to mention %q", tc.name, err, tc.wantErr)
+			}
+			if p.startCalls != 0 || p.resumeCalls != 0 {
+				t.Fatalf("%s launched a session", tc.name)
+			}
+		})
+	}
+}
+
+func TestStartSessionRejectsClaudeMCPWaitOnResume(t *testing.T) {
+	for _, backend := range []string{"claude", "claude-channel"} {
+		p := &plainThinkingProvider{}
+		_, err := StartSession(context.Background(), p, backend, runtime.StartOptions{ClaudeMCPWait: 7 * time.Second}, "session")
+		if err == nil || !strings.Contains(err.Error(), "claude-mcp-wait") || !strings.Contains(err.Error(), "only when starting a session") {
+			t.Fatalf("%s error = %v, want a start-only rejection", backend, err)
+		}
+		if p.resumeCalls != 0 || p.startCalls != 0 {
+			t.Fatalf("%s started a replacement process", backend)
+		}
 	}
 }
 

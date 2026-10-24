@@ -45,12 +45,14 @@ func (*thinkingProvider) Capabilities(context.Context) (runtime.Capabilities, er
 }
 
 type plainThinkingProvider struct {
-	resumeCalls int
-	startCalls  int
+	resumeCalls   int
+	startCalls    int
+	lastStartOpts runtime.StartOptions
 }
 
-func (p *plainThinkingProvider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
+func (p *plainThinkingProvider) Start(_ context.Context, opts runtime.StartOptions) (runtime.Session, error) {
 	p.startCalls++
+	p.lastStartOpts = opts
 	return runtime.Session{SessionID: "started"}, nil
 }
 func (p *plainThinkingProvider) Resume(context.Context, string) (runtime.Session, error) {
@@ -116,7 +118,7 @@ func TestStartSessionRejectsExplicitResumeWithoutNativePath(t *testing.T) {
 
 func TestResumeSessionUsesCentralThinkingDispatch(t *testing.T) {
 	p := &thinkingProvider{}
-	if _, err := resumeSession(context.Background(), p, "pi", runtime.StartOptions{Thinking: "max"}, "session"); err != nil {
+	if _, err := ResumeSession(context.Background(), p, "pi", runtime.StartOptions{Thinking: "max"}, "session"); err != nil {
 		t.Fatalf("resumeSession: %v", err)
 	}
 	if p.resumeOptsCalls != 1 || p.lastResumeOption.Thinking != "max" {

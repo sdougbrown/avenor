@@ -24,10 +24,12 @@
 // requires only a schema change — no hand-written policy table updates.
 //
 // ValidateThinkingForBackendResume is exported as part of the portable contract
-// for callers that need to validate resume-time thinking independently. The
-// current follow-up path does not accept a thinking value (thinking is set at
-// session start), so this function has no production callers yet; it is
-// available for hosts and future wiring.
+// for callers that need to validate resume-time thinking independently.
+// StartSession's explicit-resume branch (internal/cli/cli.go) is its production
+// caller: it classifies start-only values for backends whose resume takes no
+// per-call options. The current follow-up path does not accept a thinking
+// value (thinking is set at session start), so an explicit resume with a value
+// only reaches it when a caller passes one directly.
 package thinkingpolicy
 
 //go:generate go run github.com/umpire-tools/umpire-go-gen@v0.1.1 -i ../../schemas/thinking_policy.umpire.json -output-file thinking_policy.gen.go -pkg thinkingpolicy

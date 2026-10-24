@@ -1868,7 +1868,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		_ = writer.Close()
 		return SpawnResult{}, fmt.Errorf("create provider: %w", err)
 	}
-	session, err := cli.StartSession(childCtx, provider, backend, startOpts, params.SessionID)
+	session, err := cli.ResumeSession(childCtx, provider, backend, startOpts, params.SessionID)
 	if err != nil {
 		if closer, ok := provider.(interface{ Close() error }); ok {
 			_ = closer.Close()
@@ -2555,7 +2555,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			session, err := cli.StartSession(ctx, provider, identity.Backend, startOpts, resumeID)
+			session, err := cli.ResumeSession(ctx, provider, identity.Backend, startOpts, resumeID)
 			if err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
@@ -2841,7 +2841,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				}
 			}()
 
-			session, err := cli.StartSession(ctx, provider, identity.Backend, startOpts, resumeID)
+			session, err := cli.ResumeSession(ctx, provider, identity.Backend, startOpts, resumeID)
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
@@ -3607,7 +3607,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 			identity.Agent, identity.Model = fallbackAgent, fallbackModel
 		}
 	}
-	return cli.StartSession(ctx, provider, identity.Backend, runtime.StartOptions{
+	return cli.ResumeSession(ctx, provider, identity.Backend, runtime.StartOptions{
 		Agent:         identity.Agent,
 		AgentProfile:  identity.AgentProfile,
 		Label:         label,

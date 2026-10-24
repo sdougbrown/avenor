@@ -28,3 +28,21 @@ func TestValidateClaudeMCPWait(t *testing.T) {
 		})
 	}
 }
+
+func TestIsClaudeFamily(t *testing.T) {
+	for _, tc := range []struct {
+		backend string
+		want    bool
+	}{
+		{"claude", true},
+		{"claude-channel", true},
+		{"pony", false},
+		{"opencode-http", false},
+		{"codex-app-server", false},
+		{"pi", false},
+	} {
+		if got := IsClaudeFamily(tc.backend); got != tc.want {
+			t.Errorf("IsClaudeFamily(%q) = %v, want %v", tc.backend, got, tc.want)
+		}
+	}
+}

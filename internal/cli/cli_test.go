@@ -259,9 +259,10 @@ func scriptedChunk(sessionID, text string) events.Event {
 }
 
 type scriptedProvider struct {
-	mu       sync.Mutex
-	nextID   int
-	sessions map[string]*scriptedSession
+	mu          sync.Mutex
+	nextID      int
+	resumeCalls int
+	sessions    map[string]*scriptedSession
 	// turns, when set, serves one scripted turn per Prompt, in order.
 	turns []scriptedTurn
 	next  int
@@ -304,6 +305,7 @@ func (p *scriptedProvider) Start(ctx context.Context, opts runtime.StartOptions)
 func (p *scriptedProvider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.resumeCalls++
 	session, ok := p.sessions[sessionID]
 	if !ok {
 		return runtime.Session{}, fmt.Errorf("unknown session %q", sessionID)
@@ -327,11 +329,14 @@ func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt 
 	if !ok {
 		return fmt.Errorf("unknown session %q", sessionID)
 	}
+	p.mu.Lock()
+	eventsCh := session.events
 	session.prompt = prompt
+	p.mu.Unlock()
 
 	if scripted {
 		if turn.chunk != "" {
-			session.events <- scriptedChunk(sessionID, turn.chunk)
+			eventsCh <- scriptedChunk(sessionID, turn.chunk)
 		}
 		if started != nil {
 			started <- struct{}{}
@@ -343,8 +348,8 @@ func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt 
 		if turn.finalOutput != "" {
 			fields["final_output"] = turn.finalOutput
 		}
-		session.events <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
-		close(session.events)
+		eventsCh <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
+		close(eventsCh)
 		return nil
 	}
 
@@ -6884,5 +6889,40 @@ func TestWaitForSessionFailsWhenAuthoritativeConversationIDIsRejected(t *testing
 	}
 	if adopted {
 		t.Fatal("rejected authoritative ID reached adoption callback")
+	}
+}
+
+func TestRunLoopPhaseResumeDropsStartOnlyOptions(t *testing.T) {
+	provider := newScriptedProvider()
+	provider.turns = []scriptedTurn{
+		{stopReason: "end_turn"},
+		{stopReason: "end_turn"},
+	}
+	oldNewProvider := newProvider
+	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+	t.Cleanup(func() { newProvider = oldNewProvider })
+
+	dir := t.TempDir()
+	loopPath := filepath.Join(dir, "loop.json")
+	phases := `[{"name":"a","prompt":"one"},{"name":"b","prompt":"two","resume_from_previous":true}]`
+	if err := os.WriteFile(loopPath, []byte(`{"pre":`+phases+`}`), 0o600); err != nil {
+		t.Fatalf("write loop config: %v", err)
+	}
+
+	var stderr strings.Builder
+	if got := run([]string{
+		"--backend", "claude",
+		"--thinking", "high",
+		"--loop-file", loopPath,
+		"--run-id", "run_1",
+	}, func(string) string { return "" }, &stderr); got != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", got, stderr.String())
+	}
+	if provider.resumeCalls != 1 {
+		t.Fatalf("resume calls = %d, want 1 (the second phase resumes)", provider.resumeCalls)
+	}
+	sessions := provider.snapshotSessions()
+	if len(sessions) != 1 || sessions[0].opts.Thinking != "high" {
+		t.Fatalf("fresh first phase lost thinking: %+v", sessions)
 	}
 }
