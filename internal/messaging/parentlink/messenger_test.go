@@ -1,6 +1,7 @@
 package parentlink
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
@@ -139,6 +140,40 @@ func TestMessengerReachableFollowsTheParent(t *testing.T) {
 	}
 	if withoutParent.Reachable("run-elsewhere") {
 		t.Fatal("a target no parent can own is reachable")
+	}
+}
+
+// TestMessengerPeersJoinsTheParentsIncompleteListing pins the join at the
+// messenger: a parent listing that failed still contributes the peers it
+// reached, and the failure is joined onto the listing's error.
+func TestMessengerPeersJoinsTheParentsIncompleteListing(t *testing.T) {
+	parent := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSessions:
+			return http.StatusOK, `{"generation":"gen-a","sessions":[{"run_id":"run-y"}],"peers_error":"one branch did not answer"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	local := newStubMessenger()
+	local.peers = []messaging.Peer{{RunID: "run-x"}}
+	messenger := newTestMessenger(t, local, parent)
+	ctx := testContext(t)
+	if err := messenger.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	peers, err := messenger.Peers(ctx)
+	if !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("Peers error = %v, want the parent's incomplete listing joined", err)
+	}
+	seen := map[string]bool{}
+	for _, peer := range peers {
+		seen[peer.RunID] = true
+	}
+	if !seen["run-x"] || !seen["run-y"] {
+		t.Fatalf("peers = %v, want this broker's run and the parent's reached run", seen)
 	}
 }
 

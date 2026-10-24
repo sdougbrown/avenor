@@ -310,6 +310,31 @@ func TestLinkPeersSyncsBeforeItLists(t *testing.T) {
 	}
 }
 
+// TestLinkPeersReportsAnIncompleteListing pins the incomplete listing's
+// contract: a listing the parent could not finish still carries the peers it
+// reached, but reports the failure beside them, so a partial list never
+// reads as a complete one.
+func TestLinkPeersReportsAnIncompleteListing(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSessions:
+			return http.StatusOK, `{"generation":"gen-a","sessions":[{"run_id":"run-b"}],"peers_error":"one branch did not answer"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newTestLink(t, stub, "gen-a")
+
+	peers, err := link.Peers(testContext(t))
+	if !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("Peers error = %v, want ErrTargetUnavailable", err)
+	}
+	if len(peers) != 1 || peers[0].RunID != "run-b" {
+		t.Fatalf("peers = %v, want the peers the parent reached", peers)
+	}
+}
+
 // TestLinkPeersRefusesWithoutAListingRun pins the other recovery: a claim the
 // parent cannot accept as credentials is not a listing, so Peers reports the
 // state instead of returning an empty list.
