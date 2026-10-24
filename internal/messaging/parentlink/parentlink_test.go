@@ -259,6 +259,36 @@ func queuedAgentMessages(t *testing.T, b *broker.Broker, runID string) []*broker
 	return queued
 }
 
+// TestParentPublishesHarnessSessionName pins that the label a branch publishes
+// is the name it resolves locally: a harness-supplied session name reaches the
+// parent's peer view without a second name field on the claim.
+func TestParentPublishesHarnessSessionName(t *testing.T) {
+	parent := startBranch(t, "", "parent-run")
+	child := startBranch(t, parent.url(), "child-run")
+	awaitRegistered(t, parent, "child-run")
+
+	if err := child.broker.SetHarnessName("child-run", "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+	// A run change is what republishes this branch's claims to the parent.
+	child.link.RunChanged()
+
+	deadline := time.Now().Add(awaitDeadline)
+	for {
+		hop, ok := parent.link.Registry().Hop("child-run")
+		if ok && hop.Label == "harness-name" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("parent published hop %+v (ok=%v), want label harness-name", hop, ok)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := parent.broker.DisplayName("child-run"); got != "harness-name" {
+		t.Fatalf("parent display name = %q, want harness-name", got)
+	}
+}
+
 // TestLocalAskNeverCrossesTheParentLink pins that a target this branch owns is
 // answered here even when the parent broker is gone: no lookup and no
 // publication crosses the link.
