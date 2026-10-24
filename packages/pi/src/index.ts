@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-c
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import {
+  BrokerHttpError,
   createBrokerChildBroker,
   formatInboundAskBody,
   parseControlMessage,
@@ -583,20 +584,40 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // yet, so a failed publish is retried on the next turn.
     let publishedSessionName: { name: string | undefined } | null = null
 
-    async function publishSessionName(ctx: ExtensionContext): Promise<void> {
-      if (!subAgentEnv) return
+    // Publishes are serialized: the broker applies last-writer-wins, so an
+    // older POST landing after a newer one would leave it holding a stale name.
+    let publishChain: Promise<void> = Promise.resolve()
+    // A name the broker refused as invalid can never be accepted, so it is
+    // remembered and not republished; a different name is still sent.
+    let refusedSessionName: string | null = null
+
+    function publishSessionName(ctx: ExtensionContext): Promise<void> {
+      if (!subAgentEnv) return publishChain
+      const env = subAgentEnv
       const name = ctx.sessionManager.getSessionName()
-      if (publishedSessionName && publishedSessionName.name === name) return
+      if (publishedSessionName && publishedSessionName.name === name) return publishChain
+      if (refusedSessionName === name) return publishChain
       // Record the attempt before it lands so a second read of the same name
       // while the first is in flight does not publish twice; a failed publish
       // forgets the attempt so the next turn retries.
       publishedSessionName = { name }
-      try {
-        await publishHarnessName(subAgentEnv, name)
-      } catch (error) {
-        publishedSessionName = null
-        console.error('[avenor] session_name_set failed:', error instanceof Error ? error.message : error)
-      }
+      publishChain = publishChain.then(async () => {
+        try {
+          await publishHarnessName(env, name)
+          refusedSessionName = null
+        } catch (error) {
+          if (error instanceof BrokerHttpError && error.status === 400 && error.code === 'invalid-name') {
+            // Retrying a name the broker refuses only costs a failed POST every
+            // turn; a name that changes to a different value is sent again.
+            refusedSessionName = name
+            console.error('[avenor] session_name_set refused:', error.message)
+            return
+          }
+          publishedSessionName = null
+          console.error('[avenor] session_name_set failed:', error instanceof Error ? error.message : error)
+        }
+      })
+      return publishChain
     }
 
     async function startSubAgentPoll(): Promise<void> {
