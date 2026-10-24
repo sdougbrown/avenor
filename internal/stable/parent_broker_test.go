@@ -69,7 +69,11 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 		ChildID:    parentlink.BranchID("test/" + b.Addr()),
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
-		Runs:       func() []messaging.RunClaim { return b.ParentRunClaims() },
+		Runs: func() []messaging.RunClaim {
+			return parentlink.RunClaims(b.Sessions(),
+				func(info broker.SessionInfo) (string, string) { return info.RunID, info.Label },
+				link.Owns, b.RunToken)
+		},
 		// A run this branch stops owning loses its broker record too, so a
 		// refused descendant stops being served locally.
 		RetireRuns: func(runIDs []string) {
