@@ -37,12 +37,15 @@ type Options struct {
 	// ChildID names this branch at its parent. Empty mints one per link.
 	ChildID string
 	// Runs reports the runs this branch owns, with the display names it knows
-	// them by. It is read at every registration.
+	// them by. It is read at every registration. Required when ParentURL is
+	// set: the link publishes this branch's run set to its parent.
 	Runs func() []messaging.RunClaim
-	// Generation reports this broker's current ask generation.
+	// Generation reports this broker's current ask generation. Required: the
+	// link pins it and the relay binds every hop to it.
 	Generation func() string
 	// RunToken reports the credential this broker authenticates a run with, so a
-	// relay can reach that run's queue.
+	// relay can reach that run's queue. Required: the relay reads it on every
+	// hop it takes into a child.
 	RunToken func(runID string) (string, bool)
 	// Timeout bounds one request to a peer broker. Zero uses the messaging
 	// default.
