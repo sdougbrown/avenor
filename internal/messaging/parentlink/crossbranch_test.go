@@ -107,6 +107,44 @@ func TestWithdrawalRetractsOnlyTheParentEdge(t *testing.T) {
 	}
 }
 
+// TestRefusedDescendantRetiresItsBrokerRecord pins that a run whose branch
+// refused a relay stops being a target entirely: the claim and the broker's run
+// record go together, so a later ask is refused instead of queued for a run
+// nobody serves.
+func TestRefusedDescendantRetiresItsBrokerRecord(t *testing.T) {
+	parent, first, second := crossBranch(t)
+	if parent.broker.GetRun("target") == nil {
+		t.Fatal("the parent never adopted the target run the branch registered")
+	}
+
+	// The target branch answers as a replacement, so the relay is refused.
+	second.broker.Store().Reset()
+	status, body := ask(t, first, "asker", "target", newMsgID(t))
+	if status != http.StatusNotFound || body["code"] != "target-unavailable" {
+		t.Fatalf("ask to a refused branch = (%d, %v), want 404 target-unavailable", status, body)
+	}
+	if parent.broker.GetRun("target") != nil {
+		t.Fatal("a refused descendant kept its broker record")
+	}
+
+	// A later ask cannot fall back to serving the run locally.
+	status, body = ask(t, first, "asker", "target", newMsgID(t))
+	if status != http.StatusNotFound || body["code"] != "target-unavailable" {
+		t.Fatalf("ask after the record was retired = (%d, %v), want 404 target-unavailable", status, body)
+	}
+	if edges := parent.broker.Store().ActiveCount(); edges != 0 {
+		t.Fatalf("the parent holds %d ask edges for a retired descendant", edges)
+	}
+	if st := parent.broker.GetRun("target"); st != nil {
+		st.Mu.Lock()
+		queued := len(st.ControlQueue)
+		st.Mu.Unlock()
+		if queued != 0 {
+			t.Fatalf("the parent queued %d messages for a retired descendant", queued)
+		}
+	}
+}
+
 // TestRelayToAGoneBranchRetractsTheParentEdge pins that a relay which never
 // reaches the branch leaves no edge behind.
 func TestRelayToAGoneBranchRetractsTheParentEdge(t *testing.T) {
