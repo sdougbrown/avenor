@@ -95,7 +95,7 @@ func TestRegistryExportNarrowsToTheCallersBranch(t *testing.T) {
 	registry := NewRegistry()
 	if _, err := registry.Register(messaging.DescendantRegistration{
 		ChildID: "one", Endpoint: "http://one", Generation: "g1",
-		Runs: []messaging.RunClaim{{RunID: "asker"}},
+		Runs: []messaging.RunClaim{{RunID: "asker"}, {RunID: "asker-mate"}},
 	}); err != nil {
 		t.Fatalf("register first child: %v", err)
 	}
@@ -105,10 +105,10 @@ func TestRegistryExportNarrowsToTheCallersBranch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register second child: %v", err)
 	}
-	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: "asker"}, {RunID: "target"}}
+	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: "asker"}, {RunID: "asker-mate"}, {RunID: "target"}}
 
 	exported := runIDsOf(registry.Export(peers, "asker"))
-	if !exported["orchestrator"] || !exported["asker"] || exported["target"] {
+	if !exported["orchestrator"] || !exported["asker"] || !exported["asker-mate"] || exported["target"] {
 		t.Fatalf("export to a branch = %v, want the owner's runs and its own branch only", exported)
 	}
 	exported = runIDsOf(registry.Export(peers, "orchestrator"))
