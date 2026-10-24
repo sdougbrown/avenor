@@ -374,16 +374,20 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
 
     async state(runId: string): Promise<RunFacts> {
       if (runId === SUPERVISOR_RUN_ID) {
-        const { peers } = await listedPeers()
+        const { peers, detail } = await listedPeers()
         const peer = peers.find(entry => entry.run_id === SUPERVISOR_RUN_ID)
+        if (!peer && detail) {
+          // The listing was incomplete, so the supervisor may be in the part
+          // that was not read. Refuse rather than report an unknown status.
+          throw new Error(`the peer listing is incomplete: ${detail}`)
+        }
         const translation = translateRunFacts(peer?.status ?? '', '')
         return {
           live: translation.live,
           resumable: false,
           status: translation.status,
         }
-      }
-      const status = await client.status(runId)
+      }      const status = await client.status(runId)
       const translation = translateRunFacts(
         typeof status.status === 'string' ? status.status : '',
         typeof status.phase === 'string' ? status.phase : '',
@@ -721,9 +725,16 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
     },
 
     async state(targetRunId: string): Promise<RunFacts> {
-      const { peers } = await listedPeers()
+      const { peers, detail } = await listedPeers()
       const peer = peers.find(entry => entry.run_id === targetRunId)
-      if (!peer) throw new Error(`run ${targetRunId} is not visible`)
+      if (!peer) {
+        if (detail) {
+          // The listing was incomplete, so the run may be in the part that was
+          // not read. Refuse rather than claim the run does not exist.
+          throw new Error(`the peer listing is incomplete: ${detail}`)
+        }
+        throw new Error(`run ${targetRunId} is not visible`)
+      }
       const translation = translateRunFacts(peer.status ?? '', '')
       return { live: translation.live, resumable: false, status: translation.status }
     },
