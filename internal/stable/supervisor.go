@@ -111,8 +111,11 @@ type Config struct {
 	// supervisor's broker registers its runs with. An ask that no run in this
 	// branch can answer is forwarded to the parent, which owns the one edge the
 	// cross-branch ask has and routes it to the descendant that owns the
-	// target. Empty means this supervisor is a root: its broker behaves exactly
-	// as a standalone local broker.
+	// target. Empty means this supervisor is a root: it registers upward
+	// nowhere. A non-empty BrokerParentToken with an empty URL still turns the
+	// broker into a hub: it serves the parent routes and requires that
+	// credential from every child that registers, it just has no parent of its
+	// own.
 	BrokerParentURL string
 
 	// BrokerParentToken is the credential the parent link uses in both
@@ -1973,16 +1976,12 @@ func (s *Supervisor) installParentLink() {
 		Generation: s.broker.Store().Generation,
 		Runs:       s.parentRunClaims,
 	}
-	link, err := parentlink.New(options, s.broker.LocalMessenger())
+	link, err := parentlink.Install(options, s.broker)
 	if err != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: parent broker link disabled: %v\n", err)
 		return
 	}
 	s.parentLink = link
-	s.broker.SetMessenger(link)
-	s.broker.SetParentLink(link)
-	s.broker.SetParentLinkToken(s.config.BrokerParentToken)
-	s.broker.SetRunObserver(link.RunChanged)
 	if options.ParentURL == "" {
 		return
 	}

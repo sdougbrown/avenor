@@ -7,22 +7,25 @@ import "github.com/sdougbrown/avenor/internal/messaging"
 // host that installs a link runs the same install sequence.
 type WiringTarget interface {
 	LocalMessenger() messaging.Messenger
+	SetParentLinkToken(token string)
 	SetMessenger(messaging.Messenger)
 	SetParentLink(messaging.ParentLink)
 	SetRunObserver(fn func())
 }
 
-// Install builds the Messenger for opts and installs it on target as the local
-// messenger delegate, the parent-link seam and the run observer. Test helpers
-// wire branches through it so a test branch is wired exactly the way the
-// supervisor wires one; the supervisor keeps its own call because it adds the
-// parent-route credential and owns the context Start runs under. The caller
-// owns Start and Close.
+// Install builds the Messenger for opts and installs it on target: the
+// parent-route credential first, then the local messenger delegate, the
+// parent-link seam and the run observer. The credential goes first so the
+// parent routes never serve without it, and the messenger seam before the
+// parent-link seam so a registration accepted in between still routes through
+// the link. Every host that installs a link — test branch or supervisor — runs
+// this sequence; the caller owns Start and Close.
 func Install(opts Options, target WiringTarget) (*Messenger, error) {
 	link, err := New(opts, target.LocalMessenger())
 	if err != nil {
 		return nil, err
 	}
+	target.SetParentLinkToken(opts.Token)
 	target.SetMessenger(link)
 	target.SetParentLink(link)
 	target.SetRunObserver(link.RunChanged)
