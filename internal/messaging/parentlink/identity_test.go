@@ -3,6 +3,7 @@ package parentlink
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
@@ -16,7 +17,7 @@ func TestUncleanRestartReclaimsTheRunsUnderItsDurableIdentity(t *testing.T) {
 
 	// The first instance registers and then dies: its broker stops serving and
 	// its claim is never retracted.
-	first := newBranchWith(t, parent.url(), "branch-alpha", true, []string{"asker", "stale"})
+	first := newBranchWith(t, parent.url(), "branch-alpha", time.Hour, true, []string{"asker", "stale"})
 	awaitRegistered(t, parent, "asker", "stale")
 	if err := first.broker.Stop(); err != nil {
 		t.Fatalf("stop the first instance uncleanly: %v", err)
@@ -26,7 +27,7 @@ func TestUncleanRestartReclaimsTheRunsUnderItsDurableIdentity(t *testing.T) {
 	}
 
 	// The restarted instance keeps "asker", dropped "stale" and added "fresh".
-	restarted := newBranchWith(t, parent.url(), "branch-alpha", true, []string{"asker", "fresh"})
+	restarted := newBranchWith(t, parent.url(), "branch-alpha", time.Hour, true, []string{"asker", "fresh"})
 	awaitUntil(t, "the restarted branch to reclaim its runs", func() bool {
 		return parent.link.Registry().Owns("asker") && parent.link.Registry().Owns("fresh")
 	})
@@ -59,14 +60,14 @@ func TestReplacementClaimRefreshesTheRunCredential(t *testing.T) {
 		t.Fatalf("create the parent's own asker run: %v", err)
 	}
 	parent.tokens["orchestrator"] = token
-	first := newBranchWith(t, parent.url(), "branch-beta", true, []string{"target"})
+	first := newBranchWith(t, parent.url(), "branch-beta", time.Hour, true, []string{"target"})
 	awaitRegistered(t, parent, "target")
 	staleToken, _ := parent.broker.RunToken("target")
 	if staleToken != first.token(t, "target") {
 		t.Fatal("the parent did not adopt the first instance's credential")
 	}
 
-	replacement := newBranchWith(t, parent.url(), "branch-beta", true, []string{"target"})
+	replacement := newBranchWith(t, parent.url(), "branch-beta", time.Hour, true, []string{"target"})
 	rotated := replacement.token(t, "target")
 	if rotated == staleToken {
 		t.Fatal("the replacement branch reused the dead instance's credential")

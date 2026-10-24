@@ -26,6 +26,7 @@ func startTestParentBroker(t *testing.T) (*broker.Broker, *parentlink.Messenger)
 	link, err := parentlink.New(parentlink.Options{
 		Generation: b.Store().Generation,
 		RunToken:   b.RunToken,
+		RetireRun:  b.DeleteRun,
 	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build parent messenger: %v", err)
@@ -70,7 +71,8 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 			}
 			return claims
 		},
-		RunToken: b.RunToken,
+		RunToken:   b.RunToken,
+		RetireRun:  b.DeleteRun,
 	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build branch messenger: %v", err)

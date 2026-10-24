@@ -24,6 +24,9 @@ type relay struct {
 	// generation reports this broker's current ask generation, which the child
 	// records as the generation its eventual reply is bound to.
 	generation func() string
+	// retire retires the host broker's own record for a run this broker stops
+	// owning, so the run cannot be served locally after its branch is gone.
+	retire func(runID string)
 }
 
 func newRelay(opts Options, registry *Registry) *relay {
@@ -36,6 +39,7 @@ func newRelay(opts Options, registry *Registry) *relay {
 		client:     httpbase.New(ErrUnsupportedParentProtocol, timeout),
 		token:      opts.RunToken,
 		generation: opts.Generation,
+		retire:     opts.RetireRun,
 	}
 }
 
@@ -111,14 +115,26 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 			errors.Is(decErr, messaging.ErrTargetUnavailable),
 			errors.Is(decErr, messaging.ErrAuthRejected):
 			// The child no longer answers as the branch it registered as, so it
-			// stops being a routing target instead of being retried into.
-			r.registry.Forget(target)
+			// stops being a routing target instead of being retried into. The
+			// claim and the host's run record go together: a record left behind
+			// would make this broker serve the run locally, queueing asks that
+			// nobody consumes.
+			r.forget(target)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
 		}
 		return decErr
 	}
 	return nil
+}
+
+// forget drops a run this broker can no longer route to: its claim, and the
+// host broker's own record for it when the host installs one.
+func (r *relay) forget(runID string) {
+	r.registry.Forget(runID)
+	if r.retire != nil {
+		r.retire(runID)
+	}
 }
 
 // Close releases the relay's HTTP client.
