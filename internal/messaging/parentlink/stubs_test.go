@@ -93,6 +93,15 @@ func (b *stubBroker) serve(w http.ResponseWriter, r *http.Request) {
 	b.mu.Unlock()
 
 	status, payload := respond(request)
+	if status < 0 {
+		// A negative status hangs up on the peer without an answer, so the
+		// caller sees a transmission that failed after it left.
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(payload))
