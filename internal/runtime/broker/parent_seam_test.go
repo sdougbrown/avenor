@@ -71,7 +71,7 @@ func TestAdmissionForADescendantRunTouchesNoLink(t *testing.T) {
 		MessageID:  msgID,
 		Generation: b.Store().Generation(),
 		Body:       `{"message":"cross-branch"}`,
-	}, false)
+	})
 	if err != nil || res.Outcome != messaging.OutcomeSent {
 		t.Fatalf("admission for a descendant = (%+v, %v), want sent", res, err)
 	}

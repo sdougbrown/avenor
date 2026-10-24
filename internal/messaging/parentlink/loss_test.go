@@ -160,7 +160,8 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 				MessageID:  msgID,
 				Generation: first.broker.Store().Generation(),
 				Body:       `{"message":"ping"}`,
-			}, true)
+				Legacy:     true,
+			})
 			if err != nil || sent.Outcome != messaging.OutcomeSent {
 				t.Errorf("ask = (%+v, %v), want sent", sent, err)
 				return

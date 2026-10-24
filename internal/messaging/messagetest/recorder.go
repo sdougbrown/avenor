@@ -11,7 +11,6 @@ import (
 // its caller asked for.
 type RecordedSend struct {
 	Request messaging.SendRequest
-	Legacy  bool
 }
 
 // Recorder is a messaging.Messenger that records the operations it serves and
@@ -31,11 +30,11 @@ type Recorder struct {
 	peerCalls int
 }
 
-func (r *Recorder) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
+func (r *Recorder) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	r.mu.Lock()
-	r.sends = append(r.sends, RecordedSend{Request: req, Legacy: legacy})
+	r.sends = append(r.sends, RecordedSend{Request: req})
 	r.mu.Unlock()
-	return r.Local.Send(ctx, req, legacy)
+	return r.Local.Send(ctx, req)
 }
 
 func (r *Recorder) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {

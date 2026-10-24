@@ -24,6 +24,9 @@ type SendRequest struct {
 	// edge. The zero value is an ask: it admits the message and allocates the
 	// edge a Wait can observe.
 	NoReply bool
+	// Legacy admits an unversioned message id without a generation, which only
+	// the broker's legacy local HTTP router does.
+	Legacy bool
 }
 
 // SendResult reports the admission verdict for an ask.

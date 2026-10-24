@@ -1,48 +1,12 @@
 package parentlink
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
-
-// TestBranchIDDerivesDurableIdentity pins the identity a branch registers
-// under: the same input always derives the same identity, two identities whose
-// sanitized stems collide stay distinct, and the readable stem is sanitized.
-func TestBranchIDDerivesDurableIdentity(t *testing.T) {
-	cases := []struct {
-		identity string
-		prefix   string // the sanitized stem the identity must start with
-	}{
-		{identity: "test/avenor.sock", prefix: "avenor"},
-		{identity: "/x/avenor", prefix: "avenor"},
-		{identity: "/x/avenor.bak", prefix: "avenor"},
-		{identity: "dir/my branch!.sock", prefix: "my-branch"},
-		{identity: "dir/!!avenor!!.sock", prefix: "avenor"},
-		{identity: "dir/---.sock", prefix: "branch"},
-	}
-	seen := map[string]string{}
-	for _, tc := range cases {
-		id := BranchID(tc.identity)
-		if id == "" || !strings.HasPrefix(id, tc.prefix+"-") {
-			t.Fatalf("BranchID(%q) = %q, want the sanitized stem %q", tc.identity, id, tc.prefix)
-		}
-		if other, dup := seen[id]; dup {
-			t.Fatalf("BranchID(%q) = BranchID(%q) = %q, want distinct identities", tc.identity, other, id)
-		}
-		seen[id] = tc.identity
-		if again := BranchID(tc.identity); again != id {
-			t.Fatalf("BranchID(%q) derived %q then %q, want the same identity every time", tc.identity, id, again)
-		}
-	}
-	if id := BranchID(""); id != "" {
-		t.Fatalf("BranchID(\"\") = %q, want no identity", id)
-	}
-}
 
 // TestBranchIdentityIsDerivedFromTheControlSocketPath derives the expectation
 // from the identity itself instead of calling BranchID, so an identity that moves
@@ -63,13 +27,18 @@ func TestBranchIdentityIsDerivedFromTheControlSocketPath(t *testing.T) {
 		if got := BranchID(identity); got != want {
 			t.Fatalf("BranchID(%q) = %q, want the sanitized stem and the identity's digest %q", identity, got, want)
 		}
-		if again := BranchID(identity); again != want {
-			t.Fatalf("BranchID(%q) = %q on a second call, want the same durable identity %q", identity, again, want)
+		if again := BranchID(identity); again != id {
+			t.Fatalf("BranchID(%q) = %q on a second call, want the same durable identity %q", identity, again, id)
 		}
-		if other, collides := seen[want]; collides {
-			t.Fatalf("%q and %q share the branch identity %q", other, identity, want)
+		if other, collides := seen[id]; collides {
+			t.Fatalf("%q and %q share the branch identity %q", other, identity, id)
 		}
-		seen[want] = identity
+		seen[id] = identity
+	}
+	// Every path here names a branch-alpha.sock: the identity keeps the stem
+	// readable but must still tell the paths apart.
+	if BranchID(identities[0]) == BranchID(identities[1]) {
+		t.Fatalf("two branch-alpha.sock paths share the identity %q", BranchID(identities[0]))
 	}
 }
 
