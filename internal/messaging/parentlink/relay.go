@@ -114,10 +114,15 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 	if _, decErr := decode(status, raw); decErr != nil {
 		switch {
 		case errors.Is(decErr, messaging.ErrGenerationMismatch),
-			errors.Is(decErr, messaging.ErrTargetUnavailable),
 			errors.Is(decErr, messaging.ErrAuthRejected):
-			// The child no longer answers as the branch it registered as, so it
-			// stops being a routing target instead of being retried into.
+			// The child no longer answers as the branch it registered as, so
+			// the whole registration stops being a routing target instead of
+			// costing one doomed round trip per run it owns.
+			_, _ = r.registry.Deregister(next.ChildID)
+			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
+				messaging.ErrTargetUnavailable, target, decErr)
+		case errors.Is(decErr, messaging.ErrTargetUnavailable):
+			// The child retired this run, so only this run stops being routed.
 			r.registry.Forget(target)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
