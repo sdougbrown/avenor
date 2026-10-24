@@ -3,6 +3,7 @@ package parentlink
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,11 +32,11 @@ func TestLostSendResponseKeepsTheParentRoute(t *testing.T) {
 	gate.Open()
 	branch := newBranchWith(t, gate.url(), newTestChildID(), DefaultRefreshInterval, true, []string{"asker"})
 	target := startBranch(t, parent.url(), "target")
-	awaitRegistered(t, parent, "asker", "target")
+	awaitRegistered(t, parent, branch.key("asker"), target.key("target"))
 
 	msgID := newMsgID(t)
 	gate.DropResponse(pathSend)
-	status, body := ask(t, branch, "asker", "target", msgID)
+	status, body := ask(t, branch, "asker", target.key("target"), msgID)
 	if status == http.StatusOK {
 		t.Fatalf("a send whose answer was lost = (%d, %v), want the uncertainty reported", status, body)
 	}
@@ -108,9 +109,9 @@ func TestParentLossKeepsThePartialListingAndReportsIt(t *testing.T) {
 // its own branch stops being a routing target at the parent, and the edge it left
 // open there is completed instead of waiting out its timeout.
 func TestCallerLossRetiresTheParentEdge(t *testing.T) {
-	parent, first, _ := crossBranch(t)
+	parent, first, second := crossBranch(t)
 
-	if status, body := ask(t, first, "asker", "target", newMsgID(t)); status != http.StatusOK {
+	if status, body := ask(t, first, "asker", second.key("target"), newMsgID(t)); status != http.StatusOK {
 		t.Fatalf("cross-branch ask = (%d, %v), want 200", status, body)
 	}
 	if edges := parent.broker.Store().ActiveCount(); edges != 1 {
@@ -119,10 +120,11 @@ func TestCallerLossRetiresTheParentEdge(t *testing.T) {
 
 	// The asking run is gone, so its branch re-publishes a run set without it.
 	first.broker.DeleteRun("asker")
+	asker := first.key("asker")
 	awaitUntil(t, "the parent to retire the deleted caller", func() bool {
-		return !parent.link.Registry().Owns("asker")
+		return !parent.link.Registry().Owns(asker)
 	})
-	if parent.broker.GetRun("asker") != nil {
+	if parent.broker.GetRun(asker) != nil {
 		t.Fatal("the parent still holds the deleted caller's run record")
 	}
 	if edges := parent.broker.Store().ActiveCount(); edges != 0 {
@@ -138,6 +140,7 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 	const asks = 8
 
 	done := make(chan struct{}, asks)
+	var repliedCount, withdrawnCount atomic.Int64
 	for i := 0; i < asks; i++ {
 		go func(replied bool) {
 			defer func() { done <- struct{}{} }()
@@ -150,7 +153,7 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 			}
 			sent, err := first.link.Send(ctx, messaging.SendRequest{
 				From:       messaging.Identity{RunID: "asker", Sender: "asker"},
-				To:         messaging.Identity{RunID: "target"},
+				To:         messaging.Identity{RunID: second.key("target")},
 				MessageID:  msgID,
 				Generation: first.broker.Store().Generation(),
 				Body:       `{"message":"ping"}`,
@@ -160,19 +163,21 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 				return
 			}
 			if !replied {
-				withdrawn, err := first.link.Withdraw(ctx, messaging.WithdrawRequest{
+				result, err := first.link.Withdraw(ctx, messaging.WithdrawRequest{
 					Sender:     messaging.Identity{RunID: "asker"},
 					MessageID:  msgID,
 					Generation: first.broker.Store().Generation(),
 				})
-				if err != nil || withdrawn.Outcome != messaging.OutcomeWithdrawn {
-					t.Errorf("withdraw = (%+v, %v), want withdrawn", withdrawn, err)
+				if err != nil || result.Outcome != messaging.OutcomeWithdrawn {
+					t.Errorf("withdraw = (%+v, %v), want withdrawn", result, err)
+					return
 				}
+				withdrawnCount.Add(1)
 				return
 			}
 			outcome, err := second.link.Reply(ctx, messaging.ReplyRequest{
 				From:      messaging.Identity{RunID: "target"},
-				ToRunID:   "asker",
+				ToRunID:   first.key("asker"),
 				MessageID: msgID,
 				Body:      `{"message":"pong"}`,
 			})
@@ -188,11 +193,21 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 			})
 			if err != nil || waited.Outcome != messaging.OutcomeReplied {
 				t.Errorf("wait = (%+v, %v), want replied", waited, err)
+				return
 			}
-		}(false)
+			repliedCount.Add(1)
+		}(i%2 == 0)
 	}
 	for i := 0; i < asks; i++ {
 		<-done
+	}
+	// Both halves must run: a goroutine that only ever withdraws leaves the
+	// reply, wait and correlation paths this test claims to drive untested.
+	if got := repliedCount.Load(); got != asks/2 {
+		t.Fatalf("%d goroutines completed a reply, want %d", got, asks/2)
+	}
+	if got := withdrawnCount.Load(); got != asks/2 {
+		t.Fatalf("%d goroutines completed a withdrawal, want %d", got, asks/2)
 	}
 	if edges := parent.broker.Store().ActiveCount(); edges != 0 {
 		t.Fatalf("parent holds %d ask edges after every ask settled", edges)
@@ -205,7 +220,7 @@ func TestWaitInFlightReturnsWhenTheBranchCloses(t *testing.T) {
 	_, first, second := crossBranch(t)
 
 	msgID := newMsgID(t)
-	if status, body := ask(t, first, "asker", "target", msgID); status != http.StatusOK {
+	if status, body := ask(t, first, "asker", second.key("target"), msgID); status != http.StatusOK {
 		t.Fatalf("cross-branch ask = (%d, %v), want 200", status, body)
 	}
 	if queued := queuedAgentMessages(t, second.broker, "target"); len(queued) != 1 {

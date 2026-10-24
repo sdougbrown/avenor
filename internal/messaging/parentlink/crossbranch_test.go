@@ -15,7 +15,7 @@ func crossBranch(t *testing.T) (parent, first, second *branch) {
 	parent = startBranch(t, "")
 	first = startBranch(t, parent.url(), "asker")
 	second = startBranch(t, parent.url(), "target")
-	awaitRegistered(t, parent, "asker", "target")
+	awaitRegistered(t, parent, first.key("asker"), second.key("target"))
 	return parent, first, second
 }
 
@@ -27,7 +27,7 @@ func TestCrossBranchAskAdmitsOneEdgeAtTheParent(t *testing.T) {
 	parent, first, second := crossBranch(t)
 
 	msgID := newMsgID(t)
-	status, body := ask(t, first, "asker", "target", msgID)
+	status, body := ask(t, first, "asker", second.key("target"), msgID)
 	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
 		t.Fatalf("cross-branch ask = (%d, %v), want 200 sent", status, body)
 	}
@@ -45,11 +45,15 @@ func TestCrossBranchAskAdmitsOneEdgeAtTheParent(t *testing.T) {
 	if len(queued) != 1 {
 		t.Fatalf("target queue = %d messages, want exactly one relayed ask", len(queued))
 	}
-	if queued[0].ID != msgID || queued[0].FromRunID != "asker" {
-		t.Fatalf("relayed ask = %+v, want the canonical id and asker", queued[0])
+	// The asker travels as the parent addresses it, so the reply the target sends
+	// back names a run the parent can resolve.
+	if queued[0].ID != msgID || queued[0].FromRunID != first.key("asker") {
+		t.Fatalf("relayed ask = %+v, want the canonical id and the parent's name for the asker", queued[0])
 	}
 
-	if status, body = reply(t, second, "target", "asker", msgID, "pong"); status != http.StatusOK ||
+	// The asker is named the way the parent relayed the ask: the parent's own
+	// address for the asking branch's run.
+	if status, body = reply(t, second, "target", first.key("asker"), msgID, "pong"); status != http.StatusOK ||
 		body["outcome"] != string(messaging.OutcomeReplied) {
 		t.Fatalf("cross-branch reply = (%d, %v), want 200 replied", status, body)
 	}
@@ -61,8 +65,8 @@ func TestCrossBranchAskAdmitsOneEdgeAtTheParent(t *testing.T) {
 	if !ok || payload["message"] != "pong" {
 		t.Fatalf("wait payload = %v, want the reply body", body["payload"])
 	}
-	if fromRunID, _ := body["from_run_id"].(string); fromRunID != "target" {
-		t.Fatalf("reply from_run_id = %q, want the canonical target run", fromRunID)
+	if fromRunID, _ := body["from_run_id"].(string); fromRunID != second.key("target") {
+		t.Fatalf("reply from_run_id = %q, want the run the asker addressed", fromRunID)
 	}
 
 	// The reply completed the asker's edge; it was not queued a second time as a
@@ -82,7 +86,7 @@ func TestWithdrawalRetractsOnlyTheParentEdge(t *testing.T) {
 	parent, first, second := crossBranch(t)
 
 	msgID := newMsgID(t)
-	if status, body := ask(t, first, "asker", "target", msgID); status != http.StatusOK {
+	if status, body := ask(t, first, "asker", second.key("target"), msgID); status != http.StatusOK {
 		t.Fatalf("cross-branch ask = (%d, %v), want 200", status, body)
 	}
 	if queued := queuedAgentMessages(t, second.broker, "target"); len(queued) != 1 {
@@ -113,29 +117,30 @@ func TestWithdrawalRetractsOnlyTheParentEdge(t *testing.T) {
 // nobody serves.
 func TestRefusedDescendantRetiresItsBrokerRecord(t *testing.T) {
 	parent, first, second := crossBranch(t)
-	if parent.broker.GetRun("target") == nil {
+	target := second.key("target")
+	if parent.broker.GetRun(target) == nil {
 		t.Fatal("the parent never adopted the target run the branch registered")
 	}
 
 	// The target branch answers as a replacement, so the relay is refused.
 	second.broker.Store().Reset()
-	status, body := ask(t, first, "asker", "target", newMsgID(t))
+	status, body := ask(t, first, "asker", second.key("target"), newMsgID(t))
 	if status != http.StatusNotFound || body["code"] != "target-unavailable" {
 		t.Fatalf("ask to a refused branch = (%d, %v), want 404 target-unavailable", status, body)
 	}
-	if parent.broker.GetRun("target") != nil {
+	if parent.broker.GetRun(target) != nil {
 		t.Fatal("a refused descendant kept its broker record")
 	}
 
 	// A later ask cannot fall back to serving the run locally.
-	status, body = ask(t, first, "asker", "target", newMsgID(t))
+	status, body = ask(t, first, "asker", second.key("target"), newMsgID(t))
 	if status != http.StatusNotFound || body["code"] != "target-unavailable" {
 		t.Fatalf("ask after the record was retired = (%d, %v), want 404 target-unavailable", status, body)
 	}
 	if edges := parent.broker.Store().ActiveCount(); edges != 0 {
 		t.Fatalf("the parent holds %d ask edges for a retired descendant", edges)
 	}
-	if st := parent.broker.GetRun("target"); st != nil {
+	if st := parent.broker.GetRun(target); st != nil {
 		st.Mu.Lock()
 		queued := len(st.ControlQueue)
 		st.Mu.Unlock()
@@ -153,7 +158,7 @@ func TestRelayToAGoneBranchRetractsTheParentEdge(t *testing.T) {
 	if err := second.broker.Stop(); err != nil {
 		t.Fatalf("stop target branch broker: %v", err)
 	}
-	status, body := ask(t, first, "asker", "target", newMsgID(t))
+	status, body := ask(t, first, "asker", second.key("target"), newMsgID(t))
 	if status != http.StatusNotFound || body["code"] != "target-unavailable" {
 		t.Fatalf("ask to a gone branch = (%d, %v), want 404 target-unavailable", status, body)
 	}
@@ -172,14 +177,14 @@ func TestRelayToAReplacedBranchIsNotReplayed(t *testing.T) {
 	// generation than the one it registered with.
 	second.broker.Store().Reset()
 
-	status, body := ask(t, first, "asker", "target", newMsgID(t))
+	status, body := ask(t, first, "asker", second.key("target"), newMsgID(t))
 	if status != http.StatusNotFound || body["code"] != "target-unavailable" {
 		t.Fatalf("ask to a replaced branch = (%d, %v), want 404 target-unavailable", status, body)
 	}
 	if edges := parent.broker.Store().ActiveCount(); edges != 0 {
 		t.Fatalf("parent holds %d ask edges for a refused relay", edges)
 	}
-	if parent.link.Registry().Owns("target") {
+	if parent.link.Registry().Owns(second.key("target")) {
 		t.Fatal("a branch that answers as a replacement is still a registered target")
 	}
 }
@@ -188,10 +193,10 @@ func TestRelayToAReplacedBranchIsNotReplayed(t *testing.T) {
 // admitted by a parent whose generation has since changed is lost, not
 // forwarded again.
 func TestReplacedParentIsNeverReplayed(t *testing.T) {
-	parent, first, _ := crossBranch(t)
+	parent, first, second := crossBranch(t)
 
 	msgID := newMsgID(t)
-	if status, body := ask(t, first, "asker", "target", msgID); status != http.StatusOK {
+	if status, body := ask(t, first, "asker", second.key("target"), msgID); status != http.StatusOK {
 		t.Fatalf("cross-branch ask = (%d, %v), want 200", status, body)
 	}
 	// The parent's ask store is replaced: a new generation, and no edge from the
@@ -215,7 +220,7 @@ func TestReplyGenerationGuardRefusesAReplacedParent(t *testing.T) {
 	parent, first, second := crossBranch(t)
 
 	msgID := newMsgID(t)
-	if status, body := ask(t, first, "asker", "target", msgID); status != http.StatusOK {
+	if status, body := ask(t, first, "asker", second.key("target"), msgID); status != http.StatusOK {
 		t.Fatalf("cross-branch ask = (%d, %v), want 200", status, body)
 	}
 	admitted := parent.broker.Store().Generation()
@@ -244,7 +249,7 @@ func TestReplyRouteIsDroppedWhenTheParentWasReplaced(t *testing.T) {
 	parent, first, second := crossBranch(t)
 
 	msgID := newMsgID(t)
-	if status, body := ask(t, first, "asker", "target", msgID); status != http.StatusOK {
+	if status, body := ask(t, first, "asker", second.key("target"), msgID); status != http.StatusOK {
 		t.Fatalf("cross-branch ask = (%d, %v), want 200", status, body)
 	}
 	parent.broker.Store().Reset()
@@ -254,7 +259,7 @@ func TestReplyRouteIsDroppedWhenTheParentWasReplaced(t *testing.T) {
 
 	outcome, err := second.link.up.Reply(context.Background(), messaging.ReplyRequest{
 		From:      messaging.Identity{RunID: "target"},
-		ToRunID:   "asker",
+		ToRunID:   first.key("asker"),
 		MessageID: msgID,
 		Body:      `{"message":"pong"}`,
 	})
@@ -275,8 +280,8 @@ func TestReplyRouteIsDroppedWhenTheParentWasReplaced(t *testing.T) {
 func TestParentPeerExportHidesSiblingBranches(t *testing.T) {
 	parent := startBranch(t, "", "orchestrator")
 	first := startBranch(t, parent.url(), "asker")
-	_ = startBranch(t, parent.url(), "target")
-	awaitRegistered(t, parent, "asker", "target")
+	sibling := startBranch(t, parent.url(), "target")
+	awaitRegistered(t, parent, first.key("asker"), sibling.key("target"))
 
 	status, body := getSessions(t, first.broker.Addr(), "asker", first.token(t, "asker"))
 	if status != http.StatusOK {
@@ -286,7 +291,7 @@ func TestParentPeerExportHidesSiblingBranches(t *testing.T) {
 	if !listed["asker"] || !listed["orchestrator"] {
 		t.Fatalf("branch listing = %v, want its own run and the parent's own run", listed)
 	}
-	if listed["target"] {
+	if listed[sibling.key("target")] {
 		t.Fatalf("branch listing = %v, want no sibling branch run", listed)
 	}
 
@@ -295,7 +300,7 @@ func TestParentPeerExportHidesSiblingBranches(t *testing.T) {
 		t.Fatalf("parent sessions = (%d, %v), want 200", status, body)
 	}
 	listed = sessionRunIDs(t, body)
-	if !listed["orchestrator"] || !listed["asker"] || !listed["target"] {
+	if !listed["orchestrator"] || !listed[first.key("asker")] || !listed[sibling.key("target")] {
 		t.Fatalf("parent listing = %v, want its own run and its owned descendants", listed)
 	}
 }
@@ -305,15 +310,16 @@ func TestParentPeerExportHidesSiblingBranches(t *testing.T) {
 func TestBranchRetiresItsClaimOnClose(t *testing.T) {
 	parent := startBranch(t, "")
 	child := startBranch(t, parent.url(), "child-run")
-	awaitRegistered(t, parent, "child-run")
+	key := child.key("child-run")
+	awaitRegistered(t, parent, key)
 
 	if err := child.link.Close(); err != nil {
 		t.Fatalf("close branch link: %v", err)
 	}
-	if parent.link.Registry().Owns("child-run") {
+	if parent.link.Registry().Owns(key) {
 		t.Fatal("the closed branch is still a registered routing target")
 	}
-	if parent.broker.GetRun("child-run") != nil {
+	if parent.broker.GetRun(key) != nil {
 		t.Fatal("the closed branch's run record is still at the parent")
 	}
 }

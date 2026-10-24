@@ -202,6 +202,9 @@ func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 // Owns reports whether runID belongs to a registered child broker.
 func (m *Messenger) Owns(runID string) bool { return m.registry.Owns(runID) }
 
+// Key reports the run ID this broker addresses childID's runID by.
+func (m *Messenger) Key(childID, runID string) string { return ParentRunKey(childID, runID) }
+
 // Register adopts one child broker's claim on the runs it owns.
 func (m *Messenger) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 	return m.registry.Register(reg)

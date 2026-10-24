@@ -1258,11 +1258,12 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 // --- parent link ---
 
 // parentLinkAuthorized reports whether a parent-link request may act. A broker
-// without a parent-link token accepts the loopback caller, the same trust the
-// broker's run registration already runs on.
+// serves its parent routes only under the link credential it was configured
+// with: an unconfigured credential would let any caller on the same machine
+// replace a live branch's claim wholesale, so those routes refuse instead.
 func parentLinkAuthorized(r *http.Request, token string) bool {
 	if token == "" {
-		return true
+		return false
 	}
 	auth := r.Header.Get("Authorization")
 	const prefix = "Bearer "
@@ -1306,15 +1307,12 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusBadRequest, "every claimed run needs a run_id", "invalid-request")
 			return
 		}
-		// A branch supervisor run is reserved in every branch, so the registry
-		// addresses it under a branch-namespaced run ID and it never collides
-		// with this broker's own supervisor run.
-		if claim.RunID == messaging.SupervisorRunID {
-			continue
-		}
-		// A run this broker already owns itself is not a child's to claim. The
-		// registry refuses a run another child already owns.
-		if b.GetRun(claim.RunID) != nil && !link.Owns(claim.RunID) {
+		// A run this broker already owns itself is not a child's to claim, and a
+		// claim never re-points a record it does not own: the registry names every
+		// claim by the branch that makes it, so a collision here is a record this
+		// broker minted itself.
+		key := link.Key(body.ChildID, claim.RunID)
+		if b.GetRun(key) != nil && !link.Owns(key) {
 			writeCodedError(w, http.StatusConflict, "run already registered", "invalid-request")
 			return
 		}
@@ -1416,6 +1414,7 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 		RunID          string          `json:"run_id"`
 		Token          string          `json:"token"`
 		FromRunID      string          `json:"from_run_id"`
+		FromSender     string          `json:"from_sender"`
 		ToRunID        string          `json:"to_run_id"`
 		Type           string          `json:"type"`
 		Payload        json.RawMessage `json:"payload"`
@@ -1458,14 +1457,20 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 		return
 	}
+	sender := body.FromSender
+	if sender == "" {
+		// A relay that carried no name still names the asker by whatever this
+		// branch resolves for it, which is the run ID at worst.
+		sender = b.DisplayName(body.FromRunID)
+	}
 	queued := &ControlMessage{
 		ID:        body.MessageID,
 		Type:      body.Type,
 		RunID:     body.ToRunID,
 		FromRunID: body.FromRunID,
-		// The branch that owns the asker is the one that knows its display name;
-		// the canonical run ID travels unchanged.
-		Sender:    b.DisplayName(body.FromRunID),
+		// The branch that owns the asker is the one that knows its display name,
+		// so the relay carries it; the canonical run ID travels unchanged.
+		Sender:    sender,
 		Payload:   body.Payload,
 		CreatedAt: time.Now(),
 	}
@@ -1922,16 +1927,22 @@ func (b *Broker) DisplayName(runID string) string { return b.displayName(runID) 
 
 // MatchLabel returns every run whose display name is exactly label, sorted by
 // run ID so the caller can tell an ambiguous label from a unique one instead of
-// the broker guessing.
+// the broker guessing. A run a registered child broker owns is not this broker's
+// to resolve: its display name belongs to the branch that owns it, so this
+// broker's own labels never resolve to a descendant's record.
 func (b *Broker) MatchLabel(label string) []string {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
+	link := b.parentLink
 	matches := make([]string, 0, 1)
 	for runID, st := range b.runs {
+		if link != nil && link.Owns(runID) {
+			continue
+		}
 		if st.displayName() == label {
 			matches = append(matches, runID)
 		}
 	}
+	b.mu.RUnlock()
 	sort.Strings(matches)
 	return matches
 }
@@ -1993,14 +2004,22 @@ func (b *Broker) SetHarnessName(runID, name string) error {
 		return fmt.Errorf("run not found: %s", runID)
 	}
 	st.Mu.Lock()
-	defer st.Mu.Unlock()
 	st.HarnessName = name
+	st.Mu.Unlock()
+	// The label is part of what this broker publishes about the run, so a host
+	// with a parent link re-publishes it now instead of at the next refresh.
+	b.runSetChanged()
 	return nil
 }
 
 // RenameRun changes the model-set display name for runID. An empty name resets
-// the run to its run ID. A harness-supplied name, if any, still wins.
+// the run to its run ID. A harness-supplied name, if any, still wins. A run a
+// registered child broker owns keeps the name that branch publishes for it, so
+// a rename here is refused rather than silently reverted by the next claim.
 func (b *Broker) RenameRun(runID, name string) error {
+	if link, _ := b.parentSeam(); link != nil && link.Owns(runID) {
+		return fmt.Errorf("run %s is owned by a child broker and keeps the name that branch publishes", runID)
+	}
 	st := b.GetRun(runID)
 	if st == nil {
 		return fmt.Errorf("run not found: %s", runID)
@@ -2009,11 +2028,14 @@ func (b *Broker) RenameRun(runID, name string) error {
 		name = runID
 	}
 	st.Mu.Lock()
-	defer st.Mu.Unlock()
 	if st.Info == nil {
 		st.Info = &SessionInfo{RunID: runID}
 	}
 	st.Info.Label = name
+	st.Mu.Unlock()
+	// The label is part of what this broker publishes about the run, so a host
+	// with a parent link re-publishes it now instead of at the next refresh.
+	b.runSetChanged()
 	return nil
 }
 
