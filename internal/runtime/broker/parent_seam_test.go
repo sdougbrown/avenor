@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/parentlink"
 )
 
 // parentLinkStub is a parent-link seam that records nothing and refuses every
@@ -200,6 +201,51 @@ func postParentLink(t *testing.T, addr, body, authHeader string) (int, map[strin
 	var decoded map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&decoded)
 	return resp.StatusCode, decoded
+}
+
+// TestParentRegisterRefusesARunTheBrokerOwns pins the ownership guard on
+// /parent/register: a child that claims a run this broker already owns — its
+// own supervisor run, in any real nested topology — is refused, and the owned
+// run keeps its owner.
+func TestParentRegisterRefusesARunTheBrokerOwns(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	if _, err := b.CreateRun("supervisor", "supervisor"); err != nil {
+		t.Fatalf("create the broker's own run: %v", err)
+	}
+
+	link, err := parentlink.New(parentlink.Options{
+		Endpoint:   "http://child:1234",
+		Generation: func() string { return b.Store().Generation() },
+		Runs:       func() []messaging.RunClaim { return []messaging.RunClaim{} },
+	}, b.LocalMessenger())
+	if err != nil {
+		t.Fatalf("build parent link: %v", err)
+	}
+	t.Cleanup(func() { _ = link.Close() })
+	b.SetParentLink(link)
+
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   "child-1",
+		"endpoint":   "http://child:1234",
+		"generation": "gen-1",
+		"runs": []map[string]any{
+			{"run_id": "supervisor", "label": "supervisor", "token": "child-token"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+	status, _ := postParentLink(t, b.Addr(), string(raw), "")
+	if status != http.StatusConflict {
+		t.Fatalf("register claiming a run the broker owns = %d, want 409", status)
+	}
+	if _, ok := b.RunToken("supervisor"); !ok {
+		t.Fatal("the owned run lost its credential to the refused claim")
+	}
 }
 
 // TestParentRegisterRequiresTheParentLinkToken pins the parent-route bearer
