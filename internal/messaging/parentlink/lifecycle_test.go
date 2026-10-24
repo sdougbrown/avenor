@@ -175,10 +175,28 @@ func TestLinkRefusesWorkAfterItIsClosed(t *testing.T) {
 	})
 	ctx := testContext(t)
 	link := newTestLink(t, stub, "gen-a")
+	// A wait and a withdrawal with a recorded ask route refuse the same way:
+	// the closed transport cannot re-sync the credentials the hop needs.
+	link.recordAsk("run-a", "msg-1", askRoute{generation: "gen-a"})
 	if err := link.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if err := link.Sync(ctx); err == nil {
 		t.Fatal("Sync after the close = nil, want an error")
+	}
+
+	// The routed operations refuse the same way: a closed transport carries no
+	// ask, wait, withdrawal, or listing.
+	if _, err := link.Send(ctx, askRequest("msg-1")); err == nil {
+		t.Fatal("Send after the close = nil, want an error")
+	}
+	if _, err := link.Wait(ctx, waitRequest("msg-1")); err == nil {
+		t.Fatal("Wait after the close = nil, want an error")
+	}
+	if _, err := link.Withdraw(ctx, withdrawRequest("msg-1")); err == nil {
+		t.Fatal("Withdraw after the close = nil, want an error")
+	}
+	if _, err := link.Peers(ctx); err == nil {
+		t.Fatal("Peers after the close = nil, want an error")
 	}
 }
