@@ -53,10 +53,9 @@ type DescendantRegistration struct {
 // Label and Token are what the owning branch hands the parent, so the parent
 // authenticates the run and relays into it with the run's own credential.
 type ClaimedRun struct {
-	RunID string
-	Key   string
-	Label string
-	Token string
+	RunClaim
+	// Key is the run ID this broker addresses the claimed run by.
+	Key string
 }
 
 // DescendantClaim reports what one registration changed, so the broker can
