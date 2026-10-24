@@ -2,12 +2,14 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
 	"github.com/sdougbrown/avenor/internal/messaging/messagetest"
 )
 
@@ -197,6 +199,170 @@ func TestLocalMessagingSeamAnswersAskTargetLookup(t *testing.T) {
 	}
 	if queued := countAgentMessages(t, b, "target"); queued != 0 {
 		t.Fatalf("target queue = %d messages, want none", queued)
+	}
+}
+
+// seamPeerSource overrides only peer listing, so a test can put a peer the
+// broker does not own in front of the /sessions listing while every other
+// operation stays local.
+type seamPeerSource struct {
+	messaging.Messenger
+	peers []messaging.Peer
+	err   error
+}
+
+func (s seamPeerSource) Peers(context.Context) ([]messaging.Peer, error) { return s.peers, s.err }
+
+// TestSessionsListsSeamPeersForHTTPChildren pins that the authenticated
+// /sessions listing a local HTTP child reads comes from the installed
+// messenger: it carries the peers only that messenger can see while every
+// local peer keeps its recorded metadata.
+func TestSessionsListsSeamPeersForHTTPChildren(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+	b.UpdateSessionInfo("target", &SessionInfo{
+		Backend: "seam-backend", Model: "seam-model", Dir: "/work", Status: "thinking", Kind: "agent",
+	})
+
+	local, err := b.LocalMessenger().Peers(context.Background())
+	if err != nil {
+		t.Fatalf("local peers: %v", err)
+	}
+	remoteSession, err := json.Marshal(SessionInfo{RunID: "remote-peer", Label: "remote", LastSeen: 1700000000})
+	if err != nil {
+		t.Fatalf("remote session: %v", err)
+	}
+	b.SetMessenger(seamPeerSource{
+		Messenger: b.LocalMessenger(),
+		peers:     append(local, messaging.Peer{RunID: "remote-peer", Session: remoteSession}),
+	})
+	t.Cleanup(func() { b.SetMessenger(nil) })
+
+	child, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "sender", Token: senderToken})
+	if err != nil {
+		t.Fatalf("local transport: %v", err)
+	}
+	defer child.Close()
+
+	ctx := context.Background()
+	pre, err := child.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	listed, err := child.Peers(ctx, messaging.PeersRequest{
+		Sender:     messaging.Identity{RunID: "sender"},
+		Generation: pre.Generation,
+	})
+	if err != nil {
+		t.Fatalf("peers: %v", err)
+	}
+	byRunID := make(map[string]SessionInfo, len(listed.Peers))
+	for _, peer := range listed.Peers {
+		var info SessionInfo
+		if err := json.Unmarshal(peer.Session, &info); err != nil {
+			t.Fatalf("peer %s session = %s (%v)", peer.RunID, peer.Session, err)
+		}
+		byRunID[peer.RunID] = info
+	}
+	remote, ok := byRunID["remote-peer"]
+	if !ok {
+		t.Fatalf("peers = %+v, want the messenger-provided remote peer", listed.Peers)
+	}
+	if remote.Label != "remote" || remote.LastSeen != 1700000000 {
+		t.Fatalf("remote peer = %+v, want the record the messenger reported", remote)
+	}
+	target, ok := byRunID["target"]
+	if !ok {
+		t.Fatalf("peers = %+v, want the local target", listed.Peers)
+	}
+	if target.Label != "target" || target.Kind != "agent" || target.Backend != "seam-backend" ||
+		target.Model != "seam-model" || target.Dir != "/work" || target.Status != "thinking" {
+		t.Fatalf("target peer = %+v, want its recorded metadata", target)
+	}
+	if target.LastSeen <= 0 {
+		t.Fatalf("target last_seen = %d, want the local record's timestamp", target.LastSeen)
+	}
+}
+
+// TestSessionsReportsAnIncompletePeerListing pins that a peer listing the
+// installed messenger could not complete is reported instead of reading as a
+// complete list, while the generation and protocol marker a preflight needs
+// stay available.
+func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+	b.SetMessenger(seamPeerSource{
+		Messenger: b.LocalMessenger(),
+		peers:     []messaging.Peer{{RunID: "only-peer"}},
+		err:       errors.New("parent link down"),
+	})
+	t.Cleanup(func() { b.SetMessenger(nil) })
+
+	child, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "sender", Token: senderToken})
+	if err != nil {
+		t.Fatalf("local transport: %v", err)
+	}
+	defer child.Close()
+
+	ctx := context.Background()
+	pre, err := child.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	listed, err := child.Peers(ctx, messaging.PeersRequest{
+		Sender:     messaging.Identity{RunID: "sender"},
+		Generation: pre.Generation,
+	})
+	if err == nil {
+		t.Fatalf("peers = %+v, want the failed listing reported", listed.Peers)
+	}
+	if len(listed.Peers) != 0 {
+		t.Fatalf("peers = %+v, want no peers from a failed listing", listed.Peers)
+	}
+}
+
+// TestRoutedOwnerNoReplySendDeliversWithoutAnEdge pins the owner's routed
+// no-reply send: the message is delivered once, allocates no ask edge, and a
+// wait on it reports an absent edge instead of waiting for a reply nobody
+// asked for.
+func TestRoutedOwnerNoReplySendDeliversWithoutAnEdge(t *testing.T) {
+	b, _, _ := startSeamBroker(t)
+	transport := b.MessengerTransport()
+	t.Cleanup(func() { _ = transport.Close() })
+
+	ctx := context.Background()
+	pre, err := transport.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	now := time.Now().UTC()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("message id: %v", err)
+	}
+	sent, err := transport.Send(ctx, messaging.SendRequest{
+		From:       messaging.Identity{RunID: messaging.SupervisorRunID},
+		To:         messaging.Identity{RunID: "target"},
+		MessageID:  msgID,
+		Generation: pre.Generation,
+		Body:       `{"message":"notice"}`,
+		NoReply:    true,
+	})
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("no-reply send = (%+v, %v), want sent", sent, err)
+	}
+	if queued := countAgentMessages(t, b, "target"); queued != 1 {
+		t.Fatalf("target queue = %d messages, want the single no-reply delivery", queued)
+	}
+	if edges := b.Store().ActiveCount(); edges != 0 {
+		t.Fatalf("no-reply send allocated %d ask edges, want 0", edges)
+	}
+	waited, err := transport.Wait(ctx, messaging.WaitRequest{
+		Sender:     messaging.Identity{RunID: messaging.SupervisorRunID},
+		MessageID:  msgID,
+		Generation: pre.Generation,
+		Timeout:    time.Millisecond,
+	})
+	if err != nil || waited.Outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("wait = (%+v, %v), want an absent edge", waited, err)
 	}
 }
 

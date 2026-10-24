@@ -115,6 +115,131 @@ func TestTransportCloseUnblocksWait(t *testing.T) {
 	}
 }
 
+// blockingMessenger implements only the delegated operations, each of which
+// reports that it started and then waits for the context the transport hands
+// it. A shutdown-cancelled call returns that context's error, so a test can
+// prove the transport cancels and joins it instead of abandoning it.
+type blockingMessenger struct {
+	messaging.Messenger
+	entered chan struct{}
+}
+
+func (m blockingMessenger) block(ctx context.Context) error {
+	select {
+	case m.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (m blockingMessenger) Reply(ctx context.Context, _ messaging.ReplyRequest) (messaging.Outcome, error) {
+	return messaging.OutcomeNotSent, m.block(ctx)
+}
+
+func (m blockingMessenger) Withdraw(ctx context.Context, _ messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
+}
+
+func (m blockingMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
+	return nil, m.block(ctx)
+}
+
+// TestDelegatedOperationsJoinClose pins that every delegated operation is
+// bound to the transport's shutdown: Close cancels the call it is serving and
+// waits for it, and no delegated operation starts once the transport closed.
+func TestDelegatedOperationsJoinClose(t *testing.T) {
+	store, _ := messagetest.NewMemoryStore(t)
+	gen := store.Generation()
+	msgID := mintID(t, time.Minute)
+
+	type opOutcome struct {
+		outcome messaging.Outcome
+		err     error
+	}
+	cases := []struct {
+		name          string
+		closedOutcome messaging.Outcome
+		call          func(context.Context, messaging.Transport) (messaging.Outcome, error)
+	}{
+		{
+			name:          "reply",
+			closedOutcome: messaging.OutcomeNotSent,
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				res, err := tr.Reply(ctx, messaging.ReplyRequest{
+					From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+				})
+				return res.Outcome, err
+			},
+		},
+		{
+			name:          "withdraw",
+			closedOutcome: messaging.OutcomeNotSent,
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				res, err := tr.Withdraw(ctx, messaging.WithdrawRequest{
+					Sender: alice, MessageID: msgID, Generation: gen,
+				})
+				return res.Outcome, err
+			},
+		},
+		{
+			name: "peers",
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				_, err := tr.Peers(ctx, messaging.PeersRequest{Sender: alice, Generation: gen})
+				return "", err
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entered := make(chan struct{}, 1)
+			tr := NewRouted(store, func() messaging.Messenger {
+				return blockingMessenger{entered: entered}
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			called := make(chan opOutcome, 1)
+			go func() {
+				outcome, err := tc.call(ctx, tr)
+				called <- opOutcome{outcome: outcome, err: err}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("delegated call never reached the messenger")
+			}
+
+			closed := make(chan error, 1)
+			go func() { closed <- tr.Close() }()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Close did not join the delegated call")
+			}
+			select {
+			case out := <-called:
+				if !errors.Is(out.err, context.Canceled) {
+					t.Fatalf("delegated %s error = %v, want the shutdown cancellation", tc.name, out.err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("delegated %s did not unblock on Close", tc.name)
+			}
+
+			outcome, err := tc.call(context.Background(), tr)
+			if !errors.Is(err, messaging.ErrTransportClosed) {
+				t.Fatalf("%s after Close = (%q, %v), want ErrTransportClosed", tc.name, outcome, err)
+			}
+			if tc.closedOutcome != "" && outcome != tc.closedOutcome {
+				t.Fatalf("%s after Close outcome = %q, want %q", tc.name, outcome, tc.closedOutcome)
+			}
+		})
+	}
+}
+
 // TestAskEpochLost pins the confirmed-generation-loss path: a replaced
 // generation terminates the waiter as lost and refuses the old generation's
 // requests.

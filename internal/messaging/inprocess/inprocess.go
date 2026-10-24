@@ -112,11 +112,13 @@ func waitResult(res messaging.WaitResult, err error, closed bool) (messaging.Wai
 }
 
 func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
-	if t.isClosed() {
+	child, cancel, ok := t.child(ctx)
+	if !ok {
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID}, messaging.ErrTransportClosed
 	}
+	defer cancel()
 	if m := t.messenger(); m != nil {
-		outcome, err := m.Reply(ctx, req)
+		outcome, err := m.Reply(child, req)
 		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
 	}
 	outcome, err := t.store.Reply(
@@ -131,8 +133,13 @@ func (t *Transport) Withdraw(ctx context.Context, req messaging.WithdrawRequest)
 	if err := t.open(req.Generation); err != nil {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
 	}
+	child, cancel, ok := t.child(ctx)
+	if !ok {
+		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, messaging.ErrTransportClosed
+	}
+	defer cancel()
 	if m := t.messenger(); m != nil {
-		return m.Withdraw(ctx, req)
+		return m.Withdraw(child, req)
 	}
 	return t.store.Withdraw(t.key(req.Sender, req.MessageID, req.Generation))
 }
@@ -149,8 +156,13 @@ func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 	if err := t.open(req.Generation); err != nil {
 		return messaging.PeersResult{}, err
 	}
+	child, cancel, ok := t.child(ctx)
+	if !ok {
+		return messaging.PeersResult{}, messaging.ErrTransportClosed
+	}
+	defer cancel()
 	if m := t.messenger(); m != nil {
-		peers, err := m.Peers(ctx)
+		peers, err := m.Peers(child)
 		return messaging.PeersResult{Peers: peers, Generation: t.store.Generation()}, err
 	}
 	peers, err := t.store.Peers()

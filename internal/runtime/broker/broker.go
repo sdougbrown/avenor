@@ -1133,16 +1133,39 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 
 // handleSessions returns a list of all registered runs and their metadata.
 // The generation and the messaging protocol marker let a shared client
-// negotiate the local ask protocol before it sends anything.
+// negotiate the local ask protocol before it sends anything. The peer list
+// comes from the installed messenger, so a host that reaches peers the broker
+// does not own lists them here too; a listing that messenger could not finish
+// carries peers_error beside whatever it did return, so a partial list never
+// reads as a complete one.
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
-	sessions := b.sessions()
+	peers, listingErr := b.seam().Peers(r.Context())
 
-	writeJSONBody(w, http.StatusOK, map[string]any{
+	sessions := make([]SessionInfo, 0, len(peers))
+	for _, peer := range peers {
+		info := SessionInfo{RunID: peer.RunID}
+		if len(peer.Session) > 0 {
+			if err := json.Unmarshal(peer.Session, &info); err != nil {
+				listingErr = errors.Join(listingErr, fmt.Errorf("peer %s has an unreadable session record: %w", peer.RunID, err))
+				continue
+			}
+		}
+		if info.RunID == "" {
+			info.RunID = peer.RunID
+		}
+		sessions = append(sessions, info)
+	}
+
+	body := map[string]any{
 		"sessions":           sessions,
 		"generation":         generation,
 		"messaging_protocol": messaging.ProtocolVersion,
-	})
+	}
+	if listingErr != nil {
+		body["peers_error"] = listingErr.Error()
+	}
+	writeJSONBody(w, http.StatusOK, body)
 }
 
 // handleRename renames one run's display name. It rejects a malformed request

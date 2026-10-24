@@ -343,6 +343,9 @@ func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 	if err != nil {
 		return messaging.PeersResult{}, err
 	}
+	if body.PeersError != "" {
+		return messaging.PeersResult{}, fmt.Errorf("%w: peer listing is incomplete: %s", messaging.ErrTargetUnavailable, body.PeersError)
+	}
 	result := messaging.PeersResult{Generation: body.Generation}
 	for _, raw := range body.Sessions {
 		var session struct {
@@ -474,6 +477,7 @@ type envelope struct {
 	Generation        string            `json:"generation"`
 	MessagingProtocol int               `json:"messaging_protocol"`
 	Sessions          []json.RawMessage `json:"sessions"`
+	PeersError        string            `json:"peers_error"`
 	Fence             *httpbase.Fence   `json:"fence"`
 }
 
