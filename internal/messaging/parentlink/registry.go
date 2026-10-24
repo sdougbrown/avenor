@@ -8,6 +8,7 @@ package parentlink
 
 import (
 	"fmt"
+	"net/url"
 	"sync"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -61,6 +62,9 @@ func NewRegistry() *Registry {
 // owns is refused and nothing is applied.
 func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 	claim := messaging.DescendantClaim{}
+	if err := validEndpoint(reg.Endpoint); err != nil {
+		return claim, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, run := range reg.Runs {
@@ -96,6 +100,27 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		claim.Retired = append(claim.Retired, runID)
 	}
 	return claim, nil
+}
+
+// validEndpoint refuses an endpoint the relay could not post to. The relay
+// posts the target run's credential to the endpoint a child registered, so an
+// endpoint that is not an absolute http address is refused rather than
+// carried. An empty endpoint names no route at all and is left to the hop.
+func validEndpoint(endpoint string) error {
+	if endpoint == "" {
+		return nil
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("%w: the branch's endpoint is not a URL: %v", messaging.ErrInvalidRequest, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("%w: the branch's endpoint must be an http address", messaging.ErrInvalidRequest)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("%w: the branch's endpoint names no host", messaging.ErrInvalidRequest)
+	}
+	return nil
 }
 
 // Deregister retires one child and reports the runs it had claimed.
