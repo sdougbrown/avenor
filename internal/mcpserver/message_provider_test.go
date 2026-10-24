@@ -269,6 +269,9 @@ func TestMCPMessageProviderKeepsAPartialPeerListing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("visible peer state = %+v, %v, want the peer the listing did read", state, err)
 	}
+	if _, err := p.peerRunState(context.Background(), "rt-missing"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("missing peer state = %v, want the incomplete listing reported", err)
+	}
 	if _, err := p.Resolve(context.Background(), "rt-missing"); !errors.Is(err, messaging.ErrIncompleteListing) {
 		t.Fatalf("missing peer = %v, want the incomplete listing reported", err)
 	}
