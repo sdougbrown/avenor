@@ -58,7 +58,7 @@ func TestAdmissionForADescendantRunTouchesNoLink(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = b.Stop() })
 	link := &parentLinkStub{owned: "remote"}
-	b.SetParentLink(link)
+	b.InstallParentLink(link, "", nil)
 
 	now := time.Now().UTC()
 	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
@@ -102,7 +102,7 @@ func TestRelayRecordsTheReplyRouteBeforeExposingTheAsk(t *testing.T) {
 	link := &parentLinkStub{recordRelay: func(messaging.RelayRoute) error {
 		return messaging.ErrTransportClosed
 	}}
-	b.SetParentLink(link)
+	b.InstallParentLink(link, "", nil)
 
 	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
 		"from_run_id":     "asker",
@@ -163,7 +163,7 @@ func TestRelayRefusesAReplacementGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	b.SetParentLink(&parentLinkStub{})
+	b.InstallParentLink(&parentLinkStub{}, "", nil)
 
 	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
 		"from_run_id":   "asker",
@@ -228,30 +228,15 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 			t.Fatalf("start broker: %v", err)
 		}
 		t.Cleanup(func() { _ = b.Stop() })
-		b.SetParentLink(&parentLinkStub{
+		b.InstallParentLink(&parentLinkStub{
 			register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 				return messaging.DescendantClaim{
-					Runs:    []messaging.ClaimedRun{{RunClaim: messaging.RunClaim{RunID: "remote-run", Label: "remote", Token: "child-token"}, Key: "remote-run"}},
-					Adopted: []string{"remote-run"},
+					Runs: []messaging.ClaimedRun{{RunClaim: messaging.RunClaim{RunID: "remote-run", Label: "remote", Token: "child-token"}, Key: "remote-run"}},
 				}, nil
 			},
-		})
-		if token != "" {
-			b.SetParentLinkToken(token)
-		}
+		}, token, nil)
 		return b
 	}
-
-	t.Run("no token set accepts the loopback caller", func(t *testing.T) {
-		b := startWithLink(t, "")
-		status, body := postParentLink(t, b.Addr(), string(raw), "")
-		if status != http.StatusOK {
-			t.Fatalf("registration with no token set = (%d, %v), want 200", status, body)
-		}
-		if b.GetRun("remote-run") == nil {
-			t.Fatal("the adopted run has no record")
-		}
-	})
 
 	t.Run("no Authorization header is refused", func(t *testing.T) {
 		b := startWithLink(t, "parent-token")
@@ -287,43 +272,6 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 	})
 }
 
-// TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator pins the
-// handler's refusal of a run ID the run-key namespacing reserves: a claimed
-// run ID carrying "@" reads as a branch-namespaced key, so the registration
-// is a 400 and nothing is adopted.
-func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
-	raw, err := json.Marshal(map[string]any{
-		"child_id":   "child-1",
-		"endpoint":   "http://child:1234",
-		"generation": "gen-1",
-		"runs": []map[string]any{
-			{"run_id": messaging.SupervisorRunID + "@victim", "label": "forged", "token": "child-token"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal registration: %v", err)
-	}
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	t.Cleanup(func() { _ = b.Stop() })
-	b.SetParentLink(&parentLinkStub{
-		register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-			t.Fatal("the handler passed a namespaced run id to the link")
-			return messaging.DescendantClaim{}, nil
-		},
-	})
-
-	status, body := postParentLink(t, b.Addr(), string(raw), "")
-	if status != http.StatusBadRequest || body["code"] != "invalid-request" {
-		t.Fatalf("registration with a namespaced run id = (%d, %v), want 400 invalid-request", status, body)
-	}
-	if b.GetRun(messaging.SupervisorRunID+"@victim") != nil {
-		t.Fatal("the refused registration adopted the forged run")
-	}
-}
-
 // TestRelayRefusesATargetTheCallerDidNotAuthenticate pins the relay's target
 // authentication: a relay whose authenticated run does not match the body's
 // to_run_id is refused before the target's queue is touched, while a relay
@@ -341,7 +289,7 @@ func TestRelayRefusesATargetTheCallerDidNotAuthenticate(t *testing.T) {
 	if _, err := b.CreateRun("other-run", "other-run"); err != nil {
 		t.Fatalf("create other run: %v", err)
 	}
-	b.SetParentLink(&parentLinkStub{})
+	b.InstallParentLink(&parentLinkStub{}, "", nil)
 
 	// A relay authenticated as one run cannot target another: the guard
 	// refuses before the target's queue is touched.

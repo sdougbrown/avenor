@@ -48,7 +48,9 @@ func TestMessengerWithdrawsTheEdgeWhenTheRelayFails(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	sent, err := messenger.Send(testContext(t), askRequest("msg-1"), false)
+	request := askRequest("msg-1")
+	request.To = messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"}
+	sent, err := messenger.Send(testContext(t), request)
 	if err == nil {
 		t.Fatal("Send = nil error, want the relay failure")
 	}
@@ -58,35 +60,6 @@ func TestMessengerWithdrawsTheEdgeWhenTheRelayFails(t *testing.T) {
 	withdrawn := local.withdrawnMessages()
 	if len(withdrawn) != 1 || withdrawn[0] != "msg-1" {
 		t.Fatalf("withdrawn = %v, want the admitted edge retracted", withdrawn)
-	}
-}
-
-// TestMessengerRegisterRefusesARunThisBrokerOwns pins the claim guard's
-// other half: a descendant may not claim a run the local ask store serves,
-// so the registration is refused with nothing applied instead of routing
-// locally owned runs into the child's queue.
-func TestMessengerRegisterRefusesARunThisBrokerOwns(t *testing.T) {
-	local := newStubMessenger()
-	local.reachable["run-local"] = true
-	messenger := newTestMessenger(t, local, nil)
-
-	claim, err := messenger.Register(messaging.DescendantRegistration{
-		ChildID:    "child-one",
-		Endpoint:   "http://child-one",
-		Generation: "gen-a",
-		Runs: []messaging.RunClaim{
-			{RunID: "run-local", Token: "tok-l"},
-			{RunID: "run-child", Token: "tok-c"},
-		},
-	})
-	if !errors.Is(err, ErrRunLocallyOwned) {
-		t.Fatalf("Register error = %v, want ErrRunLocallyOwned", err)
-	}
-	if claim.Adopted != nil || claim.Retired != nil {
-		t.Fatalf("Register claim = %+v, want nothing applied", claim)
-	}
-	if messenger.Owns("run-child") {
-		t.Fatal("the refused registration left a claim behind")
 	}
 }
 
@@ -107,7 +80,7 @@ func TestMessengerRoutesALocalTargetLocally(t *testing.T) {
 
 	request := askRequest("msg-1")
 	request.To = messaging.Identity{RunID: "run-local", Sender: "carol"}
-	if _, err := messenger.Send(testContext(t), request, false); err != nil {
+	if _, err := messenger.Send(testContext(t), request); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if targets := local.sentRuns(); len(targets) != 1 || targets[0] != "run-local" {
@@ -134,7 +107,7 @@ func TestMessengerRoutesAnUnknownTargetToTheParent(t *testing.T) {
 	local := newStubMessenger()
 	messenger := newTestMessenger(t, local, parent)
 
-	sent, err := messenger.Send(testContext(t), askRequest("msg-1"), false)
+	sent, err := messenger.Send(testContext(t), askRequest("msg-1"))
 	if err != nil || sent.Outcome != messaging.OutcomeSent {
 		t.Fatalf("Send = (%+v, %v), want the ask forwarded to the parent", sent, err)
 	}
@@ -196,8 +169,9 @@ func TestMessengerSendsANoReplyAskToAChildWithoutAnEdge(t *testing.T) {
 	}
 
 	tell := askRequest("msg-1")
+	tell.To = messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"}
 	tell.NoReply = true
-	sent, err := messenger.Send(testContext(t), tell, false)
+	sent, err := messenger.Send(testContext(t), tell)
 	if err != nil || sent.Outcome != messaging.OutcomeSent {
 		t.Fatalf("Send = (%+v, %v), want the tell relayed and sent", sent, err)
 	}

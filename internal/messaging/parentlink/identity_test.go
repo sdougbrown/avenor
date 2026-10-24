@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +57,7 @@ func TestBranchIdentityIsDerivedFromTheControlSocketPath(t *testing.T) {
 	}
 	seen := make(map[string]string, len(identities))
 	for _, identity := range identities {
+		id := BranchID(identity)
 		digest := sha256.Sum256([]byte(identity))
 		want := "branch-alpha-" + hex.EncodeToString(digest[:8])
 		if got := BranchID(identity); got != want {

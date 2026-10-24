@@ -107,7 +107,7 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		link *Messenger
 		err  error
 	)
-	link, err = Install(Options{
+	link, err = New(Options{
 		ParentURL:       parentURL,
 		Token:           testLinkToken,
 		ChildID:         childID,
@@ -125,14 +125,13 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		// Retiring the claim drops the host's run record with it, so a refused
 		// descendant stops being served locally.
 		RetireRun: func(runID, token string) { b.DeleteRunIfToken(runID, token) },
-	}, b)
+	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build parent link: %v", err)
 	}
 	branch.link = link
-	// The link credential is what the parent routes require: the parent side
-	// serves them only to callers that present it.
-	b.SetParentLinkToken(testLinkToken)
+	b.InstallParentLink(link, testLinkToken, link.RunChanged)
+	b.SetMessenger(link)
 	t.Cleanup(func() { _ = link.Close() })
 	if parentURL != "" {
 		if err := link.Start(context.Background()); err != nil {
@@ -279,17 +278,9 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 	// A run change is what republishes this branch's claims to the parent.
 	child.link.RunChanged()
 
-	deadline := time.Now().Add(awaitDeadline)
-	for {
-		hop, ok := parent.link.Registry().Hop(key)
-		if ok && hop.Label == "harness-name" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("parent display name = %q, want harness-name", parent.broker.DisplayName("child-run"))
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	awaitUntil(t, "the parent to publish the harness name", func() bool {
+		return parent.broker.DisplayName(key) == "harness-name"
+	})
 	if got := parent.broker.DisplayName(key); got != "harness-name" {
 		t.Fatalf("parent display name = %q, want harness-name", got)
 	}
@@ -303,8 +294,7 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 		t.Fatalf("rename run: %v", err)
 	}
 	awaitUntil(t, "the parent to publish the renamed label", func() bool {
-		hop, ok := parent.link.Registry().Hop(key)
-		return ok && hop.Label == "renamed-run"
+		return parent.broker.DisplayName(key) == "renamed-run"
 	})
 }
 

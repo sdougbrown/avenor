@@ -116,9 +116,6 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		key := keys[i]
 		claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: key})
 		adopted[key] = struct{}{}
-		if _, held := r.owners[key]; !held {
-			claim.Adopted = append(claim.Adopted, key)
-		}
 		r.owners[key] = reg.ChildID
 		current.runs[key] = run.RunID
 		current.tokens[key] = run.Token

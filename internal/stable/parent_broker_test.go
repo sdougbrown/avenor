@@ -34,8 +34,7 @@ func startTestParentBroker(t *testing.T) (*broker.Broker, *parentlink.Messenger)
 	if err != nil {
 		t.Fatalf("build parent messenger: %v", err)
 	}
-	b.SetParentLink(link)
-	b.SetParentLinkToken(testLinkToken)
+	b.InstallParentLink(link, testLinkToken, nil)
 	b.SetMessenger(link)
 	t.Cleanup(func() { _ = link.Close() })
 	return b, link
@@ -63,7 +62,7 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 		link *parentlink.Messenger
 		err  error
 	)
-	link, err = parentlink.Install(parentlink.Options{
+	link, err = parentlink.New(parentlink.Options{
 		ParentURL:  "http://" + parentBroker.Addr(),
 		Token:      testLinkToken,
 		ChildID:    parentlink.BranchID("test/" + b.Addr()),
@@ -80,10 +79,12 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 		// A run this branch stops owning loses its broker record too, so a
 		// refused descendant stops being served locally.
 		RetireRun: func(runID, token string) { b.DeleteRunIfToken(runID, token) },
-	}, b)
+	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build branch messenger: %v", err)
 	}
+	b.InstallParentLink(link, testLinkToken, link.RunChanged)
+	b.SetMessenger(link)
 	t.Cleanup(func() { _ = link.Close() })
 	if err := link.Start(context.Background()); err != nil {
 		t.Fatalf("register branch with parent: %v", err)

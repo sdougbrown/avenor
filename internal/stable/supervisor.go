@@ -2000,10 +2000,8 @@ func (s *Supervisor) installParentLink() {
 		return
 	}
 	s.parentLink = link
+	s.broker.InstallParentLink(link, s.config.BrokerParentToken, link.RunChanged)
 	s.broker.SetMessenger(link)
-	s.broker.SetParentLink(link)
-	s.broker.SetParentLinkToken(s.config.BrokerParentToken)
-	s.broker.SetRunObserver(link.RunChanged)
 	if options.ParentURL == "" {
 		return
 	}

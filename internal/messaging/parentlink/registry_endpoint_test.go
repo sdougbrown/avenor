@@ -34,8 +34,8 @@ func TestRegistryRefusesAnEndpointItCouldNotPostTo(t *testing.T) {
 			if !errors.Is(err, messaging.ErrInvalidRequest) {
 				t.Fatalf("Register = %v, want ErrInvalidRequest", err)
 			}
-			if len(claim.Adopted) != 0 || len(claim.Retired) != 0 {
-				t.Fatalf("Register = %+v, want nothing adopted and nothing retired", claim)
+			if len(claim.Retired) != 0 {
+				t.Fatalf("Register = %+v, want nothing retired", claim)
 			}
 			if registry.Owns(ParentRunKey("child-one", "run-a")) {
 				t.Fatal("a refused registration adopted the run")

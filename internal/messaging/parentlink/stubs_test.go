@@ -199,7 +199,7 @@ func newStubMessenger() *stubMessenger {
 	return &stubMessenger{reachable: map[string]bool{}}
 }
 
-func (s *stubMessenger) Send(_ context.Context, req messaging.SendRequest, _ bool) (messaging.SendResult, error) {
+func (s *stubMessenger) Send(_ context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sends = append(s.sends, req)
