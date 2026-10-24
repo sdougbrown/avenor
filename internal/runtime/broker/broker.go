@@ -937,7 +937,8 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			MessageID:  msgID,
 			Generation: fullBody.Generation,
 			Body:       string(fullBody.Payload),
-		}, true)
+			Legacy:     true,
+		})
 		if err != nil {
 			writeSendError(w, err)
 			return
@@ -2198,7 +2199,7 @@ type localMessenger struct {
 	broker *Broker
 }
 
-func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
+func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	res, err := m.broker.store.Admit(ctx, askstore.AdmitRequest{
 		Sender:     req.From,
 		Target:     req.To.RunID,
@@ -2206,7 +2207,7 @@ func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest, leg
 		Generation: req.Generation,
 		Body:       req.Body,
 		NoReply:    req.NoReply,
-		Legacy:     legacy,
+		Legacy:     req.Legacy,
 	})
 	return messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err
 }
@@ -2263,7 +2264,7 @@ type askRouteMessenger struct {
 	route messaging.AskRoute
 }
 
-func (m askRouteMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
+func (m askRouteMessenger) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	return m.route.Send(ctx, req)
 }
 
