@@ -160,11 +160,15 @@ func TestLinkRefusesAClaimWithoutItsParts(t *testing.T) {
 			name: "no generation",
 			opts: Options{ParentURL: "http://parent", Endpoint: "http://child-one", Runs: testRuns},
 		},
+		{
+			name: "no durable child identity",
+			opts: Options{ParentURL: "http://parent", Endpoint: "http://child-one", Runs: testRuns, Generation: func() string { return "gen-a" }},
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if _, err := NewLink(testCase.opts); err == nil {
-				t.Fatal("NewLink = nil error, want the missing part refused")
+			if _, err := NewLink(testCase.opts); !errors.Is(err, messaging.ErrInvalidRequest) {
+				t.Fatalf("NewLink = %v, want the missing part refused as ErrInvalidRequest", err)
 			}
 		})
 	}
