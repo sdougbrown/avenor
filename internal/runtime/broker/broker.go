@@ -1818,6 +1818,34 @@ func (b *Broker) ownRun(claim messaging.ClaimedRun) string {
 	return st.Token
 }
 
+// ownRun adopts a run a registered child broker owns. The record keeps the
+// credential that branch authenticates the run with, so a forwarded ask and a
+// relay into that branch use the one credential the run already has. A caller
+// that adopts a whole set notifies the run observer once when the set is
+// applied.
+func (b *Broker) ownRun(claim messaging.RunClaim) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	st, exists := b.runs[claim.RunID]
+	if !exists {
+		st = newRunState(claim.RunID, claim.Label)
+		if claim.Token != "" {
+			st.Token = claim.Token
+		}
+		b.runs[claim.RunID] = st
+		return st.Token
+	}
+	if claim.Label != "" {
+		st.Mu.Lock()
+		if st.Info == nil {
+			st.Info = &SessionInfo{RunID: claim.RunID}
+		}
+		st.Info.Label = claim.Label
+		st.Mu.Unlock()
+	}
+	return st.Token
+}
+
 func newRunState(runID, name string) *RunState {
 	if name == "" {
 		name = runID
