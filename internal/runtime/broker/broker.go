@@ -2076,11 +2076,14 @@ func (b *Broker) RenameRun(runID, name string) error {
 		name = runID
 	}
 	st.Mu.Lock()
-	defer st.Mu.Unlock()
 	if st.Info == nil {
 		st.Info = &SessionInfo{RunID: runID}
 	}
 	st.Info.Label = name
+	st.Mu.Unlock()
+	// The label is what a host publishes about this run, so a rename is a
+	// run-set change even though the set itself did not change.
+	b.runSetChanged()
 	return nil
 }
 

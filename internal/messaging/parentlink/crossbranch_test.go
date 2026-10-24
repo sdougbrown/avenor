@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
@@ -297,4 +298,31 @@ func sessionRunIDs(t *testing.T, body map[string]any) map[string]bool {
 		}
 	}
 	return listed
+}
+
+// TestRenamedRunIsRepublishedToTheParent pins that a run rename reaches the
+// parent's run records: the branch re-publishes its run set when the label
+// changes, instead of the parent showing the pre-rename name until an unrelated
+// run-set change.
+func TestRenamedRunIsRepublishedToTheParent(t *testing.T) {
+	parent, _, second := crossBranch(t)
+
+	if err := second.broker.RenameRun("target", "renamed-target"); err != nil {
+		t.Fatalf("rename run: %v", err)
+	}
+	deadline := time.Now().Add(awaitDeadline)
+	label := func() string {
+		for _, info := range parent.broker.Sessions() {
+			if info.RunID == "target" {
+				return info.Label
+			}
+		}
+		return ""
+	}
+	for label() != "renamed-target" {
+		if time.Now().After(deadline) {
+			t.Fatalf("parent run label = %q, want the renamed name republished", label())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
