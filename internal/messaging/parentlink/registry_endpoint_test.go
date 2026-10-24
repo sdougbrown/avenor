@@ -9,8 +9,8 @@ import (
 
 // TestRegistryRefusesAnEndpointItCouldNotPostTo pins the registration's
 // endpoint rule: the relay posts the target run's credential to the endpoint
-// a child registered, so an endpoint that is not an absolute http address is
-// refused at registration.
+// a child registered, so an endpoint that is not an absolute http root
+// address is refused at registration.
 func TestRegistryRefusesAnEndpointItCouldNotPostTo(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -20,6 +20,7 @@ func TestRegistryRefusesAnEndpointItCouldNotPostTo(t *testing.T) {
 		{name: "a host without a scheme", endpoint: "child-one"},
 		{name: "a scheme the relay cannot dial", endpoint: "file:///tmp/child"},
 		{name: "an address without a host", endpoint: "http://"},
+		{name: "an http address with a path", endpoint: "http://child-one/broker"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -43,8 +44,9 @@ func TestRegistryRefusesAnEndpointItCouldNotPostTo(t *testing.T) {
 	}
 }
 
-// TestRegistryAcceptsAnHTTPRegistration pins the other side of the rule: an
-// absolute http address is what the relay posts to, so it is accepted.
+// TestRegistryAcceptsAnHTTPRegistration pins the other side of the rule: the
+// root http address the relay posts to is accepted, and the hop carries it
+// unchanged.
 func TestRegistryAcceptsAnHTTPRegistration(t *testing.T) {
 	registry := NewRegistry()
 	if _, err := registry.Register(messaging.DescendantRegistration{
