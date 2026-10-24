@@ -1,0 +1,92 @@
+{
+  "comment": "v1 parent protocol spoken by internal/messaging/parentlink. The parent broker serves the same paths; the server half of this protocol lands in the next pull request of the stack. Placeholders in angle brackets are values supplied at request time.",
+  "protocol": 1,
+  "paths": {
+    "register": "/parent/register",
+    "deregister": "/parent/deregister",
+    "relay": "/relay",
+    "send": "/send",
+    "wait": "/wait_reply",
+    "withdraw": "/cancel_message",
+    "sessions": "/sessions"
+  },
+  "request_fields": {
+    "register": ["child_id", "endpoint", "generation", "runs"],
+    "deregister": ["child_id"],
+    "send": ["run_id", "token", "from_run_id", "to_run_id", "type", "payload", "message_id", "generation", "expects_reply"],
+    "reply": ["run_id", "token", "from_run_id", "to_run_id", "type", "payload", "reply_to", "generation"],
+    "wait": ["run_id", "token", "waiting_for", "generation", "timeout_ms"],
+    "withdraw": ["run_id", "token", "cancel_message_id", "generation"],
+    "relay": ["run_id", "token", "from_run_id", "to_run_id", "type", "payload", "message_id", "generation", "edge_generation", "expects_reply"]
+  },
+  "responses": [
+    {
+      "name": "an_admitted_ask",
+      "fields": ["outcome", "message_id"],
+      "body": {"outcome": "sent", "message_id": "<msg-id>"},
+      "outcome": "sent"
+    },
+    {
+      "name": "a_refused_ask",
+      "fields": ["outcome", "code", "error"],
+      "body": {"outcome": "not-sent", "code": "auth-rejected", "error": "the branch refused the credential"},
+      "outcome": "not-sent",
+      "code": "auth-rejected"
+    },
+    {
+      "name": "a_replied_ask",
+      "fields": ["outcome", "message_id", "from_run_id", "sender", "kind", "payload"],
+      "body": {
+        "outcome": "replied",
+        "message_id": "<msg-id>",
+        "from_run_id": "run-b",
+        "sender": "bob",
+        "kind": "agent_message",
+        "payload": {"message": "pong"}
+      },
+      "outcome": "replied"
+    },
+    {
+      "name": "a_timed_out_ask",
+      "fields": ["outcome", "message_id"],
+      "body": {"outcome": "timed-out", "message_id": "<msg-id>"},
+      "outcome": "timed-out"
+    },
+    {
+      "name": "a_withdrawn_ask",
+      "fields": ["outcome", "message_id", "fence"],
+      "body": {
+        "outcome": "withdrawn",
+        "message_id": "<msg-id>",
+        "fence": {
+          "sender": "run-a",
+          "message_id": "<msg-id>",
+          "generation": "<generation>",
+          "deadline": "2030-01-01T00:00:00Z",
+          "terminal": true
+        }
+      },
+      "outcome": "withdrawn"
+    },
+    {
+      "name": "a_peer_listing",
+      "fields": ["sessions", "generation"],
+      "body": {"sessions": [{"run_id": "run-b"}], "generation": "<generation>"},
+      "outcome": ""
+    },
+    {
+      "name": "a_failed_peer_listing",
+      "fields": ["sessions", "generation", "peers_error"],
+      "body": {"sessions": [{"run_id": "run-b"}], "generation": "<generation>", "peers_error": "one branch did not answer"},
+      "outcome": ""
+    }
+  ],
+  "fence_fields": ["sender", "message_id", "generation", "deadline", "terminal"],
+  "codes": [
+    "auth-rejected",
+    "invalid-request",
+    "generation-mismatch",
+    "not-ask-target",
+    "target-unavailable"
+  ]
+}
