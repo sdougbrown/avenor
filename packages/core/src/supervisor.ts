@@ -15,7 +15,7 @@ import {
   validateOwnerRecordSocket,
 } from './owner-attach.js'
 import { validateSpawnSelection } from './spawn-selection.js'
-import { ensureRunPaths, socketsRoot } from './paths.js'
+import { ensureRunPaths, socketsRoot, validateSupervisorSocketPath } from './paths.js'
 import { installerBinaryPath } from './install-path.js'
 
 export { installerBinaryPath } from './install-path.js'
@@ -311,7 +311,7 @@ export class Supervisor {
 
     const socketDir = socketsRoot()
     fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 })
-    const socketPath = path.join(socketDir, `avenor-mcp-${process.pid}.sock`)
+    const socketPath = path.join(fs.realpathSync(socketDir), `avenor-mcp-${process.pid}.sock`)
 
     let socketExists = false
     try {
@@ -576,9 +576,15 @@ export class Supervisor {
    * isCurrentInstance true while currentInstance is null.
    */
   static getInstance(supervisorId: string): Supervisor | null {
-    return Supervisor.instance !== null && Supervisor.instance.supervisorId === supervisorId
-      ? Supervisor.instance
-      : null
+    if (Supervisor.instance === null) return null
+    if (Supervisor.instance.supervisorId === supervisorId) return Supervisor.instance
+    try {
+      return Supervisor.instance.supervisorId === validateSupervisorSocketPath(supervisorId)
+        ? Supervisor.instance
+        : null
+    } catch {
+      return null
+    }
   }
 
   static isCurrentInstance(supervisorId: string): boolean {

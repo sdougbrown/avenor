@@ -1,6 +1,9 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { messageTool as realMessageTool } from '@dougbots/avenor-core'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { Supervisor, messageTool as realMessageTool } from '@dougbots/avenor-core'
 import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
@@ -2111,4 +2114,162 @@ describe('Avenor Pi extension', () => {
 
     await h.eventHandlers.session_shutdown()
   })
+})
+
+describe('avenor_spawn parent run id', () => {
+  it('names the supervisor as the child parent so the child can ask it back', async () => {
+    const spawnToolMock = mock(async () => ({
+      run_id: 'run-1',
+      label: 'child',
+      supervisor_id: '/tmp/sock',
+      runtime_id: 'rt-1',
+    }))
+    const h = await startExtensionHarness({
+      deps: { spawnTool: spawnToolMock },
+      extOptions: { subAgentEnv: null },
+    })
+
+    await h.registeredTools.avenor_spawn.execute(
+      't-parent',
+      { agent: 'mule', prompt: 'do the thing', wait: false },
+      undefined,
+      undefined,
+      { cwd: '/tmp' },
+    )
+
+    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ parent_run_id: 'supervisor' })
+  })
+
+  it('omits parent_run_id for an explicit non-local supervisor but still forwards it', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-pi-parent-note-remote-'))
+    const previousHome = process.env.AVENOR_HOME
+    const socketsDir = path.join(home, 'sockets')
+    fs.mkdirSync(socketsDir, { recursive: true, mode: 0o700 })
+    const root = fs.realpathSync(socketsDir)
+    const OTHER = path.join(root, 'avenor-mcp-other.sock')
+    const singleton = path.join(root, 'avenor-mcp-singleton.sock')
+    const spawnToolMock = mock(async () => ({
+      run_id: 'run-1',
+      label: 'child',
+      supervisor_id: OTHER,
+      runtime_id: 'rt-1',
+    }))
+    const h = await startExtensionHarness({
+      deps: {
+        spawnTool: spawnToolMock,
+        Supervisor: { isCurrentInstance: (id: string) => id === singleton } as any,
+      },
+      extOptions: { subAgentEnv: null },
+    })
+    try {
+      process.env.AVENOR_HOME = home
+      await h.registeredTools.avenor_spawn.execute(
+        't-parent-remote',
+        { agent: 'mule', prompt: 'do the thing', supervisor_id: OTHER, wait: false },
+        undefined,
+        undefined,
+        { cwd: '/tmp' },
+      )
+
+      const args = spawnToolMock.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(args).not.toHaveProperty('parent_run_id')
+      expect(args).toMatchObject({ supervisorId: OTHER })
+    } finally {
+      await h.eventHandlers.session_shutdown()
+      if (previousHome === undefined) delete process.env.AVENOR_HOME
+      else process.env.AVENOR_HOME = previousHome
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('names the supervisor as the child parent for an explicit current singleton', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-pi-parent-note-singleton-'))
+    const previousHome = process.env.AVENOR_HOME
+    const socketsDir = path.join(home, 'sockets')
+    fs.mkdirSync(socketsDir, { recursive: true, mode: 0o700 })
+    const SINGLETON = path.join(fs.realpathSync(socketsDir), 'avenor-mcp-singleton.sock')
+    const spawnToolMock = mock(async () => ({
+      run_id: 'run-1',
+      label: 'child',
+      supervisor_id: SINGLETON,
+      runtime_id: 'rt-1',
+    }))
+    const h = await startExtensionHarness({
+      deps: {
+        spawnTool: spawnToolMock,
+        Supervisor: { isCurrentInstance: (id: string) => id === SINGLETON } as any,
+      },
+      extOptions: { subAgentEnv: null },
+    })
+    try {
+      process.env.AVENOR_HOME = home
+      await h.registeredTools.avenor_spawn.execute(
+        't-parent-singleton',
+        { agent: 'mule', prompt: 'do the thing', supervisor_id: SINGLETON, wait: false },
+        undefined,
+        undefined,
+        { cwd: '/tmp' },
+      )
+
+      expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ parent_run_id: 'supervisor', supervisorId: SINGLETON })
+    } finally {
+      if (previousHome === undefined) delete process.env.AVENOR_HOME
+      else process.env.AVENOR_HOME = previousHome
+      fs.rmSync(home, { recursive: true, force: true })
+      await h.eventHandlers.session_shutdown()
+    }
+  })
+
+  it('preserves parent notes and prunes singleton runs through an equivalent socket spelling', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-pi-parent-note-'))
+    const previousHome = process.env.AVENOR_HOME
+    const previousBin = process.env.AVENOR_BIN
+    let sup: Supervisor | undefined
+    let h: Awaited<ReturnType<typeof createMultiSupervisorHarness>> | undefined
+    try {
+      process.env.AVENOR_HOME = home
+      process.env.AVENOR_BIN = path.resolve(import.meta.dir, '../../core/test/fixtures/fake-avenor.ts')
+      sup = await Supervisor.get()
+      const canonical = sup.supervisorId
+      const equivalent = `${path.dirname(canonical)}/../sockets/${path.basename(canonical)}`
+      const spawnTool = mock(async (args: { supervisorId?: string; label?: string }) => ({
+        run_id: args.label!, label: args.label!,
+        supervisor_id: args.supervisorId ?? canonical, runtime_id: args.label!,
+      }))
+      const shutdownTool = mock(async () => ({ ok: true }))
+      h = await createMultiSupervisorHarness({
+        supervisor: Supervisor,
+        spawnTool,
+        shutdownTool,
+        statusTool: mock(async (args: { runId?: string } = {}) => args.runId
+          ? { run_id: args.runId, label: args.runId, status: 'running', runtime_id: args.runId }
+          : { runs: [], count: 0 }),
+      })
+      for (const [label, supervisor_id] of [
+        ['alias-child', equivalent], ['implicit-child', undefined],
+        ['canonical-child', canonical], ['remote-child', '/tmp/non-local-supervisor.sock'],
+      ] as const) {
+        await h.registeredTools.avenor_spawn.execute(label,
+          { agent: 'mule', prompt: 'do the thing', label, supervisor_id, wait: false },
+          undefined, undefined, h.ctx)
+      }
+      expect(spawnTool.mock.calls[0]?.[0]).toMatchObject({ parent_run_id: 'supervisor', supervisorId: equivalent })
+      await h.registeredCommands['avenor-status'].handler('', h.ctx)
+      expect(h.setWidget.mock.calls.filter(([n]) => n === 'avenor-status-detail').at(-1)?.[1]).toHaveLength(4)
+      await h.registeredTools.avenor_shutdown.execute('shutdown-alias', { supervisor_id: equivalent })
+      expect(shutdownTool).toHaveBeenCalledWith({ supervisorId: equivalent, force: undefined })
+      await h.registeredCommands['avenor-status'].handler('', h.ctx)
+      const detail = h.setWidget.mock.calls.filter(([n]) => n === 'avenor-status-detail').at(-1)?.[1] as string[]
+      expect(detail).toHaveLength(1)
+      expect(detail[0]).toContain('remote-child')
+    } finally {
+      await h?.eventHandlers.session_shutdown()
+      await sup?.close()
+      if (previousHome === undefined) delete process.env.AVENOR_HOME
+      else process.env.AVENOR_HOME = previousHome
+      if (previousBin === undefined) delete process.env.AVENOR_BIN
+      else process.env.AVENOR_BIN = previousBin
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  }, 20_000)
 })

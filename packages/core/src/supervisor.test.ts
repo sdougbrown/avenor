@@ -160,10 +160,42 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
     await supervisor?.close().catch(() => {})
   })
 
+  it('recognizes the singleton through an explicit equivalent socket under a symlinked home', async () => {
+    const previousHome = process.env.AVENOR_HOME
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-link-'))
+    const realHome = path.join(tempDir, 'real')
+    const linkedHome = path.join(tempDir, 'linked')
+    fs.mkdirSync(realHome)
+    fs.symlinkSync(realHome, linkedHome)
+    let sup: Supervisor | undefined
+    let resolved: Awaited<ReturnType<typeof getSupervisorClient>> | undefined
+    try {
+      process.env.AVENOR_HOME = linkedHome
+      sup = await Supervisor.get()
+      const explicitSocket = path.join(linkedHome, 'sockets', `avenor-mcp-${process.pid}.sock`)
+      const canonicalSocket = path.join(fs.realpathSync(path.dirname(explicitSocket)), path.basename(explicitSocket))
+      resolved = await getSupervisorClient(explicitSocket)
+      expect(resolved.isSingleton).toBe(true)
+      expect(resolved.sup).toBe(sup)
+      expect(resolved.client).toBe(sup.getClient())
+      expect(Supervisor.isCurrentInstance(canonicalSocket)).toBe(true)
+      for (const alias of [explicitSocket, `${path.dirname(explicitSocket)}/../sockets/${path.basename(explicitSocket)}`]) {
+        expect(Supervisor.getInstance(alias)).toBe(sup)
+        expect(Supervisor.isCurrentInstance(alias)).toBe(true)
+      }
+    } finally {
+      if (resolved && !resolved.isSingleton) resolved.client.close()
+      await sup?.close()
+      if (previousHome === undefined) delete process.env.AVENOR_HOME
+      else process.env.AVENOR_HOME = previousHome
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    }
+  }, 20_000)
+
   it('Supervisor.get starts the process', async () => {
     supervisor = await Supervisor.get()
     expect(supervisor).toBeTruthy()
-    expect(supervisor.supervisorId).toContain(path.join(expectedAvenorHome(), 'sockets', 'avenor-mcp-'))
+    expect(supervisor.supervisorId).toContain(path.join(fs.realpathSync(path.join(expectedAvenorHome(), 'sockets')), 'avenor-mcp-'))
   })
 
   it('supervisor.getClient().status() works', async () => {
@@ -283,7 +315,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor singleton', () => {
     expect(sup2).toBe(sup3)
     expect(sup2).not.toBe(sup)
     sup = sup2
-    expect(sup2.supervisorId).toContain(path.join(expectedAvenorHome(), 'sockets', 'avenor-mcp-'))
+    expect(sup2.supervisorId).toContain(path.join(fs.realpathSync(path.join(expectedAvenorHome(), 'sockets')), 'avenor-mcp-'))
   }, 20_000)
 
   it('invalidates singleton when process is alive but client is closed', async () => {

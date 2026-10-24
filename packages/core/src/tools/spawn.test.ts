@@ -145,6 +145,17 @@ describe('spawnTool with an explicit supervisor', () => {
     })
   }
 
+  it('forwards a supplied parent_run_id to the supervisor spawn', async () => {
+    const { server, socketPath, received } = await startSpawnServer()
+    try {
+      await spawnTool({ supervisorId: socketPath, prompt: 'Do work.', parent_run_id: 'parent-run-1' })
+      expect(received).toHaveLength(1)
+      expect(received[0]?.parent_run_id).toBe('parent-run-1')
+    } finally {
+      await stopSpawnServer(server, socketPath)
+    }
+  })
+
   it('does not close a client marked singleton on the RPC fallback', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-mcp-spawn-singleton-test-'))
     const previousHome = process.env.AVENOR_HOME

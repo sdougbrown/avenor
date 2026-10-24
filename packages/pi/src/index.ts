@@ -38,6 +38,7 @@ import {
   spawnTool,
   statusTool,
   Supervisor,
+  SUPERVISOR_RUN_ID,
   THINKING_LEVELS,
   validateSpawnSelection,
   workflowStatusTool,
@@ -1529,6 +1530,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const agentProfile = rosterMode || backend === 'pi' ? resolveAgentProfile(entries) : undefined
         const hostParams = { ...params, backend }
 
+        // The host polls only its singleton's ask queue. Non-local and nested
+        // spawns omit the parent note rather than advertise an unread queue.
+        const parentRunId = isSubAgentBrokerMode
+          ? undefined
+          : !params.supervisor_id || Boolean(deps.Supervisor.isCurrentInstance?.(params.supervisor_id))
+            ? SUPERVISOR_RUN_ID
+            : undefined
+
         const result = await deps.spawnTool({
           ...(params.agent !== undefined ? { agent: params.agent } : {}),
           ...(params.prompt !== undefined ? { prompt: params.prompt } : {}),
@@ -1544,6 +1553,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           ...(agentProfile !== undefined ? { agentProfile } : {}),
           ...(params.server_url !== undefined ? { serverUrl: params.server_url } : {}),
           ...(params.supervisor_id !== undefined ? { supervisorId: params.supervisor_id } : {}),
+          ...(parentRunId !== undefined ? { parent_run_id: parentRunId } : {}),
         })
 
         const supervisorId = statusSupervisorId(params.supervisor_id, result.supervisor_id)

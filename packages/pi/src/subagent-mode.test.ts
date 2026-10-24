@@ -629,3 +629,31 @@ describe('sub-agent broker mode (integration)', () => {
     }
   })
 })
+
+describe('avenor_spawn parent run id in sub-agent mode', () => {
+  it('leaves the parent unnamed: a nested supervisor has no run for this session', async () => {
+    // A child that spawns starts its own supervisor, whose broker never
+    // registered the child's own run id. Naming it would prepend a note
+    // pointing at a run nothing reads, so the asker would wait out its timeout.
+    const spawnToolMock = mock(async () => ({
+      run_id: 'run-1',
+      label: 'grandchild',
+      supervisor_id: '/tmp/sock',
+      runtime_id: 'rt-1',
+    }))
+    const h = await startExtensionHarness({
+      deps: { spawnTool: spawnToolMock },
+      extOptions: { subAgentEnv },
+    })
+
+    await h.registeredTools.avenor_spawn.execute(
+      't-nested',
+      { agent: 'mule', prompt: 'do the thing', wait: false },
+      undefined,
+      undefined,
+      { cwd: '/tmp' },
+    )
+
+    expect(spawnToolMock.mock.calls[0]?.[0]).not.toHaveProperty('parent_run_id')
+  })
+})
