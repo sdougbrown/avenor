@@ -21,6 +21,11 @@ import (
 
 const awaitDeadline = 5 * time.Second
 
+// testLinkToken is the credential every branch in this package's tests presents
+// to its parent and requires of its own children. A parent serves its parent
+// routes only under a configured link credential.
+const testLinkToken = "test-link-token"
+
 // branch is one broker wired to its parent exactly the way the supervisor wires
 // it.
 type branch struct {
@@ -41,6 +46,10 @@ var branchSeq atomic.Uint64
 func newTestChildID() string { return fmt.Sprintf("branch-%d", branchSeq.Add(1)) }
 
 func (b *branch) url() string { return "http://" + b.broker.Addr() }
+
+// key reports the run ID b's parent addresses runID by, which is how every
+// claim and every later hop names a descendant's run.
+func (b *branch) key(runID string) string { return ParentRunKey(b.childID, runID) }
 
 func (b *branch) token(t *testing.T, runID string) string {
 	t.Helper()
@@ -104,6 +113,7 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 	)
 	link, err = Install(Options{
 		ParentURL:       parentURL,
+		Token:           testLinkToken,
 		ChildID:         childID,
 		RefreshInterval: refresh,
 		Endpoint:        branch.url(),
@@ -113,6 +123,9 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 				func(info broker.SessionInfo) (string, string) { return info.RunID, info.Label },
 				link.Owns, b.RunToken)
 		},
+		// A relay carries the name this branch resolves for the asker, which is
+		// the name the receiving branch cannot resolve itself.
+		DisplayName: b.DisplayName,
 		// Retiring the claim drops the host's run record with it, so a refused
 		// descendant stops being served locally.
 		RetireRun: func(runID, token string) { b.DeleteRunIfToken(runID, token) },
@@ -121,6 +134,9 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		t.Fatalf("build parent link: %v", err)
 	}
 	branch.link = link
+	// The link credential is what the parent routes require: the parent side
+	// serves them only to callers that present it.
+	b.SetParentLinkToken(testLinkToken)
 	t.Cleanup(func() { _ = link.Close() })
 	if parentURL != "" {
 		if err := link.Start(context.Background()); err != nil {
@@ -133,14 +149,15 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 	return branch
 }
 
-// awaitRegistered waits until the parent broker has adopted every named run.
-func awaitRegistered(t *testing.T, parent *branch, runs ...string) {
+// awaitRegistered waits until the parent broker has adopted every named claim,
+// named by the run ID that parent addresses it by.
+func awaitRegistered(t *testing.T, parent *branch, keys ...string) {
 	t.Helper()
 	deadline := time.Now().Add(awaitDeadline)
-	for _, runID := range runs {
-		for !parent.link.Registry().Owns(runID) {
+	for _, key := range keys {
+		for !parent.link.Registry().Owns(key) {
 			if time.Now().After(deadline) {
-				t.Fatalf("parent never adopted run %q", runID)
+				t.Fatalf("parent never adopted run %q", key)
 			}
 			time.Sleep(2 * time.Millisecond)
 		}
@@ -252,11 +269,13 @@ func queuedAgentMessages(t *testing.T, b *broker.Broker, runID string) []*broker
 
 // TestParentPublishesHarnessSessionName pins that the label a branch publishes
 // is the name it resolves locally: a harness-supplied session name reaches the
-// parent's peer view without a second name field on the claim.
+// parent's peer view without a second name field on the claim, and the write
+// itself is what republishes the claim.
 func TestParentPublishesHarnessSessionName(t *testing.T) {
 	parent := startBranch(t, "", "parent-run")
 	child := startBranch(t, parent.url(), "child-run")
-	awaitRegistered(t, parent, "child-run")
+	key := child.key("child-run")
+	awaitRegistered(t, parent, key)
 
 	if err := child.broker.SetHarnessName("child-run", "harness-name"); err != nil {
 		t.Fatalf("set harness name: %v", err)
@@ -266,9 +285,8 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 
 	deadline := time.Now().Add(awaitDeadline)
 	for {
-		// The claim the child publishes carries the harness-resolved label, so the
-		// adopted run record's name is what peers see here.
-		if got := parent.broker.DisplayName("child-run"); got == "harness-name" {
+		hop, ok := parent.link.Registry().Hop(key)
+		if ok && hop.Label == "harness-name" {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -276,9 +294,22 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	if got := parent.broker.DisplayName("child-run"); got != "harness-name" {
+	if got := parent.broker.DisplayName(key); got != "harness-name" {
 		t.Fatalf("parent display name = %q, want harness-name", got)
 	}
+
+	// A rename is the other label write, and it republishes the claim the same
+	// way instead of waiting out the refresh interval.
+	if err := child.broker.SetHarnessName("child-run", ""); err != nil {
+		t.Fatalf("clear harness name: %v", err)
+	}
+	if err := child.broker.RenameRun("child-run", "renamed-run"); err != nil {
+		t.Fatalf("rename run: %v", err)
+	}
+	awaitUntil(t, "the parent to publish the renamed label", func() bool {
+		hop, ok := parent.link.Registry().Hop(key)
+		return ok && hop.Label == "renamed-run"
+	})
 }
 
 // TestLocalAskNeverCrossesTheParentLink pins that a target this branch owns is
@@ -287,7 +318,7 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 func TestLocalAskNeverCrossesTheParentLink(t *testing.T) {
 	parent := startBranch(t, "")
 	local := startBranch(t, parent.url(), "asker", "target")
-	awaitRegistered(t, parent, "asker", "target")
+	awaitRegistered(t, parent, local.key("asker"), local.key("target"))
 
 	// The parent stops serving. A local ask must be unaffected.
 	if err := parent.broker.Stop(); err != nil {
