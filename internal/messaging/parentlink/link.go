@@ -59,7 +59,6 @@ type askKey struct {
 // withdrawal reaches the store that owns the edge instead of this one.
 type askRoute struct {
 	generation string
-	target     string
 	recordedAt time.Time
 }
 
@@ -206,16 +205,13 @@ func (l *Link) Sync(ctx context.Context) error {
 	return nil
 }
 
-// noteGenerationLocked pins the parent's generation. A changed generation is a
-// replacement parent, so every route recorded against the previous one is
-// dropped: nothing is replayed onto a broker that never admitted it.
+// noteGenerationLocked pins the parent's generation. The routes recorded against
+// a previous generation keep their own generation, so the hop that admitted them
+// refuses them and each operation reports the replacement instead of replaying
+// into it.
 func (l *Link) noteGenerationLocked(generation string) {
 	if generation == "" {
 		return
-	}
-	if l.generation != "" && l.generation != generation {
-		l.asks = map[askKey]askRoute{}
-		l.relays = map[string]relayRoute{}
 	}
 	l.generation = generation
 }
@@ -282,7 +278,7 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 	if !req.NoReply && (outcome == messaging.OutcomeSent || outcome == messaging.OutcomeWithdrawn) {
 		// The edge exists in the parent's store, so every later operation on this
 		// ask follows the hop it was admitted on.
-		l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation, target: req.To.RunID})
+		l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation})
 	}
 	if outcome != messaging.OutcomeSent && outcome != messaging.OutcomeWithdrawn {
 		return fail(outcome, nil)

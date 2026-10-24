@@ -1,6 +1,7 @@
 package parentlink
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -165,6 +166,68 @@ func TestReplacedParentIsNeverReplayed(t *testing.T) {
 	}
 	if edges := parent.broker.Store().ActiveCount(); edges != 0 {
 		t.Fatalf("replaced parent holds %d ask edges, want none replayed", edges)
+	}
+}
+
+// TestReplyGenerationGuardRefusesAReplacedParent pins the server-side
+// no-replay invariant: a reply that names the generation its edge was admitted
+// under is refused by a replacement parent instead of degrading into a delivery
+// nobody waits for.
+func TestReplyGenerationGuardRefusesAReplacedParent(t *testing.T) {
+	parent, first, second := crossBranch(t)
+
+	msgID := newMsgID(t)
+	if status, body := ask(t, first, "asker", "target", msgID); status != http.StatusOK {
+		t.Fatalf("cross-branch ask = (%d, %v), want 200", status, body)
+	}
+	admitted := parent.broker.Store().Generation()
+	parent.broker.Store().Reset()
+
+	status, body := postJSON(t, second.broker.Addr(), "/send", "target", second.token(t, "target"), map[string]any{
+		"from_run_id": "target",
+		"to_run_id":   "asker",
+		"type":        "agent_message",
+		"reply_to":    msgID,
+		"generation":  admitted,
+		"payload":     map[string]any{"message": "pong"},
+	})
+	if status != http.StatusConflict || body["code"] != "generation-mismatch" {
+		t.Fatalf("reply to a replaced parent = (%d, %v), want 409 generation-mismatch", status, body)
+	}
+	if queued := queuedAgentMessages(t, first.broker, "asker"); len(queued) != 0 {
+		t.Fatalf("asker queue = %d messages, want no delivery for a refused reply", len(queued))
+	}
+}
+
+// TestReplyRouteIsDroppedWhenTheParentWasReplaced pins the link's own guard: once
+// a branch knows its parent was replaced, it stops transmitting replies onto the
+// old generation instead of asking the replacement to refuse them.
+func TestReplyRouteIsDroppedWhenTheParentWasReplaced(t *testing.T) {
+	parent, first, second := crossBranch(t)
+
+	msgID := newMsgID(t)
+	if status, body := ask(t, first, "asker", "target", msgID); status != http.StatusOK {
+		t.Fatalf("cross-branch ask = (%d, %v), want 200", status, body)
+	}
+	parent.broker.Store().Reset()
+	if err := second.link.up.Sync(context.Background()); err != nil {
+		t.Fatalf("re-register the target branch: %v", err)
+	}
+
+	outcome, err := second.link.up.Reply(context.Background(), messaging.ReplyRequest{
+		From:      messaging.Identity{RunID: "target"},
+		ToRunID:   "asker",
+		MessageID: msgID,
+		Body:      `{"message":"pong"}`,
+	})
+	if err != nil {
+		t.Fatalf("reply to a replaced parent = (%v, %v), want a clean lost verdict", outcome, err)
+	}
+	if outcome != messaging.OutcomeLost {
+		t.Fatalf("reply to a replaced parent = %v, want lost", outcome)
+	}
+	if queued := queuedAgentMessages(t, first.broker, "asker"); len(queued) != 0 {
+		t.Fatalf("asker queue = %d messages, want no delivery for a dropped reply route", len(queued))
 	}
 }
 

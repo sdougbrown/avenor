@@ -43,6 +43,19 @@ func (b *branch) token(t *testing.T, runID string) string {
 // has no parent of its own).
 func startBranch(t *testing.T, parentURL string, runs ...string) *branch {
 	t.Helper()
+	return newBranch(t, parentURL, true, runs)
+}
+
+// startBranchTolerant is startBranch for a branch whose parent may not be
+// listening: a failed registration leaves the branch serving locally, which is
+// the state a supervisor started before its parent is up runs in.
+func startBranchTolerant(t *testing.T, parentURL string, runs ...string) *branch {
+	t.Helper()
+	return newBranch(t, parentURL, false, runs)
+}
+
+func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *branch {
+	t.Helper()
 	b := broker.New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
@@ -85,7 +98,10 @@ func startBranch(t *testing.T, parentURL string, runs ...string) *branch {
 	t.Cleanup(func() { _ = link.Close() })
 	if parentURL != "" {
 		if err := link.Start(context.Background()); err != nil {
-			t.Fatalf("register with parent: %v", err)
+			if strict {
+				t.Fatalf("register with parent: %v", err)
+			}
+			t.Logf("branch registration failed, retrying on the next run change: %v", err)
 		}
 	}
 	return branch

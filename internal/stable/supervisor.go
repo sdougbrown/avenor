@@ -674,9 +674,9 @@ type Supervisor struct {
 	// parentLink is the broker hierarchy this supervisor participates in, nil
 	// when no parent broker is configured. parentLinkStop cancels its
 	// re-registration loop on shutdown, before the claim is retracted.
-	parentLink     *parentlink.Messenger
-	parentLinkStop context.CancelFunc
-	brokerRunID    string
+	parentLink                   *parentlink.Messenger
+	parentLinkStop               context.CancelFunc
+	brokerRunID                  string
 	brokerToken                  string
 	brokerRunMu                  sync.Mutex
 	newProviderFunc              func(startOpts runtime.StartOptions, backend string) (runtime.Provider, error)

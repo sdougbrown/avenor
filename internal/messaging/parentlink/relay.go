@@ -103,7 +103,10 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 		return fmt.Errorf("%w: %v", ErrParentUnavailable, err)
 	}
 	if _, decErr := decode(status, raw); decErr != nil {
-		if errors.Is(decErr, messaging.ErrGenerationMismatch) || errors.Is(decErr, messaging.ErrTargetUnavailable) {
+		switch {
+		case errors.Is(decErr, messaging.ErrGenerationMismatch),
+			errors.Is(decErr, messaging.ErrTargetUnavailable),
+			errors.Is(decErr, messaging.ErrAuthRejected):
 			// The child no longer answers as the branch it registered as, so it
 			// stops being a routing target instead of being retried into.
 			r.registry.Forget(target)

@@ -31,17 +31,17 @@ var ErrUnsupportedParentProtocol = fmt.Errorf(
 // envelope is one parent broker response. Every field is optional so a response
 // carries only the operation's result, plus its code class on failure.
 type envelope struct {
-	Status            int                         `json:"-"`
-	Outcome           messaging.Outcome           `json:"outcome"`
-	Code              string                      `json:"code"`
-	Error             string                      `json:"error"`
-	MessageID         string                      `json:"message_id"`
-	FromRunID         string                      `json:"from_run_id"`
-	Sender            string                      `json:"sender"`
-	Kind              string                      `json:"kind"`
-	Payload           json.RawMessage             `json:"payload"`
-	Generation        string                      `json:"generation"`
-	MessagingProtocol int                         `json:"messaging_protocol"`
+	Status            int               `json:"-"`
+	Outcome           messaging.Outcome `json:"outcome"`
+	Code              string            `json:"code"`
+	Error             string            `json:"error"`
+	MessageID         string            `json:"message_id"`
+	FromRunID         string            `json:"from_run_id"`
+	Sender            string            `json:"sender"`
+	Kind              string            `json:"kind"`
+	Payload           json.RawMessage   `json:"payload"`
+	Generation        string            `json:"generation"`
+	MessagingProtocol int               `json:"messaging_protocol"`
 	Sessions          []json.RawMessage `json:"sessions"`
 	PeersError        string            `json:"peers_error"`
 	Fence             *httpbase.Fence   `json:"fence"`

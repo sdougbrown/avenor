@@ -956,6 +956,13 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if replyTo != "" {
+		// A reply that names the generation its edge was admitted under refuses a
+		// replacement broker instead of degrading into a delivery nobody waits
+		// for. A reply that names none keeps the legacy delivery fallback below.
+		if fullBody.Generation != "" && fullBody.Generation != b.store.Generation() {
+			writeCodedError(w, http.StatusConflict, "generation mismatch", "generation-mismatch")
+			return
+		}
 		// The asker is the reply's destination. A live edge is completed with
 		// the reply; an absent edge falls back to fire-and-forget, which only
 		// this layer can do because it owns the queues. The reply carries no
@@ -1299,16 +1306,17 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusConflict, err.Error(), "invalid-request")
 		return
 	}
-	// The claim is applied, so a host that publishes this broker's own runs
-	// re-publishes from here, and the runs this child stopped owning lose their
-	// records with it.
+	// The claim is applied: the runs the child owns now have records here and the
+	// runs it stopped owning lose theirs. The run observer fires once, after the
+	// whole claim settled, so a host that publishes this broker's own runs
+	// re-publishes the settled set.
+	for _, runID := range claim.Retired {
+		b.DeleteRun(runID)
+	}
 	for _, run := range body.Runs {
 		b.ownRun(run)
 	}
 	b.runSetChanged()
-	for _, runID := range claim.Retired {
-		b.DeleteRun(runID)
-	}
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"generation":         b.store.Generation(),
 		"messaging_protocol": messaging.ProtocolVersion,
