@@ -8,6 +8,7 @@ package parentlink
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -39,8 +40,7 @@ type child struct {
 	// runs maps the run ID this broker addresses a claimed run by to the run ID
 	// the owning branch knows it by, so a namespaced claim still relays to the
 	// canonical run.
-	runs   map[string]string
-	labels map[string]string
+	runs map[string]string
 	// tokens is the credential the child registered each run with, which is the
 	// credential the parent authenticates that run with when it relays into it.
 	tokens map[string]string
@@ -59,6 +59,20 @@ func ParentRunKey(childID, runID string) string {
 	return runID + "@" + childID
 }
 
+// localRunID is the inverse of ParentRunKey: the run ID a branch knows a run by,
+// recovered from the key its parent addresses that run by. It reports false for
+// a key that is not namespaced by that branch.
+func localRunID(key, childID string) (string, bool) {
+	if childID == "" {
+		return "", false
+	}
+	runID, namespaced := strings.CutSuffix(key, "@"+childID)
+	if !namespaced || runID == "" {
+		return "", false
+	}
+	return runID, true
+}
+
 // Hop is one child broker as a relay next hop: the endpoint a relay is posted
 // to, the run ID that branch knows the target by, and the generation and
 // credential that endpoint registered the run under. A relay that overrides
@@ -68,7 +82,6 @@ type Hop struct {
 	ChildID    string
 	Endpoint   string
 	Generation string
-	Label      string
 	// Token is the credential the claiming branch registered the run with.
 	Token string
 	// RunID is the target run's canonical run ID in its own branch, which is
@@ -102,7 +115,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	}
 	current, ok := r.children[reg.ChildID]
 	if !ok {
-		current = &child{id: reg.ChildID, runs: map[string]string{}, labels: map[string]string{}, tokens: map[string]string{}}
+		current = &child{id: reg.ChildID, runs: map[string]string{}, tokens: map[string]string{}}
 		r.children[reg.ChildID] = current
 	}
 	current.endpoint = reg.Endpoint
@@ -117,12 +130,8 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 			Token: run.Token,
 		})
 		adopted[key] = struct{}{}
-		if _, held := r.owners[key]; !held {
-			claim.Adopted = append(claim.Adopted, key)
-		}
 		r.owners[key] = reg.ChildID
 		current.runs[key] = run.RunID
-		current.labels[key] = run.Label
 		current.tokens[key] = run.Token
 	}
 	for runID := range r.owners {
@@ -134,7 +143,6 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		}
 		delete(r.owners, runID)
 		delete(current.runs, runID)
-		delete(current.labels, runID)
 		delete(current.tokens, runID)
 		claim.Retired = append(claim.Retired, runID)
 	}
@@ -185,7 +193,6 @@ func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 	}
 	delete(r.owners, runID)
 	delete(current.runs, runID)
-	delete(current.labels, runID)
 	delete(current.tokens, runID)
 	return true
 }
@@ -222,7 +229,6 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 		ChildID:    current.id,
 		Endpoint:   current.endpoint,
 		Generation: current.generation,
-		Label:      current.labels[runID],
 		Token:      current.tokens[runID],
 		RunID:      current.runs[runID],
 	}, true

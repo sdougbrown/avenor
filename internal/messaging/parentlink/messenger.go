@@ -15,6 +15,9 @@ import (
 // nothing but its own local messenger, so its behavior is unchanged.
 type Messenger struct {
 	local messaging.Messenger
+	// childID is this branch's identity at its parent, which namespaces the keys
+	// the parent addresses this branch's own runs by.
+	childID string
 	// up is this branch's link to its parent broker, nil when it has none.
 	up *Link
 	// registry records the child brokers that registered here, and down relays
@@ -31,7 +34,7 @@ func New(opts Options, local messaging.Messenger) (*Messenger, error) {
 	if local == nil {
 		return nil, fmt.Errorf("%w: a parent-aware messenger composes a local messenger", messaging.ErrInvalidRequest)
 	}
-	m := &Messenger{local: local, registry: NewRegistry()}
+	m := &Messenger{local: local, childID: opts.ChildID, registry: NewRegistry()}
 	if opts.ParentURL != "" {
 		link, err := NewLink(opts)
 		if err != nil {
@@ -72,12 +75,12 @@ func (m *Messenger) Close() error {
 
 // Send admits an ask locally, in a child's queue through a relay, or in the
 // parent broker's store when no branch here can answer it.
-func (m *Messenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
+func (m *Messenger) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	if m.registry.Owns(req.To.RunID) {
-		return m.sendToChild(ctx, req, legacy)
+		return m.sendToChild(ctx, req)
 	}
 	if m.up == nil || m.local.Reachable(req.To.RunID) {
-		return m.local.Send(ctx, req, legacy)
+		return m.local.Send(ctx, req)
 	}
 	return m.up.Send(ctx, req)
 }
@@ -85,7 +88,7 @@ func (m *Messenger) Send(ctx context.Context, req messaging.SendRequest, legacy 
 // sendToChild admits the one edge a cross-branch ask owns in this broker's store
 // and relays the message into the child's queue afterwards. The admission never
 // performs network I/O, so the relay cannot run under the store's lock.
-func (m *Messenger) sendToChild(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
+func (m *Messenger) sendToChild(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	if req.NoReply {
 		// A tell allocates no edge, so nothing is admitted here.
 		if err := m.down.Tell(ctx, messaging.DeliverRequest{
@@ -99,7 +102,7 @@ func (m *Messenger) sendToChild(ctx context.Context, req messaging.SendRequest, 
 		}
 		return messaging.SendResult{Outcome: messaging.OutcomeSent, MessageID: req.MessageID, Generation: req.Generation}, nil
 	}
-	res, err := m.local.Send(ctx, req, legacy)
+	res, err := m.local.Send(ctx, req)
 	if err != nil || res.Outcome != messaging.OutcomeSent {
 		return res, err
 	}
@@ -120,7 +123,7 @@ func (m *Messenger) sendToChild(ctx context.Context, req messaging.SendRequest, 
 // Wait blocks for the reply to an ask this messenger routed.
 func (m *Messenger) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
 	if m.up != nil {
-		if _, ok := m.up.askRoute(req.Sender.RunID, req.MessageID); ok {
+		if _, ok := m.up.hopOf(req.Sender.RunID, req.MessageID); ok {
 			return m.up.Wait(ctx, req)
 		}
 	}
@@ -130,7 +133,7 @@ func (m *Messenger) Wait(ctx context.Context, req messaging.WaitRequest) (messag
 // Withdraw withdraws an ask this messenger routed.
 func (m *Messenger) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	if m.up != nil {
-		if _, ok := m.up.askRoute(req.Sender.RunID, req.MessageID); ok {
+		if _, ok := m.up.hopOf(req.Sender.RunID, req.MessageID); ok {
 			return m.up.Withdraw(ctx, req)
 		}
 	}
@@ -172,8 +175,10 @@ func (m *Messenger) Reachable(runID string) bool {
 
 // Peers lists the participants reachable from here: this broker's own runs,
 // narrowed to what the authenticated caller may see, plus the runs its parent
-// exports to it. A listing the parent could not finish reports the error beside
-// the peers that were reached.
+// exports to it. A parent lists this branch's own runs again under the key it
+// addresses them by, which is an alias: the branch already lists them under the
+// IDs it knows them by. A listing the parent could not finish reports the error
+// beside the peers that were reached.
 func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 	peers, err := m.local.Peers(ctx)
 	caller, _ := messaging.CallerRun(ctx)
@@ -191,6 +196,9 @@ func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 	}
 	for _, peer := range remote {
 		if _, ok := seen[peer.RunID]; ok {
+			continue
+		}
+		if runID, ok := localRunID(peer.RunID, m.childID); ok && m.local.Reachable(runID) {
 			continue
 		}
 		seen[peer.RunID] = struct{}{}

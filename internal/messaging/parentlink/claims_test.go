@@ -37,6 +37,19 @@ func TestSiblingBranchesThatMintTheSameRunIDsBothRegister(t *testing.T) {
 	if queued := queuedAgentMessages(t, first.broker, "rt_1"); len(queued) != 0 {
 		t.Fatalf("the asking branch queued %d messages for its own rt_1, want none", len(queued))
 	}
+
+	// A branch lists its own runs under the IDs it knows them by, and each of
+	// them exactly once: the key the parent addresses a run by is an alias.
+	for _, own := range []*branch{first, second} {
+		status, body := getSessions(t, own.broker.Addr(), messaging.SupervisorRunID, own.token(t, messaging.SupervisorRunID))
+		if status != http.StatusOK {
+			t.Fatalf("sessions = (%d, %v), want 200", status, body)
+		}
+		listed := sessionRunIDs(t, body)
+		if listed["rt_1"] != 1 || listed[own.key("rt_1")] != 0 {
+			t.Fatalf("branch listing rows = %v, want its own rt_1 exactly once and no row under the parent's key", listed)
+		}
+	}
 }
 
 // TestChildClaimLeavesTheParentsOwnRunIntact pins that a claim never takes a run
@@ -129,7 +142,7 @@ func TestParentRoutesRefuseWithoutTheLinkCredential(t *testing.T) {
 	// A broker with no configured credential does not fall back to trusting the
 	// loopback caller.
 	open := startBranch(t, "")
-	open.broker.SetParentLinkToken("")
+	open.broker.InstallParentLink(open.link, "", open.link.RunChanged)
 	status, body = postRegistration(t, open, "branch-open", "http://127.0.0.1:1", "gen-open", testLinkToken,
 		messaging.RunClaim{RunID: "target", Token: "open-token"})
 	if status != http.StatusUnauthorized {

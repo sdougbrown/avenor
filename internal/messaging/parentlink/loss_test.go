@@ -94,7 +94,7 @@ func TestParentLossKeepsThePartialListingAndReportsIt(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("sessions after parent loss = (%d, %v), want 200", status, body)
 	}
-	if listed := sessionRunIDs(t, body); !listed["asker"] {
+	if listed := sessionRunIDs(t, body); listed["asker"] != 1 {
 		t.Fatalf("partial listing = %v, want the branch's own run", listed)
 	}
 	if generation, _ := body["generation"].(string); generation == "" {
@@ -157,7 +157,8 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 				MessageID:  msgID,
 				Generation: first.broker.Store().Generation(),
 				Body:       `{"message":"ping"}`,
-			}, true)
+				Legacy:     true,
+			})
 			if err != nil || sent.Outcome != messaging.OutcomeSent {
 				t.Errorf("ask = (%+v, %v), want sent", sent, err)
 				return

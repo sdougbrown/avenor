@@ -117,7 +117,8 @@ type RunState struct {
 	RunID string
 	// Token is the credential this run authenticates with. A replacement branch
 	// claim rotates it, so it is guarded by the broker's own mutex, not by Mu:
-	// read it through Broker.RunToken or Broker.runStateFor.
+	// read it through Broker.RunToken or Broker.runStateFor, or through
+	// runStateLocked while holding b.mu.
 	Token               string
 	ControlQueue        []*ControlMessage
 	RegisteredAt        time.Time
@@ -308,11 +309,11 @@ type Broker struct {
 	store     *askstore.Store
 	messenger messaging.Messenger
 
-	// parentLink is the broker-hierarchy seam: the descendant registry its
-	// parent routes write, and the ownership test the ask store's publication
-	// uses for a run that has no queue here. nil leaves the broker standalone.
-	parentLink      messaging.ParentLink
-	parentLinkToken string
+	// parent is the broker-hierarchy link: the descendant registry its parent
+	// routes write, and the ownership test the ask store's publication uses for
+	// a run that has no queue here. nil leaves the broker standalone.
+	parent      messaging.ParentLink
+	parentToken string
 
 	// runObserver is notified after the broker's set of owned runs changes, so
 	// a host that publishes its runs to another broker re-publishes from here.
@@ -360,38 +361,27 @@ func (b *Broker) SetMessenger(m messaging.Messenger) {
 	b.messenger = m
 }
 
-// SetParentLink installs the broker's parent-link seam: the descendant registry
-// the parent routes write, and the ownership test a publication uses for a run
-// that a child broker owns and this one has no queue for. A nil link leaves the
-// parent routes unserved, which is what a standalone broker reports.
-func (b *Broker) SetParentLink(link messaging.ParentLink) {
+// InstallParentLink installs everything a parent broker serves its parent-link
+// routes with: the descendant registry those routes write, the bearer credential
+// they require, and the callback that re-publishes this broker's owned runs when
+// its run set changes. Empty token leaves the routes to the loopback, same-user
+// trust the broker's local routes already run on; a nil link leaves them unserved,
+// which is what a standalone broker reports.
+func (b *Broker) InstallParentLink(link messaging.ParentLink, token string, observer func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.parentLink = link
+	b.parent = link
+	b.parentToken = token
+	b.runObserver = observer
 }
 
-// SetParentLinkToken sets the bearer credential the broker's parent routes
-// require. Empty leaves them to the loopback, same-user trust the broker's
-// local routes already run on.
-func (b *Broker) SetParentLinkToken(token string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.parentLinkToken = token
-}
-
-func (b *Broker) parentSeam() (messaging.ParentLink, string) {
+// parentLink reports the installed parent link and the credential its parent
+// routes require. A nil link leaves those routes unserved, which is what a
+// standalone broker reports.
+func (b *Broker) parentLink() (messaging.ParentLink, string) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.parentLink, b.parentLinkToken
-}
-
-// SetRunObserver installs a callback the broker runs whenever its set of owned
-// runs changes. It is called after the change is applied and outside the
-// broker lock, so the callback may read the broker's own state.
-func (b *Broker) SetRunObserver(fn func()) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.runObserver = fn
+	return b.parent, b.parentToken
 }
 
 // runSetChanged notifies the installed run observer.
@@ -547,12 +537,10 @@ func (b *Broker) withMethod(method string, next http.HandlerFunc) http.HandlerFu
 	}
 }
 
-// authenticatedCallerKey carries the run ID withAuth verified into a handler,
-// so a handler never has to trust the request body for the caller's identity.
-type authenticatedCallerKey struct{}
-
+// authenticatedCaller reports the run ID withAuth verified into a handler, so a
+// handler never has to trust the request body for the caller's identity.
 func authenticatedCaller(r *http.Request) string {
-	caller, _ := r.Context().Value(authenticatedCallerKey{}).(string)
+	caller, _ := messaging.CallerRun(r.Context())
 	return caller
 }
 
@@ -614,12 +602,10 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		ctx := context.WithValue(r.Context(), authenticatedCallerKey{}, cred.RunID)
-		// The peer export a parent-aware messenger performs is narrowed to what
-		// the authenticated caller may see, so it travels on a key the messaging
-		// leaf owns instead of the router's own.
-		ctx = messaging.WithCallerRun(ctx, cred.RunID)
-		next(w, r.WithContext(ctx))
+		// The authenticated run travels on the messaging leaf's own key, so the
+		// router and a peer export a parent-aware messenger performs read the same
+		// caller.
+		next(w, r.WithContext(messaging.WithCallerRun(r.Context(), cred.RunID)))
 	}
 }
 
@@ -645,8 +631,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.mu.Lock()
-	if st, exists := b.runs[body.RunID]; exists {
-		if body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(st.Token)) != 1 {
+	if st, token, exists := b.runStateLocked(body.RunID); exists {
+		if body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(token)) != 1 {
 			b.mu.Unlock()
 			http.Error(w, "run already registered", http.StatusConflict)
 			return
@@ -655,7 +641,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		st.RegisteredAt = time.Now()
 		st.LastSeen = time.Now()
 		st.Mu.Unlock()
-		respToken := st.Token
+		respToken := token
 		b.mu.Unlock()
 		resp := map[string]string{
 			"token":  respToken,
@@ -951,7 +937,8 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			MessageID:  msgID,
 			Generation: fullBody.Generation,
 			Body:       string(fullBody.Payload),
-		}, true)
+			Legacy:     true,
+		})
 		if err != nil {
 			writeSendError(w, err)
 			return
@@ -1227,10 +1214,21 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 // reads as a complete one.
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
+	local := b.sessions()
+	localByID := make(map[string]SessionInfo, len(local))
+	for _, info := range local {
+		localByID[info.RunID] = info
+	}
 	peers, listingErr := b.seam().Peers(r.Context())
 
 	sessions := make([]SessionInfo, 0, len(peers))
 	for _, peer := range peers {
+		// A run this broker owns already has its record here; only a peer the
+		// installed messenger reached elsewhere arrives as an encoded session.
+		if info, ok := localByID[peer.RunID]; ok {
+			sessions = append(sessions, info)
+			continue
+		}
 		info := SessionInfo{RunID: peer.RunID}
 		if len(peer.Session) > 0 {
 			if err := json.Unmarshal(peer.Session, &info); err != nil {
@@ -1279,7 +1277,7 @@ func parentLinkAuthorized(r *http.Request, token string) bool {
 // that admitted it. A registration replaces the child's previous claim, so the
 // runs it stopped owning are retired with it.
 func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
-	link, token := b.parentSeam()
+	link, token := b.parentLink()
 	if link == nil {
 		writeCodedError(w, http.StatusNotFound, "this broker has no parent link", "unsupported-operation")
 		return
@@ -1360,7 +1358,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 // handleParentDeregister retires one child broker's claim and the run records
 // it owned, so a closed branch stops being a routing target.
 func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) {
-	link, token := b.parentSeam()
+	link, token := b.parentLink()
 	if link == nil {
 		writeCodedError(w, http.StatusNotFound, "this broker has no parent link", "unsupported-operation")
 		return
@@ -1400,7 +1398,7 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 // queue. The reply route is recorded before the ask is exposed, so a consumer
 // can never answer an ask whose route is not bound yet.
 func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
-	link, _ := b.parentSeam()
+	link, _ := b.parentLink()
 	if link == nil {
 		writeCodedError(w, http.StatusNotFound, "this broker has no parent link", "unsupported-operation")
 		return
@@ -1625,6 +1623,11 @@ func (b *Broker) sessions() []SessionInfo {
 func (b *Broker) runStateFor(runID string) (*RunState, string, bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	return b.runStateLocked(runID)
+}
+
+// runStateLocked is runStateFor for a caller that already holds b.mu.
+func (b *Broker) runStateLocked(runID string) (*RunState, string, bool) {
 	st, ok := b.runs[runID]
 	if !ok {
 		return nil, "", false
@@ -1932,7 +1935,7 @@ func (b *Broker) DisplayName(runID string) string { return b.displayName(runID) 
 // broker's own labels never resolve to a descendant's record.
 func (b *Broker) MatchLabel(label string) []string {
 	b.mu.RLock()
-	link := b.parentLink
+	link := b.parent
 	matches := make([]string, 0, 1)
 	for runID, st := range b.runs {
 		if link != nil && link.Owns(runID) {
@@ -2017,7 +2020,7 @@ func (b *Broker) SetHarnessName(runID, name string) error {
 // registered child broker owns keeps the name that branch publishes for it, so
 // a rename here is refused rather than silently reverted by the next claim.
 func (b *Broker) RenameRun(runID, name string) error {
-	if link, _ := b.parentSeam(); link != nil && link.Owns(runID) {
+	if link, _ := b.parentLink(); link != nil && link.Owns(runID) {
 		return fmt.Errorf("run %s is owned by a child broker and keeps the name that branch publishes", runID)
 	}
 	st := b.GetRun(runID)
@@ -2125,7 +2128,7 @@ func (x brokerBackend) Publish(target string, msg messaging.InboundMessage) (fun
 	// reaches the child's queue runs after admission returns, so no publication
 	// performs network I/O under the store's lock and nothing is queued locally
 	// for a withdrawal to retract.
-	if link, _ := x.broker.parentSeam(); link != nil && link.Owns(target) {
+	if link, _ := x.broker.parentLink(); link != nil && link.Owns(target) {
 		return func() {}, nil
 	}
 	st := x.broker.GetRun(target)
@@ -2196,7 +2199,7 @@ type localMessenger struct {
 	broker *Broker
 }
 
-func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
+func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	res, err := m.broker.store.Admit(ctx, askstore.AdmitRequest{
 		Sender:     req.From,
 		Target:     req.To.RunID,
@@ -2204,7 +2207,7 @@ func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest, leg
 		Generation: req.Generation,
 		Body:       req.Body,
 		NoReply:    req.NoReply,
-		Legacy:     legacy,
+		Legacy:     req.Legacy,
 	})
 	return messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err
 }
@@ -2261,7 +2264,7 @@ type askRouteMessenger struct {
 	route messaging.AskRoute
 }
 
-func (m askRouteMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
+func (m askRouteMessenger) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	return m.route.Send(ctx, req)
 }
 

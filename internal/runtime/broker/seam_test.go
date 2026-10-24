@@ -94,7 +94,7 @@ func TestLocalMessagingSeamServesTheHTTPChildPaths(t *testing.T) {
 		t.Fatalf("legacy ask = (%d, %v), want 200 sent", status, body)
 	}
 	sent := rec.Sends()
-	if len(sent) != 1 || !sent[0].Legacy || sent[0].Request.MessageID != "legacy-ask-1" {
+	if len(sent) != 1 || !sent[0].Request.Legacy || sent[0].Request.MessageID != "legacy-ask-1" {
 		t.Fatalf("sends = %+v, want one legacy ask through the seam", sent)
 	}
 	if queued := countAgentMessages(t, b, "target"); queued != 2 {
@@ -389,12 +389,13 @@ func TestLocalMessengerKeepsAskAdmissionContracts(t *testing.T) {
 		Body:      `{"message":"ping"}`,
 	}
 
-	res, err := b.LocalMessenger().Send(ctx, req, false)
+	res, err := b.LocalMessenger().Send(ctx, req)
 	if !errors.Is(err, messaging.ErrGenerationMismatch) {
 		t.Fatalf("versioned send of an unversioned id = (%+v, %v), want a generation mismatch", res, err)
 	}
 
-	res, err = b.LocalMessenger().Send(ctx, req, true)
+	req.Legacy = true
+	res, err = b.LocalMessenger().Send(ctx, req)
 	if err != nil || res.Outcome != messaging.OutcomeSent {
 		t.Fatalf("legacy send of an unversioned id = (%+v, %v), want sent", res, err)
 	}
@@ -435,7 +436,7 @@ func TestMessengerTransportResolvesTheSeamPerCall(t *testing.T) {
 		t.Fatalf("send = (%+v, %v), want sent", res, err)
 	}
 	sent := rec.Sends()
-	if len(sent) != 1 || sent[0].Request.MessageID != msgID || sent[0].Legacy {
+	if len(sent) != 1 || sent[0].Request.MessageID != msgID || sent[0].Request.Legacy {
 		t.Fatalf("sends = %+v, want one versioned ask through the seam", sent)
 	}
 	if queued := countAgentMessages(t, b, "target"); queued != 1 {

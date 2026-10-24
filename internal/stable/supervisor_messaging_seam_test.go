@@ -60,7 +60,7 @@ func TestOwnerMessagingEntersTheBrokerSeam(t *testing.T) {
 		t.Fatalf("owner ask = (%+v, %v), want sent", sent, err)
 	}
 	sends := rec.Sends()
-	if len(sends) != 1 || sends[0].Request.MessageID != msgID || sends[0].Legacy {
+	if len(sends) != 1 || sends[0].Request.MessageID != msgID || sends[0].Request.Legacy {
 		t.Fatalf("owner sends = %+v, want one versioned ask through the seam", sends)
 	}
 	if queued := brokertest.WaitForAgentMessage(t, sup.broker, "rt_child"); queued.ID != msgID {

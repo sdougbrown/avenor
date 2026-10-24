@@ -26,8 +26,7 @@ func TestRelayedAskCarriesTheAskersDisplayName(t *testing.T) {
 		t.Fatalf("name the child's supervisor: %v", err)
 	}
 	awaitUntil(t, "the parent to publish the child supervisor's name", func() bool {
-		hop, ok := parent.link.Registry().Hop(asker)
-		return ok && hop.Label == "child-supervisor"
+		return parent.broker.DisplayName(asker) == "child-supervisor"
 	})
 
 	msgID := newMsgID(t)

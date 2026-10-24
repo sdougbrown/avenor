@@ -132,7 +132,7 @@ func (m blockingMessenger) block(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (m blockingMessenger) Send(ctx context.Context, _ messaging.SendRequest, _ bool) (messaging.SendResult, error) {
+func (m blockingMessenger) Send(ctx context.Context, _ messaging.SendRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
 }
 

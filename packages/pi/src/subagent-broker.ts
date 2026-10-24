@@ -686,7 +686,14 @@ export function createBrokerChildBroker(
     },
 
     async peers() {
-      return { peers: peerRecords(await getBroker(env, '/sessions', fetchImpl)) }
+      const body = await getBroker(env, '/sessions', fetchImpl)
+      const peers = peerRecords(body)
+      const detail = body !== null && typeof body === 'object'
+        ? (body as Record<string, unknown>).peers_error
+        : undefined
+      // A partial listing still arrives with peers; the error rides along so
+      // the router can say the list is incomplete instead of dropping it.
+      return typeof detail === 'string' && detail ? { peers, detail } : { peers }
     },
 
     async rename(req) {

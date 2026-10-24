@@ -36,8 +36,7 @@ func startTestParentBroker(t *testing.T) (*broker.Broker, *parentlink.Messenger)
 	if err != nil {
 		t.Fatalf("build parent messenger: %v", err)
 	}
-	b.SetParentLink(link)
-	b.SetParentLinkToken(testLinkToken)
+	b.InstallParentLink(link, testLinkToken, nil)
 	b.SetMessenger(link)
 	t.Cleanup(func() { _ = link.Close() })
 	return b, link
@@ -87,10 +86,8 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 	if err != nil {
 		t.Fatalf("build branch messenger: %v", err)
 	}
-	b.SetParentLink(link)
-	b.SetParentLinkToken(testLinkToken)
+	b.InstallParentLink(link, testLinkToken, link.RunChanged)
 	b.SetMessenger(link)
-	b.SetRunObserver(link.RunChanged)
 	t.Cleanup(func() { _ = link.Close() })
 	if err := link.Start(context.Background()); err != nil {
 		t.Fatalf("register branch with parent: %v", err)
@@ -122,8 +119,7 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 	}
 	// The supervisor registers its own run under its branch identity: every
 	// branch reserves the supervisor run ID, so the parent addresses it there.
-	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket);
-		!parentLink.Registry().Owns(branchSupervisorRun) {
+	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket); !parentLink.Registry().Owns(branchSupervisorRun) {
 		t.Fatalf("the supervisor did not register its own run with its parent broker as %q", branchSupervisorRun)
 	}
 
