@@ -39,6 +39,12 @@ func TestHarnessNameIsWhatPeersSee(t *testing.T) {
 	if record, _ := b.LastAgentMessage("rt_h"); record.Label != "my-session" {
 		t.Fatalf("last message label = %q, want my-session", record.Label)
 	}
+	if got := b.MatchLabel("my-session"); len(got) != 1 || got[0] != "rt_h" {
+		t.Fatalf("MatchLabel(my-session) = %v, want [rt_h]", got)
+	}
+	if got := b.MatchLabel("launch-label"); len(got) != 0 {
+		t.Fatalf("MatchLabel(launch-label) = %v, want no match", got)
+	}
 }
 
 // A model rename writes its own field: the harness name keeps winning, and the
