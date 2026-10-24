@@ -72,12 +72,13 @@ func startBranchTolerant(t *testing.T, parentURL string, runs ...string) *branch
 
 func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *branch {
 	t.Helper()
-	return newBranchWith(t, parentURL, newTestChildID(), strict, runs)
+	return newBranchWith(t, parentURL, newTestChildID(), DefaultRefreshInterval, strict, runs)
 }
 
-// newBranchWith is newBranch with the branch identity a test controls: the
-// identity is what a restart reclaims its runs under.
-func newBranchWith(t *testing.T, parentURL, childID string, strict bool, runs []string) *branch {
+// newBranchWith is newBranch with the branch identity and refresh interval a
+// test controls: the identity is what a restart reclaims its runs under, and the
+// interval is how long an idle branch stays absent from a replaced parent.
+func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duration, strict bool, runs []string) *branch {
 	t.Helper()
 	b := broker.New("")
 	if err := b.Start(); err != nil {
@@ -97,11 +98,19 @@ func newBranchWith(t *testing.T, parentURL, childID string, strict bool, runs []
 		err  error
 	)
 	link, err = Install(Options{
-		ParentURL:  parentURL,
-		ChildID:    childID,
-		Endpoint:   branch.url(),
-		Generation: b.Store().Generation,
-		Runs: func() []messaging.RunClaim { return b.ParentRunClaims() },
+		ParentURL:       parentURL,
+		ChildID:         childID,
+		RefreshInterval: refresh,
+		Endpoint:        branch.url(),
+		Generation:      b.Store().Generation,
+		Runs:            func() []messaging.RunClaim { return b.ParentRunClaims() },
+		// A run this branch stops owning loses its broker record too, so a
+		// refused descendant stops being served locally.
+		RetireRuns: func(runIDs []string) {
+			for _, runID := range runIDs {
+				b.DeleteRun(runID)
+			}
+		},
 	}, b)
 	if err != nil {
 		t.Fatalf("build parent link: %v", err)
