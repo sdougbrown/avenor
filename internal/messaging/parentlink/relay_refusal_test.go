@@ -28,12 +28,11 @@ func TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch(t *testing.T) {
 		wantError       error
 	}{
 		{
-			name:            "a refused credential",
-			status:          http.StatusUnauthorized,
-			body:            `{"code":"auth-rejected","error":"the branch refused the credential"}`,
-			wantRunGone:     true,
-			wantSiblingGone: true,
-			wantError:       messaging.ErrTargetUnavailable,
+			name:        "a refused credential",
+			status:      http.StatusUnauthorized,
+			body:        `{"code":"auth-rejected","error":"the branch refused the credential"}`,
+			wantRunGone: true,
+			wantError:   messaging.ErrTargetUnavailable,
 		},
 		{
 			name:        "a branch that does not know the run",
