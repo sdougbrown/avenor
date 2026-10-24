@@ -1,6 +1,7 @@
 package parentlink
 
 import (
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
@@ -149,6 +150,91 @@ func TestLinkReplyReportsALostRelayWhenTheParentWasReplaced(t *testing.T) {
 	}
 	if stub.countPath(pathSend) != 0 {
 		t.Fatal("a reply on a replaced parent was sent onward")
+	}
+}
+
+// TestLinkReplyReportsALostRelayWhenTheParentRefusesThePinnedGeneration pins
+// the decode branch of the reply's replacement rule: a parent that pins the
+// generation the reply names but refuses it on the wire still proves the edge
+// cannot be replayed, so the reply reports lost and drops the route.
+func TestLinkReplyReportsALostRelayWhenTheParentRefusesThePinnedGeneration(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSend:
+			return http.StatusConflict, `{"code":"generation-mismatch","error":"the ask store was replaced"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	ctx := testContext(t)
+	link := newTestLink(t, stub, "gen-a")
+	if err := link.RecordRelay(messaging.RelayRoute{
+		MessageID:      "msg-1",
+		AskerRunID:     "run-a",
+		EdgeGeneration: "gen-a",
+	}); err != nil {
+		t.Fatalf("RecordRelay: %v", err)
+	}
+
+	outcome, err := link.Reply(ctx, messaging.ReplyRequest{
+		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
+		ToRunID:   "run-a",
+		MessageID: "msg-1",
+	})
+	if outcome != messaging.OutcomeLost || err == nil {
+		t.Fatalf("Reply = (%q, %v), want lost with the parent's refusal", outcome, err)
+	}
+	if !errors.Is(err, messaging.ErrGenerationMismatch) {
+		t.Fatalf("Reply error = %v, want ErrGenerationMismatch", err)
+	}
+	again, err := link.Reply(ctx, messaging.ReplyRequest{
+		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
+		ToRunID:   "run-a",
+		MessageID: "msg-1",
+	})
+	if again != messaging.OutcomeEdgeAbsent || err != nil {
+		t.Fatalf("second Reply = (%q, %v), want the dropped route", again, err)
+	}
+}
+
+// TestLinkWithdrawKeepsTheAskUncertainWhenTheParentKeepsItsGeneration pins the
+// decode branch of the withdrawal's replacement rule: a parent that refuses
+// the pinned generation but pins the same one again was not replaced, so the
+// withdrawal reports the refusal without inventing a verdict.
+func TestLinkWithdrawKeepsTheAskUncertainWhenTheParentKeepsItsGeneration(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSend:
+			return http.StatusOK, `{"outcome":"sent"}`
+		case pathWithdraw:
+			return http.StatusConflict, `{"code":"generation-mismatch","error":"the ask store was replaced"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	ctx := testContext(t)
+	link := newTestLink(t, stub, "gen-a")
+
+	if sent, err := link.Send(ctx, askRequest("msg-1")); err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("Send = (%+v, %v), want the ask admitted", sent, err)
+	}
+
+	withdrawn, err := link.Withdraw(ctx, withdrawRequest("msg-1"))
+	if err == nil {
+		t.Fatal("Withdraw error = nil, want the parent's refusal")
+	}
+	if !errors.Is(err, messaging.ErrGenerationMismatch) {
+		t.Fatalf("Withdraw error = %v, want ErrGenerationMismatch", err)
+	}
+	if withdrawn.Outcome != messaging.OutcomePossiblyPending {
+		t.Fatalf("Withdraw outcome = %q, want %q", withdrawn.Outcome, messaging.OutcomePossiblyPending)
+	}
+	// The refusal was not a replacement, so the route stays and a later
+	// operation still follows the pinned hop.
+	if _, ok := link.askRoute("run-a", "msg-1"); !ok {
+		t.Fatal("the route was dropped, want it kept for the unchanged parent")
 	}
 }
 
