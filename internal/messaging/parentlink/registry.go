@@ -37,7 +37,6 @@ type child struct {
 	id         string
 	endpoint   string
 	generation string
-	labels     map[string]string
 	// tokens holds, per run, the credential the child handed the parent in its
 	// registration. The relay posts it to the child, so the credential the
 	// child's own runs already use is the one that travels.
@@ -51,7 +50,6 @@ type Hop struct {
 	ChildID    string
 	Endpoint   string
 	Generation string
-	Label      string
 	// Token is the credential the child handed its parent for this run, which
 	// the relay posts back to the child.
 	Token string
@@ -82,7 +80,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	}
 	current, ok := r.children[reg.ChildID]
 	if !ok {
-		current = &child{id: reg.ChildID, labels: map[string]string{}, tokens: map[string]string{}}
+		current = &child{id: reg.ChildID, tokens: map[string]string{}}
 		r.children[reg.ChildID] = current
 	}
 	current.endpoint = reg.Endpoint
@@ -94,7 +92,6 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 			claim.Adopted = append(claim.Adopted, run.RunID)
 		}
 		r.owners[run.RunID] = reg.ChildID
-		current.labels[run.RunID] = run.Label
 		current.tokens[run.RunID] = run.Token
 	}
 	for runID := range r.owners {
@@ -105,7 +102,6 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 			continue
 		}
 		delete(r.owners, runID)
-		delete(current.labels, runID)
 		delete(current.tokens, runID)
 		claim.Retired = append(claim.Retired, runID)
 	}
@@ -168,7 +164,6 @@ func (r *Registry) Forget(runID string) {
 	}
 	delete(r.owners, runID)
 	if current, ok := r.children[owner]; ok {
-		delete(current.labels, runID)
 		delete(current.tokens, runID)
 	}
 }
@@ -205,7 +200,6 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 		ChildID:    current.id,
 		Endpoint:   current.endpoint,
 		Generation: current.generation,
-		Label:      current.labels[runID],
 		Token:      current.tokens[runID],
 	}, true
 }
