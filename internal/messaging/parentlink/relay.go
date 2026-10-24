@@ -66,7 +66,10 @@ func (r *relay) Tell(ctx context.Context, req messaging.DeliverRequest) error {
 	}, false)
 }
 
-// hop posts one relay to the child that owns the target run.
+// hop posts one relay to the child that owns the target run. The relay names
+// the run by its canonical run ID in that branch: a namespaced claim (a branch
+// supervisor) is addressed here under the namespaced key and delivered there as
+// the run the branch itself knows.
 func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverRequest, expectsReply bool) error {
 	next, ok := r.registry.Hop(target)
 	if !ok {
@@ -77,10 +80,10 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 		return fmt.Errorf("%w: this broker has no credential for run %q", messaging.ErrTargetUnavailable, target)
 	}
 	body, err := json.Marshal(map[string]any{
-		"run_id":          target,
+		"run_id":          next.RunID,
 		"token":           token,
 		"from_run_id":     req.FromRunID,
-		"to_run_id":       target,
+		"to_run_id":       next.RunID,
 		"type":            req.Kind,
 		"payload":         req.Payload,
 		"message_id":      req.CorrelationID,

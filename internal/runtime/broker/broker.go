@@ -1289,6 +1289,12 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusBadRequest, "every claimed run needs a run_id", "invalid-request")
 			return
 		}
+		// A branch supervisor run is reserved in every branch, so the registry
+		// addresses it under a branch-namespaced run ID and it never collides
+		// with this broker's own supervisor run.
+		if claim.RunID == messaging.SupervisorRunID {
+			continue
+		}
 		// A run this broker already owns itself is not a child's to claim. The
 		// registry refuses a run another child already owns.
 		if b.GetRun(claim.RunID) != nil && !link.Owns(claim.RunID) {
@@ -1313,14 +1319,27 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 	for _, runID := range claim.Retired {
 		b.DeleteRun(runID)
 	}
-	for _, run := range body.Runs {
+	for _, run := range claim.Runs {
 		b.ownRun(run)
 	}
 	b.runSetChanged()
-	writeJSONBody(w, http.StatusOK, map[string]any{
+	runKeys := make(map[string]string, len(claim.Runs))
+	for _, run := range claim.Runs {
+		if run.Key == run.RunID {
+			continue
+		}
+		// The branch names the run the way this broker addresses it, so its own
+		// upward operations authenticate as the run it registered.
+		runKeys[run.RunID] = run.Key
+	}
+	response := map[string]any{
 		"generation":         b.store.Generation(),
 		"messaging_protocol": messaging.ProtocolVersion,
-	})
+	}
+	if len(runKeys) > 0 {
+		response["run_keys"] = runKeys
+	}
+	writeJSONBody(w, http.StatusOK, response)
 }
 
 // handleParentDeregister retires one child broker's claim and the run records
@@ -1782,27 +1801,32 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 	return st.Token, true
 }
 
-// ownRun adopts a run a registered child broker owns. The record keeps the
-// credential that branch authenticates the run with, so a forwarded ask and a
-// relay into that branch use the one credential the run already has. A caller
-// that adopts a whole set notifies the run observer once when the set is
-// applied.
-func (b *Broker) ownRun(claim messaging.RunClaim) string {
+// ownRun adopts a run a registered child broker owns, under the run ID this
+// broker addresses it by. The record keeps the credential that branch
+// authenticates the run with, so a forwarded ask and a relay into that branch
+// use the one credential the run already has; a replacement branch presents a
+// rotated credential, and the record follows the claim it accepted so both
+// directions keep authenticating. A caller that adopts a whole set notifies the
+// run observer once when the set is applied.
+func (b *Broker) ownRun(claim messaging.ClaimedRun) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	st, exists := b.runs[claim.RunID]
+	st, exists := b.runs[claim.Key]
 	if !exists {
-		st = newRunState(claim.RunID, claim.Label)
+		st = newRunState(claim.Key, claim.Label)
 		if claim.Token != "" {
 			st.Token = claim.Token
 		}
-		b.runs[claim.RunID] = st
+		b.runs[claim.Key] = st
 		return st.Token
+	}
+	if claim.Token != "" {
+		st.Token = claim.Token
 	}
 	if claim.Label != "" {
 		st.Mu.Lock()
 		if st.Info == nil {
-			st.Info = &SessionInfo{RunID: claim.RunID}
+			st.Info = &SessionInfo{RunID: claim.Key}
 		}
 		st.Info.Label = claim.Label
 		st.Mu.Unlock()
