@@ -17,7 +17,7 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 		ChildID:    "one",
 		Endpoint:   "http://one",
 		Generation: "gen-one",
-		Runs:       []messaging.RunClaim{{RunID: "run-a", Label: "alpha"}, {RunID: "run-b"}},
+		Runs:       []messaging.RunClaim{{RunID: "run-a"}, {RunID: "run-b"}},
 	})
 	if err != nil {
 		t.Fatalf("register first child: %v", err)
@@ -26,8 +26,8 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 		t.Fatalf("first claim = %+v, want both runs adopted and none retired", first)
 	}
 	next, ok := registry.Hop("run-a")
-	if !ok || next.Endpoint != "http://one" || next.Generation != "gen-one" || next.Label != "alpha" {
-		t.Fatalf("hop for run-a = (%+v, %v), want the child's endpoint, generation and label", next, ok)
+	if !ok || next.Endpoint != "http://one" || next.Generation != "gen-one" {
+		t.Fatalf("hop for run-a = (%+v, %v), want the child's endpoint and generation", next, ok)
 	}
 
 	// Another child cannot claim a run this one already owns, and a refused
