@@ -54,9 +54,12 @@ type Options struct {
 	// relay can reach that run's queue.
 	RunToken func(runID string) (string, bool)
 	// RetireRun retires the host broker's own record for a run this branch stops
-	// owning after a relay found the owning branch gone. Nil leaves the record to
+	// owning after a relay found the owning branch gone, and reports whether it
+	// did: the retirement is conditional on the record still carrying the
+	// credential the failed relay used, so a replacement branch that registered
+	// while the refusal was in flight keeps its record. Nil leaves the record to
 	// the host.
-	RetireRun func(runID string)
+	RetireRun func(runID, token string) bool
 	// RefreshInterval bounds how long an idle branch stays absent from a
 	// replaced parent. Zero uses DefaultRefreshInterval.
 	RefreshInterval time.Duration
