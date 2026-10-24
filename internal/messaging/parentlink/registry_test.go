@@ -88,6 +88,57 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	}
 }
 
+// TestRegistryNamespacesBranchSupervisorRuns pins the branch-supervisor
+// identity: every branch reserves the same supervisor run ID, so a descendant's
+// supervisor is addressed under a branch-namespaced run ID while the run the
+// relay posts to stays the canonical one that branch knows.
+func TestRegistryNamespacesBranchSupervisorRuns(t *testing.T) {
+	registry := NewRegistry()
+	for _, child := range []string{"one", "two"} {
+		if _, err := registry.Register(messaging.DescendantRegistration{
+			ChildID: child, Endpoint: "http://" + child, Generation: "g-" + child,
+			Runs: []messaging.RunClaim{{RunID: messaging.SupervisorRunID, Label: "supervisor"}},
+		}); err != nil {
+			t.Fatalf("register %s: %v", child, err)
+		}
+	}
+	for _, child := range []string{"one", "two"} {
+		key := messaging.SupervisorRunID + "@" + child
+		if owner, ok := registry.Owner(key); !ok || owner != child {
+			t.Fatalf("owner of %q = (%q, %v), want %q", key, owner, ok, child)
+		}
+		hop, ok := registry.Hop(key)
+		if !ok {
+			t.Fatalf("no hop for %q", key)
+		}
+		if hop.RunID != messaging.SupervisorRunID {
+			t.Fatalf("hop for %q targets %q, want the branch's canonical supervisor run", key, hop.RunID)
+		}
+		if hop.Generation != "g-"+child {
+			t.Fatalf("hop for %q carries generation %q, want the claiming branch's", key, hop.Generation)
+		}
+	}
+	// The reserved ID itself stays unclaimed, so this broker's own supervisor
+	// run is never confused with a descendant's.
+	if registry.Owns(messaging.SupervisorRunID) {
+		t.Fatal("a descendant claim took the parent's own supervisor run ID")
+	}
+	// A canonical run ID that two branches both claim is still a genuine
+	// duplicate and is refused.
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "three", Endpoint: "http://three", Generation: "g-three",
+		Runs: []messaging.RunClaim{{RunID: "run-a"}},
+	}); err != nil {
+		t.Fatalf("register three: %v", err)
+	}
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "four", Endpoint: "http://four", Generation: "g-four",
+		Runs: []messaging.RunClaim{{RunID: "run-a"}},
+	}); !errors.Is(err, ErrRunClaimed) {
+		t.Fatalf("duplicate canonical claim = %v, want ErrRunClaimed", err)
+	}
+}
+
 // TestRegistryExportNarrowsToTheCallersBranch pins the export rule at the
 // registry: a branch sees its own runs and this broker's own runs, a sibling
 // branch's runs stay hidden, and this broker's own caller sees its descendants.

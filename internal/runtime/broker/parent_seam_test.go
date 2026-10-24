@@ -228,7 +228,10 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 		t.Cleanup(func() { _ = b.Stop() })
 		b.SetParentLink(&parentLinkStub{
 			register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-				return messaging.DescendantClaim{Adopted: []string{"remote-run"}}, nil
+				return messaging.DescendantClaim{
+					Runs:    []messaging.ClaimedRun{{RunID: "remote-run", Key: "remote-run", Label: "remote", Token: "child-token"}},
+					Adopted: []string{"remote-run"},
+				}, nil
 			},
 		})
 		if token != "" {

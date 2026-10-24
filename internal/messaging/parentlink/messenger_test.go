@@ -14,6 +14,7 @@ func newTestMessenger(t *testing.T, local *stubMessenger, parent *stubBroker) *M
 	t.Helper()
 	opts := Options{
 		Endpoint:   "http://child-one",
+		ChildID:    "child-one",
 		Runs:       testRuns,
 		Generation: func() string { return "gen-a" },
 	}
