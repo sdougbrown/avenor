@@ -15,6 +15,9 @@ import "context"
 type ParentLink interface {
 	// Owns reports whether runID belongs to a registered child broker.
 	Owns(runID string) bool
+	// Key reports the run ID this broker addresses childID's runID by, which is
+	// how a claim and every later hop name a descendant's run.
+	Key(childID, runID string) string
 	// Register adopts one child broker's claim on the runs it owns and reports
 	// what the claim changed. A run another child already owns is refused.
 	Register(reg DescendantRegistration) (DescendantClaim, error)
@@ -48,10 +51,10 @@ type DescendantRegistration struct {
 
 // ClaimedRun is one run a descendant claims, as the parent broker addresses it.
 // RunID is the canonical run ID the owning branch knows the run by and Key is
-// the run ID this broker routes to: a reserved branch-supervisor identity is
-// namespaced by the branch that claims it, every other run ID stays canonical.
-// Label and Token are what the owning branch hands the parent, so the parent
-// authenticates the run and relays into it with the run's own credential.
+// the run ID this broker routes to: every claim is namespaced by the branch that
+// makes it, because sibling branches mint the same run IDs. Label and Token are
+// what the owning branch hands the parent, so the parent authenticates the run
+// and relays into it with the run's own credential.
 type ClaimedRun struct {
 	RunID string
 	Key   string

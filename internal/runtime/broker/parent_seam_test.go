@@ -22,6 +22,8 @@ type parentLinkStub struct {
 
 func (p *parentLinkStub) Owns(runID string) bool { return runID == p.owned }
 
+func (p *parentLinkStub) Key(childID, runID string) string { return runID + "@" + childID }
+
 func (p *parentLinkStub) Register(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 	panic("parentlink: registration is not part of an admission")
 }

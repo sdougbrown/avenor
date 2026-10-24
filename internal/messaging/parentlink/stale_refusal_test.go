@@ -32,32 +32,33 @@ func TestDelayedRefusalKeepsTheReplacementRouted(t *testing.T) {
 	t.Cleanup(replacement.Close)
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "token-old")
-	if !parent.link.Registry().Owns("target") {
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the parent never adopted the run the fake branch claimed")
 	}
 
 	// One ask is relayed to the endpoint the branch registered first, and that
 	// endpoint holds the refusal until the replacement has registered.
-	refusal := relayAsk(t, parent, "target", stale)
+	refusal := relayAsk(t, parent, deltaTarget, stale)
 	registerDescendant(t, parent, "branch-delta", replacement.URL, "gen-new", "token-new")
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
 	// The refusal described the endpoint it was posted to, not the branch that
 	// registered while it was in flight.
-	if !parent.link.Registry().Owns("target") {
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the delayed refusal retired the replacement branch's claim")
 	}
-	if st := parent.broker.GetRun("target"); st == nil {
+	if st := parent.broker.GetRun(deltaTarget); st == nil {
 		t.Fatal("the delayed refusal deleted the replacement branch's run record")
 	}
-	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-new" {
+	if token, ok := parent.broker.RunToken(deltaTarget); !ok || token != "token-new" {
 		t.Fatalf("run record credential = (%q, %v), want the replacement's", token, ok)
 	}
 
 	// The replacement stays a routing target: the next ask reaches it.
 	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), deltaTarget, secondID, parent.broker.Store().Generation())
 	if answer.err != nil {
 		t.Fatalf("ask the replacement branch: %v", answer.err)
 	}
@@ -82,27 +83,28 @@ func TestDelayedRefusalKeepsARestartedRunsCredential(t *testing.T) {
 	stale := newBlockingEndpoint(t)
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "token-old")
-	refusal := relayAsk(t, parent, "target", stale)
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	refusal := relayAsk(t, parent, deltaTarget, stale)
 	// The same branch instance, the same endpoint and generation, a new credential:
 	// this is one run restarting inside a live branch.
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "token-new")
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
-	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-new" {
+	if token, ok := parent.broker.RunToken(deltaTarget); !ok || token != "token-new" {
 		t.Fatalf("run record credential = (%q, %v), want the credential the branch refreshed", token, ok)
 	}
-	if st := parent.broker.GetRun("target"); st == nil {
+	if st := parent.broker.GetRun(deltaTarget); st == nil {
 		t.Fatal("the delayed refusal deleted the restarted run's record")
 	}
-	if !parent.link.Registry().Owns("target") {
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the delayed refusal dropped the restarted run's claim")
 	}
 
 	// The restarted run stays a routing target: the next ask reaches the branch
 	// instead of being admitted into the parent's own store with no consumer.
 	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), deltaTarget, secondID, parent.broker.Store().Generation())
 	if answer.err != nil {
 		t.Fatalf("ask the restarted run: %v", answer.err)
 	}
@@ -209,7 +211,13 @@ func registerDescendant(t *testing.T, parent *branch, childID, endpoint, generat
 	if err != nil {
 		t.Fatalf("marshal registration: %v", err)
 	}
-	resp, err := http.Post(parent.url()+pathRegister, "application/json", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, parent.url()+pathRegister, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("build registration: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testLinkToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("register descendant: %v", err)
 	}

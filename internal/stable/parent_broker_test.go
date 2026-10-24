@@ -13,6 +13,10 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
+// testLinkToken is the credential a parent broker in these tests requires of
+// the branches that register with it, and the one those branches present.
+const testLinkToken = "stable-test-link-token"
+
 // startTestParentBroker starts a broker that serves the parent-link routes and
 // relays into the branches that register with it, wired the way the supervisor
 // wires a parent broker.
@@ -24,14 +28,16 @@ func startTestParentBroker(t *testing.T) (*broker.Broker, *parentlink.Messenger)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
 	link, err := parentlink.New(parentlink.Options{
-		Generation: b.Store().Generation,
-		RunToken:   b.RunToken,
-		RetireRun:  b.DeleteRunIfToken,
+		Generation:  b.Store().Generation,
+		RunToken:    b.RunToken,
+		DisplayName: b.DisplayName,
+		RetireRun:   b.DeleteRunIfToken,
 	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build parent messenger: %v", err)
 	}
 	b.SetParentLink(link)
+	b.SetParentLinkToken(testLinkToken)
 	b.SetMessenger(link)
 	t.Cleanup(func() { _ = link.Close() })
 	return b, link
@@ -57,6 +63,7 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 	var link *parentlink.Messenger
 	link, err := parentlink.New(parentlink.Options{
 		ParentURL:  "http://" + parentBroker.Addr(),
+		Token:      testLinkToken,
 		ChildID:    parentlink.BranchID("test/" + b.Addr()),
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
@@ -71,13 +78,17 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 			}
 			return claims
 		},
-		RunToken:   b.RunToken,
-		RetireRun:  b.DeleteRunIfToken,
+		RunToken: b.RunToken,
+		// A relay carries the asker's resolved name, which the receiving branch
+		// cannot resolve for itself.
+		DisplayName: b.DisplayName,
+		RetireRun:   b.DeleteRunIfToken,
 	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build branch messenger: %v", err)
 	}
 	b.SetParentLink(link)
+	b.SetParentLinkToken(testLinkToken)
 	b.SetMessenger(link)
 	b.SetRunObserver(link.RunChanged)
 	t.Cleanup(func() { _ = link.Close() })
@@ -95,14 +106,15 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 func TestSupervisorParentBrokerLink(t *testing.T) {
 	parentBroker, parentLink := startTestParentBroker(t)
 	peerBroker, peerTokens := startTestBranch(t, parentBroker, "rt_remote")
-	if !parentLink.Registry().Owns("rt_remote") {
+	if !parentLink.Registry().Owns(branchKey(peerBroker, "rt_remote")) {
 		t.Fatal("the parent never adopted the peer branch's run")
 	}
 
 	sup := newTestSupervisor(t, Config{
-		ControlSocket:   newStableSocketPath(t, "parent"),
-		MaxRuntimes:     2,
-		BrokerParentURL: "http://" + parentBroker.Addr(),
+		ControlSocket:     newStableSocketPath(t, "parent"),
+		MaxRuntimes:       2,
+		BrokerParentURL:   "http://" + parentBroker.Addr(),
+		BrokerParentToken: testLinkToken,
 	})
 	t.Cleanup(func() { _ = sup.Shutdown("kill") })
 	if sup.parentLink == nil {
@@ -146,7 +158,7 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 	msgID := newStableMsgID(t)
 	sent, err = sup.messaging.Send(ctx, messaging.SendRequest{
 		From:       messaging.Identity{RunID: messaging.SupervisorRunID, Sender: "supervisor"},
-		To:         messaging.Identity{RunID: "rt_remote"},
+		To:         messaging.Identity{RunID: branchKey(peerBroker, "rt_remote")},
 		MessageID:  msgID,
 		Generation: pre.Generation,
 		Body:       `{"message":"cross-branch ping"}`,
@@ -187,8 +199,8 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 	if err != nil || waited.Outcome != messaging.OutcomeReplied || waited.Reply == nil {
 		t.Fatalf("cross-branch wait = (%+v, %v), want the reply", waited, err)
 	}
-	if waited.Reply.FromRunID != "rt_remote" {
-		t.Fatalf("reply from_run_id = %q, want the canonical target run", waited.Reply.FromRunID)
+	if waited.Reply.FromRunID != branchKey(peerBroker, "rt_remote") {
+		t.Fatalf("reply from_run_id = %q, want the run the supervisor addressed", waited.Reply.FromRunID)
 	}
 	if edges := parentBroker.Store().ActiveCount(); edges != 0 {
 		t.Fatalf("parent still holds %d ask edges after the reply", edges)
@@ -306,6 +318,12 @@ func TestSupervisorWithoutParentBrokerKeepsLocalMessaging(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("standalone broker parent register = (%d, %v), want 404", status, body)
 	}
+}
+
+// branchKey reports the run ID a test parent broker addresses one of a branch
+// broker's runs by.
+func branchKey(b *broker.Broker, runID string) string {
+	return parentlink.ParentRunKey(parentlink.BranchID("test/"+b.Addr()), runID)
 }
 
 // deliveredAsker reports the run ID the relayed ask for msgID arrived from, the

@@ -117,9 +117,10 @@ type Config struct {
 
 	// BrokerParentToken is the credential the parent link uses in both
 	// directions: it is presented to the parent broker and required from the
-	// child brokers that register with this one's broker. Empty leaves the
-	// parent routes to the loopback, same-user trust the local broker already
-	// runs on.
+	// child brokers that register with this one's broker. Empty leaves this
+	// broker's parent routes unserved: without a credential to check, a
+	// registration from any caller on this machine could replace a live branch's
+	// claim wholesale.
 	BrokerParentToken string
 }
 
@@ -1967,13 +1968,14 @@ func (s *Supervisor) installParentLink() {
 		return
 	}
 	options := parentlink.Options{
-		ParentURL:  s.config.BrokerParentURL,
-		Token:      s.config.BrokerParentToken,
-		Endpoint:   "http://" + s.broker.Addr(),
-		Generation: s.broker.Store().Generation,
-		Runs:       s.parentRunClaims,
-		RunToken:   s.broker.RunToken,
-		RetireRun:  s.broker.DeleteRunIfToken,
+		ParentURL:   s.config.BrokerParentURL,
+		Token:       s.config.BrokerParentToken,
+		Endpoint:    "http://" + s.broker.Addr(),
+		Generation:  s.broker.Store().Generation,
+		Runs:        s.parentRunClaims,
+		RunToken:    s.broker.RunToken,
+		DisplayName: s.broker.DisplayName,
+		RetireRun:   s.broker.DeleteRunIfToken,
 		// The control socket path is this supervisor's stable identity: a
 		// restart comes back under the same child ID and reclaims its runs.
 		ChildID: parentlink.BranchID(s.config.ControlSocket),

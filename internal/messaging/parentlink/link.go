@@ -53,6 +53,10 @@ type Options struct {
 	// RunToken reports the credential this broker authenticates a run with, so a
 	// relay can reach that run's queue.
 	RunToken func(runID string) (string, bool)
+	// DisplayName reports the display name this broker resolves for a run. A
+	// relay carries it, so the branch that receives the ask reads the name the
+	// asking branch gave it instead of an unresolved run ID.
+	DisplayName func(runID string) string
 	// RetireRun retires the host broker's own record for a run this branch stops
 	// owning after a relay found the owning branch gone, and reports whether it
 	// did: the retirement is conditional on the record still carrying the
