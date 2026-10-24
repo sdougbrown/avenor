@@ -121,6 +121,10 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 			_, _ = r.registry.Deregister(next.ChildID)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
+		case errors.Is(decErr, ErrParentUnavailable):
+			// The parent failed without saying anything about the branch, so
+			// the claim it registered stays and the relay is retried.
+			return decErr
 		case errors.Is(decErr, messaging.ErrTargetUnavailable):
 			// The child retired this run, so only this run stops being routed.
 			r.registry.Forget(target)
