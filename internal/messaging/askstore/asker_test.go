@@ -31,6 +31,43 @@ func TestAskerAdmitsAnUnversionedIDOnlyWhenTheCallerNamesItLegacy(t *testing.T) 
 	}
 }
 
+// TestAskerRefusesAReplyBodyThatIsNotJSON pins that a reply whose body is
+// not JSON is refused rather than stored, because the stored payload is
+// carried on the wire and a payload that is not JSON breaks the response the
+// waiter reads.
+func TestAskerRefusesAReplyBodyThatIsNotJSON(t *testing.T) {
+	store := New(Options{})
+	asker := NewAsker(store)
+	gen := store.Generation()
+	now := time.Now().UTC()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("message id: %v", err)
+	}
+	send := messaging.SendRequest{
+		From:       messaging.Identity{RunID: "alice"},
+		To:         messaging.Identity{RunID: "bob"},
+		MessageID:  msgID,
+		Generation: gen,
+		Body:       "{}",
+	}
+	if _, err := asker.Send(context.Background(), send, false); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	outcome, err := asker.Reply(context.Background(), messaging.ReplyRequest{
+		From:      messaging.Identity{RunID: "bob"},
+		ToRunID:   "alice",
+		MessageID: msgID,
+		Body:      "not json",
+	})
+	if !errors.Is(err, messaging.ErrInvalidRequest) {
+		t.Fatalf("reply = (%q, %v), want the body refused", outcome, err)
+	}
+	if outcome != messaging.OutcomeNotSent {
+		t.Fatalf("reply outcome = %q, want not-sent", outcome)
+	}
+}
+
 // TestAskerKeepsAnEmptyReplyPayloadValid pins that a reply with no body
 // stores a payload the wire can carry, so an empty answer never breaks the
 // JSON the asker reads.

@@ -3,6 +3,8 @@ package askstore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
@@ -46,11 +48,15 @@ func (a *Asker) Withdraw(_ context.Context, req messaging.WithdrawRequest) (mess
 // Reply completes the ask edge MessageID names for ToRunID. The reply carries
 // no generation, so the edge is looked up in the store's current generation.
 func (a *Asker) Reply(_ context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
-	// An empty body is no payload at all, which keeps the reply's stored
-	// payload valid JSON on the wire.
+	// The reply's payload is carried on the wire, so it is JSON: a body that
+	// is not JSON is refused, as the HTTP transport refuses it, and an empty
+	// body is no payload at all.
 	var payload json.RawMessage
-	if req.Body != "" {
-		payload = json.RawMessage(req.Body)
+	if trimmed := strings.TrimSpace(req.Body); trimmed != "" {
+		if !json.Valid([]byte(trimmed)) {
+			return messaging.OutcomeNotSent, fmt.Errorf("%w: reply body is not JSON", messaging.ErrInvalidRequest)
+		}
+		payload = json.RawMessage(trimmed)
 	}
 	key := a.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, a.store.Generation())
 	return a.store.Reply(key, req.From.RunID, payload)
