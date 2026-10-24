@@ -128,12 +128,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	adopted := make(map[string]struct{}, len(reg.Runs))
 	for i, run := range reg.Runs {
 		key := keys[i]
-		claim.Runs = append(claim.Runs, messaging.ClaimedRun{
-			RunID: run.RunID,
-			Key:   key,
-			Label: run.Label,
-			Token: run.Token,
-		})
+		claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: key})
 		adopted[key] = struct{}{}
 		if _, held := r.owners[key]; !held {
 			claim.Adopted = append(claim.Adopted, key)
