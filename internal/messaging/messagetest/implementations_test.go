@@ -23,6 +23,15 @@ func TestMessagingImplementations(t *testing.T) {
 		})
 	})
 
+	t.Run("inprocess-routed", func(t *testing.T) {
+		store, backend := messagetest.NewMemoryStore(t)
+		runImplementation(t, func(t *testing.T, id messaging.Identity) messaging.Transport {
+			return inprocess.NewRouted(store, func() messaging.Messenger {
+				return messagetest.NewStoreMessenger(store, backend)
+			})
+		})
+	})
+
 	t.Run("localhttp", func(t *testing.T) {
 		b := startBroker(t)
 		runImplementation(t, func(t *testing.T, id messaging.Identity) messaging.Transport {
