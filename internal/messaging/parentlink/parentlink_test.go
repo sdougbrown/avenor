@@ -110,7 +110,9 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		},
 		// A run this branch stops owning loses its broker record too, so a
 		// refused descendant stops being served locally.
-		RetireRun: b.DeleteRun,
+		// A run this branch stops owning loses its broker record too, so a
+		// refused descendant stops being served locally.
+		RetireRun: b.DeleteRunIfToken,
 	}, b)
 	if err != nil {
 		t.Fatalf("build parent link: %v", err)

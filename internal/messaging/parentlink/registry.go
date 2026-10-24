@@ -197,20 +197,29 @@ func (r *Registry) Deregister(childID string) ([]string, error) {
 	return runs, nil
 }
 
-// Forget drops one run's claim, which is what a relay that found its child gone
-// leaves behind.
-func (r *Registry) Forget(runID string) {
+// ForgetIfStale drops one run's claim, which is what a relay that found its
+// child gone leaves behind, but only while the claim still resolves to hop. A
+// replacement branch that registered while the refusal was in flight has
+// refreshed the claim; retiring that claim would take the healthy replacement out
+// of routing. It reports whether it dropped the claim.
+func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	owner, ok := r.owners[runID]
-	if !ok {
-		return
+	if !ok || owner != hop.ChildID {
+		return false
+	}
+	current := r.children[owner]
+	if current == nil ||
+		current.endpoint != hop.Endpoint ||
+		current.generation != hop.Generation ||
+		current.runs[runID] != hop.RunID {
+		return false
 	}
 	delete(r.owners, runID)
-	if current, ok := r.children[owner]; ok {
-		delete(current.runs, runID)
-		delete(current.tokens, runID)
-	}
+	delete(current.runs, runID)
+	delete(current.tokens, runID)
+	return true
 }
 
 // Owns reports whether runID belongs to a registered child broker.

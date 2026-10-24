@@ -49,9 +49,8 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 			}
 			rotating.write(func() {
 				b.ownRun(messaging.ClaimedRun{
-					Key:   "asker",
-					Label: "asker",
-					Token: fmt.Sprintf("rotation-%d", round),
+					RunClaim: messaging.RunClaim{RunID: "asker", Label: "asker", Token: fmt.Sprintf("rotation-%d", round)},
+					Key:      "asker",
 				})
 			})
 		}
@@ -104,7 +103,10 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 				return
 			default:
 			}
-			b.ownRun(messaging.ClaimedRun{Key: "asker", Label: "asker", Token: steady})
+			b.ownRun(messaging.ClaimedRun{
+				RunClaim: messaging.RunClaim{RunID: "asker", Label: "asker", Token: steady},
+				Key:      "asker",
+			})
 		}
 	}()
 	for caller := 0; ; caller++ {
