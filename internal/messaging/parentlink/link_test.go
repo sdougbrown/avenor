@@ -147,10 +147,15 @@ func TestIdleBranchReRegistersWithAReplacedParent(t *testing.T) {
 	}
 
 	awaitUntil(t, "the idle branch to register with the replacement parent", func() bool {
-		return replacement.link.Registry().Owns(branch.key("asker"))
+		if !replacement.link.Registry().Owns(branch.key("asker")) {
+			return false
+		}
+		// The registry admits the claim before the branch records the response's
+		// generation, so ownership alone does not prove the branch converged.
+		generation, pinned := branch.pinned()
+		return pinned && generation == replacement.broker.Store().Generation()
 	})
-	generation, pinned := branch.pinned()
-	if !pinned || generation != replacement.broker.Store().Generation() {
+	if generation, pinned := branch.pinned(); !pinned || generation != replacement.broker.Store().Generation() {
 		t.Fatalf("pinned generation = (%q, %v), want the replacement parent's %q",
 			generation, pinned, replacement.broker.Store().Generation())
 	}
