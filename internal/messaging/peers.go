@@ -11,6 +11,9 @@ import (
 // loop, the empty-session guard and the run-id fallback, so a field added to
 // the peer contract reaches every provider's list, resolve and run-state paths
 // instead of stopping at a per-package copy.
+//
+// The peer's own id is the identity the listing publishes. A session record's
+// run_id is the record's content, so it cannot rename the peer.
 func DecodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 	records := make([]PeerRecord, 0, len(peers))
 	for _, peer := range peers {
@@ -20,7 +23,7 @@ func DecodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 				return nil, err
 			}
 		}
-		if record.RunID == "" {
+		if peer.RunID != "" {
 			record.RunID = peer.RunID
 		}
 		records = append(records, record)

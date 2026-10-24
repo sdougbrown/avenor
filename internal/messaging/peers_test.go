@@ -5,6 +5,31 @@ import (
 	"testing"
 )
 
+// TestDecodePeerRecordsKeepsThePeerID pins that a session record's own
+// run_id cannot rename the peer the listing names, so a peer cannot claim
+// another run's id.
+func TestDecodePeerRecordsKeepsThePeerID(t *testing.T) {
+	records, err := DecodePeerRecords([]Peer{
+		{RunID: "real-peer", Session: []byte(`{"run_id":"other-run","label":"spoofed"}`)},
+		{RunID: "no-record", Session: nil},
+	})
+	if err != nil {
+		t.Fatalf("DecodePeerRecords: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %+v, want two peers", records)
+	}
+	if records[0].RunID != "real-peer" {
+		t.Fatalf("record run id = %q, want the peer's id", records[0].RunID)
+	}
+	if records[0].Label != "spoofed" {
+		t.Fatalf("record label = %q, want the record's own metadata", records[0].Label)
+	}
+	if records[1].RunID != "no-record" {
+		t.Fatalf("record run id = %q, want the peer's id", records[1].RunID)
+	}
+}
+
 func TestLabelCandidates(t *testing.T) {
 	records := []PeerRecord{
 		{RunID: "rt-one", Label: "solo"},

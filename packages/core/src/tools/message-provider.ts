@@ -232,7 +232,9 @@ function peerRecords(peers: MessagePeersResult): PeerRecord[] {
       ? (session as Record<string, unknown>)
       : undefined
     const record: PeerRecord = {
-      run_id: typeof decoded?.run_id === 'string' && decoded.run_id ? decoded.run_id : peer.run_id,
+      // The peer's own id is the identity the listing publishes. A session
+      // record's run_id is the record's content, so it cannot rename the peer.
+      run_id: peer.run_id || (typeof decoded?.run_id === 'string' ? decoded.run_id : ''),
     }
     for (const key of ['label', 'kind', 'status', 'backend', 'model', 'dir'] as const) {
       const value = decoded?.[key]
