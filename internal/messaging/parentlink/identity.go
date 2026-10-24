@@ -12,15 +12,16 @@ import (
 // branch that comes back after an unclean stop registers under the same
 // identity, so it reclaims the runs it held instead of leaving them behind.
 //
-// The readable prefix is the sanitized file stem, and the digest keeps two
-// branches whose stems collide distinct without depending on process state.
+// The readable prefix is the sanitized file stem, and the 64-bit digest keeps
+// two branches whose stems collide distinct — and one branch's identity not
+// guessable from another's — without depending on process state.
 func BranchID(identity string) string {
 	if identity == "" {
 		return ""
 	}
 	stem := strings.TrimSuffix(filepath.Base(identity), filepath.Ext(identity))
 	sum := sha256.Sum256([]byte(identity))
-	return sanitizeBranchToken(stem) + "-" + hex.EncodeToString(sum[:4])
+	return sanitizeBranchToken(stem) + "-" + hex.EncodeToString(sum[:8])
 }
 
 // sanitizeBranchToken reduces stem to the characters a run ID and a peer
