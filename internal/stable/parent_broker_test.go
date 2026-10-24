@@ -36,8 +36,9 @@ func startTestParentBroker(t *testing.T) (*broker.Broker, *parentlink.Messenger)
 }
 
 // startTestBranch starts a broker whose runs register with parentBroker, the
-// way a nested supervisor is wired.
-func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) (*broker.Broker, map[string]string) {
+// way a nested supervisor is wired. It returns the branch's link so a test can
+// inspect the descendant registry the branch serves.
+func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) (*broker.Broker, *parentlink.Messenger, map[string]string) {
 	t.Helper()
 	b := broker.New("")
 	if err := b.Start(); err != nil {
@@ -79,7 +80,54 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 	if err := link.Start(context.Background()); err != nil {
 		t.Fatalf("register branch with parent: %v", err)
 	}
-	return b, tokens
+	return b, link, tokens
+}
+
+// awaitRegistryOwner polls until a registry has adopted runID.
+func awaitRegistryOwner(t *testing.T, what string, registry *parentlink.Registry, runID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !registry.Owns(runID) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestThreeTierBranchAttribution pins claim attribution across three tiers: a
+// grandchild's run is attributed to the child branch that registered it — at
+// the middle tier, which is the registry that saw the registration — and the
+// middle's claim to its own parent never carries the grandchild's run, so the
+// grandparent's registry records no route for it at all.
+func TestThreeTierBranchAttribution(t *testing.T) {
+	grandparentBroker, grandparentLink := startTestParentBroker(t)
+	middleBroker, middleLink, _ := startTestBranch(t, grandparentBroker, "mid-run")
+	childBroker, _, _ := startTestBranch(t, middleBroker, "child-run")
+	middleURL := "http://" + middleBroker.Addr()
+	childURL := "http://" + childBroker.Addr()
+
+	awaitRegistryOwner(t, "the grandparent to adopt the middle branch's run", grandparentLink.Registry(), "mid-run")
+	if hop, ok := grandparentLink.Registry().Hop("mid-run"); !ok || hop.Endpoint != middleURL {
+		t.Fatalf("the grandparent routes mid-run to %+v, want the middle branch at %s", hop, middleURL)
+	}
+	awaitRegistryOwner(t, "the middle branch to adopt the child branch's run", middleLink.Registry(), "child-run")
+	if hop, ok := middleLink.Registry().Hop("child-run"); !ok || hop.Endpoint != childURL {
+		t.Fatalf("the middle tier routes child-run to %+v, want the child branch at %s", hop, childURL)
+	}
+
+	// The middle's re-publish after the child registered is asynchronous, so
+	// give the middle a run-set change of its own and wait for that change to
+	// reach the grandparent: once the grandparent has adopted the later run, a
+	// claim computed after the child registered has landed, and it must not
+	// carry the child's run.
+	if _, err := middleBroker.CreateRun("mid-run-2", "mid-run-2"); err != nil {
+		t.Fatalf("create the middle branch's later run: %v", err)
+	}
+	awaitRegistryOwner(t, "the grandparent to adopt the middle branch's later run", grandparentLink.Registry(), "mid-run-2")
+	if grandparentLink.Registry().Owns("child-run") {
+		t.Fatal("the grandparent's registry holds the child's run in the middle branch's claim, want it left to the child branch alone")
+	}
 }
 
 // TestSupervisorParentBrokerLink pins the supervisor's opt-in wiring: with a
@@ -89,7 +137,7 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 // supervisor's own transport.
 func TestSupervisorParentBrokerLink(t *testing.T) {
 	parentBroker, parentLink := startTestParentBroker(t)
-	peerBroker, peerTokens := startTestBranch(t, parentBroker, "rt_remote")
+	peerBroker, _, peerTokens := startTestBranch(t, parentBroker, "rt_remote")
 	if !parentLink.Registry().Owns("rt_remote") {
 		t.Fatal("the parent never adopted the peer branch's run")
 	}
