@@ -1586,26 +1586,16 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	st := b.GetRun(body.ToRunID)
-	if st == nil {
-		writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
+	// The branch that owns the asker is the one that knows its display name;
+	// the canonical run ID travels unchanged.
+	if err := b.SendTo(body.FromRunID, body.ToRunID, body.Type, body.Payload, body.MessageID); err != nil {
+		if strings.Contains(err.Error(), "run not found") {
+			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	queued := &ControlMessage{
-		ID:        body.MessageID,
-		Type:      body.Type,
-		RunID:     body.ToRunID,
-		FromRunID: body.FromRunID,
-		// The branch that owns the asker is the one that knows its display name;
-		// the canonical run ID travels unchanged.
-		Sender:    b.DisplayName(body.FromRunID),
-		Payload:   body.Payload,
-		CreatedAt: time.Now(),
-	}
-	st.Mu.Lock()
-	st.ControlQueue = append(st.ControlQueue, queued)
-	st.signalLocked()
-	st.Mu.Unlock()
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"queued":  true,
 		"outcome": messaging.OutcomeSent,
