@@ -243,7 +243,6 @@ func TestLinkSendClassifiesAnUnreachableParent(t *testing.T) {
 		Endpoint:   "http://child-one",
 		Runs:       testRuns,
 		Generation: func() string { return "gen-a" },
-		RunToken:   func(string) (string, bool) { return "tok-a", true },
 	})
 	if err != nil {
 		t.Fatalf("NewLink: %v", err)

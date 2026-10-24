@@ -14,7 +14,7 @@ func newTestRelay(t *testing.T, registry *Registry, childID, endpoint, generatio
 	t.Helper()
 	claims := make([]messaging.RunClaim, 0, len(runs))
 	for _, runID := range runs {
-		claims = append(claims, messaging.RunClaim{RunID: runID})
+		claims = append(claims, messaging.RunClaim{RunID: runID, Token: "tok-b"})
 	}
 	if _, err := registry.Register(messaging.DescendantRegistration{
 		ChildID:    childID,
@@ -25,7 +25,6 @@ func newTestRelay(t *testing.T, registry *Registry, childID, endpoint, generatio
 		t.Fatalf("register child %q: %v", childID, err)
 	}
 	relay, err := newRelay(Options{
-		RunToken:   func(string) (string, bool) { return "tok-b", true },
 		Generation: func() string { return generation },
 	}, registry)
 	if err != nil {
@@ -53,6 +52,9 @@ func TestRelayDropsTheWholeChildWhenItRefusesTheBranch(t *testing.T) {
 	})
 	if !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("Ask = %v, want ErrTargetUnavailable", err)
+	}
+	if got, _ := stub.lastRequest(t, pathRelay).Body["token"].(string); got != "tok-b" {
+		t.Fatalf("the relay posted the token %q, want the credential the child registered", got)
 	}
 	if _, ok := registry.Hop("run-b"); ok {
 		t.Fatal("the refused branch still routes the run that was relayed to")

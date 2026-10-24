@@ -27,10 +27,9 @@ type Messenger struct {
 // New builds one broker's parent-aware messaging.
 //
 // A parent URL is required for the upward direction; a broker that only parents
-// children is built with the same call and no parent URL. The generation and
-// the run credential are always required, because the relay reads both on every
-// hop it takes into a child, and a parent URL adds the run set the link
-// publishes.
+// children is built with the same call and no parent URL. The generation is
+// always required, because the relay reads it on every hop it takes into a
+// child, and a parent URL adds the run set the link publishes.
 func New(opts Options, local messaging.Messenger) (*Messenger, error) {
 	if local == nil {
 		return nil, fmt.Errorf("%w: a parent-aware messenger composes a local messenger", messaging.ErrInvalidRequest)
