@@ -215,6 +215,25 @@ generation follows one rule:
    `possibly-pending`.
 3. The refreshed generation is what the *next* ask pins.
 
+## Linking a branch
+
+A child branch joins a parent's broker with one shared credential. Mint it
+first:
+
+```
+avenor parent-token
+```
+
+On the parent supervisor, set `BrokerParentToken` to that value. Its parent
+routes are served only when a token is configured; an empty token leaves them
+unserved. On each child branch supervisor, set `BrokerParentURL` to the parent
+broker's address and `BrokerParentToken` to the same value.
+
+The child registers the runs it owns at startup and retracts the claim on
+shutdown. The parent issues each descendant run its own credential at
+registration, and relays authenticate per run: the link token only bootstraps
+the relationship.
+
 ## Host v1 contract
 
 `internal/messaging/hosthttp` speaks a versioned host protocol:
