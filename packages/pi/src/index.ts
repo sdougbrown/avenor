@@ -600,7 +600,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // Record the attempt before it lands so a second read of the same name
       // while the first is in flight does not publish twice; a failed publish
       // forgets the attempt so the next turn retries.
-      publishedSessionName = { name }
+      const attempt = { name }
+      publishedSessionName = attempt
       publishChain = publishChain.then(async () => {
         try {
           await publishHarnessName(env, name)
@@ -613,7 +614,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             console.error('[avenor] session_name_set refused:', error.message)
             return
           }
-          publishedSessionName = null
+          // A later publish may already hold a newer record; only forget this
+          // attempt's own record so that newer name is not re-published twice.
+          if (publishedSessionName === attempt) publishedSessionName = null
           console.error('[avenor] session_name_set failed:', error instanceof Error ? error.message : error)
         }
       })
