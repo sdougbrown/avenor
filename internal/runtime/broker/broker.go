@@ -1740,17 +1740,18 @@ func (b *Broker) RunToken(runID string) (string, bool) {
 // Sessions returns the runs this broker owns with the metadata its peers see.
 func (b *Broker) Sessions() []SessionInfo { return b.sessions() }
 
-// ParentRunClaims builds the claim set a branch publishes to its parent: the
-// runs this broker serves minus the runs owned reports as already claimed by a
-// child branch, each with the credential its run authenticates with. One
-// builder serves every host that publishes a claim, so a change to the
-// publication rule cannot leave a test helper publishing something a real
-// branch would not.
-func (b *Broker) ParentRunClaims(owned func(runID string) bool) []messaging.RunClaim {
+// ParentRunClaims reports the runs this broker serves minus the runs its
+// parent-link seam reports as a child branch's claim, each with the credential
+// its run authenticates with. One builder serves every host that publishes a
+// claim, and the ownership filter comes from the seam the broker already holds,
+// so no caller can publish a child's runs as its own with a stale or missing
+// filter.
+func (b *Broker) ParentRunClaims() []messaging.RunClaim {
+	seam, _ := b.parentSeam()
 	sessions := b.sessions()
 	claims := make([]messaging.RunClaim, 0, len(sessions))
 	for _, info := range sessions {
-		if owned != nil && owned(info.RunID) {
+		if seam != nil && seam.Owns(info.RunID) {
 			continue
 		}
 		token, _ := b.RunToken(info.RunID)
