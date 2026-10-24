@@ -313,7 +313,10 @@ func New(globalToken string) *Broker {
 	return b
 }
 
-// Store returns the ask store the broker serves.
+// Store returns the ask store the broker serves. It is the broker's own
+// local door: an ask admitted through it stays local and the installed
+// messenger never sees it, so a host that owns the ask lifecycle reaches the
+// store through the messaging seam instead.
 func (b *Broker) Store() *askstore.Store { return b.store }
 
 // LocalMessenger returns the broker's own messaging implementation. A host
