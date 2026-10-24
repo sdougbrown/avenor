@@ -26,6 +26,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/parentlink"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
@@ -105,6 +106,21 @@ type Config struct {
 	// the operator's allowlist. Control-socket spawns and the CLI are
 	// operator-trusted and are not gated by this policy.
 	MCPLaunchWrapperPolicy *MCPLaunchWrapperPolicy
+
+	// BrokerParentURL is the http:// address of the parent broker this
+	// supervisor's broker registers its runs with. An ask that no run in this
+	// branch can answer is forwarded to the parent, which owns the one edge the
+	// cross-branch ask has and routes it to the descendant that owns the
+	// target. Empty means this supervisor is a root: its broker behaves exactly
+	// as a standalone local broker.
+	BrokerParentURL string
+
+	// BrokerParentToken is the credential the parent link uses in both
+	// directions: it is presented to the parent broker and required from the
+	// child brokers that register with this one's broker. Empty leaves the
+	// parent routes to the loopback, same-user trust the local broker already
+	// runs on.
+	BrokerParentToken string
 }
 
 // DefaultLeaseSweepInterval is the default live lease-expiry cadence: a
@@ -654,7 +670,12 @@ type Supervisor struct {
 	// messaging is the supervisor's own transport over the broker's ask store.
 	// It is the only transport the supervisor closes, and it never outlives
 	// the broker.
-	messaging                    messaging.Transport
+	messaging messaging.Transport
+	// parentLink is the broker hierarchy this supervisor participates in, nil
+	// when no parent broker is configured. parentLinkStop cancels its
+	// re-registration loop on shutdown, before the claim is retracted.
+	parentLink                   *parentlink.Messenger
+	parentLinkStop               context.CancelFunc
 	brokerRunID                  string
 	brokerToken                  string
 	brokerRunMu                  sync.Mutex
@@ -751,6 +772,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		sup.broker.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
 			return sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: callerRunID}, sessionID, name)
 		})
+		sup.installParentLink()
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	sup.capacityCh = make(chan struct{})
@@ -1934,6 +1956,60 @@ func (s *Supervisor) brokerURL() string {
 		return ""
 	}
 	return fmt.Sprintf("http://%s", s.broker.Addr())
+}
+
+// installParentLink wires this broker to its parent broker when the supervisor
+// is configured with one. With neither a parent URL nor a parent token the
+// broker keeps its standalone behavior exactly: no link, no relay sink, and no
+// parent routes served.
+func (s *Supervisor) installParentLink() {
+	if s.config.BrokerParentURL == "" && s.config.BrokerParentToken == "" {
+		return
+	}
+	options := parentlink.Options{
+		ParentURL:  s.config.BrokerParentURL,
+		Token:      s.config.BrokerParentToken,
+		Endpoint:   "http://" + s.broker.Addr(),
+		Generation: s.broker.Store().Generation,
+		Runs:       s.parentRunClaims,
+		RunToken:   s.broker.RunToken,
+	}
+	link, err := parentlink.New(options, s.broker.LocalMessenger())
+	if err != nil {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: parent broker link disabled: %v\n", err)
+		return
+	}
+	s.parentLink = link
+	s.broker.SetParentLink(link)
+	s.broker.SetParentLinkToken(s.config.BrokerParentToken)
+	s.broker.SetMessenger(link)
+	s.broker.SetRunObserver(link.RunChanged)
+	if options.ParentURL == "" {
+		return
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	s.parentLinkStop = stop
+	if err := link.Start(ctx); err != nil {
+		// A parent that is not up yet is not fatal: the branch keeps serving
+		// locally and the next run-set change or upward call re-registers.
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: parent broker registration failed: %v\n", err)
+	}
+}
+
+// parentRunClaims reports the runs this branch owns, which is what it publishes
+// to its parent. A run a child broker owns belongs to that branch's claim, not
+// this one.
+func (s *Supervisor) parentRunClaims() []messaging.RunClaim {
+	sessions := s.broker.Sessions()
+	claims := make([]messaging.RunClaim, 0, len(sessions))
+	for _, info := range sessions {
+		if s.parentLink != nil && s.parentLink.Owns(info.RunID) {
+			continue
+		}
+		token, _ := s.broker.RunToken(info.RunID)
+		claims = append(claims, messaging.RunClaim{RunID: info.RunID, Label: info.Label, Token: token})
+	}
+	return claims
 }
 
 // registerBrokerRun ensures the supervisor has its own run registered in the
@@ -3789,6 +3865,14 @@ func (s *Supervisor) shutdown(mode string) int {
 	// Always release the root-owned budget file, including the zero-timeout and
 	// kill paths below. Nested supervisors only close their inherited handle.
 	defer func() {
+		// The branch retracts its claim before the broker stops serving, so a
+		// parent never routes into a broker that is already gone.
+		if s.parentLinkStop != nil {
+			s.parentLinkStop()
+		}
+		if s.parentLink != nil {
+			_ = s.parentLink.Close()
+		}
 		if s.broker != nil {
 			_ = s.broker.Stop()
 		}
