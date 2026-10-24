@@ -198,10 +198,13 @@ func (r *Registry) Deregister(childID string) ([]string, error) {
 }
 
 // ForgetIfStale drops one run's claim, which is what a relay that found its
-// child gone leaves behind, but only while the claim still resolves to hop. A
-// replacement branch that registered while the refusal was in flight has
-// refreshed the claim; retiring that claim would take the healthy replacement out
-// of routing. It reports whether it dropped the claim.
+// child gone leaves behind, but only while the claim still resolves to hop: the
+// run's endpoint, generation, canonical run ID and the credential the relay
+// authenticated with. A replacement branch that registered while the refusal was
+// in flight has refreshed the claim, and so has a run that restarted inside a live
+// branch, which keeps the endpoint and generation but rotates its credential;
+// retiring either claim would take a healthy run out of routing. It reports
+// whether it dropped the claim.
 func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -213,7 +216,8 @@ func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 	if current == nil ||
 		current.endpoint != hop.Endpoint ||
 		current.generation != hop.Generation ||
-		current.runs[runID] != hop.RunID {
+		current.runs[runID] != hop.RunID ||
+		current.tokens[runID] != hop.Token {
 		return false
 	}
 	delete(r.owners, runID)

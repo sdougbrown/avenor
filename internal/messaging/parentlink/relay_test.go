@@ -34,11 +34,12 @@ func newTestRelay(t *testing.T, registry *Registry, childID, endpoint, generatio
 	return relay
 }
 
-// TestRelayDropsTheWholeChildWhenItRefusesTheBranch pins the relay's refusal
-// rule: a child that rejects the relay because its registration was replaced
-// or its credentials were refused is no longer the branch it registered as, so
-// every run it owns stops being routed instead of one run at a time.
-func TestRelayDropsTheWholeChildWhenItRefusesTheBranch(t *testing.T) {
+// TestRelayRetiresOnlyTheRefusedRunsRoute pins the relay's refusal rule: a
+// child that rejects the relay stops routing the run the relay was posted for,
+// while the branch's other runs keep their route: retirement is scoped to the
+// run whose relay was refused, and it only lands while the claim still resolves
+// to the hop the relay was posted against.
+func TestRelayRetiresOnlyTheRefusedRunsRoute(t *testing.T) {
 	stub := newStubBroker(t, func(req stubRequest) (int, string) {
 		return http.StatusConflict, `{"code":"generation-mismatch","error":"the branch was replaced"}`
 	})
@@ -59,7 +60,7 @@ func TestRelayDropsTheWholeChildWhenItRefusesTheBranch(t *testing.T) {
 	if _, ok := registry.Hop("run-b"); ok {
 		t.Fatal("the refused branch still routes the run that was relayed to")
 	}
-	if _, ok := registry.Hop("run-c"); ok {
-		t.Fatal("the refused branch still routes its other run")
+	if _, ok := registry.Hop("run-c"); !ok {
+		t.Fatal("the refusal retired the child's other run's route")
 	}
 }

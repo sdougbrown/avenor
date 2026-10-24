@@ -153,8 +153,11 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 // delayed refusal from an old relay arrives after the branch may have refreshed
 // either half of it: a replacement branch changes the hop the claim resolves to,
 // and a run restarted inside a live branch rotates its credential. Retiring
-// either would take a healthy branch out of routing.
+// either would take a healthy branch out of routing, and a dropped claim is
+// terminal: this broker's run record makes the branch's re-registration a
+// conflict, so the run can never be claimed again.
 func (r *relay) forget(runID string, hop Hop, token string) {
+	hop.Token = token
 	if !r.registry.ForgetIfStale(runID, hop) {
 		return
 	}

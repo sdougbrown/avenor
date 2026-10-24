@@ -73,10 +73,10 @@ func TestDelayedRefusalKeepsTheReplacementRouted(t *testing.T) {
 
 // TestDelayedRefusalKeepsARestartedRunsCredential pins the credential half of the
 // retirement rule: a run restarted inside a live branch keeps the branch's
-// endpoint and generation but presents a fresh credential. The refusal retires the
-// claim it failed on, but it deletes the run record only while the record still
-// carries the credential that relay authenticated with, so the restarted run's
-// credential and its ask edges survive.
+// endpoint and generation but presents a fresh credential. The refusal describes
+// the credential it authenticated with, so it leaves both the record and the claim
+// in place: the restarted run keeps its ask edges and stays a routing target,
+// where a dropped claim would make the branch's re-registration a permanent 409.
 func TestDelayedRefusalKeepsARestartedRunsCredential(t *testing.T) {
 	parent := startBranch(t, "", "orchestrator")
 	stale := newBlockingEndpoint(t)
@@ -94,6 +94,25 @@ func TestDelayedRefusalKeepsARestartedRunsCredential(t *testing.T) {
 	}
 	if st := parent.broker.GetRun("target"); st == nil {
 		t.Fatal("the delayed refusal deleted the restarted run's record")
+	}
+	if !parent.link.Registry().Owns("target") {
+		t.Fatal("the delayed refusal dropped the restarted run's claim")
+	}
+
+	// The restarted run stays a routing target: the next ask reaches the branch
+	// instead of being admitted into the parent's own store with no consumer.
+	secondID := newMsgID(t)
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	if answer.err != nil {
+		t.Fatalf("ask the restarted run: %v", answer.err)
+	}
+	if answer.status != http.StatusOK || answer.body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("ask the restarted run = (%d, %v), want 200 sent", answer.status, answer.body)
+	}
+	select {
+	case <-stale.relayed:
+	case <-time.After(awaitDeadline):
+		t.Fatal("the restarted run's branch never received an ask")
 	}
 }
 
@@ -129,14 +148,18 @@ func expectRefusedAsk(t *testing.T, answer sendAnswer) {
 	}
 }
 
-// blockingEndpoint is a descendant broker's /relay route that holds its answer
-// until the test releases it, so a claim can be refreshed while the relay is in
-// flight. It then refuses the relay the way a replaced branch does.
+// blockingEndpoint is a descendant broker's /relay route that holds its first
+// answer until the test releases it, so a claim can be refreshed while the relay
+// is in flight. It refuses that first relay the way a replaced branch does and
+// accepts the relays after it, so a test can ask again once the claim settled.
 type blockingEndpoint struct {
 	server   *httptest.Server
 	entered  chan struct{}
 	released chan struct{}
+	relayed  chan struct{}
 	once     sync.Once
+	mu       sync.Mutex
+	requests int
 }
 
 func newBlockingEndpoint(t *testing.T) *blockingEndpoint {
@@ -144,11 +167,24 @@ func newBlockingEndpoint(t *testing.T) *blockingEndpoint {
 	endpoint := &blockingEndpoint{
 		entered:  make(chan struct{}),
 		released: make(chan struct{}),
+		relayed:  make(chan struct{}, 1),
 	}
 	endpoint.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		endpoint.mu.Lock()
+		endpoint.requests++
+		first := endpoint.requests == 1
+		endpoint.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if !first {
+			select {
+			case endpoint.relayed <- struct{}{}:
+			default:
+			}
+			_, _ = w.Write([]byte(`{"outcome":"sent"}`))
+			return
+		}
 		endpoint.once.Do(func() { close(endpoint.entered) })
 		<-endpoint.released
-		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"error":"the branch was replaced","code":"generation-mismatch"}`))
 	}))
