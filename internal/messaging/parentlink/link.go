@@ -465,12 +465,24 @@ func (l *Link) Deliver(ctx context.Context, req messaging.DeliverRequest) error 
 
 // Peers lists the runs the parent broker exports to this branch. A parent that
 // cannot finish the listing reports the error beside the peers it did return, so
-// a partial list never reads as a complete one.
+// a partial list never reads as a complete one. Before the first successful
+// registration the link syncs once, so a listing is never answered with a
+// silent empty list just because no claim was published yet.
 func (l *Link) Peers(ctx context.Context) ([]messaging.Peer, error) {
 	caller, _ := messaging.CallerRun(ctx)
 	runID, token, ok := l.listingCredentials(caller)
 	if !ok {
-		return nil, nil
+		// The parent has not accepted this branch's claim yet, so it knows no run
+		// of this branch to list with. Sync once and re-pick before giving up:
+		// an empty answer would read as "the parent has no peers" when the claim
+		// was simply never published.
+		if err := l.Sync(ctx); err != nil {
+			return nil, err
+		}
+		runID, token, ok = l.listingCredentials(caller)
+		if !ok {
+			return nil, fmt.Errorf("%w: this branch has no run registered at the parent broker to list peers with", messaging.ErrTargetUnavailable)
+		}
 	}
 	req, err := http.NewRequest(http.MethodGet, l.opts.ParentURL+pathSessions, nil)
 	if err != nil {
