@@ -1,7 +1,7 @@
 import { Supervisor } from '../supervisor.js'
 import { dial, type Client } from '../client.js'
 import { attachOwner } from '../owner-attach.js'
-import { validateSupervisorSocketPath } from './validate.js'
+import { validateSupervisorSocketPath } from '../paths.js'
 
 export interface SupervisorClientOptions {
   /** Attach with the socket's published owner capability instead of a bare dial. */

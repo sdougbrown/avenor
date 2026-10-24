@@ -6246,6 +6246,9 @@ func TestSpawnParentRunIDMissingPrompt(t *testing.T) {
 		if n != 0 {
 			t.Fatalf("provider prompts = %d, want 0", n)
 		}
+		if got := sup.broker.GetRun("parent_run"); got != nil {
+			t.Fatalf("parent broker run registered for a rejected spawn")
+		}
 	}
 
 	t.Run("neither prompt nor file", func(t *testing.T) {

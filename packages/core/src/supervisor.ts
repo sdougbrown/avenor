@@ -15,9 +15,8 @@ import {
   validateOwnerRecordSocket,
 } from './owner-attach.js'
 import { validateSpawnSelection } from './spawn-selection.js'
-import { ensureRunPaths, socketsRoot } from './paths.js'
+import { ensureRunPaths, socketsRoot, validateSupervisorSocketPath } from './paths.js'
 import { installerBinaryPath } from './install-path.js'
-import { validateSupervisorSocketPath } from './tools/validate.js'
 
 export { installerBinaryPath } from './install-path.js'
 

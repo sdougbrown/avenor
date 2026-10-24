@@ -1,7 +1,7 @@
 import * as fs from 'node:fs'
 import { Supervisor } from '../supervisor.js'
 import { attachOwner } from '../owner-attach.js'
-import { validateSupervisorSocketPath } from './validate.js'
+import { validateSupervisorSocketPath } from '../paths.js'
 import { clearExternalRuns, externalRunMetadataPath } from './run-registry.js'
 
 export async function shutdownTool(args: {

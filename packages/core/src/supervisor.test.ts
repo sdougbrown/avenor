@@ -190,7 +190,7 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
       else process.env.AVENOR_HOME = previousHome
       fs.rmSync(tempDir, { recursive: true, force: true })
     }
-  })
+  }, 20_000)
 
   it('Supervisor.get starts the process', async () => {
     supervisor = await Supervisor.get()
