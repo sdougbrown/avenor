@@ -38,6 +38,7 @@ import {
   spawnTool,
   statusTool,
   Supervisor,
+  SUPERVISOR_RUN_ID,
   THINKING_LEVELS,
   validateSpawnSelection,
   workflowStatusTool,
@@ -1529,14 +1530,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const agentProfile = rosterMode || backend === 'pi' ? resolveAgentProfile(entries) : undefined
         const hostParams = { ...params, backend }
 
-        // The supervisor registers its own broker run eagerly, so a host-mode
-        // spawn names it as the child's parent: the supervisor prepends a note
-        // telling the child where to send status updates and questions.
-        // A child that spawns reaches a supervisor of its own (the launch socket
-        // is per process), whose broker never registered this session's run id.
-        // Naming it would point the note at a run nothing reads, so it stays
-        // unnamed there and the child's brief carries the address instead.
-        const parentRunId = isSubAgentBrokerMode ? undefined : 'supervisor'
+        // The host polls only its singleton's ask queue. Non-local and nested
+        // spawns omit the parent note rather than advertise an unread queue.
+        const parentRunId = isSubAgentBrokerMode
+          ? undefined
+          : (!params.supervisor_id || Boolean(deps.Supervisor.isCurrentInstance?.(params.supervisor_id)))
+            ? SUPERVISOR_RUN_ID
+            : undefined
 
         const result = await deps.spawnTool({
           ...(params.agent !== undefined ? { agent: params.agent } : {}),

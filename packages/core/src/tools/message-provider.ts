@@ -93,7 +93,7 @@ export interface PendingAsk {
   message_id: string
 }
 
-const SUPERVISOR_RUN_ID = 'supervisor'
+export const SUPERVISOR_RUN_ID = 'supervisor'
 const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
 
 function firstNonEmpty(...values: Array<string | undefined>): string {

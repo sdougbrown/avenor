@@ -2136,4 +2136,66 @@ describe('avenor_spawn parent run id', () => {
 
     expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ parent_run_id: 'supervisor' })
   })
+
+  it('omits parent_run_id for an explicit non-local supervisor but still forwards it', async () => {
+    const OTHER = '/tmp/other.sock'
+    const spawnToolMock = mock(async () => ({
+      run_id: 'run-1',
+      label: 'child',
+      supervisor_id: OTHER,
+      runtime_id: 'rt-1',
+    }))
+    const h = await startExtensionHarness({
+      deps: {
+        spawnTool: spawnToolMock,
+        Supervisor: { isCurrentInstance: (id: string) => id === '/tmp/avenor-mcp-singleton.sock' } as any,
+      },
+      extOptions: { subAgentEnv: null },
+    })
+    try {
+      await h.registeredTools.avenor_spawn.execute(
+        't-parent-remote',
+        { agent: 'mule', prompt: 'do the thing', supervisor_id: OTHER, wait: false },
+        undefined,
+        undefined,
+        { cwd: '/tmp' },
+      )
+
+      const args = spawnToolMock.mock.calls[0]?.[0] as Record<string, unknown>
+      expect(args).not.toHaveProperty('parent_run_id')
+      expect(args).toMatchObject({ supervisorId: OTHER })
+    } finally {
+      await h.eventHandlers.session_shutdown()
+    }
+  })
+
+  it('names the supervisor as the child parent for an explicit current singleton', async () => {
+    const SINGLETON = '/tmp/avenor-mcp-singleton.sock'
+    const spawnToolMock = mock(async () => ({
+      run_id: 'run-1',
+      label: 'child',
+      supervisor_id: SINGLETON,
+      runtime_id: 'rt-1',
+    }))
+    const h = await startExtensionHarness({
+      deps: {
+        spawnTool: spawnToolMock,
+        Supervisor: { isCurrentInstance: (id: string) => id === SINGLETON } as any,
+      },
+      extOptions: { subAgentEnv: null },
+    })
+    try {
+      await h.registeredTools.avenor_spawn.execute(
+        't-parent-singleton',
+        { agent: 'mule', prompt: 'do the thing', supervisor_id: SINGLETON, wait: false },
+        undefined,
+        undefined,
+        { cwd: '/tmp' },
+      )
+
+      expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ parent_run_id: 'supervisor', supervisorId: SINGLETON })
+    } finally {
+      await h.eventHandlers.session_shutdown()
+    }
+  })
 })
