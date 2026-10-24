@@ -153,6 +153,51 @@ func TestLinkReplyReportsALostRelayWhenTheParentWasReplaced(t *testing.T) {
 	}
 }
 
+// TestLinkSendClassifiesARefusedGeneration pins the send's replacement
+// rule: a parent that refuses the generation the ask was forwarded under
+// reports what the refusal proves. A replaced parent admits no edge from
+// the pinned generation, so the ask is lost; an unchanged parent leaves
+// the ask uncertain, and neither refusal records a route.
+func TestLinkSendClassifiesARefusedGeneration(t *testing.T) {
+	generation := &generationStub{generation: "gen-a"}
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"` + generation.get() + `"}`
+		case pathSend:
+			return http.StatusConflict, `{"code":"generation-mismatch","error":"the ask store was replaced"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	ctx := testContext(t)
+	link := newTestLink(t, stub, "gen-a")
+
+	sent, err := link.Send(ctx, askRequest("msg-1"))
+	if !errors.Is(err, messaging.ErrGenerationMismatch) {
+		t.Fatalf("Send error = %v, want ErrGenerationMismatch", err)
+	}
+	if sent.Outcome != messaging.OutcomePossiblyPending {
+		t.Fatalf("Send outcome = %q, want %q while the parent keeps its generation", sent.Outcome, messaging.OutcomePossiblyPending)
+	}
+	if _, ok := link.askRoute("run-a", "msg-1"); ok {
+		t.Fatal("a refused ask recorded a route, want none")
+	}
+
+	// The parent is replaced, so the generation it pins changes and the
+	// next refused ask proves the edge cannot exist.
+	generation.set("gen-b")
+	sent, err = link.Send(ctx, askRequest("msg-1"))
+	if !errors.Is(err, messaging.ErrGenerationMismatch) {
+		t.Fatalf("Send after the replacement error = %v, want ErrGenerationMismatch", err)
+	}
+	if sent.Outcome != messaging.OutcomeLost {
+		t.Fatalf("Send after the replacement outcome = %q, want %q", sent.Outcome, messaging.OutcomeLost)
+	}
+	if _, ok := link.askRoute("run-a", "msg-1"); ok {
+		t.Fatal("a lost ask recorded a route, want none")
+	}
+}
+
 // TestLinkReplyReportsALostRelayWhenTheParentRefusesThePinnedGeneration pins
 // the decode branch of the reply's replacement rule: a parent that pins the
 // generation the reply names but refuses it on the wire still proves the edge
