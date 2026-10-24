@@ -294,15 +294,9 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
   const { surface, supervisorId, generation, client, pendingAsks, pollGeneration } = options
   const claims: AskClaims = new Map()
 
-  async function listedPeers(): Promise<PeerRecord[]> {
+  async function listedPeers(): Promise<{ peers: PeerRecord[]; detail?: string }> {
     const result = await client.messagePeers({ generation })
-    if (result.peers_error) {
-      // The listing read only part of the peer set. The peers beside it are
-      // the ones that were read, so a partial list is never read as a
-      // complete one.
-      throw new Error(`the peer listing is incomplete: ${result.peers_error}`)
-    }
-    return peerRecords(result)
+    return { peers: peerRecords(result), detail: result.peers_error || undefined }
   }
 
   // A failed wait leaves no reader for the ask, so retract it the way
@@ -348,7 +342,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         const external = findExternalRunById(supervisorId, ref)
         if (external?.runtimeId) return unique(external)
       }
-      const peers = await listedPeers()
+      const { peers, detail } = await listedPeers()
       const exact = peers.find(peer => peer.run_id === ref)
       if (exact) {
         return {
@@ -368,12 +362,17 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         }
       }
       if (candidates.length > 1) return { runId: '', match: 'ambiguous', candidates }
+      if (detail) {
+        // The listing was incomplete, so this peer may be in the part that was
+        // not read. Refuse rather than claim the peer does not exist.
+        throw new Error(`the peer listing is incomplete: ${detail}`)
+      }
       return { runId: '', match: 'none' }
     },
 
     async state(runId: string): Promise<RunFacts> {
       if (runId === SUPERVISOR_RUN_ID) {
-        const peers = await listedPeers()
+        const { peers } = await listedPeers()
         const peer = peers.find(entry => entry.run_id === SUPERVISOR_RUN_ID)
         const translation = translateRunFacts(peer?.status ?? '', '')
         return {
@@ -592,7 +591,8 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     },
 
     async peers(): Promise<PeersProviderResult> {
-      return { peers: await listedPeers() }
+      const { peers, detail } = await listedPeers()
+      return { peers, detail }
     },
 
     async recordLastTurn(text: string, stopReason: string, truncated: boolean): Promise<void> {
@@ -691,9 +691,9 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
   const { surface, runId, broker, pendingAsks, pollGeneration } = options
   const claims: AskClaims = new Map()
 
-  async function listedPeers(): Promise<PeerRecord[]> {
+  async function listedPeers(): Promise<{ peers: PeerRecord[]; detail?: string }> {
     const result = await broker.peers()
-    return result.peers
+    return { peers: result.peers, detail: result.detail }
   }
 
   const provider: MessageProvider = {
@@ -704,17 +704,22 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
     async resolve(ref: string): Promise<Resolution> {
       if (ref === '') return { runId: '', match: 'none' }
       if (ref === runId) return { runId, label: ref, match: 'unique' }
-      const peers = await listedPeers()
+      const { peers, detail } = await listedPeers()
       const exact = peers.find(peer => peer.run_id === ref)
       if (exact) return { runId: exact.run_id, label: firstNonEmpty(exact.label, exact.run_id), match: 'unique' }
       const candidates = peers.filter(peer => peer.label === ref).map(peer => peer.run_id)
       if (candidates.length === 1) return { runId: candidates[0], label: ref, match: 'unique' }
       if (candidates.length > 1) return { runId: '', match: 'ambiguous', candidates }
+      if (detail) {
+        // The listing was incomplete, so this peer may be in the part that was
+        // not read. Refuse rather than claim the peer does not exist.
+        throw new Error(`the peer listing is incomplete: ${detail}`)
+      }
       return { runId: '', match: 'none' }
     },
 
     async state(targetRunId: string): Promise<RunFacts> {
-      const peers = await listedPeers()
+      const { peers } = await listedPeers()
       const peer = peers.find(entry => entry.run_id === targetRunId)
       if (!peer) throw new Error(`run ${targetRunId} is not visible`)
       const translation = translateRunFacts(peer.status ?? '', '')

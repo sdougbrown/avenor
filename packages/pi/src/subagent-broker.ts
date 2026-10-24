@@ -675,13 +675,9 @@ export function createBrokerChildBroker(
     async peers() {
       const body = await getBroker(env, '/sessions', fetchImpl) as Record<string, unknown> | null
       const incomplete = typeof body?.peers_error === 'string' ? body.peers_error : ''
-      if (incomplete) {
-        // The listing read only part of the peer set. The peers beside it are
-        // the ones that were read, so a partial list is never read as a
-        // complete one.
-        throw new Error(`the peer listing is incomplete: ${incomplete}`)
-      }
-      return { peers: peerRecords(body) }
+      // The peers are the ones that were read; the reason names the listing
+      // as incomplete, so a partial list is never read as a complete one.
+      return { peers: peerRecords(body), detail: incomplete || undefined }
     },
 
     async rename(req) {

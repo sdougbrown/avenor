@@ -174,7 +174,7 @@ describe('host message provider', () => {
     expect(result.peers.map(peer => peer.run_id)).toEqual(['supervisor', 'rt_7'])
   })
 
-  it('refuses a peer listing the broker could not complete', async () => {
+  it('keeps the peers a partial listing read and refuses the rest', async () => {
     const client = fakeClient({
       messagePeers: mock(async () => ({
         peers: [{ run_id: 'rt_7', session: { run_id: 'rt_7', label: 'mesh-a', status: 'done' } }],
@@ -182,8 +182,11 @@ describe('host message provider', () => {
       })),
     })
     const host = provider(client)
-    await expect(host.resolve('rt_7')).rejects.toThrow('the peer listing is incomplete')
+    expect(await host.resolve('rt_7')).toMatchObject({ runId: 'rt_7', match: 'unique' })
     await expect(host.resolve('rt_missing')).rejects.toThrow('the peer listing is incomplete')
+    const listed = await host.peers()
+    expect(listed.peers.map(peer => peer.run_id)).toEqual(['rt_7'])
+    expect(listed.detail).toBe('the broker could not read every peer')
   })
 
   it('returns a rejected host send as the transport outcome, not a refusal', async () => {
