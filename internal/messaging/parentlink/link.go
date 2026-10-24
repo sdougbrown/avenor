@@ -375,6 +375,13 @@ func (l *Link) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (mes
 		}
 		return messaging.WithdrawResult{Outcome: body.outcomeOf(), Fence: body.fenceAck()}, err
 	}
+	// A response that carries neither a wire code nor an outcome describes no
+	// verdict, so the withdrawal reports the protocol mismatch its sibling
+	// operations report instead of an outcome outside the outcome set.
+	if body.Code == "" && body.Outcome == "" {
+		return messaging.WithdrawResult{Outcome: messaging.OutcomePossiblyPending},
+			fmt.Errorf("%w: parent broker answered without a withdrawal outcome", ErrUnsupportedParentProtocol)
+	}
 	// The route stays: the parent keeps the terminal fence, so a repeat wait
 	// reads the same verdict, exactly as a local withdrawal's fence does.
 	return messaging.WithdrawResult{Outcome: body.Outcome, Fence: body.fenceAck()}, nil
