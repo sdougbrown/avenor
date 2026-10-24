@@ -392,6 +392,13 @@ func (t peerListingTransport) Peers(ctx context.Context, req messaging.PeersRequ
 		// listing, so the failure's own class reaches the caller.
 		return res, err
 	}
+	seam := t.broker.seam()
+	if _, own := seam.(localMessenger); own {
+		// The broker's own messenger already lists the runs the broker owns, so
+		// the listing is the seam's own and the broker's runs are not read a
+		// second time.
+		return res, err
+	}
 	set := t.broker.withLocalRuns(res.Peers)
 	res.Peers = set.peers
 	if set.unreadable > 0 {
@@ -1167,8 +1174,7 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 // reads as a complete one.
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
-	peers, listingErr := b.seam().Peers(r.Context())
-	set := b.withLocalRuns(peers)
+	set, listingErr := b.seamPeers(r.Context())
 
 	body := map[string]any{
 		"sessions":           set.sessions,
@@ -1179,6 +1185,25 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 		body["peers_error"] = incompletePeerListing(set.unreadable)
 	}
 	writeJSONBody(w, http.StatusOK, body)
+}
+
+// seamPeers is the peer listing the broker serves: the peers the installed
+// messenger reports and, when that messenger is not the broker's own, the runs
+// the broker owns. A host that lists only the peers it reaches cannot hide the
+// local runs, the supervisor's own included, from the children that address
+// them.
+//
+// The broker's own messenger already lists exactly the runs the broker owns,
+// so the listing is the broker's own session list read once, and a listing
+// from a host messenger is read once and joined with it.
+func (b *Broker) seamPeers(ctx context.Context) (peerSet, error) {
+	seam := b.seam()
+	if _, own := seam.(localMessenger); own {
+		sessions := b.sessions()
+		return peerSet{peers: peersOf(sessions), sessions: sessions}, nil
+	}
+	peers, err := seam.Peers(ctx)
+	return b.withLocalRuns(peers), err
 }
 
 // peerSet is one listing's peers with their session records already read, so
