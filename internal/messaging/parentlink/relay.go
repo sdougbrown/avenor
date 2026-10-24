@@ -138,7 +138,7 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 			// the claim and the host's run record go together, and a record
 			// left behind would make this broker serve the run locally,
 			// queueing asks that nobody consumes.
-			r.forget(target, next, next.Token)
+			r.forget(target, next)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
 		}
@@ -156,13 +156,12 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 // either would take a healthy branch out of routing, and a dropped claim is
 // terminal: this broker's run record makes the branch's re-registration a
 // conflict, so the run can never be claimed again.
-func (r *relay) forget(runID string, hop Hop, token string) {
-	hop.Token = token
+func (r *relay) forget(runID string, hop Hop) {
 	if !r.registry.ForgetIfStale(runID, hop) {
 		return
 	}
 	if r.retire != nil {
-		r.retire(runID, token)
+		r.retire(runID, hop.Token)
 	}
 }
 
