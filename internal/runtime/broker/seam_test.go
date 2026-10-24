@@ -402,7 +402,16 @@ func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
 	if listed.Generation != pre.Generation {
 		t.Fatalf("peers generation = %q, want %q", listed.Generation, pre.Generation)
 	}
-	if len(listed.Peers) != 1 || listed.Peers[0].RunID != "only-peer" {
+	if len(listed.Peers) == 0 {
+		t.Fatalf("peers = %+v, want the retained partial peer", listed.Peers)
+	}
+	retained := false
+	for _, peer := range listed.Peers {
+		if peer.RunID == "only-peer" {
+			retained = true
+		}
+	}
+	if !retained {
 		t.Fatalf("peers = %+v, want the retained partial peer", listed.Peers)
 	}
 	var record messaging.PeerRecord
@@ -414,6 +423,46 @@ func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "could not read every peer") {
 		t.Fatalf("peers error = %v, want the listing's own reason", err)
+	}
+}
+
+// TestSessionsKeepsTheBrokersOwnRuns pins that the listing carries the runs
+// this broker owns even when the installed messenger reports only the peers
+// it reaches. A child that addresses a local run by id must still find it.
+func TestSessionsKeepsTheBrokersOwnRuns(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+	b.SetMessenger(seamPeerSource{
+		Messenger: b.LocalMessenger(),
+		peers:     []messaging.Peer{{RunID: "remote-peer"}},
+	})
+	t.Cleanup(func() { b.SetMessenger(nil) })
+
+	child, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "sender", Token: senderToken})
+	if err != nil {
+		t.Fatalf("local transport: %v", err)
+	}
+	defer child.Close()
+
+	ctx := context.Background()
+	pre, err := child.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	listed, err := child.Peers(ctx, messaging.PeersRequest{
+		Sender:     messaging.Identity{RunID: "sender"},
+		Generation: pre.Generation,
+	})
+	if err != nil {
+		t.Fatalf("peers: %v", err)
+	}
+	byRunID := make(map[string]bool, len(listed.Peers))
+	for _, peer := range listed.Peers {
+		byRunID[peer.RunID] = true
+	}
+	for _, want := range []string{"sender", "target", "remote-peer"} {
+		if !byRunID[want] {
+			t.Fatalf("peers = %+v, want %s listed", listed.Peers, want)
+		}
 	}
 }
 

@@ -1143,8 +1143,13 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	peers, listingErr := b.seam().Peers(r.Context())
 
 	sessions := make([]SessionInfo, 0, len(peers))
+	seen := make(map[string]bool, len(peers))
 	unreadable := 0
 	for _, peer := range peers {
+		if seen[peer.RunID] {
+			continue
+		}
+		seen[peer.RunID] = true
 		info := SessionInfo{RunID: peer.RunID}
 		if len(peer.Session) > 0 {
 			if err := json.Unmarshal(peer.Session, &info); err != nil {
@@ -1156,6 +1161,24 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 		// record's own run_id is the record's content, not a renaming, so a
 		// peer cannot claim another run's id by naming it in its record.
 		info.RunID = peer.RunID
+		sessions = append(sessions, info)
+	}
+	// A run this broker owns stays in the listing even when the seam did not
+	// report it. A host that lists only the peers it reaches would otherwise
+	// hide the local runs, including the supervisor's own, from the children
+	// that address them.
+	// for _, info := range b.sessions() {
+	// 	if seen[info.RunID] {
+	// 		continue
+	// 	}
+	// 	seen[info.RunID] = true
+	// 	sessions = append(sessions, info)
+	// }
+	for _, info := range b.sessions() {
+		if seen[info.RunID] {
+			continue
+		}
+		seen[info.RunID] = true
 		sessions = append(sessions, info)
 	}
 
