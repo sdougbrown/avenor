@@ -241,6 +241,7 @@ func TestLinkSendClassifiesAnUnreachableParent(t *testing.T) {
 	link, err := NewLink(Options{
 		ParentURL:  closed,
 		Endpoint:   "http://child-one",
+		ChildID:    "child-one",
 		Runs:       testRuns,
 		Generation: func() string { return "gen-a" },
 	})

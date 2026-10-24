@@ -46,9 +46,25 @@ type DescendantRegistration struct {
 	Runs       []RunClaim `json:"runs"`
 }
 
+// ClaimedRun is one run a descendant claims, as the parent broker addresses it.
+// RunID is the canonical run ID the owning branch knows the run by and Key is
+// the run ID this broker routes to: a reserved branch-supervisor identity is
+// namespaced by the branch that claims it, every other run ID stays canonical.
+// Label and Token are what the owning branch hands the parent, so the parent
+// authenticates the run and relays into it with the run's own credential.
+type ClaimedRun struct {
+	RunID string
+	Key   string
+	Label string
+	Token string
+}
+
 // DescendantClaim reports what one registration changed, so the broker can
-// retire the run records a child stopped claiming.
+// adopt every run record the child now claims and retire the ones it stopped
+// claiming. Runs, Adopted and Retired all name runs by the run ID this broker
+// addresses them by.
 type DescendantClaim struct {
+	Runs    []ClaimedRun
 	Adopted []string
 	Retired []string
 }
