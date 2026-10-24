@@ -1,7 +1,9 @@
 package broker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 // the ask store's lock.
 type parentLinkStub struct {
 	owned        string
+	register     func(messaging.DescendantRegistration) (messaging.DescendantClaim, error)
 	recordRelay  func(messaging.RelayRoute) error
 	recorded     []messaging.RelayRoute
 	deregistered bool
@@ -22,7 +25,10 @@ type parentLinkStub struct {
 
 func (p *parentLinkStub) Owns(runID string) bool { return runID == p.owned }
 
-func (p *parentLinkStub) Register(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+func (p *parentLinkStub) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+	if p.register != nil {
+		return p.register(reg)
+	}
 	panic("parentlink: registration is not part of an admission")
 }
 
@@ -172,4 +178,106 @@ func TestRelayRefusesAReplacementGeneration(t *testing.T) {
 	if queued := countAgentMessages(t, b, "branch-run"); queued != 0 {
 		t.Fatalf("run queue = %d messages, want the refused relay withheld", queued)
 	}
+}
+
+// postParentLink posts a registration body to /parent/register with an
+// optional Authorization header and returns the status and decoded object.
+func postParentLink(t *testing.T, addr, body, authHeader string) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/parent/register", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post /parent/register: %v", err)
+	}
+	defer resp.Body.Close()
+	var decoded map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&decoded)
+	return resp.StatusCode, decoded
+}
+
+// TestParentRegisterRequiresTheParentLinkToken pins the parent-route bearer
+// credential: with a token set, a registration without the header or with a
+// wrong Bearer is refused, and the correct Bearer is accepted; with no token
+// set, the loopback caller is accepted, the same trust the local routes run on.
+func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   "child-1",
+		"endpoint":   "http://child:1234",
+		"generation": "gen-1",
+		"runs": []map[string]any{
+			{"run_id": "remote-run", "label": "remote", "token": "child-token"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+
+	startWithLink := func(t *testing.T, token string) *Broker {
+		t.Helper()
+		b := New("")
+		if err := b.Start(); err != nil {
+			t.Fatalf("start broker: %v", err)
+		}
+		t.Cleanup(func() { _ = b.Stop() })
+		b.SetParentLink(&parentLinkStub{
+			register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+				return messaging.DescendantClaim{Adopted: []string{"remote-run"}}, nil
+			},
+		})
+		if token != "" {
+			b.SetParentLinkToken(token)
+		}
+		return b
+	}
+
+	t.Run("no token set accepts the loopback caller", func(t *testing.T) {
+		b := startWithLink(t, "")
+		status, body := postParentLink(t, b.Addr(), string(raw), "")
+		if status != http.StatusOK {
+			t.Fatalf("registration with no token set = (%d, %v), want 200", status, body)
+		}
+		if b.GetRun("remote-run") == nil {
+			t.Fatal("the adopted run has no record")
+		}
+	})
+
+	t.Run("no Authorization header is refused", func(t *testing.T) {
+		b := startWithLink(t, "parent-token")
+		status, body := postParentLink(t, b.Addr(), string(raw), "")
+		if status != http.StatusUnauthorized {
+			t.Fatalf("registration with no header = (%d, %v), want 401", status, body)
+		}
+		if b.GetRun("remote-run") != nil {
+			t.Fatal("a refused registration adopted the run")
+		}
+	})
+
+	t.Run("a wrong Bearer token is refused", func(t *testing.T) {
+		b := startWithLink(t, "parent-token")
+		status, body := postParentLink(t, b.Addr(), string(raw), "Bearer wrong-token")
+		if status != http.StatusUnauthorized {
+			t.Fatalf("registration with a wrong token = (%d, %v), want 401", status, body)
+		}
+		if b.GetRun("remote-run") != nil {
+			t.Fatal("a refused registration adopted the run")
+		}
+	})
+
+	t.Run("the correct Bearer token is accepted", func(t *testing.T) {
+		b := startWithLink(t, "parent-token")
+		status, body := postParentLink(t, b.Addr(), string(raw), "Bearer parent-token")
+		if status != http.StatusOK {
+			t.Fatalf("registration with the correct token = (%d, %v), want 200", status, body)
+		}
+		if b.GetRun("remote-run") == nil {
+			t.Fatal("the adopted run has no record")
+		}
+	})
 }
