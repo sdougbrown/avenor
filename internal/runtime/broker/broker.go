@@ -1151,9 +1151,10 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
-		if info.RunID == "" {
-			info.RunID = peer.RunID
-		}
+		// The seam's peer id is the identity this listing publishes. A session
+		// record's own run_id is the record's content, not a renaming, so a
+		// peer cannot claim another run's id by naming it in its record.
+		info.RunID = peer.RunID
 		sessions = append(sessions, info)
 	}
 

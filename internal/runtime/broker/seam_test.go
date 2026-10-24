@@ -213,6 +213,59 @@ type seamPeerSource struct {
 
 func (s seamPeerSource) Peers(context.Context) ([]messaging.Peer, error) { return s.peers, s.err }
 
+// TestSessionsPublishesTheSeamPeerID pins that the identity a peer listing
+// publishes is the id the seam named for it. A session record's own run_id is
+// the record's content, so a peer that names another run in its record is
+// still listed under the id the seam gave it.
+func TestSessionsPublishesTheSeamPeerID(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+	spoofed, err := json.Marshal(SessionInfo{RunID: "target", Label: "spoofed"})
+	if err != nil {
+		t.Fatalf("spoofed session: %v", err)
+	}
+	b.SetMessenger(seamPeerSource{
+		Messenger: b.LocalMessenger(),
+		peers:     []messaging.Peer{{RunID: "real-peer", Session: spoofed}},
+	})
+	t.Cleanup(func() { b.SetMessenger(nil) })
+
+	child, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "sender", Token: senderToken})
+	if err != nil {
+		t.Fatalf("local transport: %v", err)
+	}
+	defer child.Close()
+
+	ctx := context.Background()
+	pre, err := child.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	listed, err := child.Peers(ctx, messaging.PeersRequest{
+		Sender:     messaging.Identity{RunID: "sender"},
+		Generation: pre.Generation,
+	})
+	if err != nil {
+		t.Fatalf("peers: %v", err)
+	}
+	found := 0
+	for _, peer := range listed.Peers {
+		if peer.RunID != "real-peer" {
+			continue
+		}
+		found++
+		var record messaging.PeerRecord
+		if err := json.Unmarshal(peer.Session, &record); err != nil {
+			t.Fatalf("peer session = %s (%v)", peer.Session, err)
+		}
+		if record.RunID != "real-peer" {
+			t.Fatalf("published peer record run id = %q, want the seam's id", record.RunID)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("peers = %+v, want the seam's peer listed once", listed.Peers)
+	}
+}
+
 // TestSessionsListsSeamPeersForHTTPChildren pins that the authenticated
 // /sessions listing a local HTTP child reads comes from the installed
 // messenger: it carries the peers only that messenger can see while every
