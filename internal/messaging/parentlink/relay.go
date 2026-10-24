@@ -25,8 +25,10 @@ type relay struct {
 	// records as the generation its eventual reply is bound to.
 	generation func() string
 	// retire retires the host broker's own record for a run this broker stops
-	// owning, so the run cannot be served locally after its branch is gone.
-	retire func(runID string)
+	// owning, but only while the record still carries the credential the failed
+	// relay used, so a branch that re-registered while the refusal was in flight
+	// keeps its record. It reports whether it retired the record.
+	retire func(runID, token string) bool
 }
 
 func newRelay(opts Options, registry *Registry) *relay {
@@ -119,7 +121,7 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 			// claim and the host's run record go together: a record left behind
 			// would make this broker serve the run locally, queueing asks that
 			// nobody consumes.
-			r.forget(target)
+			r.forget(target, next, token)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
 		}
@@ -129,11 +131,21 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 }
 
 // forget drops a run this broker can no longer route to: its claim, and the
-// host broker's own record for it when the host installs one.
-func (r *relay) forget(runID string) {
-	r.registry.Forget(runID)
+// host broker's own record for it when the host installs one. Each retirement is
+// conditional on the snapshot the failed relay was posted against, because a
+// delayed refusal from an old relay arrives after the branch may have refreshed
+// either half of it: a replacement branch changes the hop the claim resolves to,
+// and a run restarted inside a live branch rotates its credential. Retiring
+// either would take a healthy branch out of routing, and a dropped claim is
+// terminal: this broker's run record makes the branch's re-registration a
+// conflict, so the run can never be claimed again.
+func (r *relay) forget(runID string, hop Hop, token string) {
+	hop.Token = token
+	if !r.registry.ForgetIfStale(runID, hop) {
+		return
+	}
 	if r.retire != nil {
-		r.retire(runID)
+		r.retire(runID, token)
 	}
 }
 
