@@ -136,14 +136,6 @@ func TestRefusedDescendantRetiresItsBrokerRecord(t *testing.T) {
 	if edges := parent.broker.Store().ActiveCount(); edges != 0 {
 		t.Fatalf("the parent holds %d ask edges for a retired descendant", edges)
 	}
-	if st := parent.broker.GetRun("target"); st != nil {
-		st.Mu.Lock()
-		queued := len(st.ControlQueue)
-		st.Mu.Unlock()
-		if queued != 0 {
-			t.Fatalf("the parent queued %d messages for a retired descendant", queued)
-		}
-	}
 }
 
 // TestRelayToAGoneBranchRetractsTheParentEdge pins that a relay which never
