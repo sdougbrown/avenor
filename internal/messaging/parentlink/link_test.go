@@ -282,3 +282,60 @@ func TestLinkSendClassifiesAFailedTransmission(t *testing.T) {
 		t.Fatalf("Send outcome = %q, want %q", sent.Outcome, messaging.OutcomePossiblyPending)
 	}
 }
+
+// TestLinkPeersSyncsBeforeItLists pins the listing's recovery: a Peers call
+// before the first successful registration syncs this branch's claim once and
+// then lists, instead of answering a silent empty list.
+func TestLinkPeersSyncsBeforeItLists(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSessions:
+			return http.StatusOK, `{"generation":"gen-a","sessions":[{"run_id":"run-b"}]}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newTestLink(t, stub, "gen-a")
+
+	peers, err := link.Peers(testContext(t))
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	if len(peers) != 1 || peers[0].RunID != "run-b" {
+		t.Fatalf("peers = %v, want the parent's run", peers)
+	}
+	if got := stub.countPath(pathRegister); got != 1 {
+		t.Fatalf("the parent saw %d registrations, want the listing's automatic sync", got)
+	}
+}
+
+// TestLinkPeersRefusesWithoutAListingRun pins the other recovery: a claim the
+// parent cannot accept as credentials is not a listing, so Peers reports the
+// state instead of returning an empty list.
+func TestLinkPeersRefusesWithoutAListingRun(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link, err := NewLink(Options{
+		ParentURL:  stub.URL(),
+		Endpoint:   "http://child-one",
+		ChildID:    "child-one",
+		Runs:       func() []messaging.RunClaim { return []messaging.RunClaim{{RunID: "run-a"}} },
+		Generation: func() string { return "gen-a" },
+	})
+	if err != nil {
+		t.Fatalf("NewLink: %v", err)
+	}
+	t.Cleanup(func() { _ = link.Close() })
+
+	if peers, err := link.Peers(testContext(t)); err == nil {
+		t.Fatalf("Peers = %v with no run registered, want an error", peers)
+	} else if !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("Peers = %v, want ErrTargetUnavailable", err)
+	}
+}
