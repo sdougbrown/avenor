@@ -311,7 +311,7 @@ export class Supervisor {
 
     const socketDir = socketsRoot()
     fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 })
-    const socketPath = path.join(socketDir, `avenor-mcp-${process.pid}.sock`)
+    const socketPath = path.join(fs.realpathSync(socketDir), `avenor-mcp-${process.pid}.sock`)
 
     let socketExists = false
     try {

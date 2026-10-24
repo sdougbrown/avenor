@@ -6218,6 +6218,51 @@ func TestSpawnParentNoteIsBackendNeutral(t *testing.T) {
 	}
 }
 
+func TestSpawnParentRunIDMissingPrompt(t *testing.T) {
+	newSup := func(t *testing.T, name string) (*Supervisor, *promptRecordingProvider) {
+		sup := newTestSupervisor(t, Config{
+			ControlSocket: newStableSocketPath(t, name),
+			MaxRuntimes:   2,
+		})
+		provider := &promptRecordingProvider{stableFakeProvider: &stableFakeProvider{events: make(chan events.Event, 1)}}
+		sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
+		return sup, provider
+	}
+	assertRejected := func(t *testing.T, sup *Supervisor, provider *promptRecordingProvider, params SpawnParams) {
+		t.Helper()
+		_, err := sup.spawn(params)
+		if err == nil {
+			t.Fatal("spawn with parent run id and no prompt: expected required-prompt error, got nil")
+		}
+		if !strings.Contains(err.Error(), "required") {
+			t.Fatalf("spawn error = %q, want required-prompt error", err)
+		}
+		if provider.startCalls != 0 {
+			t.Fatalf("backend start calls = %d, want 0 (validation must precede spawn)", provider.startCalls)
+		}
+		provider.mu.Lock()
+		n := len(provider.prompts)
+		provider.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("provider prompts = %d, want 0", n)
+		}
+	}
+
+	t.Run("neither prompt nor file", func(t *testing.T) {
+		sup, provider := newSup(t, "spawn-parent-note-missing")
+		assertRejected(t, sup, provider, SpawnParams{Dir: t.TempDir(), ParentRunID: "parent_run"})
+	})
+
+	t.Run("empty prompt file", func(t *testing.T) {
+		emptyFile := filepath.Join(t.TempDir(), "empty-prompt.txt")
+		if err := os.WriteFile(emptyFile, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sup, provider := newSup(t, "spawn-parent-note-missing-file")
+		assertRejected(t, sup, provider, SpawnParams{Dir: t.TempDir(), PromptFile: emptyFile, ParentRunID: "parent_run"})
+	})
+}
+
 // TestSpawnAndSendToParent exercises the full parent-child round-trip through
 // the control socket: spawn a parent, verify tracking, spawn children with
 // parent context, send a message from a child to the parent, and verify the

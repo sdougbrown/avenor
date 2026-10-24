@@ -1692,6 +1692,15 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		promptText = string(data)
 	}
 
+	// A parent note is metadata, not a task; reject empty tasks before
+	// registering the parent or adding the note.
+	if params.LoopFile != "" && params.TeamFile != "" {
+		return SpawnResult{}, fmt.Errorf("loop_file and team_file are mutually exclusive")
+	}
+	if promptText == "" && params.LoopFile == "" && params.TeamFile == "" {
+		return SpawnResult{}, fmt.Errorf("prompt, prompt_file, loop_file, or team_file is required")
+	}
+
 	// Ensure the parent has a broker run for channel messaging and prepend
 	// the parent run ID to the child's prompt so it knows where to reply.
 	var parentToken string
@@ -1699,13 +1708,6 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		parentToken, _ = s.broker.EnsureRun(params.ParentRunID, "")
 		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Report status updates, findings, and questions back to your parent run %q with your surface's own messaging tool: use the action your surface calls tell for a status update, and ask when you need a reply.\n\n", params.ParentRunID, params.ParentRunID)
 		promptText = parentNote + promptText
-	}
-
-	if params.LoopFile != "" && params.TeamFile != "" {
-		return SpawnResult{}, fmt.Errorf("loop_file and team_file are mutually exclusive")
-	}
-	if promptText == "" && params.LoopFile == "" && params.TeamFile == "" {
-		return SpawnResult{}, fmt.Errorf("prompt, prompt_file, loop_file, or team_file is required")
 	}
 
 	if createArtifactDir {
