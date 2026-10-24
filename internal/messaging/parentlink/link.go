@@ -43,10 +43,6 @@ type Options struct {
 	// Generation reports this broker's current ask generation. Required: the
 	// link pins it and the relay binds every hop to it.
 	Generation func() string
-	// RunToken reports the credential this broker authenticates a run with, so a
-	// relay can reach that run's queue. Required: the relay reads it on every
-	// hop it takes into a child.
-	RunToken func(runID string) (string, bool)
 	// Timeout bounds one request to a peer broker. Zero uses the messaging
 	// default.
 	Timeout time.Duration

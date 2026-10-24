@@ -38,15 +38,23 @@ type child struct {
 	endpoint   string
 	generation string
 	labels     map[string]string
+	// tokens holds, per run, the credential the child handed the parent in its
+	// registration. The relay posts it to the child, so the credential the
+	// child's own runs already use is the one that travels.
+	tokens map[string]string
 }
 
 // Hop is one child broker as a relay next hop: the endpoint a relay is posted
-// to and the generation that endpoint pinned when the child registered.
+// to, the generation that endpoint pinned when the child registered, and the
+// credential the child handed its parent for the target run.
 type Hop struct {
 	ChildID    string
 	Endpoint   string
 	Generation string
 	Label      string
+	// Token is the credential the child handed its parent for this run, which
+	// the relay posts back to the child.
+	Token string
 }
 
 // NewRegistry builds an empty descendant registry.
@@ -74,7 +82,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	}
 	current, ok := r.children[reg.ChildID]
 	if !ok {
-		current = &child{id: reg.ChildID, labels: map[string]string{}}
+		current = &child{id: reg.ChildID, labels: map[string]string{}, tokens: map[string]string{}}
 		r.children[reg.ChildID] = current
 	}
 	current.endpoint = reg.Endpoint
@@ -87,6 +95,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		}
 		r.owners[run.RunID] = reg.ChildID
 		current.labels[run.RunID] = run.Label
+		current.tokens[run.RunID] = run.Token
 	}
 	for runID := range r.owners {
 		if r.owners[runID] != reg.ChildID {
@@ -97,6 +106,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		}
 		delete(r.owners, runID)
 		delete(current.labels, runID)
+		delete(current.tokens, runID)
 		claim.Retired = append(claim.Retired, runID)
 	}
 	return claim, nil
@@ -154,6 +164,7 @@ func (r *Registry) Forget(runID string) {
 	delete(r.owners, runID)
 	if current, ok := r.children[owner]; ok {
 		delete(current.labels, runID)
+		delete(current.tokens, runID)
 	}
 }
 
@@ -190,6 +201,7 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 		Endpoint:   current.endpoint,
 		Generation: current.generation,
 		Label:      current.labels[runID],
+		Token:      current.tokens[runID],
 	}, true
 }
 

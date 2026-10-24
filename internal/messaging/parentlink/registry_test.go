@@ -124,3 +124,36 @@ func runIDsOf(peers []messaging.Peer) map[string]bool {
 	}
 	return ids
 }
+
+// TestRegistryHopsWithTheCredentialTheChildRegistered pins where the relay's
+// run credential lives: the child hands its parent each run's credential in the
+// registration, the hop carries that one, and a re-registration that rotates it
+// is what a later relay posts.
+func TestRegistryHopsWithTheCredentialTheChildRegistered(t *testing.T) {
+	registry := NewRegistry()
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "tok-1"}},
+	}); err != nil {
+		t.Fatalf("register child: %v", err)
+	}
+	hop, ok := registry.Hop("run-a")
+	if !ok || hop.Token != "tok-1" {
+		t.Fatalf("Hop = (%+v, %v), want the registered credential", hop, ok)
+	}
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "tok-2"}},
+	}); err != nil {
+		t.Fatalf("re-register child: %v", err)
+	}
+	if hop, ok := registry.Hop("run-a"); !ok || hop.Token != "tok-2" {
+		t.Fatalf("Hop after a rotated credential = (%+v, %v), want tok-2", hop, ok)
+	}
+	if _, err := registry.Deregister("one"); err != nil {
+		t.Fatalf("Deregister: %v", err)
+	}
+	if _, ok := registry.Hop("run-a"); ok {
+		t.Fatal("the deregistered child still routes its run")
+	}
+}

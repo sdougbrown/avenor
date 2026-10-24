@@ -115,7 +115,6 @@ func newTestLink(t *testing.T, stub *stubBroker, generation string) *Link {
 		ChildID:    "child-one",
 		Runs:       testRuns,
 		Generation: func() string { return generation },
-		RunToken:   func(string) (string, bool) { return "tok-a", true },
 	})
 	if err != nil {
 		t.Fatalf("NewLink: %v", err)
