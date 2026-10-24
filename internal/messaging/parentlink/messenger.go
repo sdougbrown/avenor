@@ -15,6 +15,9 @@ import (
 // nothing but its own local messenger, so its behavior is unchanged.
 type Messenger struct {
 	local messaging.Messenger
+	// childID is this branch's identity at its parent, which namespaces the keys
+	// the parent addresses this branch's own runs by.
+	childID string
 	// up is this branch's link to its parent broker, nil when it has none.
 	up *Link
 	// registry records the child brokers that registered here, and down relays
@@ -31,7 +34,7 @@ func New(opts Options, local messaging.Messenger) (*Messenger, error) {
 	if local == nil {
 		return nil, fmt.Errorf("%w: a parent-aware messenger composes a local messenger", messaging.ErrInvalidRequest)
 	}
-	m := &Messenger{local: local, registry: NewRegistry()}
+	m := &Messenger{local: local, childID: opts.ChildID, registry: NewRegistry()}
 	if opts.ParentURL != "" {
 		link, err := NewLink(opts)
 		if err != nil {
@@ -172,8 +175,10 @@ func (m *Messenger) Reachable(runID string) bool {
 
 // Peers lists the participants reachable from here: this broker's own runs,
 // narrowed to what the authenticated caller may see, plus the runs its parent
-// exports to it. A listing the parent could not finish reports the error beside
-// the peers that were reached.
+// exports to it. A parent lists this branch's own runs again under the key it
+// addresses them by, which is an alias: the branch already lists them under the
+// IDs it knows them by. A listing the parent could not finish reports the error
+// beside the peers that were reached.
 func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 	peers, err := m.local.Peers(ctx)
 	caller, _ := messaging.CallerRun(ctx)
@@ -191,6 +196,9 @@ func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 	}
 	for _, peer := range remote {
 		if _, ok := seen[peer.RunID]; ok {
+			continue
+		}
+		if runID, ok := localRunID(peer.RunID, m.childID); ok && m.local.Reachable(runID) {
 			continue
 		}
 		seen[peer.RunID] = struct{}{}

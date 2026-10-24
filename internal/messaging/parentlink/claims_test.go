@@ -37,6 +37,19 @@ func TestSiblingBranchesThatMintTheSameRunIDsBothRegister(t *testing.T) {
 	if queued := queuedAgentMessages(t, first.broker, "rt_1"); len(queued) != 0 {
 		t.Fatalf("the asking branch queued %d messages for its own rt_1, want none", len(queued))
 	}
+
+	// A branch lists its own runs under the IDs it knows them by, and each of
+	// them exactly once: the key the parent addresses a run by is an alias.
+	for _, own := range []*branch{first, second} {
+		status, body := getSessions(t, own.broker.Addr(), messaging.SupervisorRunID, own.token(t, messaging.SupervisorRunID))
+		if status != http.StatusOK {
+			t.Fatalf("sessions = (%d, %v), want 200", status, body)
+		}
+		listed := sessionRunIDs(t, body)
+		if listed["rt_1"] != 1 || listed[own.key("rt_1")] != 0 {
+			t.Fatalf("branch listing rows = %v, want its own rt_1 exactly once and no row under the parent's key", listed)
+		}
+	}
 }
 
 // TestChildClaimLeavesTheParentsOwnRunIntact pins that a claim never takes a run
