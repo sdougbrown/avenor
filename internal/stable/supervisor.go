@@ -1973,6 +1973,9 @@ func (s *Supervisor) installParentLink() {
 		Generation: s.broker.Store().Generation,
 		Runs:       s.parentRunClaims,
 		RunToken:   s.broker.RunToken,
+		// The control socket path is this supervisor's stable identity: a
+		// restart comes back under the same child ID and reclaims its runs.
+		ChildID: parentlink.BranchID(s.config.ControlSocket),
 	}
 	link, err := parentlink.New(options, s.broker.LocalMessenger())
 	if err != nil {
