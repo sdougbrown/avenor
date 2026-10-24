@@ -42,13 +42,6 @@ func newStubBroker(t *testing.T, respond func(stubRequest) (int, string)) *stubB
 // URL reports the address the stub broker answers on.
 func (b *stubBroker) URL() string { return b.server.URL }
 
-// setResponder replaces the responder the stub broker answers with.
-func (b *stubBroker) setResponder(respond func(stubRequest) (int, string)) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.respond = respond
-}
-
 // recorded reports every request the stub broker received, in order.
 func (b *stubBroker) recorded() []stubRequest {
 	b.mu.Lock()
