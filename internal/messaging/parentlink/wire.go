@@ -24,7 +24,7 @@ const (
 // ErrUnsupportedParentProtocol reports a parent broker that answered without
 // the messaging envelope this link reads.
 var ErrUnsupportedParentProtocol = fmt.Errorf(
-	"%w: parent broker does not speak the shared messaging protocol",
+	"%w: the peer broker does not speak the parent messaging protocol",
 	messaging.ErrUnsupportedProtocol,
 )
 
@@ -63,7 +63,7 @@ func decode(status int, raw []byte) (envelope, error) {
 	case body.Code != "":
 		typed := messaging.WireErrorFor(body.Code)
 		if typed == nil {
-			return body, fmt.Errorf("%w: parent broker reported unknown code %q", ErrUnsupportedParentProtocol, body.Code)
+			return body, fmt.Errorf("%w: the peer broker reported the unknown code %q", ErrUnsupportedParentProtocol, body.Code)
 		}
 		if body.Error != "" {
 			return body, fmt.Errorf("%w: %s", typed, body.Error)
@@ -87,15 +87,15 @@ func statusFailure(status int, body envelope) error {
 	}
 	switch status {
 	case http.StatusUnauthorized:
-		return fmt.Errorf("%w: parent broker rejected the link credentials", messaging.ErrAuthRejected)
+		return fmt.Errorf("%w: the peer broker rejected the credentials", messaging.ErrAuthRejected)
 	case http.StatusForbidden:
-		return fmt.Errorf("%w: parent broker refused the request%s", messaging.ErrNotAskTarget, detail)
+		return fmt.Errorf("%w: the peer broker refused the request%s", messaging.ErrNotAskTarget, detail)
 	case http.StatusNotFound:
-		return fmt.Errorf("%w: parent broker cannot reach the target%s", messaging.ErrTargetUnavailable, detail)
+		return fmt.Errorf("%w: the peer broker cannot reach the target%s", messaging.ErrTargetUnavailable, detail)
 	case http.StatusBadRequest:
-		return fmt.Errorf("%w: parent broker refused the request%s", messaging.ErrInvalidRequest, detail)
+		return fmt.Errorf("%w: the peer broker refused the request%s", messaging.ErrInvalidRequest, detail)
 	}
-	return fmt.Errorf("%w: parent broker answered %d%s", ErrParentUnavailable, status, detail)
+	return fmt.Errorf("%w: the peer broker answered %d%s", ErrParentUnavailable, status, detail)
 }
 
 // outcomeOf reports the outcome a response carries, for a caller that received
