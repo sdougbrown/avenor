@@ -11,6 +11,9 @@ type WiringTarget interface {
 	SetMessenger(messaging.Messenger)
 	SetParentLink(messaging.ParentLink)
 	SetRunObserver(fn func())
+	// DeleteRun removes one run record the target adopted for a descendant, so
+	// the relay can retire both halves of the seam when it stops routing a run.
+	DeleteRun(runID string)
 }
 
 // Install builds the Messenger for opts and installs it on target: the
@@ -21,6 +24,13 @@ type WiringTarget interface {
 // the link. Every host that installs a link — test branch or supervisor — runs
 // this sequence; the caller owns Start and Close.
 func Install(opts Options, target WiringTarget) (*Messenger, error) {
+	if opts.RetireRuns == nil {
+		opts.RetireRuns = func(runIDs []string) {
+			for _, runID := range runIDs {
+				target.DeleteRun(runID)
+			}
+		}
+	}
 	link, err := New(opts, target.LocalMessenger())
 	if err != nil {
 		return nil, err

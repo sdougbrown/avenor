@@ -22,6 +22,17 @@ type relay struct {
 	// generation reports this broker's current ask generation, which the child
 	// records as the generation its eventual reply is bound to.
 	generation func() string
+	// retire deletes the run records the broker adopted for the runs the
+	// registry just stopped routing, so a dead branch's runs leave both halves
+	// of the seam through one step. Nil where no host retires records.
+	retire func(runIDs []string)
+}
+
+// retireRuns hands the retired run records to the broker that owns them.
+func (r *relay) retireRuns(runIDs []string) {
+	if r.retire != nil {
+		r.retire(runIDs)
+	}
 }
 
 // newRelay builds the relay that reaches the children registered with this
@@ -40,6 +51,7 @@ func newRelay(opts Options, registry *Registry) (*relay, error) {
 		registry:   registry,
 		client:     httpbase.New(ErrUnsupportedParentProtocol, timeout),
 		generation: opts.Generation,
+		retire:     opts.RetireRuns,
 	}, nil
 }
 
@@ -122,7 +134,8 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 			// The child no longer answers as the branch it registered as, so
 			// the whole registration stops being a routing target instead of
 			// costing one doomed round trip per run it owns.
-			_, _ = r.registry.Deregister(next.ChildID)
+			retired, _ := r.registry.Deregister(next.ChildID)
+			r.retireRuns(retired)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
 		case errors.Is(decErr, ErrParentUnavailable):
@@ -135,6 +148,7 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 			// only this run stops being routed and the child's other runs keep
 			// their route.
 			r.registry.Forget(target)
+			r.retireRuns([]string{target})
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
 		}
