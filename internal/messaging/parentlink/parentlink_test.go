@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +29,12 @@ type branch struct {
 	tokens map[string]string
 }
 
+// branchSeq names each test branch with a distinct durable identity, the way a
+// supervisor derives one from its control socket path.
+var branchSeq atomic.Uint64
+
+func newTestChildID() string { return fmt.Sprintf("branch-%d", branchSeq.Add(1)) }
+
 func (b *branch) url() string { return "http://" + b.broker.Addr() }
 
 func (b *branch) token(t *testing.T, runID string) string {
@@ -36,6 +44,14 @@ func (b *branch) token(t *testing.T, runID string) string {
 		t.Fatalf("run %q has no credential in this branch", runID)
 	}
 	return token
+}
+
+// pinned reports the parent generation this branch last registered under.
+func (b *branch) pinned() (string, bool) {
+	if b.link == nil || b.link.up == nil {
+		return "", false
+	}
+	return b.link.up.pinnedGeneration()
 }
 
 // startBranch starts one broker, registers the given runs and installs the
@@ -56,6 +72,14 @@ func startBranchTolerant(t *testing.T, parentURL string, runs ...string) *branch
 
 func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *branch {
 	t.Helper()
+	return newBranchWith(t, parentURL, newTestChildID(), DefaultRefreshInterval, strict, runs)
+}
+
+// newBranchWith is newBranch with the branch identity and refresh interval a
+// test controls: the identity is what a restart reclaims its runs under, and the
+// interval is how long an idle branch stays absent from a replaced parent.
+func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duration, strict bool, runs []string) *branch {
+	t.Helper()
 	b := broker.New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
@@ -71,9 +95,11 @@ func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *bran
 	}
 	var link *Messenger
 	link, err := New(Options{
-		ParentURL:  parentURL,
-		Endpoint:   branch.url(),
-		Generation: b.Store().Generation,
+		ParentURL:       parentURL,
+		ChildID:         childID,
+		RefreshInterval: refresh,
+		Endpoint:        branch.url(),
+		Generation:      b.Store().Generation,
 		Runs: func() []messaging.RunClaim {
 			claims := make([]messaging.RunClaim, 0, len(runs))
 			for _, info := range b.Sessions() {
@@ -87,6 +113,9 @@ func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *bran
 			return claims
 		},
 		RunToken: b.RunToken,
+		// A run this branch stops owning loses its broker record too, so a
+		// refused descendant stops being served locally.
+		RetireRun: b.DeleteRun,
 	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build parent link: %v", err)

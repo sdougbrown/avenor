@@ -1973,6 +1973,10 @@ func (s *Supervisor) installParentLink() {
 		Generation: s.broker.Store().Generation,
 		Runs:       s.parentRunClaims,
 		RunToken:   s.broker.RunToken,
+		RetireRun:  s.broker.DeleteRun,
+		// The control socket path is this supervisor's stable identity: a
+		// restart comes back under the same child ID and reclaims its runs.
+		ChildID: parentlink.BranchID(s.config.ControlSocket),
 	}
 	link, err := parentlink.New(options, s.broker.LocalMessenger())
 	if err != nil {
@@ -1991,7 +1995,8 @@ func (s *Supervisor) installParentLink() {
 	s.parentLinkStop = stop
 	if err := link.Start(ctx); err != nil {
 		// A parent that is not up yet is not fatal: the branch keeps serving
-		// locally and the next run-set change or upward call re-registers.
+		// locally, and the link's own publication loop keeps re-registering
+		// until the parent accepts the claim.
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: parent broker registration failed: %v\n", err)
 	}
 }

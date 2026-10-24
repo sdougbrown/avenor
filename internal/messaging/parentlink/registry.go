@@ -36,16 +36,37 @@ type child struct {
 	id         string
 	endpoint   string
 	generation string
-	labels     map[string]string
+	// runs maps the run ID this broker addresses a claimed run by to the run ID
+	// the owning branch knows it by, so a namespaced claim still relays to the
+	// canonical run.
+	runs   map[string]string
+	labels map[string]string
+}
+
+// ParentRunKey reports the run ID a parent broker addresses a descendant's run
+// by. A branch supervisor run is reserved in every branch, so the parent's own
+// supervisor and each descendant's supervisor would otherwise be the same run;
+// it is namespaced by the branch identity that claims it. Every other run ID is
+// minted by the branch that owns it, so it stays canonical.
+func ParentRunKey(childID, runID string) string {
+	if runID != messaging.SupervisorRunID {
+		return runID
+	}
+	return runID + "@" + childID
 }
 
 // Hop is one child broker as a relay next hop: the endpoint a relay is posted
-// to and the generation that endpoint pinned when the child registered.
+// to, the run ID that branch knows the target by, and the generation that
+// endpoint pinned when the child registered.
 type Hop struct {
 	ChildID    string
 	Endpoint   string
 	Generation string
 	Label      string
+	// RunID is the target run's canonical run ID in its own branch, which is
+	// what the relay posts to. It differs from the run ID this broker addresses
+	// the run by only for a namespaced branch-supervisor claim.
+	RunID string
 }
 
 // NewRegistry builds an empty descendant registry.
@@ -61,28 +82,39 @@ func NewRegistry() *Registry {
 // owns is refused and nothing is applied.
 func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 	claim := messaging.DescendantClaim{}
+	keys := make([]string, len(reg.Runs))
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, run := range reg.Runs {
-		if owner, ok := r.owners[run.RunID]; ok && owner != reg.ChildID {
+	for i, run := range reg.Runs {
+		key := ParentRunKey(reg.ChildID, run.RunID)
+		if owner, ok := r.owners[key]; ok && owner != reg.ChildID {
 			return messaging.DescendantClaim{}, fmt.Errorf("%w: %s", ErrRunClaimed, run.RunID)
 		}
+		keys[i] = key
 	}
 	current, ok := r.children[reg.ChildID]
 	if !ok {
-		current = &child{id: reg.ChildID, labels: map[string]string{}}
+		current = &child{id: reg.ChildID, runs: map[string]string{}, labels: map[string]string{}}
 		r.children[reg.ChildID] = current
 	}
 	current.endpoint = reg.Endpoint
 	current.generation = reg.Generation
 	adopted := make(map[string]struct{}, len(reg.Runs))
-	for _, run := range reg.Runs {
-		adopted[run.RunID] = struct{}{}
-		if _, held := r.owners[run.RunID]; !held {
-			claim.Adopted = append(claim.Adopted, run.RunID)
+	for i, run := range reg.Runs {
+		key := keys[i]
+		claim.Runs = append(claim.Runs, messaging.ClaimedRun{
+			RunID: run.RunID,
+			Key:   key,
+			Label: run.Label,
+			Token: run.Token,
+		})
+		adopted[key] = struct{}{}
+		if _, held := r.owners[key]; !held {
+			claim.Adopted = append(claim.Adopted, key)
 		}
-		r.owners[run.RunID] = reg.ChildID
-		current.labels[run.RunID] = run.Label
+		r.owners[key] = reg.ChildID
+		current.runs[key] = run.RunID
+		current.labels[key] = run.Label
 	}
 	for runID := range r.owners {
 		if r.owners[runID] != reg.ChildID {
@@ -92,6 +124,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 			continue
 		}
 		delete(r.owners, runID)
+		delete(current.runs, runID)
 		delete(current.labels, runID)
 		claim.Retired = append(claim.Retired, runID)
 	}
@@ -128,6 +161,7 @@ func (r *Registry) Forget(runID string) {
 	}
 	delete(r.owners, runID)
 	if current, ok := r.children[owner]; ok {
+		delete(current.runs, runID)
 		delete(current.labels, runID)
 	}
 }
@@ -165,6 +199,7 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 		Endpoint:   current.endpoint,
 		Generation: current.generation,
 		Label:      current.labels[runID],
+		RunID:      current.runs[runID],
 	}, true
 }
 

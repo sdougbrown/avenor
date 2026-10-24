@@ -24,6 +24,12 @@ const (
 	deregisterTimeout = 2 * time.Second
 )
 
+// DefaultRefreshInterval is how often an idle link re-publishes its claim. A
+// parent that was replaced while this branch was idle has no other way to learn
+// about it: nothing here changed, so no run-set change fires and no upward
+// operation runs.
+const DefaultRefreshInterval = 15 * time.Second
+
 // Options configure one branch's child link to its parent broker.
 type Options struct {
 	// ParentURL is the parent broker's http:// address. Empty means this branch
@@ -34,7 +40,10 @@ type Options struct {
 	// Endpoint is this broker's own http:// address, which the parent posts a
 	// relay to. Required when ParentURL is set.
 	Endpoint string
-	// ChildID names this branch at its parent. Empty mints one per link.
+	// ChildID is this branch's durable identity at its parent. It survives a
+	// restart: a branch that comes back under the same identity reclaims the runs
+	// it held and retires the ones it stopped owning, which is what an unclean
+	// stop leaves behind. Required when ParentURL is set.
 	ChildID string
 	// Runs reports the runs this branch owns, with the display names it knows
 	// them by. It is read at every registration.
@@ -44,6 +53,13 @@ type Options struct {
 	// RunToken reports the credential this broker authenticates a run with, so a
 	// relay can reach that run's queue.
 	RunToken func(runID string) (string, bool)
+	// RetireRun retires the host broker's own record for a run this branch stops
+	// owning after a relay found the owning branch gone. Nil leaves the record to
+	// the host.
+	RetireRun func(runID string)
+	// RefreshInterval bounds how long an idle branch stays absent from a
+	// replaced parent. Zero uses DefaultRefreshInterval.
+	RefreshInterval time.Duration
 	// Timeout bounds one request to a peer broker. Zero uses the messaging
 	// default.
 	Timeout time.Duration
@@ -85,6 +101,7 @@ type Link struct {
 	mu         sync.Mutex
 	generation string
 	tokens     map[string]string
+	keys       map[string]string
 	asks       map[askKey]askRoute
 	relays     map[string]relayRoute
 	closed     bool
@@ -107,11 +124,17 @@ func NewLink(opts Options) (*Link, error) {
 		return nil, fmt.Errorf("%w: the link needs this broker's runs and its generation", messaging.ErrInvalidRequest)
 	}
 	if opts.ChildID == "" {
-		opts.ChildID = messaging.NewGeneration()
+		// A minted identity cannot reclaim anything after a restart, so a link
+		// without a durable one is refused instead of quietly registering as a
+		// branch nobody can replace.
+		return nil, fmt.Errorf("%w: this branch's durable child identity is required to register with a parent", messaging.ErrInvalidRequest)
 	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = httpbase.DefaultRequestTimeout
+	}
+	if opts.RefreshInterval <= 0 {
+		opts.RefreshInterval = DefaultRefreshInterval
 	}
 	opts.ParentURL = strings.TrimRight(opts.ParentURL, "/")
 	_, stop := context.WithCancel(context.Background())
@@ -119,6 +142,7 @@ func NewLink(opts Options) (*Link, error) {
 		opts:     opts,
 		client:   httpbase.New(ErrUnsupportedParentProtocol, timeout),
 		tokens:   map[string]string{},
+		keys:     map[string]string{},
 		asks:     map[askKey]askRoute{},
 		relays:   map[string]relayRoute{},
 		closedCh: make(chan struct{}),
@@ -127,15 +151,17 @@ func NewLink(opts Options) (*Link, error) {
 	}, nil
 }
 
-// Start publishes this branch's claim to the parent broker and then re-publishes
-// it whenever the run set changes.
+// Start publishes this branch's claim to the parent broker and then keeps it
+// published: a run-set change re-publishes it at once, and an idle branch
+// re-publishes it on its refresh interval.
+//
+// The publication loop runs whether or not the first registration succeeded. A
+// parent that is not up yet, or that was replaced, is reached by that loop; it
+// does not wait for an upward operation that may never come.
 func (l *Link) Start(ctx context.Context) error {
-	if err := l.Sync(ctx); err != nil {
-		return err
-	}
 	l.wg.Add(1)
 	go l.publishLoop(ctx)
-	return nil
+	return l.Sync(ctx)
 }
 
 // RunChanged asks the link to re-publish this branch's run set. Changes are
@@ -152,11 +178,14 @@ func (l *Link) RunChanged() {
 	}
 }
 
-// publishLoop re-publishes the run set after a change. A parent that is
-// unreachable keeps the claim it last accepted; the next change or the next
-// upward call re-publishes.
+// publishLoop re-publishes the run set after a change and on every refresh
+// interval. One loop owns every re-registration, so a change and a refresh
+// coalesce instead of stacking goroutines; a parent that is unreachable keeps
+// the claim it last accepted and the next tick retries it.
 func (l *Link) publishLoop(ctx context.Context) {
 	defer l.wg.Done()
+	ticker := time.NewTicker(l.opts.RefreshInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-l.closedCh:
@@ -164,14 +193,16 @@ func (l *Link) publishLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-l.dirty:
-			_ = l.Sync(ctx)
+		case <-ticker.C:
 		}
+		_ = l.Sync(ctx)
 	}
 }
 
-// Sync publishes this branch's run set to the parent broker and pins the
-// generation it answered with. A registration replaces the previous claim, so a
-// run this branch stopped owning is retired at the parent with it.
+// Sync publishes this branch's run set to the parent broker, pins the
+// generation it answered with, and records the run ID the parent addresses each
+// claimed run by. A registration replaces the previous claim, so a run this
+// branch stopped owning is retired at the parent with it.
 func (l *Link) Sync(ctx context.Context) error {
 	l.regMu.Lock()
 	defer l.regMu.Unlock()
@@ -200,6 +231,7 @@ func (l *Link) Sync(ctx context.Context) error {
 	}
 	l.mu.Lock()
 	l.tokens = tokens
+	l.noteKeysLocked(claims, registered.RunKeys)
 	l.noteGenerationLocked(registered.Generation)
 	l.mu.Unlock()
 	return nil
@@ -214,6 +246,21 @@ func (l *Link) noteGenerationLocked(generation string) {
 		return
 	}
 	l.generation = generation
+}
+
+// noteKeysLocked records the run ID the parent addresses each claimed run by. A
+// reserved branch-supervisor run is namespaced by the branch that claims it, so
+// every upward operation names it the way the parent knows it; a run the parent
+// reports no key for stays canonical.
+func (l *Link) noteKeysLocked(claims []messaging.RunClaim, keys map[string]string) {
+	recorded := make(map[string]string, len(claims))
+	for _, claim := range claims {
+		recorded[claim.RunID] = claim.RunID
+		if key := keys[claim.RunID]; key != "" {
+			recorded[claim.RunID] = key
+		}
+	}
+	l.keys = recorded
 }
 
 // Close retracts this branch's claim and releases the link. The retraction is
@@ -244,22 +291,29 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 	fail := func(outcome messaging.Outcome, err error) (messaging.SendResult, error) {
 		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: req.Generation}, err
 	}
-	token, generation, err := l.credentials(ctx, req.From.RunID)
+	sender, token, generation, err := l.credentials(ctx, req.From.RunID)
 	if err != nil {
 		return fail(messaging.OutcomeNotSent, err)
 	}
 	status, raw, err := l.post(ctx, pathSend, map[string]any{
-		"from_run_id":   req.From.RunID,
+		"from_run_id":   sender,
 		"to_run_id":     req.To.RunID,
 		"type":          "agent_message",
 		"payload":       payloadFor(req.Body),
 		"message_id":    req.MessageID,
 		"generation":    generation,
 		"expects_reply": !req.NoReply,
-	}, req.From.RunID, token, 0)
+	}, sender, token, 0)
 	if err != nil {
 		if httpbase.NeverTransmitted(err) {
 			return fail(messaging.OutcomeNotSent, fmt.Errorf("%w: %v", ErrParentUnavailable, err))
+		}
+		if !req.NoReply {
+			// The request was transmitted, so the parent may have admitted the
+			// edge even though its answer never arrived. Recording the hop is
+			// what lets a later wait or withdrawal follow that edge instead of
+			// falling back to this branch's empty store.
+			l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation})
 		}
 		return fail(messaging.OutcomePossiblyPending, fmt.Errorf("%w: %v", ErrParentUnavailable, err))
 	}
@@ -268,7 +322,13 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 		if errors.Is(err, messaging.ErrGenerationMismatch) {
 			return fail(l.replacementOutcome(ctx, generation), err)
 		}
-		return fail(body.sendOutcomeOf(), err)
+		outcome := body.sendOutcomeOf()
+		if !req.NoReply && outcome == messaging.OutcomePossiblyPending {
+			// The parent answered without saying whether it admitted the edge,
+			// so the hop is recorded for the same reason a lost answer is.
+			l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation})
+		}
+		return fail(outcome, err)
 	}
 	outcome := body.Outcome
 	if !messaging.IsSendOutcome(outcome) {
@@ -295,7 +355,7 @@ func (l *Link) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.W
 	if !ok {
 		return messaging.WaitResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
 	}
-	token, _, err := l.credentials(ctx, req.Sender.RunID)
+	sender, token, _, err := l.credentials(ctx, req.Sender.RunID)
 	if err != nil {
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, err
 	}
@@ -304,7 +364,7 @@ func (l *Link) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.W
 		"waiting_for": req.MessageID,
 		"generation":  route.generation,
 		"timeout_ms":  timeout.Milliseconds(),
-	}, req.Sender.RunID, token, timeout+messaging.CleanupDeadline)
+	}, sender, token, timeout+messaging.CleanupDeadline)
 	if err != nil {
 		if httpbase.IsTransportCancelled(err) {
 			return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
@@ -352,14 +412,14 @@ func (l *Link) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (mes
 	if !ok {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
 	}
-	token, _, err := l.credentials(ctx, req.Sender.RunID)
+	sender, token, _, err := l.credentials(ctx, req.Sender.RunID)
 	if err != nil {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
 	}
 	status, raw, err := l.post(ctx, pathWithdraw, map[string]any{
 		"cancel_message_id": req.MessageID,
 		"generation":        route.generation,
-	}, req.Sender.RunID, token, 0)
+	}, sender, token, 0)
 	if err != nil {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomePossiblyPending},
 			fmt.Errorf("%w: %v", ErrParentUnavailable, err)
@@ -393,18 +453,18 @@ func (l *Link) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging
 		l.dropRelay(req.MessageID)
 		return messaging.OutcomeLost, nil
 	}
-	token, _, err := l.credentials(ctx, req.From.RunID)
+	sender, token, _, err := l.credentials(ctx, req.From.RunID)
 	if err != nil {
 		return messaging.OutcomeNotSent, err
 	}
 	status, raw, err := l.post(ctx, pathSend, map[string]any{
-		"from_run_id": req.From.RunID,
+		"from_run_id": sender,
 		"to_run_id":   req.ToRunID,
 		"type":        "agent_message",
 		"payload":     payloadFor(req.Body),
 		"reply_to":    req.MessageID,
 		"generation":  route.edgeGeneration,
-	}, req.From.RunID, token, 0)
+	}, sender, token, 0)
 	if err != nil {
 		return messaging.OutcomePossiblyPending, fmt.Errorf("%w: %v", ErrParentUnavailable, err)
 	}
@@ -427,17 +487,17 @@ func (l *Link) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging
 // Deliver forwards a tell to the parent broker, which hands it to the branch
 // that owns the target.
 func (l *Link) Deliver(ctx context.Context, req messaging.DeliverRequest) error {
-	token, generation, err := l.credentials(ctx, req.FromRunID)
+	sender, token, generation, err := l.credentials(ctx, req.FromRunID)
 	if err != nil {
 		return err
 	}
 	status, raw, err := l.post(ctx, pathSend, map[string]any{
-		"from_run_id": req.FromRunID,
+		"from_run_id": sender,
 		"to_run_id":   req.ToRunID,
 		"type":        req.Kind,
 		"payload":     payloadFor(string(req.Payload)),
 		"generation":  generation,
-	}, req.FromRunID, token, 0)
+	}, sender, token, 0)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrParentUnavailable, err)
 	}
@@ -587,43 +647,60 @@ func (l *Link) replacementOutcome(ctx context.Context, pinned string) messaging.
 	return messaging.OutcomePossiblyPending
 }
 
-// credentials reports the credential the parent issued for runID and the
-// generation the parent pinned, re-registering this branch once when the run is
-// not known there yet.
-func (l *Link) credentials(ctx context.Context, runID string) (string, string, error) {
-	generation, token, ok := l.lookup(runID)
+// credentials reports the run ID the parent addresses runID by, the credential
+// the parent holds for it, and the generation the parent pinned, re-registering
+// this branch once when the run is not known there yet.
+func (l *Link) credentials(ctx context.Context, runID string) (string, string, string, error) {
+	generation, key, token, ok := l.lookup(runID)
 	if ok && generation != "" {
-		return token, generation, nil
+		return key, token, generation, nil
 	}
 	if err := l.Sync(ctx); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	generation, token, ok = l.lookup(runID)
+	generation, key, token, ok = l.lookup(runID)
 	if !ok || generation == "" {
-		return "", "", fmt.Errorf("%w: run %q is not registered at the parent broker", messaging.ErrTargetUnavailable, runID)
+		return "", "", "", fmt.Errorf("%w: run %q is not registered at the parent broker", messaging.ErrTargetUnavailable, runID)
 	}
-	return token, generation, nil
+	return key, token, generation, nil
 }
 
-func (l *Link) lookup(runID string) (string, string, bool) {
+func (l *Link) lookup(runID string) (string, string, string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	token, ok := l.tokens[runID]
-	return l.generation, token, ok
+	if !ok {
+		return "", "", "", false
+	}
+	key := l.keys[runID]
+	if key == "" {
+		key = runID
+	}
+	return l.generation, key, token, true
 }
 
 // listingCredentials picks the run whose credential lists peers: the caller when
 // the parent knows it, else the first run in a stable order so two listings of
-// the same branch read the same.
+// the same branch read the same. The run is named by the run ID the parent
+// addresses it by, which is what authenticates the listing there.
 func (l *Link) listingCredentials(caller string) (string, string, bool) {
 	l.mu.Lock()
 	tokens := make(map[string]string, len(l.tokens))
+	keys := make(map[string]string, len(l.tokens))
 	for runID, token := range l.tokens {
 		tokens[runID] = token
+		keys[runID] = l.keys[runID]
 	}
 	l.mu.Unlock()
-	if token, ok := tokens[caller]; ok {
-		return caller, token, true
+	listingRun := func(runID string) (string, string, bool) {
+		key := keys[runID]
+		if key == "" {
+			key = runID
+		}
+		return key, tokens[runID], true
+	}
+	if _, ok := tokens[caller]; ok {
+		return listingRun(caller)
 	}
 	runs := make([]string, 0, len(tokens))
 	for runID := range tokens {
@@ -633,7 +710,7 @@ func (l *Link) listingCredentials(caller string) (string, string, bool) {
 		return "", "", false
 	}
 	sort.Strings(runs)
-	return runs[0], tokens[runs[0]], true
+	return listingRun(runs[0])
 }
 
 // post sends one authenticated parent request. A run-scoped request carries the

@@ -44,7 +44,10 @@ type envelope struct {
 	MessagingProtocol int               `json:"messaging_protocol"`
 	Sessions          []json.RawMessage `json:"sessions"`
 	PeersError        string            `json:"peers_error"`
-	Fence             *httpbase.Fence   `json:"fence"`
+	// RunKeys reports the run ID the parent addresses each claimed run by, for
+	// the runs where that differs from the canonical run ID.
+	RunKeys map[string]string `json:"run_keys,omitempty"`
+	Fence   *httpbase.Fence   `json:"fence"`
 }
 
 // decode reads one parent response. A response that carries a wire code or an
