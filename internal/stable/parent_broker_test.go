@@ -160,8 +160,8 @@ func TestSupervisorParentTokenWithoutURL(t *testing.T) {
 	if code := register("wrong"); code != http.StatusUnauthorized {
 		t.Fatalf("register with a wrong credential = %d, want 401", code)
 	}
-	if code := register("hub-token"); code == http.StatusUnauthorized {
-		t.Fatalf("register with the hub credential = %d, want it accepted", code)
+	if code := register("hub-token"); code != http.StatusOK {
+		t.Fatalf("register with the hub credential = %d, want 200", code)
 	}
 }
 
