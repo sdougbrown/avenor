@@ -1529,6 +1529,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const agentProfile = rosterMode || backend === 'pi' ? resolveAgentProfile(entries) : undefined
         const hostParams = { ...params, backend }
 
+        // The supervisor registers its own broker run eagerly, so a host-mode
+        // spawn names it as the child's parent: the supervisor prepends a note
+        // telling the child where to send status updates and questions.
+        // A child that spawns reaches a supervisor of its own (the launch socket
+        // is per process), whose broker never registered this session's run id.
+        // Naming it would point the note at a run nothing reads, so it stays
+        // unnamed there and the child's brief carries the address instead.
+        const parentRunId = isSubAgentBrokerMode ? undefined : 'supervisor'
+
         const result = await deps.spawnTool({
           ...(params.agent !== undefined ? { agent: params.agent } : {}),
           ...(params.prompt !== undefined ? { prompt: params.prompt } : {}),
@@ -1544,6 +1553,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           ...(agentProfile !== undefined ? { agentProfile } : {}),
           ...(params.server_url !== undefined ? { serverUrl: params.server_url } : {}),
           ...(params.supervisor_id !== undefined ? { supervisorId: params.supervisor_id } : {}),
+          ...(parentRunId !== undefined ? { parent_run_id: parentRunId } : {}),
         })
 
         const supervisorId = statusSupervisorId(params.supervisor_id, result.supervisor_id)

@@ -56,9 +56,16 @@ removed, it means the run was never registered on that broker.
 The OpenCode plugin is the surface that supplies `parent_run_id` on
 `avenor_spawn`, a fresh UUID per plugin instance. The control `spawn` method
 accepts the field directly. The supervisor registers that parent run and
-prepends its broker run ID to the child's prompt. The `pi` extension does not
-set it, so a child learns its parent's broker run ID only when the spawner puts
-it in the child's prompt.
+prepends its broker run ID to the child's prompt.
+
+The `pi` extension supplies it too, as `supervisor` in host mode: the supervisor
+registers that run eagerly, so the note reaches every pi child without the
+spawner writing the address into the brief. A pi session that is itself a child
+supplies nothing, because a spawn from that session starts a supervisor of its
+own (the launch socket is per process) whose broker never registered the child.
+Naming a run that broker does not have would prepend a note pointing at a run
+nothing reads, so a grandchild learns its address only when the parent's brief
+carries it.
 
 ## Transport contract
 

@@ -112,7 +112,7 @@ Available tools for LLM sub-agent management:
 
 | Tool | Description |
 |---|---|
-| `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget). Uses the `pi` backend by default in direct mode; accepts optional `agent`, `model`, `prompt`, `dir`, `roster_file`, and `roster_entry`. |
+| `avenor_spawn` | Dispatch an agent run (blocking or fire-and-forget). Uses the `pi` backend by default in direct mode; accepts optional `agent`, `model`, `prompt`, `dir`, `roster_file`, and `roster_entry`. The child's prompt is told the supervisor is its parent, so it can report progress and ask questions with `avenor_message`. |
 | `avenor_status` | Get status of a run or all runs; use `view="lifecycle"` for compact progress and permission checks |
 | `avenor_result` | Wait for a run and return its complete final output without transcript details |
 | `avenor_inspect` | Review a bounded transcript, tool activity, permissions, and final output |

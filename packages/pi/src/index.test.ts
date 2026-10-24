@@ -2112,3 +2112,28 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 })
+
+describe('avenor_spawn parent run id', () => {
+  it('names the supervisor as the child parent so the child can ask it back', async () => {
+    const spawnToolMock = mock(async () => ({
+      run_id: 'run-1',
+      label: 'child',
+      supervisor_id: '/tmp/sock',
+      runtime_id: 'rt-1',
+    }))
+    const h = await startExtensionHarness({
+      deps: { spawnTool: spawnToolMock },
+      extOptions: { subAgentEnv: null },
+    })
+
+    await h.registeredTools.avenor_spawn.execute(
+      't-parent',
+      { agent: 'mule', prompt: 'do the thing', wait: false },
+      undefined,
+      undefined,
+      { cwd: '/tmp' },
+    )
+
+    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ parent_run_id: 'supervisor' })
+  })
+})
