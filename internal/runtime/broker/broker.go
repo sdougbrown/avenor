@@ -308,11 +308,11 @@ type Broker struct {
 	store     *askstore.Store
 	messenger messaging.Messenger
 
-	// parentLink is the broker-hierarchy seam: the descendant registry its
-	// parent routes write, and the ownership test the ask store's publication
-	// uses for a run that has no queue here. nil leaves the broker standalone.
-	parentLink      messaging.ParentLink
-	parentLinkToken string
+	// parent is the broker-hierarchy link: the descendant registry its parent
+	// routes write, and the ownership test the ask store's publication uses for
+	// a run that has no queue here. nil leaves the broker standalone.
+	parent      messaging.ParentLink
+	parentToken string
 
 	// runObserver is notified after the broker's set of owned runs changes, so
 	// a host that publishes its runs to another broker re-publishes from here.
@@ -367,7 +367,7 @@ func (b *Broker) SetMessenger(m messaging.Messenger) {
 func (b *Broker) SetParentLink(link messaging.ParentLink) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.parentLink = link
+	b.parent = link
 }
 
 // SetParentLinkToken sets the bearer credential the broker's parent routes
@@ -376,13 +376,16 @@ func (b *Broker) SetParentLink(link messaging.ParentLink) {
 func (b *Broker) SetParentLinkToken(token string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.parentLinkToken = token
+	b.parentToken = token
 }
 
-func (b *Broker) parentSeam() (messaging.ParentLink, string) {
+// parentLink reports the installed parent link and the credential its parent
+// routes require. A nil link leaves those routes unserved, which is what a
+// standalone broker reports.
+func (b *Broker) parentLink() (messaging.ParentLink, string) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.parentLink, b.parentLinkToken
+	return b.parent, b.parentToken
 }
 
 // SetRunObserver installs a callback the broker runs whenever its set of owned
@@ -1279,7 +1282,7 @@ func parentLinkAuthorized(r *http.Request, token string) bool {
 // that admitted it. A registration replaces the child's previous claim, so the
 // runs it stopped owning are retired with it.
 func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
-	link, token := b.parentSeam()
+	link, token := b.parentLink()
 	if link == nil {
 		writeCodedError(w, http.StatusNotFound, "this broker has no parent link", "unsupported-operation")
 		return
@@ -1360,7 +1363,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 // handleParentDeregister retires one child broker's claim and the run records
 // it owned, so a closed branch stops being a routing target.
 func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) {
-	link, token := b.parentSeam()
+	link, token := b.parentLink()
 	if link == nil {
 		writeCodedError(w, http.StatusNotFound, "this broker has no parent link", "unsupported-operation")
 		return
@@ -1400,7 +1403,7 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 // queue. The reply route is recorded before the ask is exposed, so a consumer
 // can never answer an ask whose route is not bound yet.
 func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
-	link, _ := b.parentSeam()
+	link, _ := b.parentLink()
 	if link == nil {
 		writeCodedError(w, http.StatusNotFound, "this broker has no parent link", "unsupported-operation")
 		return
@@ -1932,7 +1935,7 @@ func (b *Broker) DisplayName(runID string) string { return b.displayName(runID) 
 // broker's own labels never resolve to a descendant's record.
 func (b *Broker) MatchLabel(label string) []string {
 	b.mu.RLock()
-	link := b.parentLink
+	link := b.parent
 	matches := make([]string, 0, 1)
 	for runID, st := range b.runs {
 		if link != nil && link.Owns(runID) {
@@ -2017,7 +2020,7 @@ func (b *Broker) SetHarnessName(runID, name string) error {
 // registered child broker owns keeps the name that branch publishes for it, so
 // a rename here is refused rather than silently reverted by the next claim.
 func (b *Broker) RenameRun(runID, name string) error {
-	if link, _ := b.parentSeam(); link != nil && link.Owns(runID) {
+	if link, _ := b.parentLink(); link != nil && link.Owns(runID) {
 		return fmt.Errorf("run %s is owned by a child broker and keeps the name that branch publishes", runID)
 	}
 	st := b.GetRun(runID)
@@ -2125,7 +2128,7 @@ func (x brokerBackend) Publish(target string, msg messaging.InboundMessage) (fun
 	// reaches the child's queue runs after admission returns, so no publication
 	// performs network I/O under the store's lock and nothing is queued locally
 	// for a withdrawal to retract.
-	if link, _ := x.broker.parentSeam(); link != nil && link.Owns(target) {
+	if link, _ := x.broker.parentLink(); link != nil && link.Owns(target) {
 		return func() {}, nil
 	}
 	st := x.broker.GetRun(target)

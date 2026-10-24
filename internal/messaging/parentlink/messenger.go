@@ -120,7 +120,7 @@ func (m *Messenger) sendToChild(ctx context.Context, req messaging.SendRequest, 
 // Wait blocks for the reply to an ask this messenger routed.
 func (m *Messenger) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
 	if m.up != nil {
-		if _, ok := m.up.askRoute(req.Sender.RunID, req.MessageID); ok {
+		if _, ok := m.up.hopOf(req.Sender.RunID, req.MessageID); ok {
 			return m.up.Wait(ctx, req)
 		}
 	}
@@ -130,7 +130,7 @@ func (m *Messenger) Wait(ctx context.Context, req messaging.WaitRequest) (messag
 // Withdraw withdraws an ask this messenger routed.
 func (m *Messenger) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	if m.up != nil {
-		if _, ok := m.up.askRoute(req.Sender.RunID, req.MessageID); ok {
+		if _, ok := m.up.hopOf(req.Sender.RunID, req.MessageID); ok {
 			return m.up.Withdraw(ctx, req)
 		}
 	}
