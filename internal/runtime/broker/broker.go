@@ -1742,6 +1742,25 @@ func (b *Broker) RunToken(runID string) (string, bool) {
 // Sessions returns the runs this broker owns with the metadata its peers see.
 func (b *Broker) Sessions() []SessionInfo { return b.sessions() }
 
+// ParentRunClaims builds the claim set a branch publishes to its parent: the
+// runs this broker serves minus the runs owned reports as already claimed by a
+// child branch, each with the credential its run authenticates with. One
+// builder serves every host that publishes a claim, so a change to the
+// publication rule cannot leave a test helper publishing something a real
+// branch would not.
+func (b *Broker) ParentRunClaims(owned func(runID string) bool) []messaging.RunClaim {
+	sessions := b.sessions()
+	claims := make([]messaging.RunClaim, 0, len(sessions))
+	for _, info := range sessions {
+		if owned != nil && owned(info.RunID) {
+			continue
+		}
+		token, _ := b.RunToken(info.RunID)
+		claims = append(claims, messaging.RunClaim{RunID: info.RunID, Label: info.Label, Token: token})
+	}
+	return claims
+}
+
 func (b *Broker) ingest(w http.ResponseWriter, runID string, fn func(*RunState)) {
 	b.mu.Lock()
 	st, ok := b.runs[runID]
