@@ -143,6 +143,43 @@ func TestMessengerReachableFollowsTheParent(t *testing.T) {
 	}
 }
 
+// TestMessengerSendsANoReplyAskToAChildWithoutAnEdge pins the tell's relay
+// into a child branch: the hop carries no reply expectation, the send is
+// reported as sent, and this broker admits no edge of its own for it.
+func TestMessengerSendsANoReplyAskToAChildWithoutAnEdge(t *testing.T) {
+	child := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRelay:
+			return http.StatusOK, `{}`
+		}
+		return http.StatusOK, `{}`
+	})
+	local := newStubMessenger()
+	messenger := newTestMessenger(t, local, nil)
+	if _, err := messenger.Register(messaging.DescendantRegistration{
+		ChildID:    "child-one",
+		Endpoint:   child.URL(),
+		Generation: "gen-a",
+		Runs:       []messaging.RunClaim{{RunID: "run-b", Token: "tok-b"}},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	tell := askRequest("msg-1")
+	tell.NoReply = true
+	sent, err := messenger.Send(testContext(t), tell, false)
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("Send = (%+v, %v), want the tell relayed and sent", sent, err)
+	}
+	relayed := child.lastRequest(t, pathRelay)
+	if relayed.Body["expects_reply"] != false {
+		t.Fatalf("relayed tell = %v, want no reply expectation", relayed.Body)
+	}
+	if len(local.sends) != 0 {
+		t.Fatalf("the local seam admitted %d edges, want none for a tell", len(local.sends))
+	}
+}
+
 // TestMessengerForwardsAReplyWhenTheLocalEdgeIsAbsent pins the reply's
 // upward fallback: a reply to an ask no local edge owns follows the relay
 // route it arrived on, so the asker in the ancestor branch sees its edge
