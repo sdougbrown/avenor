@@ -16,12 +16,12 @@ import (
 // nothing but its own local messenger, so its behavior is unchanged.
 type Messenger struct {
 	local messaging.Messenger
-	// up is this branch's link to its parent broker. Nil when it has none.
+	// up is this branch's link to its parent broker, nil when it has none.
 	up *Link
 	// down relays into the children that registered with this broker. It is
 	// built for every broker, because a child may register at any time.
-	down     *relay
 	registry *Registry
+	down     *relay
 }
 
 // New builds one broker's parent-aware messaging.
@@ -215,10 +215,12 @@ func (m *Messenger) Owns(runID string) bool { return m.registry.Owns(runID) }
 // Register adopts one child broker's claim on the runs it owns. A run this
 // broker itself owns is refused: it never belongs to a descendant, and
 // routing it into a child would bypass the queue the local ask store admits
-// edges for.
+// edges for. A run the registry already records as a descendant's claim is not
+// locally owned, even though the broker holds a run record it adopted for it:
+// Registry.Register replaces that claim.
 func (m *Messenger) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 	for _, run := range reg.Runs {
-		if m.local.Reachable(run.RunID) {
+		if m.local.Reachable(run.RunID) && !m.registry.Owns(run.RunID) {
 			return messaging.DescendantClaim{}, fmt.Errorf("%w: %s is owned by this broker", ErrRunLocallyOwned, run.RunID)
 		}
 	}
