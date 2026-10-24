@@ -43,6 +43,12 @@ type Options struct {
 	// Generation reports this broker's current ask generation. Required: the
 	// link pins it and the relay binds every hop to it.
 	Generation func() string
+	// RetireRuns deletes the run records this broker adopted for a descendant's
+	// runs when the registry stops routing them — a relay that found a
+	// generation-mismatched branch or a refused credential. The broker owns
+	// its own run records, so it supplies the deletion; nil leaves the records
+	// in place.
+	RetireRuns func(runIDs []string)
 	// Timeout bounds one request to a peer broker. Zero uses the messaging
 	// default.
 	Timeout time.Duration
