@@ -43,12 +43,12 @@ func TestPeerListingKeepsThePeersItRead(t *testing.T) {
 // run_id cannot rename the peer the listing names, so a peer cannot claim
 // another run's id.
 func TestDecodePeerRecordsKeepsThePeerID(t *testing.T) {
-	records, err := DecodePeerRecords([]Peer{
+	records, err := decodePeerRecords([]Peer{
 		{RunID: "real-peer", Session: []byte(`{"run_id":"other-run","label":"spoofed"}`)},
 		{RunID: "no-record", Session: nil},
 	})
 	if err != nil {
-		t.Fatalf("DecodePeerRecords: %v", err)
+		t.Fatalf("decodePeerRecords: %v", err)
 	}
 	if len(records) != 2 {
 		t.Fatalf("records = %+v, want two peers", records)

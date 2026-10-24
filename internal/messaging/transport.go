@@ -28,10 +28,11 @@ const (
 // credentials or classifies a result from an HTTP status alone.
 //
 // Peers reports the visible peer set. A transport that could not read every
-// peer returns the peers it did read together with ErrIncompleteListing, and
-// a transport that could not read the listing at all returns an error and no
-// peers. A caller keeps the peers it can see and reports the listing as
-// incomplete rather than reading a partial set as a complete one.
+// peer returns the peers it did read together with ErrIncompleteListing, so a
+// caller keeps the peers it can see and reports the listing as incomplete
+// rather than reading a partial set as a complete one. The host transport
+// reports a listing it could not read as an error, because the host's own
+// envelope has no field for a partial listing.
 type Transport interface {
 	Send(ctx context.Context, req SendRequest) (SendResult, error)
 	Wait(ctx context.Context, req WaitRequest) (WaitResult, error)
@@ -84,10 +85,11 @@ type Messenger interface {
 	// authority for an ask's target: a target it denies is not askable.
 	Reachable(runID string) bool
 	// Peers lists the participants reachable from here. A listing that could
-	// not be completed returns the peers it did read together with an error,
-	// so a caller keeps the peers it can see and reports the listing as
-	// incomplete. The listing and Reachable answer one question about the
-	// same participants, so an implementation keeps them consistent.
+	// not be completed returns the peers it did read together with
+	// ErrIncompleteListing, so a caller keeps the peers it can see and
+	// reports the listing as incomplete. The listing and Reachable answer one
+	// question about the same participants, so an implementation keeps them
+	// consistent.
 	Peers(ctx context.Context) ([]Peer, error)
 }
 
@@ -101,24 +103,25 @@ const IncompletePeerListing = "the broker could not read every peer"
 // Typed error classes. Transports report facts through these; callers map them
 // to an Outcome and never parse response text.
 var (
-	ErrAuthRejected        = errors.New("messaging: credentials rejected")
-	ErrInvalidRequest      = errors.New("messaging: invalid request")
-	ErrGenerationMismatch  = errors.New("messaging: generation mismatch")
-	ErrUnsupportedProtocol = errors.New("messaging: unsupported protocol")
-	ErrMalformedMessageID  = errors.New("messaging: malformed message id")
-	ErrMessageIDExpired    = errors.New("messaging: message id expired")
-	ErrMessageIDHorizon    = errors.New("messaging: message id deadline beyond horizon")
-	ErrDuplicateMessageID  = errors.New("messaging: message id already in use")
-	ErrMutualAsk           = errors.New("messaging: mutual ask refused")
-	ErrFenceCapacity       = errors.New("messaging: fence capacity exhausted")
-	ErrSenderMismatch      = errors.New("messaging: sender does not match this run")
-	ErrNotAskSender        = errors.New("messaging: not the sender of this ask")
-	ErrNotAskTarget        = errors.New("messaging: not the target of this ask")
-	ErrTargetUnavailable   = errors.New("messaging: target unavailable")
-	// ErrIncompleteListing reports a peer listing that could not be
-	// completed. It is a client's own classification of the listing's own
-	// reason, so it never crosses the wire as an error code.
-	ErrIncompleteListing    = errors.New("messaging: peer listing is incomplete")
+	ErrAuthRejected         = errors.New("messaging: credentials rejected")
+	ErrInvalidRequest       = errors.New("messaging: invalid request")
+	ErrGenerationMismatch   = errors.New("messaging: generation mismatch")
+	ErrUnsupportedProtocol  = errors.New("messaging: unsupported protocol")
+	ErrMalformedMessageID   = errors.New("messaging: malformed message id")
+	ErrMessageIDExpired     = errors.New("messaging: message id expired")
+	ErrMessageIDHorizon     = errors.New("messaging: message id deadline beyond horizon")
+	ErrDuplicateMessageID   = errors.New("messaging: message id already in use")
+	ErrMutualAsk            = errors.New("messaging: mutual ask refused")
+	ErrFenceCapacity        = errors.New("messaging: fence capacity exhausted")
+	ErrSenderMismatch       = errors.New("messaging: sender does not match this run")
+	ErrNotAskSender         = errors.New("messaging: not the sender of this ask")
+	ErrNotAskTarget         = errors.New("messaging: not the target of this ask")
+	ErrTargetUnavailable    = errors.New("messaging: target unavailable")
 	ErrTransportClosed      = errors.New("messaging: transport closed")
 	ErrUnsupportedOperation = errors.New("messaging: operation unsupported by this transport")
 )
+
+// ErrIncompleteListing reports a peer listing that could not be completed. It
+// is a client's own classification of the listing's own reason, so it never
+// crosses the wire as an error code.
+var ErrIncompleteListing = errors.New("messaging: peer listing is incomplete")

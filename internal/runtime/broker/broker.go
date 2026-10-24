@@ -392,7 +392,7 @@ func (t peerListingTransport) Peers(ctx context.Context, req messaging.PeersRequ
 		// listing, so the failure's own class reaches the caller.
 		return res, err
 	}
-	peers, unreadable := t.broker.peerListing(res.Peers)
+	peers, unreadable := t.broker.withLocalRuns(res.Peers)
 	res.Peers = peers
 	if unreadable > 0 {
 		return res, fmt.Errorf("%w: %d session records unreadable", messaging.ErrIncompleteListing, unreadable)
@@ -1169,7 +1169,7 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
 	peers, listingErr := b.seam().Peers(r.Context())
-	peers, unreadable := b.peerListing(peers)
+	peers, unreadable := b.withLocalRuns(peers)
 
 	sessions := make([]SessionInfo, 0, len(peers))
 	for _, peer := range peers {
@@ -1199,14 +1199,14 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSONBody(w, http.StatusOK, body)
 }
 
-// peerListing is the peer set every listing the broker serves names: the
+// withLocalRuns is the peer set every listing the broker serves names: the
 // runs the broker owns and the peers the seam can see. A host that lists
 // only the peers it reaches cannot hide the local runs, the supervisor's own
 // included, from the children that address them, and a host that reports a
 // peer under a local run's id cannot replace the broker's own record for it.
 // A record that cannot be read is dropped and counted, so every listing
 // carries the same records and a malformed record cannot break a response.
-func (b *Broker) peerListing(peers []messaging.Peer) ([]messaging.Peer, int) {
+func (b *Broker) withLocalRuns(peers []messaging.Peer) ([]messaging.Peer, int) {
 	seen := make(map[string]bool, len(peers))
 	out := make([]messaging.Peer, 0, len(peers))
 	unreadable := 0
