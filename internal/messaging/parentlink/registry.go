@@ -41,6 +41,9 @@ type child struct {
 	// canonical run.
 	runs   map[string]string
 	labels map[string]string
+	// tokens is the credential the child registered each run with, which is the
+	// credential the parent authenticates that run with when it relays into it.
+	tokens map[string]string
 }
 
 // ParentRunKey reports the run ID a parent broker addresses a descendant's run
@@ -56,13 +59,17 @@ func ParentRunKey(childID, runID string) string {
 }
 
 // Hop is one child broker as a relay next hop: the endpoint a relay is posted
-// to, the run ID that branch knows the target by, and the generation that
-// endpoint pinned when the child registered.
+// to, the run ID that branch knows the target by, and the generation and
+// credential that endpoint registered the run under. A relay that overrides
+// Token with the credential it authenticated with turns the hop into the
+// snapshot of what it failed on.
 type Hop struct {
 	ChildID    string
 	Endpoint   string
 	Generation string
 	Label      string
+	// Token is the credential the claiming branch registered the run with.
+	Token string
 	// RunID is the target run's canonical run ID in its own branch, which is
 	// what the relay posts to. It differs from the run ID this broker addresses
 	// the run by only for a namespaced branch-supervisor claim.
@@ -94,7 +101,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	}
 	current, ok := r.children[reg.ChildID]
 	if !ok {
-		current = &child{id: reg.ChildID, runs: map[string]string{}, labels: map[string]string{}}
+		current = &child{id: reg.ChildID, runs: map[string]string{}, labels: map[string]string{}, tokens: map[string]string{}}
 		r.children[reg.ChildID] = current
 	}
 	current.endpoint = reg.Endpoint
@@ -115,6 +122,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		r.owners[key] = reg.ChildID
 		current.runs[key] = run.RunID
 		current.labels[key] = run.Label
+		current.tokens[key] = run.Token
 	}
 	for runID := range r.owners {
 		if r.owners[runID] != reg.ChildID {
@@ -126,6 +134,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		delete(r.owners, runID)
 		delete(current.runs, runID)
 		delete(current.labels, runID)
+		delete(current.tokens, runID)
 		claim.Retired = append(claim.Retired, runID)
 	}
 	return claim, nil
@@ -151,10 +160,13 @@ func (r *Registry) Deregister(childID string) ([]string, error) {
 }
 
 // ForgetIfStale drops one run's claim, which is what a relay that found its
-// child gone leaves behind, but only while the claim still resolves to hop. A
-// replacement branch that registered while the refusal was in flight has
-// refreshed the claim; retiring that claim would take the healthy replacement out
-// of routing. It reports whether it dropped the claim.
+// child gone leaves behind, but only while the claim still resolves to hop: the
+// run's endpoint, generation, canonical run ID and the credential the relay
+// authenticated with. A replacement branch that registered while the refusal was
+// in flight has refreshed the claim, and so has a run that restarted inside a live
+// branch, which keeps the endpoint and generation but rotates its credential;
+// retiring either claim would take a healthy run out of routing. It reports
+// whether it dropped the claim.
 func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -166,12 +178,14 @@ func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 	if current == nil ||
 		current.endpoint != hop.Endpoint ||
 		current.generation != hop.Generation ||
-		current.runs[runID] != hop.RunID {
+		current.runs[runID] != hop.RunID ||
+		current.tokens[runID] != hop.Token {
 		return false
 	}
 	delete(r.owners, runID)
 	delete(current.runs, runID)
 	delete(current.labels, runID)
+	delete(current.tokens, runID)
 	return true
 }
 
@@ -208,6 +222,7 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 		Endpoint:   current.endpoint,
 		Generation: current.generation,
 		Label:      current.labels[runID],
+		Token:      current.tokens[runID],
 		RunID:      current.runs[runID],
 	}, true
 }
