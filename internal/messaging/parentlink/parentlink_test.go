@@ -69,8 +69,11 @@ func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *bran
 		}
 		branch.tokens[runID] = token
 	}
-	var link *Messenger
-	link, err := New(Options{
+	var (
+		link *Messenger
+		err  error
+	)
+	link, err = Install(Options{
 		ParentURL:  parentURL,
 		Endpoint:   branch.url(),
 		Generation: b.Store().Generation,
@@ -86,14 +89,11 @@ func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *bran
 			}
 			return claims
 		},
-	}, b.LocalMessenger())
+	}, b)
 	if err != nil {
 		t.Fatalf("build parent link: %v", err)
 	}
 	branch.link = link
-	b.SetParentLink(link)
-	b.SetMessenger(link)
-	b.SetRunObserver(link.RunChanged)
 	t.Cleanup(func() { _ = link.Close() })
 	if parentURL != "" {
 		if err := link.Start(context.Background()); err != nil {

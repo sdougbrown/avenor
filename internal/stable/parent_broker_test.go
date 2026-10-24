@@ -53,8 +53,11 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 		}
 		tokens[runID] = token
 	}
-	var link *parentlink.Messenger
-	link, err := parentlink.New(parentlink.Options{
+	var (
+		link *parentlink.Messenger
+		err  error
+	)
+	link, err = parentlink.Install(parentlink.Options{
 		ParentURL:  "http://" + parentBroker.Addr(),
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
@@ -69,13 +72,10 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 			}
 			return claims
 		},
-	}, b.LocalMessenger())
+	}, b)
 	if err != nil {
 		t.Fatalf("build branch messenger: %v", err)
 	}
-	b.SetParentLink(link)
-	b.SetMessenger(link)
-	b.SetRunObserver(link.RunChanged)
 	t.Cleanup(func() { _ = link.Close() })
 	if err := link.Start(context.Background()); err != nil {
 		t.Fatalf("register branch with parent: %v", err)
