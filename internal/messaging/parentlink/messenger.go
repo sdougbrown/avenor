@@ -39,7 +39,11 @@ func New(opts Options, local messaging.Messenger) (*Messenger, error) {
 		}
 		m.up = link
 	}
-	m.down = newRelay(opts, m.registry)
+	down, err := newRelay(opts, m.registry)
+	if err != nil {
+		return nil, err
+	}
+	m.down = down
 	return m, nil
 }
 
