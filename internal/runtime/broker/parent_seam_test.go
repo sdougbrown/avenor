@@ -281,3 +281,57 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 		}
 	})
 }
+
+// TestRelayRefusesATargetTheCallerDidNotAuthenticate pins the relay's target
+// authentication: a relay whose authenticated run does not match the body's
+// to_run_id is refused before the target's queue is touched, while a relay
+// that names the run it authenticated as still lands in that run's queue.
+func TestRelayRefusesATargetTheCallerDidNotAuthenticate(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	token, err := b.CreateRun("branch-run", "branch-run")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if _, err := b.CreateRun("other-run", "other-run"); err != nil {
+		t.Fatalf("create other run: %v", err)
+	}
+	b.SetParentLink(&parentLinkStub{})
+
+	// A relay authenticated as one run cannot target another: the guard
+	// refuses before the target's queue is touched.
+	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
+		"from_run_id": "asker",
+		"to_run_id":   "other-run",
+		"type":        "agent_message",
+		"payload":     map[string]any{"message": "hijacked"},
+		"message_id":  "av1.abc.def",
+		"generation":  b.Store().Generation(),
+	})
+	if status != http.StatusForbidden || body["code"] != "not-ask-target" {
+		t.Fatalf("relay to another run's target = (%d, %v), want 403 not-ask-target", status, body)
+	}
+	if queued := countAgentMessages(t, b, "other-run"); queued != 0 {
+		t.Fatalf("target queue = %d messages, want the refused relay withheld", queued)
+	}
+
+	// A relay that names the run it authenticated as still lands in that
+	// run's queue, so the guard is not a blanket refusal.
+	status, body = postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
+		"from_run_id": "asker",
+		"to_run_id":   "branch-run",
+		"type":        "agent_message",
+		"payload":     map[string]any{"message": "relayed"},
+		"message_id":  "av1.ghi.jkl",
+		"generation":  b.Store().Generation(),
+	})
+	if status != http.StatusOK {
+		t.Fatalf("relay to the authenticated run = (%d, %v), want 200", status, body)
+	}
+	if queued := countAgentMessages(t, b, "branch-run"); queued != 1 {
+		t.Fatalf("run queue = %d messages, want the relayed ask", queued)
+	}
+}
