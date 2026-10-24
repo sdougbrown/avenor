@@ -18,6 +18,10 @@ import (
 // already owns.
 var ErrRunClaimed = fmt.Errorf("%w: run already claimed by another child broker", messaging.ErrInvalidRequest)
 
+// ErrRunLocallyOwned reports a registration that claims a run this broker
+// itself owns. A locally owned run is never a descendant's to relay into.
+var ErrRunLocallyOwned = fmt.Errorf("%w: run already owned by this broker", messaging.ErrInvalidRequest)
+
 // ErrParentUnavailable reports a peer broker that could not be reached or
 // refused the hop. It classifies as ErrTargetUnavailable: the target cannot be
 // reached from this branch right now, and nothing is replayed.
