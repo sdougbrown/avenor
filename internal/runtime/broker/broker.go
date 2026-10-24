@@ -387,7 +387,11 @@ type peerListingTransport struct {
 
 func (t peerListingTransport) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	res, err := t.Transport.Peers(ctx, req)
-	res.Peers = t.broker.peerListing(res.Peers)
+	peers, unreadable := t.broker.peerListing(res.Peers)
+	res.Peers = peers
+	if unreadable > 0 {
+		return res, fmt.Errorf("%w: %d session records unreadable", messaging.ErrIncompleteListing, unreadable)
+	}
 	return res, err
 }
 
@@ -1160,22 +1164,22 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
 	peers, listingErr := b.seam().Peers(r.Context())
-	peers = b.peerListing(peers)
+	peers, unreadable := b.peerListing(peers)
 
 	sessions := make([]SessionInfo, 0, len(peers))
-	unreadable := 0
 	for _, peer := range peers {
 		info := SessionInfo{RunID: peer.RunID}
 		if len(peer.Session) > 0 {
 			if err := json.Unmarshal(peer.Session, &info); err != nil {
-				unreadable++
 				continue
 			}
 		}
 		// The seam's peer id is the identity this listing publishes. A session
 		// record's own run_id is the record's content, not a renaming, so a
 		// peer cannot claim another run's id by naming it in its record.
-		info.RunID = peer.RunID
+		if peer.RunID != "" {
+			info.RunID = peer.RunID
+		}
 		sessions = append(sessions, info)
 	}
 
@@ -1193,10 +1197,13 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 // peerListing is the peer set every listing the broker serves names: the
 // peers the seam can see and the runs the broker owns. A host that lists only
 // the peers it reaches cannot hide the local runs, the supervisor's own
-// included, from the children that address them.
-func (b *Broker) peerListing(peers []messaging.Peer) []messaging.Peer {
+// included, from the children that address them. A record that cannot be read
+// is dropped and counted, so every listing carries the same records and a
+// malformed record cannot break a response.
+func (b *Broker) peerListing(peers []messaging.Peer) ([]messaging.Peer, int) {
 	seen := make(map[string]bool, len(peers))
 	out := make([]messaging.Peer, 0, len(peers))
+	unreadable := 0
 	for _, peer := range peers {
 		if peer.RunID != "" {
 			if seen[peer.RunID] {
@@ -1204,16 +1211,47 @@ func (b *Broker) peerListing(peers []messaging.Peer) []messaging.Peer {
 			}
 			seen[peer.RunID] = true
 		}
-		out = append(out, peer)
+		record, err := peerRecord(peer)
+		if err != nil {
+			unreadable++
+			continue
+		}
+		out = append(out, record)
 	}
 	for _, peer := range b.localPeers() {
 		if seen[peer.RunID] {
 			continue
 		}
 		seen[peer.RunID] = true
-		out = append(out, peer)
+		record, err := peerRecord(peer)
+		if err != nil {
+			unreadable++
+			continue
+		}
+		out = append(out, record)
 	}
-	return out
+	return out, unreadable
+}
+
+// peerRecord is one peer with its session record read into the broker's
+// session shape, so every listing the broker serves publishes the same
+// record for the same run.
+func peerRecord(peer messaging.Peer) (messaging.Peer, error) {
+	if len(peer.Session) == 0 {
+		return peer, nil
+	}
+	var info SessionInfo
+	if err := json.Unmarshal(peer.Session, &info); err != nil {
+		return messaging.Peer{}, err
+	}
+	if peer.RunID != "" {
+		info.RunID = peer.RunID
+	}
+	raw, err := json.Marshal(info)
+	if err != nil {
+		return messaging.Peer{}, err
+	}
+	return messaging.Peer{RunID: peer.RunID, Session: raw}, nil
 }
 
 // localPeers is the broker's own runs as peers, with their recorded

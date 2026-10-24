@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/sdougbrown/avenor/internal/runstate"
 )
@@ -14,19 +15,27 @@ import (
 //
 // The peer's own id is the identity the listing publishes. A session record's
 // run_id is the record's content, so it cannot rename the peer.
+//
+// A record that cannot be read is dropped and the listing is reported as
+// incomplete, so a caller keeps the peers it can see.
 func DecodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 	records := make([]PeerRecord, 0, len(peers))
+	unreadable := 0
 	for _, peer := range peers {
 		var record PeerRecord
 		if len(peer.Session) > 0 {
 			if err := json.Unmarshal(peer.Session, &record); err != nil {
-				return nil, err
+				unreadable++
+				continue
 			}
 		}
 		if peer.RunID != "" {
 			record.RunID = peer.RunID
 		}
 		records = append(records, record)
+	}
+	if unreadable > 0 {
+		return records, fmt.Errorf("%w: %d session records unreadable", ErrIncompleteListing, unreadable)
 	}
 	return records, nil
 }
@@ -39,11 +48,11 @@ func DecodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 // error alone.
 func PeerListing(peers []Peer, err error) ([]PeerRecord, error) {
 	records, decodeErr := DecodePeerRecords(peers)
-	if decodeErr != nil {
-		return nil, decodeErr
-	}
 	if err != nil && len(peers) == 0 {
 		return nil, err
+	}
+	if decodeErr != nil {
+		return records, decodeErr
 	}
 	return records, err
 }

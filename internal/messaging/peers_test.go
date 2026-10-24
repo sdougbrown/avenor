@@ -27,8 +27,15 @@ func TestPeerListingKeepsThePeersItRead(t *testing.T) {
 		t.Fatalf("failed listing error = %v, want the failure reported", err)
 	}
 
-	if _, err := PeerListing([]Peer{{RunID: "rt-bad", Session: []byte(`{"run_id":`)}}, nil); err == nil {
-		t.Fatal("unreadable record error = nil, want the decode failure reported")
+	records, err = PeerListing([]Peer{
+		{RunID: "rt-good", Session: []byte(`{"run_id":"rt-good"}`)},
+		{RunID: "rt-bad", Session: []byte(`{"run_id":`)},
+	}, nil)
+	if !errors.Is(err, ErrIncompleteListing) {
+		t.Fatalf("unreadable record error = %v, want the incomplete listing reported", err)
+	}
+	if len(records) != 1 || records[0].RunID != "rt-good" {
+		t.Fatalf("records = %+v, want the peer that decoded", records)
 	}
 }
 
