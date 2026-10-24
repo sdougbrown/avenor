@@ -129,7 +129,7 @@ func TestParentRoutesRefuseWithoutTheLinkCredential(t *testing.T) {
 	// A broker with no configured credential does not fall back to trusting the
 	// loopback caller.
 	open := startBranch(t, "")
-	open.broker.SetParentLinkToken("")
+	open.broker.InstallParentLink(open.link, "", open.link.RunChanged)
 	status, body = postRegistration(t, open, "branch-open", "http://127.0.0.1:1", "gen-open", testLinkToken,
 		messaging.RunClaim{RunID: "target", Token: "open-token"})
 	if status != http.StatusUnauthorized {

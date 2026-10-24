@@ -135,10 +135,8 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		t.Fatalf("build parent link: %v", err)
 	}
 	branch.link = link
-	b.SetParentLink(link)
-	b.SetParentLinkToken(testLinkToken)
+	b.InstallParentLink(link, testLinkToken, link.RunChanged)
 	b.SetMessenger(link)
-	b.SetRunObserver(link.RunChanged)
 	t.Cleanup(func() { _ = link.Close() })
 	if parentURL != "" {
 		if err := link.Start(context.Background()); err != nil {
@@ -289,17 +287,9 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 		t.Fatalf("set harness name: %v", err)
 	}
 
-	deadline := time.Now().Add(awaitDeadline)
-	for {
-		hop, ok := parent.link.Registry().Hop(key)
-		if ok && hop.Label == "harness-name" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("parent published hop %+v (ok=%v), want label harness-name", hop, ok)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	awaitUntil(t, "the parent to publish the harness name", func() bool {
+		return parent.broker.DisplayName(key) == "harness-name"
+	})
 	if got := parent.broker.DisplayName(key); got != "harness-name" {
 		t.Fatalf("parent display name = %q, want harness-name", got)
 	}
@@ -313,8 +303,7 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 		t.Fatalf("rename run: %v", err)
 	}
 	awaitUntil(t, "the parent to publish the renamed label", func() bool {
-		hop, ok := parent.link.Registry().Hop(key)
-		return ok && hop.Label == "renamed-run"
+		return parent.broker.DisplayName(key) == "renamed-run"
 	})
 }
 

@@ -31,7 +31,6 @@ var ErrUnsupportedParentProtocol = fmt.Errorf(
 // envelope is one parent broker response. Every field is optional so a response
 // carries only the operation's result, plus its code class on failure.
 type envelope struct {
-	Status            int               `json:"-"`
 	Outcome           messaging.Outcome `json:"outcome"`
 	Code              string            `json:"code"`
 	Error             string            `json:"error"`
@@ -55,12 +54,11 @@ type envelope struct {
 // its status, because the broker's auth layer answers before a messaging
 // handler does.
 func decode(status int, raw []byte) (envelope, error) {
-	body := envelope{Status: status}
+	body := envelope{}
 	if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 && trimmed[0] == '{' {
 		if err := json.Unmarshal(trimmed, &body); err != nil {
-			return envelope{Status: status}, fmt.Errorf("%w: %v", ErrUnsupportedParentProtocol, err)
+			return envelope{}, fmt.Errorf("%w: %v", ErrUnsupportedParentProtocol, err)
 		}
-		body.Status = status
 	}
 	switch {
 	case body.Code != "":

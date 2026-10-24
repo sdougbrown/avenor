@@ -52,7 +52,7 @@ func TestAdmissionForADescendantRunTouchesNoLink(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = b.Stop() })
 	link := &parentLinkStub{owned: "remote"}
-	b.SetParentLink(link)
+	b.InstallParentLink(link, "", nil)
 
 	now := time.Now().UTC()
 	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
@@ -96,7 +96,7 @@ func TestRelayRecordsTheReplyRouteBeforeExposingTheAsk(t *testing.T) {
 	link := &parentLinkStub{recordRelay: func(messaging.RelayRoute) error {
 		return messaging.ErrTransportClosed
 	}}
-	b.SetParentLink(link)
+	b.InstallParentLink(link, "", nil)
 
 	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
 		"from_run_id":     "asker",
@@ -157,7 +157,7 @@ func TestRelayRefusesAReplacementGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	b.SetParentLink(&parentLinkStub{})
+	b.InstallParentLink(&parentLinkStub{}, "", nil)
 
 	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
 		"from_run_id":   "asker",
