@@ -1,6 +1,7 @@
 package parentlink
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -322,4 +323,91 @@ func TestMessengerPeersUnionsTheParentsPeersWithoutDuplicates(t *testing.T) {
 			t.Fatalf("peers = %v, want %q listed once", seen, runID)
 		}
 	}
+}
+
+// TestMessengerDeliverDispatchesThreeWays pins the deliver routing: a run a
+// registered child owns relays into the child's queue, a run the local seam
+// serves delivers locally, and anything else with a parent forwards upward.
+func TestMessengerDeliverDispatchesThreeWays(t *testing.T) {
+	deliverRequest := func(toRunID string) messaging.DeliverRequest {
+		return messaging.DeliverRequest{
+			FromRunID: "run-a",
+			ToRunID:   toRunID,
+			Kind:      "agent_message",
+			Payload:   json.RawMessage(`{"message":"ping"}`),
+		}
+	}
+
+	t.Run("descendant-owned target relays down", func(t *testing.T) {
+		child := newStubBroker(t, func(req stubRequest) (int, string) {
+			return http.StatusOK, `{"outcome":"queued"}`
+		})
+		local := newStubMessenger()
+		messenger := newTestMessenger(t, local, nil)
+		if _, err := messenger.Register(messaging.DescendantRegistration{
+			ChildID:    "child-one",
+			Endpoint:   child.URL(),
+			Generation: "gen-a",
+			Runs:       []messaging.RunClaim{{RunID: "run-b", Token: "tok-b"}},
+		}); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+
+		if err := messenger.Deliver(testContext(t), deliverRequest("run-b")); err != nil {
+			t.Fatalf("Deliver: %v", err)
+		}
+		if child.countPath(pathRelay) != 1 {
+			t.Fatalf("the child saw %d relays, want 1", child.countPath(pathRelay))
+		}
+		if len(local.delivers) != 0 {
+			t.Fatalf("the local seam saw %d delivers, want none routed locally", len(local.delivers))
+		}
+	})
+
+	t.Run("locally reachable target delivers locally", func(t *testing.T) {
+		parent := newStubBroker(t, func(req stubRequest) (int, string) {
+			return http.StatusOK, `{"outcome":"queued"}`
+		})
+		local := newStubMessenger()
+		local.reachable["run-a"] = true
+		messenger := newTestMessenger(t, local, parent)
+
+		if err := messenger.Deliver(testContext(t), deliverRequest("run-a")); err != nil {
+			t.Fatalf("Deliver: %v", err)
+		}
+		if len(local.delivers) != 1 || local.delivers[0].ToRunID != "run-a" {
+			t.Fatalf("the local seam saw %v, want the delivery routed locally", local.delivers)
+		}
+		if parent.countPath(pathSend) != 0 {
+			t.Fatal("the parent saw a forwarded delivery, want the local answer")
+		}
+	})
+
+	t.Run("unknown target forwards to the parent", func(t *testing.T) {
+		parent := newStubBroker(t, func(req stubRequest) (int, string) {
+			switch req.Path {
+			case pathRegister:
+				return http.StatusOK, `{"generation":"gen-a"}`
+			}
+			return http.StatusOK, `{"outcome":"queued"}`
+		})
+		local := newStubMessenger()
+		messenger := newTestMessenger(t, local, parent)
+		ctx := testContext(t)
+		// The forward carries this run's credentials, so the claim is published
+		// before the delivery is routed upward.
+		if err := messenger.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		if err := messenger.Deliver(ctx, deliverRequest("run-x")); err != nil {
+			t.Fatalf("Deliver: %v", err)
+		}
+		if parent.countPath(pathSend) != 1 {
+			t.Fatalf("the parent saw %d deliveries, want 1", parent.countPath(pathSend))
+		}
+		if len(local.delivers) != 0 {
+			t.Fatalf("the local seam saw %d delivers, want none", len(local.delivers))
+		}
+	})
 }
