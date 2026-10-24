@@ -198,9 +198,12 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 // exported to a caller in that child's own branch and to this broker's own
 // callers (its owned descendants), but never to a caller in a sibling branch.
 func (r *Registry) Export(peers []messaging.Peer, caller string) []messaging.Peer {
-	callerBranch, callerIsDescendant := r.Owner(caller)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	// The caller's branch and the peers' owners are read under the same lock, so
+	// a registration that lands mid-listing cannot split what the caller is from
+	// what it is shown.
+	callerBranch, callerIsDescendant := r.owners[caller]
 	exported := make([]messaging.Peer, 0, len(peers))
 	for _, peer := range peers {
 		owner, registered := r.owners[peer.RunID]
