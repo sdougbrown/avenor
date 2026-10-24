@@ -89,8 +89,11 @@ func (m *Messenger) Send(ctx context.Context, req messaging.SendRequest, legacy 
 	return m.up.Send(ctx, req)
 }
 
-// sendToChild admits the one edge a cross-branch ask owns in this broker's store
-// and relays the message into the child's queue afterwards. The admission never
+// sendToChild serves an ask whose target run is owned by a registered child
+// branch. The ask is not local to this broker, so it admits the one edge a
+// cross-branch ask owns in this broker's store (the ancestor ask store) and
+// relays the message into the child's queue afterwards; the relay itself admits
+// no second edge. The admission never
 // performs network I/O, so the relay cannot run under the store's lock.
 func (m *Messenger) sendToChild(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
 	if req.NoReply {
