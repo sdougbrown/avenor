@@ -466,6 +466,44 @@ func TestSessionsKeepsTheBrokersOwnRuns(t *testing.T) {
 	}
 }
 
+// TestRoutedTransportListsTheBrokersOwnRuns pins that the transport the
+// broker serves peers through names the runs the broker owns beside the peers
+// the seam can see, so every listing the broker serves names the same
+// participants.
+func TestRoutedTransportListsTheBrokersOwnRuns(t *testing.T) {
+	b, _, _ := startSeamBroker(t)
+	b.SetMessenger(seamPeerSource{
+		Messenger: b.LocalMessenger(),
+		peers:     []messaging.Peer{{RunID: "remote-peer"}},
+	})
+	t.Cleanup(func() { b.SetMessenger(nil) })
+
+	transport := b.MessengerTransport()
+	t.Cleanup(func() { _ = transport.Close() })
+
+	ctx := context.Background()
+	pre, err := transport.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	listed, err := transport.Peers(ctx, messaging.PeersRequest{
+		Sender:     messaging.Identity{RunID: "sender"},
+		Generation: pre.Generation,
+	})
+	if err != nil {
+		t.Fatalf("peers: %v", err)
+	}
+	byRunID := make(map[string]bool, len(listed.Peers))
+	for _, peer := range listed.Peers {
+		byRunID[peer.RunID] = true
+	}
+	for _, want := range []string{"sender", "target", "remote-peer"} {
+		if !byRunID[want] {
+			t.Fatalf("peers = %+v, want %s listed", listed.Peers, want)
+		}
+	}
+}
+
 // TestSessionsDropsAnUnreadablePeerRecord pins that a peer whose session
 // record cannot be read is dropped from the listing and the listing reports
 // that it could not read every peer, so a partial list never reads as a

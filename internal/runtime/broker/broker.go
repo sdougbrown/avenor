@@ -371,8 +371,24 @@ func (b *Broker) seam() messaging.Messenger {
 // MessengerTransport returns the in-process transport over the broker's ask
 // store whose ask, reply and peer operations enter the messenger seam at call
 // time. A messenger installed after this transport was built is still reached.
+// The peer listing it serves names the runs the broker owns beside the peers
+// the seam can see, so every listing the broker serves names the same
+// participants.
 func (b *Broker) MessengerTransport() messaging.Transport {
-	return inprocess.NewRouted(b.store, b.seam)
+	return peerListingTransport{Transport: inprocess.NewRouted(b.store, b.seam), broker: b}
+}
+
+// peerListingTransport is the broker's routed transport with the broker's own
+// runs merged into the seam's peer listing.
+type peerListingTransport struct {
+	messaging.Transport
+	broker *Broker
+}
+
+func (t peerListingTransport) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
+	res, err := t.Transport.Peers(ctx, req)
+	res.Peers = t.broker.peerListing(res.Peers)
+	return res, err
 }
 
 func MakeToken() string {
@@ -1144,15 +1160,11 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
 	peers, listingErr := b.seam().Peers(r.Context())
+	peers = b.peerListing(peers)
 
 	sessions := make([]SessionInfo, 0, len(peers))
-	seen := make(map[string]bool, len(peers))
 	unreadable := 0
 	for _, peer := range peers {
-		if seen[peer.RunID] {
-			continue
-		}
-		seen[peer.RunID] = true
 		info := SessionInfo{RunID: peer.RunID}
 		if len(peer.Session) > 0 {
 			if err := json.Unmarshal(peer.Session, &info); err != nil {
@@ -1166,24 +1178,6 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 		info.RunID = peer.RunID
 		sessions = append(sessions, info)
 	}
-	// A run this broker owns stays in the listing even when the seam did not
-	// report it. A host that lists only the peers it reaches would otherwise
-	// hide the local runs, including the supervisor's own, from the children
-	// that address them.
-	// for _, info := range b.sessions() {
-	// 	if seen[info.RunID] {
-	// 		continue
-	// 	}
-	// 	seen[info.RunID] = true
-	// 	sessions = append(sessions, info)
-	// }
-	for _, info := range b.sessions() {
-		if seen[info.RunID] {
-			continue
-		}
-		seen[info.RunID] = true
-		sessions = append(sessions, info)
-	}
 
 	body := map[string]any{
 		"sessions":           sessions,
@@ -1194,6 +1188,49 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 		body["peers_error"] = incompletePeerListing(unreadable)
 	}
 	writeJSONBody(w, http.StatusOK, body)
+}
+
+// peerListing is the peer set every listing the broker serves names: the
+// peers the seam can see and the runs the broker owns. A host that lists only
+// the peers it reaches cannot hide the local runs, the supervisor's own
+// included, from the children that address them.
+func (b *Broker) peerListing(peers []messaging.Peer) []messaging.Peer {
+	seen := make(map[string]bool, len(peers))
+	out := make([]messaging.Peer, 0, len(peers))
+	for _, peer := range peers {
+		if peer.RunID != "" {
+			if seen[peer.RunID] {
+				continue
+			}
+			seen[peer.RunID] = true
+		}
+		out = append(out, peer)
+	}
+	for _, peer := range b.localPeers() {
+		if seen[peer.RunID] {
+			continue
+		}
+		seen[peer.RunID] = true
+		out = append(out, peer)
+	}
+	return out
+}
+
+// localPeers is the broker's own runs as peers, with their recorded
+// metadata. It is the one place the broker's peer records are built, so the
+// store's peer source and the listing the broker serves publish the same
+// record for the same run.
+func (b *Broker) localPeers() []messaging.Peer {
+	sessions := b.sessions()
+	peers := make([]messaging.Peer, 0, len(sessions))
+	for _, info := range sessions {
+		raw, err := json.Marshal(info)
+		if err != nil {
+			continue
+		}
+		peers = append(peers, messaging.Peer{RunID: info.RunID, Session: raw})
+	}
+	return peers
 }
 
 // incompletePeerListing is the reason a peer listing the broker could not
@@ -1754,16 +1791,7 @@ func (x brokerBackend) Peers() ([]messaging.Peer, error) {
 	// the runs this broker owns. Routing this through the seam would let a
 	// seam that composes its local peers from the public store call back into
 	// itself, so the store's peer source stays the broker's own registry.
-	sessions := x.broker.sessions()
-	peers := make([]messaging.Peer, 0, len(sessions))
-	for _, info := range sessions {
-		raw, err := json.Marshal(info)
-		if err != nil {
-			continue
-		}
-		peers = append(peers, messaging.Peer{RunID: info.RunID, Session: raw})
-	}
-	return peers, nil
+	return x.broker.localPeers(), nil
 }
 
 // localMessenger serves local messaging from the broker's own queues and ask
@@ -1801,16 +1829,7 @@ func (m localMessenger) Reachable(runID string) bool {
 }
 
 func (m localMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
-	sessions := m.broker.sessions()
-	peers := make([]messaging.Peer, 0, len(sessions))
-	for _, info := range sessions {
-		raw, err := json.Marshal(info)
-		if err != nil {
-			continue
-		}
-		peers = append(peers, messaging.Peer{RunID: info.RunID, Session: raw})
-	}
-	return peers, nil
+	return m.broker.localPeers(), nil
 }
 
 // mergedField combines a payload field with its envelope counterpart: the
