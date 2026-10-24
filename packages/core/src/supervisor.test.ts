@@ -179,6 +179,10 @@ describe.skipIf(skipIfNoBinary)('Supervisor lifecycle', () => {
       expect(resolved.sup).toBe(sup)
       expect(resolved.client).toBe(sup.getClient())
       expect(Supervisor.isCurrentInstance(canonicalSocket)).toBe(true)
+      for (const alias of [explicitSocket, `${path.dirname(explicitSocket)}/../sockets/${path.basename(explicitSocket)}`]) {
+        expect(Supervisor.getInstance(alias)).toBe(sup)
+        expect(Supervisor.isCurrentInstance(alias)).toBe(true)
+      }
     } finally {
       if (resolved && !resolved.isSingleton) resolved.client.close()
       await sup?.close()

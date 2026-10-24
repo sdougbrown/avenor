@@ -49,7 +49,6 @@ export { spawnTool } from './tools/spawn.js'
 export type { SpawnToolArgs, SpawnToolResult } from './tools/spawn.js'
 export { validateSpawnSelection } from './spawn-selection.js'
 export type { SpawnSelectionInput } from './spawn-selection.js'
-export { validateSupervisorSocketPath } from './tools/validate.js'
 export {
   THINKING_LEVELS,
   evaluateThinkingPolicy,

@@ -41,7 +41,6 @@ import {
   SUPERVISOR_RUN_ID,
   THINKING_LEVELS,
   validateSpawnSelection,
-  validateSupervisorSocketPath,
   workflowStatusTool,
   workflowWaitTool,
   workflowInspectTool,
@@ -1472,18 +1471,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return new Text(text, 0, 0)
     })
 
-    function isLocalSupervisor(supervisorId: string | undefined): boolean {
-      if (!supervisorId) return true
-      let canonical: string
-      try {
-        canonical = validateSupervisorSocketPath(supervisorId)
-      } catch {
-        // Spawn remains responsible for reporting invalid socket paths.
-        return false
-      }
-      return Boolean(deps.Supervisor.isCurrentInstance?.(canonical))
-    }
-
     pi.registerTool({
       name: 'avenor_spawn',
       label: 'Avenor Spawn',
@@ -1547,7 +1534,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         // spawns omit the parent note rather than advertise an unread queue.
         const parentRunId = isSubAgentBrokerMode
           ? undefined
-          : isLocalSupervisor(params.supervisor_id)
+          : !params.supervisor_id || Boolean(deps.Supervisor.isCurrentInstance?.(params.supervisor_id))
             ? SUPERVISOR_RUN_ID
             : undefined
 
