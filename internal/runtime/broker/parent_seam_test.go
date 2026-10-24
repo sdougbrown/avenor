@@ -331,6 +331,43 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 	})
 }
 
+// TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator pins the
+// handler's refusal of a run ID the run-key namespacing reserves: a claimed
+// run ID carrying "@" reads as a branch-namespaced key, so the registration
+// is a 400 and nothing is adopted.
+func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   "child-1",
+		"endpoint":   "http://child:1234",
+		"generation": "gen-1",
+		"runs": []map[string]any{
+			{"run_id": messaging.SupervisorRunID + "@victim", "label": "forged", "token": "child-token"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	b.SetParentLink(&parentLinkStub{
+		register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+			t.Fatal("the handler passed a namespaced run id to the link")
+			return messaging.DescendantClaim{}, nil
+		},
+	})
+
+	status, body := postParentLink(t, b.Addr(), string(raw), "")
+	if status != http.StatusBadRequest || body["code"] != "invalid-request" {
+		t.Fatalf("registration with a namespaced run id = (%d, %v), want 400 invalid-request", status, body)
+	}
+	if b.GetRun(messaging.SupervisorRunID+"@victim") != nil {
+		t.Fatal("the refused registration adopted the forged run")
+	}
+}
+
 // TestRelayRefusesATargetTheCallerDidNotAuthenticate pins the relay's target
 // authentication: a relay whose authenticated run does not match the body's
 // to_run_id is refused before the target's queue is touched, while a relay

@@ -9,6 +9,7 @@ package parentlink
 import (
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -21,6 +22,12 @@ var ErrRunClaimed = fmt.Errorf("%w: run already claimed by another child broker"
 // ErrRunLocallyOwned reports a registration that claims a run this broker
 // itself owns. A locally owned run is never a descendant's to relay into.
 var ErrRunLocallyOwned = fmt.Errorf("%w: run already owned by this broker", messaging.ErrInvalidRequest)
+
+// ErrInvalidRunID reports a registration that claims a run ID the run-key
+// namespacing reserves: a run ID carrying "@" reads as a branch-namespaced
+// key, so a child claiming one could forge another branch's supervisor
+// identity. Run IDs are minted without the separator.
+var ErrInvalidRunID = fmt.Errorf("%w: run id contains the reserved separator \"@\"", messaging.ErrInvalidRequest)
 
 // ErrParentUnavailable reports a peer broker that could not be reached or
 // refused the hop. It classifies as ErrTargetUnavailable: the target cannot be
@@ -95,6 +102,11 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	claim := messaging.DescendantClaim{}
 	if err := validEndpoint(reg.Endpoint); err != nil {
 		return claim, err
+	}
+	for _, run := range reg.Runs {
+		if strings.Contains(run.RunID, "@") {
+			return messaging.DescendantClaim{}, fmt.Errorf("%w: %q", ErrInvalidRunID, run.RunID)
+		}
 	}
 	keys := make([]string, len(reg.Runs))
 	r.mu.Lock()

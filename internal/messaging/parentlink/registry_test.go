@@ -139,6 +139,33 @@ func TestRegistryNamespacesBranchSupervisorRuns(t *testing.T) {
 	}
 }
 
+// TestRegistryRefusesARunIDCarryingTheNamespacingSeparator pins the run ID a
+// descendant may claim: a run ID carrying "@" reads as a branch-namespaced
+// key, so a child claiming one could forge another branch's supervisor
+// identity. The registration is refused before anything is applied.
+func TestRegistryRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
+	registry := NewRegistry()
+	for _, runID := range []string{messaging.SupervisorRunID + "@victim", "run@a", "@"} {
+		claim, err := registry.Register(messaging.DescendantRegistration{
+			ChildID: "one", Endpoint: "http://one", Generation: "g1",
+			Runs: []messaging.RunClaim{{RunID: runID}},
+		})
+		if !errors.Is(err, ErrInvalidRunID) || !errors.Is(err, messaging.ErrInvalidRequest) {
+			t.Fatalf("claim of %q = %v, want ErrInvalidRunID", runID, err)
+		}
+		if len(claim.Runs) != 0 || len(claim.Adopted) != 0 || len(claim.Retired) != 0 {
+			t.Fatalf("refused claim of %q = %+v, want nothing applied", runID, claim)
+		}
+		if registry.Owns(runID) {
+			t.Fatalf("the refused run %q was adopted", runID)
+		}
+	}
+	// The child itself is not left registered by a refused claim.
+	if _, err := registry.Deregister("one"); !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("deregistering the refused child = %v, want the child never registered", err)
+	}
+}
+
 // TestRegistryExportNarrowsToTheCallersBranch pins the export rule at the
 // registry: a branch sees its own runs and this broker's own runs, a sibling
 // branch's runs stay hidden, and this broker's own caller sees its descendants.

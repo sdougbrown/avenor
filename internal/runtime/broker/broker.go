@@ -1458,8 +1458,14 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, claim := range body.Runs {
-		if claim.RunID == "" {
+		switch {
+		case claim.RunID == "":
 			writeCodedError(w, http.StatusBadRequest, "every claimed run needs a run_id", "invalid-request")
+			return
+		case strings.Contains(claim.RunID, "@"):
+			// A run ID carrying "@" reads as a branch-namespaced key, so a child
+			// claiming one could forge another branch's supervisor identity.
+			writeCodedError(w, http.StatusBadRequest, "a claimed run id cannot contain \"@\"", "invalid-request")
 			return
 		}
 	}
