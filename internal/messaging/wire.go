@@ -108,6 +108,17 @@ func IsSendOutcome(o Outcome) bool {
 	return false
 }
 
+// IsWithdrawOutcome reports whether o is an outcome a withdrawal may report:
+// the terminal fence it installed, the verdict of an edge that was already
+// there, or the fact that the ask's fate is unknown.
+func IsWithdrawOutcome(o Outcome) bool {
+	switch o {
+	case OutcomeWithdrawn, OutcomeReplied, OutcomeTimedOut, OutcomeEdgeAbsent, OutcomePossiblyPending, OutcomeLost:
+		return true
+	}
+	return false
+}
+
 // SendOutcomeFor returns the outcome a send carries when the peer rejects it
 // with code. A code whose documented outcome is not a send outcome is reported
 // as not-sent.
