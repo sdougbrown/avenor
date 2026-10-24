@@ -76,6 +76,8 @@ func TestLinkKeepsItsClaimWhenTheParentIsUnreachable(t *testing.T) {
 				return http.StatusInternalServerError, `{}`
 			}
 			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSend:
+			return http.StatusOK, `{"outcome":"sent"}`
 		}
 		return http.StatusOK, `{}`
 	})
@@ -95,6 +97,15 @@ func TestLinkKeepsItsClaimWhenTheParentIsUnreachable(t *testing.T) {
 	}
 	if generation, pinned := link.pinnedGeneration(); !pinned || generation != "gen-a" {
 		t.Fatalf("pinned generation = (%q, %v), want the claim the parent last accepted", generation, pinned)
+	}
+	// The claim the parent last accepted is still the one this branch
+	// forwards under.
+	if _, err := link.Send(ctx, askRequest("msg-1")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	forwarded := stub.lastRequest(t, pathSend)
+	if forwarded.Body["generation"] != "gen-a" {
+		t.Fatalf("forwarded generation = %v, want the claim the parent last accepted", forwarded.Body["generation"])
 	}
 
 	reachable.Store(true)
@@ -155,9 +166,9 @@ func TestLinkRefusesAClaimWithoutItsParts(t *testing.T) {
 	}
 }
 
-// TestLinkRefusesWorkAfterItIsClosed pins the link's closed contract: a
-// registration after the close is refused, so a late caller cannot resurrect
-// the claim.
+// TestLinkRefusesWorkAfterItIsClosed pins the link's closed contract: the
+// closed transport refuses to carry a registration, so a late caller cannot
+// resurrect the claim the close retracted.
 func TestLinkRefusesWorkAfterItIsClosed(t *testing.T) {
 	stub := newStubBroker(t, func(req stubRequest) (int, string) {
 		return http.StatusOK, `{"generation":"gen-a"}`
