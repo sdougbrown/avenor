@@ -17,10 +17,10 @@ import (
 // already owns.
 var ErrRunClaimed = fmt.Errorf("%w: run already claimed by another child broker", messaging.ErrInvalidRequest)
 
-// ErrParentUnavailable reports a parent broker that could not be reached or
+// ErrParentUnavailable reports a peer broker that could not be reached or
 // refused the hop. It classifies as ErrTargetUnavailable: the target cannot be
 // reached from this branch right now, and nothing is replayed.
-var ErrParentUnavailable = fmt.Errorf("%w: parent broker unreachable", messaging.ErrTargetUnavailable)
+var ErrParentUnavailable = fmt.Errorf("%w: the peer broker is unreachable", messaging.ErrTargetUnavailable)
 
 // Registry is a parent broker's record of the child brokers that registered
 // with it: each child's endpoint, the generation its ask store pinned, and the
