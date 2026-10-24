@@ -2,11 +2,46 @@ package parentlink
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
+
+// TestBranchIDDerivesDurableIdentity pins the identity a branch registers
+// under: the same input always derives the same identity, two identities whose
+// sanitized stems collide stay distinct, and the readable stem is sanitized.
+func TestBranchIDDerivesDurableIdentity(t *testing.T) {
+	cases := []struct {
+		identity string
+		prefix   string // the sanitized stem the identity must start with
+	}{
+		{identity: "test/avenor.sock", prefix: "avenor"},
+		{identity: "/x/avenor", prefix: "avenor"},
+		{identity: "/x/avenor.bak", prefix: "avenor"},
+		{identity: "dir/my branch!.sock", prefix: "my-branch"},
+		{identity: "dir/!!avenor!!.sock", prefix: "avenor"},
+		{identity: "dir/---.sock", prefix: "branch"},
+	}
+	seen := map[string]string{}
+	for _, tc := range cases {
+		id := BranchID(tc.identity)
+		if id == "" || !strings.HasPrefix(id, tc.prefix+"-") {
+			t.Fatalf("BranchID(%q) = %q, want the sanitized stem %q", tc.identity, id, tc.prefix)
+		}
+		if other, dup := seen[id]; dup {
+			t.Fatalf("BranchID(%q) = BranchID(%q) = %q, want distinct identities", tc.identity, other, id)
+		}
+		seen[id] = tc.identity
+		if again := BranchID(tc.identity); again != id {
+			t.Fatalf("BranchID(%q) derived %q then %q, want the same identity every time", tc.identity, id, again)
+		}
+	}
+	if id := BranchID(""); id != "" {
+		t.Fatalf("BranchID(\"\") = %q, want no identity", id)
+	}
+}
 
 // TestUncleanRestartReclaimsTheRunsUnderItsDurableIdentity pins the recovery
 // path: a branch that dies without retracting its claim comes back under the
