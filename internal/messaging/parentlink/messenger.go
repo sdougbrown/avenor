@@ -209,25 +209,11 @@ func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 // Owns reports whether runID belongs to a registered child broker.
 func (m *Messenger) Owns(runID string) bool { return m.registry.Owns(runID) }
 
-// Key reports the run ID this broker addresses childID's runID by, which is
-// how a claim and every later hop name a descendant's run.
+// Key reports the run ID this broker addresses childID's runID by.
 func (m *Messenger) Key(childID, runID string) string { return ParentRunKey(childID, runID) }
 
-// Register adopts one child broker's claim on the runs it owns. A run this
-// broker itself owns is refused: it never belongs to a descendant, and
-// routing it into a child would bypass the queue the local ask store admits
-// edges for. A run the registry already records as a descendant's claim is not
-// locally owned, even though the broker holds a run record it adopted for it:
-// Registry.Register replaces that claim.
+// Register adopts one child broker's claim on the runs it owns.
 func (m *Messenger) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-	for _, run := range reg.Runs {
-		// A branch supervisor run is reserved in every branch, so the parent's own
-		// supervisor never blocks a descendant's claim of the same ID: the
-		// registry addresses it under a branch-namespaced run ID instead.
-		if run.RunID != messaging.SupervisorRunID && m.local.Reachable(run.RunID) && !m.registry.Owns(run.RunID) {
-			return messaging.DescendantClaim{}, fmt.Errorf("%w: %s is owned by this broker", ErrRunLocallyOwned, run.RunID)
-		}
-	}
 	return m.registry.Register(reg)
 }
 

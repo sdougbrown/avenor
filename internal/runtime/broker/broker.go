@@ -1254,11 +1254,12 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 // --- parent link ---
 
 // parentLinkAuthorized reports whether a parent-link request may act. A broker
-// without a parent-link token accepts the loopback caller, the same trust the
-// broker's run registration already runs on.
+// serves its parent routes only under the link credential it was configured
+// with: an unconfigured credential would let any caller on the same machine
+// replace a live branch's claim wholesale, so those routes refuse instead.
 func parentLinkAuthorized(r *http.Request, token string) bool {
 	if token == "" {
-		return true
+		return false
 	}
 	return bearerAuthorized(r, token)
 }
@@ -1292,14 +1293,13 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		case claim.RunID == "":
 			writeCodedError(w, http.StatusBadRequest, "every claimed run needs a run_id", "invalid-request")
 			return
-		case strings.Contains(claim.RunID, "@"):
-			// A run ID carrying "@" reads as a branch-namespaced key, so a child
-			// claiming one could forge another branch's supervisor identity.
-			writeCodedError(w, http.StatusBadRequest, "a claimed run id cannot contain \"@\"", "invalid-request")
-			return
-		case b.GetRun(link.Key(body.ChildID, claim.RunID)) != nil && !link.Owns(link.Key(body.ChildID, claim.RunID)):
-			// A record this broker minted itself under a claim key is not a child's
-			// to take: the claim is refused whole so the record keeps its credential.
+		}
+		// A run this broker already owns itself is not a child's to claim, and a
+		// claim never re-points a record it does not own: the registry names every
+		// claim by the branch that makes it, so a collision here is a record this
+		// broker minted itself.
+		key := link.Key(body.ChildID, claim.RunID)
+		if b.GetRun(key) != nil && !link.Owns(key) {
 			writeCodedError(w, http.StatusConflict, "run already registered", "invalid-request")
 			return
 		}
@@ -1408,6 +1408,7 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 		RunID          string          `json:"run_id"`
 		Token          string          `json:"token"`
 		FromRunID      string          `json:"from_run_id"`
+		FromSender     string          `json:"from_sender"`
 		ToRunID        string          `json:"to_run_id"`
 		Type           string          `json:"type"`
 		Payload        json.RawMessage `json:"payload"`
@@ -1445,16 +1446,32 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The branch that owns the asker is the one that knows its display name;
-	// the canonical run ID travels unchanged.
-	if err := b.SendTo(body.FromRunID, body.ToRunID, body.Type, body.Payload, body.MessageID); err != nil {
-		if strings.Contains(err.Error(), "run not found") {
-			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	st := b.GetRun(body.ToRunID)
+	if st == nil {
+		writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 		return
 	}
+	sender := body.FromSender
+	if sender == "" {
+		// A relay that carried no name still names the asker by whatever this
+		// branch resolves for it, which is the run ID at worst.
+		sender = b.DisplayName(body.FromRunID)
+	}
+	queued := &ControlMessage{
+		ID:        body.MessageID,
+		Type:      body.Type,
+		RunID:     body.ToRunID,
+		FromRunID: body.FromRunID,
+		// The branch that owns the asker is the one that knows its display name,
+		// so the relay carries it; the canonical run ID travels unchanged.
+		Sender:    sender,
+		Payload:   body.Payload,
+		CreatedAt: time.Now(),
+	}
+	st.Mu.Lock()
+	st.ControlQueue = append(st.ControlQueue, queued)
+	st.signalLocked()
+	st.Mu.Unlock()
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"queued":  true,
 		"outcome": messaging.OutcomeSent,
@@ -1901,16 +1918,22 @@ func (b *Broker) DisplayName(runID string) string { return b.displayName(runID) 
 
 // MatchLabel returns every run whose display name is exactly label, sorted by
 // run ID so the caller can tell an ambiguous label from a unique one instead of
-// the broker guessing.
+// the broker guessing. A run a registered child broker owns is not this broker's
+// to resolve: its display name belongs to the branch that owns it, so this
+// broker's own labels never resolve to a descendant's record.
 func (b *Broker) MatchLabel(label string) []string {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
+	link := b.parentLink
 	matches := make([]string, 0, 1)
 	for runID, st := range b.runs {
+		if link != nil && link.Owns(runID) {
+			continue
+		}
 		if st.displayName() == label {
 			matches = append(matches, runID)
 		}
 	}
+	b.mu.RUnlock()
 	sort.Strings(matches)
 	return matches
 }
@@ -1978,6 +2001,9 @@ func (b *Broker) SetHarnessName(runID, name string) error {
 	st.HarnessName = name
 	st.Mu.Unlock()
 	b.harnessNameChanged(runID, name)
+	// The label is part of what this broker publishes about the run, so a host
+	// with a parent link re-publishes it now instead of at the next refresh.
+	b.runSetChanged()
 	return nil
 }
 
@@ -2000,8 +2026,13 @@ func (b *Broker) harnessNameChanged(runID, name string) {
 }
 
 // RenameRun changes the model-set display name for runID. An empty name resets
-// the run to its run ID. A harness-supplied name, if any, still wins.
+// the run to its run ID. A harness-supplied name, if any, still wins. A run a
+// registered child broker owns keeps the name that branch publishes for it, so
+// a rename here is refused rather than silently reverted by the next claim.
 func (b *Broker) RenameRun(runID, name string) error {
+	if link, _ := b.parentSeam(); link != nil && link.Owns(runID) {
+		return fmt.Errorf("run %s is owned by a child broker and keeps the name that branch publishes", runID)
+	}
 	st := b.GetRun(runID)
 	if st == nil {
 		return fmt.Errorf("run not found: %s", runID)

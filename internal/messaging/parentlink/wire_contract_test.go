@@ -239,7 +239,9 @@ func driveParentRequests(t *testing.T) map[string]map[string]any {
 
 	registry := NewRegistry()
 	relay := newTestRelay(t, registry, "child-one", child.URL(), "gen-a", "run-b")
-	if err := relay.Ask(ctx, askRequest("msg-1")); err != nil {
+	relayAsk := askRequest("msg-1")
+	relayAsk.To = messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"}
+	if err := relay.Ask(ctx, relayAsk); err != nil {
 		t.Fatalf("relay Ask: %v", err)
 	}
 

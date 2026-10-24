@@ -47,10 +47,6 @@ func newTestChildID() string { return fmt.Sprintf("branch-%d", branchSeq.Add(1))
 
 func (b *branch) url() string { return "http://" + b.broker.Addr() }
 
-// key reports the run ID b's parent addresses runID by, which is how every
-// claim and every later hop names a descendant's run.
-func (b *branch) key(runID string) string { return ParentRunKey(b.childID, runID) }
-
 func (b *branch) token(t *testing.T, runID string) string {
 	t.Helper()
 	token, ok := b.tokens[runID]

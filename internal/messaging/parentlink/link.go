@@ -52,6 +52,10 @@ type Options struct {
 	// Generation reports this broker's current ask generation. Required: the
 	// link pins it and the relay binds every hop to it.
 	Generation func() string
+	// DisplayName reports the display name this broker resolves for a run. A
+	// relay carries it, so the branch that receives the ask reads the name the
+	// asking branch gave it instead of an unresolved run ID.
+	DisplayName func(runID string) string
 	// RetireRun retires the host broker's own record for a run this branch stops
 	// owning after a relay found the owning branch gone: the retirement is
 	// conditional on the record still carrying the credential the run's claim
