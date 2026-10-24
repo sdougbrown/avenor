@@ -130,6 +130,11 @@ func validEndpoint(endpoint string) error {
 	if parsed.Host == "" {
 		return fmt.Errorf("%w: the branch's endpoint names no host", messaging.ErrInvalidRequest)
 	}
+	// The relay posts its hop to the endpoint's root, so a path under the host
+	// would be one the relay never sends to.
+	if parsed.EscapedPath() != "" {
+		return fmt.Errorf("%w: the branch's endpoint must be its broker's root address", messaging.ErrInvalidRequest)
+	}
 	return nil
 }
 
