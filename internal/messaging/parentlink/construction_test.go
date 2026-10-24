@@ -17,6 +17,10 @@ func TestNewRefusesTheCallbacksTheRelayReads(t *testing.T) {
 		t.Fatalf("New without a generation = %v, want ErrInvalidRequest", err)
 	}
 
+	if _, err := New(Options{Generation: func() string { return "gen-a" }}, nil); !errors.Is(err, messaging.ErrInvalidRequest) {
+		t.Fatalf("New without a local seam = %v, want ErrInvalidRequest", err)
+	}
+
 	messenger, err := New(Options{
 		Generation: func() string { return "gen-a" },
 	}, local)
