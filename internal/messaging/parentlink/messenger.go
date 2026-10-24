@@ -15,12 +15,12 @@ import (
 // nothing but its own local messenger, so its behavior is unchanged.
 type Messenger struct {
 	local messaging.Messenger
-	// up is this branch's link to its parent broker. Nil when it has none.
+	// up is this branch's link to its parent broker, nil when it has none.
 	up *Link
-	// down relays into the children that registered with this broker. Nil when
-	// it has none.
-	down     *relay
+	// registry records the child brokers that registered here, and down relays
+	// into the runs they own.
 	registry *Registry
+	down     *relay
 }
 
 // New builds one broker's parent-aware messaging.
