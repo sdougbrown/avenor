@@ -356,7 +356,7 @@ func (l *Link) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (mes
 	}
 	token, _, err := l.credentials(ctx, req.Sender.RunID)
 	if err != nil {
-		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
+		return messaging.WithdrawResult{Outcome: messaging.OutcomePossiblyPending}, err
 	}
 	status, raw, err := l.post(ctx, pathWithdraw, map[string]any{
 		"cancel_message_id": req.MessageID,
