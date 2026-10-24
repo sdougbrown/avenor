@@ -1,6 +1,8 @@
 package parentlink
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"testing"
 	"time"

@@ -289,10 +289,10 @@ func TestParentPeerExportHidesSiblingBranches(t *testing.T) {
 		t.Fatalf("sessions = (%d, %v), want 200", status, body)
 	}
 	listed := sessionRunIDs(t, body)
-	if !listed["asker"] || !listed["orchestrator"] {
-		t.Fatalf("branch listing = %v, want its own run and the parent's own run", listed)
+	if listed["asker"] != 1 || listed["orchestrator"] != 1 {
+		t.Fatalf("branch listing = %v, want its own run and the parent's own run, once each", listed)
 	}
-	if listed[sibling.key("target")] {
+	if listed[sibling.key("target")] != 0 {
 		t.Fatalf("branch listing = %v, want no sibling branch run", listed)
 	}
 
@@ -301,8 +301,8 @@ func TestParentPeerExportHidesSiblingBranches(t *testing.T) {
 		t.Fatalf("parent sessions = (%d, %v), want 200", status, body)
 	}
 	listed = sessionRunIDs(t, body)
-	if !listed["orchestrator"] || !listed[first.key("asker")] || !listed[sibling.key("target")] {
-		t.Fatalf("parent listing = %v, want its own run and its owned descendants", listed)
+	if listed["orchestrator"] != 1 || listed[first.key("asker")] != 1 || listed[sibling.key("target")] != 1 {
+		t.Fatalf("parent listing = %v, want its own run and its owned descendants, once each", listed)
 	}
 }
 
@@ -325,20 +325,22 @@ func TestBranchRetiresItsClaimOnClose(t *testing.T) {
 	}
 }
 
-func sessionRunIDs(t *testing.T, body map[string]any) map[string]bool {
+// sessionRunIDs counts the rows a /sessions listing carries for each run ID, so
+// a run listed twice reads as two rather than as present.
+func sessionRunIDs(t *testing.T, body map[string]any) map[string]int {
 	t.Helper()
 	sessions, ok := body["sessions"].([]any)
 	if !ok {
 		t.Fatalf("sessions body = %v, want a sessions array", body)
 	}
-	listed := make(map[string]bool, len(sessions))
+	listed := make(map[string]int, len(sessions))
 	for _, entry := range sessions {
 		record, ok := entry.(map[string]any)
 		if !ok {
 			continue
 		}
 		if runID, ok := record["run_id"].(string); ok {
-			listed[runID] = true
+			listed[runID]++
 		}
 	}
 	return listed

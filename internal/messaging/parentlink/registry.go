@@ -61,6 +61,20 @@ func ParentRunKey(childID, runID string) string {
 	return runID + "@" + childID
 }
 
+// localRunID is the inverse of ParentRunKey: the run ID a branch knows a run by,
+// recovered from the key its parent addresses that run by. It reports false for
+// a key that is not namespaced by that branch.
+func localRunID(key, childID string) (string, bool) {
+	if childID == "" {
+		return "", false
+	}
+	runID, namespaced := strings.CutSuffix(key, "@"+childID)
+	if !namespaced || runID == "" {
+		return "", false
+	}
+	return runID, true
+}
+
 // Hop is one child broker as a relay next hop: the endpoint a relay is posted
 // to, the run ID that branch knows the target by, the generation that endpoint
 // pinned when the child registered, and the credential the child handed its
