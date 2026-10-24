@@ -306,7 +306,15 @@ func (l *Link) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.W
 	}, req.Sender.RunID, token, timeout+messaging.CleanupDeadline)
 	if err != nil {
 		if httpbase.IsTransportCancelled(err) {
-			return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
+			// The caller's cancellation reached the wait, so the edge's fate is
+			// unknown and the caller hears why, exactly as a local wait reports
+			// its own cancellation.
+			return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, err
+		}
+		if httpbase.NeverTransmitted(err) {
+			// The connection was refused before any byte was written, so the
+			// wait was never carried and the edge was never asked.
+			return messaging.WaitResult{Outcome: messaging.OutcomeNotSent}, fmt.Errorf("%w: %v", ErrParentUnavailable, err)
 		}
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, fmt.Errorf("%w: %v", ErrParentUnavailable, err)
 	}
