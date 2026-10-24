@@ -149,8 +149,8 @@ func (l *Link) RunChanged() {
 }
 
 // publishLoop re-publishes the run set after a change. A parent that is
-// unreachable keeps the claim it last accepted; the next change or the next
-// upward call re-publishes.
+// unreachable keeps the claim it last accepted; the next change signaled
+// through RunChanged re-publishes.
 func (l *Link) publishLoop(ctx context.Context) {
 	defer l.wg.Done()
 	for {
