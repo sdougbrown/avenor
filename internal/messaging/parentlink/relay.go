@@ -19,20 +19,16 @@ import (
 type relay struct {
 	registry *Registry
 	client   *httpbase.Client
-	// token reports the credential this broker issued for a descendant run.
-	token func(runID string) (string, bool)
 	// generation reports this broker's current ask generation, which the child
 	// records as the generation its eventual reply is bound to.
 	generation func() string
 }
 
 // newRelay builds the relay that reaches the children registered with this
-// broker. The relay reads the run credential and the generation on every hop,
-// so a missing callback is refused here rather than at the first relay.
+// broker. The relay reads the generation on every hop, so a missing callback is
+// refused here rather than at the first relay. The run credential is the one the
+// child handed this broker in its registration, so it comes from the registry.
 func newRelay(opts Options, registry *Registry) (*relay, error) {
-	if opts.RunToken == nil {
-		return nil, fmt.Errorf("%w: a parent broker needs the credential it authenticates a descendant run with", messaging.ErrInvalidRequest)
-	}
 	if opts.Generation == nil {
 		return nil, fmt.Errorf("%w: a parent broker needs its current ask generation", messaging.ErrInvalidRequest)
 	}
@@ -43,7 +39,6 @@ func newRelay(opts Options, registry *Registry) (*relay, error) {
 	return &relay{
 		registry:   registry,
 		client:     httpbase.New(ErrUnsupportedParentProtocol, timeout),
-		token:      opts.RunToken,
 		generation: opts.Generation,
 	}, nil
 }
@@ -89,13 +84,15 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 	if !ok {
 		return fmt.Errorf("%w: no registered branch owns run %q", messaging.ErrTargetUnavailable, target)
 	}
-	token, ok := r.token(target)
-	if !ok || token == "" {
+	// The child authenticated this run when it registered it, so the credential
+	// the relay posts is the one from the child's own claim, not a second copy
+	// this broker keeps elsewhere.
+	if next.Token == "" {
 		return fmt.Errorf("%w: this broker has no credential for run %q", messaging.ErrTargetUnavailable, target)
 	}
 	body, err := json.Marshal(map[string]any{
 		"run_id":          target,
-		"token":           token,
+		"token":           next.Token,
 		"from_run_id":     req.FromRunID,
 		"to_run_id":       target,
 		"type":            req.Kind,

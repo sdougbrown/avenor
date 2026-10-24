@@ -15,7 +15,6 @@ func newTestMessenger(t *testing.T, local *stubMessenger, parent *stubBroker) *M
 		Endpoint:   "http://child-one",
 		Runs:       testRuns,
 		Generation: func() string { return "gen-a" },
-		RunToken:   func(string) (string, bool) { return "tok-a", true },
 	}
 	if parent != nil {
 		opts.ParentURL = parent.URL()
@@ -42,7 +41,7 @@ func TestMessengerWithdrawsTheEdgeWhenTheRelayFails(t *testing.T) {
 		ChildID:    "child-one",
 		Endpoint:   child.URL(),
 		Generation: "gen-a",
-		Runs:       []messaging.RunClaim{{RunID: "run-b"}},
+		Runs:       []messaging.RunClaim{{RunID: "run-b", Token: "tok-b"}},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
