@@ -30,17 +30,25 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 		t.Fatalf("hop for run-a = (%+v, %v), want the child's endpoint, generation and label", next, ok)
 	}
 
-	// Another child cannot claim a run this one already owns.
-	if _, err := registry.Register(messaging.DescendantRegistration{
+	// Another child cannot claim a run this one already owns, and a refused
+	// claim applies nothing at all.
+	refused, err := registry.Register(messaging.DescendantRegistration{
 		ChildID:    "two",
 		Endpoint:   "http://two",
 		Generation: "gen-two",
 		Runs:       []messaging.RunClaim{{RunID: "run-a"}},
-	}); !errors.Is(err, ErrRunClaimed) || !errors.Is(err, messaging.ErrInvalidRequest) {
+	})
+	if !errors.Is(err, ErrRunClaimed) || !errors.Is(err, messaging.ErrInvalidRequest) {
 		t.Fatalf("conflicting claim = %v, want ErrRunClaimed", err)
+	}
+	if len(refused.Adopted) != 0 || len(refused.Retired) != 0 {
+		t.Fatalf("refused claim = %+v, want nothing adopted and nothing retired", refused)
 	}
 	if owner, ok := registry.Owner("run-a"); !ok || owner != "one" {
 		t.Fatalf("owner of run-a = (%q, %v) after a refused claim, want the first child", owner, ok)
+	}
+	if next, ok := registry.Hop("run-a"); !ok || next.Endpoint != "http://one" || next.Generation != "gen-one" {
+		t.Fatalf("hop for run-a = (%+v, %v) after a refused claim, want the surviving child's hop", next, ok)
 	}
 
 	// A re-registration replaces the claim, so the runs it stopped naming are
