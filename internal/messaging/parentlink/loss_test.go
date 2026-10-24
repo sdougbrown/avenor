@@ -22,8 +22,11 @@ func awaitUntil(t *testing.T, what string, condition func() bool) {
 }
 
 // TestUnreachableParentSurfacesAsTargetUnavailable pins the parent-loss
-// fallback: a branch whose parent is not listening forwards nothing, reports the
-// target as unavailable instead of hanging, and keeps its own listing.
+// fallback: a branch whose parent is not listening forwards nothing, reports an
+// ask for a target it cannot reach as target-unavailable instead of hanging, and
+// reports a wait with no forwarded route as edge-absent. The listing such a
+// branch still keeps is pinned separately by
+// TestParentLossKeepsThePartialListingAndReportsIt.
 func TestUnreachableParentSurfacesAsTargetUnavailable(t *testing.T) {
 	gone := startBranch(t, "")
 	goneURL := gone.url()
@@ -106,7 +109,7 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 
 	done := make(chan struct{}, asks)
 	for i := 0; i < asks; i++ {
-		go func(replied bool) {
+		go func(i int) {
 			defer func() { done <- struct{}{} }()
 			ctx := context.Background()
 			now := time.Now().UTC()
@@ -126,7 +129,7 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 				t.Errorf("ask = (%+v, %v), want sent", sent, err)
 				return
 			}
-			if !replied {
+			if i%2 == 0 {
 				withdrawn, err := first.link.Withdraw(ctx, messaging.WithdrawRequest{
 					Sender:     messaging.Identity{RunID: "asker"},
 					MessageID:  msgID,
@@ -137,16 +140,26 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 				}
 				return
 			}
-			outcome, err := second.link.Reply(ctx, messaging.ReplyRequest{
-				From:      messaging.Identity{RunID: "target"},
-				ToRunID:   "asker",
-				MessageID: msgID,
-				Body:      `{"message":"pong"}`,
-			})
-			if err != nil || outcome != messaging.OutcomeReplied {
-				t.Errorf("reply = (%v, %v), want replied", outcome, err)
-				return
-			}
+			// The reply arm: the target's reply races this branch's wait on
+			// the same edge, and the verdict is Replied under either
+			// interleaving: a wait admitted first blocks on the live edge until
+			// the reply completes it, and a reply that completes the edge first
+			// leaves it for this wait to read, because this wait is the only
+			// consumer. A withdrawal never touches this edge: that path is the
+			// other arm's.
+			replied := make(chan messaging.Outcome, 1)
+			go func() {
+				outcome, err := second.link.Reply(ctx, messaging.ReplyRequest{
+					From:      messaging.Identity{RunID: "target"},
+					ToRunID:   "asker",
+					MessageID: msgID,
+					Body:      `{"message":"pong"}`,
+				})
+				if err != nil || outcome != messaging.OutcomeReplied {
+					t.Errorf("reply = (%v, %v), want replied", outcome, err)
+				}
+				replied <- outcome
+			}()
 			waited, err := first.link.Wait(ctx, messaging.WaitRequest{
 				Sender:     messaging.Identity{RunID: "asker"},
 				MessageID:  msgID,
@@ -155,8 +168,11 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 			})
 			if err != nil || waited.Outcome != messaging.OutcomeReplied {
 				t.Errorf("wait = (%+v, %v), want replied", waited, err)
+			} else if string(waited.Reply.Payload) != `{"message":"pong"}` {
+				t.Errorf("wait reply payload = %v, want the reply the target sent", waited.Reply.Payload)
 			}
-		}(false)
+			<-replied
+		}(i)
 	}
 	for i := 0; i < asks; i++ {
 		<-done
