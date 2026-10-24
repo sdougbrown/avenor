@@ -160,6 +160,13 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 	return nil
 }
 
+// forget drops a run this broker can no longer route to: its claim, and the
+// host broker's own record for it when the host installs one.
+func (r *relay) forget(runID string) {
+	r.registry.Forget(runID)
+	r.retireRuns([]string{runID})
+}
+
 // Close releases the relay's HTTP client.
 func (r *relay) Close() error {
 	return r.client.Close()

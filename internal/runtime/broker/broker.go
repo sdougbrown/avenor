@@ -1485,7 +1485,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 	for _, run := range claim.Runs {
 		b.ownRun(run)
 	}
-	if claim.Changed {
+	if len(claim.Adopted) > 0 || len(claim.Retired) > 0 {
 		b.runSetChanged()
 	}
 	runKeys := make(map[string]string, len(claim.Runs))
@@ -1992,14 +1992,6 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 	return st.Token, true
 }
 
-// ownRun adopts a run a registered child broker owns, under the run ID this
-// broker addresses it by. The record keeps the credential that branch
-// authenticates the run with, so a forwarded ask and a relay into that branch
-// use the one credential the run already has; a replacement branch presents a
-// rotated credential, and the record follows the claim it accepted so both
-// directions keep authenticating. A caller that adopts a whole set notifies the
-// run observer once when the set is applied.
-func (b *Broker) ownRun(claim messaging.ClaimedRun) string {
 // ownRun adopts a run a registered child broker owns, under the run ID this
 // broker addresses it by. The record keeps the credential that branch
 // authenticates the run with, so a forwarded ask and a relay into that branch
