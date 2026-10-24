@@ -1,9 +1,36 @@
 package messaging
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 )
+
+// TestPeerListingKeepsThePeersItRead pins the rule every provider that reads
+// a peer listing relies on: a listing that could not be completed keeps the
+// peers it did read and reports the incompleteness alongside them, a listing
+// that could not be read at all reports the failure alone, and a record that
+// cannot be decoded is a decode failure.
+func TestPeerListingKeepsThePeersItRead(t *testing.T) {
+	listingErr := errors.New("the listing could not be completed")
+	peers := []Peer{{RunID: "rt-seen", Session: []byte(`{"run_id":"rt-seen"}`)}}
+
+	records, err := PeerListing(peers, listingErr)
+	if !errors.Is(err, listingErr) {
+		t.Fatalf("partial listing error = %v, want the incompleteness reported", err)
+	}
+	if len(records) != 1 || records[0].RunID != "rt-seen" {
+		t.Fatalf("partial listing records = %+v, want the peer it read", records)
+	}
+
+	if _, err := PeerListing(nil, listingErr); !errors.Is(err, listingErr) {
+		t.Fatalf("failed listing error = %v, want the failure reported", err)
+	}
+
+	if _, err := PeerListing([]Peer{{RunID: "rt-bad", Session: []byte(`{"run_id":`)}}, nil); err == nil {
+		t.Fatal("unreadable record error = nil, want the decode failure reported")
+	}
+}
 
 // TestDecodePeerRecordsKeepsThePeerID pins that a session record's own
 // run_id cannot rename the peer the listing names, so a peer cannot claim
