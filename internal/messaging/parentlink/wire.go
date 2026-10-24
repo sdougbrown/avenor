@@ -29,7 +29,8 @@ var ErrUnsupportedParentProtocol = fmt.Errorf(
 )
 
 // envelope is one parent broker response. Every field is optional so a response
-// carries only the operation's result, plus its code class on failure.
+// carries only the operation's result, plus its code class on failure. The
+// parent protocol this link speaks is recorded in testdata/parent_wire.json.
 type envelope struct {
 	Status     int               `json:"-"`
 	Outcome    messaging.Outcome `json:"outcome"`
