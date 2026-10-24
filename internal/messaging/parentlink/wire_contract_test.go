@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"testing"
 
@@ -83,10 +84,23 @@ func TestParentWireDocumentPinsThePathsAndTheCodes(t *testing.T) {
 
 // TestParentWireDocumentPinsTheRequestShapes pins the requests the link and
 // the relay put on the wire: every operation carries exactly the fields the
-// recorded protocol names.
+// recorded protocol names, and every operation the protocol names was sent.
 func TestParentWireDocumentPinsTheRequestShapes(t *testing.T) {
 	doc := loadParentWireDoc(t)
 	requests := driveParentRequests(t)
+	recorded := make([]string, 0, len(requests))
+	for operation := range requests {
+		recorded = append(recorded, operation)
+	}
+	sort.Strings(recorded)
+	documented := make([]string, 0, len(doc.RequestFields))
+	for operation := range doc.RequestFields {
+		documented = append(documented, operation)
+	}
+	sort.Strings(documented)
+	if !slices.Equal(recorded, documented) {
+		t.Fatalf("the operations sent = %v, want the documented %v", recorded, documented)
+	}
 	for operation, documented := range doc.RequestFields {
 		body, ok := requests[operation]
 		if !ok {
@@ -154,8 +168,21 @@ func TestParentWireDocumentPinsTheResponseShapes(t *testing.T) {
 			}
 			if body.Fence != nil {
 				fence := body.Fence
-				if fence.Sender == "" || fence.MessageID == "" || fence.Generation == "" || fence.Deadline.IsZero() {
-					t.Fatalf("the decoded fence = %+v, want every documented field", fence)
+				carried := map[string]bool{
+					"sender":     fence.Sender != "",
+					"message_id": fence.MessageID != "",
+					"generation": fence.Generation != "",
+					"deadline":   !fence.Deadline.IsZero(),
+					"terminal":   fence.Terminal,
+				}
+				for _, field := range doc.FenceFields {
+					present, known := carried[field]
+					if !known {
+						t.Fatalf("the documented fence field %q is not one the fence carries", field)
+					}
+					if !present {
+						t.Fatalf("the decoded fence does not carry %q", field)
+					}
 				}
 			}
 		})
