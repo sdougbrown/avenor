@@ -290,8 +290,8 @@ type Broker struct {
 	messenger messaging.Messenger
 
 	// parentLink is the broker-hierarchy seam: the descendant registry its
-	// parent routes write, and the sink a publication to a run this broker does
-	// not own goes to. nil leaves the broker standalone.
+	// parent routes write, and the ownership test the ask store's publication
+	// uses for a run that has no queue here. nil leaves the broker standalone.
 	parentLink      messaging.ParentLink
 	parentLinkToken string
 
@@ -341,10 +341,10 @@ func (b *Broker) SetMessenger(m messaging.Messenger) {
 	b.messenger = m
 }
 
-// SetParentLink installs the broker's parent-link seam: the descendant
-// registry the parent routes write and the sink a publication to a run this
-// broker does not own goes to. A nil link leaves the parent routes unserved,
-// which is what a standalone broker reports.
+// SetParentLink installs the broker's parent-link seam: the descendant registry
+// the parent routes write, and the ownership test a publication uses for a run
+// that a child broker owns and this one has no queue for. A nil link leaves the
+// parent routes unserved, which is what a standalone broker reports.
 func (b *Broker) SetParentLink(link messaging.ParentLink) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
