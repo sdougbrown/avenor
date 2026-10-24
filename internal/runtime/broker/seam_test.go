@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -379,6 +380,55 @@ func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
 	var record messaging.PeerRecord
 	if err := json.Unmarshal(listed.Peers[0].Session, &record); err != nil || record.RunID != "only-peer" {
 		t.Fatalf("partial peer session = %s (%v), want only-peer", listed.Peers[0].Session, err)
+	}
+	if strings.Contains(err.Error(), "parent link down") {
+		t.Fatalf("peers error = %v, want the seam's own failure text kept out of the served listing", err)
+	}
+	if !strings.Contains(err.Error(), "could not read every peer") {
+		t.Fatalf("peers error = %v, want the listing's own reason", err)
+	}
+}
+
+// TestSessionsDropsAnUnreadablePeerRecord pins that a peer whose session
+// record cannot be read is dropped from the listing and the listing reports
+// that it could not read every peer, so a partial list never reads as a
+// complete one.
+func TestSessionsDropsAnUnreadablePeerRecord(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+	b.SetMessenger(seamPeerSource{
+		Messenger: b.LocalMessenger(),
+		peers: []messaging.Peer{
+			{RunID: "readable-peer", Session: json.RawMessage(`{"run_id":"readable-peer"}`)},
+			{RunID: "unreadable-peer", Session: json.RawMessage(`not json`)},
+		},
+	})
+	t.Cleanup(func() { b.SetMessenger(nil) })
+
+	child, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "sender", Token: senderToken})
+	if err != nil {
+		t.Fatalf("local transport: %v", err)
+	}
+	defer child.Close()
+
+	ctx := context.Background()
+	pre, err := child.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	listed, err := child.Peers(ctx, messaging.PeersRequest{
+		Sender:     messaging.Identity{RunID: "sender"},
+		Generation: pre.Generation,
+	})
+	if err == nil {
+		t.Fatalf("peers = %+v, want the incomplete listing reported", listed.Peers)
+	}
+	if !strings.Contains(err.Error(), "could not read every peer") {
+		t.Fatalf("peers error = %v, want the listing's own reason", err)
+	}
+	for _, peer := range listed.Peers {
+		if peer.RunID == "unreadable-peer" {
+			t.Fatalf("peers = %+v, want the unreadable peer dropped", listed.Peers)
+		}
 	}
 }
 
