@@ -14,7 +14,7 @@ import (
 func TestPruneLockedDropsRoutesPastTheWaitHorizon(t *testing.T) {
 	now := time.Now()
 	link := &Link{
-		asks: map[askKey]askRoute{
+		asks: map[askKey]askHop{
 			{Sender: "run-a", MessageID: "msg-old"}: {generation: "gen-a", recordedAt: now.Add(-messaging.MaxWait - time.Second)},
 			{Sender: "run-a", MessageID: "msg-new"}: {generation: "gen-a", recordedAt: now.Add(-time.Second)},
 		},

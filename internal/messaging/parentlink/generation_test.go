@@ -179,7 +179,7 @@ func TestLinkSendClassifiesARefusedGeneration(t *testing.T) {
 	if sent.Outcome != messaging.OutcomePossiblyPending {
 		t.Fatalf("Send outcome = %q, want %q while the parent keeps its generation", sent.Outcome, messaging.OutcomePossiblyPending)
 	}
-	if _, ok := link.askRoute("run-a", "msg-1"); ok {
+	if _, ok := link.hopOf("run-a", "msg-1"); ok {
 		t.Fatal("a refused ask recorded a route, want none")
 	}
 
@@ -193,7 +193,7 @@ func TestLinkSendClassifiesARefusedGeneration(t *testing.T) {
 	if sent.Outcome != messaging.OutcomeLost {
 		t.Fatalf("Send after the replacement outcome = %q, want %q", sent.Outcome, messaging.OutcomeLost)
 	}
-	if _, ok := link.askRoute("run-a", "msg-1"); ok {
+	if _, ok := link.hopOf("run-a", "msg-1"); ok {
 		t.Fatal("a lost ask recorded a route, want none")
 	}
 }
@@ -278,7 +278,7 @@ func TestLinkWithdrawKeepsTheAskUncertainWhenTheParentKeepsItsGeneration(t *test
 	}
 	// The refusal was not a replacement, so the route stays and a later
 	// operation still follows the pinned hop.
-	if _, ok := link.askRoute("run-a", "msg-1"); !ok {
+	if _, ok := link.hopOf("run-a", "msg-1"); !ok {
 		t.Fatal("the route was dropped, want it kept for the unchanged parent")
 	}
 }
