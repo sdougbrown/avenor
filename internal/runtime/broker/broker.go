@@ -1457,12 +1457,6 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusBadRequest, "every claimed run needs a run_id", "invalid-request")
 			return
 		}
-		// A run this broker already owns itself is not a child's to claim. The
-		// registry refuses a run another child already owns.
-		if b.GetRun(claim.RunID) != nil && !link.Owns(claim.RunID) {
-			writeCodedError(w, http.StatusConflict, "run already registered", "invalid-request")
-			return
-		}
 	}
 	claim, err := link.Register(messaging.DescendantRegistration{
 		ChildID:    body.ChildID,
@@ -1475,9 +1469,9 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The claim is applied: the runs the child owns now have records here and the
-	// runs it stopped owning lose theirs. The run observer fires once, after the
-	// whole claim settled, so a host that publishes this broker's own runs
-	// re-publishes the settled set.
+	// runs it stopped owning lose theirs. The run observer fires once per retired
+	// run as they are deleted, plus once after the settled set, so a host that
+	// publishes this broker's own runs re-publishes each step.
 	for _, runID := range claim.Retired {
 		b.DeleteRun(runID)
 	}
