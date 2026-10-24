@@ -64,6 +64,81 @@ func TestWithdrawReportsAnUncertainFateWhenTheCredentialFails(t *testing.T) {
 		t.Fatalf("Withdraw outcome %q is outside the withdrawal contract", withdrawn.Outcome)
 	}
 }
+
+// TestWithdrawReadsEveryWithdrawalVerdictFromTheParent drives every outcome
+// a withdrawal may report through the withdraw path, so each member of the
+// contract is read from the wire and passed through unchanged.
+func TestWithdrawReadsEveryWithdrawalVerdictFromTheParent(t *testing.T) {
+	cases := []messaging.Outcome{
+		messaging.OutcomeReplied,
+		messaging.OutcomeTimedOut,
+		messaging.OutcomeLost,
+		messaging.OutcomeEdgeAbsent,
+	}
+	for _, outcome := range cases {
+		t.Run(string(outcome), func(t *testing.T) {
+			stub := newStubBroker(t, func(req stubRequest) (int, string) {
+				switch req.Path {
+				case pathRegister:
+					return http.StatusOK, `{"generation":"gen-a"}`
+				case pathSend:
+					return http.StatusOK, `{"outcome":"sent"}`
+				case pathWithdraw:
+					return http.StatusOK, `{"outcome":"` + string(outcome) + `"}`
+				}
+				return http.StatusOK, `{}`
+			})
+			ctx := testContext(t)
+			link := newTestLink(t, stub, "gen-a")
+
+			if sent, err := link.Send(ctx, askRequest("msg-1")); err != nil || sent.Outcome != messaging.OutcomeSent {
+				t.Fatalf("Send = (%+v, %v), want the ask admitted", sent, err)
+			}
+			withdrawn, err := link.Withdraw(ctx, withdrawRequest("msg-1"))
+			if err != nil {
+				t.Fatalf("Withdraw error = %v, want no error", err)
+			}
+			if withdrawn.Outcome != outcome {
+				t.Fatalf("Withdraw outcome = %q, want %q", withdrawn.Outcome, outcome)
+			}
+			if !messaging.IsWithdrawOutcome(withdrawn.Outcome) {
+				t.Fatalf("Withdraw outcome %q is outside the withdrawal contract", withdrawn.Outcome)
+			}
+		})
+	}
+}
+
+// TestIsWithdrawOutcomeClassifiesTheWithdrawalVerdicts pins the contract set
+// itself: the verdicts a withdrawal may report are accepted, and every other
+// outcome is refused.
+func TestIsWithdrawOutcomeClassifiesTheWithdrawalVerdicts(t *testing.T) {
+	accepted := []messaging.Outcome{
+		messaging.OutcomeWithdrawn,
+		messaging.OutcomeReplied,
+		messaging.OutcomeTimedOut,
+		messaging.OutcomeEdgeAbsent,
+		messaging.OutcomePossiblyPending,
+		messaging.OutcomeLost,
+	}
+	for _, outcome := range accepted {
+		if !messaging.IsWithdrawOutcome(outcome) {
+			t.Fatalf("IsWithdrawOutcome(%q) = false, want true", outcome)
+		}
+	}
+	refused := []messaging.Outcome{
+		messaging.OutcomeSent,
+		messaging.OutcomeNotSent,
+		messaging.OutcomeAuthRejected,
+		messaging.Outcome(""),
+	}
+	for _, outcome := range refused {
+		if messaging.IsWithdrawOutcome(outcome) {
+			t.Fatalf("IsWithdrawOutcome(%q) = true, want false", outcome)
+		}
+	}
+}
+
+// TestWithdrawReportsTheProtocolErrorWhenTheParentAnswersWithoutAVerdict
 // pins the withdrawal's guard against an answer that describes no withdrawal
 // verdict: a response with neither a wire code nor an outcome, and a response
 // with an outcome a withdrawal never reports, are both protocol mismatches
