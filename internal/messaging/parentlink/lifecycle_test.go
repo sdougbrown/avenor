@@ -1,9 +1,12 @@
 package parentlink
 
 import (
+	"errors"
 	"net/http"
 	"sync/atomic"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 // TestLinkPublishesItsClaimAndCoalescesChanges pins the claim's lifecycle: the
@@ -198,5 +201,14 @@ func TestLinkRefusesWorkAfterItIsClosed(t *testing.T) {
 	}
 	if _, err := link.Peers(ctx); err == nil {
 		t.Fatal("Peers after the close = nil, want an error")
+	}
+	// A late relay-route record cannot land either: the claim the route would
+	// reply into was retracted by the close.
+	if err := link.RecordRelay(messaging.RelayRoute{
+		MessageID:      "msg-1",
+		AskerRunID:     "run-a",
+		EdgeGeneration: "gen-a",
+	}); !errors.Is(err, messaging.ErrTransportClosed) {
+		t.Fatalf("RecordRelay after the close = %v, want ErrTransportClosed", err)
 	}
 }
