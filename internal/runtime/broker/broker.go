@@ -337,17 +337,6 @@ func (b *Broker) SetMessenger(m messaging.Messenger) {
 	b.messenger = m
 }
 
-// SetAskRoute installs an ask-only seam: ask operations delegate to route and
-// every other publication stays local. It is the composition a host that owns
-// a parent link builds on through SetMessenger.
-func (b *Broker) SetAskRoute(route messaging.AskRoute) {
-	if route == nil {
-		b.SetMessenger(nil)
-		return
-	}
-	b.SetMessenger(askRouteMessenger{local: b.localMessenger(), route: route})
-}
-
 // RenameHandler is the authority a rename delegates to. It persists the name
 // and returns the resolved run and the label before and after the write. The
 // broker installs one only when a supervisor owns it; a broker without one
@@ -1814,40 +1803,6 @@ func (m localMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 		peers = append(peers, messaging.Peer{RunID: info.RunID, Session: raw})
 	}
 	return peers, nil
-}
-
-// askRouteMessenger composes an installed ask route with the broker's local
-// publication: asks delegate to the route and tells, replies and lookups stay
-// local.
-type askRouteMessenger struct {
-	local localMessenger
-	route messaging.AskRoute
-}
-
-func (m askRouteMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
-	return m.route.Send(ctx, req)
-}
-
-func (m askRouteMessenger) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
-	return m.route.Wait(ctx, req)
-}
-
-func (m askRouteMessenger) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
-	return m.route.Withdraw(ctx, req)
-}
-
-func (m askRouteMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
-	return m.local.Reply(ctx, req)
-}
-
-func (m askRouteMessenger) Deliver(ctx context.Context, req messaging.DeliverRequest) error {
-	return m.local.Deliver(ctx, req)
-}
-
-func (m askRouteMessenger) Reachable(runID string) bool { return m.local.Reachable(runID) }
-
-func (m askRouteMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
-	return m.local.Peers(ctx)
 }
 
 // mergedField combines a payload field with its envelope counterpart: the

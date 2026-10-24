@@ -43,22 +43,15 @@ type Transport interface {
 	Close() error
 }
 
-// AskRoute is the ask-only delegate seam. The broker installs a local
-// implementation by default and a host implementation replaces it only when a
-// host coordinator exists.
-type AskRoute interface {
-	Send(ctx context.Context, req SendRequest) (SendResult, error)
-	Wait(ctx context.Context, req WaitRequest) (WaitResult, error)
-	Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error)
-}
-
 // DeliverRequest is one fire-and-forget message a messenger publishes to a
 // target. It allocates no reply edge: a tell has no ask to answer.
 type DeliverRequest struct {
-	FromRunID     string
-	ToRunID       string
-	Kind          string
-	Payload       json.RawMessage
+	FromRunID string
+	ToRunID   string
+	Kind      string
+	Payload   json.RawMessage
+	// CorrelationID is the id the publication carries, so a receiver can
+	// relate it to the tell that produced it.
 	CorrelationID string
 }
 
