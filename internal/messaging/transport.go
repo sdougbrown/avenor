@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -36,13 +37,50 @@ type Transport interface {
 	Close() error
 }
 
-// AskRoute is the delegate seam the broker exposes for ask operations. The
-// broker installs a local implementation by default and a host implementation
-// replaces it only when a host coordinator exists.
+// AskRoute is the ask-only delegate seam. The broker installs a local
+// implementation by default and a host implementation replaces it only when a
+// host coordinator exists.
 type AskRoute interface {
 	Send(ctx context.Context, req SendRequest) (SendResult, error)
 	Wait(ctx context.Context, req WaitRequest) (WaitResult, error)
 	Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error)
+}
+
+// DeliverRequest is one fire-and-forget message a messenger publishes to a
+// target. It allocates no reply edge: a tell has no ask to answer.
+type DeliverRequest struct {
+	FromRunID     string
+	ToRunID       string
+	Kind          string
+	Payload       json.RawMessage
+	CorrelationID string
+}
+
+// Messenger is the broker's outbound seam for local messaging. The broker
+// installs a local implementation that publishes into its own queues and ask
+// store; a host that owns a parent link replaces it so asks, tells, replies and
+// peer lookups all have one place to reach the parent. An implementation
+// composes the local seam for targets that are still local instead of owning a
+// queue or an ask store of its own.
+type Messenger interface {
+	// Send admits an ask and publishes it to its target. legacy admits an
+	// unversioned message id without a generation, which only the broker's
+	// legacy local HTTP router does.
+	Send(ctx context.Context, req SendRequest, legacy bool) (SendResult, error)
+	// Wait blocks for the reply to an ask this messenger routed.
+	Wait(ctx context.Context, req WaitRequest) (WaitResult, error)
+	// Withdraw withdraws an ask this messenger routed.
+	Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error)
+	// Reply completes the ask edge MessageID names for ToRunID. An edge this
+	// messenger did not route reports OutcomeEdgeAbsent and the caller falls
+	// back to Deliver.
+	Reply(ctx context.Context, req ReplyRequest) (Outcome, error)
+	// Deliver publishes a fire-and-forget message.
+	Deliver(ctx context.Context, req DeliverRequest) error
+	// Reachable reports whether runID can be reached from here.
+	Reachable(runID string) bool
+	// Peers lists the participants reachable from here.
+	Peers(ctx context.Context) ([]Peer, error)
 }
 
 // Typed error classes. Transports report facts through these; callers map them
