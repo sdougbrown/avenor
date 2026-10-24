@@ -318,7 +318,10 @@ func (l *Link) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.W
 				l.dropAsk(key)
 				return messaging.WaitResult{Outcome: messaging.OutcomeLost}, nil
 			}
-			return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
+			// The parent refused the pinned generation and the ask's fate is
+			// unknown, so the wait reports the refusal the withdrawal reports
+			// for the same state.
+			return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, err
 		}
 		return messaging.WaitResult{Outcome: body.outcomeOf()}, err
 	}
