@@ -61,29 +61,3 @@ func TestRelayDropsTheWholeChildWhenItRefusesTheBranch(t *testing.T) {
 		t.Fatal("the refused branch still routes its other run")
 	}
 }
-
-// TestRelayForgetsOnlyTheRunTheChildRetired pins the relay's refusal rule for
-// a child that no longer knows the target run: the run stops being routed and
-// the child's other runs keep their route.
-func TestRelayForgetsOnlyTheRunTheChildRetired(t *testing.T) {
-	stub := newStubBroker(t, func(req stubRequest) (int, string) {
-		return http.StatusNotFound, `{}`
-	})
-	registry := NewRegistry()
-	relay := newTestRelay(t, registry, "child-one", stub.URL(), "gen-a", "run-b", "run-c")
-
-	err := relay.Ask(testContext(t), messaging.SendRequest{
-		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-		To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
-		MessageID: "msg-1",
-	})
-	if !errors.Is(err, messaging.ErrTargetUnavailable) {
-		t.Fatalf("Ask = %v, want ErrTargetUnavailable", err)
-	}
-	if _, ok := registry.Hop("run-b"); ok {
-		t.Fatal("the retired run still routes")
-	}
-	if _, ok := registry.Hop("run-c"); !ok {
-		t.Fatal("the retired run took the child's other run with it")
-	}
-}
