@@ -218,7 +218,8 @@ func TestMessagePeersKeepsAPartialListing(t *testing.T) {
 	}
 }
 
-func TestResumeAndSessionRPCDispatch(t *testing.T) {	state := NewState("run_1", "", 0)
+func TestResumeAndSessionRPCDispatch(t *testing.T) {
+	state := NewState("run_1", "", 0)
 	s, cap := NewTestServer(state)
 	handler := &mockStableHandler{
 		resumeResult: messaging.ResumeResult{RunID: "run_2", Label: "follow", RuntimeID: "rt_2", SessionID: "ses_2", SentinelFile: "/tmp/s", OnEvent: "/tmp/e"},

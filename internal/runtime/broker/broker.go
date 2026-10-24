@@ -309,7 +309,7 @@ func New(globalToken string) *Broker {
 		store:        askstore.New(askstore.Options{}),
 	}
 	b.store.SetBackend(brokerBackend{broker: b})
-	b.messenger = localMessenger{broker: b}
+	b.messenger = b.localMessenger()
 	return b
 }
 
@@ -318,7 +318,13 @@ func (b *Broker) Store() *askstore.Store { return b.store }
 
 // LocalMessenger returns the broker's own messaging implementation. A host
 // that owns a parent link composes it for every target that is still local.
-func (b *Broker) LocalMessenger() messaging.Messenger { return localMessenger{broker: b} }
+func (b *Broker) LocalMessenger() messaging.Messenger { return b.localMessenger() }
+
+// localMessenger is the broker's own messaging implementation, serving the
+// ask operations from its ask store and the publications from its queues.
+func (b *Broker) localMessenger() localMessenger {
+	return localMessenger{asks: askstore.NewAsker(b.store), broker: b}
+}
 
 // SetMessenger installs the delegate seam for local messaging. A nil messenger
 // restores the broker's own implementation.
@@ -339,7 +345,7 @@ func (b *Broker) SetAskRoute(route messaging.AskRoute) {
 		b.SetMessenger(nil)
 		return
 	}
-	b.SetMessenger(askRouteMessenger{local: localMessenger{broker: b}, route: route})
+	b.SetMessenger(askRouteMessenger{local: b.localMessenger(), route: route})
 }
 
 // RenameHandler is the authority a rename delegates to. It persists the name
@@ -365,7 +371,7 @@ func (b *Broker) seam() messaging.Messenger {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.messenger == nil {
-		return localMessenger{broker: b}
+		return b.localMessenger()
 	}
 	return b.messenger
 }
@@ -1767,39 +1773,26 @@ func (x brokerBackend) Peers() ([]messaging.Peer, error) {
 // store. It owns no state of its own, so a parent-aware messenger composes it
 // for every target that is still local.
 type localMessenger struct {
+	// asks serves the ask operations from the broker's own ask store, so the
+	// store's admission, wait, withdrawal and reply contract has one owner.
+	asks   *askstore.Asker
 	broker *Broker
 }
 
 func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
-	res, err := m.broker.store.Admit(ctx, askstore.AdmitRequest{
-		Sender:     req.From,
-		Target:     req.To.RunID,
-		MessageID:  req.MessageID,
-		Generation: req.Generation,
-		Body:       req.Body,
-		NoReply:    req.NoReply,
-		Legacy:     legacy,
-	})
-	return messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err
+	return m.asks.Send(ctx, req, legacy)
 }
 
 func (m localMessenger) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
-	return m.broker.store.Wait(ctx, m.key(req.Sender, req.MessageID, req.Generation), req.Timeout)
+	return m.asks.Wait(ctx, req)
 }
 
 func (m localMessenger) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
-	return m.broker.store.Withdraw(m.key(req.Sender, req.MessageID, req.Generation))
+	return m.asks.Withdraw(ctx, req)
 }
 
 func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
-	// An empty body is no payload at all, which keeps the reply's stored
-	// payload valid JSON on the wire.
-	var payload json.RawMessage
-	if req.Body != "" {
-		payload = json.RawMessage(req.Body)
-	}
-	key := m.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, m.broker.store.Generation())
-	return m.broker.store.Reply(key, req.From.RunID, payload)
+	return m.asks.Reply(ctx, req)
 }
 
 func (m localMessenger) Deliver(ctx context.Context, req messaging.DeliverRequest) error {
@@ -1821,10 +1814,6 @@ func (m localMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 		peers = append(peers, messaging.Peer{RunID: info.RunID, Session: raw})
 	}
 	return peers, nil
-}
-
-func (m localMessenger) key(sender messaging.Identity, messageID, generation string) messaging.FenceKey {
-	return messaging.FenceKey{Sender: sender.RunID, MessageID: messageID, Generation: generation}
 }
 
 // askRouteMessenger composes an installed ask route with the broker's local

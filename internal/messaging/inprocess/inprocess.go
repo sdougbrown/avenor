@@ -14,6 +14,9 @@ import (
 // Transport is the in-process messaging transport.
 type Transport struct {
 	store *askstore.Store
+	// asks serves the ask operations from the store alone. A routed transport
+	// leaves it unset and resolves the messenger per call instead.
+	asks *askstore.Asker
 	// resolve names the messenger ask, reply and peer operations delegate to.
 	// It is nil when the transport serves them from the store alone.
 	resolve  func() messaging.Messenger
@@ -38,7 +41,11 @@ func NewRouted(store *askstore.Store, resolve func() messaging.Messenger) messag
 
 func newTransport(store *askstore.Store, resolve func() messaging.Messenger) messaging.Transport {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Transport{store: store, resolve: resolve, ctx: ctx, cancel: cancel}
+	t := &Transport{store: store, resolve: resolve, ctx: ctx, cancel: cancel}
+	if resolve == nil {
+		t.asks = askstore.NewAsker(store)
+	}
+	return t
 }
 
 // messenger returns the installed messenger, or nil when the transport serves
@@ -63,15 +70,8 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		res, err := m.Send(child, req, false)
 		return sendResult(res, err), err
 	}
-	res, err := t.store.Admit(child, askstore.AdmitRequest{
-		Sender:     req.From,
-		Target:     req.To.RunID,
-		MessageID:  req.MessageID,
-		Generation: req.Generation,
-		Body:       req.Body,
-		NoReply:    req.NoReply,
-	})
-	out := sendResult(messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err)
+	res, err := t.asks.Send(child, req, false)
+	out := sendResult(res, err)
 	return out, err
 }
 
@@ -97,7 +97,7 @@ func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messag
 		res, err := m.Wait(child, req)
 		return waitResult(res, err, t.isClosed())
 	}
-	res, err := t.store.Wait(child, t.key(req.Sender, req.MessageID, req.Generation), req.Timeout)
+	res, err := t.asks.Wait(child, req)
 	return waitResult(res, err, t.isClosed())
 }
 
@@ -121,11 +121,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 		outcome, err := m.Reply(child, req)
 		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
 	}
-	outcome, err := t.store.Reply(
-		t.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, t.store.Generation()),
-		req.From.RunID,
-		[]byte(req.Body),
-	)
+	outcome, err := t.asks.Reply(child, req)
 	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
 }
 
@@ -141,7 +137,7 @@ func (t *Transport) Withdraw(ctx context.Context, req messaging.WithdrawRequest)
 	if m := t.messenger(); m != nil {
 		return m.Withdraw(child, req)
 	}
-	return t.store.Withdraw(t.key(req.Sender, req.MessageID, req.Generation))
+	return t.asks.Withdraw(child, req)
 }
 
 func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
@@ -236,10 +232,6 @@ func (t *Transport) child(ctx context.Context) (context.Context, func(), bool) {
 			t.inflight.Done()
 		}
 	}, true
-}
-
-func (t *Transport) key(sender messaging.Identity, messageID, generation string) messaging.FenceKey {
-	return messaging.FenceKey{Sender: sender.RunID, MessageID: messageID, Generation: generation}
 }
 
 var _ messaging.Transport = (*Transport)(nil)
