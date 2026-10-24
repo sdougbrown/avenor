@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
 	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
 	"github.com/sdougbrown/avenor/internal/messaging/messagetest"
 )
@@ -501,6 +502,86 @@ func TestRoutedTransportListsTheBrokersOwnRuns(t *testing.T) {
 		if !byRunID[want] {
 			t.Fatalf("peers = %+v, want %s listed", listed.Peers, want)
 		}
+	}
+}
+
+// TestStoreOnlyTransportAndLocalMessengerAgree pins that the transport that
+// serves messaging from the store alone and the broker's own messenger answer
+// the same ask the same way, so the store's ask contract has one owner.
+func TestStoreOnlyTransportAndLocalMessengerAgree(t *testing.T) {
+	b, _, _ := startSeamBroker(t)
+	transport := inprocess.New(b.Store())
+	t.Cleanup(func() { _ = transport.Close() })
+	messenger := b.LocalMessenger()
+
+	ctx := context.Background()
+	gen := b.Store().Generation()
+	now := time.Now().UTC()
+
+	outcomes := func(t *testing.T, ask string) [3]messaging.Outcome {
+		t.Helper()
+		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("message id: %v", err)
+		}
+		sent, err := transport.Send(ctx, messaging.SendRequest{
+			From: messaging.Identity{RunID: "sender"}, To: messaging.Identity{RunID: "target"},
+			MessageID: msgID, Generation: gen, Body: `{"message":"ping"}`,
+		})
+		if err != nil {
+			t.Fatalf("%s send: %v", ask, err)
+		}
+		replied, err := transport.Reply(ctx, messaging.ReplyRequest{
+			From: messaging.Identity{RunID: "target"}, ToRunID: "sender", MessageID: msgID, Body: `{"message":"pong"}`,
+		})
+		if err != nil {
+			t.Fatalf("%s reply: %v", ask, err)
+		}
+		waited, err := transport.Wait(ctx, messaging.WaitRequest{
+			Sender: messaging.Identity{RunID: "sender"}, MessageID: msgID, Generation: gen, Timeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("%s wait: %v", ask, err)
+		}
+		return [3]messaging.Outcome{sent.Outcome, replied.Outcome, waited.Outcome}
+	}
+
+	seamOutcomes := func(t *testing.T, ask string) [3]messaging.Outcome {
+		t.Helper()
+		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("message id: %v", err)
+		}
+		sent, err := messenger.Send(ctx, messaging.SendRequest{
+			From: messaging.Identity{RunID: "sender"}, To: messaging.Identity{RunID: "target"},
+			MessageID: msgID, Generation: gen, Body: `{"message":"ping"}`,
+		}, false)
+		if err != nil {
+			t.Fatalf("%s send: %v", ask, err)
+		}
+		replied, err := messenger.Reply(ctx, messaging.ReplyRequest{
+			From: messaging.Identity{RunID: "target"}, ToRunID: "sender", MessageID: msgID, Body: `{"message":"pong"}`,
+		})
+		if err != nil {
+			t.Fatalf("%s reply: %v", ask, err)
+		}
+		waited, err := messenger.Wait(ctx, messaging.WaitRequest{
+			Sender: messaging.Identity{RunID: "sender"}, MessageID: msgID, Generation: gen, Timeout: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("%s wait: %v", ask, err)
+		}
+		return [3]messaging.Outcome{sent.Outcome, replied, waited.Outcome}
+	}
+
+	fromStore := outcomes(t, "store-only")
+	fromSeam := seamOutcomes(t, "local messenger")
+	if fromStore != fromSeam {
+		t.Fatalf("store-only outcomes = %v, local messenger outcomes = %v, want the same", fromStore, fromSeam)
+	}
+	if fromStore[0] != messaging.OutcomeSent || fromStore[1] != messaging.OutcomeReplied ||
+		fromStore[2] != messaging.OutcomeReplied {
+		t.Fatalf("outcomes = %v, want sent, replied, replied", fromStore)
 	}
 }
 
