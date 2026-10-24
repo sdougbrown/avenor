@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +123,49 @@ func TestThreeTierBranchAttribution(t *testing.T) {
 	awaitRegistryOwner(t, "the grandparent to adopt the middle branch's later run", grandparentLink.Registry(), "mid-run-2")
 	if grandparentLink.Registry().Owns("child-run") {
 		t.Fatal("the grandparent's registry holds the child's run in the middle branch's claim, want it left to the child branch alone")
+	}
+}
+
+// TestSupervisorParentTokenWithoutURL pins the token-only hub mode: a
+// supervisor configured with a parent token and no parent URL still installs
+// the parent link — its broker serves the parent routes and requires that
+// credential from every child that registers — while it registers upward
+// nowhere.
+func TestSupervisorParentTokenWithoutURL(t *testing.T) {
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:     newStableSocketPath(t, "parent-token"),
+		MaxRuntimes:       2,
+		BrokerParentToken: "hub-token",
+	})
+	t.Cleanup(func() { _ = sup.Shutdown("kill") })
+	if sup.parentLink == nil {
+		t.Fatal("a supervisor with only a parent token has no parent link")
+	}
+
+	register := func(token string) int {
+		body := fmt.Sprintf(`{"child_id":"child","endpoint":"http://child","generation":%q,"runs":[]}`, sup.broker.Store().Generation())
+		req, err := http.NewRequest(http.MethodPost, "http://"+sup.broker.Addr()+"/parent/register", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("build register request: %v", err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("post /parent/register: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := register(""); code != http.StatusUnauthorized {
+		t.Fatalf("register without a credential = %d, want 401", code)
+	}
+	if code := register("wrong"); code != http.StatusUnauthorized {
+		t.Fatalf("register with a wrong credential = %d, want 401", code)
+	}
+	if code := register("hub-token"); code == http.StatusUnauthorized {
+		t.Fatalf("register with the hub credential = %d, want it accepted", code)
 	}
 }
 
