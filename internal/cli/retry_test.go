@@ -155,7 +155,9 @@ func TestRunSingleAttemptResumesForInterruptQueuedBeforeStart(t *testing.T) {
 
 func TestRunSingleAttemptResumesForMidWaitInterrupt(t *testing.T) {
 	provider, result := runSingleAttemptWithControl(t, func(p *scriptedProvider, cs *control.ControlServer) {
-		started := make(chan struct{})
+		// Buffered so turn 2's prompt send cannot block after the trigger
+		// goroutine has exited.
+		started := make(chan struct{}, 2)
 		release := make(chan struct{})
 		p.promptStarted = started
 		p.release = release

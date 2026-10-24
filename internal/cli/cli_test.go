@@ -329,11 +329,14 @@ func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt 
 	if !ok {
 		return fmt.Errorf("unknown session %q", sessionID)
 	}
+	p.mu.Lock()
+	eventsCh := session.events
 	session.prompt = prompt
+	p.mu.Unlock()
 
 	if scripted {
 		if turn.chunk != "" {
-			session.events <- scriptedChunk(sessionID, turn.chunk)
+			eventsCh <- scriptedChunk(sessionID, turn.chunk)
 		}
 		if started != nil {
 			started <- struct{}{}
@@ -345,8 +348,8 @@ func (p *scriptedProvider) Prompt(ctx context.Context, sessionID string, prompt 
 		if turn.finalOutput != "" {
 			fields["final_output"] = turn.finalOutput
 		}
-		session.events <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
-		close(session.events)
+		eventsCh <- events.Event{Event: "session.end", SessionID: sessionID, Fields: fields}
+		close(eventsCh)
 		return nil
 	}
 
