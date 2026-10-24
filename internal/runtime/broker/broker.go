@@ -536,18 +536,22 @@ func authenticatedCaller(r *http.Request) string {
 	return caller
 }
 
+// bearerAuthorized reports whether the request's Authorization header presents
+// the expected Bearer credential.
+func bearerAuthorized(r *http.Request, expected string) bool {
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(auth, prefix) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(auth[len(prefix):])), []byte(expected)) == 1
+}
+
 func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Check global HTTP token for push-control
 		if b.httpToken != "" && r.URL.Path == "/push-control" {
-			auth := r.Header.Get("Authorization")
-			const prefix = "Bearer "
-			if !strings.HasPrefix(auth, prefix) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			got := strings.TrimSpace(auth[len(prefix):])
-			if subtle.ConstantTimeCompare([]byte(got), []byte(b.httpToken)) != 1 {
+			if !bearerAuthorized(r, b.httpToken) {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -1247,12 +1251,7 @@ func parentLinkAuthorized(r *http.Request, token string) bool {
 	if token == "" {
 		return true
 	}
-	auth := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(auth, prefix) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(auth[len(prefix):])), []byte(token)) == 1
+	return bearerAuthorized(r, token)
 }
 
 // handleParentRegister adopts one child broker's claim on the runs it owns. The
