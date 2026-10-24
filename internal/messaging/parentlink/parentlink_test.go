@@ -104,16 +104,9 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		Endpoint:        branch.url(),
 		Generation:      b.Store().Generation,
 		Runs: func() []messaging.RunClaim {
-			claims := make([]messaging.RunClaim, 0, len(runs))
-			for _, info := range b.Sessions() {
-				if link.Owns(info.RunID) {
-					// A run a child branch owns is that branch's claim.
-					continue
-				}
-				token, _ := b.RunToken(info.RunID)
-				claims = append(claims, messaging.RunClaim{RunID: info.RunID, Label: info.Label, Token: token})
-			}
-			return claims
+			return RunClaims(b.Sessions(),
+				func(info broker.SessionInfo) (string, string) { return info.RunID, info.Label },
+				link.Owns, b.RunToken)
 		},
 		// A run this branch stops owning loses its broker record too, so a
 		// refused descendant stops being served locally.
