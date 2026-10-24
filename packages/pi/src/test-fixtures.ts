@@ -12,6 +12,8 @@ export async function startExtensionHarness(options: {
   deps?: Partial<ExtensionDeps>
   extOptions?: { pollIntervalMs?: number; subAgentEnv?: SubAgentEnv | null }
   ui?: Record<string, any>
+  /** The harness's user-defined session name, as pi's session manager reports it. */
+  sessionName?: () => string | undefined
   onEmit?: (channel: string, payload: unknown) => void
   sendUserMessage?: any
 } = {}) {
@@ -77,7 +79,11 @@ export async function startExtensionHarness(options: {
   }
   await createExtension({ ...baseDeps, ...options.deps }, { pollIntervalMs: 5, subAgentEnv: null, ...options.extOptions })(mockPi as any)
 
-  const ctx = { cwd: '/tmp', ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) } }
+  const ctx = {
+    cwd: '/tmp',
+    sessionManager: { getSessionName: options.sessionName ?? (() => undefined) },
+    ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) },
+  }
   await eventHandlers.session_start({}, ctx)
   return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, setStatus, setWidget }
 }
