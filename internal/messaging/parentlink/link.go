@@ -90,7 +90,6 @@ type Link struct {
 	closed     bool
 	closedCh   chan struct{}
 
-	stop  context.CancelFunc
 	dirty chan struct{}
 	wg    sync.WaitGroup
 }
@@ -114,7 +113,6 @@ func NewLink(opts Options) (*Link, error) {
 		timeout = httpbase.DefaultRequestTimeout
 	}
 	opts.ParentURL = strings.TrimRight(opts.ParentURL, "/")
-	_, stop := context.WithCancel(context.Background())
 	return &Link{
 		opts:     opts,
 		client:   httpbase.New(ErrUnsupportedParentProtocol, timeout),
@@ -122,7 +120,6 @@ func NewLink(opts Options) (*Link, error) {
 		asks:     map[askKey]askRoute{},
 		relays:   map[string]relayRoute{},
 		closedCh: make(chan struct{}),
-		stop:     stop,
 		dirty:    make(chan struct{}, 1),
 	}, nil
 }
@@ -228,7 +225,6 @@ func (l *Link) Close() error {
 	l.closed = true
 	close(l.closedCh)
 	l.mu.Unlock()
-	l.stop()
 	l.wg.Wait()
 
 	ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
