@@ -21,6 +21,39 @@ func awaitUntil(t *testing.T, what string, condition func() bool) {
 	}
 }
 
+// TestLostSendResponseKeepsTheParentRoute pins the uncertain-send route: a send
+// whose answer is lost after transmission may have admitted the edge at the
+// parent, so the hop is recorded and a later wait correlates through the parent
+// instead of falling back to this branch's empty store.
+func TestLostSendResponseKeepsTheParentRoute(t *testing.T) {
+	parent := startBranch(t, "")
+	gate := newGateProxy(t, parent.url())
+	gate.Open()
+	branch := newBranchWith(t, gate.url(), newTestChildID(), DefaultRefreshInterval, true, []string{"asker"})
+	target := startBranch(t, parent.url(), "target")
+	awaitRegistered(t, parent, "asker", "target")
+
+	msgID := newMsgID(t)
+	gate.DropResponse(pathSend)
+	status, body := ask(t, branch, "asker", "target", msgID)
+	if status == http.StatusOK {
+		t.Fatalf("a send whose answer was lost = (%d, %v), want the uncertainty reported", status, body)
+	}
+	if edges := parent.broker.Store().ActiveCount(); edges != 1 {
+		t.Fatalf("parent holds %d ask edges, want the one the lost-answer send admitted", edges)
+	}
+	if queued := queuedAgentMessages(t, target.broker, "target"); len(queued) != 1 {
+		t.Fatalf("target queue = %d messages, want the relayed ask", len(queued))
+	}
+
+	// The asker never learns the answer, so it waits on the edge: an absent route
+	// would report edge-absent instead of the timeout the open edge produces.
+	status, body = waitReply(t, branch, "asker", msgID, 200)
+	if status != http.StatusGatewayTimeout || body["outcome"] != string(messaging.OutcomeTimedOut) {
+		t.Fatalf("wait after a lost send answer = (%d, %v), want 504 timed_out", status, body)
+	}
+}
+
 // TestUnreachableParentSurfacesAsTargetUnavailable pins the parent-loss
 // fallback: a branch whose parent is not listening forwards nothing, reports an
 // ask for a target it cannot reach as target-unavailable instead of hanging, and

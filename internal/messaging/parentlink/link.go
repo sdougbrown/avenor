@@ -24,6 +24,12 @@ const (
 	deregisterTimeout = 2 * time.Second
 )
 
+// DefaultRefreshInterval is how often an idle link re-publishes its claim. A
+// parent that was replaced while this branch was idle has no other way to learn
+// about it: nothing here changed, so no run-set change fires and no upward
+// operation runs.
+const DefaultRefreshInterval = 15 * time.Second
+
 // Options configure one branch's child link to its parent broker.
 type Options struct {
 	// ParentURL is the parent broker's http:// address. Empty means this branch
@@ -46,6 +52,13 @@ type Options struct {
 	// Generation reports this broker's current ask generation. Required: the
 	// link pins it and the relay binds every hop to it.
 	Generation func() string
+	// RetireRun retires the host broker's own record for a run this branch stops
+	// owning after a relay found the owning branch gone. Nil leaves the record to
+	// the host.
+	RetireRun func(runID string)
+	// RefreshInterval bounds how long an idle branch stays absent from a
+	// replaced parent. Zero uses DefaultRefreshInterval.
+	RefreshInterval time.Duration
 	// Timeout bounds one request to a peer broker. Zero uses the messaging
 	// default.
 	Timeout time.Duration
@@ -118,6 +131,9 @@ func NewLink(opts Options) (*Link, error) {
 	if timeout <= 0 {
 		timeout = httpbase.DefaultRequestTimeout
 	}
+	if opts.RefreshInterval <= 0 {
+		opts.RefreshInterval = DefaultRefreshInterval
+	}
 	opts.ParentURL = strings.TrimRight(opts.ParentURL, "/")
 	return &Link{
 		opts:     opts,
@@ -131,15 +147,17 @@ func NewLink(opts Options) (*Link, error) {
 	}, nil
 }
 
-// Start publishes this branch's claim to the parent broker and then re-publishes
-// it whenever the run set changes.
+// Start publishes this branch's claim to the parent broker and then keeps it
+// published: a run-set change re-publishes it at once, and an idle branch
+// re-publishes it on its refresh interval.
+//
+// The publication loop runs whether or not the first registration succeeded. A
+// parent that is not up yet, or that was replaced, is reached by that loop; it
+// does not wait for an upward operation that may never come.
 func (l *Link) Start(ctx context.Context) error {
-	if err := l.Sync(ctx); err != nil {
-		return err
-	}
 	l.wg.Add(1)
 	go l.publishLoop(ctx)
-	return nil
+	return l.Sync(ctx)
 }
 
 // RunChanged asks the link to re-publish this branch's run set. Changes are
@@ -156,11 +174,14 @@ func (l *Link) RunChanged() {
 	}
 }
 
-// publishLoop re-publishes the run set after a change. A parent that is
-// unreachable keeps the claim it last accepted; the next change or the next
-// upward call re-publishes.
+// publishLoop re-publishes the run set after a change and on every refresh
+// interval. One loop owns every re-registration, so a change and a refresh
+// coalesce instead of stacking goroutines; a parent that is unreachable keeps
+// the claim it last accepted and the next tick retries it.
 func (l *Link) publishLoop(ctx context.Context) {
 	defer l.wg.Done()
+	ticker := time.NewTicker(l.opts.RefreshInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-l.closedCh:
@@ -168,6 +189,7 @@ func (l *Link) publishLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-l.dirty:
+		case <-ticker.C:
 		}
 		_ = l.Sync(ctx)
 	}
@@ -285,6 +307,13 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 		if httpbase.NeverTransmitted(err) {
 			return fail(messaging.OutcomeNotSent, fmt.Errorf("%w: %v", ErrParentUnavailable, err))
 		}
+		if !req.NoReply {
+			// The request was transmitted, so the parent may have admitted the
+			// edge even though its answer never arrived. Recording the hop is
+			// what lets a later wait or withdrawal follow that edge instead of
+			// falling back to this branch's empty store.
+			l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation})
+		}
 		return fail(messaging.OutcomePossiblyPending, fmt.Errorf("%w: %v", ErrParentUnavailable, err))
 	}
 	body, err := decode(status, raw)
@@ -292,7 +321,13 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 		if errors.Is(err, messaging.ErrGenerationMismatch) {
 			return fail(l.replacementOutcome(ctx, generation), err)
 		}
-		return fail(body.sendOutcomeOf(), err)
+		outcome := body.sendOutcomeOf()
+		if !req.NoReply && outcome == messaging.OutcomePossiblyPending {
+			// The parent answered without saying whether it admitted the edge,
+			// so the hop is recorded for the same reason a lost answer is.
+			l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation})
+		}
+		return fail(outcome, err)
 	}
 	outcome := body.Outcome
 	if !messaging.IsSendOutcome(outcome) {
