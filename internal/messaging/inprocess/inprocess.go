@@ -15,7 +15,7 @@ import (
 type Transport struct {
 	store *askstore.Store
 	// asks serves the ask operations from the store alone. A routed transport
-	// leaves it unset and resolves the messenger per call instead.
+	// falls back to it when its resolver names no messenger.
 	asks *askstore.Asker
 	// resolve names the messenger ask, reply and peer operations delegate to.
 	// It is nil when the transport serves them from the store alone.
@@ -41,11 +41,9 @@ func NewRouted(store *askstore.Store, resolve func() messaging.Messenger) messag
 
 func newTransport(store *askstore.Store, resolve func() messaging.Messenger) messaging.Transport {
 	ctx, cancel := context.WithCancel(context.Background())
-	t := &Transport{store: store, resolve: resolve, ctx: ctx, cancel: cancel}
-	if resolve == nil {
-		t.asks = askstore.NewAsker(store)
-	}
-	return t
+	// The store's ask seam is always available: a routed transport falls back
+	// to it when its resolver names no messenger.
+	return &Transport{store: store, asks: askstore.NewAsker(store), resolve: resolve, ctx: ctx, cancel: cancel}
 }
 
 // messenger returns the installed messenger, or nil when the transport serves

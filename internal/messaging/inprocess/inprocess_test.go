@@ -330,6 +330,51 @@ func TestRoutedResolutionJoinsClose(t *testing.T) {
 	})
 }
 
+// TestRoutedTransportFallsBackToTheStore pins that a routed transport whose
+// resolver names no messenger still serves the ask operations from the store.
+// A transport built before its host installs a messenger is a supported shape,
+// so the fallback must answer rather than crash.
+func TestRoutedTransportFallsBackToTheStore(t *testing.T) {
+	store, _ := messagetest.NewMemoryStore(t)
+	tr := NewRouted(store, func() messaging.Messenger { return nil })
+	t.Cleanup(func() { _ = tr.Close() })
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("message id: %v", err)
+	}
+	sent, err := tr.Send(ctx, messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: store.Generation(), Body: `{"message":"ping"}`,
+	})
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("Send = (%+v, %v), want sent", sent, err)
+	}
+	replied, err := tr.Reply(ctx, messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Reply = (%+v, %v), want replied", replied, err)
+	}
+	waited, err := tr.Wait(ctx, messaging.WaitRequest{
+		Sender: alice, MessageID: msgID, Generation: store.Generation(), Timeout: time.Second,
+	})
+	if err != nil || waited.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Wait = (%+v, %v), want replied", waited, err)
+	}
+	withdrawn, err := tr.Withdraw(ctx, messaging.WithdrawRequest{
+		Sender: alice, MessageID: msgID, Generation: store.Generation(),
+	})
+	if err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+	if withdrawn.Outcome != messaging.OutcomeWithdrawn && withdrawn.Outcome != messaging.OutcomeEdgeAbsent &&
+		withdrawn.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Withdraw = %+v, want a terminal outcome", withdrawn)
+	}
+}
+
 // TestAskEpochLost pins the confirmed-generation-loss path: a replaced
 // generation terminates the waiter as lost and refuses the old generation's
 // requests.
