@@ -167,8 +167,10 @@ func TestRegistryRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
 }
 
 // TestRegistryExportNarrowsToTheCallersBranch pins the export rule at the
-// registry: a branch sees its own runs and this broker's own runs, a sibling
-// branch's runs stay hidden, and this broker's own caller sees its descendants.
+// registry: a branch sees only this broker's own runs — its own branch's runs
+// come from its own listing, so a re-exported alias of its own supervisor would
+// only shadow it — a sibling branch's runs stay hidden, and this broker's own
+// caller sees its descendants.
 func TestRegistryExportNarrowsToTheCallersBranch(t *testing.T) {
 	registry := NewRegistry()
 	if _, err := registry.Register(messaging.DescendantRegistration{
@@ -186,12 +188,33 @@ func TestRegistryExportNarrowsToTheCallersBranch(t *testing.T) {
 	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: "asker"}, {RunID: "asker-mate"}, {RunID: "target"}}
 
 	exported := runIDsOf(registry.Export(peers, "asker"))
-	if !exported["orchestrator"] || !exported["asker"] || !exported["asker-mate"] || exported["target"] {
-		t.Fatalf("export to a branch = %v, want the owner's runs and its own branch only", exported)
+	if !exported["orchestrator"] || exported["asker"] || exported["asker-mate"] || exported["target"] {
+		t.Fatalf("export to a branch = %v, want this broker's own runs only", exported)
 	}
 	exported = runIDsOf(registry.Export(peers, "orchestrator"))
 	if !exported["orchestrator"] || !exported["asker"] || !exported["target"] {
 		t.Fatalf("export to this broker's own caller = %v, want every owned descendant", exported)
+	}
+}
+
+// TestRegistryExportLeavesTheOwningsBranchItsCanonicalSupervisor pins the
+// supervisor alias: a branch's supervisor registers at its parent under the
+// branch-namespaced key, so an export that returned the run to the owning
+// branch's own caller would hand it a phantom remote peer beside the canonical
+// run it already lists locally.
+func TestRegistryExportLeavesTheOwningsBranchItsCanonicalSupervisor(t *testing.T) {
+	registry := NewRegistry()
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: messaging.SupervisorRunID}},
+	}); err != nil {
+		t.Fatalf("register child: %v", err)
+	}
+	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: ParentRunKey("one", messaging.SupervisorRunID)}}
+
+	exported := runIDsOf(registry.Export(peers, ParentRunKey("one", messaging.SupervisorRunID)))
+	if !exported["orchestrator"] || exported["supervisor@one"] {
+		t.Fatalf("export to the owning branch = %v, want no alias of its own supervisor", exported)
 	}
 }
 
