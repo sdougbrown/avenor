@@ -26,7 +26,16 @@ type relay struct {
 	generation func() string
 }
 
-func newRelay(opts Options, registry *Registry) *relay {
+// newRelay builds the relay that reaches the children registered with this
+// broker. The relay reads the run credential and the generation on every hop,
+// so a missing callback is refused here rather than at the first relay.
+func newRelay(opts Options, registry *Registry) (*relay, error) {
+	if opts.RunToken == nil {
+		return nil, fmt.Errorf("%w: a parent broker needs the credential it authenticates a descendant run with", messaging.ErrInvalidRequest)
+	}
+	if opts.Generation == nil {
+		return nil, fmt.Errorf("%w: a parent broker needs its current ask generation", messaging.ErrInvalidRequest)
+	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = httpbase.DefaultRequestTimeout
@@ -36,7 +45,7 @@ func newRelay(opts Options, registry *Registry) *relay {
 		client:     httpbase.New(ErrUnsupportedParentProtocol, timeout),
 		token:      opts.RunToken,
 		generation: opts.Generation,
-	}
+	}, nil
 }
 
 // Ask relays one ask this broker admitted. The child publishes it into the

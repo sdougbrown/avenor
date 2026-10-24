@@ -135,9 +135,9 @@ func askRequest(messageID string) messaging.SendRequest {
 // waitRequest reports one wait the test link forwards to its parent.
 func waitRequest(messageID string) messaging.WaitRequest {
 	return messaging.WaitRequest{
-		Sender:     messaging.Identity{RunID: "run-a", Sender: "alice"},
-		MessageID:  messageID,
-		Timeout:    messaging.MaxWait,
+		Sender:    messaging.Identity{RunID: "run-a", Sender: "alice"},
+		MessageID: messageID,
+		Timeout:   messaging.MaxWait,
 	}
 }
 
@@ -155,4 +155,98 @@ func testContext(t *testing.T) context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// stubMessenger is one local messaging seam: it records the calls the
+// parent-aware messenger makes and answers them from scripted verdicts.
+type stubMessenger struct {
+	mu       sync.Mutex
+	sends    []messaging.SendRequest
+	waits    []messaging.WaitRequest
+	withdraw []messaging.WithdrawRequest
+	replies  []messaging.ReplyRequest
+	delivers []messaging.DeliverRequest
+
+	reachable map[string]bool
+	peers     []messaging.Peer
+	peersErr  error
+
+	sendResult     messaging.SendResult
+	sendErr        error
+	withdrawResult messaging.WithdrawResult
+	withdrawErr    error
+}
+
+func newStubMessenger() *stubMessenger {
+	return &stubMessenger{reachable: map[string]bool{}}
+}
+
+func (s *stubMessenger) Send(_ context.Context, req messaging.SendRequest, _ bool) (messaging.SendResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sends = append(s.sends, req)
+	return s.sendResult, s.sendErr
+}
+
+func (s *stubMessenger) Wait(_ context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.waits = append(s.waits, req)
+	return messaging.WaitResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
+}
+
+func (s *stubMessenger) Withdraw(_ context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.withdraw = append(s.withdraw, req)
+	return s.withdrawResult, s.withdrawErr
+}
+
+func (s *stubMessenger) Reply(_ context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replies = append(s.replies, req)
+	return messaging.OutcomeEdgeAbsent, nil
+}
+
+func (s *stubMessenger) Deliver(_ context.Context, req messaging.DeliverRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.delivers = append(s.delivers, req)
+	return nil
+}
+
+func (s *stubMessenger) Reachable(runID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reachable[runID]
+}
+
+func (s *stubMessenger) Peers(_ context.Context) ([]messaging.Peer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peers, s.peersErr
+}
+
+// sentRuns reports the runs the local seam was asked to send to.
+func (s *stubMessenger) sentRuns() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	targets := make([]string, 0, len(s.sends))
+	for _, send := range s.sends {
+		targets = append(targets, send.To.RunID)
+	}
+	return targets
+}
+
+// withdrawnMessages reports the message ids the local seam was asked to
+// withdraw.
+func (s *stubMessenger) withdrawnMessages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.withdraw))
+	for _, withdrawal := range s.withdraw {
+		ids = append(ids, withdrawal.MessageID)
+	}
+	return ids
 }
