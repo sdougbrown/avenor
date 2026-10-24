@@ -18,8 +18,8 @@ type Messenger struct {
 	local messaging.Messenger
 	// up is this branch's link to its parent broker. Nil when it has none.
 	up *Link
-	// down relays into the children that registered with this broker. Nil when
-	// it has none.
+	// down relays into the children that registered with this broker. It is
+	// built for every broker, because a child may register at any time.
 	down     *relay
 	registry *Registry
 }
@@ -27,7 +27,10 @@ type Messenger struct {
 // New builds one broker's parent-aware messaging.
 //
 // A parent URL is required for the upward direction; a broker that only parents
-// children is built with the same call and no parent URL.
+// children is built with the same call and no parent URL. The generation and
+// the run credential are always required, because the relay reads both on every
+// hop it takes into a child, and a parent URL adds the run set the link
+// publishes.
 func New(opts Options, local messaging.Messenger) (*Messenger, error) {
 	if local == nil {
 		return nil, fmt.Errorf("%w: a parent-aware messenger composes a local messenger", messaging.ErrInvalidRequest)
