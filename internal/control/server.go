@@ -1736,10 +1736,17 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return resp
 		}
 		res, err := tr.Peers(c.ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
+		out := newMessagePeersResult(res)
 		if err != nil {
-			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+			if len(res.Peers) == 0 {
+				return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
+			}
+			// The listing read only part of the peer set. The peers it did
+			// read are returned with the reason, so the caller keeps them and
+			// reports the listing as incomplete.
+			out.PeersError = err.Error()
 		}
-		return success(req.ID, newMessagePeersResult(res))
+		return success(req.ID, out)
 	case "message_preflight":
 		transport, resp, ok := s.messagePrelude(c, req, nil, false)
 		if !ok {

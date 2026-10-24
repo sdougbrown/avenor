@@ -26,6 +26,12 @@ const (
 // Transport is the shared messaging surface. Every method takes the caller's
 // authenticated identities and expected generation; no method reads ambient
 // credentials or classifies a result from an HTTP status alone.
+//
+// Peers reports the visible peer set. A transport that could not read every
+// peer returns the peers it did read together with ErrIncompleteListing, and
+// a transport that could not read the listing at all returns an error and no
+// peers. A caller keeps the peers it can see and reports the listing as
+// incomplete rather than reading a partial set as a complete one.
 type Transport interface {
 	Send(ctx context.Context, req SendRequest) (SendResult, error)
 	Wait(ctx context.Context, req WaitRequest) (WaitResult, error)
@@ -100,6 +106,7 @@ var (
 	ErrNotAskSender         = errors.New("messaging: not the sender of this ask")
 	ErrNotAskTarget         = errors.New("messaging: not the target of this ask")
 	ErrTargetUnavailable    = errors.New("messaging: target unavailable")
+	ErrIncompleteListing    = errors.New("messaging: peer listing is incomplete")
 	ErrTransportClosed      = errors.New("messaging: transport closed")
 	ErrUnsupportedOperation = errors.New("messaging: operation unsupported by this transport")
 )

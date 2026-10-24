@@ -396,8 +396,8 @@ func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
 		Sender:     messaging.Identity{RunID: "sender"},
 		Generation: pre.Generation,
 	})
-	if !errors.Is(err, messaging.ErrTargetUnavailable) {
-		t.Fatalf("peers = (%+v, %v), want ErrTargetUnavailable for the incomplete listing", listed, err)
+	if !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("peers = (%+v, %v), want ErrIncompleteListing for the incomplete listing", listed, err)
 	}
 	if listed.Generation != pre.Generation {
 		t.Fatalf("peers generation = %q, want %q", listed.Generation, pre.Generation)

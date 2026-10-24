@@ -295,7 +295,14 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
   const claims: AskClaims = new Map()
 
   async function listedPeers(): Promise<PeerRecord[]> {
-    return peerRecords(await client.messagePeers({ generation }))
+    const result = await client.messagePeers({ generation })
+    if (result.peers_error) {
+      // The listing read only part of the peer set. The peers beside it are
+      // the ones that were read, so a partial list is never read as a
+      // complete one.
+      throw new Error(`the peer listing is incomplete: ${result.peers_error}`)
+    }
+    return peerRecords(result)
   }
 
   // A failed wait leaves no reader for the ask, so retract it the way
