@@ -51,11 +51,15 @@ func newRelay(opts Options, registry *Registry) (*relay, error) {
 // Ask relays one ask this broker admitted. The child publishes it into the
 // target run's queue and records the reply route, but admits no second edge.
 func (r *relay) Ask(ctx context.Context, req messaging.SendRequest) error {
+	payload, err := payloadFor(req.Body)
+	if err != nil {
+		return err
+	}
 	return r.hop(ctx, req.To.RunID, messaging.DeliverRequest{
 		FromRunID:     req.From.RunID,
 		ToRunID:       req.To.RunID,
 		Kind:          "agent_message",
-		Payload:       payloadFor(req.Body),
+		Payload:       payload,
 		CorrelationID: req.MessageID,
 	}, true)
 }
@@ -66,11 +70,15 @@ func (r *relay) Tell(ctx context.Context, req messaging.DeliverRequest) error {
 	if kind == "" {
 		kind = "agent_message"
 	}
+	payload, err := payloadFor(string(req.Payload))
+	if err != nil {
+		return err
+	}
 	return r.hop(ctx, req.ToRunID, messaging.DeliverRequest{
 		FromRunID:     req.FromRunID,
 		ToRunID:       req.ToRunID,
 		Kind:          kind,
-		Payload:       payloadFor(string(req.Payload)),
+		Payload:       payload,
 		CorrelationID: req.CorrelationID,
 	}, false)
 }

@@ -244,11 +244,15 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 	if err != nil {
 		return fail(messaging.OutcomeNotSent, err)
 	}
+	payload, err := payloadFor(req.Body)
+	if err != nil {
+		return fail(messaging.OutcomeNotSent, err)
+	}
 	status, raw, err := l.post(ctx, pathSend, map[string]any{
 		"from_run_id":   req.From.RunID,
 		"to_run_id":     req.To.RunID,
 		"type":          "agent_message",
-		"payload":       payloadFor(req.Body),
+		"payload":       payload,
 		"message_id":    req.MessageID,
 		"generation":    generation,
 		"expects_reply": !req.NoReply,
@@ -403,11 +407,15 @@ func (l *Link) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging
 	if err != nil {
 		return messaging.OutcomeNotSent, err
 	}
+	payload, err := payloadFor(req.Body)
+	if err != nil {
+		return messaging.OutcomeNotSent, err
+	}
 	status, raw, err := l.post(ctx, pathSend, map[string]any{
 		"from_run_id": req.From.RunID,
 		"to_run_id":   req.ToRunID,
 		"type":        "agent_message",
-		"payload":     payloadFor(req.Body),
+		"payload":     payload,
 		"reply_to":    req.MessageID,
 		"generation":  route.edgeGeneration,
 	}, req.From.RunID, token, 0)
@@ -437,11 +445,15 @@ func (l *Link) Deliver(ctx context.Context, req messaging.DeliverRequest) error 
 	if err != nil {
 		return err
 	}
+	payload, err := payloadFor(string(req.Payload))
+	if err != nil {
+		return err
+	}
 	status, raw, err := l.post(ctx, pathSend, map[string]any{
 		"from_run_id": req.FromRunID,
 		"to_run_id":   req.ToRunID,
 		"type":        req.Kind,
-		"payload":     payloadFor(string(req.Payload)),
+		"payload":     payload,
 		"generation":  generation,
 	}, req.FromRunID, token, 0)
 	if err != nil {
@@ -670,12 +682,17 @@ func (l *Link) post(ctx context.Context, path string, payload map[string]any, ru
 	return l.client.Do(ctx, req, timeout)
 }
 
-// payloadFor renders a message body on the wire. An empty body is no payload at
-// all, which keeps the stored payload valid JSON.
-func payloadFor(body string) json.RawMessage {
+// payloadFor renders a message body on the wire. An empty body is no payload
+// at all, which keeps the stored payload valid JSON, and a body that is not
+// one JSON value is refused here: the request would not render, and the fault
+// belongs to the caller rather than to the parent's reachability.
+func payloadFor(body string) (json.RawMessage, error) {
 	payload := json.RawMessage(body)
 	if len(bytes.TrimSpace(payload)) == 0 {
-		return json.RawMessage("{}")
+		return json.RawMessage("{}"), nil
 	}
-	return payload
+	if !json.Valid(payload) {
+		return nil, fmt.Errorf("%w: the message body is not one JSON value", messaging.ErrInvalidRequest)
+	}
+	return payload, nil
 }
