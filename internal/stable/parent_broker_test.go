@@ -62,15 +62,9 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
 		Runs: func() []messaging.RunClaim {
-			claims := make([]messaging.RunClaim, 0, len(runs))
-			for _, info := range b.Sessions() {
-				if link.Owns(info.RunID) {
-					continue
-				}
-				token, _ := b.RunToken(info.RunID)
-				claims = append(claims, messaging.RunClaim{RunID: info.RunID, Label: info.Label, Token: token})
-			}
-			return claims
+			return b.ParentRunClaims(func(runID string) bool {
+				return link != nil && link.Owns(runID)
+			})
 		},
 	}, b)
 	if err != nil {
