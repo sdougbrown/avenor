@@ -586,6 +586,56 @@ describe('Avenor Pi extension', () => {
     }
   })
 
+  it('publishes the harness session name and republishes it only when it changes', async () => {
+    let sessionName: string | undefined = 'my-session'
+    const published: Array<Record<string, unknown>> = []
+    let polls = 0
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+      if (path === '/session_name') {
+        published.push(body)
+        return Response.json({ run_id: body.run_id, label: body.name })
+      }
+      if (path === '/poll-control') {
+        polls++
+        return Response.json([])
+      }
+      return Response.json({})
+    }) as unknown as typeof fetch
+    const harness = await startExtensionHarness({
+      extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
+      sessionName: () => sessionName,
+    })
+    try {
+      await waitFor(() => published.length === 1)
+      expect(published[0]).toEqual({ name: 'my-session', run_id: 'rt_child', token: 'tok' })
+
+      sessionName = 'renamed'
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      await waitFor(() => published.length === 2)
+      expect(published[1]).toMatchObject({ name: 'renamed' })
+
+      // An unchanged name is not republished. Wait for two more child poll ticks
+      // so a republish would have had time to land before asserting it did not.
+      const pollsBefore = polls
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      await waitFor(() => polls >= pollsBefore + 2)
+      expect(published).toHaveLength(2)
+
+      // Clearing the name in the harness clears the broker's copy, so the run
+      // stops shadowing whatever name the model set.
+      sessionName = undefined
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      await waitFor(() => published.length === 3)
+      expect(published[2]).toMatchObject({ name: '' })
+    } finally {
+      globalThis.fetch = previousFetch
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
   it('registers all expected tools, commands, renderers, and event handlers', async () => {
     const registeredTools: Record<string, any> = {}
     const registeredCommands: Record<string, any> = {}

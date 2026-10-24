@@ -6,6 +6,7 @@ import {
   formatInboundAskBody,
   parseControlMessage,
   postBroker,
+  publishHarnessName,
   readSubAgentEnv,
   type InboundAsk,
   type InboundAskBodyOptions,
@@ -571,6 +572,30 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       if (subAgentPollTimer) {
         clearTimeout(subAgentPollTimer)
         subAgentPollTimer = null
+      }
+    }
+
+    // The harness owns the session's user-defined name, and the broker lets it
+    // outrank any name the model set for itself. The pi peer this package builds
+    // against exposes the name through the session manager but no rename event,
+    // so it is read on session start and before every turn; an unchanged name is
+    // not republished. `null` means nothing has been published for this session
+    // yet, so a failed publish is retried on the next turn.
+    let publishedSessionName: { name: string | undefined } | null = null
+
+    async function publishSessionName(ctx: ExtensionContext): Promise<void> {
+      if (!subAgentEnv) return
+      const name = ctx.sessionManager.getSessionName()
+      if (publishedSessionName && publishedSessionName.name === name) return
+      // Record the attempt before it lands so a second read of the same name
+      // while the first is in flight does not publish twice; a failed publish
+      // forgets the attempt so the next turn retries.
+      publishedSessionName = { name }
+      try {
+        await publishHarnessName(subAgentEnv, name)
+      } catch (error) {
+        publishedSessionName = null
+        console.error('[avenor] session_name_set failed:', error instanceof Error ? error.message : error)
       }
     }
 
@@ -1415,6 +1440,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       lastStatusEntries = []
       pollingErrorCount = 0
       pollingErrors.length = 0
+      publishedSessionName = null
+      void publishSessionName(ctx)
       if (!isSubAgentBrokerMode) startHostAskPoll()
       void startSubAgentPoll()
     })
@@ -1436,7 +1463,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       sessionCtx = null
     })
 
-    pi.on('before_agent_start', async () => {
+    pi.on('before_agent_start', async (_event, ctx) => {
+      // A session renamed between turns is picked up here, before the turn whose
+      // messages will carry the old name any further.
+      void publishSessionName(ctx)
       if (trackedRuns.size === 0) return
 
       const entries = await pollRuns()
