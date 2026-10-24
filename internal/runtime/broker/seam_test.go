@@ -513,6 +513,83 @@ func TestSessionsDropsAnUnreadablePeerRecord(t *testing.T) {
 // no-reply send: the message is delivered once, allocates no ask edge, and a
 // wait on it reports an absent edge instead of waiting for a reply nobody
 // asked for.
+// answeringWaiter answers a wait at once, so the broker's wait path is
+// exercised without waiting for a reply that will not come.
+type answeringWaiter struct {
+	messaging.Messenger
+	waited messaging.WaitRequest
+}
+
+func (w *answeringWaiter) Wait(_ context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
+	w.waited = req
+	return messaging.WaitResult{
+		Outcome: messaging.OutcomeReplied,
+		Reply: &messaging.InboundMessage{
+			MessageID: req.MessageID,
+			FromRunID: "target",
+			Sender:    "target",
+			Kind:      "agent_message",
+			Payload:   json.RawMessage(`{"message":"pong"}`),
+		},
+	}, nil
+}
+
+// TestLocalMessagingSeamServesTheHTTPWaitPath pins that the authenticated
+// /wait_reply path waits through the broker's seam, so an ask the seam routed
+// is the ask the caller waits for.
+func TestLocalMessagingSeamServesTheHTTPWaitPath(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+	waiter := &answeringWaiter{}
+	rec := &messagetest.Recorder{Local: waiter}
+	b.SetMessenger(rec)
+	t.Cleanup(func() { b.SetMessenger(nil) })
+
+	status, body := postAuthBroker(t, b.Addr(), "/wait_reply", "sender", senderToken, map[string]any{
+		"waiting_for": "legacy-ask-1",
+		"generation":  b.Store().Generation(),
+		"timeout_ms":  1000,
+	})
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeReplied) {
+		t.Fatalf("wait = (%d, %v), want 200 replied", status, body)
+	}
+	waits := rec.Waits()
+	if len(waits) != 1 || waits[0].MessageID != "legacy-ask-1" {
+		t.Fatalf("waits = %+v, want the wait through the seam", waits)
+	}
+	if waits[0].Sender.RunID != "sender" {
+		t.Fatalf("wait sender = %+v, want the calling run", waits[0].Sender)
+	}
+	if waiter.waited.MessageID != "legacy-ask-1" {
+		t.Fatalf("seam wait = %+v, want the message id the caller waited for", waiter.waited)
+	}
+}
+
+// TestSetMessengerRestoresTheLocalMessenger pins that a nil messenger restores
+// the broker's own implementation, so a host that takes its seam back leaves
+// the broker serving its own runs.
+func TestSetMessengerRestoresTheLocalMessenger(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+	rec := &messagetest.Recorder{Local: b.LocalMessenger()}
+	b.SetMessenger(rec)
+	b.SetMessenger(nil)
+
+	status, body := postAuthBroker(t, b.Addr(), "/send", "sender", senderToken, map[string]any{
+		"from_run_id": "sender",
+		"to_run_id":   "target",
+		"type":        "agent_message",
+		"payload":     map[string]any{"message": "notice"},
+	})
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("tell = (%d, %v), want 200 sent", status, body)
+	}
+	if delivers := rec.Delivers(); len(delivers) != 0 {
+		t.Fatalf("deliveries = %+v, want the local messenger back", delivers)
+	}
+	if queued := countAgentMessages(t, b, "target"); queued != 1 {
+		t.Fatalf("target queue = %d messages, want the single tell", queued)
+	}
+}
+
 func TestRoutedOwnerNoReplySendDeliversWithoutAnEdge(t *testing.T) {
 	b, _, _ := startSeamBroker(t)
 	transport := b.MessengerTransport()
