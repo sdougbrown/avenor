@@ -125,6 +125,12 @@ once (not repeated every 500ms); the terminal `session.end` has
 `AVENOR_CLAUDE_TERMINAL=tmux` also gives `ready_signal=pane`: the tmux launcher
 and `claude-channel` never answer the query.
 
+**MCP startup wait:** rerun the report-path drive with `--claude-mcp-wait 4s`.
+Proof: `agent.prompt_submitted` carries `startup_wait_ms` (about 4000 minus the
+time readiness took) and lands no earlier than 4s after `session.start`; without the
+flag the field is absent. `--claude-mcp-wait 61s` and a non-claude backend with
+a non-zero wait exit `1` before launching anything.
+
 ## Gotchas
 
 - Runs are real model calls — keep prompts to one-word replies.

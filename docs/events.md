@@ -148,7 +148,7 @@ The `claude` backend emits a subset of the `claude-channel` event surface. It ha
 Events emitted:
 - `session.start` — carries `backend="claude"`, `dir`, and `dangerously_load=false` (the flag is never set).
 - `session.end` — `stop_reason` is one of `end_turn`, `cancelled`, or `cancelled_forced`. No token usage field (transcript does not expose it).
-- `agent.prompt_submitted` — `delivery` is `"pty"` or `"tmux"` depending on the active launcher. `ready_signal` says what decided the input box was taking input: `"osc7501"` when the prompt waited for Claude's startup `idle` report, `"pane"` when the visible input box alone decided (tmux, `AVENOR_CLAUDE_OSC7501=off`, or no report in time).
+- `agent.prompt_submitted` — `delivery` is `"pty"` or `"tmux"` depending on the active launcher. `ready_signal` says what decided the input box was taking input: `"osc7501"` when the prompt waited for Claude's startup `idle` report, `"pane"` when the visible input box alone decided (tmux, `AVENOR_CLAUDE_OSC7501=off`, or no report in time). `startup_wait_ms` is present only on the first prompt of a `--claude-mcp-wait` run: the extra milliseconds the first prompt waited beyond readiness (`0` when readiness already took longer).
 - `agent.status` — `phase=working` sourced from `"transcript"` when new JSONL records appear; `phase=waiting` sourced from `"pty"` or `"tmux"` on each pane scrape that finds Claude at its input box, until the first OSC 7501 report arrives (see below).
 - `permission.request` — emitted from pane-scrape when a permission dialog is detected.
 
@@ -178,7 +178,7 @@ The `claude-channel` backend emits a few extra synthesized events so non-Claude 
 
 **`agent.prompt_queued`** — A prompt was queued onto the broker control channel for Claude to consume. Fields: `control_id`, `message_type` (currently `"continue"`), `delivery` (`"channel"`), `prompt_length`.
 
-**`agent.prompt_submitted`** — A prompt was injected directly into Claude's terminal session and submitted with Enter. Fields: `delivery` (`"tmux"` or `"pty"` depending on which backend the session is running on), `prompt_length`.
+**`agent.prompt_submitted`** — A prompt was injected directly into Claude's terminal session and submitted with Enter. Fields: `delivery` (`"tmux"` or `"pty"` depending on which backend the session is running on), `prompt_length`, and on the first prompt of a `--claude-mcp-wait` run `startup_wait_ms`.
 
 **`agent.report`** — The Claude sidecar called `avenor_report`. Fields: `state`, `payload`, `source` (`"channel"`). Avenor may also emit a second derived event such as `agent.message_chunk` or `agent.status` from the same report payload for compatibility with existing consumers.
 

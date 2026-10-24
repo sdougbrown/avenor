@@ -227,6 +227,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, fmt.Errorf("terminal launch: %w", err)
 	}
 	s.Term = term
+	s.SetStartupWait(merged.ClaudeMCPWait)
 
 	p.sessions[sessionID] = s
 
@@ -488,6 +489,16 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		if !claudecore.WaitForPaneReady(s.Ctx, s.Term) {
 			return
 		}
+		startupWait, waitConfigured, ok := s.WaitForStartupMCP(s.Ctx)
+		if !ok {
+			return
+		}
+		s.Mu.Lock()
+		finished := s.Finished
+		s.Mu.Unlock()
+		if finished {
+			return
+		}
 
 		if err := pastePromptAndSubmit(s.Ctx, s.Term, prompt); err != nil {
 			return
@@ -495,13 +506,17 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		s.Mu.Lock()
 		s.Prompted = true
 		s.Mu.Unlock()
+		fields := map[string]any{
+			"delivery":      s.Term.Kind(),
+			"prompt_length": len(prompt),
+		}
+		if waitConfigured {
+			fields["startup_wait_ms"] = startupWait.Milliseconds()
+		}
 		s.Emit(events.Event{
 			Event:     "agent.prompt_submitted",
 			SessionID: s.SessionID,
-			Fields: map[string]any{
-				"delivery":      s.Term.Kind(),
-				"prompt_length": len(prompt),
-			},
+			Fields:    fields,
 		})
 		go claudecore.ResendEnterUntilSubmitted(s.Ctx, s.Term, prompt, nil)
 	}()
