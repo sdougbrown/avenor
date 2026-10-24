@@ -220,7 +220,10 @@ func (m *Messenger) Owns(runID string) bool { return m.registry.Owns(runID) }
 // Registry.Register replaces that claim.
 func (m *Messenger) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 	for _, run := range reg.Runs {
-		if m.local.Reachable(run.RunID) && !m.registry.Owns(run.RunID) {
+		// A branch supervisor run is reserved in every branch, so the parent's own
+		// supervisor never blocks a descendant's claim of the same ID: the
+		// registry addresses it under a branch-namespaced run ID instead.
+		if run.RunID != messaging.SupervisorRunID && m.local.Reachable(run.RunID) && !m.registry.Owns(run.RunID) {
 			return messaging.DescendantClaim{}, fmt.Errorf("%w: %s is owned by this broker", ErrRunLocallyOwned, run.RunID)
 		}
 	}

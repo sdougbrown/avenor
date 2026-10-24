@@ -213,7 +213,7 @@ func TestParentRegisterRefusesARunTheBrokerOwns(t *testing.T) {
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	if _, err := b.CreateRun("supervisor", "supervisor"); err != nil {
+	if _, err := b.CreateRun("web", "web"); err != nil {
 		t.Fatalf("create the broker's own run: %v", err)
 	}
 
@@ -233,7 +233,7 @@ func TestParentRegisterRefusesARunTheBrokerOwns(t *testing.T) {
 		"endpoint":   "http://child:1234",
 		"generation": "gen-1",
 		"runs": []map[string]any{
-			{"run_id": "supervisor", "label": "supervisor", "token": "child-token"},
+			{"run_id": "web", "label": "web", "token": "child-token"},
 		},
 	})
 	if err != nil {
@@ -243,7 +243,7 @@ func TestParentRegisterRefusesARunTheBrokerOwns(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("register claiming a run the broker owns = %d, want 409", status)
 	}
-	if _, ok := b.RunToken("supervisor"); !ok {
+	if _, ok := b.RunToken("web"); !ok {
 		t.Fatal("the owned run lost its credential to the refused claim")
 	}
 }
@@ -274,7 +274,10 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 		t.Cleanup(func() { _ = b.Stop() })
 		b.SetParentLink(&parentLinkStub{
 			register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-				return messaging.DescendantClaim{Adopted: []string{"remote-run"}}, nil
+				return messaging.DescendantClaim{
+					Runs:    []messaging.ClaimedRun{{RunID: "remote-run", Key: "remote-run", Label: "remote", Token: "child-token"}},
+					Adopted: []string{"remote-run"},
+				}, nil
 			},
 		})
 		if token != "" {

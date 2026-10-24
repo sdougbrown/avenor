@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +29,12 @@ type branch struct {
 	tokens map[string]string
 }
 
+// branchSeq names each test branch with a distinct durable identity, the way a
+// supervisor derives one from its control socket path.
+var branchSeq atomic.Uint64
+
+func newTestChildID() string { return fmt.Sprintf("branch-%d", branchSeq.Add(1)) }
+
 func (b *branch) url() string { return "http://" + b.broker.Addr() }
 
 func (b *branch) token(t *testing.T, runID string) string {
@@ -36,6 +44,14 @@ func (b *branch) token(t *testing.T, runID string) string {
 		t.Fatalf("run %q has no credential in this branch", runID)
 	}
 	return token
+}
+
+// pinned reports the parent generation this branch last registered under.
+func (b *branch) pinned() (string, bool) {
+	if b.link == nil || b.link.up == nil {
+		return "", false
+	}
+	return b.link.up.pinnedGeneration()
 }
 
 // startBranch starts one broker, registers the given runs and installs the
@@ -56,6 +72,13 @@ func startBranchTolerant(t *testing.T, parentURL string, runs ...string) *branch
 
 func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *branch {
 	t.Helper()
+	return newBranchWith(t, parentURL, newTestChildID(), strict, runs)
+}
+
+// newBranchWith is newBranch with the branch identity a test controls: the
+// identity is what a restart reclaims its runs under.
+func newBranchWith(t *testing.T, parentURL, childID string, strict bool, runs []string) *branch {
+	t.Helper()
 	b := broker.New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
@@ -75,6 +98,7 @@ func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *bran
 	)
 	link, err = Install(Options{
 		ParentURL:  parentURL,
+		ChildID:    childID,
 		Endpoint:   branch.url(),
 		Generation: b.Store().Generation,
 		Runs:       func() []messaging.RunClaim { return b.ParentRunClaims() },
