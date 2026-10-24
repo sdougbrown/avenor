@@ -2,6 +2,7 @@ package parentlink
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -96,7 +97,7 @@ func (m *Messenger) sendToChild(ctx context.Context, req messaging.SendRequest, 
 			FromRunID:     req.From.RunID,
 			ToRunID:       req.To.RunID,
 			Kind:          "agent_message",
-			Payload:       payloadFor(req.Body),
+			Payload:       json.RawMessage(req.Body),
 			CorrelationID: req.MessageID,
 		}); err != nil {
 			return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: req.Generation}, err
