@@ -1724,8 +1724,20 @@ func (x brokerBackend) Receive(sender string, limit int) ([]messaging.InboundMes
 }
 
 func (x brokerBackend) Peers() ([]messaging.Peer, error) {
-	// The store's backend carries no request context; peers are a snapshot.
-	return x.broker.seam().Peers(context.Background())
+	// The store's backend carries no request context; peers are a snapshot of
+	// the runs this broker owns. Routing this through the seam would let a
+	// seam that composes its local peers from the public store call back into
+	// itself, so the store's peer source stays the broker's own registry.
+	sessions := x.broker.sessions()
+	peers := make([]messaging.Peer, 0, len(sessions))
+	for _, info := range sessions {
+		raw, err := json.Marshal(info)
+		if err != nil {
+			continue
+		}
+		peers = append(peers, messaging.Peer{RunID: info.RunID, Session: raw})
+	}
+	return peers, nil
 }
 
 // localMessenger serves local messaging from the broker's own queues and ask

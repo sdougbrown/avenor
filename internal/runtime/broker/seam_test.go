@@ -214,6 +214,34 @@ type seamPeerSource struct {
 
 func (s seamPeerSource) Peers(context.Context) ([]messaging.Peer, error) { return s.peers, s.err }
 
+// storePeerSource lists its peers through the public ask store, the way a host
+// seam that composes the broker's local peers with the ones it reaches would.
+type storePeerSource struct {
+	messaging.Messenger
+	broker *Broker
+}
+
+func (s storePeerSource) Peers(context.Context) ([]messaging.Peer, error) {
+	return s.broker.Store().Peers()
+}
+
+// TestStorePeersDoNotRecurseThroughTheSeam pins that the ask store's peer
+// source is the broker's own registry. A seam that composes its local peers
+// from the public store would otherwise call the store back into itself.
+func TestStorePeersDoNotRecurseThroughTheSeam(t *testing.T) {
+	b, _, _ := startSeamBroker(t)
+	b.SetMessenger(storePeerSource{Messenger: b.LocalMessenger(), broker: b})
+	t.Cleanup(func() { b.SetMessenger(nil) })
+
+	peers, err := b.Store().Peers()
+	if err != nil {
+		t.Fatalf("store peers: %v", err)
+	}
+	if len(peers) == 0 {
+		t.Fatalf("store peers = %+v, want the broker's own runs", peers)
+	}
+}
+
 // TestSessionsPublishesTheSeamPeerID pins that the identity a peer listing
 // publishes is the id the seam named for it. A session record's own run_id is
 // the record's content, so a peer that names another run in its record is
