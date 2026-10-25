@@ -53,7 +53,7 @@ func TestRelayRefusalRetiresTheRefusedRunOnTheHost(t *testing.T) {
 			registry := NewRegistry()
 			relay := newTestRelay(t, registry, "child-one", stub.URL(), "gen-a", "run-b", "run-c")
 			var retired []string
-			relay.retire = func(runID string) { retired = append(retired, runID) }
+			relay.retire = func(runIDs []string) { retired = append(retired, runIDs...) }
 			ctx := testContext(t)
 
 			err := relay.Ask(ctx, messaging.SendRequest{
