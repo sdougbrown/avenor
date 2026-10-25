@@ -252,5 +252,6 @@ whose generation no view can pin, so an ordinary deregistration no-ops forever.
 For that case the operator posts `{"child_id": "<old child>", "force": true}`
 instead. A forced deregistration skips the generation check, retires every claim
 the dead child holds, and reports the retired run count; the branch then
-re-registers under its new identity and reclaims the runs. The forced variant
-requires the same parent-link credential as the ordinary one.
+re-registers under its new identity and reclaims the runs. The forced variant requires a configured parent-link token:
+the same credential the ordinary one accepts, and a link with no token
+configured refuses the force outright.

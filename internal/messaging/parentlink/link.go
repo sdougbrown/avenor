@@ -296,11 +296,16 @@ func (l *Link) publish(ctx context.Context, claims []messaging.RunClaim) error {
 		}
 		return err
 	}
-	// A parent that accepted the full claim but named no run key for the
+	// A degraded parent that accepted the full claim but named no run key for the
 	// branch-supervisor run predates the namespacing: it recorded the claim as a
 	// literal run, so the claim is re-registered without it and the replacement
-	// retires the record the parent took.
+	// retires the record the parent took. The generation the acceptance reported
+	// is pinned first, so the re-offer below cannot fire on the same generation
+	// change again and recurse forever.
 	if claimsSupervisor(claims) && registered.RunKeys[messaging.SupervisorRunID] == "" {
+		l.mu.Lock()
+		l.noteGenerationLocked(registered.Generation)
+		l.mu.Unlock()
 		l.rememberDegraded()
 		return l.publish(ctx, withoutSupervisorClaim(claims))
 	}

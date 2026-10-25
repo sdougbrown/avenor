@@ -899,6 +899,48 @@ func TestSyncKeepsTheLegacyShapeForAReplacementWithoutNamespacing(t *testing.T) 
 	}
 }
 
+// TestSyncSurvivesAGenerationChangeOnAStillLegacyParent pins the termination
+// of the degraded re-offer: a legacy-shape parent whose generation changes
+// after the legacy shape latched re-fires the re-offer, but the re-offered full
+// claim is answered keyless again, so the link re-latches the legacy shape,
+// pins the generation the acceptance reported, and stops instead of re-firing
+// on the same generation change forever.
+func TestSyncSurvivesAGenerationChangeOnAStillLegacyParent(t *testing.T) {
+	var registrations atomic.Int64
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			if registrations.Add(1) <= 2 {
+				return http.StatusOK, `{"generation":"gen-old"}`
+			}
+			return http.StatusOK, `{"generation":"gen-new"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newSupervisorLink(t, stub)
+
+	// The shape latches legacy under the parent's first generation.
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	// The parent's generation changes, the legacy refresh meets it, and the
+	// bounded re-offer runs: the full claim is answered keyless again, so the
+	// legacy shape is re-latched under the new generation.
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if got := registrations.Load(); got != 5 {
+		t.Fatalf("the parent saw %d registrations, want the latched shape, the refresh, and the bounded re-offer", got)
+	}
+	// The re-latched shape holds: the next refresh is one legacy registration.
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("third Sync: %v", err)
+	}
+	if got := registrations.Load(); got != 6 {
+		t.Fatalf("the parent saw %d registrations after the re-latched shape, want a single legacy refresh", got)
+	}
+}
+
 // TestSyncKeepsTheFullShapeWhenTheParentRefusesAnotherRun pins that a refusal
 // that is not about the supervisor claim never degrades the link: the retry
 // without the supervisor claim fails the same way, the refusal is reported, and
