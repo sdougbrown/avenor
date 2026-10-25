@@ -41,7 +41,6 @@ type envelope struct {
 	Kind              string            `json:"kind"`
 	Payload           json.RawMessage   `json:"payload"`
 	Generation        string            `json:"generation"`
-	MessagingProtocol int               `json:"messaging_protocol"`
 	Sessions          []json.RawMessage `json:"sessions"`
 	PeersError        string            `json:"peers_error"`
 	// RunKeys reports the run ID the parent addresses each claimed run by, for
