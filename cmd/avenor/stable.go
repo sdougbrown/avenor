@@ -35,7 +35,8 @@ func runStable(args []string) int {
 	mcpLaunchWrapperPolicyPath := fs.String("mcp-launch-wrapper-policy", "", "path to a JSON allowlist of launch_wrapper argv entries permitted for MCP-driven spawns (default: disabled)")
 	workflowRoot := fs.String("workflow-root", "", "workflow store root (default: $XDG_STATE_HOME/avenor/workflows, else $HOME/.avenor/workflows)")
 	workflowAdapterDir := fs.String("workflow-adapter-dir", "", "host-owned trusted adapter manifest directory (default: $XDG_CONFIG_HOME/avenor/workflow-adapters, else $HOME/.config/avenor/workflow-adapters)")
-	brokerParentURL := fs.String("broker-parent-url", "", "http:// address of the parent broker to join (empty disables the parent link; the credential comes from $AVENOR_PARENT_BROKER_TOKEN)")
+	brokerParentURL := fs.String("broker-parent-url", "", "http:// address of the parent broker to join (empty disables the parent link; the credential comes from $AVENOR_PARENT_BROKER_TOKEN, or --broker-parent-token as an explicit override)")
+	brokerParentToken := fs.String("broker-parent-token", "", "parent-link credential overriding $AVENOR_PARENT_BROKER_TOKEN; prefer the env var, since argv is world-readable via /proc/<pid>/cmdline")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -47,9 +48,12 @@ func runStable(args []string) int {
 		fmt.Fprintln(os.Stderr, "avenor stable: --idempotency-capacity must be greater than 0")
 		return 1
 	}
-	brokerParentToken := os.Getenv(EnvBrokerParentToken)
-	if *brokerParentURL != "" && brokerParentToken == "" {
-		fmt.Fprintf(os.Stderr, "avenor stable: %s must be set when --broker-parent-url is used\n", EnvBrokerParentToken)
+	token := *brokerParentToken
+	if token == "" {
+		token = os.Getenv(EnvBrokerParentToken)
+	}
+	if *brokerParentURL != "" && token == "" {
+		fmt.Fprintf(os.Stderr, "avenor stable: %s or --broker-parent-token must be set when --broker-parent-url is used\n", EnvBrokerParentToken)
 		return 1
 	}
 
@@ -91,7 +95,7 @@ func runStable(args []string) int {
 		WorkflowAdapterDir:         *workflowAdapterDir,
 		MCPLaunchWrapperPolicy:     mcpPolicy,
 		BrokerParentURL:            *brokerParentURL,
-		BrokerParentToken:          brokerParentToken,
+		BrokerParentToken:          token,
 	})
 	if treeBudgetFile == "" {
 		// Root: propagate the tree budget path to descendant processes.

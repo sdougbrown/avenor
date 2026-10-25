@@ -1,5 +1,6 @@
-// Package cli holds helpers shared by the avenor subcommands.
-package cli
+// Package token provides the shared random credential generator for avenor
+// subcommands and internals.
+package token
 
 import (
 	"crypto/rand"

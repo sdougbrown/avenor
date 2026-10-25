@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/sdougbrown/avenor/internal/cli"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // runParentToken implements `avenor parent-token`.
@@ -21,7 +21,7 @@ func runParentTokenTo(stdout, stderr io.Writer, args ...string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	token, err := cli.NewHexToken()
+	token, err := token.NewHexToken()
 	if err != nil {
 		fmt.Fprintf(stderr, "avenor parent-token: %v\n", err)
 		return 1

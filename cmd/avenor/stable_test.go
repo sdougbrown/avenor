@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,14 +205,70 @@ func TestRunStableBrokerParentFlagPropagation(t *testing.T) {
 	}
 }
 
-// TestRunStableBrokerParentURLRequiresToken: --broker-parent-url without
-// $AVENOR_PARENT_BROKER_TOKEN is rejected at the CLI boundary with exit 1.
+// TestRunStableBrokerParentURLRequiresToken: --broker-parent-url without a
+// credential (neither $AVENOR_PARENT_BROKER_TOKEN nor --broker-parent-token)
+// is rejected at the CLI boundary with exit 1 and the guard's error message.
 func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
 	tmpDir := stableTestEnv(t)
 	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
 
+	orig := newSupervisorFn
+	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+		return nil
+	}
+	t.Cleanup(func() { newSupervisorFn = orig })
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = oldStderr
+		_ = r.Close()
+	}()
+
 	t.Setenv(EnvBrokerParentToken, "")
-	if code := runStable([]string{"--control-socket", socketPath, "--broker-parent-url", "http://127.0.0.1:9"}); code != 1 {
+	code := runStable([]string{"--control-socket", socketPath, "--broker-parent-url", "http://127.0.0.1:9"})
+	_ = w.Close()
+	os.Stderr = oldStderr
+	var stderr bytes.Buffer
+	if _, err := io.Copy(&stderr, r); err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	if code != 1 {
 		t.Fatalf("runStable(url without token) = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), EnvBrokerParentToken) {
+		t.Fatalf("stderr = %q, want the %s guard error", stderr.String(), EnvBrokerParentToken)
+	}
+}
+
+// TestRunStableBrokerParentTokenFlagOverridesEnv: an explicit
+// --broker-parent-token wins over $AVENOR_PARENT_BROKER_TOKEN.
+func TestRunStableBrokerParentTokenFlagOverridesEnv(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+	var captured *stable.Config
+	orig := newSupervisorFn
+	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+		captured = &cfg
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newSupervisorFn = orig })
+
+	t.Setenv(EnvBrokerParentToken, "env-token")
+	_ = runStable([]string{
+		"--control-socket", socketPath,
+		"--broker-parent-url", "http://127.0.0.1:9",
+		"--broker-parent-token", "flag-token",
+	})
+	if captured == nil {
+		t.Fatal("config was not captured; the constructor seam was not hit")
+	}
+	if captured.BrokerParentToken != "flag-token" {
+		t.Fatalf("Config parent token = %q, want the explicit flag value", captured.BrokerParentToken)
 	}
 }

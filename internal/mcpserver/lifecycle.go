@@ -1,8 +1,6 @@
 package mcpserver
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -18,6 +16,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 var execCommand = exec.Command
@@ -29,14 +28,6 @@ var startupTimeout = 10 * time.Second
 var afterSupervisorReady = func() {}
 
 const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
-
-func newControlIdentityToken() (string, error) {
-	var token [32]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		return "", fmt.Errorf("generate control identity token: %w", err)
-	}
-	return hex.EncodeToString(token[:]), nil
-}
 
 type supervisorLifecycle struct {
 	mu         sync.Mutex
@@ -129,7 +120,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 		return nil, fmt.Errorf("create supervisor readiness pipe: %w", err)
 	}
 	defer readyReader.Close()
-	identityToken, err := newControlIdentityToken()
+	identityToken, err := token.NewHexToken()
 	if err != nil {
 		_ = readyWriter.Close()
 		return nil, err
