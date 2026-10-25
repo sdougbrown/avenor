@@ -1514,7 +1514,11 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleParentDeregister retires one child broker's claim and the run records
-// it owned, so a closed branch stops being a routing target.
+// it owned, so a closed branch stops being a routing target. A body with
+// "force": true retires the child's claims without pinning a generation: that
+// is the operator's recovery path for a child whose durable identity changed
+// across a restart, whose old claims the ordinary generation-pinned
+// deregistration can never retire.
 func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) {
 	link, token := b.parentSeam()
 	if link == nil {
@@ -1528,6 +1532,7 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		ChildID    string `json:"child_id"`
 		Generation string `json:"generation"`
+		Force      bool   `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -1537,7 +1542,13 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		writeCodedError(w, http.StatusBadRequest, "child_id is required", "invalid-request")
 		return
 	}
-	runs, err := link.Deregister(body.ChildID, body.Generation)
+	var runs []string
+	var err error
+	if body.Force {
+		runs, err = link.ForceDeregister(body.ChildID)
+	} else {
+		runs, err = link.Deregister(body.ChildID, body.Generation)
+	}
 	if err != nil {
 		writeCodedError(w, http.StatusNotFound, err.Error(), "target-unavailable")
 		return

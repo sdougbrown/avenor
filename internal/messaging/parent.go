@@ -22,6 +22,10 @@ type ParentLink interface {
 	// caller pins the generation its view of the child registered with: a claim
 	// a fresher registration replaced survives the deregistration.
 	Deregister(childID, generation string) ([]string, error)
+	// ForceDeregister retires every claim a child holds and deletes its record
+	// without pinning a generation, so an operator can release a child whose
+	// durable identity moved and whose generation no view can pin.
+	ForceDeregister(childID string) ([]string, error)
 	// RecordRelay records the reply route of a relayed ask. The broker calls it
 	// before it exposes the ask to a consumer, so a reply always follows the
 	// hop the ask arrived on.
