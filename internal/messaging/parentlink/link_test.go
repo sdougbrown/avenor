@@ -602,3 +602,43 @@ func TestIdleBranchReRegistersWithAReplacedParent(t *testing.T) {
 			generation, pinned, replacement.broker.Store().Generation())
 	}
 }
+
+// TestNewLinkRefusesPlaintextParentOutsideLoopback pins the credential guard:
+// the bearer credential must not cross a routable network in plaintext, so a
+// non-loopback http:// parent URL is refused unless the opt-in is set, while
+// loopback and https need none.
+func TestNewLinkRefusesPlaintextParentOutsideLoopback(t *testing.T) {
+	base := Options{
+		Endpoint:   "http://child-one",
+		ChildID:    "child-one",
+		Runs:       testRuns,
+		Generation: func() string { return "gen-a" },
+	}
+	tests := []struct {
+		name    string
+		url     string
+		insec   bool
+		wantErr bool
+	}{
+		{name: "non-loopback http refused", url: "http://10.0.0.1:8080", wantErr: true},
+		{name: "non-loopback http allowed with opt-in", url: "http://10.0.0.1:8080", insec: true},
+		{name: "https allowed", url: "https://parent.example:8443"},
+		{name: "loopback http allowed", url: "http://127.0.0.1:8080"},
+		{name: "localhost http allowed", url: "http://localhost:8080"},
+		{name: "not a url refused", url: "parent.example:8443", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := base
+			opts.ParentURL = tt.url
+			opts.AllowInsecureParentLink = tt.insec
+			_, err := NewLink(opts)
+			if tt.wantErr && err == nil {
+				t.Fatalf("NewLink(%q) succeeded, want refusal", tt.url)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("NewLink(%q) = %v, want accepted", tt.url, err)
+			}
+		})
+	}
+}
