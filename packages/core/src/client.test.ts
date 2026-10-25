@@ -3,7 +3,7 @@ import * as net from 'node:net'
 import * as path from 'node:path'
 import * as os from 'node:os'
 import { PassThrough } from 'node:stream'
-import { Client, dial, OwnerAuthError, RpcError, type Event } from './client.js'
+import { Client, ClosedSocketError, dial, isClosedSocketError, OwnerAuthError, RpcError, type Event } from './client.js'
 import type {
   ExecutionIdentity,
   WorkflowCompleteParams,
@@ -655,6 +655,113 @@ describe('Client.call error handling', () => {
       await expect(client.status()).rejects.toThrow(
         'rpc error [-32000]: something went wrong',
       )
+    } finally {
+      client.close()
+    }
+  })
+})
+
+describe('ClosedSocketError classification', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('classifies an already-closed send refusal as closed', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (_req, sock) => {
+      sock.destroy()
+    })
+
+    const client = await dial(socketPath)
+    try {
+      // The first call is in flight when the peer destroys the connection, so
+      // it rejects through the read-close path; the second is refused because
+      // the client is already closed.
+      await expect(client.status()).rejects.toBeInstanceOf(ClosedSocketError)
+      expect(client.isClosed()).toBe(true)
+      const refusal = await client.status().catch((e) => e)
+      expect(isClosedSocketError(refusal)).toBe(true)
+      expect((refusal as Error).message).toBe('control socket is closed')
+    } finally {
+      client.close()
+    }
+  })
+
+  it('classifies a pending call rejected on read close as closed', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (_req, sock) => {
+      sock.destroy()
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const failure = await client.status().catch((e) => e)
+      expect(isClosedSocketError(failure)).toBe(true)
+      expect((failure as Error).message).toBe('read response: connection closed')
+    } finally {
+      client.close()
+    }
+  })
+
+  it('classifies a socket write failure as closed', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, () => {})
+
+    const client = await dial(socketPath)
+    try {
+      ;(client as any).socket.write = (
+        data: string,
+        cb?: (err?: Error | null) => void,
+      ): boolean => {
+        if (cb) cb(new Error('pipe broken'))
+        return false
+      }
+
+      const failure = await client.status().catch((e) => e)
+      expect(isClosedSocketError(failure)).toBe(true)
+      expect((failure as Error).message).toBe('write request: pipe broken')
+      expect(client.isClosed()).toBe(true)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('does not classify an RPC error as closed', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      sock.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: req.id,
+        error: { code: -32000, message: 'something went wrong' },
+      }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const failure = await client.status().catch((e) => e)
+      expect(isClosedSocketError(failure)).toBe(false)
+      expect(failure).toBeInstanceOf(RpcError)
+    } finally {
+      client.close()
+    }
+  })
+
+  it('does not classify a call timeout as closed', async () => {
+    const socketPath = tempSocketPath()
+
+    server = await startMockServer(socketPath, () => {})
+
+    const client = await dial(socketPath, { callTimeoutMs: 100 })
+    try {
+      const failure = await client.status().catch((e) => e)
+      expect(isClosedSocketError(failure)).toBe(false)
+      expect((failure as Error).message).toBe('read response: timeout')
     } finally {
       client.close()
     }
