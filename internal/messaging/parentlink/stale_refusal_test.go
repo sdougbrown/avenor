@@ -183,6 +183,42 @@ func TestDeregisterRetiresTheClaimsItNames(t *testing.T) {
 	}
 }
 
+// TestDeregisterAcceptsAViewThatNamesARetiredRun pins the claim-set half of the
+// deregistration rule: the parent is a second writer of a registration's claim
+// set, and a per-run relay refusal retires one claim between the branch's
+// registrations, so the view a closing branch holds can name a run the
+// registration no longer carries. The close is still the branch's own: it
+// retires every claim the registration still holds, where refusing it over the
+// retired run would strand the surviving claims on a branch that is gone.
+func TestDeregisterAcceptsAViewThatNamesARetiredRun(t *testing.T) {
+	parent := startBranch(t, "", "orchestrator")
+	stale := newBlockingEndpoint(t, http.StatusNotFound, "target-unavailable")
+
+	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old",
+		"target", "token-a", "second", "token-b")
+
+	// A relay for target finds the run gone: the branch itself answers that the
+	// run is no longer there, so the parent retires target's claim alone.
+	refusal := relayAsk(t, parent, "target", stale)
+	stale.release()
+	expectRefusedAsk(t, <-refusal)
+	if parent.link.Registry().Owns("target") {
+		t.Fatal("the per-run refusal left the retired run claimed")
+	}
+
+	// The branch closes with the view of its last accepted registration, which
+	// still names target: the close retires the claim the registration holds.
+	deregisterDescendant(t, parent, "branch-delta", stale.url(), "gen-old",
+		"target", "token-a", "second", "token-b")
+
+	if parent.link.Registry().Owns("second") {
+		t.Fatal("the deregistration left the surviving run claimed")
+	}
+	if st := parent.broker.GetRun("second"); st != nil {
+		t.Fatal("the deregistration left the surviving run served locally")
+	}
+}
+
 // deregisterWith posts a deregistration that carries a view of the registration
 // and expects the status and code the parent answers a mismatch with: the view
 // no longer matches the registration the parent holds.
