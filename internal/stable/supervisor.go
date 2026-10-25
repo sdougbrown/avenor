@@ -266,9 +266,9 @@ type childRuntime struct {
 	// provider label environment and launch provenance describe the launch.
 	label string
 	// displayName is the run's current display name, the one messaging peers
-	// see. A spawn sets it and applySessionName rewrites it under
-	// s.controlMu -> child.mu, the locks List, RuntimeStatus and
-	// labelHolderLocked read it under.
+	// see. A spawn sets it, applySessionName rewrites it, and the broker's
+	// harness-name observer rewrites it — each under s.controlMu -> child.mu,
+	// the locks List, RuntimeStatus and labelHolderLocked read it under.
 	displayName      string
 	agent            string
 	agentProfile     string
