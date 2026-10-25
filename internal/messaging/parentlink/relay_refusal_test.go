@@ -9,10 +9,12 @@ import (
 )
 
 // TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch pins the relay's
-// refusal rule: a child that refuses the relay because it is no longer the
-// branch it registered as stops being a routing target, a child that retired
-// one run loses that run alone, and a child that merely failed keeps its
-// claim and is retried.
+// refusal rule: a generation mismatch retires the whole registration — but
+// only while it still matches what the relay was posted against, so a branch
+// that refreshed its claim while the refusal was in flight keeps it; a run
+// whose child refused its claim or credential stops being routed alone, its
+// claim and host record going together; and a child that failed without
+// saying anything about its branch keeps its claim and is retried.
 func TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch(t *testing.T) {
 	cases := []struct {
 		name string
