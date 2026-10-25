@@ -83,8 +83,28 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 				}
 				settledStarted, settledDone := rotating.snapshot()
 				if started == settledStarted && done == settledDone && status != http.StatusOK {
-					t.Errorf("authentication with the current credential %q = %d, want 200", token, status)
-					return
+					// A write that incremented started before the first snapshot can
+					// increment done after the second, which reads as no overlap while
+					// the credential switched mid-request. The record then no longer
+					// carries the credential the request used, so retry once with the
+					// credential the record carries now; a refusal under a credential
+					// the record still carries is a real failure.
+					current, ok := b.RunToken("asker")
+					if !ok {
+						t.Errorf("the run disappeared while its credential was refreshed")
+						return
+					}
+					if current != token {
+						status, err = authenticatedGet(b.Addr(), "asker", current)
+						if err != nil {
+							t.Errorf("authenticate with the refreshed credential: %v", err)
+							return
+						}
+					}
+					if status != http.StatusOK {
+						t.Errorf("authentication with the current credential %q = %d, want 200", token, status)
+						return
+					}
 				}
 			}
 		}()
