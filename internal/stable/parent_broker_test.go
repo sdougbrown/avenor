@@ -6,11 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-<<<<<<< HEAD
-	"strings"
-=======
 	"os"
->>>>>>> d0a16f7 (🛡️ Mix the host into the branch identity digest)
+	"strings"
 	"testing"
 	"time"
 
@@ -80,7 +77,7 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 		ChildID:    parentlink.BranchID("test/"+b.Addr(), testHost()),
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
-		Runs: b.ParentRunClaims,
+		Runs:       b.ParentRunClaims,
 		// A run this branch stops owning loses its broker record too, so a
 		// refused descendant stops being served locally.
 		RetireRuns: func(runIDs []string) {
@@ -212,12 +209,7 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 	}
 	// The supervisor registers its own run under its branch identity: every
 	// branch reserves the supervisor run ID, so the parent addresses it there.
-<<<<<<< HEAD
-	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket); !parentLink.Registry().Owns(branchSupervisorRun) {
-=======
-	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket, testHost());
-		!parentLink.Registry().Owns(branchSupervisorRun) {
->>>>>>> d0a16f7 (🛡️ Mix the host into the branch identity digest)
+	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket, testHost()); !parentLink.Registry().Owns(branchSupervisorRun) {
 		t.Fatalf("the supervisor did not register its own run with its parent broker as %q", branchSupervisorRun)
 	}
 
