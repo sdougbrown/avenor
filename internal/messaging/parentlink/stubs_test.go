@@ -133,6 +133,23 @@ func askRequest(messageID string) messaging.SendRequest {
 	}
 }
 
+// sendBody builds the /send request body an ask posts over a broker's HTTP
+// surface: the run credential the broker authenticates with, the ask's route,
+// and the pin the broker translates into the generation of the hop it admits.
+func sendBody(fromRunID, token, toRunID, msgID, generation string) map[string]any {
+	return map[string]any{
+		"run_id":        fromRunID,
+		"token":         token,
+		"from_run_id":   fromRunID,
+		"to_run_id":     toRunID,
+		"type":          "agent_message",
+		"payload":       map[string]any{"message": "ping"},
+		"message_id":    msgID,
+		"generation":    generation,
+		"expects_reply": true,
+	}
+}
+
 // waitRequest reports one wait the test link forwards to its parent.
 func waitRequest(messageID string) messaging.WaitRequest {
 	return messaging.WaitRequest{

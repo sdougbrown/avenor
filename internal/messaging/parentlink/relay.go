@@ -26,8 +26,8 @@ type relay struct {
 	// owning, but only while the record still carries the credential the run's
 	// claim carried in the registration the failed relay was posted against, so
 	// a branch that re-registered while the refusal was in flight keeps its
-	// record. It reports whether it retired the record.
-	retire func(runID, token string) bool
+	// record.
+	retire func(runID, token string)
 }
 
 // newRelay builds the relay that reaches the children registered with this

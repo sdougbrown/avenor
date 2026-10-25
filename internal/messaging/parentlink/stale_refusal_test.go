@@ -402,17 +402,7 @@ type sendAnswer struct {
 
 // sendAsk posts one ask over a broker's HTTP surface and reports the answer.
 func sendAsk(addr, fromRunID, token, toRunID, msgID, generation string) sendAnswer {
-	raw, err := json.Marshal(map[string]any{
-		"run_id":        fromRunID,
-		"token":         token,
-		"from_run_id":   fromRunID,
-		"to_run_id":     toRunID,
-		"type":          "agent_message",
-		"payload":       map[string]any{"message": "ping"},
-		"message_id":    msgID,
-		"generation":    generation,
-		"expects_reply": true,
-	})
+	raw, err := json.Marshal(sendBody(fromRunID, token, toRunID, msgID, generation))
 	if err != nil {
 		return sendAnswer{err: err}
 	}

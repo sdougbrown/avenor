@@ -53,13 +53,12 @@ type Options struct {
 	// link pins it and the relay binds every hop to it.
 	Generation func() string
 	// RetireRun retires the host broker's own record for a run this branch stops
-	// owning after a relay found the owning branch gone, and reports whether it
-	// did: the retirement is conditional on the record still carrying the
-	// credential the run's claim carried in the registration the failed relay
-	// was posted against, so a replacement branch that registered while the
-	// refusal was in flight keeps its record. Nil leaves the record to the
-	// host.
-	RetireRun func(runID, token string) bool
+	// owning after a relay found the owning branch gone: the retirement is
+	// conditional on the record still carrying the credential the run's claim
+	// carried in the registration the failed relay was posted against, so a
+	// replacement branch that registered while the refusal was in flight keeps
+	// its record. Nil leaves the record to the host.
+	RetireRun func(runID, token string)
 	// RefreshInterval bounds how long an idle branch stays absent from a
 	// replaced parent. Zero uses DefaultRefreshInterval.
 	RefreshInterval time.Duration

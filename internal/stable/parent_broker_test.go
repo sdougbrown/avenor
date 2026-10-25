@@ -25,7 +25,7 @@ func startTestParentBroker(t *testing.T) (*broker.Broker, *parentlink.Messenger)
 	t.Cleanup(func() { _ = b.Stop() })
 	link, err := parentlink.New(parentlink.Options{
 		Generation: b.Store().Generation,
-		RetireRun:  b.DeleteRunIfToken,
+		RetireRun:  func(runID, token string) { b.DeleteRunIfToken(runID, token) },
 	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build parent messenger: %v", err)
@@ -70,7 +70,7 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 		},
 		// A run this branch stops owning loses its broker record too, so a
 		// refused descendant stops being served locally.
-		RetireRun: b.DeleteRunIfToken,
+		RetireRun: func(runID, token string) { b.DeleteRunIfToken(runID, token) },
 	}, b)
 	if err != nil {
 		t.Fatalf("build branch messenger: %v", err)
@@ -152,8 +152,7 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 	}
 	// The supervisor registers its own run under its branch identity: every
 	// branch reserves the supervisor run ID, so the parent addresses it there.
-	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket);
-		!parentLink.Registry().Owns(branchSupervisorRun) {
+	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket); !parentLink.Registry().Owns(branchSupervisorRun) {
 		t.Fatalf("the supervisor did not register its own run with its parent broker as %q", branchSupervisorRun)
 	}
 
