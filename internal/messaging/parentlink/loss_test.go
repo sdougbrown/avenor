@@ -179,16 +179,25 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 				withdrawnCount.Add(1)
 				return
 			}
-			outcome, err := second.link.Reply(ctx, messaging.ReplyRequest{
-				From:      messaging.Identity{RunID: "target"},
-				ToRunID:   first.key("asker"),
-				MessageID: msgID,
-				Body:      `{"message":"pong"}`,
-			})
-			if err != nil || outcome != messaging.OutcomeReplied {
-				t.Errorf("reply = (%v, %v), want replied", outcome, err)
-				return
-			}
+			// The reply arm: the target's reply races this branch's wait on the
+			// same edge, and the verdict is Replied under either interleaving: a
+			// wait admitted first blocks on the live edge until the reply
+			// completes it, and a reply that completes the edge first leaves it
+			// for this wait to read, because this wait is the only consumer. A
+			// withdrawal never touches this edge: that path is the other arm's.
+			repliedDone := make(chan messaging.Outcome, 1)
+			go func() {
+				outcome, err := second.link.Reply(ctx, messaging.ReplyRequest{
+					From:      messaging.Identity{RunID: "target"},
+					ToRunID:   first.key("asker"),
+					MessageID: msgID,
+					Body:      `{"message":"pong"}`,
+				})
+				if err != nil || outcome != messaging.OutcomeReplied {
+					t.Errorf("reply = (%v, %v), want replied", outcome, err)
+				}
+				repliedDone <- outcome
+			}()
 			waited, err := first.link.Wait(ctx, messaging.WaitRequest{
 				Sender:     messaging.Identity{RunID: "asker"},
 				MessageID:  msgID,
@@ -197,8 +206,10 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 			})
 			if err != nil || waited.Outcome != messaging.OutcomeReplied {
 				t.Errorf("wait = (%+v, %v), want replied", waited, err)
-				return
+			} else if string(waited.Reply.Payload) != `{"message":"pong"}` {
+				t.Errorf("wait reply payload = %v, want the reply the target sent", waited.Reply.Payload)
 			}
+			<-repliedDone
 			repliedCount.Add(1)
 		}(i%2 == 0)
 	}
