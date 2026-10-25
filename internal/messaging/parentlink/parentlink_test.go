@@ -103,7 +103,7 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		RefreshInterval: refresh,
 		Endpoint:        branch.url(),
 		Generation:      b.Store().Generation,
-		Runs: b.ParentRunClaims,
+		Runs:            b.ParentRunClaims,
 		// A run this branch stops owning loses its broker record too, so a
 		// refused descendant stops being served locally.
 		RetireRuns: func(runIDs []string) {

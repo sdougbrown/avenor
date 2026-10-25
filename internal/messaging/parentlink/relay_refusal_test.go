@@ -56,7 +56,7 @@ func TestRelayRefusalRetiresTheRefusedRunOnTheHost(t *testing.T) {
 			relay.retire = func(runID string) { retired = append(retired, runID) }
 			ctx := testContext(t)
 
-				err := relay.Ask(ctx, messaging.SendRequest{
+			err := relay.Ask(ctx, messaging.SendRequest{
 				From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
 				To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
 				MessageID: "msg-1",
