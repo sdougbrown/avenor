@@ -32,6 +32,14 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 	if _, err := b.CreateRun("target", "target"); err != nil {
 		t.Fatalf("create the target run: %v", err)
 	}
+	// The credential the run authenticates with before any rotation, so the
+	// replaced-credential check at the end names one the rotation loop is
+	// guaranteed to have replaced rather than one a starved loop may never
+	// have moved past.
+	original, ok := b.RunToken("asker")
+	if !ok {
+		t.Fatal("the asking run has no credential")
+	}
 
 	// A replacement claim rotates the credential, so a request whose credential
 	// did not move while it was in flight must authenticate.
@@ -126,7 +134,7 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 	if current, ok := b.RunToken("asker"); !ok || current != steady {
 		t.Fatalf("credential after re-registration = (%q, %v), want %q", current, ok, steady)
 	}
-	if status, err := authenticatedGet(b.Addr(), "asker", "rotation-0"); err != nil || status != http.StatusUnauthorized {
+	if status, err := authenticatedGet(b.Addr(), "asker", original); err != nil || status != http.StatusUnauthorized {
 		t.Fatalf("authentication with the replaced credential = (%d, %v), want 401", status, err)
 	}
 }
