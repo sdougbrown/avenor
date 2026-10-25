@@ -25,3 +25,16 @@ func TestNewHexTokenShape(t *testing.T) {
 		t.Fatal("NewHexToken() returned the same token twice")
 	}
 }
+
+func TestNewHexSize(t *testing.T) {
+	s, err := NewHex(16)
+	if err != nil {
+		t.Fatalf("NewHex(16) = %q, %v", s, err)
+	}
+	if len(s) != 32 {
+		t.Fatalf("NewHex(16) length = %d, want 32 hex characters", len(s))
+	}
+	if _, err := hex.DecodeString(s); err != nil {
+		t.Fatalf("NewHex(16) = %q, want hex: %v", s, err)
+	}
+}

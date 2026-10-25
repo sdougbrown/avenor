@@ -445,7 +445,7 @@ func (b *Broker) MessengerTransport() messaging.Transport {
 // MakeToken returns a random opaque credential via the shared hex generator.
 // It panics if crypto/rand fails, matching its use as an infallible helper.
 func MakeToken() string {
-	token, err := token.NewHexToken()
+	token, err := token.NewHex(16)
 	if err != nil {
 		panic(fmt.Sprintf("crypto/rand: %v", err))
 	}
