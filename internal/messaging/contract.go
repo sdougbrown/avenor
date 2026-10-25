@@ -96,13 +96,18 @@ type RenameRequest struct {
 	Name      string // the new display name; becomes SessionInfo.Label
 }
 
-// RenameResult reports the one display-name field before and after the write.
-// There is no second name field: Label is SessionInfo.Label and is what
-// /sessions, /send's sender and the resolution ladder all read.
+// RenameResult reports the one resolved display name before and after the
+// write. The rename writes the model-set half — the request's Name becomes
+// SessionInfo.Label — but the name peers see is the resolved display name:
+// the harness's own session name wins whenever the harness supplied one, the
+// model-set label is the fallback, and a run with neither carries its run ID.
+// Label and PreviousLabel report that resolution the way /sessions, /send's
+// sender and the resolution ladder read it: through the broker's resolution,
+// never Info.Label directly.
 type RenameResult struct {
 	RunID         string // resolved broker/runtime id
-	Label         string // the new SessionInfo.Label
-	PreviousLabel string // the label before the rename (the launch label if never renamed)
+	Label         string // the resolved display name after the rename
+	PreviousLabel string // the resolved display name before the rename
 }
 
 // PeerRecord is one peers `list` entry: the tool's projection of the broker's
