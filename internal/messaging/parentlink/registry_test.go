@@ -57,7 +57,7 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 		ChildID:    "one",
 		Endpoint:   "http://one-again",
 		Generation: "gen-one-two",
-		Runs:       []messaging.RunClaim{{RunID: "run-c"}},
+		Runs:       []messaging.RunClaim{{RunID: "run-c", Token: "tok-c"}},
 	})
 	if err != nil {
 		t.Fatalf("re-register first child: %v", err)
@@ -74,20 +74,20 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 
 	// Deregistering retires the child and reports everything it held, with the
 	// credential each claim was registered under.
-	retired, err := registry.Deregister("one", messaging.DescendantView{
+	retired, err := registry.Deregister("one", messaging.DescendantRegistration{
 		Endpoint: "http://one-again", Generation: "gen-one-two",
-		Runs: []messaging.RunClaim{{RunID: "run-c"}},
+		Runs: []messaging.RunClaim{{RunID: "run-c", Token: "tok-c"}},
 	})
 	if err != nil {
 		t.Fatalf("deregister child: %v", err)
 	}
-	if len(retired) != 1 || retired["run-c"] != "" {
+	if len(retired) != 1 || retired["run-c"] != "tok-c" {
 		t.Fatalf("deregistered runs = %v, want run-c with the credential it claimed", retired)
 	}
 	if _, ok := registry.Hop("run-c"); ok {
 		t.Fatal("a deregistered child still owns a run")
 	}
-	if _, err := registry.Deregister("one", messaging.DescendantView{}); !errors.Is(err, messaging.ErrTargetUnavailable) {
+	if _, err := registry.Deregister("one", messaging.DescendantRegistration{}); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("deregistering an unknown child = %v, want ErrTargetUnavailable", err)
 	}
 }
@@ -165,7 +165,7 @@ func TestRegistryRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
 		}
 	}
 	// The child itself is not left registered by a refused claim.
-	if _, err := registry.Deregister("one", messaging.DescendantView{}); !errors.Is(err, messaging.ErrTargetUnavailable) {
+	if _, err := registry.Deregister("one", messaging.DescendantRegistration{}); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("deregistering the refused child = %v, want the child never registered", err)
 	}
 }
@@ -232,7 +232,7 @@ func TestRegistryHopsWithTheCredentialTheChildRegistered(t *testing.T) {
 	if hop, ok := registry.Hop("run-a"); !ok || hop.Token != "tok-2" {
 		t.Fatalf("Hop after a rotated credential = (%+v, %v), want tok-2", hop, ok)
 	}
-	if _, err := registry.Deregister("one", messaging.DescendantView{
+	if _, err := registry.Deregister("one", messaging.DescendantRegistration{
 		Endpoint: "http://one", Generation: "g1",
 		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "tok-2"}},
 	}); err != nil {
