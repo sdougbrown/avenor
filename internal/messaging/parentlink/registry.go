@@ -197,6 +197,19 @@ func (r *Registry) Deregister(childID string) ([]string, error) {
 	return runs, nil
 }
 
+// claimMatchesHop reports whether childID's registration still resolves to
+// hop for runKey: the endpoint and pinned generation match the hop, and the
+// claim the relay named still holds the run ID and credential it
+// authenticated with. Both callers hold r.mu.
+func (r *Registry) claimMatchesHop(childID, runKey string, hop Hop) bool {
+	current, ok := r.children[childID]
+	return ok &&
+		current.endpoint == hop.Endpoint &&
+		current.generation == hop.Generation &&
+		current.runs[runKey] == hop.RunID &&
+		current.tokens[runKey] == hop.Token
+}
+
 // ForgetIfStale drops one run's claim, which is what a relay that found its
 // child gone leaves behind, but only while the claim still resolves to hop: the
 // run's endpoint, generation, canonical run ID and the credential the relay
@@ -212,14 +225,10 @@ func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 	if !ok || owner != hop.ChildID {
 		return false
 	}
-	current := r.children[owner]
-	if current == nil ||
-		current.endpoint != hop.Endpoint ||
-		current.generation != hop.Generation ||
-		current.runs[runID] != hop.RunID ||
-		current.tokens[runID] != hop.Token {
+	if !r.claimMatchesHop(owner, runID, hop) {
 		return false
 	}
+	current := r.children[owner]
 	delete(r.owners, runID)
 	delete(current.runs, runID)
 	delete(current.tokens, runID)
@@ -242,14 +251,10 @@ func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 func (r *Registry) ForgetChildIfStale(childID, failed string, hop Hop) map[string]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	current, ok := r.children[childID]
-	if !ok ||
-		current.endpoint != hop.Endpoint ||
-		current.generation != hop.Generation ||
-		current.runs[failed] != hop.RunID ||
-		current.tokens[failed] != hop.Token {
+	if !r.claimMatchesHop(childID, failed, hop) {
 		return nil
 	}
+	current := r.children[childID]
 	delete(r.children, childID)
 	retired := make(map[string]string, len(current.runs))
 	for key := range current.runs {

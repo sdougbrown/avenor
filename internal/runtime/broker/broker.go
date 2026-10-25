@@ -584,7 +584,7 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized: missing run_id or token", http.StatusUnauthorized)
 			return
 		}
-		want, ok := b.runToken(cred.RunID)
+		_, want, ok := b.runStateFor(cred.RunID)
 		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(want)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -1580,14 +1580,11 @@ func (b *Broker) runStateFor(runID string) (*RunState, string, bool) {
 	return st, st.Token, true
 }
 
-// runToken reports the credential this broker authenticates runID with.
-func (b *Broker) runToken(runID string) (string, bool) {
+// RunToken reports the credential this broker authenticates runID with.
+func (b *Broker) RunToken(runID string) (string, bool) {
 	_, token, ok := b.runStateFor(runID)
 	return token, ok
 }
-
-// RunToken reports the credential this broker authenticates runID with.
-func (b *Broker) RunToken(runID string) (string, bool) { return b.runToken(runID) }
 
 // Sessions returns the runs this broker owns with the metadata its peers see.
 func (b *Broker) Sessions() []SessionInfo { return b.sessions() }
