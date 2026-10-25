@@ -370,9 +370,10 @@ func (b *Broker) SetMessenger(m messaging.Messenger) {
 // InstallParentLink installs everything a parent broker serves its parent-link
 // routes with: the descendant registry those routes write, the bearer credential
 // they require, and the callback that re-publishes this broker's owned runs when
-// its run set changes. Empty token leaves the routes to the loopback, same-user
-// trust the broker's local routes already run on; a nil link leaves them unserved,
-// which is what a standalone broker reports.
+// its run set changes. An unconfigured credential leaves the parent routes
+// refused — the same-user trust the broker's local routes run on would let any
+// local caller replace a live branch's claim wholesale; a nil link leaves them
+// unserved, which is what a standalone broker reports.
 func (b *Broker) InstallParentLink(link messaging.ParentLink, token string, observer func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
