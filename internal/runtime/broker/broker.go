@@ -1794,7 +1794,6 @@ func (b *Broker) UpdateSessionInfo(runID string, info *SessionInfo) {
 func (b *Broker) handleSessionName(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RunID string `json:"run_id"`
-		Token string `json:"token"`
 		Name  string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

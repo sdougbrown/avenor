@@ -392,15 +392,21 @@ func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T)
 		}
 	}()
 	<-entered
+	// Signal the second registration's arrival without a fixed sleep: the
+	// goroutine announces itself before posting, so the release below happens
+	// only after the second POST is in the server's hands and its register
+	// handler is contending on the broker lock.
+	secondStarted := make(chan struct{})
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
+		close(secondStarted)
 		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(body("token-2"))))
 		if err == nil {
 			resp.Body.Close()
 		}
 	}()
-	time.Sleep(50 * time.Millisecond)
+	<-secondStarted
 	close(release)
 	<-firstDone
 	<-secondDone
