@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -28,15 +29,49 @@ type stubBroker struct {
 	mu       sync.Mutex
 	requests []stubRequest
 	respond  func(stubRequest) (int, string)
+	conns    map[string]net.Conn
 }
 
 // newStubBroker starts one stub broker whose responder answers every request.
 func newStubBroker(t *testing.T, respond func(stubRequest) (int, string)) *stubBroker {
 	t.Helper()
-	b := &stubBroker{t: t, respond: respond}
-	b.server = httptest.NewServer(http.HandlerFunc(b.serve))
-	t.Cleanup(b.server.Close)
+	b := &stubBroker{t: t, respond: respond, conns: map[string]net.Conn{}}
+	// Unstarted so the hook is installed before the server serves: a hook set
+	// after Start races the serve loop's own read of it.
+	b.server = httptest.NewUnstartedServer(http.HandlerFunc(b.serve))
+	b.server.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			b.mu.Lock()
+			b.conns[c.RemoteAddr().String()] = c
+			b.mu.Unlock()
+		case http.StateClosed, http.StateHijacked:
+			b.mu.Lock()
+			delete(b.conns, c.RemoteAddr().String())
+			b.mu.Unlock()
+		}
+	}
+	b.server.Start()
+	t.Cleanup(b.Close)
 	return b
+}
+
+// Close shuts the stub broker down for good: beyond the server's own close it
+// force-closes every accepted connection, so a pooled keep-alive conn cannot
+// outlive the shutdown and let a late request reach a live handler instead of
+// dialing a closed port.
+func (b *stubBroker) Close() {
+	b.server.Close()
+	b.mu.Lock()
+	conns := make([]net.Conn, 0, len(b.conns))
+	for _, c := range b.conns {
+		conns = append(conns, c)
+	}
+	b.conns = map[string]net.Conn{}
+	b.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
 }
 
 // URL reports the address the stub broker answers on.
