@@ -155,9 +155,11 @@ func LaunchEnv(environ []string, p *LaunchProvenance) []string {
 	return append(ScrubIdentityEnv(environ), p.IdentityEnv()...)
 }
 
-// ScrubIdentityEnv returns environ without inherited launch identity. Matching
-// is on the exact key, so duplicates and bare-key entries are removed too,
-// while near-miss names and every other variable keep their order.
+// ScrubIdentityEnv returns environ without the names a child must not inherit
+// (ScrubbedEnvNames): launch identity, the test-only switches, and the
+// parent-link credential. Matching is on the exact key, so duplicates and
+// bare-key entries are removed too, while near-miss names and every other
+// variable keep their order.
 func ScrubIdentityEnv(environ []string) []string {
 	if len(environ) == 0 {
 		return nil

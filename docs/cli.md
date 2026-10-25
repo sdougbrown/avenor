@@ -284,7 +284,7 @@ avenor stable --control-socket /tmp/avenor.sock
 | `--lease-sweep-interval` | `10s` | Expire workflow leases whose heartbeat stopped at this cadence (0 = disable; leases expire only on restart recovery) |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout before killing children |
 | `--permission-claim-timeout` | `0` (disabled) | Optional permission claim deadline; with 0, fallback occurs only after all control clients disconnect |
-| `--broker-parent-url` | (none) | `http://` address of the parent broker to join; empty disables the parent link. The credential comes from the `AVENOR_PARENT_BROKER_TOKEN` environment variable (required when this flag is set) |
+| `--broker-parent-url` | (none) | `http://` address of the parent broker to join. The credential comes from the `AVENOR_PARENT_BROKER_TOKEN` environment variable (required when this flag is set); a credential without a URL runs this broker as the tree's parent broker |
 | `--broker-parent-token` | (none) | Explicit parent-link credential overriding `AVENOR_PARENT_BROKER_TOKEN`; prefer the env var, since argv is world-readable via `/proc/<pid>/cmdline` |
 
 ### Example
