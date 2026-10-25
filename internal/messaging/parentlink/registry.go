@@ -197,13 +197,20 @@ func (r *Registry) Deregister(childID string, view messaging.DescendantView) (ma
 	if !registrationMatches(current, view) {
 		return nil, fmt.Errorf("%w: child %q's registration no longer matches the closing branch's view", messaging.ErrGenerationMismatch, childID)
 	}
-	delete(r.children, childID)
+	return r.retireRegistration(current), nil
+}
+
+// retireRegistration drops one child's whole registration and reports the run
+// keys it retired with the credential each claim was registered with. Both
+// callers hold r.mu.
+func (r *Registry) retireRegistration(current *child) map[string]string {
+	delete(r.children, current.id)
 	retired := make(map[string]string, len(current.runs))
 	for key := range current.runs {
 		delete(r.owners, key)
 		retired[key] = current.tokens[key]
 	}
-	return retired, nil
+	return retired
 }
 
 // registrationMatches reports whether a registered child still resolves to the
@@ -290,14 +297,7 @@ func (r *Registry) ForgetChildIfStale(childID, failed string, hop Hop) map[strin
 	if !r.claimMatchesHop(childID, failed, hop) {
 		return nil
 	}
-	current := r.children[childID]
-	delete(r.children, childID)
-	retired := make(map[string]string, len(current.runs))
-	for key := range current.runs {
-		delete(r.owners, key)
-		retired[key] = current.tokens[key]
-	}
-	return retired
+	return r.retireRegistration(r.children[childID])
 }
 
 // Owns reports whether runID belongs to a registered child broker.
