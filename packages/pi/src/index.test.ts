@@ -636,6 +636,39 @@ describe('Avenor Pi extension', () => {
     }
   })
 
+  it('skips the session-name publish when the context has no session manager', async () => {
+    const published: Array<Record<string, unknown>> = []
+    let polls = 0
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/session_name') {
+        published.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+        return Response.json({ run_id: 'rt_child', label: '' })
+      }
+      if (path === '/poll-control') {
+        polls++
+        return Response.json([])
+      }
+      return Response.json({})
+    }) as unknown as typeof fetch
+    // The session manager is absent entirely: neither session_start nor a turn
+    // may crash, and neither may publish a name (an empty one would clobber
+    // whatever label the broker still holds).
+    const harness = await startExtensionHarness({
+      extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
+      sessionManager: {},
+    })
+    try {
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      await waitFor(() => polls >= 2)
+      expect(published).toHaveLength(0)
+    } finally {
+      globalThis.fetch = previousFetch
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
   it('retries a failed session-name publish on the next turn', async () => {
     const published: Array<Record<string, unknown>> = []
     let failNext = true
@@ -712,6 +745,97 @@ describe('Avenor Pi extension', () => {
       gates[0]?.()
       await waitFor(() => received.length === 2)
       expect(received).toEqual(['first', 'second'])
+    } finally {
+      globalThis.fetch = previousFetch
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('keeps the newer publish record when an older in-flight publish fails', async () => {
+    let sessionName: string | undefined = 'first'
+    const received: string[] = []
+    const gates: Array<() => void> = []
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/session_name') {
+        received.push(String((JSON.parse(String(init?.body ?? '{}')) as { name?: string }).name))
+        // Hold the older publish open so the newer name is recorded while it is
+        // still in flight, then fail it; every later publish succeeds.
+        if (received.length === 1) {
+          await new Promise<void>(resolve => gates.push(resolve))
+          return Response.json({ error: 'boom' }, { status: 503 })
+        }
+        return Response.json({ run_id: 'rt_child', label: 'x' })
+      }
+      if (path === '/poll-control') return Response.json([])
+      return Response.json({})
+    }) as unknown as typeof fetch
+    const originalError = console.error
+    const errorLog = mock(() => {})
+    console.error = errorLog as any
+    const harness = await startExtensionHarness({
+      extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
+      sessionName: () => sessionName,
+    })
+    try {
+      await waitFor(() => received.length === 1)
+      sessionName = 'second'
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      gates[0]?.()
+      // The newer publish lands after the older one failed.
+      await waitFor(() => received.length === 2)
+      expect(received).toEqual(['first', 'second'])
+      // The failure of the older attempt did not clear the newer record, so a
+      // turn on the unchanged name does not republish 'second'.
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      await waitFor(() => errorLog.mock.calls.length >= 1)
+      expect(received).toEqual(['first', 'second'])
+    } finally {
+      console.error = originalError
+      globalThis.fetch = previousFetch
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('republishes the name after a failed publish is followed by a session start', async () => {
+    let sessionName: string | undefined = 'first'
+    const received: string[] = []
+    const gates: Array<() => void> = []
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/session_name') {
+        received.push(String((JSON.parse(String(init?.body ?? '{}')) as { name?: string }).name))
+        // The older publish fails once the gate releases; every later publish
+        // succeeds.
+        if (received.length === 1) {
+          await new Promise<void>(resolve => gates.push(resolve))
+          return Response.json({ error: 'boom' }, { status: 503 })
+        }
+        return Response.json({ run_id: 'rt_child', label: 'x' })
+      }
+      if (path === '/poll-control') return Response.json([])
+      return Response.json({})
+    }) as unknown as typeof fetch
+    const harness = await startExtensionHarness({
+      extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
+      sessionName: () => sessionName,
+    })
+    try {
+      // The newer name is recorded while the older publish is in flight, so a
+      // failed older publish leaves a record a session start must reset.
+      await waitFor(() => received.length === 1)
+      sessionName = 'second'
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      gates[0]?.()
+      await waitFor(() => received.length === 2)
+      expect(received).toEqual(['first', 'second'])
+      // The session start resets the published record, so the same name is
+      // published again instead of being assumed live.
+      await harness.eventHandlers.session_start({}, harness.ctx)
+      await waitFor(() => received.length === 3)
+      expect(received[2]).toBe('second')
     } finally {
       globalThis.fetch = previousFetch
       await harness.eventHandlers.session_shutdown({}, {})
