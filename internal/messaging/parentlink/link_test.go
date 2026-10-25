@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -591,5 +593,200 @@ func TestIdleBranchReRegistersWithAReplacedParent(t *testing.T) {
 	if !pinned || generation != replacement.broker.Store().Generation() {
 		t.Fatalf("pinned generation = (%q, %v), want the replacement parent's %q",
 			generation, pinned, replacement.broker.Store().Generation())
+	}
+}
+
+// supervisorRuns reports the claim a branch publishes when its supervisor
+// session is served: the run set plus the reserved branch-supervisor run.
+func supervisorRuns() []messaging.RunClaim {
+	return []messaging.RunClaim{
+		{RunID: "run-a", Label: "alpha", Token: "tok-a"},
+		{RunID: messaging.SupervisorRunID, Label: "supervisor", Token: "tok-sup"},
+	}
+}
+
+// newSupervisorLink builds one link whose claim carries the branch-supervisor
+// run, pointed at a stub parent.
+func newSupervisorLink(t *testing.T, stub *stubBroker) *Link {
+	t.Helper()
+	link, err := NewLink(Options{
+		ParentURL:  stub.URL(),
+		Endpoint:   "http://child-one",
+		ChildID:    "child-one",
+		Runs:       supervisorRuns,
+		Generation: func() string { return "gen-a" },
+	})
+	if err != nil {
+		t.Fatalf("NewLink: %v", err)
+	}
+	t.Cleanup(func() { _ = link.Close() })
+	return link
+}
+
+// claimedRunIDs reports the run IDs one registration carried, in order.
+func claimedRunIDs(t *testing.T, req stubRequest) []string {
+	t.Helper()
+	runs, ok := req.Body["runs"].([]any)
+	if !ok {
+		t.Fatalf("registration body %v carries no run set", req.Body)
+	}
+	ids := make([]string, 0, len(runs))
+	for _, run := range runs {
+		claim, ok := run.(map[string]any)
+		if !ok {
+			t.Fatalf("claimed run %v is not an object", run)
+		}
+		id, _ := claim["run_id"].(string)
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// TestSyncNamesTheSupervisorWithANamespacingParent pins the full flow against a
+// parent that names the branch-supervisor claim's run key: one registration, no
+// fallback, and the link names the supervisor the way the parent addresses it.
+func TestSyncNamesTheSupervisorWithANamespacingParent(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a","run_keys":{"supervisor":"supervisor@child-one"}}`
+		case pathSend:
+			return http.StatusOK, `{"outcome":"sent","message_id":"msg-1"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newSupervisorLink(t, stub)
+
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if got := stub.countPath(pathRegister); got != 1 {
+		t.Fatalf("the parent saw %d registrations, want one", got)
+	}
+	// The link names the branch-supervisor run the way the parent addresses it:
+	// an ask the supervisor forwards carries the namespaced run ID.
+	ctx := testContext(t)
+	sent, err := link.Send(ctx, messaging.SendRequest{
+		From:      messaging.Identity{RunID: messaging.SupervisorRunID, Sender: "supervisor"},
+		To:        messaging.Identity{RunID: "run-a", Sender: "alice"},
+		MessageID: "msg-1",
+		Body:      `{"message":"ping"}`,
+	})
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("Send = (%+v, %v), want the ask admitted", sent, err)
+	}
+	forwarded := stub.lastRequest(t, pathSend)
+	if forwarded.Body["from_run_id"] != "supervisor@child-one" {
+		t.Fatalf("forwarded from_run_id = %v, want the parent's key for the supervisor", forwarded.Body["from_run_id"])
+	}
+}
+
+// TestSyncFallsBackToTheLegacyShapeForAPreNamespacingParent pins the version-
+// skew fallback: a parent that accepts the full claim but names no run key for
+// the branch-supervisor run predates the namespacing, so the claim is
+// immediately re-registered without the supervisor claim, and every later
+// registration stays in the legacy shape.
+func TestSyncFallsBackToTheLegacyShapeForAPreNamespacingParent(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newSupervisorLink(t, stub)
+
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	registrations := stub.recorded()
+	if got := len(registrations); got != 2 {
+		t.Fatalf("the parent saw %d registrations, want the full claim and the legacy one", got)
+	}
+	if first := claimedRunIDs(t, registrations[0]); !slices.Contains(first, messaging.SupervisorRunID) {
+		t.Fatalf("first registration = %v, want the full claim with the supervisor", first)
+	}
+	if second := claimedRunIDs(t, registrations[1]); slices.Contains(second, messaging.SupervisorRunID) {
+		t.Fatalf("legacy registration = %v, want the supervisor claim omitted", second)
+	}
+
+	// The degraded shape persists: a refresh re-registers in the legacy shape
+	// without retrying the full claim.
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if got := stub.countPath(pathRegister); got != 3 {
+		t.Fatalf("the parent saw %d registrations, want the refresh in the legacy shape", got)
+	}
+	if last := claimedRunIDs(t, stub.lastRequest(t, pathRegister)); slices.Contains(last, messaging.SupervisorRunID) {
+		t.Fatalf("refreshed registration = %v, want the supervisor claim still omitted", last)
+	}
+}
+
+// TestSyncRetriesTheLegacyShapeWhenTheParentRefusesTheSupervisorClaim pins the
+// other pre-namespacing response: a parent with no supervisor exemption refuses
+// the branch-supervisor claim, so the claim is re-registered without it, the
+// retry succeeds, and the legacy shape is remembered.
+func TestSyncRetriesTheLegacyShapeWhenTheParentRefusesTheSupervisorClaim(t *testing.T) {
+	var registrations atomic.Int64
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			if registrations.Add(1) == 1 {
+				return http.StatusConflict, `{"code":"invalid-request","error":"run already owned by this broker: supervisor is owned by this broker"}`
+			}
+			return http.StatusOK, `{"generation":"gen-a"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newSupervisorLink(t, stub)
+
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if got := registrations.Load(); got != 2 {
+		t.Fatalf("the parent saw %d registrations, want the refused claim and the legacy one", got)
+	}
+	if last := claimedRunIDs(t, stub.lastRequest(t, pathRegister)); slices.Contains(last, messaging.SupervisorRunID) {
+		t.Fatalf("legacy registration = %v, want the supervisor claim omitted", last)
+	}
+
+	// The degraded shape persists after a refused registration too.
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if got := registrations.Load(); got != 3 {
+		t.Fatalf("the parent saw %d registrations, want the refresh in the legacy shape", got)
+	}
+}
+
+// TestSyncKeepsTheFullShapeWhenTheParentRefusesAnotherRun pins that a refusal
+// that is not about the supervisor claim never degrades the link: the retry
+// without the supervisor claim fails the same way, the refusal is reported, and
+// the next registration offers the full claim again.
+func TestSyncKeepsTheFullShapeWhenTheParentRefusesAnotherRun(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusConflict, `{"code":"invalid-request","error":"run already owned by this broker: run-a is owned by this broker"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newSupervisorLink(t, stub)
+
+	if err := link.Sync(testContext(t)); err == nil {
+		t.Fatal("Sync = nil, want the refusal reported")
+	}
+	if got := stub.countPath(pathRegister); got != 2 {
+		t.Fatalf("the parent saw %d registrations, want the full claim and the legacy retry", got)
+	}
+	// The next registration offers the full claim again: the link never
+	// remembered the legacy shape for a refusal the legacy shape did not cure.
+	if err := link.Sync(testContext(t)); err == nil {
+		t.Fatal("second Sync = nil, want the refusal reported")
+	}
+	registrations := stub.recorded()
+	if third := claimedRunIDs(t, registrations[2]); !slices.Contains(third, messaging.SupervisorRunID) {
+		t.Fatalf("third registration = %v, want the full claim again", third)
 	}
 }
