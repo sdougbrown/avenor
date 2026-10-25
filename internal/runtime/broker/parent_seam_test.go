@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -321,6 +322,98 @@ func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T
 	}
 	if b.GetRun(messaging.SupervisorRunID+"@victim") != nil {
 		t.Fatal("the refused registration adopted the forged run")
+	}
+}
+
+// TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing pins the
+// registration critical section: the guard, the register and the apply of one
+// registration run as one sequence, so a second registration cannot land
+// between the first's register and its apply and leave the registry's
+// credential and the run record's credential disagreeing.
+func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	var mu sync.Mutex
+	lastToken := ""
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	first := true
+	b.SetParentLink(&parentLinkStub{
+		register: func(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+			claim := messaging.DescendantClaim{}
+			for _, run := range reg.Runs {
+				claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: run.RunID + "@" + reg.ChildID})
+				claim.Adopted = append(claim.Adopted, run.RunID+"@"+reg.ChildID)
+			}
+			mu.Lock()
+			block := first
+			first = false
+			mu.Unlock()
+			if block {
+				close(entered)
+				<-release
+			}
+			mu.Lock()
+			if len(reg.Runs) > 0 {
+				lastToken = reg.Runs[0].Token
+			}
+			mu.Unlock()
+			return claim, nil
+		},
+	})
+
+	body := func(token string) string {
+		raw, err := json.Marshal(map[string]any{
+			"child_id":   "child-1",
+			"endpoint":   "http://child:1234",
+			"generation": "gen-1",
+			"runs":       []map[string]any{{"run_id": "rt_x", "label": "claim", "token": token}},
+		})
+		if err != nil {
+			t.Fatalf("marshal registration: %v", err)
+		}
+		return string(raw)
+	}
+
+	// The first registration is held inside its register call while the second
+	// registration is posted. With the critical section the second waits and
+	// runs wholly after the first; without it its register and apply land in
+	// the gap and the two credentials diverge.
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(body("token-1"))))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-entered
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(body("token-2"))))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	<-firstDone
+	<-secondDone
+
+	mu.Lock()
+	want := lastToken
+	mu.Unlock()
+	if want == "" {
+		t.Fatal("no registration was applied")
+	}
+	key := "rt_x@child-1"
+	if token, ok := b.RunToken(key); !ok || token != want {
+		t.Fatalf("run record credential = (%q, %v), want the registry's %q", token, ok, want)
 	}
 }
 

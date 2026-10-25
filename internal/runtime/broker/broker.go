@@ -329,6 +329,13 @@ type Broker struct {
 	harnessNameMu       sync.RWMutex
 	harnessNameObserver func(runID, name string)
 
+	// parentRegisterMu serializes one registration's guard, register and apply:
+	// the guard reads the run records and the link's ownership under two lock
+	// domains, so a second registration whose own sequence interleaved with this
+	// one could retire a record between this guard and this register and leave
+	// the registry and the run records disagreeing about who owns a run.
+	parentRegisterMu sync.Mutex
+
 	pruneMu   sync.Mutex
 	pruneStop context.CancelFunc
 }
@@ -1287,6 +1294,12 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusBadRequest, "child_id, endpoint and generation are required", "invalid-request")
 		return
 	}
+	// The guard, the register and the apply of one registration run as one
+	// critical section, so a concurrent registration cannot slip a retirement
+	// between this guard's read and this register, nor between this register
+	// and the records it applies.
+	b.parentRegisterMu.Lock()
+	defer b.parentRegisterMu.Unlock()
 	for _, claim := range body.Runs {
 		switch {
 		case claim.RunID == "":
