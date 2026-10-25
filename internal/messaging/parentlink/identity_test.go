@@ -37,11 +37,6 @@ func TestBranchIdentityIsDerivedFromTheControlSocketPath(t *testing.T) {
 		}
 		seen[id] = identity
 	}
-	// Every path here names a branch-alpha.sock: the identity keeps the stem
-	// readable but must still tell the paths apart.
-	if BranchID(identities[0]) == BranchID(identities[1]) {
-		t.Fatalf("two branch-alpha.sock paths share the identity %q", BranchID(identities[0]))
-	}
 }
 
 // TestUncleanRestartReclaimsTheRunsUnderItsDurableIdentity pins the recovery

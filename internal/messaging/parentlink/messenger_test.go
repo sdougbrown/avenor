@@ -304,20 +304,23 @@ func TestMessengerPeersUnionsTheParentsPeersWithoutDuplicates(t *testing.T) {
 // a run with the same literal ID, and the local run is the one that ID names.
 // The parent-exported same-ID run is shadowed — the child could not address the
 // parent's run under that ID without also reaching its own — while a parent run
-// whose ID is distinct still lists.
+// whose ID is distinct still lists. The parent's listing carries both forms the
+// parent exports: the literal ID a parent-owned run uses, and the namespaced key
+// under which the parent re-lists this branch's own claim.
 func TestMessengerPeersShadowsAParentRunSharingALocalRunID(t *testing.T) {
 	parent := newStubBroker(t, func(req stubRequest) (int, string) {
 		switch req.Path {
 		case pathRegister:
 			return http.StatusOK, `{"generation":"gen-a"}`
 		case pathSessions:
-			return http.StatusOK, `{"generation":"gen-a","sessions":[{"run_id":"run-collide"},{"run_id":"run-distinct"}]}`
+			return http.StatusOK, `{"generation":"gen-a","sessions":[{"run_id":"run-collide"},{"run_id":"run-collide@child-one"},{"run_id":"run-distinct"}]}`
 		}
 		return http.StatusOK, `{}
 `
 	})
 	local := newStubMessenger()
 	local.peers = []messaging.Peer{{RunID: "run-collide"}}
+	local.reachable["run-collide"] = true
 	messenger := newTestMessenger(t, local, parent)
 	ctx := testContext(t)
 	if err := messenger.Start(ctx); err != nil {
@@ -334,6 +337,9 @@ func TestMessengerPeersShadowsAParentRunSharingALocalRunID(t *testing.T) {
 	}
 	if seen["run-collide"] != 1 {
 		t.Fatalf("peers = %v, want the local run-collide listed exactly once", seen)
+	}
+	if seen["run-collide@child-one"] != 0 {
+		t.Fatalf("peers = %v, want the parent's namespaced re-listing of the local claim shadowed", seen)
 	}
 	if seen["run-distinct"] != 1 {
 		t.Fatalf("peers = %v, want the parent's run-distinct listed", seen)

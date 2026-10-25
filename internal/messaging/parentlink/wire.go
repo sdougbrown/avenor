@@ -43,8 +43,9 @@ type envelope struct {
 	Generation        string            `json:"generation"`
 	Sessions          []json.RawMessage `json:"sessions"`
 	PeersError        string            `json:"peers_error"`
-	// RunKeys reports the run ID the parent addresses each claimed run by, for
-	// the runs where that differs from the canonical run ID.
+	// RunKeys reports the run ID the parent addresses each claimed run by: the
+	// parent returns a key for every claimed run, since every claim is
+	// namespaced by the branch that claims it.
 	RunKeys map[string]string `json:"run_keys,omitempty"`
 	Fence   *httpbase.Fence   `json:"fence"`
 }

@@ -150,6 +150,53 @@ func TestRelayRecordsTheReplyRouteBeforeExposingTheAsk(t *testing.T) {
 	}
 }
 
+// TestRelayWithoutASenderNamesTheAskAsTheBranchResolvesIt pins handleRelay's
+// from_sender fallback: a relay that omits the name — the mixed-version case —
+// is still delivered with the sender name the receiving branch resolves for the
+// asking run, not an empty Sender.
+func TestRelayWithoutASenderNamesTheAskAsTheBranchResolvesIt(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	if _, err := b.CreateRun("asker", ""); err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	if err := b.SetHarnessName("asker", "asker-name"); err != nil {
+		t.Fatalf("name the asker: %v", err)
+	}
+	token, err := b.CreateRun("branch-run", "branch-run")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	b.InstallParentLink(&parentLinkStub{}, "", nil)
+
+	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
+		"from_run_id":   "asker",
+		"to_run_id":     "branch-run",
+		"type":          "agent_message",
+		"payload":       map[string]any{"message": "relayed"},
+		"message_id":    "av1.abc.def",
+		"generation":    b.Store().Generation(),
+	})
+	if status != http.StatusOK {
+		t.Fatalf("relay without a sender = (%d, %v), want 200", status, body)
+	}
+	st := b.GetRun("branch-run")
+	st.Mu.Lock()
+	var sender string
+	for _, msg := range st.ControlQueue {
+		if msg.ID == "av1.abc.def" {
+			sender = msg.Sender
+		}
+	}
+	st.Mu.Unlock()
+	if sender != "asker-name" {
+		t.Fatalf("relayed ask sender = %q, want the name the branch resolves for the asker", sender)
+	}
+}
+
 // TestRelayRefusesAReplacementGeneration pins that a relay names the generation
 // the branch pinned when it registered, so a relay prepared for a replaced broker
 // is refused instead of landing in the replacement.

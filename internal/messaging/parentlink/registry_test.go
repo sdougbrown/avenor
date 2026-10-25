@@ -72,27 +72,17 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if next, ok := registry.Hop(ParentRunKey("one", "run-a")); !ok || next.Generation != "gen-one-again" {
 		t.Fatalf("hop for the re-claimed run = (%+v, %v), want the replacement generation", next, ok)
 	}
-	// A child ID is supplied by the caller, so it is not trusted to keep the
-	// namespaced keys of two children apart: a claim key another child already
-	// owns is refused whatever run IDs produced it.
+	// A run ID that itself contains "@" would mint a namespaced key the owning
+	// branch cannot relay to — the canonical ID the relay posts to would not
+	// exist there — so a claim carrying one is refused up front, and a crafted
+	// run ID can no longer collide with a sibling's namespaced key.
 	if _, err := registry.Register(messaging.DescendantRegistration{
 		ChildID:    "one",
 		Endpoint:   "http://one",
 		Generation: "gen-one",
-		Runs:       []messaging.RunClaim{{RunID: "run-a"}, {RunID: "run-x@two"}},
-	}); err != nil {
-		t.Fatalf("claim a run under a key a sibling will collide with: %v", err)
-	}
-	if _, err := registry.Register(messaging.DescendantRegistration{
-		ChildID:    "two@one",
-		Endpoint:   "http://colliding",
-		Generation: "gen-colliding",
-		Runs:       []messaging.RunClaim{{RunID: "run-x"}},
-	}); !errors.Is(err, ErrRunClaimed) || !errors.Is(err, messaging.ErrInvalidRequest) {
-		t.Fatalf("a claim on a key another child owns = %v, want ErrRunClaimed", err)
-	}
-	if owner, ok := registry.Owner("run-x@two@one"); !ok || owner != "one" {
-		t.Fatalf("owner of the colliding key = (%q, %v), want the child that claimed it first", owner, ok)
+		Runs:       []messaging.RunClaim{{RunID: "run-x@two"}},
+	}); !errors.Is(err, messaging.ErrInvalidRequest) {
+		t.Fatalf("a claim whose run ID contains @ = %v, want ErrInvalidRequest", err)
 	}
 
 	// A re-registration replaces the claim, so the runs it stopped naming are
@@ -106,8 +96,8 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-register first child: %v", err)
 	}
-	if len(second.Retired) != 2 {
-		t.Fatalf("re-registration = %+v, want the two runs it stopped naming retired", second)
+	if len(second.Retired) != 1 {
+		t.Fatalf("re-registration = %+v, want the run it stopped naming retired", second)
 	}
 	if registry.Owns(ParentRunKey("one", "run-a")) || registry.Owns(ParentRunKey("one", "run-b")) {
 		t.Fatal("a retired run is still owned")

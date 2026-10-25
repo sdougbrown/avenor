@@ -112,6 +112,12 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, run := range reg.Runs {
+		// A claimed run ID that itself contains "@" would mint a namespaced key
+		// the owning branch cannot relay to: the canonical ID the relay posts to
+		// would not exist there. Refuse the claim up front.
+		if strings.Contains(run.RunID, "@") {
+			return messaging.DescendantClaim{}, fmt.Errorf("%w: %s", messaging.ErrInvalidRequest, run.RunID)
+		}
 		key := ParentRunKey(reg.ChildID, run.RunID)
 		if owner, ok := r.owners[key]; ok && owner != reg.ChildID {
 			return messaging.DescendantClaim{}, fmt.Errorf("%w: %s", ErrRunClaimed, run.RunID)

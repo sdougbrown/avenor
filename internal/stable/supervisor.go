@@ -1980,6 +1980,13 @@ func (s *Supervisor) installParentLink() {
 	if s.config.BrokerParentURL == "" && s.config.BrokerParentToken == "" {
 		return
 	}
+	if s.config.BrokerParentURL != "" && s.config.BrokerParentToken == "" {
+		// Fail fast: parent routes refuse every request without a credential,
+		// so a link would retry its registration against a 401 forever. The
+		// misconfiguration surfaces here as one startup error instead.
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: parent broker link disabled: BrokerParentURL is set but BrokerParentToken is empty\n")
+		return
+	}
 	options := parentlink.Options{
 		ParentURL:  s.config.BrokerParentURL,
 		Token:      s.config.BrokerParentToken,
