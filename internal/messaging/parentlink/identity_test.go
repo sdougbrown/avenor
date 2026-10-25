@@ -43,11 +43,11 @@ func TestBranchIDDerivesDurableIdentity(t *testing.T) {
 	}
 }
 
-// TestBranchIdentityIsDerivedFromTheControlSocketPath derives the expectation
-// from the identity itself instead of calling BranchID, so an identity that moves
-// with process state, drops the digest, or cannot tell two paths with the same
-// stem apart fails here instead of silently defeating restart reclamation in
-// tests that compute their expectations through the same function.
+// TestBranchIdentityIsDerivedFromTheControlSocketPath pins the derivation's
+// durability behaviors — repeat calls agree and distinct paths with the same
+// stem stay distinct — without mirroring the hash itself, so a derivation that
+// moves with process state or collides same-stem paths fails here instead of
+// silently defeating restart reclamation in tests that share the branch id.
 func TestBranchIdentityIsDerivedFromTheControlSocketPath(t *testing.T) {
 	identities := []string{
 		"/run/user/500/avenor/branch-alpha.sock",

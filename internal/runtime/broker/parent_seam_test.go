@@ -536,12 +536,11 @@ func TestConcurrentDeregisterCannotOrphanARegisteredRun(t *testing.T) {
 			resp.Body.Close()
 		}
 	}()
-	// The close retires its claims and deletes the record while the retry is
-	// held. Under the critical section the close waits for the registration it
-	// would have slipped inside, so the deadline elapses instead.
-	deadline := time.Now().Add(2 * time.Second)
-	for b.GetRun(key) != nil && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
+	// While the retry holds the critical section the close cannot proceed, so
+	// the record the retry would recreate survives until the gate releases:
+	// one check pins the no-orphan window without a spin.
+	if b.GetRun(key) == nil {
+		t.Fatal("the record vanished while the retry held the critical section: the close slipped inside the window")
 	}
 	close(release)
 	<-secondDone
