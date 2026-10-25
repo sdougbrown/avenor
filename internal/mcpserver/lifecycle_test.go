@@ -21,6 +21,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 func TestStartSupervisorLeavesStaleSocketForChild(t *testing.T) {
@@ -105,6 +106,28 @@ func TestStartSupervisorScrubsTestHookEnv(t *testing.T) {
 	for _, entry := range child.Env {
 		if strings.HasPrefix(entry, runtime.EnvTestHooks+"=") || strings.HasPrefix(entry, runtime.EnvTestOwnerPublishDelay+"=") {
 			t.Fatalf("test hook %q reached the supervisor child environment", entry)
+		}
+	}
+}
+
+func TestStartSupervisorScrubsParentTokenEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(token.EnvBrokerParentToken, "leaked-credential")
+	var child *exec.Cmd
+	origExec := execCommand
+	execCommand = func(string, ...string) *exec.Cmd {
+		child = exec.Command("/nonexistent/avenor-test-stub")
+		return child
+	}
+	defer func() { execCommand = origExec }()
+
+	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+	if child == nil {
+		t.Fatal("startSupervisor never built a child command")
+	}
+	for _, entry := range child.Env {
+		if strings.HasPrefix(entry, token.EnvBrokerParentToken+"=") {
+			t.Fatalf("parent-link credential %q reached the supervisor child environment", entry)
 		}
 	}
 }

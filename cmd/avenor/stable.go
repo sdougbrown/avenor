@@ -8,17 +8,18 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/stable"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // newSupervisorFn is the supervisor constructor used by runStable. Tests patch
 // it to capture the Config without relying on Run's side effects.
 var newSupervisorFn = stable.NewSupervisor
 
-// EnvBrokerParentToken carries the parent-link credential to `avenor stable`.
 // The token is a bearer credential for the parent broker's parent routes, so it
 // travels by environment variable rather than argv, whose contents are
-// world-readable via /proc/<pid>/cmdline.
-const EnvBrokerParentToken = "AVENOR_PARENT_BROKER_TOKEN"
+// world-readable via /proc/<pid>/cmdline. The name lives in internal/token so
+// the MCP spawn path can filter it out of nested environments.
+const EnvBrokerParentToken = token.EnvBrokerParentToken
 
 func runStable(args []string) int {
 	fs := flag.NewFlagSet("stable", flag.ContinueOnError)

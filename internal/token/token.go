@@ -8,6 +8,11 @@ import (
 	"fmt"
 )
 
+// EnvBrokerParentToken carries the parent-link credential to `avenor stable`.
+// It is defined here so both the CLI that reads it and the MCP spawn path that
+// must keep it out of nested environments agree on the name.
+const EnvBrokerParentToken = "AVENOR_PARENT_BROKER_TOKEN"
+
 // NewHexToken returns a 256-bit random token encoded as 64 lowercase hex
 // characters. Subcommands that mint credentials (parent-link tokens, control
 // identity tokens) share this generator so the token format lives in one place.
