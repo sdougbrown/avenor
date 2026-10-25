@@ -273,10 +273,6 @@ func TestRunStableBrokerParentTokenFlagOverridesEnv(t *testing.T) {
 	}
 }
 
-// TestRunStableRefusesParentURLWithoutCredential pins the CLI-boundary guard:
-// the documented configuration sets the parent-link credential by environment
-// variable, so a --broker-parent-url with neither the env var nor the flag
-// must fail startup instead of silently disabling the parent link.
 func TestRunStableRefusesParentURLWithoutCredential(t *testing.T) {
 	t.Setenv(EnvBrokerParentToken, "")
 	t.Setenv("HOME", t.TempDir())

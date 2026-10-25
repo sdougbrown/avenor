@@ -275,20 +275,20 @@ func (b *Budget) Acquire(holder string) (string, error) {
 			RootID: bf.RootID,
 		}
 	}
-	token, err := token.NewHex(16)
+	credential, err := token.NewHex(16)
 	if err != nil {
 		return "", fmt.Errorf("admission: generate token: %w", err)
 	}
-	bf.Active[token] = &reservation{
+	bf.Active[credential] = &reservation{
 		PID:    os.Getpid(),
 		Holder: holder,
 		At:     time.Now().UnixNano(),
-		Token:  token,
+		Token:  credential,
 	}
 	if err := writeBudget(b.f, bf); err != nil {
 		return "", err
 	}
-	return token, nil
+	return credential, nil
 }
 
 // Release returns a held capacity slot to the tree budget. It is safe to call
