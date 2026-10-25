@@ -539,8 +539,13 @@ func (g *gateProxy) DropResponse(path string) {
 
 func (g *gateProxy) serve(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
-	closed, target, drop := g.closed, g.target, g.drop
-	if drop != "" && drop == r.URL.Path {
+	closed, target := g.closed, g.target
+	drop := ""
+	// Only the request the drop names loses its answer: a concurrent request
+	// to another path must pass through untouched and leave the armed drop
+	// for its target.
+	if g.drop != "" && g.drop == r.URL.Path {
+		drop = g.drop
 		g.drop = ""
 	}
 	g.mu.Unlock()
