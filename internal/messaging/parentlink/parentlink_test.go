@@ -108,8 +108,8 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 				func(info broker.SessionInfo) (string, string) { return info.RunID, info.Label },
 				link.Owns, b.RunToken)
 		},
-		// A run this branch stops owning loses its broker record too, so a
-		// refused descendant stops being served locally.
+		// Retiring the claim drops the host's run record with it, so a refused
+		// descendant stops being served locally.
 		RetireRun: func(runID, token string) { b.DeleteRunIfToken(runID, token) },
 	}, b)
 	if err != nil {
