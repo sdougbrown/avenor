@@ -204,6 +204,61 @@ func TestDelayedRefusalKeepsTheClaimARefreshedGenerationCarries(t *testing.T) {
 	}
 }
 
+// TestDelayedRefusalKeepsTheClaimAnotherChildTookOver pins the owner half of the
+// per-run retirement rule: a refusal carries the child it was relayed to, so it
+// retires nothing when the run is owned by a different child by the time it
+// lands. Child A's claim is removed while its refusal is held, child B claims the
+// run, and the refusal leaves B's claim, record and route alone.
+func TestDelayedRefusalKeepsTheClaimAnotherChildTookOver(t *testing.T) {
+	parent := startBranch(t, "", "orchestrator")
+	stale := newBlockingEndpoint(t, http.StatusNotFound, "target-unavailable")
+	relayed := make(chan struct{}, 1)
+	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case relayed <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"outcome":"sent"}`))
+	}))
+	t.Cleanup(replacement.Close)
+
+	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
+	refusal := relayAsk(t, parent, "target", stale)
+
+	// While the refusal is in flight, branch-delta drops its claim and
+	// branch-echo takes the run over.
+	deregisterDescendant(t, parent, "branch-delta")
+	registerDescendant(t, parent, "branch-echo", replacement.URL, "gen-old", "target", "token-echo")
+	stale.release()
+	expectRefusedAsk(t, <-refusal)
+
+	if owner, ok := parent.link.Registry().Owner("target"); !ok || owner != "branch-echo" {
+		t.Fatalf("run owner = (%q, %v), want branch-echo: the refusal retired the child that took the run over", owner, ok)
+	}
+	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-echo" {
+		t.Fatalf("run record credential = (%q, %v), want the taking-over child's", token, ok)
+	}
+	if st := parent.broker.GetRun("target"); st == nil {
+		t.Fatal("the delayed refusal deleted the taking-over child's run record")
+	}
+
+	// The taking-over child stays a routing target: the next ask reaches it.
+	secondID := newMsgID(t)
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	if answer.err != nil {
+		t.Fatalf("ask the run the other child took over: %v", answer.err)
+	}
+	if answer.status != http.StatusOK || answer.body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("ask the run the other child took over = (%d, %v), want 200 sent", answer.status, answer.body)
+	}
+	select {
+	case <-relayed:
+	case <-time.After(awaitDeadline):
+		t.Fatal("the child that took the run over never received an ask")
+	}
+}
+
 // relayAsk posts one ask to target in the background, so the test can register a
 // refreshed claim while the relay is in flight. It waits until the endpoint that
 // owns the target has received the relay.
@@ -315,6 +370,25 @@ func registerDescendant(t *testing.T, parent *branch, childID, endpoint, generat
 		var decoded map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&decoded)
 		t.Fatalf("register descendant = (%d, %v), want 200", resp.StatusCode, decoded)
+	}
+}
+
+// deregisterDescendant retracts a child broker's claim the way a closing branch
+// does, so a test can hand a run from one child to another while a refusal is in
+// flight.
+func deregisterDescendant(t *testing.T, parent *branch, childID string) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"child_id": childID})
+	if err != nil {
+		t.Fatalf("marshal deregistration: %v", err)
+	}
+	resp, err := http.Post(parent.url()+pathDeregister, "application/json", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("deregister descendant: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("deregister descendant = %d, want 200", resp.StatusCode)
 	}
 }
 
