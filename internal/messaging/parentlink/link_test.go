@@ -628,8 +628,14 @@ func TestIdleBranchReRegistersWithAReplacedParent(t *testing.T) {
 		t.Fatalf("stop the replaced parent: %v", err)
 	}
 
-	awaitUntil(t, "the idle branch to register with the replacement parent", func() bool {
-		return replacement.link.Registry().Owns("asker")
+	awaitUntil(t, "the idle branch to register with and pin the replacement parent", func() bool {
+		if !replacement.link.Registry().Owns("asker") {
+			return false
+		}
+		// The registry adopts the claim before the branch applies the answer, so
+		// the pinned generation, not the adoption, is what this test asserts.
+		generation, pinned := branch.pinned()
+		return pinned && generation == replacement.broker.Store().Generation()
 	})
 	generation, pinned := branch.pinned()
 	if !pinned || generation != replacement.broker.Store().Generation() {
