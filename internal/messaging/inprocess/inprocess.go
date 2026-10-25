@@ -14,7 +14,7 @@ import (
 // Transport is the in-process messaging transport.
 type Transport struct {
 	store *askstore.Store
-	// resolve names the seam the transport ask, reply, tell and peer operations
+	// resolve names the seam the transport ask, reply and peer operations
 	// delegate to. It is nil when the transport serves them from the store alone.
 	resolve  func() messaging.Seam
 	ctx      context.Context
@@ -29,8 +29,8 @@ func New(store *askstore.Store) messaging.Transport {
 	return newTransport(store, nil)
 }
 
-// NewRouted builds a transport over store whose ask, reply, tell and peer
-// operations delegate to the seam resolve returns. Resolution happens per call,
+// NewRouted builds a transport over store whose ask, reply and peer operations
+// delegate to the seam resolve returns. Resolution happens per call,
 // so a transport built before its host installs a seam still reaches it.
 func NewRouted(store *askstore.Store, resolve func() messaging.Seam) messaging.Transport {
 	return newTransport(store, resolve)
