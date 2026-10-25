@@ -83,7 +83,7 @@ func TestMessengerRegisterRefusesARunThisBrokerOwns(t *testing.T) {
 	if !errors.Is(err, ErrRunLocallyOwned) {
 		t.Fatalf("Register error = %v, want ErrRunLocallyOwned", err)
 	}
-	if claim.Adopted != nil || claim.Retired != nil {
+	if claim.Retired != nil {
 		t.Fatalf("Register claim = %+v, want nothing applied", claim)
 	}
 	if messenger.Owns("run-child") {

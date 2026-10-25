@@ -131,7 +131,6 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: key})
 		adopted[key] = struct{}{}
 		if _, held := r.owners[key]; !held {
-			claim.Adopted = append(claim.Adopted, key)
 			claim.Changed = true
 		}
 		r.owners[key] = reg.ChildID
