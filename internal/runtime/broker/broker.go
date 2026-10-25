@@ -1939,6 +1939,13 @@ func (b *Broker) DeleteRun(runID string) {
 	if !ok {
 		return
 	}
+	b.recordRemoved(runID)
+}
+
+// recordRemoved drops what a deleted record leaves behind: the run's ask edges,
+// and the run-set change a host publishes. It runs after the record left the
+// broker, outside the broker mutex.
+func (b *Broker) recordRemoved(runID string) {
 	// No owner is left to wait for or cancel this run's asks, and asks
 	// addressed to it can never be answered.
 	b.store.RemoveRun(runID)
@@ -1959,8 +1966,7 @@ func (b *Broker) DeleteRunIfToken(runID, token string) bool {
 	}
 	delete(b.runs, runID)
 	b.mu.Unlock()
-	b.store.RemoveRun(runID)
-	b.runSetChanged()
+	b.recordRemoved(runID)
 	return true
 }
 
