@@ -332,9 +332,10 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 }
 
 // TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator pins the
-// handler's refusal of a run ID the run-key namespacing reserves: a claimed
-// run ID carrying "@" reads as a branch-namespaced key, so the registration
-// is a 400 and nothing is adopted.
+// registration route's refusal of a run ID the run-key namespacing reserves:
+// a claimed run ID carrying "@" reads as a branch-namespaced key, so the
+// registry refuses the claim and the route reports it. The handler re-checks
+// nothing: the registry's refusal is the one enforcement point.
 func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
 	raw, err := json.Marshal(map[string]any{
 		"child_id":   "child-1",
@@ -352,19 +353,22 @@ func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
+	registry := parentlink.NewRegistry()
 	b.SetParentLink(&parentLinkStub{
-		register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-			t.Fatal("the handler passed a namespaced run id to the link")
-			return messaging.DescendantClaim{}, nil
+		register: func(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+			return registry.Register(reg)
 		},
 	})
 
 	status, body := postParentLink(t, b.Addr(), string(raw), "")
-	if status != http.StatusBadRequest || body["code"] != "invalid-request" {
-		t.Fatalf("registration with a namespaced run id = (%d, %v), want 400 invalid-request", status, body)
+	if status != http.StatusConflict || body["code"] != "invalid-request" {
+		t.Fatalf("registration with a namespaced run id = (%d, %v), want 409 invalid-request", status, body)
 	}
 	if b.GetRun(messaging.SupervisorRunID+"@victim") != nil {
 		t.Fatal("the refused registration adopted the forged run")
+	}
+	if registry.Owns(messaging.SupervisorRunID + "@victim") {
+		t.Fatal("the refused claim stayed in the registry")
 	}
 }
 
