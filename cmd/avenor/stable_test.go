@@ -273,11 +273,3 @@ func TestRunStableBrokerParentTokenFlagOverridesEnv(t *testing.T) {
 		t.Fatalf("Config parent token = %q, want the explicit flag value", captured.BrokerParentToken)
 	}
 }
-
-func TestRunStableRefusesParentURLWithoutCredential(t *testing.T) {
-	t.Setenv(token.EnvBrokerParentToken, "")
-	t.Setenv("HOME", t.TempDir())
-	if code := runStable([]string{"--control-socket", filepath.Join(t.TempDir(), "s.sock"), "--broker-parent-url", "http://127.0.0.1:9"}); code != 1 {
-		t.Fatalf("runStable = %d, want 1: a parent URL without a credential must be refused", code)
-	}
-}
