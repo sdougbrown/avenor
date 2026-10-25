@@ -126,12 +126,17 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 			if child == nil {
 				t.Fatal("startSupervisor never built a child command")
 			}
+			kept := 0
 			for _, entry := range child.Env {
 				for _, name := range tt.scrubbed {
 					if strings.HasPrefix(entry, name+"=") {
 						t.Fatalf("%q reached the supervisor child environment", entry)
 					}
 				}
+				kept++
+			}
+			if kept < 2 {
+				t.Fatalf("child env keeps only %d entries: the scrub dropped the environment", kept)
 			}
 		})
 	}

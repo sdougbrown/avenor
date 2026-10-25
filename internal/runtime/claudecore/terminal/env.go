@@ -5,7 +5,6 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/shellquote"
-	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // parentClaudeSessionEnv names the variables that identify the Claude Code
@@ -97,22 +96,20 @@ func UnsetParentClaudeEnvPrefix() string {
 	return b.String()
 }
 
-// identityEnvPrefix returns a shell prefix that removes inherited launch
-// identity and the parent-link credential from a pane's environment and exports
-// this launch's identity. The credential must go here, not just in LaunchEnv:
-// a pane inherits the tmux server's environment, and the server carries the
-// credential the documented setup way. Values
+// identityEnvPrefix returns a shell prefix that unsets every name a child must
+// not inherit (runtime.ScrubbedEnvNames) and exports this launch's identity.
+// The unset must happen here, not just in LaunchEnv: a pane inherits the tmux
+// server's environment, which carries the credential the documented setup way.
+// Values
 // are single-quoted so labels containing quotes, newlines or command
 // substitution text stay literal data.
 func identityEnvPrefix(p *runtime.LaunchProvenance) string {
 	var b strings.Builder
 	b.WriteString("unset")
-	for _, name := range runtime.IdentityEnvNames() {
+	for _, name := range runtime.ScrubbedEnvNames() {
 		b.WriteString(" ")
 		b.WriteString(name)
 	}
-	b.WriteString(" ")
-	b.WriteString(token.EnvBrokerParentToken)
 	b.WriteString("; ")
 	for _, entry := range p.IdentityEnv() {
 		key, value, _ := strings.Cut(entry, "=")

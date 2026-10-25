@@ -62,6 +62,14 @@ func IdentityEnvNames() []string {
 	return append([]string(nil), identityEnvNames...)
 }
 
+// ScrubbedEnvNames returns every environment name a child must not inherit:
+// launch identity, the test-only switches, and the parent-link credential.
+// A shell launcher that assembles its child's environment by hand unsets
+// these instead of calling ScrubIdentityEnv.
+func ScrubbedEnvNames() []string {
+	return append([]string(nil), scrubbedEnvNames...)
+}
+
 // Launch kinds reported in LaunchProvenance.Kind.
 const (
 	LaunchKindRun  = "run"

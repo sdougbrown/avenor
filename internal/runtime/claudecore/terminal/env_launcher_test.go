@@ -244,7 +244,16 @@ func TestTmuxPrefixUnsetsTheParentCredential(t *testing.T) {
 		Command: "exec claude",
 	})
 	shellCmd := args[len(args)-1]
-	if !strings.Contains(shellCmd, " "+token.EnvBrokerParentToken+"; ") {
-		t.Fatalf("tmux command = %q, want its unset list to include %s", shellCmd, token.EnvBrokerParentToken)
+	// The prefix may span several "unset ..." segments (Claude session vars,
+	// then the shared scrub set); the credential must be unset by one of them.
+	words := strings.Fields(shellCmd)
+	var unset bool
+	for _, w := range words {
+		if strings.TrimSuffix(w, ";") == token.EnvBrokerParentToken {
+			unset = true
+		}
+	}
+	if !unset {
+		t.Fatalf("tmux command = %q, want some unset segment to include %s", shellCmd, token.EnvBrokerParentToken)
 	}
 }
