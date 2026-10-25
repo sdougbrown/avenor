@@ -18,8 +18,10 @@ type ParentLink interface {
 	// Register adopts one child broker's claim on the runs it owns and reports
 	// what the claim changed. A run another child already owns is refused.
 	Register(reg DescendantRegistration) (DescendantClaim, error)
-	// Deregister retires one child and reports the runs it had claimed.
-	Deregister(childID string) ([]string, error)
+	// Deregister retires one child and reports the runs it had claimed. The
+	// caller pins the generation its view of the child registered with: a claim
+	// a fresher registration replaced survives the deregistration.
+	Deregister(childID, generation string) ([]string, error)
 	// RecordRelay records the reply route of a relayed ask. The broker calls it
 	// before it exposes the ask to a consumer, so a reply always follows the
 	// hop the ask arrived on.

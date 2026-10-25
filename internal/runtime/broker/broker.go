@@ -1526,7 +1526,8 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var body struct {
-		ChildID string `json:"child_id"`
+		ChildID    string `json:"child_id"`
+		Generation string `json:"generation"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -1536,7 +1537,7 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		writeCodedError(w, http.StatusBadRequest, "child_id is required", "invalid-request")
 		return
 	}
-	runs, err := link.Deregister(body.ChildID)
+	runs, err := link.Deregister(body.ChildID, body.Generation)
 	if err != nil {
 		writeCodedError(w, http.StatusNotFound, err.Error(), "target-unavailable")
 		return

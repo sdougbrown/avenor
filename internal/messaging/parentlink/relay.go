@@ -136,8 +136,11 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 		case errors.Is(decErr, messaging.ErrGenerationMismatch):
 			// The child no longer answers as the branch it registered as, so
 			// the whole registration stops being a routing target instead of
-			// costing one doomed round trip per run it owns.
-			retired, _ := r.registry.Deregister(next.ChildID)
+			// costing one doomed round trip per run it owns. The claim and the
+			// host's run records go together: a record left behind would make
+			// this broker serve the run locally, queueing asks that nobody
+			// consumes.
+			retired, _ := r.registry.Deregister(next.ChildID, next.Generation)
 			r.retireRuns(retired)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
@@ -149,9 +152,10 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 			errors.Is(decErr, messaging.ErrTargetUnavailable):
 			// The child refused this run's credential or retired the run, so
 			// only this run stops being routed and the child's other runs keep
-			// their route.
-			r.registry.Forget(target)
-			r.retireRuns([]string{target})
+			// their route. The claim and the host's run record go together: a
+			// record left behind would make this broker serve the run locally,
+			// queueing asks that nobody consumes.
+			r.forget(target, next.Generation)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
 		}
@@ -162,8 +166,8 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 
 // forget drops a run this broker can no longer route to: its claim, and the
 // host broker's own record for it when the host installs one.
-func (r *relay) forget(runID string) {
-	r.registry.Forget(runID)
+func (r *relay) forget(runID, generation string) {
+	r.registry.Forget(runID, generation)
 	r.retireRuns([]string{runID})
 }
 
