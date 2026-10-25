@@ -2,9 +2,7 @@ package control
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 var ErrRuntimeNotFound = errors.New("runtime not found")
@@ -50,11 +49,11 @@ func NewHTTPDebugServer(addr string, control *ControlServer) (*HTTPDebugServer, 
 	if err != nil {
 		return nil, err
 	}
-	tokenBytes := make([]byte, 16)
-	if _, err := rand.Read(tokenBytes); err != nil {
+	tok, err := token.NewHex(16)
+	if err != nil {
 		panic("avenor: failed to generate debug token: " + err.Error())
 	}
-	token := hex.EncodeToString(tokenBytes)
+	token := tok
 	h := &HTTPDebugServer{control: control, facade: control.OwnerFacade(), token: token}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status/", h.handleStatusRuntime)

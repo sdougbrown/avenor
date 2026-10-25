@@ -15,8 +15,6 @@
 package admission
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +23,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/sdougbrown/avenor/internal/token"
 	"time"
 )
 
@@ -467,11 +467,7 @@ func writeBudget(f *os.File, bf *budgetFile) error {
 }
 
 func newToken() (string, error) {
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf[:]), nil
+	return token.NewHex(16)
 }
 
 // pidAlive reports whether a process with the given PID exists. A PID whose
