@@ -30,6 +30,11 @@ func TestWaitReportsAnUnsentWaitWhenTheParentIsUnreachable(t *testing.T) {
 		t.Fatalf("Send = (%+v, %v), want the ask admitted", sent, err)
 	}
 	stub.server.Close()
+	// The wait must be refused before any byte is written. A request carried on a
+	// connection the closed stub left pooled can surface the shutdown after the
+	// request was written, which reads as an unknown fate instead of a refusal,
+	// so the wait is sent on a transport with no connection to reuse.
+	link.client.SetTransport(http.DefaultTransport.(*http.Transport).Clone())
 
 	waited, err := link.Wait(ctx, waitRequest("msg-1"))
 	if waited.Outcome != messaging.OutcomeNotSent {
