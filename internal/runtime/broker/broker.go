@@ -1449,32 +1449,25 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	st := b.GetRun(body.ToRunID)
-	if st == nil {
-		writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
-		return
-	}
 	sender := body.FromSender
 	if sender == "" {
 		// A relay that carried no name still names the asker by whatever this
 		// branch resolves for it, which is the run ID at worst.
 		sender = b.DisplayName(body.FromRunID)
 	}
-	queued := &ControlMessage{
+	// The branch that owns the asker is the one that knows its display name,
+	// so the relay carries it; the canonical run ID travels unchanged.
+	if err := b.PushControl(body.ToRunID, ControlMessage{
 		ID:        body.MessageID,
 		Type:      body.Type,
 		RunID:     body.ToRunID,
 		FromRunID: body.FromRunID,
-		// The branch that owns the asker is the one that knows its display name,
-		// so the relay carries it; the canonical run ID travels unchanged.
 		Sender:    sender,
 		Payload:   body.Payload,
-		CreatedAt: time.Now(),
+	}); err != nil {
+		writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
+		return
 	}
-	st.Mu.Lock()
-	st.ControlQueue = append(st.ControlQueue, queued)
-	st.signalLocked()
-	st.Mu.Unlock()
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"queued":  true,
 		"outcome": messaging.OutcomeSent,
