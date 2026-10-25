@@ -323,6 +323,12 @@ type Broker struct {
 	renameMu      sync.RWMutex
 	renameHandler RenameHandler
 
+	// harnessNameMu guards harnessNameObserver, the host-installed callback
+	// SetHarnessName calls after it writes a harness session name, so a host
+	// that keeps its own copy of the label follows the write.
+	harnessNameMu       sync.RWMutex
+	harnessNameObserver func(runID, name string)
+
 	pruneMu   sync.Mutex
 	pruneStop context.CancelFunc
 }
@@ -1959,16 +1965,38 @@ func (b *Broker) LastAgentMessage(runID string) (LastAgentMessage, bool) {
 // SetHarnessName records the user-defined session name the harness supplied for
 // runID, or clears it when name is empty. It writes only the harness half of the
 // label, so a model rename is neither clobbered by it nor able to hide it: the
-// harness name is what peers see until the harness clears it.
+// harness name is what peers see until the harness clears it. An observer set
+// through SetHarnessNameObserver is called after the write with the run's
+// resolved name, so a host that keeps its own copy of the label follows the
+// write it did not perform.
 func (b *Broker) SetHarnessName(runID, name string) error {
 	st := b.GetRun(runID)
 	if st == nil {
 		return fmt.Errorf("run not found: %s", runID)
 	}
 	st.Mu.Lock()
-	defer st.Mu.Unlock()
 	st.HarnessName = name
+	st.Mu.Unlock()
+	b.harnessNameChanged(runID, name)
 	return nil
+}
+
+// SetHarnessNameObserver sets the callback SetHarnessName calls after it writes
+// a harness session name (or clears one). Nil leaves the write local to the
+// broker.
+func (b *Broker) SetHarnessNameObserver(fn func(runID, name string)) {
+	b.harnessNameMu.Lock()
+	defer b.harnessNameMu.Unlock()
+	b.harnessNameObserver = fn
+}
+
+func (b *Broker) harnessNameChanged(runID, name string) {
+	b.harnessNameMu.RLock()
+	fn := b.harnessNameObserver
+	b.harnessNameMu.RUnlock()
+	if fn != nil {
+		fn(runID, name)
+	}
 }
 
 // RenameRun changes the model-set display name for runID. An empty name resets

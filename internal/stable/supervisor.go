@@ -772,6 +772,19 @@ func NewSupervisor(cfg Config) *Supervisor {
 		sup.broker.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
 			return sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: callerRunID}, sessionID, name)
 		})
+		// The harness writes a session name straight to the broker's own label
+		// half. The runtime copy follows it under the same locks /rename writes
+		// under, so status and label reservation read the resolved name the
+		// broker does however the name was set.
+		sup.broker.SetHarnessNameObserver(func(runID, name string) {
+			sup.controlMu.Lock()
+			defer sup.controlMu.Unlock()
+			if child := sup.runtimes[runID]; child != nil {
+				child.mu.Lock()
+				child.displayName = sup.broker.DisplayName(runID)
+				child.mu.Unlock()
+			}
+		})
 		sup.installParentLink()
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
