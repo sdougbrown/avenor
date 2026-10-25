@@ -584,8 +584,13 @@ func TestIdleBranchReRegistersWithAReplacedParent(t *testing.T) {
 		t.Fatalf("stop the replaced parent: %v", err)
 	}
 
+	// The registration can land before the branch processes the answer that pins
+	// the replacement's generation, and a generation pinned by the replaced
+	// parent is still pinned in that window, so the replacement's generation is
+	// what is awaited.
 	awaitUntil(t, "the idle branch to register with the replacement parent", func() bool {
-		return replacement.link.Registry().Owns("asker")
+		generation, _ := branch.pinned()
+		return generation == replacement.broker.Store().Generation()
 	})
 	generation, pinned := branch.pinned()
 	if !pinned || generation != replacement.broker.Store().Generation() {
