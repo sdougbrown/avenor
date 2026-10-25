@@ -632,8 +632,12 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		b.mu.RLock()
 		st, ok := b.runs[cred.RunID]
+		var token string
+		if ok {
+			token = st.Token
+		}
 		b.mu.RUnlock()
-		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(st.Token)) != 1 {
+		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -667,20 +671,27 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.mu.Lock()
-	if st, exists := b.runs[body.RunID]; exists {
-		if body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(st.Token)) != 1 {
-			b.mu.Unlock()
-			http.Error(w, "run already registered", http.StatusConflict)
-			return
-		}
+	st, exists := b.runs[body.RunID]
+	var registered string
+	var registeredID string
+	if exists {
+		registered = st.Token
+		registeredID = st.RunID
+	}
+	if exists && (body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(registered)) != 1) {
+		b.mu.Unlock()
+		http.Error(w, "run already registered", http.StatusConflict)
+		return
+	}
+	if exists {
 		st.Mu.Lock()
 		st.RegisteredAt = time.Now()
 		st.LastSeen = time.Now()
 		st.Mu.Unlock()
 		b.mu.Unlock()
 		resp := map[string]string{
-			"token":  st.Token,
-			"run_id": st.RunID,
+			"token":  registered,
+			"run_id": registeredID,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -690,7 +701,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		token = MakeToken()
 	}
-	st := &RunState{
+	st = &RunState{
 		RunID:               body.RunID,
 		Token:               token,
 		RegisteredAt:        time.Now(),
@@ -705,8 +716,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"token":  st.Token,
-		"run_id": st.RunID,
+		"token":  token,
+		"run_id": body.RunID,
 	})
 }
 
@@ -913,12 +924,16 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 	// Validate that the authenticated caller matches from_run_id's token.
 	b.mu.RLock()
 	fromSt, ok := b.runs[fullBody.FromRunID]
+	var fromToken string
+	if ok {
+		fromToken = fromSt.Token
+	}
 	b.mu.RUnlock()
 	if !ok {
 		writeCodedError(w, http.StatusNotFound, "from run not found", "invalid-request")
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(fullBody.Token), []byte(fromSt.Token)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(fullBody.Token), []byte(fromToken)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -1969,9 +1984,10 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 	}
 	st := newRunState(runID, name)
 	b.runs[runID] = st
+	token := st.Token
 	b.mu.Unlock()
 	b.runSetChanged()
-	return st.Token, nil
+	return token, nil
 }
 
 // EnsureRun registers a new run under name if one does not already exist for
@@ -1981,14 +1997,16 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 	b.mu.Lock()
 	if st, exists := b.runs[runID]; exists {
+		token := st.Token
 		b.mu.Unlock()
-		return st.Token, false
+		return token, false
 	}
 	st := newRunState(runID, name)
 	b.runs[runID] = st
+	token := st.Token
 	b.mu.Unlock()
 	b.runSetChanged()
-	return st.Token, true
+	return token, true
 }
 
 // ownRun adopts a run a registered child broker owns, under the run ID this
