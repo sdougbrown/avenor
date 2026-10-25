@@ -228,9 +228,10 @@ func (m *Messenger) Register(reg messaging.DescendantRegistration) (messaging.De
 }
 
 // Deregister retires one child and reports the run keys it had claimed with the
-// credential each claim carried, but only while the registration still matches
-// the closing branch's view; a registration a same-identity replacement
-// replaced is refused with ErrRegistrationReplaced and nothing is retired.
+// credential each claim carried, but only while the registration still resolves
+// to the closing branch's view; a registration a same-identity replacement
+// replaced is refused with messaging.ErrGenerationMismatch and nothing is
+// retired.
 func (m *Messenger) Deregister(childID string, view messaging.DescendantView) (map[string]string, error) {
 	return m.registry.Deregister(childID, view)
 }
