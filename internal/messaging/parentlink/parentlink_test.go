@@ -275,8 +275,6 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 	if err := child.broker.SetHarnessName("child-run", "harness-name"); err != nil {
 		t.Fatalf("set harness name: %v", err)
 	}
-	// A run change is what republishes this branch's claims to the parent.
-	child.link.RunChanged()
 
 	awaitUntil(t, "the parent to publish the harness name", func() bool {
 		return parent.broker.DisplayName(key) == "harness-name"
