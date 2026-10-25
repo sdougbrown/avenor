@@ -1,7 +1,12 @@
 package broker
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 // The harness-supplied session name is the human's choice, so it is the name
@@ -170,5 +175,44 @@ func TestHarnessNameOnlyForTheAuthenticatedRun(t *testing.T) {
 	}
 	if got := b.DisplayName("rt_b"); got != "name-b" {
 		t.Fatalf("rt_b label = %q, want name-b", got)
+	}
+
+	// A run cannot name another run, and it cannot even try: the credential in
+	// the body authenticates rt_a, so a body naming rt_b never passes auth.
+	status, body = postAuthBroker(t, b.Addr(), "/session_name", "rt_b", tokenA, map[string]any{"name": "hijack"})
+	if status != 401 {
+		t.Fatalf("cross-run session_name = %d %v, want 401", status, body)
+	}
+	if got := b.DisplayName("rt_b"); got != "name-b" {
+		t.Fatalf("rt_b label after a hijack attempt = %q, want name-b", got)
+	}
+}
+
+// TestSessionNameRefusesACrossRunCaller pins the handler's own caller check.
+// The HTTP surface cannot reach it — withAuth authenticates the very run_id
+// field the body carries — so the request is driven at the handler with a
+// context that names a different caller, the mismatch the guard refuses.
+func TestSessionNameRefusesACrossRunCaller(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	if _, err := b.CreateRun("rt_a", "name-a"); err != nil {
+		t.Fatalf("create run a: %v", err)
+	}
+	if _, err := b.CreateRun("rt_b", "name-b"); err != nil {
+		t.Fatalf("create run b: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/session_name", bytes.NewBufferString(`{"run_id":"rt_b","name":"hijack"}`))
+	req = req.WithContext(messaging.WithCallerRun(req.Context(), "rt_a"))
+	rec := httptest.NewRecorder()
+	b.handleSessionName(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-run handler status = %d, want 403", rec.Code)
+	}
+	if got := b.DisplayName("rt_b"); got != "name-b" {
+		t.Fatalf("rt_b label after a hijack attempt = %q, want name-b", got)
 	}
 }

@@ -594,7 +594,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function publishSessionName(ctx: ExtensionContext): Promise<void> {
       if (!subAgentEnv) return publishChain
       const env = subAgentEnv
-      const name = ctx.sessionManager.getSessionName()
+      // The event context does not always carry a session manager; a read on
+      // one that is missing must not throw past the poll starts below.
+      const name = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } })
+        .sessionManager?.getSessionName?.()
       if (publishedSessionName && publishedSessionName.name === name) return publishChain
       if (refusedSessionName === name) return publishChain
       // Record the attempt before it lands so a second read of the same name

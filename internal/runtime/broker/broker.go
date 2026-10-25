@@ -1316,8 +1316,13 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 	for _, runID := range claim.Retired {
 		b.DeleteRun(runID)
 	}
+	adopted := make(map[string]struct{}, len(claim.Adopted))
+	for _, key := range claim.Adopted {
+		adopted[key] = struct{}{}
+	}
 	for _, run := range claim.Runs {
-		b.ownRun(run)
+		_, isNew := adopted[run.Key]
+		b.ownRun(run, isNew)
 	}
 	b.runSetChanged()
 	runKeys := make(map[string]string, len(claim.Runs))
@@ -1851,9 +1856,12 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 // authenticates the run with, so a forwarded ask and a relay into that branch
 // use the one credential the run already has; a replacement branch presents a
 // rotated credential, and the record follows the claim it accepted so both
-// directions keep authenticating. A caller that adopts a whole set notifies the
-// run observer once when the set is applied.
-func (b *Broker) ownRun(claim messaging.ClaimedRun) string {
+// directions keep authenticating. A record the register guard already saw but
+// that was minted by this broker between the guard and the register — a claim
+// the link did not already own — keeps its own credential: it is not the
+// child's to take. A caller that adopts a whole set notifies the run observer
+// once when the set is applied.
+func (b *Broker) ownRun(claim messaging.ClaimedRun, newlyAdopted bool) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	st, exists := b.runs[claim.Key]
@@ -1865,7 +1873,7 @@ func (b *Broker) ownRun(claim messaging.ClaimedRun) string {
 		b.runs[claim.Key] = st
 		return st.Token
 	}
-	if claim.Token != "" {
+	if !newlyAdopted && claim.Token != "" {
 		st.Token = claim.Token
 	}
 	if claim.Label != "" {
@@ -1977,6 +1985,9 @@ func (b *Broker) SetHarnessName(runID, name string) error {
 	st.Mu.Lock()
 	st.HarnessName = name
 	st.Mu.Unlock()
+	// The label is what a host publishes about this run, so a harness session
+	// name is a run-set change the way a rename is.
+	b.runSetChanged()
 	b.harnessNameChanged(runID, name)
 	return nil
 }

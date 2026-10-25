@@ -73,6 +73,37 @@ func TestClaimOnARecordTheParentOwnsUnderTheKeyIsRefused(t *testing.T) {
 	}
 }
 
+// TestClaimOfTheSupervisorRunUnderItsNamespacedKeyIsRefused pins the register
+// guard on the supervisor form: a branch-supervisor run is reserved in every
+// branch, so a claim of the supervisor run is addressed under the branch's
+// namespaced key, and a record the parent minted under that key — the form the
+// Messenger.Register local-ownership check explicitly skips — is not a child's
+// to take.
+func TestClaimOfTheSupervisorRunUnderItsNamespacedKeyIsRefused(t *testing.T) {
+	parent := startBranch(t, "", "orchestrator")
+	const childID = "branch-supervisor-claim"
+	key := ParentRunKey(childID, messaging.SupervisorRunID)
+	owned, err := parent.broker.CreateRun(key, "parent-supervisor")
+	if err != nil {
+		t.Fatalf("create the parent's own record under the namespaced key: %v", err)
+	}
+
+	status, body := postRegistration(t, parent, childID, "http://127.0.0.1:1", "gen-claim", "",
+		messaging.RunClaim{RunID: messaging.SupervisorRunID, Label: "child-supervisor", Token: "child-token"})
+	if status != http.StatusConflict {
+		t.Fatalf("claim of the supervisor run = (%d, %v), want 409", status, body)
+	}
+	if token, ok := parent.broker.RunToken(key); !ok || token != owned {
+		t.Fatalf("run record credential = (%q, %v), want the parent's own", token, ok)
+	}
+	if parent.link.Registry().Owns(key) {
+		t.Fatal("a refused claim was adopted anyway")
+	}
+	if label := parent.broker.DisplayName(key); label != "parent-supervisor" {
+		t.Fatalf("run record label = %q, want the parent's own", label)
+	}
+}
+
 // postRegistration publishes one child's claim the way a branch's link does and
 // reports the parent's answer. A broker without a configured link credential
 // trusts the loopback caller, so a request without an Authorization header is
