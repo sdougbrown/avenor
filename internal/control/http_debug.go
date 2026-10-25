@@ -53,8 +53,7 @@ func NewHTTPDebugServer(addr string, control *ControlServer) (*HTTPDebugServer, 
 	if err != nil {
 		panic("avenor: failed to generate debug token: " + err.Error())
 	}
-	token := tok
-	h := &HTTPDebugServer{control: control, facade: control.OwnerFacade(), token: token}
+	h := &HTTPDebugServer{control: control, facade: control.OwnerFacade(), token: tok}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status/", h.handleStatusRuntime)
 	mux.HandleFunc("/status", h.handleStatus)
@@ -70,7 +69,7 @@ func NewHTTPDebugServer(addr string, control *ControlServer) (*HTTPDebugServer, 
 	// the print in non-TTY environments is intentional; operators that need the
 	// token in non-interactive setups should inject it via another channel.
 	if stat, serr := os.Stderr.Stat(); serr == nil && (stat.Mode()&os.ModeCharDevice) != 0 {
-		fmt.Fprintf(os.Stderr, "avenor: http debug token: %s\n", token)
+		fmt.Fprintf(os.Stderr, "avenor: http debug token: %s\n", tok)
 	}
 	return h, nil
 }

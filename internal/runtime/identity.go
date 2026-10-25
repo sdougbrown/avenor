@@ -3,6 +3,8 @@ package runtime
 import (
 	"strconv"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // Environment variables that describe the launch a harness child belongs to.
@@ -38,9 +40,11 @@ var identityEnvNames = []string{
 	envParentRunID,
 }
 
-// scrubbedEnvNames is everything a child must not inherit: launch identity plus
-// the test-only switches. Only identityEnvNames is ever emitted.
-var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay)
+// scrubbedEnvNames is everything a child must not inherit: launch identity,
+// the test-only switches, and the parent-link credential — a spawned agent is
+// not the parent broker, so carrying the credential would let it authenticate
+// against parent routes it was never meant to serve.
+var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken)
 
 var identityEnvKeys = func() map[string]struct{} {
 	keys := make(map[string]struct{}, len(scrubbedEnvNames))

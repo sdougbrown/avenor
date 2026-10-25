@@ -16,6 +16,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/launcher"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 const stderrCap = 400
@@ -131,7 +132,8 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 			!strings.HasPrefix(e, "PI_AGENT_PROFILE=") &&
 			!strings.HasPrefix(e, "AVENOR_BROKER_URL=") &&
 			!strings.HasPrefix(e, "AVENOR_RUN_ID=") &&
-			!strings.HasPrefix(e, "AVENOR_BROKER_TOKEN=") {
+			!strings.HasPrefix(e, "AVENOR_BROKER_TOKEN=") &&
+			!strings.HasPrefix(e, token.EnvBrokerParentToken+"=") {
 			filtered = append(filtered, e)
 		}
 	}
