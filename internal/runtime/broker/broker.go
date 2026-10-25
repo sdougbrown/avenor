@@ -1291,6 +1291,11 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 			// claiming one could forge another branch's supervisor identity.
 			writeCodedError(w, http.StatusBadRequest, "a claimed run id cannot contain \"@\"", "invalid-request")
 			return
+		case b.GetRun(link.Key(body.ChildID, claim.RunID)) != nil && !link.Owns(link.Key(body.ChildID, claim.RunID)):
+			// A record this broker minted itself under a claim key is not a child's
+			// to take: the claim is refused whole so the record keeps its credential.
+			writeCodedError(w, http.StatusConflict, "run already registered", "invalid-request")
+			return
 		}
 	}
 	claim, err := link.Register(body)
@@ -1861,34 +1866,6 @@ func (b *Broker) ownRun(claim messaging.ClaimedRun) string {
 		st.Mu.Lock()
 		if st.Info == nil {
 			st.Info = &SessionInfo{RunID: claim.Key}
-		}
-		st.Info.Label = claim.Label
-		st.Mu.Unlock()
-	}
-	return st.Token
-}
-
-// ownRun adopts a run a registered child broker owns. The record keeps the
-// credential that branch authenticates the run with, so a forwarded ask and a
-// relay into that branch use the one credential the run already has. A caller
-// that adopts a whole set notifies the run observer once when the set is
-// applied.
-func (b *Broker) ownRun(claim messaging.RunClaim) string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	st, exists := b.runs[claim.RunID]
-	if !exists {
-		st = newRunState(claim.RunID, claim.Label)
-		if claim.Token != "" {
-			st.Token = claim.Token
-		}
-		b.runs[claim.RunID] = st
-		return st.Token
-	}
-	if claim.Label != "" {
-		st.Mu.Lock()
-		if st.Info == nil {
-			st.Info = &SessionInfo{RunID: claim.RunID}
 		}
 		st.Info.Label = claim.Label
 		st.Mu.Unlock()

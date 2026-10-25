@@ -25,6 +25,8 @@ type parentLinkStub struct {
 
 func (p *parentLinkStub) Owns(runID string) bool { return runID == p.owned }
 
+func (p *parentLinkStub) Key(childID, runID string) string { return runID + "@" + childID }
+
 func (p *parentLinkStub) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 	if p.register != nil {
 		return p.register(reg)

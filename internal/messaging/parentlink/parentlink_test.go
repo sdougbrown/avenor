@@ -24,10 +24,15 @@ const awaitDeadline = 5 * time.Second
 // branch is one broker wired to its parent exactly the way the supervisor wires
 // it.
 type branch struct {
-	broker *broker.Broker
-	link   *Messenger
-	tokens map[string]string
+	broker  *broker.Broker
+	link    *Messenger
+	tokens  map[string]string
+	childID string
 }
+
+// key reports the run ID the parent addresses this branch's runID by: the
+// branch-namespaced claim key its registration carries.
+func (b *branch) key(runID string) string { return ParentRunKey(b.childID, runID) }
 
 // branchSeq names each test branch with a distinct durable identity, the way a
 // supervisor derives one from its control socket path.
@@ -85,7 +90,7 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	branch := &branch{broker: b, tokens: map[string]string{}}
+	branch := &branch{broker: b, tokens: map[string]string{}, childID: childID}
 	for _, runID := range runs {
 		token, err := b.CreateRun(runID, runID)
 		if err != nil {
@@ -261,12 +266,13 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 
 	deadline := time.Now().Add(awaitDeadline)
 	for {
-		hop, ok := parent.link.Registry().Hop("child-run")
-		if ok && hop.Label == "harness-name" {
+		// The claim the child publishes carries the harness-resolved label, so the
+		// adopted run record's name is what peers see here.
+		if got := parent.broker.DisplayName("child-run"); got == "harness-name" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("parent published hop %+v (ok=%v), want label harness-name", hop, ok)
+			t.Fatalf("parent display name = %q, want harness-name", parent.broker.DisplayName("child-run"))
 		}
 		time.Sleep(2 * time.Millisecond)
 	}

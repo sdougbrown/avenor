@@ -22,9 +22,6 @@ type relay struct {
 	// generation reports this broker's current ask generation, which the child
 	// records as the generation its eventual reply is bound to.
 	generation func() string
-	// name reports the display name this broker resolves for a run, so an ask
-	// carries the name the asking branch gives it to the branch that receives it.
-	name func(runID string) string
 	// retire retires the host broker's own record for a run this broker stops
 	// owning, but only while the record still carries the credential the run's
 	// claim carried in the registration the failed relay was posted against, so
@@ -49,7 +46,6 @@ func newRelay(opts Options, registry *Registry) (*relay, error) {
 		registry:   registry,
 		client:     httpbase.New(ErrUnsupportedParentProtocol, timeout),
 		generation: opts.Generation,
-		name:       opts.DisplayName,
 		retire:     opts.RetireRun,
 	}, nil
 }
@@ -67,7 +63,7 @@ func (r *relay) Ask(ctx context.Context, req messaging.SendRequest) error {
 		Kind:          "agent_message",
 		Payload:       payload,
 		CorrelationID: req.MessageID,
-	}, r.sender(req.From), true)
+	}, true)
 }
 
 // Tell relays a fire-and-forget message this broker did not admit an edge for.
@@ -86,24 +82,14 @@ func (r *relay) Tell(ctx context.Context, req messaging.DeliverRequest) error {
 		Kind:          kind,
 		Payload:       payload,
 		CorrelationID: req.CorrelationID,
-	}, r.sender(messaging.Identity{RunID: req.FromRunID}), false)
-}
-
-// sender reports the display name the asker goes by in its own branch. Only that
-// branch can resolve it, so the name travels with the relay instead of being
-// looked up on the far side, where the asker's run ID is a name nobody knows.
-func (r *relay) sender(from messaging.Identity) string {
-	if r.name != nil {
-		return r.name(from.RunID)
-	}
-	return from.Sender
+	}, false)
 }
 
 // hop posts one relay to the child that owns the target run. The relay names
-// the run by its canonical run ID in that branch: a claim is addressed here
-// under the namespaced key and delivered there as the run the branch itself
-// knows.
-func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverRequest, sender string, expectsReply bool) error {
+// the run by its canonical run ID in that branch: a namespaced claim (a branch
+// supervisor) is addressed here under the namespaced key and delivered there as
+// the run the branch itself knows.
+func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverRequest, expectsReply bool) error {
 	next, ok := r.registry.Hop(target)
 	if !ok {
 		return fmt.Errorf("%w: no registered branch owns run %q", messaging.ErrTargetUnavailable, target)
@@ -118,7 +104,6 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 		"run_id":          next.RunID,
 		"token":           next.Token,
 		"from_run_id":     req.FromRunID,
-		"from_sender":     sender,
 		"to_run_id":       next.RunID,
 		"type":            req.Kind,
 		"payload":         req.Payload,
