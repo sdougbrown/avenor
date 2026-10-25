@@ -1222,21 +1222,13 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 // reads as a complete one.
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
-	local := b.sessions()
-	localByID := make(map[string]SessionInfo, len(local))
-	for _, info := range local {
-		localByID[info.RunID] = info
-	}
 	peers, listingErr := b.seam().Peers(r.Context())
 
 	sessions := make([]SessionInfo, 0, len(peers))
 	for _, peer := range peers {
-		// A run this broker owns already has its record here; only a peer the
-		// installed messenger reached elsewhere arrives as an encoded session.
-		if info, ok := localByID[peer.RunID]; ok {
-			sessions = append(sessions, info)
-			continue
-		}
+		// Every run arrives as an encoded session record: the local messenger
+		// encodes its own snapshot, so this single listing needs no second
+		// snapshot to prefer local records over remote ones.
 		info := SessionInfo{RunID: peer.RunID}
 		if len(peer.Session) > 0 {
 			if err := json.Unmarshal(peer.Session, &info); err != nil {
