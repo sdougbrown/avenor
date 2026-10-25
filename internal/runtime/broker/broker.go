@@ -1472,16 +1472,19 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The claim is applied: the runs the child owns now have records here and the
-	// runs it stopped owning lose theirs. The run observer fires once per retired
-	// run as they are deleted, plus once after the settled set, so a host that
-	// publishes this broker's own runs re-publishes each step.
+	// runs it stopped owning lose theirs. Each retired run fires the observer as
+	// it is deleted, so the observer fires here only when the claim adopted or
+	// retired a run — a refresh that re-registers the same runs leaves the owned
+	// run set, and the observer, alone.
 	for _, runID := range claim.Retired {
 		b.DeleteRun(runID)
 	}
 	for _, run := range claim.Runs {
 		b.ownRun(run)
 	}
-	b.runSetChanged()
+	if claim.Changed {
+		b.runSetChanged()
+	}
 	runKeys := make(map[string]string, len(claim.Runs))
 	for _, run := range claim.Runs {
 		if run.Key == run.RunID {

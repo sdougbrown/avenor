@@ -132,6 +132,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		adopted[key] = struct{}{}
 		if _, held := r.owners[key]; !held {
 			claim.Adopted = append(claim.Adopted, key)
+			claim.Changed = true
 		}
 		r.owners[key] = reg.ChildID
 		current.runs[key] = run.RunID
@@ -148,6 +149,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		delete(current.runs, runID)
 		delete(current.tokens, runID)
 		claim.Retired = append(claim.Retired, runID)
+		claim.Changed = true
 	}
 	return claim, nil
 }
