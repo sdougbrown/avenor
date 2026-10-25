@@ -19,6 +19,7 @@ import (
 type parentLinkStub struct {
 	owned        string
 	register     func(messaging.DescendantRegistration) (messaging.DescendantClaim, error)
+	deregister   func(childID string, reg messaging.DescendantRegistration) (map[string]string, error)
 	recordRelay  func(messaging.RelayRoute) error
 	recorded     []messaging.RelayRoute
 	deregistered bool
@@ -36,6 +37,9 @@ func (p *parentLinkStub) Register(reg messaging.DescendantRegistration) (messagi
 }
 
 func (p *parentLinkStub) Deregister(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
+	if p.deregister != nil {
+		return p.deregister(childID, reg)
+	}
 	p.deregistered = true
 	return nil, nil
 }
@@ -420,6 +424,141 @@ func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T)
 	key := "rt_x@child-1"
 	if token, ok := b.RunToken(key); !ok || token != want {
 		t.Fatalf("run record credential = (%q, %v), want the registry's %q", token, ok, want)
+	}
+}
+
+// TestConcurrentDeregisterCannotOrphanARegisteredRun pins the deregistration
+// half of the registration critical section: a deregistration's retirement and
+// record deletes run under the same mutex as a registration's guard, register
+// and apply, so a close cannot retire the link's ownership between one
+// registration's register and its apply. The registration the close raced is a
+// same-view retry — the one registration whose view a closing branch can still
+// match — and a retirement landing in its window would leave the apply
+// recreating a record the link no longer owns, a state whose next claim is
+// refused for good.
+func TestConcurrentDeregisterCannotOrphanARegisteredRun(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	key := "rt_x@child-1"
+	var mu sync.Mutex
+	generation := ""
+	token := ""
+	calls := 0
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	stub := &parentLinkStub{}
+	stub.register = func(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+		claim := messaging.DescendantClaim{}
+		mu.Lock()
+		held := stub.owned
+		mu.Unlock()
+		for _, run := range reg.Runs {
+			runKey := run.RunID + "@" + reg.ChildID
+			claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: runKey})
+			if runKey != held {
+				claim.Adopted = append(claim.Adopted, runKey)
+			}
+		}
+		mu.Lock()
+		calls++
+		block := calls == 2
+		if len(reg.Runs) > 0 {
+			stub.owned = reg.Runs[0].RunID + "@" + reg.ChildID
+			generation = reg.Generation
+			token = reg.Runs[0].Token
+		}
+		mu.Unlock()
+		if block {
+			close(entered)
+			<-release
+		}
+		return claim, nil
+	}
+	stub.deregister = func(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if reg.Generation != generation {
+			return nil, messaging.ErrGenerationMismatch
+		}
+		retired := stub.owned
+		stub.owned = ""
+		return map[string]string{retired: token}, nil
+	}
+	b.SetParentLink(stub)
+
+	body := func(payloadGeneration, payloadToken string) string {
+		raw, err := json.Marshal(map[string]any{
+			"child_id":   "child-1",
+			"endpoint":   "http://child:1234",
+			"generation": payloadGeneration,
+			"runs":       []map[string]any{{"run_id": "rt_x", "label": "claim", "token": payloadToken}},
+		})
+		if err != nil {
+			t.Fatalf("marshal registration: %v", err)
+		}
+		return string(raw)
+	}
+	post := func(payload string) int {
+		t.Helper()
+		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(payload)))
+		if err != nil {
+			t.Fatalf("post registration: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if status := post(body("gen-1", "token-1")); status != http.StatusOK {
+		t.Fatalf("first registration = %d, want 200", status)
+	}
+
+	// The retry of the same registration is held between its register and its
+	// apply — the window a concurrent close must not retire in.
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(body("gen-1", "token-1"))))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-entered
+
+	deregisterDone := make(chan struct{})
+	go func() {
+		defer close(deregisterDone)
+		resp, err := http.Post("http://"+b.Addr()+"/parent/deregister", "application/json", bytes.NewReader([]byte(body("gen-1", "token-1"))))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	// The close retires its claims and deletes the record while the retry is
+	// held. Under the critical section the close waits for the registration it
+	// would have slipped inside, so the deadline elapses instead.
+	deadline := time.Now().Add(2 * time.Second)
+	for b.GetRun(key) != nil && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	close(release)
+	<-secondDone
+	<-deregisterDone
+
+	// The branch recovers: the next registration of the key succeeds and leaves
+	// the record carrying the new claim's credential under an owned claim.
+	if status := post(body("gen-2", "token-2")); status != http.StatusOK {
+		t.Fatalf("re-registration = %d, want 200: the recreated record refused the branch's claim for good", status)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if stub.owned != key {
+		t.Fatalf("claim owner = %q, want %q", stub.owned, key)
+	}
+	if got, ok := b.RunToken(key); !ok || got != "token-2" {
+		t.Fatalf("run record credential = (%q, %v), want the re-registration's", got, ok)
 	}
 }
 

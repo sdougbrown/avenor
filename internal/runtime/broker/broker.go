@@ -333,7 +333,10 @@ type Broker struct {
 	// the guard reads the run records and the link's ownership under two lock
 	// domains, so a second registration whose own sequence interleaved with this
 	// one could retire a record between this guard and this register and leave
-	// the registry and the run records disagreeing about who owns a run.
+	// the registry and the run records disagreeing about who owns a run. A
+	// deregistration's retirement runs under the same mutex, so it cannot land
+	// between one registration's register and its apply and leave that apply
+	// holding records the link no longer owns.
 	parentRegisterMu sync.Mutex
 
 	pruneMu   sync.Mutex
@@ -1382,6 +1385,14 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		writeCodedError(w, http.StatusBadRequest, "child_id is required", "invalid-request")
 		return
 	}
+	// The retirement runs under the registration critical section: retiring the
+	// link's ownership between a concurrent registration's register and its
+	// apply would leave that apply recreating records the link no longer owns,
+	// and the next claim of those keys would be refused for good. A stale view
+	// is still refused whole: the matching refusal below runs under this mutex
+	// too, so a replacement that registered first keeps its claims and records.
+	b.parentRegisterMu.Lock()
+	defer b.parentRegisterMu.Unlock()
 	retired, err := link.Deregister(body.ChildID, body)
 	switch {
 	case errors.Is(err, messaging.ErrGenerationMismatch):
