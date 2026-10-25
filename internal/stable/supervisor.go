@@ -2003,16 +2003,6 @@ func (s *Supervisor) installParentLink() {
 	}
 }
 
-// parentRunClaims reports the runs this branch owns, which is what it publishes
-// to its parent. A run a child broker owns belongs to that branch's claim, not
-// this one.
-func (s *Supervisor) parentRunClaims() []messaging.RunClaim {
-	owned := func(runID string) bool { return s.parentLink != nil && s.parentLink.Owns(runID) }
-	return parentlink.RunClaims(s.broker.Sessions(),
-		func(info broker.SessionInfo) (string, string) { return info.RunID, info.Label },
-		owned, s.broker.RunToken)
-}
-
 // registerBrokerRun ensures the supervisor has its own run registered in the
 // broker for authentication. Returns the run ID and token.
 func (s *Supervisor) registerBrokerRun() (string, string) {
