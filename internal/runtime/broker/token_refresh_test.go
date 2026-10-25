@@ -159,6 +159,40 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 	}
 }
 
+// TestDeleteRunIfTokenKeepsARecordItsCredentialLeftBehind pins the mismatch
+// branch of the record retirement: a retirement that arrives after the record's
+// credential rotated — a run that restarted inside a live branch while the relay
+// refusal was in flight — deletes nothing, because a dropped record makes the
+// run unclaimable and the healthy record belongs to its owner.
+func TestDeleteRunIfTokenKeepsARecordItsCredentialLeftBehind(t *testing.T) {
+	b := New("")
+	if _, err := b.CreateRun("asker", "asker"); err != nil {
+		t.Fatalf("create the run: %v", err)
+	}
+	stale, ok := b.RunToken("asker")
+	if !ok || stale == "" {
+		t.Fatalf("run credential = (%q, %v), want a credential to retire against", stale, ok)
+	}
+
+	// The run restarts inside the live branch and presents a fresh credential.
+	b.ownRun(messaging.ClaimedRun{RunClaim: messaging.RunClaim{RunID: "asker", Label: "asker", Token: "token-new"}, Key: "asker"})
+	if b.DeleteRunIfToken("asker", stale) {
+		t.Fatal("a retirement carrying the rotated-away credential deleted the record")
+	}
+	if token, ok := b.RunToken("asker"); !ok || token != "token-new" {
+		t.Fatalf("run credential = (%q, %v), want the restarted run's record kept", token, ok)
+	}
+
+	// The matching credential still retires the record, so the two halves of
+	// the rule stay paired.
+	if !b.DeleteRunIfToken("asker", "token-new") {
+		t.Fatal("a retirement carrying the record's credential did not delete the record")
+	}
+	if _, ok := b.RunToken("asker"); ok {
+		t.Fatal("the retirement left the record behind")
+	}
+}
+
 // rotationLog reports whether any credential write overlapped a caller's
 // request. A writer brackets its write with the counters, so a caller that saw
 // the same pair on both sides of a request cannot have shared the record with a
