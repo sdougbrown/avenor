@@ -2,6 +2,7 @@ package parentlink
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -369,5 +370,35 @@ func TestRetirementSkipsAReplacedClaim(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0] != "run-c" {
 		t.Fatalf("deregistered runs = %v, want run-c", runs)
+	}
+}
+
+// TestForcedDeregisterRetiresEveryClaim pins that the forced variant ignores
+// the generation pin entirely: a dead child whose generation no view can pin is
+// released wholesale, and an unknown child is refused like an ordinary one.
+func TestForcedDeregisterRetiresEveryClaim(t *testing.T) {
+	registry := NewRegistry()
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "gen-one",
+		Runs: []messaging.RunClaim{{RunID: "run-a"}, {RunID: "run-b"}},
+	}); err != nil {
+		t.Fatalf("register child: %v", err)
+	}
+	if _, err := registry.ForceDeregister("missing"); !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("ForceDeregister of an unknown child = %v, want target-unavailable", err)
+	}
+	runs, err := registry.ForceDeregister("one")
+	if err != nil {
+		t.Fatalf("ForceDeregister: %v", err)
+	}
+	slices.Sort(runs)
+	if len(runs) != 2 || runs[0] != "run-a" || runs[1] != "run-b" {
+		t.Fatalf("forced runs = %v, want run-a and run-b", runs)
+	}
+	if registry.Owns("run-a") || registry.Owns("run-b") {
+		t.Fatal("the forced deregistration left claims behind")
+	}
+	if _, ok := registry.Hop("run-a"); ok {
+		t.Fatal("the forced deregistration left a hop behind")
 	}
 }

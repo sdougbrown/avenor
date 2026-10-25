@@ -202,6 +202,30 @@ func (r *Registry) Deregister(childID, generation string) ([]string, error) {
 	return runs, nil
 }
 
+// ForceDeregister retires every claim a child holds and deletes its record
+// without pinning a generation. An operator uses it to release a child whose
+// durable identity moved across a restart: the old claims are owned by a dead
+// identity whose generation no view can pin, so the ordinary Deregister would
+// no-op forever. The retired runs are free for a fresh registration by the
+// replacement identity.
+func (r *Registry) ForceDeregister(childID string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.children[childID]; !ok {
+		return nil, fmt.Errorf("%w: child %q is not registered", messaging.ErrTargetUnavailable, childID)
+	}
+	delete(r.children, childID)
+	var runs []string
+	for runID, owner := range r.owners {
+		if owner != childID {
+			continue
+		}
+		delete(r.owners, runID)
+		runs = append(runs, runID)
+	}
+	return runs, nil
+}
+
 // Forget drops one run's claim, which is what a relay that found its child gone
 // leaves behind. The generation the caller observed pins the claim it retires:
 // a run a fresher registration re-claimed keeps its route.

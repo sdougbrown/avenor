@@ -235,6 +235,12 @@ func (m *Messenger) Deregister(childID, generation string) ([]string, error) {
 	return m.registry.Deregister(childID, generation)
 }
 
+// ForceDeregister retires every claim a child holds without pinning a
+// generation.
+func (m *Messenger) ForceDeregister(childID string) ([]string, error) {
+	return m.registry.ForceDeregister(childID)
+}
+
 // RecordRelay binds a relayed ask's reply route before the ask is exposed.
 func (m *Messenger) RecordRelay(route messaging.RelayRoute) error {
 	if m.up == nil {
