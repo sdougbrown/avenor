@@ -583,6 +583,7 @@ func TestForcedDeregisterRecoversAMovedBranch(t *testing.T) {
 	t.Cleanup(func() { _ = b.Stop() })
 	registry := parentlink.NewRegistry()
 	b.SetParentLink(registryBackedStub(registry))
+	b.SetParentLinkToken("parent-token")
 
 	claims := func(childID, generation, runID string) string {
 		t.Helper()
@@ -598,14 +599,14 @@ func TestForcedDeregisterRecoversAMovedBranch(t *testing.T) {
 		return string(raw)
 	}
 
-	status, _ := postParentLink(t, b.Addr(), claims("child-1", "gen-1", "run-a"), "")
+	status, _ := postParentLink(t, b.Addr(), claims("child-1", "gen-1", "run-a"), "Bearer parent-token")
 	if status != http.StatusOK {
 		t.Fatalf("registration of the old identity = %d, want 200", status)
 	}
 
 	// A generation-pinned deregistration with a generation the operator cannot
 	// know retires nothing, which is why the recovery path must be forced.
-	status, body := postDeregister(t, b.Addr(), `{"child_id":"child-1","generation":"gen-stale"}`, "")
+	status, body := postDeregister(t, b.Addr(), `{"child_id":"child-1","generation":"gen-stale"}`, "Bearer parent-token")
 	if status != http.StatusOK {
 		t.Fatalf("unforced deregistration = (%d, %v), want 200", status, body)
 	}
@@ -613,7 +614,7 @@ func TestForcedDeregisterRecoversAMovedBranch(t *testing.T) {
 		t.Fatalf("unforced deregistration retired %v runs, want none", got)
 	}
 
-	status, body = postDeregister(t, b.Addr(), `{"child_id":"child-1","force":true}`, "")
+	status, body = postDeregister(t, b.Addr(), `{"child_id":"child-1","force":true}`, "Bearer parent-token")
 	if status != http.StatusOK {
 		t.Fatalf("forced deregistration = (%d, %v), want 200", status, body)
 	}
@@ -625,7 +626,7 @@ func TestForcedDeregisterRecoversAMovedBranch(t *testing.T) {
 	}
 
 	// The replacement identity reclaims the run only once the dead claim is gone.
-	status, body = postParentLink(t, b.Addr(), claims("child-2", "gen-2", "run-a"), "")
+	status, body = postParentLink(t, b.Addr(), claims("child-2", "gen-2", "run-a"), "Bearer parent-token")
 	if status != http.StatusOK {
 		t.Fatalf("re-registration by the new identity = (%d, %v), want 200", status, body)
 	}
@@ -696,6 +697,40 @@ func TestForcedDeregisterRequiresTheParentLinkToken(t *testing.T) {
 	status, _ = postDeregister(t, b.Addr(), `{"child_id":"child-1","force":true}`, "")
 	if status != http.StatusUnauthorized {
 		t.Fatalf("forced deregistration with no credential = %d, want 401", status)
+	}
+	if hop, _ := registry.Hop("run-a"); hop.ChildID != "child-1" {
+		t.Fatal("the refused forced deregistration retired the child's claim")
+	}
+}
+
+// TestForcedDeregisterWithoutATokenIsRefused pins the guard on the forced
+// variant: a parent link with no configured token authenticates every caller,
+// so a force that would unroute a live branch is refused outright there.
+func TestForcedDeregisterWithoutATokenIsRefused(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	registry := parentlink.NewRegistry()
+	b.SetParentLink(registryBackedStub(registry))
+
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   "child-1",
+		"endpoint":   "http://child:1234",
+		"generation": "gen-1",
+		"runs":       []map[string]any{{"run_id": "run-a", "label": "run-a", "token": "child-token"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+	status, _ := postParentLink(t, b.Addr(), string(raw), "")
+	if status != http.StatusOK {
+		t.Fatalf("registration = %d, want 200", status)
+	}
+	status, body := postDeregister(t, b.Addr(), `{"child_id":"child-1","force":true}`, "")
+	if status != http.StatusForbidden {
+		t.Fatalf("forced deregistration on a tokenless link = (%d, %v), want 403", status, body)
 	}
 	if hop, _ := registry.Hop("run-a"); hop.ChildID != "child-1" {
 		t.Fatal("the refused forced deregistration retired the child's claim")

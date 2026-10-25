@@ -1518,7 +1518,8 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 // "force": true retires the child's claims without pinning a generation: that
 // is the operator's recovery path for a child whose durable identity changed
 // across a restart, whose old claims the ordinary generation-pinned
-// deregistration can never retire.
+// deregistration can never retire. Force requires a configured parent-link
+// token, since a tokenless link authenticates every caller.
 func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) {
 	link, token := b.parentSeam()
 	if link == nil {
@@ -1540,6 +1541,15 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 	}
 	if body.ChildID == "" {
 		writeCodedError(w, http.StatusBadRequest, "child_id is required", "invalid-request")
+		return
+	}
+	// A forced deregistration deletes a child's registration wholesale, so a
+	// link whose authorization degrades to "accept any caller" when no token is
+	// configured must not serve it: without a configured credential there is no
+	// caller this route can authenticate, and force would let any network peer
+	// unroute a live branch.
+	if body.Force && token == "" {
+		writeCodedError(w, http.StatusForbidden, "the forced deregistration requires a configured parent-link token", "invalid-request")
 		return
 	}
 	var runs []string
