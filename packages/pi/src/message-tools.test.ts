@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test'
 import conformance from '../../../schemas/message_route.conformance.json'
 import resultFixture from '../../../schemas/message_route.result.json'
-import { messageTool as realMessageTool, renderLast, type MessageProvider } from '@dougbots/avenor-core'
-import { makeMessageProvider, startExtensionHarness } from './test-fixtures.js'
+import { ClosedSocketError, messageTool as realMessageTool, renderLast, RpcError, type MessageProvider } from '@dougbots/avenor-core'
+import { makeMessageProvider, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 const openHarnesses: Array<{
   harness: Awaited<ReturnType<typeof startExtensionHarness>>
@@ -251,7 +251,7 @@ describe('Pi host turn producer', () => {
 
   it('logs a closed control socket once and stops retrying until session_start', async () => {
     const record = mock(async () => {
-      throw new Error('control socket is closed')
+      throw new ClosedSocketError('control socket is closed')
     })
     const errorLog = mock((_message?: unknown, ..._rest: unknown[]) => {})
     const originalError = console.error
@@ -289,6 +289,81 @@ describe('Pi host turn producer', () => {
       await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
       expect(record).toHaveBeenCalledTimes(2)
       expect(errorLog).toHaveBeenCalledTimes(2)
+    } finally {
+      console.error = originalError
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('recovers last-turn recording after a generation mismatch without session_start', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    const closedRecord = mock(async () => { throw new ClosedSocketError('control socket is closed') })
+    let provider = makeMessageProvider({ recordLastTurn: closedRecord })
+    const hostProviderFor = mock(async () => provider)
+    let receiveCount = 0
+    const brokerReceiveTool = mock(async (args: { generation?: string }) => {
+      receiveCount++
+      if (args.generation === 'gen-1') {
+        throw new RpcError(-32000, 'messaging: generation mismatch', {
+          code: 'generation-mismatch',
+          outcome: 'not-sent',
+          wire_code: 'generation-mismatch',
+        })
+      }
+      return { asks: [], generation: receiveCount === 1 ? 'gen-1' : 'gen-2' }
+    })
+    const errorLog = mock((_message?: unknown, ..._rest: unknown[]) => {})
+    const originalError = console.error
+    const harness = await startHarness({
+      deps: { hostProviderFor, brokerReceiveTool },
+      extOptions: { subAgentEnv: null, pollIntervalMs: 5 },
+    })
+    console.error = errorLog
+    try {
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+      expect(closedRecord).toHaveBeenCalledTimes(1)
+      expect(errorLog).toHaveBeenCalledTimes(1)
+      await waitFor(() => receiveCount >= 3)
+      provider = makeMessageProvider({ recordLastTurn: record })
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
+      expect(record).toHaveBeenCalledWith('turn three', 'end_turn', false)
+    } finally {
+      console.error = originalError
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('recovers last-turn recording after default binding eviction without session_start', async () => {
+    const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    const client = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
+      sessionLastSet: mock(async () => { throw new ClosedSocketError('control socket is closed') }),
+    }
+    const getSupervisorClient = mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: 'sup' }))
+    const errorLog = mock((_message?: unknown, ..._rest: unknown[]) => {})
+    const originalError = console.error
+    const harness = await startHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+      },
+    })
+    console.error = errorLog
+    try {
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+      expect(client.sessionLastSet).toHaveBeenCalledTimes(1)
+      expect(errorLog).toHaveBeenCalledTimes(1)
+      await harness.registeredTools.avenor_shutdown.execute('s1', { supervisor_id: '/tmp/other.sock' })
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
+      expect(client.sessionLastSet).toHaveBeenCalledTimes(1)
+      expect(errorLog).toHaveBeenCalledTimes(1)
+      await harness.registeredTools.avenor_shutdown.execute('s2', {})
+      client.sessionLastSet = record
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn four', stopReason: 'stop' }))
+      expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+      expect(record).toHaveBeenCalledWith('supervisor', 'turn four', 'end_turn', false)
     } finally {
       console.error = originalError
       await harness.eventHandlers.session_shutdown({}, {})

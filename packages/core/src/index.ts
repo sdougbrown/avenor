@@ -1,4 +1,4 @@
-export { dial, RpcError, OwnerAuthError } from './client.js'
+export { dial, RpcError, OwnerAuthError, ClosedSocketError, isClosedSocketError } from './client.js'
 export {
   attachOwner,
   ForeignPeerError,

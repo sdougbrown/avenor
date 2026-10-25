@@ -326,6 +326,25 @@ export class CallTimeoutError extends Error {
   }
 }
 
+/**
+ * A transport failure that marks the control client closed: a send refused
+ * because the socket is already closed, a pending call rejected because the
+ * read side closed, or a socket write failure. A peer's structured rejection
+ * (RpcError) or a call timeout do not close the client and are not classified
+ * here.
+ */
+export class ClosedSocketError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ClosedSocketError'
+  }
+}
+
+/** True when the error is a transport failure that closed the client. */
+export function isClosedSocketError(error: unknown): boolean {
+  return error instanceof ClosedSocketError
+}
+
 const OWNER_AUTH_VERSION = 1
 export const OWNER_UNAUTHENTICATED_CODE = -32011
 export const UNSUPPORTED_OWNER_AUTH_CODE = -32012
@@ -457,7 +476,7 @@ export class Client {
       this.closed = true
       for (const [, pc] of this.pending) {
         clearTimeout(pc.timer)
-        pc.reject(new Error('read response: connection closed'))
+        pc.reject(new ClosedSocketError('read response: connection closed'))
       }
       this.pending.clear()
       this.eventDone = true
@@ -546,7 +565,7 @@ export class Client {
 
   private sendCall(method: string, params: unknown, timeout: number): Promise<unknown> {
     if (this.isClosed()) {
-      return Promise.reject(new Error('control socket is closed'))
+      return Promise.reject(new ClosedSocketError('control socket is closed'))
     }
     this.startReadLoop()
 
@@ -571,7 +590,7 @@ export class Client {
           this.closed = true
           clearTimeout(timer)
           this.pending.delete(id)
-          reject(new Error(`write request: ${err.message}`))
+          reject(new ClosedSocketError(`write request: ${err.message}`))
         }
       })
     })

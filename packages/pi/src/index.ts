@@ -24,6 +24,7 @@ import {
   getSupervisorClient,
   inspectTool,
   installAskClaims,
+  isClosedSocketError,
   isGenerationMismatchError,
   killTool,
   messageTool,
@@ -407,11 +408,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let pollingErrorCount = 0
     const pollingErrors: PollErrorPayload[] = []
     let lastStatusEntries: RunStatusEntry[] = []
-    // The host's last-turn publishing is terminal once its control socket is
-    // closed: the supervisor is gone or the provider was disposed. One log is
-    // enough; per-turn retries would only spam. Cleared when the host providers
-    // are re-established (session_start, or the redial after a generation
-    // mismatch).
+    // Suppress last-turn writes after a closed-socket failure until the default
+    // binding is evicted by disposeHostProvider/disposeHostProviders, or a new
+    // session starts. Evicting other supervisors must not reset this flag.
     let lastTurnSocketClosed = false
 
     // Registry of in-flight blocking waits (avenor_result, spawn with
@@ -660,9 +659,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             // The cached providers carry the old generation, so a send through
             // them would be refused as not-sent; drop them and redial instead.
             disposeHostProviders()
-            // The redial re-establishes the host providers, so a last-turn
-            // record may succeed again.
-            lastTurnSocketClosed = false
             received = await receive()
           }
           if (generation !== hostPollGeneration) return
@@ -1299,6 +1295,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       hostProviders.delete(key)
       // A disposed provider's claims belong to a dead session.
       hostAskClaims.delete(key)
+      if (key === '') lastTurnSocketClosed = false
       if (!binding || binding.isSingleton || !binding.client) return
       try {
         binding.client.close()
@@ -1312,6 +1309,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function disposeHostProviders(): void {
       for (const key of [...hostProviders.keys()]) disposeHostProvider(key)
       hostAskClaims.clear()
+      lastTurnSocketClosed = false
     }
 
     async function defaultHostProviderFor(supervisorId: string | undefined): Promise<MessageProvider> {
@@ -1392,11 +1390,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     async function messageProvider(supervisorId: string | undefined): Promise<MessageProvider> {
       if (childProvider) return childProvider
       return hostMessageProvider(supervisorId)
-    }
-
-    // The core client's refusal for a send on an already-closed socket.
-    function isClosedSocketError(error: unknown): boolean {
-      return error instanceof Error && error.message === 'control socket is closed'
     }
 
     // The host's own last-turn producer. Every turn's end is recorded, including
