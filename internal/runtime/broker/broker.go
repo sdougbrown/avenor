@@ -1255,12 +1255,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	var body struct {
-		ChildID    string               `json:"child_id"`
-		Endpoint   string               `json:"endpoint"`
-		Generation string               `json:"generation"`
-		Runs       []messaging.RunClaim `json:"runs"`
-	}
+	var body messaging.DescendantRegistration
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -1281,12 +1276,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	claim, err := link.Register(messaging.DescendantRegistration{
-		ChildID:    body.ChildID,
-		Endpoint:   body.Endpoint,
-		Generation: body.Generation,
-		Runs:       body.Runs,
-	})
+	claim, err := link.Register(body)
 	if err != nil {
 		writeCodedError(w, http.StatusConflict, err.Error(), "invalid-request")
 		return
@@ -1337,12 +1327,7 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	var body struct {
-		ChildID    string               `json:"child_id"`
-		Endpoint   string               `json:"endpoint"`
-		Generation string               `json:"generation"`
-		Runs       []messaging.RunClaim `json:"runs"`
-	}
+	var body messaging.DescendantRegistration
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -1351,11 +1336,7 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		writeCodedError(w, http.StatusBadRequest, "child_id is required", "invalid-request")
 		return
 	}
-	retired, err := link.Deregister(body.ChildID, messaging.DescendantView{
-		Endpoint:   body.Endpoint,
-		Generation: body.Generation,
-		Runs:       body.Runs,
-	})
+	retired, err := link.Deregister(body.ChildID, body)
 	switch {
 	case errors.Is(err, messaging.ErrGenerationMismatch):
 		// The deregistration describes a registration this broker no longer

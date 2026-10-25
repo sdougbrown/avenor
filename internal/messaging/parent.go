@@ -23,7 +23,7 @@ type ParentLink interface {
 	// registration still matches the closing branch's view; a registration a
 	// same-identity replacement replaced is refused with
 	// ErrGenerationMismatch and nothing is retired.
-	Deregister(childID string, view DescendantView) (map[string]string, error)
+	Deregister(childID string, reg DescendantRegistration) (map[string]string, error)
 	// RecordRelay records the reply route of a relayed ask. The broker calls it
 	// before it exposes the ask to a consumer, so a reply always follows the
 	// hop the ask arrived on.
@@ -42,21 +42,13 @@ type RunClaim struct {
 }
 
 // DescendantRegistration is one child broker's claim on the runs it owns: where
-// its broker answers, the generation its ask store pinned, and the runs.
+// its broker answers, the generation its ask store pinned, and the runs. It is
+// also the view a closing branch holds of the registration its parent last
+// accepted: a deregistration carries it for the parent to compare against the
+// registration it holds, so a deregistration that arrives after a replacement
+// re-registered is refused instead of retiring the replacement's claims.
 type DescendantRegistration struct {
 	ChildID    string     `json:"child_id"`
-	Endpoint   string     `json:"endpoint"`
-	Generation string     `json:"generation"`
-	Runs       []RunClaim `json:"runs"`
-}
-
-// DescendantView is the view a closing branch holds of the registration its
-// parent last accepted: where its broker answers, the generation its ask store
-// pinned at that registration, and the credential it handed its parent for each
-// run it claimed. The parent compares the view against the registration it
-// holds, so a deregistration that arrives after a replacement re-registered is
-// refused instead of retiring the replacement's claims.
-type DescendantView struct {
 	Endpoint   string     `json:"endpoint"`
 	Generation string     `json:"generation"`
 	Runs       []RunClaim `json:"runs"`

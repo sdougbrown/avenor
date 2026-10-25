@@ -232,8 +232,8 @@ func (m *Messenger) Register(reg messaging.DescendantRegistration) (messaging.De
 // to the closing branch's view; a registration a same-identity replacement
 // replaced is refused with messaging.ErrGenerationMismatch and nothing is
 // retired.
-func (m *Messenger) Deregister(childID string, view messaging.DescendantView) (map[string]string, error) {
-	return m.registry.Deregister(childID, view)
+func (m *Messenger) Deregister(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
+	return m.registry.Deregister(childID, reg)
 }
 
 // RecordRelay binds a relayed ask's reply route before the ask is exposed.

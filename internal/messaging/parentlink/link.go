@@ -290,7 +290,8 @@ func (l *Link) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
 	defer cancel()
 	l.mu.Lock()
-	view := messaging.DescendantView{
+	reg := messaging.DescendantRegistration{
+		ChildID:    l.opts.ChildID,
 		Endpoint:   l.opts.Endpoint,
 		Generation: l.publishedGeneration,
 		Runs:       l.published,
@@ -300,10 +301,10 @@ func (l *Link) Close() error {
 	// branch sends the view its parent last accepted, so a parent that holds a
 	// same-identity replacement's registration refuses to retire it.
 	_, _, _ = l.post(ctx, pathDeregister, map[string]any{
-		"child_id":   l.opts.ChildID,
-		"endpoint":   view.Endpoint,
-		"generation": view.Generation,
-		"runs":       view.Runs,
+		"child_id":   reg.ChildID,
+		"endpoint":   reg.Endpoint,
+		"generation": reg.Generation,
+		"runs":       reg.Runs,
 	}, "", "", deregisterTimeout)
 	return l.client.Close()
 }

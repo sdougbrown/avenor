@@ -187,14 +187,14 @@ func validEndpoint(endpoint string) error {
 // replacement can re-register while it is in flight; the replacement presents a
 // different endpoint, generation or credential set, and retiring its claims
 // would take the healthy branch out of routing and delete its run records.
-func (r *Registry) Deregister(childID string, view messaging.DescendantView) (map[string]string, error) {
+func (r *Registry) Deregister(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	current, ok := r.children[childID]
 	if !ok {
 		return nil, fmt.Errorf("%w: child %q is not registered", messaging.ErrTargetUnavailable, childID)
 	}
-	if !registrationMatches(current, view) {
+	if !registrationMatches(current, reg) {
 		return nil, fmt.Errorf("%w: child %q's registration no longer matches the closing branch's view", messaging.ErrGenerationMismatch, childID)
 	}
 	return r.retireRegistration(current), nil
@@ -224,12 +224,12 @@ func (r *Registry) retireRegistration(current *child) map[string]string {
 // claim describes the registration the parent last accepted rather than a
 // replacement — a same-identity replacement refreshed the endpoint, generation
 // or credentials, and the comparisons above refuse it. Both callers hold r.mu.
-func registrationMatches(current *child, view messaging.DescendantView) bool {
-	if current.endpoint != view.Endpoint || current.generation != view.Generation {
+func registrationMatches(current *child, reg messaging.DescendantRegistration) bool {
+	if current.endpoint != reg.Endpoint || current.generation != reg.Generation {
 		return false
 	}
-	viewed := make(map[string]string, len(view.Runs))
-	for _, run := range view.Runs {
+	viewed := make(map[string]string, len(reg.Runs))
+	for _, run := range reg.Runs {
 		viewed[run.RunID] = run.Token
 	}
 	for key, runID := range current.runs {
