@@ -1479,19 +1479,18 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusConflict, err.Error(), "invalid-request")
 		return
 	}
-	// The claim is applied: the runs the child owns now have records here and
-	// the runs it stopped owning lose theirs. Deleting an adopted record is not
-	// a change to the run set this broker owns, so the observer fires once here,
-	// and only when the claim adopted or retired a run — a refresh that
-	// re-registers the same runs leaves the owned run set, and the observer,
-	// alone.
+	// The claim is applied: the runs the child owns now have records here and the
+	// runs it stopped owning lose theirs. Each retired run fires the observer as
+	// it is deleted, so the observer fires here only when the claim adopted or
+	// retired a run — a refresh that re-registers the same runs leaves the owned
+	// run set, and the observer, alone.
 	for _, runID := range claim.Retired {
 		b.DeleteRun(runID)
 	}
 	for _, run := range claim.Runs {
 		b.ownRun(run)
 	}
-	if len(claim.Adopted) > 0 || len(claim.Retired) > 0 {
+	if claim.Changed {
 		b.runSetChanged()
 	}
 	runKeys := make(map[string]string, len(claim.Runs))

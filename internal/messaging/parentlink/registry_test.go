@@ -139,6 +139,65 @@ func TestRegistryNamespacesBranchSupervisorRuns(t *testing.T) {
 	}
 }
 
+// TestRegistryReportsWhetherARegistrationChangedTheRunSet pins the changed
+// report: a claim that adopts or retires a run changed the owned run set, a
+// refresh that re-registers the same runs did not, and a rotated credential
+// alone is not a run-set change.
+func TestRegistryReportsWhetherARegistrationChangedTheRunSet(t *testing.T) {
+	registry := NewRegistry()
+	claim, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t1"}},
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if !claim.Changed {
+		t.Fatal("the first claim of a run reported no change")
+	}
+	claim, err = registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t1"}},
+	})
+	if err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	if claim.Changed || len(claim.Adopted) != 0 || len(claim.Retired) != 0 {
+		t.Fatalf("an unchanged re-registration = %+v, want nothing changed", claim)
+	}
+	// A rotated credential refreshes the claim without changing the run set.
+	claim, err = registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t2"}},
+	})
+	if err != nil {
+		t.Fatalf("re-register with a new token: %v", err)
+	}
+	if claim.Changed {
+		t.Fatal("a credential refresh alone reported a run-set change")
+	}
+	claim, err = registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t2"}, {RunID: "run-b"}},
+	})
+	if err != nil {
+		t.Fatalf("register an added run: %v", err)
+	}
+	if !claim.Changed {
+		t.Fatal("adopting a new run reported no change")
+	}
+	claim, err = registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t2"}},
+	})
+	if err != nil {
+		t.Fatalf("register without the retired run: %v", err)
+	}
+	if !claim.Changed || len(claim.Retired) != 1 {
+		t.Fatalf("retiring a run = %+v, want a change and one retired run", claim)
+	}
+}
+
 // TestRegistryRefusesARunIDCarryingTheNamespacingSeparator pins the run ID a
 // descendant may claim: a run ID carrying "@" reads as a branch-namespaced
 // key, so a child claiming one could forge another branch's supervisor

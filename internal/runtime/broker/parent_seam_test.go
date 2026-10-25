@@ -368,6 +368,67 @@ func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T
 	}
 }
 
+// TestParentRegisterFiresTheRunObserverOnlyWhenTheSetChanged pins the handler's
+// observer rule: a claim that adopted or retired a run notifies the run
+// observer, and a refresh that re-registers the runs the child already claimed
+// leaves the observer alone — an idle branch's periodic re-registration must
+// not re-publish the parent's peer set.
+func TestParentRegisterFiresTheRunObserverOnlyWhenTheSetChanged(t *testing.T) {
+	raw := func(runID string) []byte {
+		body, err := json.Marshal(map[string]any{
+			"child_id":   "child-1",
+			"endpoint":   "http://child:1234",
+			"generation": "gen-1",
+			"runs":       []map[string]any{{"run_id": runID, "label": "remote", "token": "child-token"}},
+		})
+		if err != nil {
+			t.Fatalf("marshal registration: %v", err)
+		}
+		return body
+	}
+	start := func(t *testing.T, changed bool) (*Broker, *int) {
+		t.Helper()
+		b := New("")
+		if err := b.Start(); err != nil {
+			t.Fatalf("start broker: %v", err)
+		}
+		t.Cleanup(func() { _ = b.Stop() })
+		fired := 0
+		b.SetRunObserver(func() { fired++ })
+		b.SetParentLink(&parentLinkStub{
+			register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+				return messaging.DescendantClaim{
+					Runs:    []messaging.ClaimedRun{{RunClaim: messaging.RunClaim{RunID: "remote-run", Label: "remote", Token: "child-token"}, Key: "remote-run"}},
+					Changed: changed,
+				}, nil
+			},
+		})
+		return b, &fired
+	}
+
+	t.Run("a claim that adopted a run fires the observer", func(t *testing.T) {
+		b, fired := start(t, true)
+		status, _ := postParentLink(t, b.Addr(), string(raw("remote-run")), "")
+		if status != http.StatusOK {
+			t.Fatalf("registration = %d, want 200", status)
+		}
+		if *fired == 0 {
+			t.Fatal("an adopting registration did not notify the run observer")
+		}
+	})
+
+	t.Run("a refresh of the same claim does not fire the observer", func(t *testing.T) {
+		b, fired := start(t, false)
+		status, _ := postParentLink(t, b.Addr(), string(raw("remote-run")), "")
+		if status != http.StatusOK {
+			t.Fatalf("registration = %d, want 200", status)
+		}
+		if *fired != 0 {
+			t.Fatalf("an unchanged re-registration notified the run observer %d times", *fired)
+		}
+	})
+}
+
 // TestRelayRefusesATargetTheCallerDidNotAuthenticate pins the relay's target
 // authentication: a relay whose authenticated run does not match the body's
 // to_run_id is refused before the target's queue is touched, while a relay
