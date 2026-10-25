@@ -471,8 +471,8 @@ func TestMCPSupervisorChild(t *testing.T) {
 		return
 	}
 	path := os.Getenv("AVENOR_MCP_SUPERVISOR_SOCKET")
-	identityToken := os.Getenv(controlIdentityTokenEnv)
-	_ = os.Unsetenv(controlIdentityTokenEnv)
+	identityToken := os.Getenv(token.EnvControlIdentityToken)
+	_ = os.Unsetenv(token.EnvControlIdentityToken)
 	// A real child removes a proven-stale path under the control lock before
 	// binding; the stub does the same so a predecessor's leftover socket does
 	// not block it.

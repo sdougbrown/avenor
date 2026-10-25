@@ -27,8 +27,6 @@ var startupTimeout = 10 * time.Second
 // post-readiness socket-replacement test before its first identity probe.
 var afterSupervisorReady = func() {}
 
-const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
-
 type supervisorLifecycle struct {
 	mu         sync.Mutex
 	socketPath string
@@ -132,7 +130,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 		env = os.Environ()
 	}
 	const readyEnv = "AVENOR_CONTROL_READY_FD="
-	const identityEnv = controlIdentityTokenEnv + "="
+	const identityEnv = token.EnvControlIdentityToken + "="
 	// Credential and ownership plumbing must not leak into the nested
 	// supervisor: a parent-link token in the environment with no
 	// --broker-parent-url would make the nested broker serve parent-link

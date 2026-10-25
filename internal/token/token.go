@@ -13,6 +13,11 @@ import (
 // must keep it out of nested environments agree on the name.
 const EnvBrokerParentToken = "AVENOR_PARENT_BROKER_TOKEN"
 
+// EnvControlIdentityToken carries the supervisor ownership credential through
+// the nested supervisor's inherited readiness pipe. It is defined here so the
+// MCP spawn path and the control server that reads it back agree on the name.
+const EnvControlIdentityToken = "AVENOR_CONTROL_IDENTITY_TOKEN"
+
 // NewHexToken returns a 256-bit random token encoded as 64 lowercase hex
 // characters. Subcommands that mint credentials (parent-link tokens, control
 // identity tokens) share this generator so the token format lives in one place.

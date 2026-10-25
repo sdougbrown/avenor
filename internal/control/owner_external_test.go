@@ -11,9 +11,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/control/controltest"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/token"
 )
-
-const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
 
 func externalSocketPath(t *testing.T) string {
 	t.Helper()
@@ -22,7 +21,7 @@ func externalSocketPath(t *testing.T) string {
 
 func TestSocketStartIdentityTokenIsOneShot(t *testing.T) {
 	path := externalSocketPath(t)
-	t.Setenv(controlIdentityTokenEnv, "child-token")
+	t.Setenv(token.EnvControlIdentityToken, "child-token")
 
 	s, _ := controltest.NewServer(control.NewState("run_1", "", 0))
 	if err := s.Start(path); err != nil {
@@ -30,7 +29,7 @@ func TestSocketStartIdentityTokenIsOneShot(t *testing.T) {
 	}
 	defer s.Stop()
 
-	if got := os.Getenv(controlIdentityTokenEnv); got != "" {
+	if got := os.Getenv(token.EnvControlIdentityToken); got != "" {
 		t.Fatalf("identity token still in environment: %q", got)
 	}
 	cl, err := client.Dial(path)
