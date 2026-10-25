@@ -107,6 +107,10 @@ type Link struct {
 	relays     map[string]relayRoute
 	closed     bool
 	closedCh   chan struct{}
+	// degraded records a parent that predates the run-key namespacing: it
+	// understands only the legacy claim shape, so the branch-supervisor claim is
+	// omitted for the rest of the link's life with that parent.
+	degraded bool
 
 	dirty chan struct{}
 	wg    sync.WaitGroup
@@ -211,10 +215,56 @@ func (l *Link) publishLoop(ctx context.Context) {
 func (l *Link) Sync(ctx context.Context) error {
 	l.regMu.Lock()
 	defer l.regMu.Unlock()
+	return l.publish(ctx, l.claims())
+}
+
+// claims reports the run set this branch publishes, in the shape its parent
+// speaks: a parent that predates the run-key namespacing never learns the
+// branch-supervisor claim, so the degraded shape omits it.
+func (l *Link) claims() []messaging.RunClaim {
+	claims := l.opts.Runs()
+	l.mu.Lock()
+	degraded := l.degraded
+	l.mu.Unlock()
+	if !degraded {
+		return claims
+	}
+	return withoutSupervisorClaim(claims)
+}
+
+// withoutSupervisorClaim drops the branch-supervisor claim, which is the shape
+// a parent predating the run-key namespacing understands.
+func withoutSupervisorClaim(claims []messaging.RunClaim) []messaging.RunClaim {
+	legacy := make([]messaging.RunClaim, 0, len(claims))
+	for _, claim := range claims {
+		if claim.RunID == messaging.SupervisorRunID {
+			continue
+		}
+		legacy = append(legacy, claim)
+	}
+	return legacy
+}
+
+// claimsSupervisor reports whether the claim carries the branch-supervisor run,
+// the only claim a namespacing parent answers with a run key.
+func claimsSupervisor(claims []messaging.RunClaim) bool {
+	for _, claim := range claims {
+		if claim.RunID == messaging.SupervisorRunID {
+			return true
+		}
+	}
+	return false
+}
+
+// publish registers claims with the parent and applies its response. A response
+// that shows the parent predates the run-key namespacing — a refusal naming the
+// branch-supervisor claim, or an acceptance that names no run key for it —
+// switches the link to the legacy shape and re-registers once, so a claim the
+// parent took in the namespacing shape is replaced by the one it understands.
+func (l *Link) publish(ctx context.Context, claims []messaging.RunClaim) error {
 	// The branch hands its parent the credentials its own runs already use, so
 	// the parent forwards an ask as the run that asked and relays a message back
 	// into the run's own queue.
-	claims := l.opts.Runs()
 	tokens := make(map[string]string, len(claims))
 	for _, claim := range claims {
 		if claim.Token != "" {
@@ -232,7 +282,27 @@ func (l *Link) Sync(ctx context.Context) error {
 	}
 	registered, err := decode(status, raw)
 	if err != nil {
+		// A parent with no supervisor exemption refuses the branch-supervisor
+		// claim: a namespacing parent never refuses that claim, so the refusal is
+		// its response. The refused registration adopted nothing, and retrying
+		// without the supervisor claim fails the same way when the refusal was
+		// for another run, so the legacy shape is remembered only when the retry
+		// succeeds.
+		if claimsSupervisor(claims) {
+			if retryErr := l.publish(ctx, withoutSupervisorClaim(claims)); retryErr == nil {
+				l.rememberDegraded()
+				return nil
+			}
+		}
 		return err
+	}
+	// A parent that accepted the full claim but named no run key for the
+	// branch-supervisor run predates the namespacing: it recorded the claim as a
+	// literal run, so the claim is re-registered without it and the replacement
+	// retires the record the parent took.
+	if claimsSupervisor(claims) && registered.RunKeys[messaging.SupervisorRunID] == "" {
+		l.rememberDegraded()
+		return l.publish(ctx, withoutSupervisorClaim(claims))
 	}
 	l.mu.Lock()
 	l.tokens = tokens
@@ -240,6 +310,15 @@ func (l *Link) Sync(ctx context.Context) error {
 	l.noteGenerationLocked(registered.Generation)
 	l.mu.Unlock()
 	return nil
+}
+
+// rememberDegraded pins the legacy claim shape for the rest of the link's life
+// with this parent. A parent that namespaced once never stops, so the shape is
+// never revisited.
+func (l *Link) rememberDegraded() {
+	l.mu.Lock()
+	l.degraded = true
+	l.mu.Unlock()
 }
 
 // noteGenerationLocked pins the parent's generation. The routes recorded against
