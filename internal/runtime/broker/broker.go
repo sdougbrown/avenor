@@ -220,6 +220,13 @@ func (b *Broker) Send(runID string, kind string, payload json.RawMessage, correl
 // The fromRunID must belong to a registered run whose token matches the
 // authenticated caller's token.
 func (b *Broker) SendTo(fromRunID, toRunID, kind string, payload json.RawMessage, correlationID string) error {
+	return b.sendToAs(fromRunID, toRunID, kind, payload, correlationID, b.displayName(fromRunID))
+}
+
+// sendToAs is SendTo with the sender named by the caller. The local seam always
+// resolves the asker's name here; a relay instead carries the name the relaying
+// branch resolved, because the receiving branch has no record of the asking run.
+func (b *Broker) sendToAs(fromRunID, toRunID, kind string, payload json.RawMessage, correlationID, sender string) error {
 	b.mu.RLock()
 	_, ok := b.runs[toRunID]
 	b.mu.RUnlock()
@@ -234,7 +241,7 @@ func (b *Broker) SendTo(fromRunID, toRunID, kind string, payload json.RawMessage
 		Type:      kind,
 		RunID:     toRunID,
 		FromRunID: fromRunID,
-		Sender:    b.displayName(fromRunID),
+		Sender:    sender,
 		Payload:   payload,
 	}
 	return b.PushControl(toRunID, msg)
@@ -1449,22 +1456,15 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The branch that owns the asker is the one that knows its display name,
+	// so the relay carries the name it resolved; the receiving branch cannot
+	// resolve a foreign run ID, and both branches compose through the same
+	// sendTo path so they cannot diverge.
 	sender := body.FromSender
 	if sender == "" {
-		// A relay that carried no name still names the asker by whatever this
-		// branch resolves for it, which is the run ID at worst.
 		sender = b.DisplayName(body.FromRunID)
 	}
-	// The branch that owns the asker is the one that knows its display name,
-	// so the relay carries it; the canonical run ID travels unchanged.
-	if err := b.PushControl(body.ToRunID, ControlMessage{
-		ID:        body.MessageID,
-		Type:      body.Type,
-		RunID:     body.ToRunID,
-		FromRunID: body.FromRunID,
-		Sender:    sender,
-		Payload:   body.Payload,
-	}); err != nil {
+	if err := b.sendToAs(body.FromRunID, body.ToRunID, body.Type, body.Payload, body.MessageID, sender); err != nil {
 		writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 		return
 	}
