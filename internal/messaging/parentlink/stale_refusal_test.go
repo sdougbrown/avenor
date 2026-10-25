@@ -394,6 +394,60 @@ func TestDelayedRefusalKeepsTheClaimAnotherChildTookOver(t *testing.T) {
 	}
 }
 
+// TestDelayedRefusalKeepsTheClaimTheMovedEndpointCarries pins the endpoint half
+// of the per-run retirement rule: a branch that re-registered from a new
+// endpoint keeping its generation and credentials is compared claim by claim,
+// so a refusal that described the old endpoint leaves the moved claim, the run
+// record and the route alone.
+func TestDelayedRefusalKeepsTheClaimTheMovedEndpointCarries(t *testing.T) {
+	parent := startBranch(t, "", "orchestrator")
+	stale := newBlockingEndpoint(t, http.StatusNotFound, "target-unavailable")
+	relayed := make(chan struct{}, 1)
+	moved := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case relayed <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"outcome":"sent"}`))
+	}))
+	t.Cleanup(moved.Close)
+
+	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
+	refusal := relayAsk(t, parent, "target", stale)
+	// The same child, the same generation and credential, a new endpoint: the
+	// branch moved to an address the parent has not been told about yet.
+	registerDescendant(t, parent, "branch-delta", moved.URL, "gen-old", "target", "token-old")
+	stale.release()
+	expectRefusedAsk(t, <-refusal)
+
+	if !parent.link.Registry().Owns("target") {
+		t.Fatal("the delayed refusal dropped the claim the moved endpoint carries")
+	}
+	if st := parent.broker.GetRun("target"); st == nil {
+		t.Fatal("the delayed refusal deleted the re-registered run's record")
+	}
+	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-old" {
+		t.Fatalf("run record credential = (%q, %v), want the credential the registration kept", token, ok)
+	}
+
+	// The moved claim stays a routing target: the next ask reaches the endpoint
+	// the registration now carries.
+	secondID := newMsgID(t)
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	if answer.err != nil {
+		t.Fatalf("ask the run at the moved endpoint: %v", answer.err)
+	}
+	if answer.status != http.StatusOK || answer.body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("ask the run at the moved endpoint = (%d, %v), want 200 sent", answer.status, answer.body)
+	}
+	select {
+	case <-relayed:
+	case <-time.After(awaitDeadline):
+		t.Fatal("the branch at the moved endpoint never received an ask")
+	}
+}
+
 // relayAsk posts one ask to target in the background, so the test can register a
 // refreshed claim while the relay is in flight. It waits until the endpoint that
 // owns the target has received the relay.
