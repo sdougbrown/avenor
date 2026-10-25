@@ -262,10 +262,9 @@ func (l *Link) noteGenerationLocked(generation string) {
 	l.generation = generation
 }
 
-// noteKeysLocked records the run ID the parent addresses each claimed run by. A
-// reserved branch-supervisor run is namespaced by the branch that claims it, so
-// every upward operation names it the way the parent knows it; a run the parent
-// reports no key for stays canonical.
+// noteKeysLocked records the run ID the parent addresses each claimed run by. Every
+// run the child claims is namespaced by that claim, so every upward operation names
+// it the way the parent knows it; a run the parent reports no key for stays canonical.
 func (l *Link) noteKeysLocked(claims []messaging.RunClaim, keys map[string]string) {
 	recorded := make(map[string]string, len(claims))
 	for _, claim := range claims {

@@ -206,8 +206,9 @@ func postParentLink(t *testing.T, addr, body, authHeader string) (int, map[strin
 
 // TestParentRegisterRequiresTheParentLinkToken pins the parent-route bearer
 // credential: with a token set, a registration without the header or with a
-// wrong Bearer is refused, and the correct Bearer is accepted; with no token
-// set, the loopback caller is accepted, the same trust the local routes run on.
+// wrong Bearer is refused, and the correct Bearer is accepted; a broker with
+// no configured credential serves no parent routes at all, which
+// TestParentRoutesRefuseWithoutTheLinkCredential pins on the parentlink side.
 func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 	raw, err := json.Marshal(map[string]any{
 		"child_id":   "child-1",
