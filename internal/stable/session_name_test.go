@@ -373,3 +373,57 @@ func TestSessionRenameIndexesRuntimeHistory(t *testing.T) {
 	}
 	t.Fatalf("session.renamed is absent from the runtime history: %v", history.Events)
 }
+
+// TestHarnessNameObserverMirrorsIntoTheRuntimeLabel pins the supervisor-level
+// wiring of the broker's harness-name observer: SetHarnessName writes the
+// broker's label half, and the observer wired at construction copies the
+// broker's resolved name into the runtime's display name, the copy status and
+// label reservation read.
+func TestHarnessNameObserverMirrorsIntoTheRuntimeLabel(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "harnessname"), MaxRuntimes: 2})
+	if sup.broker == nil {
+		t.Fatal("the test supervisor has no broker")
+	}
+	const runID = "rt_harness"
+	if _, ok := sup.broker.EnsureRun(runID, "launch-label"); !ok {
+		t.Fatal("ensure the run record: not created")
+	}
+	sup.controlMu.Lock()
+	sup.runtimes[runID] = &childRuntime{id: runID, label: "launch-label", displayName: "launch-label", done: make(chan struct{})}
+	sup.controlMu.Unlock()
+	// The synthetic runtime leaves the map before the lifecycle cleanup walks
+	// runtimes it does not model.
+	t.Cleanup(func() {
+		sup.controlMu.Lock()
+		delete(sup.runtimes, runID)
+		sup.controlMu.Unlock()
+	})
+
+	if err := sup.broker.SetHarnessName(runID, "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+	if got := runtimeDisplayName(sup, runID); got != "harness-name" {
+		t.Fatalf("runtime display name after harness name = %q, want harness-name", got)
+	}
+
+	// Clearing the harness name rewrites the mirror to the resolved fallback.
+	if err := sup.broker.SetHarnessName(runID, ""); err != nil {
+		t.Fatalf("clear harness name: %v", err)
+	}
+	if got := runtimeDisplayName(sup, runID); got != "launch-label" {
+		t.Fatalf("runtime display name after clear = %q, want launch-label", got)
+	}
+}
+
+// runtimeDisplayName reads one runtime's display name under its lock.
+func runtimeDisplayName(sup *Supervisor, runID string) string {
+	sup.controlMu.Lock()
+	child := sup.runtimes[runID]
+	sup.controlMu.Unlock()
+	if child == nil {
+		return ""
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	return child.displayName
+}

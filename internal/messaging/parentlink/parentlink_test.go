@@ -264,18 +264,11 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 	// A run change is what republishes this branch's claims to the parent.
 	child.link.RunChanged()
 
-	deadline := time.Now().Add(awaitDeadline)
-	for {
-		// The claim the child publishes carries the harness-resolved label, so the
-		// adopted run record's name is what peers see here.
-		if got := parent.broker.DisplayName("child-run"); got == "harness-name" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("parent display name = %q, want harness-name", parent.broker.DisplayName("child-run"))
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	// The claim the child publishes carries the harness-resolved label, so the
+	// adopted run record's name is what peers see here.
+	awaitUntil(t, "the parent's display name to become harness-name", func() bool {
+		return parent.broker.DisplayName("child-run") == "harness-name"
+	})
 	if got := parent.broker.DisplayName("child-run"); got != "harness-name" {
 		t.Fatalf("parent display name = %q, want harness-name", got)
 	}
