@@ -14,8 +14,8 @@ func TestParentTokenPrintsFreshToken(t *testing.T) {
 	}
 
 	out := strings.TrimSuffix(stdout.String(), "\n")
-	if stdout.String() != out+"\n" {
-		t.Fatalf("expected exactly one line, got %q", stdout.String())
+	if strings.Count(stdout.String(), "\n") != 1 || !strings.HasSuffix(stdout.String(), "\n") {
+		t.Fatalf("expected exactly one newline-terminated line, got %q", stdout.String())
 	}
 	if len(out) != 64 {
 		t.Fatalf("expected a 64-character hex token, got %d characters: %q", len(out), out)

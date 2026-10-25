@@ -1,12 +1,12 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/sdougbrown/avenor/internal/cli"
 )
 
 // runParentToken implements `avenor parent-token`.
@@ -21,19 +21,11 @@ func runParentTokenTo(stdout, stderr io.Writer, args ...string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	token, err := newParentToken()
+	token, err := cli.NewHexToken()
 	if err != nil {
 		fmt.Fprintf(stderr, "avenor parent-token: %v\n", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, token)
 	return 0
-}
-
-func newParentToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("crypto/rand: %w", err)
-	}
-	return hex.EncodeToString(b), nil
 }

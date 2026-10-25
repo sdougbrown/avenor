@@ -175,7 +175,8 @@ func TestRunStableIdempotencyCapacityFlagPropagation(t *testing.T) {
 }
 
 // TestRunStableBrokerParentFlagPropagation: --broker-parent-url and
-// --broker-parent-token propagate to the Config fields the parent link reads.
+// $AVENOR_PARENT_BROKER_TOKEN propagate to the Config fields the parent link
+// reads. The token travels by environment variable, not argv.
 func TestRunStableBrokerParentFlagPropagation(t *testing.T) {
 	tmpDir := stableTestEnv(t)
 	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
@@ -189,15 +190,27 @@ func TestRunStableBrokerParentFlagPropagation(t *testing.T) {
 	}
 	t.Cleanup(func() { newSupervisorFn = orig })
 
+	t.Setenv(EnvBrokerParentToken, "tok")
 	_ = runStable([]string{
 		"--control-socket", socketPath,
 		"--broker-parent-url", "http://127.0.0.1:9",
-		"--broker-parent-token", "tok",
 	})
 	if captured == nil {
 		t.Fatal("config was not captured; the constructor seam was not hit")
 	}
 	if captured.BrokerParentURL != "http://127.0.0.1:9" || captured.BrokerParentToken != "tok" {
-		t.Fatalf("Config parent link = (%q, %q), want the flag values", captured.BrokerParentURL, captured.BrokerParentToken)
+		t.Fatalf("Config parent link = (%q, %q), want the flag and env values", captured.BrokerParentURL, captured.BrokerParentToken)
+	}
+}
+
+// TestRunStableBrokerParentURLRequiresToken: --broker-parent-url without
+// $AVENOR_PARENT_BROKER_TOKEN is rejected at the CLI boundary with exit 1.
+func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+	t.Setenv(EnvBrokerParentToken, "")
+	if code := runStable([]string{"--control-socket", socketPath, "--broker-parent-url", "http://127.0.0.1:9"}); code != 1 {
+		t.Fatalf("runStable(url without token) = %d, want 1", code)
 	}
 }
