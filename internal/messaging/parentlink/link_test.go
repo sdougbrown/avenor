@@ -771,6 +771,92 @@ func TestSyncRetriesTheLegacyShapeWhenTheParentRefusesTheSupervisorClaim(t *test
 	}
 }
 
+// TestSyncReOffersTheSupervisorClaimWhenTheParentIsReplaced pins the recovery
+// from the degraded shape: a parent that was upgraded or replaced under the
+// same URL answers under a new generation, so the link offers the full claim —
+// the branch-supervisor run included — again instead of waiting for a branch
+// restart.
+func TestSyncReOffersTheSupervisorClaimWhenTheParentIsReplaced(t *testing.T) {
+	var registrations atomic.Int64
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			if registrations.Add(1) <= 2 {
+				return http.StatusOK, `{"generation":"gen-old"}`
+			}
+			return http.StatusOK, `{"generation":"gen-new","run_keys":{"supervisor":"supervisor@child-one"}}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newSupervisorLink(t, stub)
+
+	// The first publication meets the pre-namespacing parent and latches the
+	// legacy shape.
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if registrations.Load() != 2 {
+		t.Fatalf("the parent saw %d registrations, want the full claim and the legacy one", registrations.Load())
+	}
+
+	// The next refresh meets the replaced parent under a new generation and
+	// offers the full claim again, which the replacement accepts and names.
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if got := registrations.Load(); got != 4 {
+		t.Fatalf("the parent saw %d registrations, want the degraded refresh and the full re-offer", got)
+	}
+	if fourth := claimedRunIDs(t, stub.lastRequest(t, pathRegister)); !slices.Contains(fourth, messaging.SupervisorRunID) {
+		t.Fatalf("registration to the replacement = %v, want the supervisor claim back", fourth)
+	}
+
+	// The shape stays full for the replacement parent.
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("third Sync: %v", err)
+	}
+	if got := registrations.Load(); got != 5 {
+		t.Fatalf("the parent saw %d registrations, want the refresh in the full shape", got)
+	}
+	if last := claimedRunIDs(t, stub.lastRequest(t, pathRegister)); !slices.Contains(last, messaging.SupervisorRunID) {
+		t.Fatalf("refreshed registration = %v, want the supervisor claim kept", last)
+	}
+}
+
+// TestSyncKeepsTheLegacyShapeForAReplacementWithoutNamespacing pins the bound
+// on the re-offer: a replacement parent that still predates the namespacing
+// accepts the full claim but names no run key, so the legacy shape is
+// re-latched and the refresh settles back into it instead of churning.
+func TestSyncKeepsTheLegacyShapeForAReplacementWithoutNamespacing(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-new"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newSupervisorLink(t, stub)
+
+	// The first publication meets a parent that accepts the full claim without
+	// naming a key, so the shape latches legacy and stays there: the pinned
+	// generation is the one the legacy shape registered under.
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if got := stub.countPath(pathRegister); got != 2 {
+		t.Fatalf("the parent saw %d registrations, want the full claim and the legacy one", got)
+	}
+	if err := link.Sync(testContext(t)); err != nil {
+		t.Fatalf("second Sync: %v", err)
+	}
+	if got := stub.countPath(pathRegister); got != 3 {
+		t.Fatalf("the parent saw %d registrations, want the refresh to stay in the legacy shape", got)
+	}
+	if last := claimedRunIDs(t, stub.lastRequest(t, pathRegister)); slices.Contains(last, messaging.SupervisorRunID) {
+		t.Fatalf("refreshed registration = %v, want the legacy shape held", last)
+	}
+}
+
 // TestSyncKeepsTheFullShapeWhenTheParentRefusesAnotherRun pins that a refusal
 // that is not about the supervisor claim never degrades the link: the retry
 // without the supervisor claim fails the same way, the refusal is reported, and
