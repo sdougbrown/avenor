@@ -173,3 +173,31 @@ func TestRunStableIdempotencyCapacityFlagPropagation(t *testing.T) {
 		t.Fatalf("Config.IdempotencyCapacity = %d, want 7", captured.IdempotencyCapacity)
 	}
 }
+
+// TestRunStableBrokerParentFlagPropagation: --broker-parent-url and
+// --broker-parent-token propagate to the Config fields the parent link reads.
+func TestRunStableBrokerParentFlagPropagation(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+	var captured *stable.Config
+	orig := newSupervisorFn
+	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+		c := cfg
+		captured = &c
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newSupervisorFn = orig })
+
+	_ = runStable([]string{
+		"--control-socket", socketPath,
+		"--broker-parent-url", "http://127.0.0.1:9",
+		"--broker-parent-token", "tok",
+	})
+	if captured == nil {
+		t.Fatal("config was not captured; the constructor seam was not hit")
+	}
+	if captured.BrokerParentURL != "http://127.0.0.1:9" || captured.BrokerParentToken != "tok" {
+		t.Fatalf("Config parent link = (%q, %q), want the flag values", captured.BrokerParentURL, captured.BrokerParentToken)
+	}
+}

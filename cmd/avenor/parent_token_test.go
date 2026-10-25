@@ -32,3 +32,16 @@ func TestParentTokenPrintsFreshToken(t *testing.T) {
 		t.Fatal("expected a fresh token on each run")
 	}
 }
+
+func TestParentTokenRejectsUnknownFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runParentTokenTo(&stdout, &stderr, "--typo"); code != 1 {
+		t.Fatalf("runParentTokenTo(--typo) = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected no token on stdout, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("expected a flag error on stderr, got %q", stderr.String())
+	}
+}

@@ -284,6 +284,8 @@ avenor stable --control-socket /tmp/avenor.sock
 | `--lease-sweep-interval` | `10s` | Expire workflow leases whose heartbeat stopped at this cadence (0 = disable; leases expire only on restart recovery) |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout before killing children |
 | `--permission-claim-timeout` | `0` (disabled) | Optional permission claim deadline; with 0, fallback occurs only after all control clients disconnect |
+| `--broker-parent-url` | (none) | `http://` address of the parent broker to join; empty disables the parent link |
+| `--broker-parent-token` | (none) | Parent-link credential; required when `--broker-parent-url` is set |
 
 ### Example
 

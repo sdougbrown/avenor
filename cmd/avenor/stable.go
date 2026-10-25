@@ -29,6 +29,8 @@ func runStable(args []string) int {
 	mcpLaunchWrapperPolicyPath := fs.String("mcp-launch-wrapper-policy", "", "path to a JSON allowlist of launch_wrapper argv entries permitted for MCP-driven spawns (default: disabled)")
 	workflowRoot := fs.String("workflow-root", "", "workflow store root (default: $XDG_STATE_HOME/avenor/workflows, else $HOME/.avenor/workflows)")
 	workflowAdapterDir := fs.String("workflow-adapter-dir", "", "host-owned trusted adapter manifest directory (default: $XDG_CONFIG_HOME/avenor/workflow-adapters, else $HOME/.config/avenor/workflow-adapters)")
+	brokerParentURL := fs.String("broker-parent-url", "", "http:// address of the parent broker to join (empty disables the parent link)")
+	brokerParentToken := fs.String("broker-parent-token", "", "parent-link credential; required when --broker-parent-url is set")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -78,6 +80,8 @@ func runStable(args []string) int {
 		WorkflowRoot:               *workflowRoot,
 		WorkflowAdapterDir:         *workflowAdapterDir,
 		MCPLaunchWrapperPolicy:     mcpPolicy,
+		BrokerParentURL:            *brokerParentURL,
+		BrokerParentToken:          *brokerParentToken,
 	})
 	if treeBudgetFile == "" {
 		// Root: propagate the tree budget path to descendant processes.
