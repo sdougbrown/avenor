@@ -23,23 +23,34 @@ const (
 	CleanupDeadline = 5 * time.Second
 )
 
-// Transport is the shared messaging surface. Every method takes the caller's
+// Transport is the shared messaging surface every wire transport and the
+// broker's own outbound seam answers. Every method takes the caller's
 // authenticated identities and expected generation; no method reads ambient
 // credentials or classifies a result from an HTTP status alone.
 type Transport interface {
+	// Send admits an ask and publishes it to its target.
 	Send(ctx context.Context, req SendRequest) (SendResult, error)
+	// Wait blocks for the reply to an ask this transport routed.
 	Wait(ctx context.Context, req WaitRequest) (WaitResult, error)
+	// Reply completes the ask edge MessageID names for ToRunID. An edge this
+	// transport did not route reports OutcomeEdgeAbsent and the caller falls
+	// back to Tell.
 	Reply(ctx context.Context, req ReplyRequest) (SendResult, error)
+	// Withdraw withdraws an ask this transport routed.
 	Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error)
+	// Receive drains the messages queued for the caller.
 	Receive(ctx context.Context, req ReceiveRequest) (ReceiveResult, error)
+	// Peers lists the participants reachable from here. A listing the transport
+	// could not finish returns the peers it did read beside its error, so a
+	// partial listing never reads as a complete one.
 	Peers(ctx context.Context, req PeersRequest) (PeersResult, error)
 	Preflight(ctx context.Context) (PreflightResult, error)
 	Close() error
 }
 
-// DeliverRequest is one fire-and-forget message a messenger publishes to a
-// target. It allocates no reply edge: a tell has no ask to answer.
-type DeliverRequest struct {
+// TellRequest is one fire-and-forget message a seam publishes to a target. It
+// allocates no reply edge: a tell has no ask to answer.
+type TellRequest struct {
 	FromRunID     string
 	ToRunID       string
 	Kind          string
@@ -47,29 +58,24 @@ type DeliverRequest struct {
 	CorrelationID string
 }
 
-// Messenger is the broker's outbound seam for local messaging. The broker
-// installs a local implementation that publishes into its own queues and ask
-// store; a host that owns a parent link replaces it so asks, tells, replies and
-// peer lookups all have one place to reach the parent. An implementation
-// composes the local seam for targets that are still local instead of owning a
-// queue or an ask store of its own.
-type Messenger interface {
-	// Send admits an ask and publishes it to its target.
-	Send(ctx context.Context, req SendRequest) (SendResult, error)
-	// Wait blocks for the reply to an ask this messenger routed.
-	Wait(ctx context.Context, req WaitRequest) (WaitResult, error)
-	// Withdraw withdraws an ask this messenger routed.
-	Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error)
-	// Reply completes the ask edge MessageID names for ToRunID. An edge this
-	// messenger did not route reports OutcomeEdgeAbsent and the caller falls
-	// back to Deliver.
-	Reply(ctx context.Context, req ReplyRequest) (Outcome, error)
-	// Deliver publishes a fire-and-forget message.
-	Deliver(ctx context.Context, req DeliverRequest) error
+// Seam is the broker's outbound messaging surface: the shared Transport plus the
+// two operations only a broker can answer. It is one interface with one shape
+// per operation, so the broker's local implementation, a parent-aware host that
+// replaces it, and a client-side transport cannot disagree about what a send, a
+// reply or a peer listing looks like.
+//
+// Tell and Reachable stay here rather than on Transport because a client-side
+// transport has no counterpart for either: a tell is a bare publication into a
+// broker's queue, and reachability is a broker-local ownership test, so a wire
+// client could only answer them with a stub. Everything else, including the
+// store-backed reads and Preflight, comes from Transport.
+type Seam interface {
+	Transport
+	// Tell publishes a fire-and-forget message. It allocates no reply edge, so
+	// it admits nothing and fences nothing.
+	Tell(ctx context.Context, req TellRequest) error
 	// Reachable reports whether runID can be reached from here.
 	Reachable(runID string) bool
-	// Peers lists the participants reachable from here.
-	Peers(ctx context.Context) ([]Peer, error)
 }
 
 // Typed error classes. Transports report facts through these; callers map them

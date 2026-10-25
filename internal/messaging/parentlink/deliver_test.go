@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// TestLinkDeliverForwardsTheKindWithoutEdgeFields pins the tell forward: the
+// TestLinkTellForwardsTheKindWithoutEdgeFields pins the tell forward: the
 // parent receives the message under the kind it was given, and carries no
 // field an ask edge owns, because a tell admits no edge.
-func TestLinkDeliverForwardsTheKindWithoutEdgeFields(t *testing.T) {
+func TestLinkTellForwardsTheKindWithoutEdgeFields(t *testing.T) {
 	stub := newStubBroker(t, func(req stubRequest) (int, string) {
 		switch req.Path {
 		case pathRegister:
@@ -28,13 +28,13 @@ func TestLinkDeliverForwardsTheKindWithoutEdgeFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal the payload: %v", err)
 	}
-	if err := link.Deliver(ctx, messaging.DeliverRequest{
+	if err := link.Tell(ctx, messaging.TellRequest{
 		FromRunID: "run-a",
 		ToRunID:   "run-b",
 		Kind:      "status_update",
 		Payload:   payload,
 	}); err != nil {
-		t.Fatalf("Deliver: %v", err)
+		t.Fatalf("Tell: %v", err)
 	}
 	forwarded := stub.lastRequest(t, pathSend)
 	if forwarded.Body["type"] != "status_update" {
@@ -47,9 +47,9 @@ func TestLinkDeliverForwardsTheKindWithoutEdgeFields(t *testing.T) {
 	}
 }
 
-// TestLinkDeliverReportsAnUnreachableParent pins the tell's failure: a
+// TestLinkTellReportsAnUnreachableParent pins the tell's failure: a
 // delivery the parent cannot receive is an error, not a silent success.
-func TestLinkDeliverReportsAnUnreachableParent(t *testing.T) {
+func TestLinkTellReportsAnUnreachableParent(t *testing.T) {
 	stub := newStubBroker(t, func(req stubRequest) (int, string) {
 		return http.StatusOK, `{"generation":"gen-a"}`
 	})
@@ -68,13 +68,13 @@ func TestLinkDeliverReportsAnUnreachableParent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = link.Close() })
 
-	err = link.Deliver(testContext(t), messaging.DeliverRequest{
+	err = link.Tell(testContext(t), messaging.TellRequest{
 		FromRunID: "run-a",
 		ToRunID:   "run-b",
 		Kind:      "status_update",
 		Payload:   json.RawMessage(`{}`),
 	})
 	if !errors.Is(err, ErrParentUnavailable) {
-		t.Fatalf("Deliver = %v, want ErrParentUnavailable", err)
+		t.Fatalf("Tell = %v, want ErrParentUnavailable", err)
 	}
 }
