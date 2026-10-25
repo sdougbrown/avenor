@@ -486,3 +486,42 @@ func TestRelayRefusesATargetTheCallerDidNotAuthenticate(t *testing.T) {
 		t.Fatalf("run queue = %d messages, want the relayed ask", queued)
 	}
 }
+
+// TestParentRunClaimsRaceWithSetParentLink pins the accessor discipline on the
+// parent link: claims are read while a concurrent writer installs links, so an
+// unlocked read of the broker's parentLink field trips the race detector.
+func TestParentRunClaimsRaceWithSetParentLink(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	for _, runID := range []string{"run-a", "run-b"} {
+		if _, err := b.CreateRun(runID, runID); err != nil {
+			t.Fatalf("create run %q: %v", runID, err)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			b.SetParentLink(&parentLinkStub{owned: "run-a"})
+			b.SetParentLink(nil)
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		claims := b.ParentRunClaims()
+		seen := map[string]bool{}
+		for _, claim := range claims {
+			if claim.RunID != "run-a" && claim.RunID != "run-b" {
+				t.Fatalf("claim %q is not a run this broker serves", claim.RunID)
+			}
+			if seen[claim.RunID] {
+				t.Fatalf("claim %q reported twice", claim.RunID)
+			}
+			seen[claim.RunID] = true
+		}
+	}
+	<-done
+}
