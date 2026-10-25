@@ -15,12 +15,6 @@ import (
 // it to capture the Config without relying on Run's side effects.
 var newSupervisorFn = stable.NewSupervisor
 
-// The token is a bearer credential for the parent broker's parent routes, so it
-// travels by environment variable rather than argv, whose contents are
-// world-readable via /proc/<pid>/cmdline. The name lives in internal/token so
-// the MCP spawn path can filter it out of nested environments.
-const EnvBrokerParentToken = token.EnvBrokerParentToken
-
 func runStable(args []string) int {
 	fs := flag.NewFlagSet("stable", flag.ContinueOnError)
 	controlSocket := fs.String("control-socket", "", "unix socket path for the control plane (required)")
@@ -49,12 +43,12 @@ func runStable(args []string) int {
 		fmt.Fprintln(os.Stderr, "avenor stable: --idempotency-capacity must be greater than 0")
 		return 1
 	}
-	token := *brokerParentToken
-	if token == "" {
-		token = os.Getenv(EnvBrokerParentToken)
+	credential := *brokerParentToken
+	if credential == "" {
+		credential = os.Getenv(token.EnvBrokerParentToken)
 	}
-	if *brokerParentURL != "" && token == "" {
-		fmt.Fprintf(os.Stderr, "avenor stable: %s or --broker-parent-token must be set when --broker-parent-url is used\n", EnvBrokerParentToken)
+	if *brokerParentURL != "" && credential == "" {
+		fmt.Fprintf(os.Stderr, "avenor stable: %s or --broker-parent-token must be set when --broker-parent-url is used\n", token.EnvBrokerParentToken)
 		return 1
 	}
 
@@ -96,7 +90,7 @@ func runStable(args []string) int {
 		WorkflowAdapterDir:         *workflowAdapterDir,
 		MCPLaunchWrapperPolicy:     mcpPolicy,
 		BrokerParentURL:            *brokerParentURL,
-		BrokerParentToken:          token,
+		BrokerParentToken:          credential,
 	})
 	if treeBudgetFile == "" {
 		// Root: propagate the tree budget path to descendant processes.

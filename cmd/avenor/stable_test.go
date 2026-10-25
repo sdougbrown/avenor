@@ -10,6 +10,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/stable"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // stableTestEnv isolates HOME (runtime state and sockets) and TMPDIR (the
@@ -192,7 +193,7 @@ func TestRunStableBrokerParentFlagPropagation(t *testing.T) {
 	}
 	t.Cleanup(func() { newSupervisorFn = orig })
 
-	t.Setenv(EnvBrokerParentToken, "tok")
+	t.Setenv(token.EnvBrokerParentToken, "tok")
 	_ = runStable([]string{
 		"--control-socket", socketPath,
 		"--broker-parent-url", "http://127.0.0.1:9",
@@ -229,7 +230,7 @@ func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
 		_ = r.Close()
 	}()
 
-	t.Setenv(EnvBrokerParentToken, "")
+	t.Setenv(token.EnvBrokerParentToken, "")
 	code := runStable([]string{"--control-socket", socketPath, "--broker-parent-url", "http://127.0.0.1:9"})
 	_ = w.Close()
 	os.Stderr = oldStderr
@@ -240,8 +241,8 @@ func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("runStable(url without token) = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), EnvBrokerParentToken) {
-		t.Fatalf("stderr = %q, want the %s guard error", stderr.String(), EnvBrokerParentToken)
+	if !strings.Contains(stderr.String(), token.EnvBrokerParentToken) {
+		t.Fatalf("stderr = %q, want the %s guard error", stderr.String(), token.EnvBrokerParentToken)
 	}
 }
 
@@ -259,7 +260,7 @@ func TestRunStableBrokerParentTokenFlagOverridesEnv(t *testing.T) {
 	}
 	t.Cleanup(func() { newSupervisorFn = orig })
 
-	t.Setenv(EnvBrokerParentToken, "env-token")
+	t.Setenv(token.EnvBrokerParentToken, "env-token")
 	_ = runStable([]string{
 		"--control-socket", socketPath,
 		"--broker-parent-url", "http://127.0.0.1:9",
@@ -274,7 +275,7 @@ func TestRunStableBrokerParentTokenFlagOverridesEnv(t *testing.T) {
 }
 
 func TestRunStableRefusesParentURLWithoutCredential(t *testing.T) {
-	t.Setenv(EnvBrokerParentToken, "")
+	t.Setenv(token.EnvBrokerParentToken, "")
 	t.Setenv("HOME", t.TempDir())
 	if code := runStable([]string{"--control-socket", filepath.Join(t.TempDir(), "s.sock"), "--broker-parent-url", "http://127.0.0.1:9"}); code != 1 {
 		t.Fatalf("runStable = %d, want 1: a parent URL without a credential must be refused", code)

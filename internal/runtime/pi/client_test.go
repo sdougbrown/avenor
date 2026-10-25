@@ -546,7 +546,6 @@ func TestStartClientReplacesAgentProfileEnvironment(t *testing.T) {
 	original := piExecCommandContext
 	t.Cleanup(func() { piExecCommandContext = original })
 	t.Setenv("PI_AGENT", "stale-agent")
-	t.Setenv(token.EnvBrokerParentToken, "parent-secret")
 	t.Setenv("PI_AGENT_PROFILE", "stale-profile")
 
 	var captured *exec.Cmd

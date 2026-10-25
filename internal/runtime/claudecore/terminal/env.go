@@ -100,8 +100,7 @@ func UnsetParentClaudeEnvPrefix() string {
 // not inherit (runtime.ScrubbedEnvNames) and exports this launch's identity.
 // The unset must happen here, not just in LaunchEnv: a pane inherits the tmux
 // server's environment, which carries the credential the documented setup way.
-// Values
-// are single-quoted so labels containing quotes, newlines or command
+// Values are single-quoted so labels containing quotes, newlines or command
 // substitution text stay literal data.
 func identityEnvPrefix(p *runtime.LaunchProvenance) string {
 	var b strings.Builder
