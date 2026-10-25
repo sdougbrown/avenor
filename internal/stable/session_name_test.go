@@ -427,3 +427,50 @@ func runtimeDisplayName(sup *Supervisor, runID string) string {
 	defer child.mu.Unlock()
 	return child.displayName
 }
+
+// TestSessionRenameUnderAHarnessName pins the primary rename path against the
+// harness overlay: SessionRename writes the model-set label underneath while
+// the resolved display name keeps winning with the harness name, and clearing
+// the harness name falls back to the renamed model-set label.
+func TestSessionRenameUnderAHarnessName(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "harnessrename"), MaxRuntimes: 2})
+	if sup.broker == nil {
+		t.Fatal("the test supervisor has no broker")
+	}
+	const runID = "rt_hrn"
+	if _, ok := sup.broker.EnsureRun(runID, "launch-label"); !ok {
+		t.Fatal("ensure the run record: not created")
+	}
+	sup.controlMu.Lock()
+	sup.runtimes[runID] = &childRuntime{id: runID, label: "launch-label", displayName: "launch-label", done: make(chan struct{})}
+	sup.controlMu.Unlock()
+	t.Cleanup(func() {
+		sup.controlMu.Lock()
+		delete(sup.runtimes, runID)
+		sup.controlMu.Unlock()
+	})
+
+	if err := sup.broker.SetHarnessName(runID, "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+	renamed, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: runID}, "", "model-name")
+	if err != nil {
+		t.Fatalf("rename under a harness name: %v", err)
+	}
+	// The result carries the resolved display name (the harness overlay wins),
+	// while the model-set label is written underneath — pinned by the fallback
+	// below, which surfaces it when the harness name clears.
+	if renamed.Label != "harness-name" {
+		t.Fatalf("rename result label = %q, want the resolved harness name", renamed.Label)
+	}
+	if got := runtimeDisplayName(sup, runID); got != "harness-name" {
+		t.Fatalf("runtime display name after rename = %q, want the harness name to keep winning", got)
+	}
+
+	if err := sup.broker.SetHarnessName(runID, ""); err != nil {
+		t.Fatalf("clear harness name: %v", err)
+	}
+	if got := runtimeDisplayName(sup, runID); got != "model-name" {
+		t.Fatalf("runtime display name after clear = %q, want the renamed model-set label", got)
+	}
+}

@@ -53,7 +53,7 @@ type Resolution struct {
 	RunID       string          // broker/runtime id; the only id transports accept
 	PublicRunID string          // host-surface run id; empty on child surfaces
 	Match       ResolutionMatch // unique | ambiguous | none
-	Label       string          // the target's display name: SessionInfo.Label, else its run id
+	Label       string          // the target's resolved display name: harness-supplied name, else model-set/launch label (SessionInfo.Label), else its run id
 	Candidates  []string        // run ids for an ambiguous label; empty when unique or none
 }
 
