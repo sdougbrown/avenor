@@ -117,6 +117,105 @@ func TestDelayedRefusalKeepsARestartedRunsCredential(t *testing.T) {
 	}
 }
 
+// TestDelayedDeregisterKeepsTheReplacementRouted pins the deregistration half
+// of the retirement rule: a deregistration is posted fire-and-forget with a
+// client-side timeout, so a same-identity replacement can re-register while it
+// is in flight. The deregistration carries the view of the registration the
+// closing branch last published, and a registration that no longer matches it is
+// refused: the replacement's claim and run record stay, where an unconditional
+// retirement would take the healthy branch out of routing.
+func TestDelayedDeregisterKeepsTheReplacementRouted(t *testing.T) {
+	parent := startBranch(t, "", "orchestrator")
+
+	registerDescendant(t, parent, "branch-delta", "http://stale-delta", "gen-old", "target", "token-old")
+	// The replacement re-registered under the same durable identity before the
+	// closing branch's deregistration landed.
+	registerDescendant(t, parent, "branch-delta", "http://replacement-delta", "gen-new", "target", "token-new")
+
+	deregisterWith(t, parent, "branch-delta", "http://stale-delta", "gen-old",
+		http.StatusConflict, "generation-mismatch", "target", "token-old")
+
+	if owner, ok := parent.link.Registry().Owner("target"); !ok || owner != "branch-delta" {
+		t.Fatalf("run owner = (%q, %v), want the replacement branch-delta: the delayed deregistration retired its claim", owner, ok)
+	}
+	if st := parent.broker.GetRun("target"); st == nil {
+		t.Fatal("the delayed deregistration deleted the replacement branch's run record")
+	}
+	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-new" {
+		t.Fatalf("run record credential = (%q, %v), want the replacement's", token, ok)
+	}
+}
+
+// TestDeregisterRetiresTheClaimsItNames pins the matching half of the
+// deregistration rule: a deregistration whose view still matches the
+// registration retires every claim it holds and deletes the run records the
+// claims carried, so a closed branch stops being served locally. The records
+// are deleted through the credential they were registered with, the way a relay
+// refusal retires its failed claim.
+func TestDeregisterRetiresTheClaimsItNames(t *testing.T) {
+	parent := startBranch(t, "", "orchestrator")
+
+	registerDescendant(t, parent, "branch-delta", "http://delta", "gen-old",
+		"target", "token-a", "second", "token-b")
+	for _, runID := range []string{"target", "second"} {
+		if !parent.link.Registry().Owns(runID) || parent.broker.GetRun(runID) == nil {
+			t.Fatalf("run %q was never claimed with a record", runID)
+		}
+	}
+
+	deregisterDescendant(t, parent, "branch-delta", "http://delta", "gen-old",
+		"target", "token-a", "second", "token-b")
+
+	for _, runID := range []string{"target", "second"} {
+		if parent.link.Registry().Owns(runID) {
+			t.Fatalf("the deregistration left run %q claimed", runID)
+		}
+		if st := parent.broker.GetRun(runID); st != nil {
+			t.Fatalf("the deregistration left run %q served locally", runID)
+		}
+	}
+
+	// The claims are terminal: the runs are claimable again once a branch
+	// re-registers.
+	registerDescendant(t, parent, "branch-delta", "http://delta", "gen-new", "target", "token-a2")
+	if !parent.link.Registry().Owns("target") {
+		t.Fatal("run target was not claimable after the branch re-registered")
+	}
+}
+
+// deregisterWith posts a deregistration that carries a view of the registration
+// and expects the status and code the parent answers a mismatch with: the view
+// no longer matches the registration the parent holds.
+func deregisterWith(t *testing.T, parent *branch, childID, endpoint, generation string, status int, code string, runs ...string) {
+	t.Helper()
+	if len(runs)%2 != 0 {
+		t.Fatalf("deregister with needs a run ID and token per run, got %d arguments", len(runs))
+	}
+	claims := make([]map[string]string, 0, len(runs)/2)
+	for i := 0; i < len(runs); i += 2 {
+		claims = append(claims, map[string]string{"run_id": runs[i], "token": runs[i+1]})
+	}
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   childID,
+		"endpoint":   endpoint,
+		"generation": generation,
+		"runs":       claims,
+	})
+	if err != nil {
+		t.Fatalf("marshal deregistration: %v", err)
+	}
+	resp, err := http.Post(parent.url()+pathDeregister, "application/json", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("deregister descendant: %v", err)
+	}
+	defer resp.Body.Close()
+	var decoded map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&decoded)
+	if resp.StatusCode != status || decoded["code"] != code {
+		t.Fatalf("deregister with a stale view = (%d, %v), want %d %s", resp.StatusCode, decoded, status, code)
+	}
+}
+
 // TestOneGenerationRefusalRetiresTheWholeClaim pins the branch half of the
 // retirement rule: a generation refusal is a verdict about the registration, not
 // about one run, so one refusal retires every claim the registration carried —
@@ -228,7 +327,7 @@ func TestDelayedRefusalKeepsTheClaimAnotherChildTookOver(t *testing.T) {
 
 	// While the refusal is in flight, branch-delta drops its claim and
 	// branch-echo takes the run over.
-	deregisterDescendant(t, parent, "branch-delta")
+	deregisterDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
 	registerDescendant(t, parent, "branch-echo", replacement.URL, "gen-old", "target", "token-echo")
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
@@ -374,11 +473,24 @@ func registerDescendant(t *testing.T, parent *branch, childID, endpoint, generat
 }
 
 // deregisterDescendant retracts a child broker's claim the way a closing branch
-// does, so a test can hand a run from one child to another while a refusal is in
-// flight.
-func deregisterDescendant(t *testing.T, parent *branch, childID string) {
+// does, sending the view of its registration the parent last accepted, so a test
+// can hand a run from one child to another while a refusal is in flight. Each
+// run is a run ID followed by the credential the branch's registration carried.
+func deregisterDescendant(t *testing.T, parent *branch, childID, endpoint, generation string, runs ...string) {
 	t.Helper()
-	raw, err := json.Marshal(map[string]any{"child_id": childID})
+	if len(runs)%2 != 0 {
+		t.Fatalf("deregister descendant needs a run ID and token per run, got %d arguments", len(runs))
+	}
+	claims := make([]map[string]string, 0, len(runs)/2)
+	for i := 0; i < len(runs); i += 2 {
+		claims = append(claims, map[string]string{"run_id": runs[i], "token": runs[i+1]})
+	}
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   childID,
+		"endpoint":   endpoint,
+		"generation": generation,
+		"runs":       claims,
+	})
 	if err != nil {
 		t.Fatalf("marshal deregistration: %v", err)
 	}

@@ -178,23 +178,53 @@ func validEndpoint(endpoint string) error {
 	return nil
 }
 
-// Deregister retires one child and reports the runs it had claimed.
-func (r *Registry) Deregister(childID string) ([]string, error) {
+// Deregister retires one child's whole registration and reports the run keys it
+// retired with the credential each claim was registered with, but only while the
+// registration is still the one the closing branch published: the endpoint and
+// pinned generation must resolve to the branch's view, and every claim must
+// still carry the run ID and credential that view named. A deregistration is
+// posted fire-and-forget with a client-side timeout, so a same-identity
+// replacement can re-register while it is in flight; the replacement presents a
+// different endpoint, generation or credential set, and retiring its claims
+// would take the healthy branch out of routing and delete its run records.
+func (r *Registry) Deregister(childID string, view messaging.DescendantView) (map[string]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.children[childID]; !ok {
+	current, ok := r.children[childID]
+	if !ok {
 		return nil, fmt.Errorf("%w: child %q is not registered", messaging.ErrTargetUnavailable, childID)
 	}
-	delete(r.children, childID)
-	var runs []string
-	for runID, owner := range r.owners {
-		if owner != childID {
-			continue
-		}
-		delete(r.owners, runID)
-		runs = append(runs, runID)
+	if !registrationMatches(childID, current, view) {
+		return nil, fmt.Errorf("%w: child %q's registration no longer matches the closing branch's view", messaging.ErrGenerationMismatch, childID)
 	}
-	return runs, nil
+	delete(r.children, childID)
+	retired := make(map[string]string, len(current.runs))
+	for key := range current.runs {
+		delete(r.owners, key)
+		retired[key] = current.tokens[key]
+	}
+	return retired, nil
+}
+
+// registrationMatches reports whether a registered child still resolves to the
+// view a closing branch sent: the endpoint and pinned generation match, and the
+// view names exactly the runs the registration holds, with the credentials they
+// were registered under. It is claimMatchesHop across a whole registration
+// instead of one run. Both callers hold r.mu.
+func registrationMatches(childID string, current *child, view messaging.DescendantView) bool {
+	if current.endpoint != view.Endpoint || current.generation != view.Generation {
+		return false
+	}
+	if len(current.runs) != len(view.Runs) {
+		return false
+	}
+	for _, run := range view.Runs {
+		key := ParentRunKey(childID, run.RunID)
+		if current.runs[key] != run.RunID || current.tokens[key] != run.Token {
+			return false
+		}
+	}
+	return true
 }
 
 // claimMatchesHop reports whether childID's registration still resolves to

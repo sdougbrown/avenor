@@ -109,6 +109,14 @@ type Link struct {
 	closed     bool
 	closedCh   chan struct{}
 
+	// published is the claim the parent last accepted and the generation it was
+	// published under: the view a closing branch sends with its deregistration,
+	// so the parent can refuse one that no longer matches what it holds. A
+	// publication that failed left the parent's registration alone, so the view
+	// is updated only when one is accepted.
+	published           []messaging.RunClaim
+	publishedGeneration string
+
 	dirty chan struct{}
 	wg    sync.WaitGroup
 }
@@ -215,10 +223,11 @@ func (l *Link) Sync(ctx context.Context) error {
 			tokens[claim.RunID] = claim.Token
 		}
 	}
+	generation := l.opts.Generation()
 	status, raw, err := l.post(ctx, pathRegister, map[string]any{
 		"child_id":   l.opts.ChildID,
 		"endpoint":   l.opts.Endpoint,
-		"generation": l.opts.Generation(),
+		"generation": generation,
 		"runs":       claims,
 	}, "", "", registerTimeout)
 	if err != nil {
@@ -230,6 +239,8 @@ func (l *Link) Sync(ctx context.Context) error {
 	}
 	l.mu.Lock()
 	l.tokens = tokens
+	l.published = claims
+	l.publishedGeneration = generation
 	l.noteKeysLocked(claims, registered.RunKeys)
 	l.noteGenerationLocked(registered.Generation)
 	l.mu.Unlock()
@@ -278,8 +289,22 @@ func (l *Link) Close() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
 	defer cancel()
-	// A parent that cannot answer needs no cleanup: the claim dies with it.
-	_, _, _ = l.post(ctx, pathDeregister, map[string]any{"child_id": l.opts.ChildID}, "", "", deregisterTimeout)
+	l.mu.Lock()
+	view := messaging.DescendantView{
+		Endpoint:   l.opts.Endpoint,
+		Generation: l.publishedGeneration,
+		Runs:       l.published,
+	}
+	l.mu.Unlock()
+	// A parent that cannot answer needs no cleanup: the claim dies with it. The
+	// branch sends the view its parent last accepted, so a parent that holds a
+	// same-identity replacement's registration refuses to retire it.
+	_, _, _ = l.post(ctx, pathDeregister, map[string]any{
+		"child_id":   l.opts.ChildID,
+		"endpoint":   view.Endpoint,
+		"generation": view.Generation,
+		"runs":       view.Runs,
+	}, "", "", deregisterTimeout)
 	return l.client.Close()
 }
 

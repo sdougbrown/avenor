@@ -1322,7 +1322,11 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleParentDeregister retires one child broker's claim and the run records
-// it owned, so a closed branch stops being a routing target.
+// it owned, so a closed branch stops being a routing target. The branch sends
+// the view of its registration its parent last accepted, and the retirement
+// applies only while the registration still matches it: a same-identity
+// replacement that re-registered while the deregistration was in flight keeps
+// its claims and records.
 func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) {
 	link, token := b.parentSeam()
 	if link == nil {
@@ -1334,7 +1338,10 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var body struct {
-		ChildID string `json:"child_id"`
+		ChildID    string               `json:"child_id"`
+		Endpoint   string               `json:"endpoint"`
+		Generation string               `json:"generation"`
+		Runs       []messaging.RunClaim `json:"runs"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -1344,17 +1351,31 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		writeCodedError(w, http.StatusBadRequest, "child_id is required", "invalid-request")
 		return
 	}
-	runs, err := link.Deregister(body.ChildID)
-	if err != nil {
+	retired, err := link.Deregister(body.ChildID, messaging.DescendantView{
+		Endpoint:   body.Endpoint,
+		Generation: body.Generation,
+		Runs:       body.Runs,
+	})
+	switch {
+	case errors.Is(err, messaging.ErrGenerationMismatch):
+		// The deregistration describes a registration this broker no longer
+		// holds: a same-identity replacement registered while it was in flight,
+		// and the replacement's claims and run records stay.
+		writeCodedError(w, http.StatusConflict, err.Error(), "generation-mismatch")
+		return
+	case err != nil:
 		writeCodedError(w, http.StatusNotFound, err.Error(), "target-unavailable")
 		return
 	}
-	for _, runID := range runs {
-		b.DeleteRun(runID)
+	// Each retirement deletes the record only while the record still
+	// authenticates with the credential its claim was registered with, so a
+	// record a restarted run rotated is left to its owner.
+	for runID, token := range retired {
+		b.DeleteRunIfToken(runID, token)
 	}
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"deregistered": true,
-		"runs":         len(runs),
+		"runs":         len(retired),
 	})
 }
 
