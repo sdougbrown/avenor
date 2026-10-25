@@ -100,8 +100,8 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Register replaces one child's claim with the runs it now owns and reports the
-// runs it adopted and the ones it stopped claiming. A run another child already
+// Register replaces one child's claim: the runs it now owns are adopted and the
+// ones it stopped claiming are retired. A run another child already
 // owns is refused and nothing is applied.
 func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 	claim := messaging.DescendantClaim{}

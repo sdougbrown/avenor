@@ -202,6 +202,10 @@ func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 		seen[peer.RunID] = struct{}{}
 	}
 	for _, peer := range remote {
+		// A literal run ID names the local run: a parent-exported run that
+		// shares a local run's ID is shadowed by it, because the child could
+		// not address the parent's run under that ID without also reaching its
+		// own. Only IDs the local registry does not hold survive the dedup.
 		if _, ok := seen[peer.RunID]; ok {
 			continue
 		}
