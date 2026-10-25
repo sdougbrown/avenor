@@ -22,7 +22,7 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register first child: %v", err)
 	}
-	if len(first.Adopted) != 2 || len(first.Retired) != 0 {
+	if len(first.Retired) != 0 {
 		t.Fatalf("first claim = %+v, want both runs adopted and none retired", first)
 	}
 	next, ok := registry.Hop("run-a")
@@ -41,7 +41,7 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if !errors.Is(err, ErrRunClaimed) || !errors.Is(err, messaging.ErrInvalidRequest) {
 		t.Fatalf("conflicting claim = %v, want ErrRunClaimed", err)
 	}
-	if len(refused.Adopted) != 0 || len(refused.Retired) != 0 {
+	if len(refused.Retired) != 0 {
 		t.Fatalf("refused claim = %+v, want nothing adopted and nothing retired", refused)
 	}
 	if owner, ok := registry.Owner("run-a"); !ok || owner != "one" {
@@ -62,7 +62,7 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-register first child: %v", err)
 	}
-	if len(second.Adopted) != 1 || len(second.Retired) != 2 {
+	if len(second.Retired) != 2 {
 		t.Fatalf("re-registration = %+v, want run-c adopted and two retired", second)
 	}
 	if registry.Owns("run-a") || registry.Owns("run-b") {
@@ -162,7 +162,7 @@ func TestRegistryReportsWhetherARegistrationChangedTheRunSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
-	if claim.Changed || len(claim.Adopted) != 0 || len(claim.Retired) != 0 {
+	if claim.Changed || len(claim.Retired) != 0 {
 		t.Fatalf("an unchanged re-registration = %+v, want nothing changed", claim)
 	}
 	// A rotated credential refreshes the claim without changing the run set.
@@ -212,7 +212,7 @@ func TestRegistryRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
 		if !errors.Is(err, ErrInvalidRunID) || !errors.Is(err, messaging.ErrInvalidRequest) {
 			t.Fatalf("claim of %q = %v, want ErrInvalidRunID", runID, err)
 		}
-		if len(claim.Runs) != 0 || len(claim.Adopted) != 0 || len(claim.Retired) != 0 {
+		if len(claim.Runs) != 0 || len(claim.Retired) != 0 {
 			t.Fatalf("refused claim of %q = %+v, want nothing applied", runID, claim)
 		}
 		if registry.Owns(runID) {

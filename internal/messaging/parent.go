@@ -60,13 +60,12 @@ type ClaimedRun struct {
 
 // DescendantClaim reports what one registration changed, so the broker can
 // adopt every run record the child now claims and retire the ones it stopped
-// claiming. Runs, Adopted and Retired all name runs by the run ID this broker
+// claiming. Runs and Retired both name runs by the run ID this broker
 // addresses them by. Changed reports whether the claim adopted or retired a
 // run: a registration that only refreshes what the child already claimed left
 // the owned run set alone.
 type DescendantClaim struct {
 	Runs    []ClaimedRun
-	Adopted []string
 	Retired []string
 	Changed bool
 }
