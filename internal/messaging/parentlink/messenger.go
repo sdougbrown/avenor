@@ -231,8 +231,8 @@ func (m *Messenger) Register(reg messaging.DescendantRegistration) (messaging.De
 }
 
 // Deregister retires one child and reports the runs it had claimed.
-func (m *Messenger) Deregister(childID string) ([]string, error) {
-	return m.registry.Deregister(childID)
+func (m *Messenger) Deregister(childID, generation string) ([]string, error) {
+	return m.registry.Deregister(childID, generation)
 }
 
 // RecordRelay binds a relayed ask's reply route before the ask is exposed.

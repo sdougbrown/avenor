@@ -73,7 +73,7 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	}
 
 	// Deregistering retires the child and reports everything it held.
-	runs, err := registry.Deregister("one")
+	runs, err := registry.Deregister("one", "gen-one-two")
 	if err != nil {
 		t.Fatalf("deregister child: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if _, ok := registry.Hop("run-c"); ok {
 		t.Fatal("a deregistered child still owns a run")
 	}
-	if _, err := registry.Deregister("one"); !errors.Is(err, messaging.ErrTargetUnavailable) {
+	if _, err := registry.Deregister("one", "g1"); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("deregistering an unknown child = %v, want ErrTargetUnavailable", err)
 	}
 }
@@ -220,7 +220,7 @@ func TestRegistryRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
 		}
 	}
 	// The child itself is not left registered by a refused claim.
-	if _, err := registry.Deregister("one"); !errors.Is(err, messaging.ErrTargetUnavailable) {
+	if _, err := registry.Deregister("one", "g1"); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("deregistering the refused child = %v, want the child never registered", err)
 	}
 }
@@ -310,10 +310,64 @@ func TestRegistryHopsWithTheCredentialTheChildRegistered(t *testing.T) {
 	if hop, ok := registry.Hop("run-a"); !ok || hop.Token != "tok-2" {
 		t.Fatalf("Hop after a rotated credential = (%+v, %v), want tok-2", hop, ok)
 	}
-	if _, err := registry.Deregister("one"); err != nil {
+	if _, err := registry.Deregister("one", "g1"); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 	if _, ok := registry.Hop("run-a"); ok {
 		t.Fatal("the deregistered child still routes its run")
+	}
+}
+
+// TestRetirementSkipsAReplacedClaim pins the generation-aware retirement: a
+// refusal that observed the child under an older generation retires nothing
+// once a fresher registration replaced the claim, so a restart's replacement
+// survives a relay refusal that raced it.
+func TestRetirementSkipsAReplacedClaim(t *testing.T) {
+	registry := NewRegistry()
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "gen-one",
+		Runs: []messaging.RunClaim{{RunID: "run-a"}, {RunID: "run-b"}},
+	}); err != nil {
+		t.Fatalf("register child: %v", err)
+	}
+
+	// A per-run retirement observed under the replaced generation keeps the run
+	// a fresher registration re-claimed.
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "gen-two",
+		Runs: []messaging.RunClaim{{RunID: "run-a"}},
+	}); err != nil {
+		t.Fatalf("re-register child: %v", err)
+	}
+	registry.Forget("run-a", "gen-one")
+	if !registry.Owns("run-a") {
+		t.Fatal("the replaced run lost its claim to a stale refusal")
+	}
+	registry.Forget("run-a", "gen-two")
+	if registry.Owns("run-a") {
+		t.Fatal("the refusal under the observed generation did not retire the run")
+	}
+
+	// A whole-child retirement observed under a replaced generation keeps the
+	// replacement claim, and the one under the observed generation retires it.
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "gen-three",
+		Runs: []messaging.RunClaim{{RunID: "run-c"}},
+	}); err != nil {
+		t.Fatalf("register the replacement claim: %v", err)
+	}
+	runs, err := registry.Deregister("one", "gen-one")
+	if err != nil {
+		t.Fatalf("Deregister with a stale generation: %v", err)
+	}
+	if len(runs) != 0 || !registry.Owns("run-c") {
+		t.Fatalf("stale deregistration retired %v, want the replacement claim kept", runs)
+	}
+	runs, err = registry.Deregister("one", "gen-three")
+	if err != nil {
+		t.Fatalf("Deregister: %v", err)
+	}
+	if len(runs) != 1 || runs[0] != "run-c" {
+		t.Fatalf("deregistered runs = %v, want run-c", runs)
 	}
 }

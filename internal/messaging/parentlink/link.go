@@ -364,7 +364,7 @@ func (l *Link) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
 	defer cancel()
 	// A parent that cannot answer needs no cleanup: the claim dies with it.
-	_, _, _ = l.post(ctx, pathDeregister, map[string]any{"child_id": l.opts.ChildID}, "", "", deregisterTimeout)
+	_, _, _ = l.post(ctx, pathDeregister, map[string]any{"child_id": l.opts.ChildID, "generation": l.opts.Generation()}, "", "", deregisterTimeout)
 	return l.client.Close()
 }
 

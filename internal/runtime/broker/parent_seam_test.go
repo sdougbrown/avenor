@@ -33,7 +33,7 @@ func (p *parentLinkStub) Register(reg messaging.DescendantRegistration) (messagi
 	panic("parentlink: registration is not part of an admission")
 }
 
-func (p *parentLinkStub) Deregister(childID string) ([]string, error) {
+func (p *parentLinkStub) Deregister(childID, generation string) ([]string, error) {
 	p.deregistered = true
 	return nil, nil
 }

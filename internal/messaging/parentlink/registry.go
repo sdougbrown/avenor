@@ -179,12 +179,20 @@ func validEndpoint(endpoint string) error {
 	return nil
 }
 
-// Deregister retires one child and reports the runs it had claimed.
-func (r *Registry) Deregister(childID string) ([]string, error) {
+// Deregister retires one child and reports the runs it had claimed. The
+// generation the caller observed pins the claim it retires: a registration
+// that replaced the claim with a fresher generation survives the retirement,
+// because a refusal that raced the replacement must not wipe the claim that
+// took its place.
+func (r *Registry) Deregister(childID, generation string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.children[childID]; !ok {
+	current, ok := r.children[childID]
+	if !ok {
 		return nil, fmt.Errorf("%w: child %q is not registered", messaging.ErrTargetUnavailable, childID)
+	}
+	if current.generation != generation {
+		return nil, nil
 	}
 	delete(r.children, childID)
 	var runs []string
@@ -199,12 +207,16 @@ func (r *Registry) Deregister(childID string) ([]string, error) {
 }
 
 // Forget drops one run's claim, which is what a relay that found its child gone
-// leaves behind.
-func (r *Registry) Forget(runID string) {
+// leaves behind. The generation the caller observed pins the claim it retires:
+// a run a fresher registration re-claimed keeps its route.
+func (r *Registry) Forget(runID, generation string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	owner, ok := r.owners[runID]
 	if !ok {
+		return
+	}
+	if current, ok := r.children[owner]; ok && current.generation != generation {
 		return
 	}
 	delete(r.owners, runID)
