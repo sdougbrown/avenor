@@ -34,6 +34,12 @@ func TestRelayRefusalRetiresTheRefusedRunOnTheHost(t *testing.T) {
 			wantRetire: []string{"run-b"},
 		},
 		{
+			name:       "a branch that is no longer the one it registered as",
+			status:     http.StatusConflict,
+			body:       `{"code":"generation-mismatch","error":"the branch no longer answers as the generation the relay carried"}`,
+			wantRetire: []string{"run-b", "run-c"},
+		},
+		{
 			name:   "a failure that says nothing about the branch",
 			status: http.StatusInternalServerError,
 			body:   `{}`,
@@ -62,6 +68,8 @@ func TestRelayRefusalRetiresTheRefusedRunOnTheHost(t *testing.T) {
 			if !errors.Is(err, wantError) {
 				t.Fatalf("Ask = %v, want %v", err, wantError)
 			}
+			// A whole-child retirement reports the runs it held in no order.
+			slices.Sort(retired)
 			if !slices.Equal(retired, testCase.wantRetire) {
 				t.Fatalf("the relay retired %v, want %v", retired, testCase.wantRetire)
 			}
