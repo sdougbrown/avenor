@@ -54,14 +54,6 @@ var identityEnvKeys = func() map[string]struct{} {
 	return keys
 }()
 
-// IdentityEnvNames returns every environment name that describes launch
-// identity, including the superseded name that is scrubbed but never emitted.
-// A shell launcher that cannot set its child's environment needs the names to
-// remove inherited values itself.
-func IdentityEnvNames() []string {
-	return append([]string(nil), identityEnvNames...)
-}
-
 // ScrubbedEnvNames returns every environment name a child must not inherit:
 // launch identity, the test-only switches, and the parent-link credential.
 // A shell launcher that assembles its child's environment by hand unsets

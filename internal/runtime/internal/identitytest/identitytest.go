@@ -20,10 +20,11 @@ import (
 // inherit, so a test can tell "unset" from "empty".
 const unsetValue = "__UNSET__"
 
-// keys returns every environment name the observer serializes: launch identity
-// plus the operational variables that prove the scrub is exact.
+// keys returns every environment name the observer serializes: the full set a
+// child must not inherit, plus the operational variables that prove the scrub
+// is exact.
 func keys() []string {
-	return append(runtime.IdentityEnvNames(),
+	return append(runtime.ScrubbedEnvNames(),
 		runtime.EnvRuntimeID+"_SUFFIX", // near miss of an identity name
 		"AVENOR_TREE_BUDGET",
 		"AVENOR_RUN_ID",
@@ -144,7 +145,7 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 		key, value, _ := strings.Cut(entry, "=")
 		supplied[key] = value
 	}
-	for _, key := range runtime.IdentityEnvNames() {
+	for _, key := range runtime.ScrubbedEnvNames() {
 		if value, ok := supplied[key]; ok {
 			if observed[key] != value {
 				t.Errorf("%s = %q, want %q", key, observed[key], value)
