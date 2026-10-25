@@ -1291,8 +1291,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, claim := range body.Runs {
-		switch {
-		case claim.RunID == "":
+		if claim.RunID == "" {
 			writeCodedError(w, http.StatusBadRequest, "every claimed run needs a run_id", "invalid-request")
 			return
 		}
@@ -1324,11 +1323,8 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 	b.runSetChanged()
 	runKeys := make(map[string]string, len(claim.Runs))
 	for _, run := range claim.Runs {
-		if run.Key == run.RunID {
-			continue
-		}
-		// The branch names the run the way this broker addresses it, so its own
-		// upward operations authenticate as the run it registered.
+		// Every claim is namespaced: ChildID is required and ParentRunKey suffixes
+		// it, so run.Key never equals run.RunID here.
 		runKeys[run.RunID] = run.Key
 	}
 	response := map[string]any{
