@@ -32,17 +32,17 @@ var ErrUnsupportedParentProtocol = fmt.Errorf(
 // carries only the operation's result, plus its code class on failure. The
 // parent protocol this link speaks is recorded in testdata/parent_wire.json.
 type envelope struct {
-	Outcome           messaging.Outcome `json:"outcome"`
-	Code              string            `json:"code"`
-	Error             string            `json:"error"`
-	MessageID         string            `json:"message_id"`
-	FromRunID         string            `json:"from_run_id"`
-	Sender            string            `json:"sender"`
-	Kind              string            `json:"kind"`
-	Payload           json.RawMessage   `json:"payload"`
-	Generation        string            `json:"generation"`
-	Sessions          []json.RawMessage `json:"sessions"`
-	PeersError        string            `json:"peers_error"`
+	Outcome    messaging.Outcome `json:"outcome"`
+	Code       string            `json:"code"`
+	Error      string            `json:"error"`
+	MessageID  string            `json:"message_id"`
+	FromRunID  string            `json:"from_run_id"`
+	Sender     string            `json:"sender"`
+	Kind       string            `json:"kind"`
+	Payload    json.RawMessage   `json:"payload"`
+	Generation string            `json:"generation"`
+	Sessions   []json.RawMessage `json:"sessions"`
+	PeersError string            `json:"peers_error"`
 	// RunKeys reports the run ID the parent addresses each claimed run by: the
 	// parent returns a key for every claimed run, since every claim is
 	// namespaced by the branch that claims it.

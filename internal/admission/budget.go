@@ -117,7 +117,7 @@ func CreateRootInRuntimeState(capacity int) (*Budget, error) {
 
 	// CreateRoot uses O_EXCL, and the cryptographically random suffix keeps
 	// independent root supervisors from contending for a predictable name.
-	suffix, err := newToken()
+	suffix, err := token.NewHex(16)
 	if err != nil {
 		return nil, fmt.Errorf("admission: generate runtime state name: %w", err)
 	}
@@ -132,7 +132,7 @@ func CreateRoot(path string, capacity int) (*Budget, error) {
 	if capacity <= 0 {
 		capacity = DefaultTreeBudget
 	}
-	rootID, err := newToken()
+	rootID, err := token.NewHex(16)
 	if err != nil {
 		return nil, fmt.Errorf("admission: generate root id: %w", err)
 	}
@@ -275,7 +275,7 @@ func (b *Budget) Acquire(holder string) (string, error) {
 			RootID: bf.RootID,
 		}
 	}
-	token, err := newToken()
+	token, err := token.NewHex(16)
 	if err != nil {
 		return "", fmt.Errorf("admission: generate token: %w", err)
 	}
@@ -464,10 +464,6 @@ func writeBudget(f *os.File, bf *budgetFile) error {
 		return fmt.Errorf("admission: sync: %w", err)
 	}
 	return nil
-}
-
-func newToken() (string, error) {
-	return token.NewHex(16)
 }
 
 // pidAlive reports whether a process with the given PID exists. A PID whose

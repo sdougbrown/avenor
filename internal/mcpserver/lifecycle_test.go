@@ -85,50 +85,55 @@ func TestStartSupervisorOmitsLaunchWrapperPolicyByDefault(t *testing.T) {
 	}
 }
 
-// TestStartSupervisorScrubsTestHookEnv proves the autostarted supervisor child
-// never inherits the control test hooks.
-func TestStartSupervisorScrubsTestHookEnv(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(runtime.EnvTestHooks, "1")
-	t.Setenv(runtime.EnvTestOwnerPublishDelay, "5s")
-	var child *exec.Cmd
-	origExec := execCommand
-	execCommand = func(string, ...string) *exec.Cmd {
-		child = exec.Command("/nonexistent/avenor-test-stub")
-		return child
+// TestSupervisorScrubChildEnv proves the autostarted
+// supervisor child never inherits secrets it must not carry: the control test
+// hooks and the parent-link credential.
+func TestSupervisorScrubChildEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(t *testing.T)
+		scrubbed []string
+	}{
+		{
+			name: "hooks",
+			setup: func(t *testing.T) {
+				t.Setenv(runtime.EnvTestHooks, "1")
+				t.Setenv(runtime.EnvTestOwnerPublishDelay, "5s")
+			},
+			scrubbed: []string{runtime.EnvTestHooks, runtime.EnvTestOwnerPublishDelay},
+		},
+		{
+			name: "parent-token",
+			setup: func(t *testing.T) {
+				t.Setenv(token.EnvBrokerParentToken, "leaked-credential")
+			},
+			scrubbed: []string{token.EnvBrokerParentToken},
+		},
 	}
-	defer func() { execCommand = origExec }()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			tt.setup(t)
+			var child *exec.Cmd
+			origExec := execCommand
+			execCommand = func(string, ...string) *exec.Cmd {
+				child = exec.Command("/nonexistent/avenor-test-stub")
+				return child
+			}
+			t.Cleanup(func() { execCommand = origExec })
 
-	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
-	if child == nil {
-		t.Fatal("startSupervisor never built a child command")
-	}
-	for _, entry := range child.Env {
-		if strings.HasPrefix(entry, runtime.EnvTestHooks+"=") || strings.HasPrefix(entry, runtime.EnvTestOwnerPublishDelay+"=") {
-			t.Fatalf("test hook %q reached the supervisor child environment", entry)
-		}
-	}
-}
-
-func TestStartSupervisorScrubsParentTokenEnv(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(token.EnvBrokerParentToken, "leaked-credential")
-	var child *exec.Cmd
-	origExec := execCommand
-	execCommand = func(string, ...string) *exec.Cmd {
-		child = exec.Command("/nonexistent/avenor-test-stub")
-		return child
-	}
-	defer func() { execCommand = origExec }()
-
-	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
-	if child == nil {
-		t.Fatal("startSupervisor never built a child command")
-	}
-	for _, entry := range child.Env {
-		if strings.HasPrefix(entry, token.EnvBrokerParentToken+"=") {
-			t.Fatalf("parent-link credential %q reached the supervisor child environment", entry)
-		}
+			_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+			if child == nil {
+				t.Fatal("startSupervisor never built a child command")
+			}
+			for _, entry := range child.Env {
+				for _, name := range tt.scrubbed {
+					if strings.HasPrefix(entry, name+"=") {
+						t.Fatalf("%q reached the supervisor child environment", entry)
+					}
+				}
+			}
+		})
 	}
 }
 

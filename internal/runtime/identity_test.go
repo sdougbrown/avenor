@@ -66,22 +66,20 @@ func TestIdentityEnv(t *testing.T) {
 }
 
 func TestScrubIdentityEnv(t *testing.T) {
-	t.Run("parent broker credential is scrubbed", func(t *testing.T) {
-		environ := []string{
-			"AVENOR_PARENT_BROKER_TOKEN=credential",
-			"AVENOR_BROKER_TOKEN=kept",
-			"PATH=/usr/bin",
-		}
-		want := []string{"AVENOR_BROKER_TOKEN=kept", "PATH=/usr/bin"}
-		if got := ScrubIdentityEnv(environ); !slices.Equal(got, want) {
-			t.Fatalf("ScrubIdentityEnv() = %q, want %q", got, want)
-		}
-	})
 	tests := []struct {
 		name    string
 		environ []string
 		want    []string
 	}{
+		{
+			name: "parent broker credential is scrubbed",
+			environ: []string{
+				"AVENOR_PARENT_BROKER_TOKEN=credential",
+				"AVENOR_BROKER_TOKEN=kept",
+				"PATH=/usr/bin",
+			},
+			want: []string{"AVENOR_BROKER_TOKEN=kept", "PATH=/usr/bin"},
+		},
 		{
 			name:    "nil environ",
 			environ: nil,

@@ -3128,4 +3128,3 @@ func readRespForID(t *testing.T, c net.Conn, id uint64) Response {
 	t.Fatal("no response with matching id")
 	return Response{}
 }
-

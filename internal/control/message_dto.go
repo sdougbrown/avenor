@@ -34,9 +34,9 @@ type MessageSendResult struct {
 
 // MessageWaitParams is the message_wait request.
 type MessageWaitParams struct {
-	MessageID   string `json:"message_id"`
-	Generation  string `json:"generation"`
-	TimeoutMS   int64  `json:"timeout_ms,omitempty"`
+	MessageID  string `json:"message_id"`
+	Generation string `json:"generation"`
+	TimeoutMS  int64  `json:"timeout_ms,omitempty"`
 }
 
 // MessageInbound is one inbound message on the control wire.
@@ -65,8 +65,8 @@ type MessageReplyParams struct {
 
 // MessageWithdrawParams is the message_withdraw request.
 type MessageWithdrawParams struct {
-	MessageID   string `json:"message_id"`
-	Generation  string `json:"generation"`
+	MessageID  string `json:"message_id"`
+	Generation string `json:"generation"`
 }
 
 // MessageFence is the terminal fence a withdrawal installed.
@@ -86,9 +86,9 @@ type MessageWithdrawResult struct {
 
 // MessageReceiveParams is the message_receive request.
 type MessageReceiveParams struct {
-	Generation  string `json:"generation"`
-	TimeoutMS   int64  `json:"timeout_ms,omitempty"`
-	Limit       int    `json:"limit,omitempty"`
+	Generation string `json:"generation"`
+	TimeoutMS  int64  `json:"timeout_ms,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
 }
 
 // MessageReceiveResult is the message_receive response.
@@ -218,9 +218,9 @@ func (p MessageSendParams) request(from messaging.Identity) messaging.SendReques
 // NewMessageWaitParams projects a wait request onto the wire shape.
 func NewMessageWaitParams(req messaging.WaitRequest) MessageWaitParams {
 	return MessageWaitParams{
-		MessageID:   req.MessageID,
-		Generation:  req.Generation,
-		TimeoutMS:   req.Timeout.Milliseconds(),
+		MessageID:  req.MessageID,
+		Generation: req.Generation,
+		TimeoutMS:  req.Timeout.Milliseconds(),
 	}
 }
 
@@ -256,8 +256,8 @@ func (p MessageReplyParams) request(from messaging.Identity) messaging.ReplyRequ
 // NewMessageWithdrawParams projects a withdraw request onto the wire shape.
 func NewMessageWithdrawParams(req messaging.WithdrawRequest) MessageWithdrawParams {
 	return MessageWithdrawParams{
-		MessageID:   req.MessageID,
-		Generation:  req.Generation,
+		MessageID:  req.MessageID,
+		Generation: req.Generation,
 	}
 }
 
@@ -268,9 +268,9 @@ func (p MessageWithdrawParams) request(from messaging.Identity) messaging.Withdr
 // NewMessageReceiveParams projects a receive request onto the wire shape.
 func NewMessageReceiveParams(req messaging.ReceiveRequest) MessageReceiveParams {
 	return MessageReceiveParams{
-		Generation:  req.Generation,
-		TimeoutMS:   req.Timeout.Milliseconds(),
-		Limit:       req.Limit,
+		Generation: req.Generation,
+		TimeoutMS:  req.Timeout.Milliseconds(),
+		Limit:      req.Limit,
 	}
 }
 
