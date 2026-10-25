@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 func fakeClient() (*client, *io.PipeWriter, *io.PipeReader) {
@@ -545,6 +546,7 @@ func TestStartClientReplacesAgentProfileEnvironment(t *testing.T) {
 	original := piExecCommandContext
 	t.Cleanup(func() { piExecCommandContext = original })
 	t.Setenv("PI_AGENT", "stale-agent")
+	t.Setenv(token.EnvBrokerParentToken, "parent-secret")
 	t.Setenv("PI_AGENT_PROFILE", "stale-profile")
 
 	var captured *exec.Cmd
@@ -1103,6 +1105,9 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 		if v, ok := emptyEnv[key]; ok {
 			t.Errorf("%s = %q leaked into child env with empty broker args", key, v)
 		}
+	}
+	if v, ok := emptyEnv[token.EnvBrokerParentToken]; ok {
+		t.Fatalf("pi child env carries the parent-link credential: %q", v)
 	}
 
 	// Intermediate case: PI_AGENT injected while broker credentials are empty
