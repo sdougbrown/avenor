@@ -115,10 +115,6 @@ type Config struct {
 	// as a standalone local broker.
 	BrokerParentURL string
 
-	// BrokerParentInsecure opts into a plaintext http:// parent URL that is
-	// not loopback (the credential travels as a bearer header, so plaintext to
-	// a routable host hands the shared secret to anyone on the path).
-	BrokerParentInsecure bool
 	// BrokerParentToken is the credential the parent link uses in both
 	// directions: it is presented to the parent broker and required from the
 	// child brokers that register with this one's broker. Empty leaves this
@@ -1997,12 +1993,11 @@ func (s *Supervisor) installParentLink() {
 		return
 	}
 	options := parentlink.Options{
-		ParentURL:               s.config.BrokerParentURL,
-		AllowInsecureParentLink: s.config.BrokerParentInsecure,
-		Token:                   s.config.BrokerParentToken,
-		Endpoint:                s.brokerURL(),
-		Generation:              s.broker.Store().Generation,
-		Runs:                    s.parentRunClaims,
+		ParentURL:  s.config.BrokerParentURL,
+		Token:      s.config.BrokerParentToken,
+		Endpoint:   s.brokerURL(),
+		Generation: s.broker.Store().Generation,
+		Runs:       s.parentRunClaims,
 		// The relay carries the asker's display name, so the branch that receives
 		// the ask reads the name the asking branch gave it.
 		DisplayName: s.broker.DisplayName,

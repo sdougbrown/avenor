@@ -235,11 +235,6 @@ as an explicit override when the environment cannot carry the value, but the
 env var is preferred. Starting a supervisor with `--broker-parent-url` but no
 token (neither the env var nor the flag) exits with an error.
 
-The credential travels as a bearer header, so a non-loopback parent URL must
-use `https://`; a plaintext `http://` parent URL to a routable host is refused
-unless `--broker-parent-insecure` opts in. Loopback addresses (including
-`localhost`) need no opt-in.
-
 The child registers the runs it owns at startup and retracts the claim on
 shutdown. The parent issues each descendant run its own credential at
 registration, and relays authenticate per run: the link token only bootstraps

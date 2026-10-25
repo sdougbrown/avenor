@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -39,11 +37,6 @@ type Options struct {
 	ParentURL string
 	// Token is the bearer credential the parent broker's parent routes require.
 	Token string
-	// AllowInsecureParentLink opts into a plaintext http:// parent URL that is
-	// not loopback. The credential travels as a bearer header, so plaintext to
-	// a routable host hands the shared secret to anyone on the path; loopback
-	// and https need no opt-in.
-	AllowInsecureParentLink bool
 	// Endpoint is this broker's own http:// address, which the parent posts a
 	// relay to. Required when ParentURL is set.
 	Endpoint string
@@ -157,11 +150,6 @@ func NewLink(opts Options) (*Link, error) {
 		opts.RefreshInterval = DefaultRefreshInterval
 	}
 	opts.ParentURL = strings.TrimRight(opts.ParentURL, "/")
-	if u, err := url.Parse(opts.ParentURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("%w: parent broker URL %q must be an absolute http(s) URL", messaging.ErrInvalidRequest, opts.ParentURL)
-	} else if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) && !opts.AllowInsecureParentLink {
-		return nil, fmt.Errorf("%w: plaintext http:// to a non-loopback parent exposes the bearer credential; use https:// or set the insecure opt-in", messaging.ErrInvalidRequest)
-	}
 	return &Link{
 		opts:     opts,
 		client:   httpbase.New(ErrUnsupportedParentProtocol, timeout),
@@ -172,18 +160,6 @@ func NewLink(opts Options) (*Link, error) {
 		closedCh: make(chan struct{}),
 		dirty:    make(chan struct{}, 1),
 	}, nil
-}
-
-// isLoopbackHost reports whether the host is a loopback address: the loopback
-// literals, a loopback IP, or the loopback name.
-func isLoopbackHost(host string) bool {
-	if host == "localhost" || host == "::1" {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
 }
 
 // Start publishes this branch's claim to the parent broker and then keeps it
