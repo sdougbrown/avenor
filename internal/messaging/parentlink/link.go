@@ -149,6 +149,13 @@ func NewLink(opts Options) (*Link, error) {
 	}, nil
 }
 
+// SetTransport replaces the round tripper the link's parent requests travel
+// on. It must run before the link's first request, and it exists so a test can
+// inject a connection-level fault the way the messagetest suites do.
+func (l *Link) SetTransport(rt http.RoundTripper) {
+	l.client.SetTransport(rt)
+}
+
 // Start publishes this branch's claim to the parent broker and then keeps it
 // published: a run-set change re-publishes it at once, and an idle branch
 // re-publishes it on its refresh interval. The publish loop runs regardless
