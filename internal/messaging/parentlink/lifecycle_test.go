@@ -117,6 +117,72 @@ func TestLinkKeepsItsClaimWhenTheParentIsUnreachable(t *testing.T) {
 	}
 }
 
+// TestLinkClosesWithTheViewTheParentLastAccepted pins the view-update rule on
+// the failure side: a registration the parent accepted but whose response the
+// link fails to decode leaves the recorded view at the last accepted
+// registration, so the close retracts the claim the parent actually holds —
+// where a view of the failed registration would no longer match and the claims
+// would never retire.
+func TestLinkClosesWithTheViewTheParentLastAccepted(t *testing.T) {
+	var registrations atomic.Int32
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			if registrations.Add(1) > 1 {
+				// The parent accepted the registration, but the response is
+				// not an envelope the link can decode.
+				return http.StatusOK, `{not json`
+			}
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathDeregister:
+			return http.StatusOK, `{}`
+		}
+		return http.StatusOK, `{}`
+	})
+	ctx := testContext(t)
+	generation := "gen-1"
+	link, err := NewLink(Options{
+		ParentURL:  stub.URL(),
+		Endpoint:   "http://child-one",
+		ChildID:    "child-one",
+		Runs:       testRuns,
+		Generation: func() string { return generation },
+	})
+	if err != nil {
+		t.Fatalf("NewLink: %v", err)
+	}
+	t.Cleanup(func() { _ = link.Close() })
+
+	if err := link.Sync(ctx); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	// The second registration moves the branch's generation, but its response
+	// fails to decode: the view the link holds stays at the accepted one.
+	generation = "gen-2"
+	if err := link.Sync(ctx); err == nil {
+		t.Fatal("Sync with an undecodable response = nil, want an error")
+	}
+	if pinned, ok := link.pinnedGeneration(); !ok || pinned != "gen-a" {
+		t.Fatalf("pinned generation = (%q, %v), want the accepted registration's", pinned, ok)
+	}
+
+	if err := link.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	deregistered := stub.lastRequest(t, pathDeregister)
+	if deregistered.Body["endpoint"] != "http://child-one" || deregistered.Body["generation"] != "gen-1" {
+		t.Fatalf("deregistration = %v, want registration 1's endpoint and generation", deregistered.Body)
+	}
+	runs, ok := deregistered.Body["runs"].([]any)
+	if !ok || len(runs) != 1 {
+		t.Fatalf("deregistration runs = %v, want registration 1's run set", deregistered.Body["runs"])
+	}
+	run, _ := runs[0].(map[string]any)
+	if run["run_id"] != "run-a" || run["token"] != "tok-a" {
+		t.Fatalf("deregistered claim = %v, want the claim the parent last accepted", run)
+	}
+}
+
 // TestLinkClosesWithoutAParent pins the close of a link whose parent is
 // already gone: the retraction is best effort, so the close still succeeds.
 func TestLinkClosesWithoutAParent(t *testing.T) {
