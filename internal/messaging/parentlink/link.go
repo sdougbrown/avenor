@@ -304,6 +304,13 @@ func (l *Link) publish(ctx context.Context, claims []messaging.RunClaim) error {
 		l.rememberDegraded()
 		return l.publish(ctx, withoutSupervisorClaim(claims))
 	}
+	// A replaced parent may speak the namespacing the one it replaced lacked:
+	// a generation change retires the degraded shape, so this publication
+	// offers the full claim again instead of waiting for a branch restart.
+	if previous, pinned := l.pinnedGeneration(); l.degraded && pinned && registered.Generation != previous {
+		l.forgetDegraded()
+		return l.publish(ctx, l.claims())
+	}
 	l.mu.Lock()
 	l.tokens = tokens
 	l.noteKeysLocked(claims, registered.RunKeys)
@@ -318,6 +325,15 @@ func (l *Link) publish(ctx context.Context, claims []messaging.RunClaim) error {
 func (l *Link) rememberDegraded() {
 	l.mu.Lock()
 	l.degraded = true
+	l.mu.Unlock()
+}
+
+// forgetDegraded retracts the legacy claim shape after the pinned generation
+// changed: the registration that answered under a new generation is a replaced
+// parent, which may speak the namespacing the old one lacked.
+func (l *Link) forgetDegraded() {
+	l.mu.Lock()
+	l.degraded = false
 	l.mu.Unlock()
 }
 
