@@ -1969,20 +1969,22 @@ func (s *Supervisor) installParentLink() {
 	if s.config.BrokerParentURL == "" && s.config.BrokerParentToken == "" {
 		return
 	}
+	// The control socket path plus the host it lives on is this supervisor's
+	// stable identity: a restart comes back under the same child ID and
+	// reclaims its runs, and a same-path branch on another host stays distinct.
+	host, _ := os.Hostname()
 	options := parentlink.Options{
 		ParentURL:  s.config.BrokerParentURL,
 		Token:      s.config.BrokerParentToken,
 		Endpoint:   s.brokerURL(),
 		Generation: s.broker.Store().Generation,
-		Runs:       s.parentRunClaims,
+		Runs:       s.broker.ParentRunClaims,
 		RetireRuns: func(runIDs []string) {
 			for _, runID := range runIDs {
 				s.broker.DeleteRun(runID)
 			}
 		},
-		// The control socket path is this supervisor's stable identity: a
-		// restart comes back under the same child ID and reclaims its runs.
-		ChildID: parentlink.BranchID(s.config.ControlSocket),
+		ChildID: parentlink.BranchID(s.config.ControlSocket, host),
 	}
 	link, err := parentlink.Install(options, s.broker)
 	if err != nil {

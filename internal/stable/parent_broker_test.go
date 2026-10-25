@@ -6,7 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+<<<<<<< HEAD
 	"strings"
+=======
+	"os"
+>>>>>>> d0a16f7 (🛡️ Mix the host into the branch identity digest)
 	"testing"
 	"time"
 
@@ -14,6 +18,13 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging/parentlink"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
+
+// testHost reports the host component the supervisor mixes into its branch
+// identity, so a test that derives an expected identity matches the real one.
+func testHost() string {
+	host, _ := os.Hostname()
+	return host
+}
 
 // startTestParentBroker starts a broker that serves the parent-link routes and
 // relays into the branches that register with it, wired the way the supervisor
@@ -66,7 +77,7 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 	)
 	link, err = parentlink.Install(parentlink.Options{
 		ParentURL:  "http://" + parentBroker.Addr(),
-		ChildID:    parentlink.BranchID("test/" + b.Addr()),
+		ChildID:    parentlink.BranchID("test/"+b.Addr(), testHost()),
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
 		Runs: b.ParentRunClaims,
@@ -201,7 +212,12 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 	}
 	// The supervisor registers its own run under its branch identity: every
 	// branch reserves the supervisor run ID, so the parent addresses it there.
+<<<<<<< HEAD
 	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket); !parentLink.Registry().Owns(branchSupervisorRun) {
+=======
+	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket, testHost());
+		!parentLink.Registry().Owns(branchSupervisorRun) {
+>>>>>>> d0a16f7 (🛡️ Mix the host into the branch identity digest)
 		t.Fatalf("the supervisor did not register its own run with its parent broker as %q", branchSupervisorRun)
 	}
 
@@ -255,7 +271,7 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 	// the run ID the ask arrived with, which is the parent's address for this
 	// branch's supervisor.
 	asker := deliveredAsker(t, peerBroker, "rt_remote", msgID)
-	if want := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket); asker != want {
+	if want := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket, testHost()); asker != want {
 		t.Fatalf("delivered asker = %q, want the supervisor's branch-scoped run ID %q", asker, want)
 	}
 	if status, body := parentLinkedPost(t, peerBroker.Addr(), "/send", "rt_remote", peerTokens["rt_remote"], map[string]any{
@@ -315,7 +331,7 @@ func TestSupervisorParentAcceptsSupervisorChildren(t *testing.T) {
 		})
 		t.Cleanup(func() { _ = child.Shutdown("kill") })
 		children = append(children, child)
-		childKeys = append(childKeys, messaging.SupervisorRunID+"@"+parentlink.BranchID(socket))
+		childKeys = append(childKeys, messaging.SupervisorRunID+"@"+parentlink.BranchID(socket, testHost()))
 	}
 	for _, key := range childKeys {
 		if !parentSup.parentLink.Registry().Owns(key) {
