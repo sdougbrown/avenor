@@ -27,6 +27,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
+	"github.com/sdougbrown/avenor/internal/token"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
@@ -8104,5 +8105,39 @@ func TestSubscribeRuntimeOnlyReceivesSessionEnd(t *testing.T) {
 		case <-time.After(30 * time.Second):
 			t.Fatalf("timed out waiting for session.end for runtime %s", runtimeID)
 		}
+	}
+}
+
+// TestStartHTTPServerScrubsTheParentCredential pins the agent-host boundary:
+// opencode serve must not inherit the supervisor's environment whole, or it
+// carries the parent-link credential into a process that only serves the
+// workspace.
+func TestStartHTTPServerScrubsTheParentCredential(t *testing.T) {
+	sup := newTestSupervisor(t, Config{
+		ControlSocket: "/tmp/test-http-server-scrub.sock",
+		MaxRuntimes:   2,
+	})
+
+	t.Setenv(token.EnvBrokerParentToken, "parent-secret")
+	var capturedCmd *exec.Cmd
+	withFakeExec(t, func(name string, arg ...string) *exec.Cmd {
+		cmd := exec.Command("false")
+		capturedCmd = cmd
+		return cmd
+	})
+
+	// The fake exec fails to start; the assertion below is on the captured
+	// command's environment, not on a successful serve.
+	_, _ = sup.getOrCreateHTTPServer("/tmp/scrub-test-dir")
+	if capturedCmd == nil {
+		t.Fatal("httpExecCommand was not called")
+	}
+	for _, entry := range capturedCmd.Env {
+		if strings.HasPrefix(entry, token.EnvBrokerParentToken+"=") {
+			t.Fatalf("cmd.Env carries the parent-link credential: %q", entry)
+		}
+	}
+	if len(capturedCmd.Env) == 0 {
+		t.Fatal("cmd.Env is empty: the scrub dropped the whole environment")
 	}
 }

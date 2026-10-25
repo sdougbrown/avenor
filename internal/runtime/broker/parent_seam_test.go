@@ -173,12 +173,12 @@ func TestRelayWithoutASenderNamesTheAskAsTheBranchResolvesIt(t *testing.T) {
 	b.InstallParentLink(&parentLinkStub{}, "", nil)
 
 	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
-		"from_run_id":   "asker",
-		"to_run_id":     "branch-run",
-		"type":          "agent_message",
-		"payload":       map[string]any{"message": "relayed"},
-		"message_id":    "av1.abc.def",
-		"generation":    b.Store().Generation(),
+		"from_run_id": "asker",
+		"to_run_id":   "branch-run",
+		"type":        "agent_message",
+		"payload":     map[string]any{"message": "relayed"},
+		"message_id":  "av1.abc.def",
+		"generation":  b.Store().Generation(),
 	})
 	if status != http.StatusOK {
 		t.Fatalf("relay without a sender = (%d, %v), want 200", status, body)
