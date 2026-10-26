@@ -402,7 +402,8 @@ func (t peerListingTransport) Peers(ctx context.Context, req messaging.PeersRequ
 	set := t.broker.withLocalRuns(res.Peers)
 	res.Peers = set.peers
 	if set.unreadable > 0 {
-		return res, fmt.Errorf("%w: %d session records unreadable", messaging.ErrIncompleteListing, set.unreadable)
+		return res, fmt.Errorf("%w: %s", messaging.ErrIncompleteListing,
+			messaging.UnreadablePeerRecordsDetail(set.unreadable))
 	}
 	return res, err
 }
@@ -1308,7 +1309,7 @@ func incompletePeerListing(unreadable int) string {
 	if unreadable == 0 {
 		return messaging.IncompletePeerListing
 	}
-	return fmt.Sprintf("%s: %d session records unreadable", messaging.IncompletePeerListing, unreadable)
+	return fmt.Sprintf("%s: %s", messaging.IncompletePeerListing, messaging.UnreadablePeerRecordsDetail(unreadable))
 }
 
 // handleRename renames one run's display name. It rejects a malformed request

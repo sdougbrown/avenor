@@ -7,6 +7,12 @@ import (
 	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
+// UnreadablePeerRecordsDetail is the detail suffix an incomplete peer listing
+// carries when it dropped unreadable session records.
+func UnreadablePeerRecordsDetail(count int) string {
+	return fmt.Sprintf("%d session records unreadable", count)
+}
+
 // decodePeerRecords decodes a peer listing into the contract's peer records.
 // It owns the decode loop, the empty-session guard and the run-id fallback, so
 // a field added to the peer contract reaches every provider's list, resolve
@@ -34,7 +40,7 @@ func decodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 		records = append(records, record)
 	}
 	if unreadable > 0 {
-		return records, fmt.Errorf("%w: %d session records unreadable", ErrIncompleteListing, unreadable)
+		return records, fmt.Errorf("%w: %s", ErrIncompleteListing, UnreadablePeerRecordsDetail(unreadable))
 	}
 	return records, nil
 }
