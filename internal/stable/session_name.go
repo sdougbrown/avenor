@@ -60,13 +60,14 @@ func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name stri
 }
 
 // applySessionName writes one display name to the broker's SessionInfo.Label
-// and, for a locally owned run, the child runtime's pre-registration fallback
-// copy. The broker's resolved name is the one peers see; readers go through
-// peerLabel. Both writes happen under s.controlMu, which labelHolderLocked,
-// List and RuntimeStatus also hold while they read, so a reader never sees the
-// new broker name beside the old runtime name and a concurrent keyed spawn
-// sees the old name held or the new name held, never both free. The supervisor
-// session is broker-only: it has no child runtime to update.
+// and, for a locally owned run, the child runtime's display-name copy. The
+// broker's resolved name is the one peers see; readers go through the runtime's
+// mirrored displayName. Both writes happen under s.controlMu, which
+// labelHolderLocked, List and RuntimeStatus also hold while they read, so a
+// reader never sees the new broker name beside the old runtime name and a
+// concurrent keyed spawn sees the old name held or the new name held, never
+// both free. The supervisor session is broker-only: it has no child runtime to
+// update.
 func (s *Supervisor) applySessionName(runID, name string) (string, error) {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()

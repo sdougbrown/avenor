@@ -53,7 +53,7 @@ type Resolution struct {
 	RunID       string          // broker/runtime id; the only id transports accept
 	PublicRunID string          // host-surface run id; empty on child surfaces
 	Match       ResolutionMatch // unique | ambiguous | none
-	Label       string          // the target's display name: the harness-supplied name if any, else SessionInfo.Label, else its run id
+	Label       string          // the target's resolved display name: harness-supplied name, else model-set/launch label (SessionInfo.Label), else its run id
 	Candidates  []string        // run ids for an ambiguous label; empty when unique or none
 }
 
@@ -96,16 +96,18 @@ type RenameRequest struct {
 	Name      string // the new display name; becomes SessionInfo.Label
 }
 
-// RenameResult reports the stored label before and after the write. The
-// resolved display name adds a second, harness-supplied field that wins in
-// resolution: RunState.HarnessName (set through /session_name) is what
-// /sessions, /send's sender and the resolution ladder all read, resolved only
-// through DisplayName; StoredLabel is the write-tracking view of the stored
-// label, and is what Label here reports.
+// RenameResult reports the one resolved display name before and after the
+// write. The rename writes the model-set half — the request's Name becomes
+// SessionInfo.Label — but the name peers see is the resolved display name:
+// the harness's own session name wins whenever the harness supplied one, the
+// model-set label is the fallback, and a run with neither carries its run ID.
+// Label and PreviousLabel report that resolution the way /sessions, /send's
+// sender and the resolution ladder read it: through the broker's resolution,
+// never Info.Label directly.
 type RenameResult struct {
 	RunID         string // resolved broker/runtime id
-	Label         string // the new SessionInfo.Label (StoredLabel, not the resolved display name)
-	PreviousLabel string // the stored label before the rename (the launch label if never renamed)
+	Label         string // the resolved display name after the rename
+	PreviousLabel string // the resolved display name before the rename
 }
 
 // PeerRecord is one peers `list` entry: the tool's projection of the broker's

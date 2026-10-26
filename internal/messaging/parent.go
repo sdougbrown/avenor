@@ -15,6 +15,9 @@ import "context"
 type ParentLink interface {
 	// Owns reports whether runID belongs to a registered child broker.
 	Owns(runID string) bool
+	// Key reports the run ID this broker addresses childID's runID by, which is
+	// how a claim and every later hop name a descendant's run.
+	Key(childID, runID string) string
 	// Register adopts one child broker's claim on the runs it owns and reports
 	// what the claim changed. A run another child already owns is refused.
 	Register(reg DescendantRegistration) (DescendantClaim, error)

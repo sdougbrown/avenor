@@ -2,37 +2,12 @@ package broker
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
-
-// A run with no launch label and no harness name reports its run ID as its
-// session label, not an empty string.
-func TestSessionsStampsRunIDForUnlabeledRun(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-	if _, err := b.CreateRun("rt_bare", ""); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-
-	found := false
-	for _, info := range b.Sessions() {
-		if info.RunID != "rt_bare" {
-			continue
-		}
-		found = true
-		if info.Label != "rt_bare" {
-			t.Fatalf("session label = %q, want the run ID rt_bare", info.Label)
-		}
-	}
-	if !found {
-		t.Fatal("Sessions() did not list rt_bare")
-	}
-}
 
 // The harness-supplied session name is the human's choice, so it is the name
 // peers see as soon as it exists.
@@ -96,11 +71,6 @@ func TestModelRenameDoesNotClobberHarnessName(t *testing.T) {
 	status, body := postAuthBroker(t, b.Addr(), "/rename", "rt_h", token, map[string]any{"name": "model-choice"})
 	if status != 200 {
 		t.Fatalf("rename status = %d (%v)", status, body)
-	}
-	// The response reports the stored label the rename accepted, not the
-	// resolved display name the harness name shadows.
-	if body["label"] != "model-choice" || body["previous_label"] != "launch-label" {
-		t.Fatalf("rename response = %v, want launch-label -> model-choice", body)
 	}
 	if got := b.DisplayName("rt_h"); got != "my-session" {
 		t.Fatalf("DisplayName after model rename = %q, want my-session", got)
@@ -206,49 +176,129 @@ func TestHarnessNameOnlyForTheAuthenticatedRun(t *testing.T) {
 	if got := b.DisplayName("rt_b"); got != "name-b" {
 		t.Fatalf("rt_b label = %q, want name-b", got)
 	}
+
+	// A run cannot name another run, and it cannot even try: the credential in
+	// the body authenticates rt_a, so a body naming rt_b never passes auth.
+	status, body = postAuthBroker(t, b.Addr(), "/session_name", "rt_b", tokenA, map[string]any{"name": "hijack"})
+	if status != 401 {
+		t.Fatalf("cross-run session_name = %d %v, want 401", status, body)
+	}
+	if got := b.DisplayName("rt_b"); got != "name-b" {
+		t.Fatalf("rt_b label after a hijack attempt = %q, want name-b", got)
+	}
 }
 
-// A run may only name itself. The credential and the body's run_id travel in
-// the same JSON body, so withAuth authenticates the named run itself: a body
-// naming another run carries that run's name and the caller's token, and is
-// refused as unauthorized before the handler runs. This pins that transport
-// rejection, so one authenticated run cannot overwrite another run's
-// user-defined session name.
-func TestSessionNameRejectsAnotherRunsBody(t *testing.T) {
+// TestSessionNameRefusesACrossRunCaller pins the handler's own caller check.
+// The HTTP surface cannot reach it — withAuth authenticates the very run_id
+// field the body carries — so the request is driven at the handler with a
+// context that names a different caller, the mismatch the guard refuses.
+func TestSessionNameRefusesACrossRunCaller(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer b.Stop()
-	tokenA, err := b.CreateRun("rt_a", "name-a")
-	if err != nil {
+	if _, err := b.CreateRun("rt_a", "name-a"); err != nil {
 		t.Fatalf("create run a: %v", err)
 	}
 	if _, err := b.CreateRun("rt_b", "name-b"); err != nil {
 		t.Fatalf("create run b: %v", err)
 	}
 
-	// Forge the body directly: postAuthBroker stamps run_id/token from the
-	// authenticated caller, but this test needs a body whose run_id names
-	// another run while the credential still authenticates rt_a.
-	raw, err := json.Marshal(map[string]any{"run_id": "rt_b", "token": tokenA, "name": "hijack"})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	resp, err := http.Post("http://"+b.Addr()+"/session_name", "application/json", bytes.NewReader(raw))
-	if err != nil {
-		t.Fatalf("post session_name: %v", err)
-	}
-	defer resp.Body.Close()
-	var body map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&body)
-	if resp.StatusCode != 401 {
-		t.Fatalf("mismatched run_id response = %d %v, want 401 unauthorized", resp.StatusCode, body)
+	req := httptest.NewRequest(http.MethodPost, "/session_name", bytes.NewBufferString(`{"run_id":"rt_b","name":"hijack"}`))
+	req = req.WithContext(messaging.WithCallerRun(req.Context(), "rt_a"))
+	rec := httptest.NewRecorder()
+	b.handleSessionName(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-run handler status = %d, want 403", rec.Code)
 	}
 	if got := b.DisplayName("rt_b"); got != "name-b" {
-		t.Fatalf("rt_b label after refusal = %q, want name-b", got)
+		t.Fatalf("rt_b label after a hijack attempt = %q, want name-b", got)
 	}
-	if got := b.DisplayName("rt_a"); got != "name-a" {
-		t.Fatalf("rt_a label after refusal = %q, want name-a", got)
+}
+
+// A run with no launch label and no harness name reports its run ID as its
+// session label, not an empty string.
+func TestSessionsStampsRunIDForUnlabeledRun(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	if _, err := b.CreateRun("rt_bare", ""); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	found := false
+	for _, info := range b.Sessions() {
+		if info.RunID != "rt_bare" {
+			continue
+		}
+		found = true
+		if info.Label != "rt_bare" {
+			t.Fatalf("session label = %q, want the run ID rt_bare", info.Label)
+		}
+	}
+	if !found {
+		t.Fatal("Sessions() did not list rt_bare")
+	}
+}
+
+// TestSetHarnessNameNotifiesRunObserverOnce pins the notification count of a
+// harness session-name write: the run-set observer fires exactly once per set
+// and per clear, and each firing sees the resolved label the write produced.
+// The mirror fires once per write with the name written, and clearing the
+// name falls back to the launch label. The callback order is deliberately not
+// pinned: the run-set firing sits before the mirror here and moves after it
+// when the duplicate firing upstream is collapsed.
+func TestSetHarnessNameNotifiesRunObserverOnce(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	if _, err := b.CreateRun("rt_h", "launch-label"); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	var runFires, mirrorFires int
+	var runLabel, mirrorName string
+	b.SetRunObserver(func() {
+		runFires++
+		runLabel = b.DisplayName("rt_h")
+	})
+	b.SetHarnessNameObserver(func(runID, name string) {
+		mirrorFires++
+		mirrorName = name
+	})
+
+	// Set: the run observer fires exactly once and sees the resolved harness
+	// name; the mirror fires once with the name written.
+	if err := b.SetHarnessName("rt_h", "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+	if runFires != 1 {
+		t.Fatalf("run observer fired %d times on set, want exactly 1", runFires)
+	}
+	if runLabel != "harness-name" {
+		t.Fatalf("run observer label on set = %q, want the resolved harness name", runLabel)
+	}
+	if mirrorFires != 1 || mirrorName != "harness-name" {
+		t.Fatalf("mirror fired %d times (name %q) on set, want 1 / harness-name", mirrorFires, mirrorName)
+	}
+
+	// Clear: the run observer fires exactly once more and sees the resolved
+	// fallback (the launch label); the mirror fires once with the empty name.
+	if err := b.SetHarnessName("rt_h", ""); err != nil {
+		t.Fatalf("clear harness name: %v", err)
+	}
+	if runFires != 2 {
+		t.Fatalf("run observer fired %d times through set+clear, want exactly 2", runFires)
+	}
+	if runLabel != "launch-label" {
+		t.Fatalf("run observer label on clear = %q, want the resolved fallback launch-label", runLabel)
+	}
+	if mirrorFires != 2 || mirrorName != "" {
+		t.Fatalf("mirror fired %d times (name %q) through set+clear, want 2 / empty", mirrorFires, mirrorName)
 	}
 }

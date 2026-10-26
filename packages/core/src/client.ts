@@ -223,12 +223,6 @@ export interface MessagePeer {
 export interface MessagePeersResult {
   peers: MessagePeer[]
   generation?: string
-  /**
-   * Set when the listing read only part of the peer set. The peers beside it
-   * are the ones that were read, so a partial list is never read as a
-   * complete one.
-   */
-  peers_error?: string
 }
 
 export interface MessagePreflightResult {
