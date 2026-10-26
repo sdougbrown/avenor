@@ -47,12 +47,10 @@ type Transport interface {
 // DeliverRequest is one fire-and-forget message a messenger publishes to a
 // target. It allocates no reply edge: a tell has no ask to answer.
 type DeliverRequest struct {
-	FromRunID string
-	ToRunID   string
-	Kind      string
-	Payload   json.RawMessage
-	// CorrelationID is the id the publication carries, so a receiver can
-	// relate it to the tell that produced it.
+	FromRunID     string
+	ToRunID       string
+	Kind          string
+	Payload       json.RawMessage
 	CorrelationID string
 }
 
@@ -62,9 +60,6 @@ type DeliverRequest struct {
 // peer lookups all have one place to reach the parent. An implementation
 // composes the local seam for targets that are still local instead of owning a
 // queue or an ask store of its own.
-//
-// An implementation honours the cancellation of the context it is handed, so a
-// transport that joins a delegated call can join it when the transport closes.
 type Messenger interface {
 	// Send admits an ask and publishes it to its target. legacy admits an
 	// unversioned message id without a generation, which only the broker's
@@ -79,10 +74,9 @@ type Messenger interface {
 	// back to Deliver. A replier that is not the edge's target reports
 	// ErrNotAskTarget, so the broker can refuse it as the local store does.
 	Reply(ctx context.Context, req ReplyRequest) (Outcome, error)
-	// Deliver publishes a fire-and-forget message. It allocates no reply edge.
+	// Deliver publishes a fire-and-forget message.
 	Deliver(ctx context.Context, req DeliverRequest) error
-	// Reachable reports whether runID can be reached from here. It is the
-	// authority for an ask's target: a target it denies is not askable.
+	// Reachable reports whether runID can be reached from here.
 	Reachable(runID string) bool
 	// Peers lists the participants reachable from here. A listing that could
 	// not be completed returns the peers it did read together with

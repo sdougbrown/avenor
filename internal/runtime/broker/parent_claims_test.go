@@ -63,8 +63,8 @@ func (p *parentLinkPause) Register(reg messaging.DescendantRegistration) (messag
 	return claim, err
 }
 
-func (p *parentLinkPause) Deregister(childID, generation string) ([]string, error) {
-	runs, err := p.ParentLink.Deregister(childID, generation)
+func (p *parentLinkPause) Deregister(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
+	runs, err := p.ParentLink.Deregister(childID, reg)
 	pauseCh, releaseCh := p.take(&p.deregisterPause, &p.deregisterRelease)
 	if pauseCh != nil {
 		close(pauseCh)
@@ -188,7 +188,7 @@ func TestParentRunClaimsExcludeARetiredDescendantRecord(t *testing.T) {
 	deregisterDone := make(chan int, 1)
 	go func() {
 		req, err := http.NewRequest(http.MethodPost, "http://"+b.Addr()+"/parent/deregister",
-			bytes.NewReader([]byte(`{"child_id":"child-a","generation":"gen-a"}`)))
+			bytes.NewReader([]byte(`{"child_id":"child-a","endpoint":"http://child-a","generation":"gen-a","runs":[{"run_id":"run-x","label":"run-x","token":"tok-x"}]}`)))
 		if err != nil {
 			deregisterDone <- -1
 			return

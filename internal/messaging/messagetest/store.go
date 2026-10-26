@@ -34,60 +34,6 @@ func NewMemoryBackend() *MemoryBackend {
 	return &MemoryBackend{queues: make(map[string][]queuedEntry)}
 }
 
-// NewStoreMessenger builds a messaging.Messenger over a store and its memory
-// backend, so the shared contract suite can exercise a transport that routes
-// through a messenger instead of serving the store alone.
-func NewStoreMessenger(store *askstore.Store, backend *MemoryBackend) messaging.Messenger {
-	return storeMessenger{asks: askstore.NewAsker(store), backend: backend}
-}
-
-// PeersMessenger reports a fixed peer set beside the messenger it wraps, so a
-// test can tell a listing that came from the messenger from one that came
-// from the store behind it.
-type PeersMessenger struct {
-	messaging.Messenger
-	// Reported is the peer set this messenger reports.
-	Reported []messaging.Peer
-}
-
-func (m PeersMessenger) Peers(context.Context) ([]messaging.Peer, error) { return m.Reported, nil }
-
-// storeMessenger serves the messaging seam from a store and a memory backend.
-type storeMessenger struct {
-	asks    *askstore.Asker
-	backend *MemoryBackend
-}
-
-func (m storeMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
-	return m.asks.Send(ctx, req, legacy)
-}
-
-func (m storeMessenger) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
-	return m.asks.Wait(ctx, req)
-}
-
-func (m storeMessenger) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
-	return m.asks.Withdraw(ctx, req)
-}
-
-func (m storeMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
-	return m.asks.Reply(ctx, req)
-}
-
-func (m storeMessenger) Deliver(_ context.Context, req messaging.DeliverRequest) error {
-	_, err := m.backend.Publish(req.ToRunID, messaging.InboundMessage{
-		MessageID: req.CorrelationID,
-		FromRunID: req.FromRunID,
-		Kind:      req.Kind,
-		Payload:   req.Payload,
-	})
-	return err
-}
-
-func (m storeMessenger) Reachable(string) bool { return true }
-
-func (m storeMessenger) Peers(context.Context) ([]messaging.Peer, error) { return m.backend.Peers() }
-
 // Publish appends msg to target's queue.
 func (m *MemoryBackend) Publish(target string, msg messaging.InboundMessage) (func(), error) {
 	m.mu.Lock()

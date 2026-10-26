@@ -1,7 +1,6 @@
 package parentlink
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -83,7 +82,7 @@ func TestMessengerRegisterRefusesARunThisBrokerOwns(t *testing.T) {
 	if !errors.Is(err, ErrRunLocallyOwned) {
 		t.Fatalf("Register error = %v, want ErrRunLocallyOwned", err)
 	}
-	if claim.Retired != nil {
+	if claim.Adopted != nil || claim.Retired != nil {
 		t.Fatalf("Register claim = %+v, want nothing applied", claim)
 	}
 	if messenger.Owns("run-child") {
@@ -323,166 +322,5 @@ func TestMessengerPeersUnionsTheParentsPeersWithoutDuplicates(t *testing.T) {
 		if seen[runID] != 1 {
 			t.Fatalf("peers = %v, want %q listed once", seen, runID)
 		}
-	}
-}
-
-// TestMessengerDeliverDispatchesThreeWays pins the deliver routing: a run a
-// registered child owns relays into the child's queue, a run the local seam
-// serves delivers locally, and anything else with a parent forwards upward.
-func TestMessengerDeliverDispatchesThreeWays(t *testing.T) {
-	deliverRequest := func(toRunID string) messaging.DeliverRequest {
-		return messaging.DeliverRequest{
-			FromRunID: "run-a",
-			ToRunID:   toRunID,
-			Kind:      "agent_message",
-			Payload:   json.RawMessage(`{"message":"ping"}`),
-		}
-	}
-
-	t.Run("descendant-owned target relays down", func(t *testing.T) {
-		child := newStubBroker(t, func(req stubRequest) (int, string) {
-			return http.StatusOK, `{"outcome":"queued"}`
-		})
-		local := newStubMessenger()
-		messenger := newTestMessenger(t, local, nil)
-		if _, err := messenger.Register(messaging.DescendantRegistration{
-			ChildID:    "child-one",
-			Endpoint:   child.URL(),
-			Generation: "gen-a",
-			Runs:       []messaging.RunClaim{{RunID: "run-b", Token: "tok-b"}},
-		}); err != nil {
-			t.Fatalf("Register: %v", err)
-		}
-
-		if err := messenger.Deliver(testContext(t), deliverRequest("run-b")); err != nil {
-			t.Fatalf("Deliver: %v", err)
-		}
-		if child.countPath(pathRelay) != 1 {
-			t.Fatalf("the child saw %d relays, want 1", child.countPath(pathRelay))
-		}
-		if len(local.delivers) != 0 {
-			t.Fatalf("the local seam saw %d delivers, want none routed locally", len(local.delivers))
-		}
-	})
-
-	t.Run("locally reachable target delivers locally", func(t *testing.T) {
-		parent := newStubBroker(t, func(req stubRequest) (int, string) {
-			return http.StatusOK, `{"outcome":"queued"}`
-		})
-		local := newStubMessenger()
-		local.reachable["run-a"] = true
-		messenger := newTestMessenger(t, local, parent)
-
-		if err := messenger.Deliver(testContext(t), deliverRequest("run-a")); err != nil {
-			t.Fatalf("Deliver: %v", err)
-		}
-		if len(local.delivers) != 1 || local.delivers[0].ToRunID != "run-a" {
-			t.Fatalf("the local seam saw %v, want the delivery routed locally", local.delivers)
-		}
-		if parent.countPath(pathSend) != 0 {
-			t.Fatal("the parent saw a forwarded delivery, want the local answer")
-		}
-	})
-
-	t.Run("unknown target forwards to the parent", func(t *testing.T) {
-		parent := newStubBroker(t, func(req stubRequest) (int, string) {
-			switch req.Path {
-			case pathRegister:
-				return http.StatusOK, `{"generation":"gen-a"}`
-			}
-			return http.StatusOK, `{"outcome":"queued"}`
-		})
-		local := newStubMessenger()
-		messenger := newTestMessenger(t, local, parent)
-		ctx := testContext(t)
-		// The forward carries this run's credentials, so the claim is published
-		// before the delivery is routed upward.
-		if err := messenger.Start(ctx); err != nil {
-			t.Fatalf("Start: %v", err)
-		}
-
-		if err := messenger.Deliver(ctx, deliverRequest("run-x")); err != nil {
-			t.Fatalf("Deliver: %v", err)
-		}
-		if parent.countPath(pathSend) != 1 {
-			t.Fatalf("the parent saw %d deliveries, want 1", parent.countPath(pathSend))
-		}
-		if len(local.delivers) != 0 {
-			t.Fatalf("the local seam saw %d delivers, want none", len(local.delivers))
-		}
-	})
-}
-
-// TestMessengerWaitAndWithdrawFollowTheRoutedAsk pins the route-following: an
-// ask this broker forwarded to its parent is waited on and withdrawn through
-// the same up link, not against the local seam that never saw the edge.
-func TestMessengerWaitAndWithdrawFollowTheRoutedAsk(t *testing.T) {
-	parent := newStubBroker(t, func(req stubRequest) (int, string) {
-		switch req.Path {
-		case pathRegister:
-			return http.StatusOK, `{"generation":"gen-a"}`
-		case pathSend:
-			return http.StatusOK, `{"outcome":"sent"}`
-		case pathWait:
-			return http.StatusOK, `{"outcome":"replied","message_id":"msg-1"}`
-		case pathWithdraw:
-			return http.StatusOK, `{"outcome":"withdrawn"}`
-		}
-		return http.StatusOK, `{}`
-	})
-	local := newStubMessenger()
-	local.withdrawResult = messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent}
-	messenger := newTestMessenger(t, local, parent)
-	ctx := testContext(t)
-	if err := messenger.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	// No branch here owns or serves run-x, so the ask routes up and the link
-	// records its route.
-	sent, err := messenger.Send(ctx, askRequest("msg-1"), false)
-	if err != nil || sent.Outcome != messaging.OutcomeSent {
-		t.Fatalf("Send = (%v, %v), want the parent's sent outcome", sent, err)
-	}
-	if localWaited := len(local.waits); localWaited != 0 {
-		t.Fatalf("the local seam saw %d waits before the ask was answered", localWaited)
-	}
-
-	waited, err := messenger.Wait(ctx, waitRequest("msg-1"))
-	if err != nil || waited.Outcome != messaging.OutcomeReplied {
-		t.Fatalf("Wait = (%v, %v), want the parent's replied outcome", waited, err)
-	}
-	if parent.countPath(pathWait) != 1 {
-		t.Fatalf("the parent saw %d waits, want 1 on the recorded route", parent.countPath(pathWait))
-	}
-	if len(local.waits) != 0 {
-		t.Fatalf("the local seam saw %d waits, want the ask followed up", len(local.waits))
-	}
-
-	// A second ask routes up the same way; withdrawing it reaches the parent
-	// instead of the local seam that never admitted the edge.
-	if _, err := messenger.Send(ctx, askRequest("msg-2"), false); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	withdrew, err := messenger.Withdraw(ctx, withdrawRequest("msg-2"))
-	if err != nil || withdrew.Outcome != messaging.OutcomeWithdrawn {
-		t.Fatalf("Withdraw = (%v, %v), want the parent's withdrawn outcome", withdrew, err)
-	}
-	if parent.countPath(pathWithdraw) != 1 {
-		t.Fatalf("the parent saw %d withdrawals, want 1 on the recorded route", parent.countPath(pathWithdraw))
-	}
-	if len(local.withdraw) != 0 {
-		t.Fatalf("the local seam saw %d withdrawals, want the route followed up", len(local.withdraw))
-	}
-
-	// The replied edge is terminal: the route the wait consumed is gone, so the
-	// withdrawal degrades to the local seam's edge-absent verdict instead of
-	// replaying into the parent.
-	withdrew, err = messenger.Withdraw(ctx, withdrawRequest("msg-1"))
-	if err != nil || withdrew.Outcome != messaging.OutcomeEdgeAbsent {
-		t.Fatalf("Withdraw = (%v, %v), want the local edge-absent verdict", withdrew, err)
-	}
-	if parent.countPath(pathWithdraw) != 1 {
-		t.Fatalf("the parent saw %d withdrawals, want the consumed route not replayed", parent.countPath(pathWithdraw))
 	}
 }

@@ -99,14 +99,12 @@ func TestRelayRefusalRetiresTheAdoptedRecordQuietly(t *testing.T) {
 	)
 	link, err := Install(Options{
 		Generation: b.Store().Generation,
-		RetireRuns: func(runIDs []string) {
+		RetireRun: func(runID, token string) {
 			if armed.Load() {
 				close(paused)
 				<-release
 			}
-			for _, runID := range runIDs {
-				b.DeleteRun(runID)
-			}
+			b.DeleteRun(runID)
 		},
 	}, b)
 	if err != nil {

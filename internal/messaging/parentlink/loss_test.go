@@ -121,14 +121,16 @@ func TestCallerLossRetiresTheParentEdge(t *testing.T) {
 	}
 
 	// The asking run is gone, so its branch re-publishes a run set without it.
-	// The registry change and the adopted record's deletion land in two steps,
-	// so wait for the whole server-side transition before asserting.
 	first.broker.DeleteRun("asker")
 	awaitUntil(t, "the parent to retire the deleted caller", func() bool {
-		return !parent.link.Registry().Owns("asker") &&
-			parent.broker.GetRun("asker") == nil &&
-			parent.broker.Store().ActiveCount() == 0
+		return !parent.link.Registry().Owns("asker")
 	})
+	if parent.broker.GetRun("asker") != nil {
+		t.Fatal("the parent still holds the deleted caller's run record")
+	}
+	if edges := parent.broker.Store().ActiveCount(); edges != 0 {
+		t.Fatalf("parent holds %d ask edges for a caller that is gone", edges)
+	}
 }
 
 // TestConcurrentCrossBranchAsksAndWithdrawals drives the routed reply, wait and

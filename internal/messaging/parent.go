@@ -18,14 +18,12 @@ type ParentLink interface {
 	// Register adopts one child broker's claim on the runs it owns and reports
 	// what the claim changed. A run another child already owns is refused.
 	Register(reg DescendantRegistration) (DescendantClaim, error)
-	// Deregister retires one child and reports the runs it had claimed. The
-	// caller pins the generation its view of the child registered with: a claim
-	// a fresher registration replaced survives the deregistration.
-	Deregister(childID, generation string) ([]string, error)
-	// ForceDeregister retires every claim a child holds and deletes its record
-	// without pinning a generation, so an operator can release a child whose
-	// durable identity moved and whose generation no view can pin.
-	ForceDeregister(childID string) ([]string, error)
+	// Deregister retires one child and reports the run keys it had claimed with
+	// the credential each claim was registered with, but only while the
+	// registration still matches the closing branch's view; a registration a
+	// same-identity replacement replaced is refused with
+	// ErrGenerationMismatch and nothing is retired.
+	Deregister(childID string, reg DescendantRegistration) (map[string]string, error)
 	// RecordRelay records the reply route of a relayed ask. The broker calls it
 	// before it exposes the ask to a consumer, so a reply always follows the
 	// hop the ask arrived on.
@@ -44,7 +42,11 @@ type RunClaim struct {
 }
 
 // DescendantRegistration is one child broker's claim on the runs it owns: where
-// its broker answers, the generation its ask store pinned, and the runs.
+// its broker answers, the generation its ask store pinned, and the runs. It is
+// also the view a closing branch holds of the registration its parent last
+// accepted: a deregistration carries it for the parent to compare against the
+// registration it holds, so a deregistration that arrives after a replacement
+// re-registered is refused instead of retiring the replacement's claims.
 type DescendantRegistration struct {
 	ChildID    string     `json:"child_id"`
 	Endpoint   string     `json:"endpoint"`
@@ -66,16 +68,12 @@ type ClaimedRun struct {
 
 // DescendantClaim reports what one registration changed, so the broker can
 // adopt every run record the child now claims and retire the ones it stopped
-// claiming. Retired names runs by the run ID this broker addresses them by;
-// Runs carries both, with ClaimedRun.RunID the canonical run ID the owning
-// branch knows the run by and Key the run ID this broker addresses it by.
-// Changed reports whether the claim adopted or retired a run: a registration
-// that only refreshes what the child already claimed left the owned run set
-// alone.
+// claiming. Runs, Adopted and Retired all name runs by the run ID this broker
+// addresses them by.
 type DescendantClaim struct {
 	Runs    []ClaimedRun
+	Adopted []string
 	Retired []string
-	Changed bool
 }
 
 // RelayRoute is one relayed ask's reply route, recorded before the ask is

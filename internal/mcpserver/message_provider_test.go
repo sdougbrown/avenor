@@ -247,33 +247,26 @@ func TestMCPMessageProviderPeerRunStateMissIsTargetUnavailable(t *testing.T) {
 	}
 }
 
-// TestMCPMessageProviderKeepsAPartialPeerListing pins that a peer listing
-// the broker could not complete still answers for the peer it did read, and
-// refuses to claim that a peer it did not read does not exist.
-func TestMCPMessageProviderKeepsAPartialPeerListing(t *testing.T) {
+func TestMCPMessageProviderRefusesResolutionOnAPeersError(t *testing.T) {
+	// The listing came back with a transport error beside the peers it read:
+	// the provider refuses the whole lookup the way a listing it could not
+	// read at all is refused, even for a peer the partial set contains.
+	peersErr := fmt.Errorf("%w: dial http://10.0.0.1:9 failed", messaging.ErrIncompleteListing)
 	cl := &fakeMessageControlClient{
 		fakeClient: &fakeClient{},
 		peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
 			return messaging.PeersResult{
-				Peers:      []messaging.Peer{testPeer("rt-seen", "seen", "running")},
+				Peers:      []messaging.Peer{testPeer("rt-a", "alpha", "running")},
 				Generation: "gen-1",
-			}, fmt.Errorf("%w: the broker could not read every peer", messaging.ErrIncompleteListing)
+			}, peersErr
 		},
 	}
 	p := newTestMessageProvider(t, cl)
-	resolved, err := p.Resolve(context.Background(), "rt-seen")
-	if err != nil || resolved.RunID != "rt-seen" {
-		t.Fatalf("visible peer = %+v, %v, want the peer the listing did read", resolved, err)
+	if _, err := p.Resolve(context.Background(), "rt-a"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("Resolve error = %v, want the incomplete-listing error", err)
 	}
-	state, err := p.peerRunState(context.Background(), "rt-seen")
-	if err != nil {
-		t.Fatalf("visible peer state = %+v, %v, want the peer the listing did read", state, err)
-	}
-	if _, err := p.peerRunState(context.Background(), "rt-missing"); !errors.Is(err, messaging.ErrIncompleteListing) {
-		t.Fatalf("missing peer state = %v, want the incomplete listing reported", err)
-	}
-	if _, err := p.Resolve(context.Background(), "rt-missing"); !errors.Is(err, messaging.ErrIncompleteListing) {
-		t.Fatalf("missing peer = %v, want the incomplete listing reported", err)
+	if _, err := p.peerRunState(context.Background(), "rt-a"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("peerRunState error = %v, want the incomplete-listing error", err)
 	}
 }
 

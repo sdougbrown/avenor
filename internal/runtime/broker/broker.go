@@ -114,7 +114,10 @@ type LastAgentMessage struct {
 
 // RunState holds all per-run broker state.
 type RunState struct {
-	RunID               string
+	RunID string
+	// Token is the credential this run authenticates with. A replacement branch
+	// claim rotates it, so it is guarded by the broker's own mutex, not by Mu:
+	// read it through Broker.runToken or Broker.runStateFor.
 	Token               string
 	ControlQueue        []*ControlMessage
 	RegisteredAt        time.Time
@@ -326,25 +329,16 @@ func New(globalToken string) *Broker {
 		store:        askstore.New(askstore.Options{}),
 	}
 	b.store.SetBackend(brokerBackend{broker: b})
-	b.messenger = b.localMessenger()
+	b.messenger = localMessenger{broker: b}
 	return b
 }
 
-// Store returns the ask store the broker serves. It is the broker's own
-// local door: an ask admitted through it stays local and the installed
-// messenger never sees it, so a host that owns the ask lifecycle reaches the
-// store through the messaging seam instead.
+// Store returns the ask store the broker serves.
 func (b *Broker) Store() *askstore.Store { return b.store }
 
 // LocalMessenger returns the broker's own messaging implementation. A host
 // that owns a parent link composes it for every target that is still local.
-func (b *Broker) LocalMessenger() messaging.Messenger { return b.localMessenger() }
-
-// localMessenger is the broker's own messaging implementation, serving the
-// ask operations from its ask store and the publications from its queues.
-func (b *Broker) localMessenger() localMessenger {
-	return localMessenger{asks: askstore.NewAsker(b.store), broker: b}
-}
+func (b *Broker) LocalMessenger() messaging.Messenger { return localMessenger{broker: b} }
 
 // SetMessenger installs the delegate seam for local messaging. A nil messenger
 // restores the broker's own implementation.
@@ -424,7 +418,7 @@ func (b *Broker) seam() messaging.Messenger {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.messenger == nil {
-		return b.localMessenger()
+		return localMessenger{broker: b}
 	}
 	return b.messenger
 }
@@ -432,42 +426,10 @@ func (b *Broker) seam() messaging.Messenger {
 // MessengerTransport returns the in-process transport over the broker's ask
 // store whose ask, reply and peer operations enter the messenger seam at call
 // time. A messenger installed after this transport was built is still reached.
-// The peer listing it serves names the runs the broker owns beside the peers
-// the seam can see, so every listing the broker serves names the same
-// participants.
 func (b *Broker) MessengerTransport() messaging.Transport {
-	return peerListingTransport{Transport: inprocess.NewRouted(b.store, b.seam), broker: b}
+	return inprocess.NewRouted(b.store, b.seam)
 }
 
-// peerListingTransport is the broker's routed transport with the broker's own
-// runs merged into the seam's peer listing.
-type peerListingTransport struct {
-	messaging.Transport
-	broker *Broker
-}
-
-func (t peerListingTransport) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
-	res, err := t.Transport.Peers(ctx, req)
-	if err != nil && !errors.Is(err, messaging.ErrIncompleteListing) {
-		// The listing could not be read, which is a failure and not a partial
-		// listing, so the failure's own class reaches the caller.
-		return res, err
-	}
-	seam := t.broker.seam()
-	if _, own := seam.(localMessenger); own {
-		// The broker's own messenger already lists the runs the broker owns, so
-		// the listing is the seam's own and the broker's runs are not read a
-		// second time.
-		return res, err
-	}
-	set := t.broker.withLocalRuns(res.Peers)
-	res.Peers = set.peers
-	if set.unreadable > 0 {
-		return res, fmt.Errorf("%w: %s", messaging.ErrIncompleteListing,
-			messaging.UnreadablePeerRecordsDetail(set.unreadable))
-	}
-	return res, err
-}
 func MakeToken() string {
 	b := make([]byte, 16)
 	_, err := rand.Read(b)
@@ -564,10 +526,9 @@ func (b *Broker) withMethod(method string, next http.HandlerFunc) http.HandlerFu
 	}
 }
 
-// authenticatedCaller reports the run ID withAuth verified into a handler, so
-// a handler never has to trust the request body for the caller's identity. The
-// identity travels on the messaging leaf's caller key — the same key the
-// peer-export narrowing reads — so there is one owner per request.
+// authenticatedCaller reports the run ID withAuth verified, which travels on
+// the messaging leaf's caller-run key so a handler never has to trust the
+// request body for the caller's identity and one key serves every reader.
 func authenticatedCaller(r *http.Request) string {
 	caller, _ := messaging.CallerRun(r.Context())
 	return caller
@@ -630,20 +591,13 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized: missing run_id or token", http.StatusUnauthorized)
 			return
 		}
-		b.mu.RLock()
-		st, ok := b.runs[cred.RunID]
-		var token string
-		if ok {
-			token = st.Token
-		}
-		b.mu.RUnlock()
-		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(token)) != 1 {
+		_, want, ok := b.runStateFor(cred.RunID)
+		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(want)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		// The authenticated caller travels on the messaging leaf's caller key: the
-		// peer export a parent-aware messenger performs is narrowed to what this
-		// caller may see, and the broker's handlers read the same fact.
+		// The authenticated run travels on the messaging leaf's caller-run key,
+		// the one key the peer export and the router's own handlers read.
 		ctx := messaging.WithCallerRun(r.Context(), cred.RunID)
 		next(w, r.WithContext(ctx))
 	}
@@ -671,27 +625,21 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.mu.Lock()
-	st, exists := b.runs[body.RunID]
-	var registered string
-	var registeredID string
-	if exists {
-		registered = st.Token
-		registeredID = st.RunID
-	}
-	if exists && (body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(registered)) != 1) {
-		b.mu.Unlock()
-		http.Error(w, "run already registered", http.StatusConflict)
-		return
-	}
-	if exists {
+	if st, exists := b.runs[body.RunID]; exists {
+		if body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(st.Token)) != 1 {
+			b.mu.Unlock()
+			http.Error(w, "run already registered", http.StatusConflict)
+			return
+		}
 		st.Mu.Lock()
 		st.RegisteredAt = time.Now()
 		st.LastSeen = time.Now()
 		st.Mu.Unlock()
+		respToken := st.Token
 		b.mu.Unlock()
 		resp := map[string]string{
-			"token":  registered,
-			"run_id": registeredID,
+			"token":  respToken,
+			"run_id": st.RunID,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -701,7 +649,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		token = MakeToken()
 	}
-	st = &RunState{
+	st := &RunState{
 		RunID:               body.RunID,
 		Token:               token,
 		RegisteredAt:        time.Now(),
@@ -717,7 +665,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"token":  token,
-		"run_id": body.RunID,
+		"run_id": st.RunID,
 	})
 }
 
@@ -922,13 +870,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Validate that the authenticated caller matches from_run_id's token.
-	b.mu.RLock()
-	fromSt, ok := b.runs[fullBody.FromRunID]
-	var fromToken string
-	if ok {
-		fromToken = fromSt.Token
-	}
-	b.mu.RUnlock()
+	fromSt, fromToken, ok := b.runStateFor(fullBody.FromRunID)
 	if !ok {
 		writeCodedError(w, http.StatusNotFound, "from run not found", "invalid-request")
 		return
@@ -978,16 +920,12 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 
 		target := fullBody.ToRunID
 
-		// One request reaches one seam, so a messenger installed while the
-		// request is in flight cannot answer the reachability check with one
-		// implementation and admit the ask with another.
-		seam := b.seam()
-		if !seam.Reachable(target) {
+		if !b.seam().Reachable(target) {
 			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 			return
 		}
 
-		res, err := seam.Send(r.Context(), messaging.SendRequest{
+		res, err := b.seam().Send(r.Context(), messaging.SendRequest{
 			From:       messaging.Identity{RunID: fullBody.FromRunID, Sender: senderName},
 			To:         messaging.Identity{RunID: target, Sender: target},
 			MessageID:  msgID,
@@ -1027,8 +965,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		// this layer can do because it owns the queues. The reply carries no
 		// generation, so the messenger looks the edge up in the store's current
 		// generation.
-		seam := b.seam()
-		outcome, err := seam.Reply(r.Context(), messaging.ReplyRequest{
+		outcome, err := b.seam().Reply(r.Context(), messaging.ReplyRequest{
 			From:          messaging.Identity{RunID: fullBody.FromRunID},
 			ToRunID:       fullBody.ToRunID,
 			MessageID:     replyTo,
@@ -1046,7 +983,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		if outcome == messaging.OutcomeEdgeAbsent {
 			// No live edge owns this ID, so the reply degrades to a delivery
 			// rather than completing an edge the store already retired.
-			err = seam.Deliver(r.Context(), messaging.DeliverRequest{
+			err = b.seam().Deliver(r.Context(), messaging.DeliverRequest{
 				FromRunID: fullBody.FromRunID,
 				ToRunID:   fullBody.ToRunID,
 				Kind:      fullBody.Type,
@@ -1270,165 +1207,45 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 // reads as a complete one.
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
-	set, listingErr := b.seamPeers(r.Context())
+	peers, listingErr := b.seam().Peers(r.Context())
+
+	sessions := make([]SessionInfo, 0, len(peers))
+	unreadable := 0
+	for _, peer := range peers {
+		info := SessionInfo{RunID: peer.RunID}
+		if len(peer.Session) > 0 {
+			if err := json.Unmarshal(peer.Session, &info); err != nil {
+				unreadable++
+				continue
+			}
+		}
+		if info.RunID == "" {
+			info.RunID = peer.RunID
+		}
+		sessions = append(sessions, info)
+	}
 
 	body := map[string]any{
-		"sessions":           set.sessions,
+		"sessions":           sessions,
 		"generation":         generation,
 		"messaging_protocol": messaging.ProtocolVersion,
 	}
-	if listingErr != nil || set.unreadable > 0 {
-		body["peers_error"] = incompletePeerListing(set.unreadable)
+	if listingErr != nil || unreadable > 0 {
+		body["peers_error"] = incompletePeerListing(unreadable)
 	}
 	writeJSONBody(w, http.StatusOK, body)
 }
 
-// seamPeers is the peer listing the broker serves: the peers the installed
-// messenger reports and, when that messenger is not the broker's own, the runs
-// the broker owns. A host that lists only the peers it reaches cannot hide the
-// local runs, the supervisor's own included, from the children that address
-// them.
-//
-// The broker's own messenger already lists exactly the runs the broker owns,
-// so the listing is the broker's own session list read once, and a listing
-// from a host messenger is read once and joined with it.
-func (b *Broker) seamPeers(ctx context.Context) (peerSet, error) {
-	seam := b.seam()
-	if _, own := seam.(localMessenger); own {
-		sessions := b.sessions()
-		return peerSet{peers: peersOf(sessions), sessions: sessions}, nil
-	}
-	peers, err := seam.Peers(ctx)
-	if _, routed := seam.(messaging.ParentLink); routed {
-		// The routed messenger's own listing already carries the broker's own
-		// runs and applies the registry's export rule to the whole set, so the
-		// local merge below would re-add the descendant runs the rule hid from
-		// a caller in a sibling branch.
-		return peersOfExported(peers), err
-	}
-	return b.withLocalRuns(peers), err
-}
-
-// peersOfExported reads an already-exported peer listing into the set the
-// broker serves: every peer becomes a session record, and a record that cannot
-// be read is dropped and counted so a malformed record cannot break the listing.
-func peersOfExported(peers []messaging.Peer) peerSet {
-	set := peerSet{peers: []messaging.Peer{}, sessions: []SessionInfo{}}
-	for _, peer := range peers {
-		info, err := peerSession(peer)
-		if err != nil {
-			set.unreadable++
-			continue
-		}
-		set.sessions = append(set.sessions, info)
-		set.peers = append(set.peers, peer)
-	}
-	return set
-}
-
-// peerSet is one listing's peers with their session records already read, so
-// every listing the broker serves publishes the same record for the same run.
-type peerSet struct {
-	peers      []messaging.Peer
-	sessions   []SessionInfo
-	unreadable int
-}
-
-// withLocalRuns is the peer set every listing the broker serves names: the
-// runs the broker owns and the peers the seam can see. A host that lists
-// only the peers it reaches cannot hide the local runs, the supervisor's own
-// included, from the children that address them, and a host that reports a
-// peer under a local run's id cannot replace the broker's own record for it.
-// A record that cannot be read is dropped and counted, so every listing
-// carries the same records and a malformed record cannot break a response.
-func (b *Broker) withLocalRuns(peers []messaging.Peer) peerSet {
-	set := peerSet{peers: []messaging.Peer{}, sessions: []SessionInfo{}}
-	seen := make(map[string]bool, len(peers))
-	add := func(peer messaging.Peer) {
-		if peer.RunID != "" {
-			if seen[peer.RunID] {
-				return
-			}
-			seen[peer.RunID] = true
-		}
-		info, err := peerSession(peer)
-		if err != nil {
-			set.unreadable++
-			return
-		}
-		set.sessions = append(set.sessions, info)
-		raw, err := json.Marshal(info)
-		if err != nil {
-			set.unreadable++
-			return
-		}
-		set.peers = append(set.peers, messaging.Peer{RunID: peer.RunID, Session: raw})
-	}
-	for _, info := range b.sessions() {
-		if seen[info.RunID] {
-			continue
-		}
-		seen[info.RunID] = true
-		set.sessions = append(set.sessions, info)
-		raw, err := json.Marshal(info)
-		if err != nil {
-			set.unreadable++
-			continue
-		}
-		set.peers = append(set.peers, messaging.Peer{RunID: info.RunID, Session: raw})
-	}
-	for _, peer := range peers {
-		add(peer)
-	}
-	return set
-}
-
-// peerSession is one peer's session record read into the broker's session
-// shape. The peer's own id is the identity: a session record's run_id is the
-// record's content, so it cannot rename the peer.
-func peerSession(peer messaging.Peer) (SessionInfo, error) {
-	info := SessionInfo{RunID: peer.RunID}
-	if len(peer.Session) > 0 {
-		if err := json.Unmarshal(peer.Session, &info); err != nil {
-			return SessionInfo{}, err
-		}
-	}
-	if peer.RunID != "" {
-		info.RunID = peer.RunID
-	}
-	return info, nil
-}
-
-// localPeers is the broker's own runs as peers, with their recorded
-// metadata. It is the one place the broker's peer records are built, so the
-// store's peer source and the listing the broker serves publish the same
-// record for the same run.
-func (b *Broker) localPeers() []messaging.Peer {
-	return peersOf(b.sessions())
-}
-
-// peersOf is a session list as peers, with each session's record built once.
-func peersOf(sessions []SessionInfo) []messaging.Peer {
-	peers := make([]messaging.Peer, 0, len(sessions))
-	for _, info := range sessions {
-		raw, err := json.Marshal(info)
-		if err != nil {
-			continue
-		}
-		peers = append(peers, messaging.Peer{RunID: info.RunID, Session: raw})
-	}
-	return peers
-}
-
 // incompletePeerListing is the reason a peer listing the broker could not
-// complete carries. It names no detail of the failure: a seam's error can
-// carry an absolute path or a remote endpoint, and this reason reaches every
-// authenticated run and, through the local adapter, a model's context.
+// complete carries on the wire. It names no detail of the failure: a seam's
+// error can carry an absolute path or a remote endpoint, and the reason
+// reaches every authenticated run and, through a client's tool result, a
+// model's context.
 func incompletePeerListing(unreadable int) string {
 	if unreadable == 0 {
 		return messaging.IncompletePeerListing
 	}
-	return fmt.Sprintf("%s: %s", messaging.IncompletePeerListing, messaging.UnreadablePeerRecordsDetail(unreadable))
+	return fmt.Sprintf("%s: %d session records unreadable", messaging.IncompletePeerListing, unreadable)
 }
 
 // --- parent link ---
@@ -1468,12 +1285,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	var body struct {
-		ChildID    string               `json:"child_id"`
-		Endpoint   string               `json:"endpoint"`
-		Generation string               `json:"generation"`
-		Runs       []messaging.RunClaim `json:"runs"`
-	}
+	var body messaging.DescendantRegistration
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -1483,17 +1295,18 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, claim := range body.Runs {
-		if claim.RunID == "" {
+		switch {
+		case claim.RunID == "":
 			writeCodedError(w, http.StatusBadRequest, "every claimed run needs a run_id", "invalid-request")
+			return
+		case strings.Contains(claim.RunID, "@"):
+			// A run ID carrying "@" reads as a branch-namespaced key, so a child
+			// claiming one could forge another branch's supervisor identity.
+			writeCodedError(w, http.StatusBadRequest, "a claimed run id cannot contain \"@\"", "invalid-request")
 			return
 		}
 	}
-	claim, err := link.Register(messaging.DescendantRegistration{
-		ChildID:    body.ChildID,
-		Endpoint:   body.Endpoint,
-		Generation: body.Generation,
-		Runs:       body.Runs,
-	})
+	claim, err := link.Register(body)
 	if err != nil {
 		writeCodedError(w, http.StatusConflict, err.Error(), "invalid-request")
 		return
@@ -1529,12 +1342,11 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleParentDeregister retires one child broker's claim and the run records
-// it owned, so a closed branch stops being a routing target. A body with
-// "force": true retires the child's claims without pinning a generation: that
-// is the operator's recovery path for a child whose durable identity changed
-// across a restart, whose old claims the ordinary generation-pinned
-// deregistration can never retire. Force requires a configured parent-link
-// token, since a tokenless link authenticates every caller.
+// it owned, so a closed branch stops being a routing target. The branch sends
+// the view of its registration its parent last accepted, and the retirement
+// applies only while the registration still matches it: a same-identity
+// replacement that re-registered while the deregistration was in flight keeps
+// its claims and records.
 func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) {
 	link, token := b.parentSeam()
 	if link == nil {
@@ -1555,11 +1367,7 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	var body struct {
-		ChildID    string `json:"child_id"`
-		Generation string `json:"generation"`
-		Force      bool   `json:"force"`
-	}
+	var body messaging.DescendantRegistration
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -1568,31 +1376,27 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		writeCodedError(w, http.StatusBadRequest, "child_id is required", "invalid-request")
 		return
 	}
-	// A forced deregistration deletes a child's registration wholesale, so a
-	// link whose authorization degrades to "accept any caller" when no token is
-	// configured must not serve it: without a configured credential there is no
-	// caller this route can authenticate, and force would let any network peer
-	// unroute a live branch.
-	if body.Force && token == "" {
-		writeCodedError(w, http.StatusForbidden, "the forced deregistration requires a configured parent-link token", "invalid-request")
+	retired, err := link.Deregister(body.ChildID, body)
+	switch {
+	case errors.Is(err, messaging.ErrGenerationMismatch):
+		// The deregistration describes a registration this broker no longer
+		// holds: a same-identity replacement registered while it was in flight,
+		// and the replacement's claims and run records stay.
+		writeCodedError(w, http.StatusConflict, err.Error(), "generation-mismatch")
 		return
-	}
-	var runs []string
-	if body.Force {
-		runs, err = link.ForceDeregister(body.ChildID)
-	} else {
-		runs, err = link.Deregister(body.ChildID, body.Generation)
-	}
-	if err != nil {
+	case err != nil:
 		writeCodedError(w, http.StatusNotFound, err.Error(), "target-unavailable")
 		return
 	}
-	for _, runID := range runs {
-		b.DeleteRun(runID)
+	// Each retirement deletes the record only while the record still
+	// authenticates with the credential its claim was registered with, so a
+	// record a restarted run rotated is left to its owner.
+	for runID, token := range retired {
+		b.DeleteRunIfToken(runID, token)
 	}
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"deregistered": true,
-		"runs":         len(runs),
+		"runs":         len(retired),
 	})
 }
 
@@ -1803,15 +1607,25 @@ func (b *Broker) sessions() []SessionInfo {
 	return sessions
 }
 
-// runToken reports the credential this broker authenticates runID with.
-func (b *Broker) runToken(runID string) (string, bool) {
+// runStateFor reports runID's record and the credential it authenticates with,
+// both read under one lock. A replacement branch claim rotates the credential, so
+// a reader that dropped the broker mutex between the lookup and the comparison
+// would race the refresh and could authenticate against a credential that is
+// already gone.
+func (b *Broker) runStateFor(runID string) (*RunState, string, bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	st, ok := b.runs[runID]
 	if !ok {
-		return "", false
+		return nil, "", false
 	}
-	return st.Token, true
+	return st, st.Token, true
+}
+
+// runToken reports the credential this broker authenticates runID with.
+func (b *Broker) runToken(runID string) (string, bool) {
+	_, token, ok := b.runStateFor(runID)
+	return token, ok
 }
 
 // ParentRunClaims reports this broker's own runs, each with the credential its
@@ -2202,12 +2016,40 @@ func (b *Broker) DeleteRun(runID string) {
 	if !ok {
 		return
 	}
+	b.recordRemoved(runID, descendant)
+}
+
+// recordRemoved drops what a deleted record leaves behind: the run's ask edges,
+// and the run-set change a host publishes. It runs after the record left the
+// broker, outside the broker mutex. A removal of a record the broker only
+// adopted for a descendant's claim is not a change to the run set it publishes,
+// so that removal stays silent.
+func (b *Broker) recordRemoved(runID string, descendant bool) {
 	// No owner is left to wait for or cancel this run's asks, and asks
 	// addressed to it can never be answered.
 	b.store.RemoveRun(runID)
 	if !descendant {
 		b.runSetChanged()
 	}
+}
+
+// DeleteRunIfToken removes a run from the broker only while it still
+// authenticates with token, and reports whether it did. A relay that could not
+// reach a branch retires the record it failed on, but a replacement branch may
+// have registered with a fresh credential while the refusal was in flight; that
+// record belongs to the healthy replacement and survives.
+func (b *Broker) DeleteRunIfToken(runID, token string) bool {
+	b.mu.Lock()
+	st, ok := b.runs[runID]
+	if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(st.Token)) != 1 {
+		b.mu.Unlock()
+		return false
+	}
+	descendant := st.descendant
+	delete(b.runs, runID)
+	b.mu.Unlock()
+	b.recordRemoved(runID, descendant)
+	return true
 }
 
 func (b *Broker) RunCount() int {
@@ -2319,37 +2161,39 @@ func (x brokerBackend) Receive(sender string, limit int) ([]messaging.InboundMes
 }
 
 func (x brokerBackend) Peers() ([]messaging.Peer, error) {
-	// The store's backend carries no request context; peers are a snapshot of
-	// the runs this broker owns. Routing this through the seam would let a
-	// seam that composes its local peers from the public store call back into
-	// itself, so the store's peer source stays the broker's own registry.
-	return x.broker.localPeers(), nil
+	// The store's backend carries no request context; peers are a snapshot.
+	return x.broker.seam().Peers(context.Background())
 }
 
 // localMessenger serves local messaging from the broker's own queues and ask
 // store. It owns no state of its own, so a parent-aware messenger composes it
 // for every target that is still local.
 type localMessenger struct {
-	// asks serves the ask operations from the broker's own ask store, so the
-	// store's admission, wait, withdrawal and reply contract has one owner.
-	asks   *askstore.Asker
 	broker *Broker
 }
 
 func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
-	return m.asks.Send(ctx, req, legacy)
+	res, err := m.broker.store.Admit(ctx, askstore.AdmitRequestFrom(req, legacy))
+	return messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err
 }
 
 func (m localMessenger) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
-	return m.asks.Wait(ctx, req)
+	return m.broker.store.Wait(ctx, m.key(req.Sender, req.MessageID, req.Generation), req.Timeout)
 }
 
 func (m localMessenger) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
-	return m.asks.Withdraw(ctx, req)
+	return m.broker.store.Withdraw(m.key(req.Sender, req.MessageID, req.Generation))
 }
 
 func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
-	return m.asks.Reply(ctx, req)
+	// An empty body is no payload at all, which keeps the reply's stored
+	// payload valid JSON on the wire.
+	var payload json.RawMessage
+	if req.Body != "" {
+		payload = json.RawMessage(req.Body)
+	}
+	key := m.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, m.broker.store.Generation())
+	return m.broker.store.Reply(key, req.From.RunID, payload)
 }
 
 func (m localMessenger) Deliver(ctx context.Context, req messaging.DeliverRequest) error {
@@ -2361,7 +2205,20 @@ func (m localMessenger) Reachable(runID string) bool {
 }
 
 func (m localMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
-	return m.broker.localPeers(), nil
+	sessions := m.broker.sessions()
+	peers := make([]messaging.Peer, 0, len(sessions))
+	for _, info := range sessions {
+		raw, err := json.Marshal(info)
+		if err != nil {
+			continue
+		}
+		peers = append(peers, messaging.Peer{RunID: info.RunID, Session: raw})
+	}
+	return peers, nil
+}
+
+func (m localMessenger) key(sender messaging.Identity, messageID, generation string) messaging.FenceKey {
+	return messaging.FenceKey{Sender: sender.RunID, MessageID: messageID, Generation: generation}
 }
 
 // mergedField combines a payload field with its envelope counterpart: the

@@ -103,14 +103,10 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		RefreshInterval: refresh,
 		Endpoint:        branch.url(),
 		Generation:      b.Store().Generation,
-		Runs:            b.ParentRunClaims,
-		// A run this branch stops owning loses its broker record too, so a
-		// refused descendant stops being served locally.
-		RetireRuns: func(runIDs []string) {
-			for _, runID := range runIDs {
-				b.DeleteRun(runID)
-			}
-		},
+		Runs:            func() []messaging.RunClaim { return b.ParentRunClaims() },
+		// Retiring the claim drops the host's run record with it, so a refused
+		// descendant stops being served locally.
+		RetireRun: func(runID, token string) { b.DeleteRunIfToken(runID, token) },
 	}, b)
 	if err != nil {
 		t.Fatalf("build parent link: %v", err)
@@ -193,15 +189,9 @@ func ask(t *testing.T, from *branch, fromRunID, toRunID, msgID string) (int, map
 	t.Helper()
 	// An agent pins the generation of the broker it talks to; the link translates
 	// that pin into the generation of the hop the ask is admitted on.
-	return postJSON(t, from.broker.Addr(), "/send", fromRunID, from.token(t, fromRunID), map[string]any{
-		"from_run_id":   fromRunID,
-		"to_run_id":     toRunID,
-		"type":          "agent_message",
-		"payload":       map[string]any{"message": "ping"},
-		"message_id":    msgID,
-		"generation":    from.broker.Store().Generation(),
-		"expects_reply": true,
-	})
+	token := from.token(t, fromRunID)
+	return postJSON(t, from.broker.Addr(), "/send", fromRunID, token,
+		sendBody(fromRunID, token, toRunID, msgID, from.broker.Store().Generation()))
 }
 
 // reply answers a queued ask over the target branch's HTTP surface.
