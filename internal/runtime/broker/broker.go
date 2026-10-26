@@ -1501,7 +1501,9 @@ func decodeRenameCaller(w http.ResponseWriter, r *http.Request) (renameRequest, 
 	}
 	var body renameRequest
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {
-		writeCodedError(w, http.StatusBadRequest, "request body is not a rename request", "invalid-request")
+		// /rename and /session_name share this decoder, so the error cannot name
+		// an endpoint — and valid JSON with a wrongly typed field fails here too.
+		writeCodedError(w, http.StatusBadRequest, "request body has invalid fields", "invalid-request")
 		return renameRequest{}, "", false
 	}
 	return body, authenticatedCaller(r), true
