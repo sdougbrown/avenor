@@ -62,16 +62,16 @@ func TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch(t *testing.T) {
 
 			err := relay.Ask(ctx, messaging.SendRequest{
 				From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-				To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
+				To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"},
 				MessageID: "msg-1",
 			})
 			if !errors.Is(err, testCase.wantError) {
 				t.Fatalf("Ask = %v, want %v", err, testCase.wantError)
 			}
-			if _, ok := registry.Hop("run-b"); ok == testCase.wantRunGone {
+			if _, ok := registry.Hop(ParentRunKey("child-one", "run-b")); ok == testCase.wantRunGone {
 				t.Fatalf("the relayed run routes = %v, want %v", ok, !testCase.wantRunGone)
 			}
-			if _, ok := registry.Hop("run-c"); ok == testCase.wantSiblingGone {
+			if _, ok := registry.Hop(ParentRunKey("child-one", "run-c")); ok == testCase.wantSiblingGone {
 				t.Fatalf("the child's other run routes = %v, want %v", ok, !testCase.wantSiblingGone)
 			}
 
@@ -79,7 +79,7 @@ func TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch(t *testing.T) {
 			// that is gone is not.
 			again := relay.Ask(ctx, messaging.SendRequest{
 				From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-				To:        messaging.Identity{RunID: "run-c", Sender: "bob"},
+				To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-c"), Sender: "bob"},
 				MessageID: "msg-2",
 			})
 			if testCase.wantSiblingGone {

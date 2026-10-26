@@ -48,7 +48,9 @@ func TestMessengerWithdrawsTheEdgeWhenTheRelayFails(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	sent, err := messenger.Send(testContext(t), askRequest("msg-1"), false)
+	request := askRequest("msg-1")
+	request.To = messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"}
+	sent, err := messenger.Send(testContext(t), request)
 	if err == nil {
 		t.Fatal("Send = nil error, want the relay failure")
 	}
@@ -58,35 +60,6 @@ func TestMessengerWithdrawsTheEdgeWhenTheRelayFails(t *testing.T) {
 	withdrawn := local.withdrawnMessages()
 	if len(withdrawn) != 1 || withdrawn[0] != "msg-1" {
 		t.Fatalf("withdrawn = %v, want the admitted edge retracted", withdrawn)
-	}
-}
-
-// TestMessengerRegisterRefusesARunThisBrokerOwns pins the claim guard's
-// other half: a descendant may not claim a run the local ask store serves,
-// so the registration is refused with nothing applied instead of routing
-// locally owned runs into the child's queue.
-func TestMessengerRegisterRefusesARunThisBrokerOwns(t *testing.T) {
-	local := newStubMessenger()
-	local.reachable["run-local"] = true
-	messenger := newTestMessenger(t, local, nil)
-
-	claim, err := messenger.Register(messaging.DescendantRegistration{
-		ChildID:    "child-one",
-		Endpoint:   "http://child-one",
-		Generation: "gen-a",
-		Runs: []messaging.RunClaim{
-			{RunID: "run-local", Token: "tok-l"},
-			{RunID: "run-child", Token: "tok-c"},
-		},
-	})
-	if !errors.Is(err, ErrRunLocallyOwned) {
-		t.Fatalf("Register error = %v, want ErrRunLocallyOwned", err)
-	}
-	if claim.Adopted != nil || claim.Retired != nil {
-		t.Fatalf("Register claim = %+v, want nothing applied", claim)
-	}
-	if messenger.Owns("run-child") {
-		t.Fatal("the refused registration left a claim behind")
 	}
 }
 
@@ -107,7 +80,7 @@ func TestMessengerRoutesALocalTargetLocally(t *testing.T) {
 
 	request := askRequest("msg-1")
 	request.To = messaging.Identity{RunID: "run-local", Sender: "carol"}
-	if _, err := messenger.Send(testContext(t), request, false); err != nil {
+	if _, err := messenger.Send(testContext(t), request); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if targets := local.sentRuns(); len(targets) != 1 || targets[0] != "run-local" {
@@ -134,7 +107,7 @@ func TestMessengerRoutesAnUnknownTargetToTheParent(t *testing.T) {
 	local := newStubMessenger()
 	messenger := newTestMessenger(t, local, parent)
 
-	sent, err := messenger.Send(testContext(t), askRequest("msg-1"), false)
+	sent, err := messenger.Send(testContext(t), askRequest("msg-1"))
 	if err != nil || sent.Outcome != messaging.OutcomeSent {
 		t.Fatalf("Send = (%+v, %v), want the ask forwarded to the parent", sent, err)
 	}
@@ -196,8 +169,9 @@ func TestMessengerSendsANoReplyAskToAChildWithoutAnEdge(t *testing.T) {
 	}
 
 	tell := askRequest("msg-1")
+	tell.To = messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"}
 	tell.NoReply = true
-	sent, err := messenger.Send(testContext(t), tell, false)
+	sent, err := messenger.Send(testContext(t), tell)
 	if err != nil || sent.Outcome != messaging.OutcomeSent {
 		t.Fatalf("Send = (%+v, %v), want the tell relayed and sent", sent, err)
 	}
@@ -322,5 +296,52 @@ func TestMessengerPeersUnionsTheParentsPeersWithoutDuplicates(t *testing.T) {
 		if seen[runID] != 1 {
 			t.Fatalf("peers = %v, want %q listed once", seen, runID)
 		}
+	}
+}
+
+// TestMessengerPeersShadowsAParentRunSharingALocalRunID pins the collision rule
+// under universal claim namespacing: a child branch and its parent can both own
+// a run with the same literal ID, and the local run is the one that ID names.
+// The parent-exported same-ID run is shadowed — the child could not address the
+// parent's run under that ID without also reaching its own — while a parent run
+// whose ID is distinct still lists. The parent's listing carries both forms the
+// parent exports: the literal ID a parent-owned run uses, and the namespaced key
+// under which the parent re-lists this branch's own claim.
+func TestMessengerPeersShadowsAParentRunSharingALocalRunID(t *testing.T) {
+	parent := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSessions:
+			return http.StatusOK, `{"generation":"gen-a","sessions":[{"run_id":"run-collide"},{"run_id":"run-collide@child-one"},{"run_id":"run-distinct"}]}`
+		}
+		return http.StatusOK, `{}
+`
+	})
+	local := newStubMessenger()
+	local.peers = []messaging.Peer{{RunID: "run-collide"}}
+	local.reachable["run-collide"] = true
+	messenger := newTestMessenger(t, local, parent)
+	ctx := testContext(t)
+	if err := messenger.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	peers, err := messenger.Peers(ctx)
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	seen := map[string]int{}
+	for _, peer := range peers {
+		seen[peer.RunID]++
+	}
+	if seen["run-collide"] != 1 {
+		t.Fatalf("peers = %v, want the local run-collide listed exactly once", seen)
+	}
+	if seen["run-collide@child-one"] != 0 {
+		t.Fatalf("peers = %v, want the parent's namespaced re-listing of the local claim shadowed", seen)
+	}
+	if seen["run-distinct"] != 1 {
+		t.Fatalf("peers = %v, want the parent's run-distinct listed", seen)
 	}
 }

@@ -1,53 +1,20 @@
 package parentlink
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
-// TestBranchIDDerivesDurableIdentity pins the identity a branch registers
-// under: the same input always derives the same identity, two identities whose
-// sanitized stems collide stay distinct, and the readable stem is sanitized.
-func TestBranchIDDerivesDurableIdentity(t *testing.T) {
-	cases := []struct {
-		identity string
-		prefix   string // the sanitized stem the identity must start with
-	}{
-		{identity: "test/avenor.sock", prefix: "avenor"},
-		{identity: "/x/avenor", prefix: "avenor"},
-		{identity: "/x/avenor.bak", prefix: "avenor"},
-		{identity: "dir/my branch!.sock", prefix: "my-branch"},
-		{identity: "dir/!!avenor!!.sock", prefix: "avenor"},
-		{identity: "dir/---.sock", prefix: "branch"},
-	}
-	seen := map[string]string{}
-	for _, tc := range cases {
-		id := BranchID(tc.identity)
-		if id == "" || !strings.HasPrefix(id, tc.prefix+"-") {
-			t.Fatalf("BranchID(%q) = %q, want the sanitized stem %q", tc.identity, id, tc.prefix)
-		}
-		if other, dup := seen[id]; dup {
-			t.Fatalf("BranchID(%q) = BranchID(%q) = %q, want distinct identities", tc.identity, other, id)
-		}
-		seen[id] = tc.identity
-		if again := BranchID(tc.identity); again != id {
-			t.Fatalf("BranchID(%q) derived %q then %q, want the same identity every time", tc.identity, id, again)
-		}
-	}
-	if id := BranchID(""); id != "" {
-		t.Fatalf("BranchID(\"\") = %q, want no identity", id)
-	}
-}
-
-// TestBranchIdentityIsDerivedFromTheControlSocketPath pins the derivation's
-// durability behaviors — repeat calls agree and distinct paths with the same
-// stem stay distinct — without mirroring the hash itself, so a derivation that
-// moves with process state or collides same-stem paths fails here instead of
-// silently defeating restart reclamation in tests that share the branch id.
+// TestBranchIdentityIsDerivedFromTheControlSocketPath derives the expectation
+// from the identity itself instead of calling BranchID, so an identity that moves
+// with process state, drops the digest, or cannot tell two paths with the same
+// stem apart fails here instead of silently defeating restart reclamation in
+// tests that compute their expectations through the same function.
 func TestBranchIdentityIsDerivedFromTheControlSocketPath(t *testing.T) {
 	identities := []string{
 		"/run/user/500/avenor/branch-alpha.sock",
@@ -56,17 +23,19 @@ func TestBranchIdentityIsDerivedFromTheControlSocketPath(t *testing.T) {
 	}
 	seen := make(map[string]string, len(identities))
 	for _, identity := range identities {
-		// The digest is the production derivation's job: this test pins only the
-		// durability behaviors — repeat calls agree, and distinct paths with the
-		// same stem stay distinct — without mirroring the hash itself.
-		want := BranchID(identity)
-		if again := BranchID(identity); again != want {
-			t.Fatalf("BranchID(%q) = %q on a second call, want the same durable identity %q", identity, again, want)
+		id := BranchID(identity)
+		digest := sha256.Sum256([]byte(identity))
+		want := "branch-alpha-" + hex.EncodeToString(digest[:8])
+		if got := BranchID(identity); got != want {
+			t.Fatalf("BranchID(%q) = %q, want the sanitized stem and the identity's digest %q", identity, got, want)
 		}
-		if other, collides := seen[want]; collides {
-			t.Fatalf("%q and %q share the branch identity %q", other, identity, want)
+		if again := BranchID(identity); again != id {
+			t.Fatalf("BranchID(%q) = %q on a second call, want the same durable identity %q", identity, again, id)
 		}
-		seen[want] = identity
+		if other, collides := seen[id]; collides {
+			t.Fatalf("%q and %q share the branch identity %q", other, identity, id)
+		}
+		seen[id] = identity
 	}
 }
 

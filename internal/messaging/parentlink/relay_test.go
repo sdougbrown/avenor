@@ -48,7 +48,7 @@ func TestRelayRetiresOnlyTheRefusedRunsRoute(t *testing.T) {
 
 	err := relay.Ask(testContext(t), messaging.SendRequest{
 		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-		To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
+		To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"},
 		MessageID: "msg-1",
 	})
 	if !errors.Is(err, messaging.ErrTargetUnavailable) {
@@ -57,10 +57,10 @@ func TestRelayRetiresOnlyTheRefusedRunsRoute(t *testing.T) {
 	if got, _ := stub.lastRequest(t, pathRelay).Body["token"].(string); got != "tok-b" {
 		t.Fatalf("the relay posted the token %q, want the credential the child registered", got)
 	}
-	if _, ok := registry.Hop("run-b"); ok {
+	if _, ok := registry.Hop(ParentRunKey("child-one", "run-b")); ok {
 		t.Fatal("the refused branch still routes the run that was relayed to")
 	}
-	if _, ok := registry.Hop("run-c"); !ok {
+	if _, ok := registry.Hop(ParentRunKey("child-one", "run-c")); !ok {
 		t.Fatal("the refusal retired the child's other run's route")
 	}
 }
@@ -78,14 +78,14 @@ func TestRelayRetiresTheRefusedRegistrationWhole(t *testing.T) {
 
 	err := relay.Ask(testContext(t), messaging.SendRequest{
 		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-		To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
+		To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"},
 		MessageID: "msg-1",
 	})
 	if !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("Ask = %v, want ErrTargetUnavailable", err)
 	}
 	for _, runID := range []string{"run-b", "run-c"} {
-		if _, ok := registry.Hop(runID); ok {
+		if _, ok := registry.Hop(ParentRunKey("child-one", runID)); ok {
 			t.Fatalf("the generation refusal still routes run %q of the registration it refused", runID)
 		}
 	}

@@ -54,10 +54,8 @@ type DeliverRequest struct {
 // composes the local seam for targets that are still local instead of owning a
 // queue or an ask store of its own.
 type Messenger interface {
-	// Send admits an ask and publishes it to its target. legacy admits an
-	// unversioned message id without a generation, which only the broker's
-	// legacy local HTTP router does.
-	Send(ctx context.Context, req SendRequest, legacy bool) (SendResult, error)
+	// Send admits an ask and publishes it to its target.
+	Send(ctx context.Context, req SendRequest) (SendResult, error)
 	// Wait blocks for the reply to an ask this messenger routed.
 	Wait(ctx context.Context, req WaitRequest) (WaitResult, error)
 	// Withdraw withdraws an ask this messenger routed.

@@ -33,32 +33,33 @@ func TestDelayedRefusalKeepsTheReplacementRouted(t *testing.T) {
 	t.Cleanup(replacement.Close)
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
-	if !parent.link.Registry().Owns("target") {
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the parent never adopted the run the fake branch claimed")
 	}
 
 	// One ask is relayed to the endpoint the branch registered first, and that
 	// endpoint holds the refusal until the replacement has registered.
-	refusal := relayAsk(t, parent, "target", stale)
+	refusal := relayAsk(t, parent, deltaTarget, stale)
 	registerDescendant(t, parent, "branch-delta", replacement.URL, "gen-new", "target", "token-new")
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
 	// The refusal described the endpoint it was posted to, not the branch that
 	// registered while it was in flight.
-	if !parent.link.Registry().Owns("target") {
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the delayed refusal retired the replacement branch's claim")
 	}
-	if st := parent.broker.GetRun("target"); st == nil {
+	if st := parent.broker.GetRun(deltaTarget); st == nil {
 		t.Fatal("the delayed refusal deleted the replacement branch's run record")
 	}
-	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-new" {
+	if token, ok := parent.broker.RunToken(deltaTarget); !ok || token != "token-new" {
 		t.Fatalf("run record credential = (%q, %v), want the replacement's", token, ok)
 	}
 
 	// The replacement stays a routing target: the next ask reaches it.
 	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), deltaTarget, secondID, parent.broker.Store().Generation())
 	if answer.err != nil {
 		t.Fatalf("ask the replacement branch: %v", answer.err)
 	}
@@ -83,27 +84,28 @@ func TestDelayedRefusalKeepsARestartedRunsCredential(t *testing.T) {
 	stale := newBlockingEndpoint(t, http.StatusConflict, "generation-mismatch")
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
-	refusal := relayAsk(t, parent, "target", stale)
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	refusal := relayAsk(t, parent, deltaTarget, stale)
 	// The same branch instance, the same endpoint and generation, a new credential:
 	// this is one run restarting inside a live branch.
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-new")
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
-	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-new" {
+	if token, ok := parent.broker.RunToken(deltaTarget); !ok || token != "token-new" {
 		t.Fatalf("run record credential = (%q, %v), want the credential the branch refreshed", token, ok)
 	}
-	if st := parent.broker.GetRun("target"); st == nil {
+	if st := parent.broker.GetRun(deltaTarget); st == nil {
 		t.Fatal("the delayed refusal deleted the restarted run's record")
 	}
-	if !parent.link.Registry().Owns("target") {
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the delayed refusal dropped the restarted run's claim")
 	}
 
 	// The restarted run stays a routing target: the next ask reaches the branch
 	// instead of being admitted into the parent's own store with no consumer.
 	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), deltaTarget, secondID, parent.broker.Store().Generation())
 	if answer.err != nil {
 		t.Fatalf("ask the restarted run: %v", answer.err)
 	}
@@ -135,13 +137,14 @@ func TestDelayedDeregisterKeepsTheReplacementRouted(t *testing.T) {
 	deregisterWith(t, parent, "branch-delta", "http://stale-delta", "gen-old",
 		http.StatusConflict, "generation-mismatch", "target", "token-old")
 
-	if owner, ok := parent.link.Registry().Owner("target"); !ok || owner != "branch-delta" {
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	if owner, ok := parent.link.Registry().Owner(deltaTarget); !ok || owner != "branch-delta" {
 		t.Fatalf("run owner = (%q, %v), want the replacement branch-delta: the delayed deregistration retired its claim", owner, ok)
 	}
-	if st := parent.broker.GetRun("target"); st == nil {
+	if st := parent.broker.GetRun(deltaTarget); st == nil {
 		t.Fatal("the delayed deregistration deleted the replacement branch's run record")
 	}
-	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-new" {
+	if token, ok := parent.broker.RunToken(deltaTarget); !ok || token != "token-new" {
 		t.Fatalf("run record credential = (%q, %v), want the replacement's", token, ok)
 	}
 }
@@ -157,7 +160,9 @@ func TestDeregisterRetiresTheClaimsItNames(t *testing.T) {
 
 	registerDescendant(t, parent, "branch-delta", "http://delta", "gen-old",
 		"target", "token-a", "second", "token-b")
-	for _, runID := range []string{"target", "second"} {
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	deltaSecond := ParentRunKey("branch-delta", "second")
+	for _, runID := range []string{deltaTarget, deltaSecond} {
 		if !parent.link.Registry().Owns(runID) || parent.broker.GetRun(runID) == nil {
 			t.Fatalf("run %q was never claimed with a record", runID)
 		}
@@ -166,7 +171,7 @@ func TestDeregisterRetiresTheClaimsItNames(t *testing.T) {
 	deregisterDescendant(t, parent, "branch-delta", "http://delta", "gen-old",
 		"target", "token-a", "second", "token-b")
 
-	for _, runID := range []string{"target", "second"} {
+	for _, runID := range []string{deltaTarget, deltaSecond} {
 		if parent.link.Registry().Owns(runID) {
 			t.Fatalf("the deregistration left run %q claimed", runID)
 		}
@@ -178,7 +183,7 @@ func TestDeregisterRetiresTheClaimsItNames(t *testing.T) {
 	// The claims are terminal: the runs are claimable again once a branch
 	// re-registers.
 	registerDescendant(t, parent, "branch-delta", "http://delta", "gen-new", "target", "token-a2")
-	if !parent.link.Registry().Owns("target") {
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("run target was not claimable after the branch re-registered")
 	}
 }
@@ -196,13 +201,15 @@ func TestDeregisterAcceptsAViewThatNamesARetiredRun(t *testing.T) {
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old",
 		"target", "token-a", "second", "token-b")
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	deltaSecond := ParentRunKey("branch-delta", "second")
 
 	// A relay for target finds the run gone: the branch itself answers that the
 	// run is no longer there, so the parent retires target's claim alone.
-	refusal := relayAsk(t, parent, "target", stale)
+	refusal := relayAsk(t, parent, deltaTarget, stale)
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
-	if parent.link.Registry().Owns("target") {
+	if parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the per-run refusal left the retired run claimed")
 	}
 
@@ -211,10 +218,10 @@ func TestDeregisterAcceptsAViewThatNamesARetiredRun(t *testing.T) {
 	deregisterDescendant(t, parent, "branch-delta", stale.url(), "gen-old",
 		"target", "token-a", "second", "token-b")
 
-	if parent.link.Registry().Owns("second") {
+	if parent.link.Registry().Owns(deltaSecond) {
 		t.Fatal("the deregistration left the surviving run claimed")
 	}
-	if st := parent.broker.GetRun("second"); st != nil {
+	if st := parent.broker.GetRun(deltaSecond); st != nil {
 		t.Fatal("the deregistration left the surviving run served locally")
 	}
 }
@@ -240,7 +247,13 @@ func deregisterWith(t *testing.T, parent *branch, childID, endpoint, generation 
 	if err != nil {
 		t.Fatalf("marshal deregistration: %v", err)
 	}
-	resp, err := http.Post(parent.url()+pathDeregister, "application/json", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, parent.url()+pathDeregister, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("build deregistration: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testLinkToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("deregister descendant: %v", err)
 	}
@@ -264,15 +277,17 @@ func TestOneGenerationRefusalRetiresTheWholeClaim(t *testing.T) {
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old",
 		"target", "token-a", "second", "token-b")
-	if !parent.link.Registry().Owns("second") {
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	deltaSecond := ParentRunKey("branch-delta", "second")
+	if !parent.link.Registry().Owns(deltaSecond) {
 		t.Fatal("the parent never adopted the second run the branch claimed")
 	}
 
-	refusal := relayAsk(t, parent, "target", stale)
+	refusal := relayAsk(t, parent, deltaTarget, stale)
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
-	for _, runID := range []string{"target", "second"} {
+	for _, runID := range []string{deltaTarget, deltaSecond} {
 		if parent.link.Registry().Owns(runID) {
 			t.Fatalf("the generation refusal left run %q claimed by a registration it refused", runID)
 		}
@@ -284,7 +299,7 @@ func TestOneGenerationRefusalRetiresTheWholeClaim(t *testing.T) {
 	// The runs are claimable again once the branch re-registers.
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-new",
 		"target", "token-a2", "second", "token-b2")
-	for _, runID := range []string{"target", "second"} {
+	for _, runID := range []string{deltaTarget, deltaSecond} {
 		if !parent.link.Registry().Owns(runID) {
 			t.Fatalf("run %q was not claimable after the branch re-registered", runID)
 		}
@@ -301,11 +316,12 @@ func TestDelayedRefusalKeepsTheClaimARefreshedGenerationCarries(t *testing.T) {
 	stale := newBlockingEndpoint(t, http.StatusNotFound, "target-unavailable")
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
-	if !parent.link.Registry().Owns("target") {
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the parent never adopted the run the fake branch claimed")
 	}
 
-	refusal := relayAsk(t, parent, "target", stale)
+	refusal := relayAsk(t, parent, deltaTarget, stale)
 	// The same child, the same endpoint and credential, a new generation: the
 	// branch's ask store moved on without touching anything else the claim
 	// carries.
@@ -313,19 +329,19 @@ func TestDelayedRefusalKeepsTheClaimARefreshedGenerationCarries(t *testing.T) {
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
-	if !parent.link.Registry().Owns("target") {
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the delayed refusal dropped the claim the refreshed generation carries")
 	}
-	if st := parent.broker.GetRun("target"); st == nil {
+	if st := parent.broker.GetRun(deltaTarget); st == nil {
 		t.Fatal("the delayed refusal deleted the re-registered run's record")
 	}
-	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-old" {
+	if token, ok := parent.broker.RunToken(deltaTarget); !ok || token != "token-old" {
 		t.Fatalf("run record credential = (%q, %v), want the credential the registration kept", token, ok)
 	}
 
 	// The refreshed claim stays a routing target: the next ask reaches it.
 	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), deltaTarget, secondID, parent.broker.Store().Generation())
 	if answer.err != nil {
 		t.Fatalf("ask the run with the refreshed generation: %v", answer.err)
 	}
@@ -359,28 +375,30 @@ func TestDelayedRefusalKeepsTheClaimAnotherChildTookOver(t *testing.T) {
 	t.Cleanup(replacement.Close)
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
-	refusal := relayAsk(t, parent, "target", stale)
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	refusal := relayAsk(t, parent, deltaTarget, stale)
 
 	// While the refusal is in flight, branch-delta drops its claim and
 	// branch-echo takes the run over.
 	deregisterDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
 	registerDescendant(t, parent, "branch-echo", replacement.URL, "gen-old", "target", "token-echo")
+	echoTarget := ParentRunKey("branch-echo", "target")
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
-	if owner, ok := parent.link.Registry().Owner("target"); !ok || owner != "branch-echo" {
+	if owner, ok := parent.link.Registry().Owner(echoTarget); !ok || owner != "branch-echo" {
 		t.Fatalf("run owner = (%q, %v), want branch-echo: the refusal retired the child that took the run over", owner, ok)
 	}
-	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-echo" {
+	if token, ok := parent.broker.RunToken(echoTarget); !ok || token != "token-echo" {
 		t.Fatalf("run record credential = (%q, %v), want the taking-over child's", token, ok)
 	}
-	if st := parent.broker.GetRun("target"); st == nil {
+	if st := parent.broker.GetRun(echoTarget); st == nil {
 		t.Fatal("the delayed refusal deleted the taking-over child's run record")
 	}
 
 	// The taking-over child stays a routing target: the next ask reaches it.
 	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), echoTarget, secondID, parent.broker.Store().Generation())
 	if answer.err != nil {
 		t.Fatalf("ask the run the other child took over: %v", answer.err)
 	}
@@ -414,27 +432,28 @@ func TestDelayedRefusalKeepsTheClaimTheMovedEndpointCarries(t *testing.T) {
 	t.Cleanup(moved.Close)
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
-	refusal := relayAsk(t, parent, "target", stale)
+	deltaTarget := ParentRunKey("branch-delta", "target")
+	refusal := relayAsk(t, parent, deltaTarget, stale)
 	// The same child, the same generation and credential, a new endpoint: the
 	// branch moved to an address the parent has not been told about yet.
 	registerDescendant(t, parent, "branch-delta", moved.URL, "gen-old", "target", "token-old")
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
-	if !parent.link.Registry().Owns("target") {
+	if !parent.link.Registry().Owns(deltaTarget) {
 		t.Fatal("the delayed refusal dropped the claim the moved endpoint carries")
 	}
-	if st := parent.broker.GetRun("target"); st == nil {
+	if st := parent.broker.GetRun(deltaTarget); st == nil {
 		t.Fatal("the delayed refusal deleted the re-registered run's record")
 	}
-	if token, ok := parent.broker.RunToken("target"); !ok || token != "token-old" {
+	if token, ok := parent.broker.RunToken(deltaTarget); !ok || token != "token-old" {
 		t.Fatalf("run record credential = (%q, %v), want the credential the registration kept", token, ok)
 	}
 
 	// The moved claim stays a routing target: the next ask reaches the endpoint
 	// the registration now carries.
 	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), deltaTarget, secondID, parent.broker.Store().Generation())
 	if answer.err != nil {
 		t.Fatalf("ask the run at the moved endpoint: %v", answer.err)
 	}
@@ -550,7 +569,13 @@ func registerDescendant(t *testing.T, parent *branch, childID, endpoint, generat
 	if err != nil {
 		t.Fatalf("marshal registration: %v", err)
 	}
-	resp, err := http.Post(parent.url()+pathRegister, "application/json", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, parent.url()+pathRegister, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("build registration: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testLinkToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("register descendant: %v", err)
 	}
@@ -584,7 +609,13 @@ func deregisterDescendant(t *testing.T, parent *branch, childID, endpoint, gener
 	if err != nil {
 		t.Fatalf("marshal deregistration: %v", err)
 	}
-	resp, err := http.Post(parent.url()+pathDeregister, "application/json", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, parent.url()+pathDeregister, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("build deregistration: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testLinkToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("deregister descendant: %v", err)
 	}
