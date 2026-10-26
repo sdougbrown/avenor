@@ -167,6 +167,19 @@ export async function postBroker(
   return res.json()
 }
 
+/**
+ * Publish the harness's own user-defined session name for this run, or clear it
+ * with an empty name. The broker stores it apart from any model-set rename and
+ * prefers it, so peers see the name the human gave the session.
+ */
+export async function publishHarnessName(
+  env: SubAgentEnv,
+  name: string | undefined,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  await postBroker(env, '/session_name', { name: name ?? '' }, fetchImpl)
+}
+
 /** Authenticated GET; broker credentials travel in headers, never the URL. */
 export async function getBroker(
   env: SubAgentEnv,

@@ -76,7 +76,7 @@ type Result struct {
 	MessageID string
 	RunID     string // public run id when the surface has one, else the broker run id
 	RuntimeID string // broker/runtime id of the resolved target (peers `last`)
-	Label     string // the resolved target's display name (SessionInfo.Label)
+	Label     string // the resolved target's display name: the broker's ladder — harness name, then SessionInfo.Label, then the run ID
 	Reply     string // the reply body, ask/replied only; empty everywhere else
 	Text      string
 	// Peers is the peers `list` action's output: one record per visible peer,
