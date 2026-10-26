@@ -4,6 +4,7 @@
 package askstore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -366,6 +367,16 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 	}
 	if e.completed {
 		return e.outcome, nil
+	}
+	// A reply body that is not JSON never reaches the edge: the edge would
+	// complete on a payload the sender's surface could not have delivered, so
+	// the reply is refused not-sent and the edge stays live. An empty or
+	// whitespace-only body is no payload at all, which keeps the reply's
+	// stored payload valid JSON on the wire.
+	if trimmed := bytes.TrimSpace(payload); len(trimmed) == 0 {
+		payload = nil
+	} else if !json.Valid(payload) {
+		return messaging.OutcomeNotSent, fmt.Errorf("%w: reply body is not JSON", messaging.ErrInvalidRequest)
 	}
 	reply := &messaging.InboundMessage{
 		MessageID: e.key.MessageID,

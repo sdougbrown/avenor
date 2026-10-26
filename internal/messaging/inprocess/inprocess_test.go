@@ -504,3 +504,41 @@ func TestWaitKeepsTerminalOutcomeAcrossClose(t *testing.T) {
 		t.Fatalf("second Send: %v", err)
 	}
 }
+
+// TestReplyRejectsNonJSONWithoutConsumingTheEdge pins the reply validation at
+// the transport: a reply body that is not JSON is refused not-sent and leaves
+// the edge live, so the same edge still completes on a reply that parses.
+// The store owns the validation, so the bare and routed transports both
+// inherit it; this test pins the bare surface.
+func TestReplyRejectsNonJSONWithoutConsumingTheEdge(t *testing.T) {
+	store, _ := messagetest.NewMemoryStore(t)
+	tr := New(store)
+	defer func() { _ = tr.Close() }()
+
+	ctx := context.Background()
+	sent, err := tr.Send(ctx, messaging.SendRequest{
+		From: alice, To: bob, MessageID: mintID(t, time.Minute), Generation: store.Generation(),
+		Body: `{"message":"ping"}`,
+	})
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("Send = (%+v, %v), want sent", sent, err)
+	}
+	replied, err := tr.Reply(ctx, messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: sent.MessageID, Body: `{"payload":`,
+	})
+	if replied.Outcome != messaging.OutcomeNotSent || !errors.Is(err, messaging.ErrInvalidRequest) {
+		t.Fatalf("Reply(not JSON) = (%+v, %v), want not-sent invalid-request", replied, err)
+	}
+	replied, err = tr.Reply(ctx, messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: sent.MessageID, Body: `{"payload":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Reply(valid) after the refusal = (%+v, %v), want replied", replied, err)
+	}
+	waited, err := tr.Wait(ctx, messaging.WaitRequest{
+		Sender: alice, MessageID: sent.MessageID, Generation: store.Generation(), Timeout: time.Second,
+	})
+	if err != nil || waited.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Wait = (%+v, %v), want the replied edge", waited, err)
+	}
+}

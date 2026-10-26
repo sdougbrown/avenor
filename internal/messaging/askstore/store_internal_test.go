@@ -1,6 +1,7 @@
 package askstore
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -384,5 +385,71 @@ func TestNoReplyCannotBypassWithdrawnFence(t *testing.T) {
 	}
 	if len(backend.published) != 0 {
 		t.Fatalf("withdrawn no-reply message was delivered %d time(s)", len(backend.published))
+	}
+}
+
+// TestStoreReplyRejectsNonJSONWithoutConsumingTheEdge pins the reply
+// validation the store owns for every transport: a reply body that is not
+// JSON is refused invalid-request/not-sent before the edge is touched, so the
+// same edge still accepts the reply that does parse. Empty and whitespace
+// bodies stay the no-payload policy.
+func TestStoreReplyRejectsNonJSONWithoutConsumingTheEdge(t *testing.T) {
+	store := New(Options{})
+	sender := messaging.Identity{RunID: "alice", Sender: "alice"}
+	now := time.Now()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	key := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID, Generation: store.Generation()}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
+		Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	outcome, err := store.Reply(key, "bob", json.RawMessage(`{"payload":`))
+	if outcome != messaging.OutcomeNotSent || !errors.Is(err, messaging.ErrInvalidRequest) {
+		t.Fatalf("Reply(not JSON) = (%q, %v), want not-sent invalid-request", outcome, err)
+	}
+
+	// The refused reply must not have consumed the edge: the same edge still
+	// completes on a reply that parses.
+	outcome, err = store.Reply(key, "bob", json.RawMessage(`{"payload":"pong"}`))
+	if outcome != messaging.OutcomeReplied || err != nil {
+		t.Fatalf("Reply(valid) after the refusal = (%q, %v), want replied", outcome, err)
+	}
+	waited, err := store.Wait(t.Context(), key, time.Second)
+	if err != nil || waited.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Wait = (%+v, %v), want the replied edge", waited, err)
+	}
+	if string(waited.Reply.Payload) != `{"payload":"pong"}` {
+		t.Fatalf("reply payload = %s, want the valid reply stored", waited.Reply.Payload)
+	}
+}
+
+// TestStoreReplyKeepsTheEmptyBodyPolicy pins the empty-body normalization: an
+// empty or whitespace-only reply is no payload at all, not a JSON error.
+func TestStoreReplyKeepsTheEmptyBodyPolicy(t *testing.T) {
+	for _, body := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage("   ")} {
+		store := New(Options{})
+		sender := messaging.Identity{RunID: "alice", Sender: "alice"}
+		now := time.Now()
+		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("NewMsgID: %v", err)
+		}
+		key := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID, Generation: store.Generation()}
+		if _, err := store.Admit(t.Context(), AdmitRequest{
+			Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(),
+			Body: `{"message":"ping"}`,
+		}); err != nil {
+			t.Fatalf("Admit: %v", err)
+		}
+		outcome, err := store.Reply(key, "bob", body)
+		if outcome != messaging.OutcomeReplied || err != nil {
+			t.Fatalf("Reply(%q) = (%q, %v), want replied with no payload", string(body), outcome, err)
+		}
 	}
 }
