@@ -2156,15 +2156,7 @@ type localMessenger struct {
 }
 
 func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
-	res, err := m.broker.store.Admit(ctx, askstore.AdmitRequest{
-		Sender:     req.From,
-		Target:     req.To.RunID,
-		MessageID:  req.MessageID,
-		Generation: req.Generation,
-		Body:       req.Body,
-		NoReply:    req.NoReply,
-		Legacy:     legacy,
-	})
+	res, err := m.broker.store.Admit(ctx, askstore.AdmitRequestFrom(req, legacy))
 	return messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err
 }
 

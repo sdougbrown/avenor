@@ -63,14 +63,7 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		res, err := m.Send(child, req, false)
 		return sendResult(res, err), err
 	}
-	res, err := t.store.Admit(child, askstore.AdmitRequest{
-		Sender:     req.From,
-		Target:     req.To.RunID,
-		MessageID:  req.MessageID,
-		Generation: req.Generation,
-		Body:       req.Body,
-		NoReply:    req.NoReply,
-	})
+	res, err := t.store.Admit(child, askstore.AdmitRequestFrom(req, false))
 	out := sendResult(messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err)
 	return out, err
 }
