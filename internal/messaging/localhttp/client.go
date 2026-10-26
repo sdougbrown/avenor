@@ -354,7 +354,7 @@ func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 		result.Peers = append(result.Peers, messaging.Peer{RunID: session.RunID, Session: raw})
 	}
 	if body.PeersError != "" {
-		return result, fmt.Errorf("%w: peer listing is incomplete: %s", messaging.ErrTargetUnavailable, body.PeersError)
+		return result, fmt.Errorf("%w: %s", messaging.ErrIncompleteListing, body.PeersError)
 	}
 	return result, nil
 }

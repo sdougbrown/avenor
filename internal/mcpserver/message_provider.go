@@ -162,7 +162,7 @@ func (p *mcpMessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerR
 	if err != nil {
 		return nil, err
 	}
-	return messaging.DecodePeerRecords(peers.Peers)
+	return messaging.PeerListing(peers.Peers, err)
 }
 
 // Resolve is the host ladder: the reserved self alias already became the

@@ -1210,11 +1210,12 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	peers, listingErr := b.seam().Peers(r.Context())
 
 	sessions := make([]SessionInfo, 0, len(peers))
+	unreadable := 0
 	for _, peer := range peers {
 		info := SessionInfo{RunID: peer.RunID}
 		if len(peer.Session) > 0 {
 			if err := json.Unmarshal(peer.Session, &info); err != nil {
-				listingErr = errors.Join(listingErr, fmt.Errorf("peer %s has an unreadable session record: %w", peer.RunID, err))
+				unreadable++
 				continue
 			}
 		}
@@ -1229,10 +1230,22 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 		"generation":         generation,
 		"messaging_protocol": messaging.ProtocolVersion,
 	}
-	if listingErr != nil {
-		body["peers_error"] = listingErr.Error()
+	if listingErr != nil || unreadable > 0 {
+		body["peers_error"] = incompletePeerListing(unreadable)
 	}
 	writeJSONBody(w, http.StatusOK, body)
+}
+
+// incompletePeerListing is the reason a peer listing the broker could not
+// complete carries on the wire. It names no detail of the failure: a seam's
+// error can carry an absolute path or a remote endpoint, and the reason
+// reaches every authenticated run and, through a client's tool result, a
+// model's context.
+func incompletePeerListing(unreadable int) string {
+	if unreadable == 0 {
+		return messaging.IncompletePeerListing
+	}
+	return fmt.Sprintf("%s: %d session records unreadable", messaging.IncompletePeerListing, unreadable)
 }
 
 // --- parent link ---
