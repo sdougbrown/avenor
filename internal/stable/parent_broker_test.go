@@ -71,11 +71,7 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 		ChildID:    parentlink.BranchID("test/"+b.Addr(), testHost()),
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
-		Runs: func() []messaging.RunClaim {
-			return parentlink.RunClaims(b.Sessions(),
-				func(info broker.SessionInfo) (string, string) { return info.RunID, info.Label },
-				link.Owns, b.RunToken)
-		},
+		Runs:       func() []messaging.RunClaim { return b.ParentRunClaims() },
 		// A run this branch stops owning loses its broker record too, so a
 		// refused descendant stops being served locally.
 		RetireRun: func(runID, token string) { b.DeleteRunIfToken(runID, token) },
@@ -286,7 +282,8 @@ func TestSupervisorParentAcceptsSupervisorChildren(t *testing.T) {
 	if parentSup.parentLink.Registry().Owns(messaging.SupervisorRunID) {
 		t.Fatal("a child supervisor claim took the parent's own supervisor run ID")
 	}
-	if token, ok := parentSup.broker.RunToken(messaging.SupervisorRunID); !ok || token != parentSup.brokerToken {
+	st := parentSup.broker.GetRun(messaging.SupervisorRunID)
+	if st == nil || st.Token != parentSup.brokerToken {
 		t.Fatal("the parent's own supervisor record was overwritten by a child claim")
 	}
 

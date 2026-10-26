@@ -7,7 +7,18 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
+
+// brokerRunToken reads one run's adopted credential off the parent broker: the
+// run record carries the credential the branch presented at registration.
+func brokerRunToken(b *broker.Broker, runID string) (string, bool) {
+	st := b.GetRun(runID)
+	if st == nil {
+		return "", false
+	}
+	return st.Token, true
+}
 
 // TestBranchIDDerivesDurableIdentity pins the identity a branch registers
 // under: the same input always derives the same identity, two identities whose
@@ -93,7 +104,7 @@ func TestUncleanRestartReclaimsTheRunsUnderItsDurableIdentity(t *testing.T) {
 	if count := parent.broker.RunCount(); count != 2 {
 		t.Fatalf("the parent holds %d run records, want the two the restarted branch claims", count)
 	}
-	if token, _ := parent.broker.RunToken("asker"); token != restarted.token(t, "asker") {
+	if token, _ := brokerRunToken(parent.broker, "asker"); token != restarted.token(t, "asker") {
 		t.Fatal("the reclaimed run kept the dead instance's credential")
 	}
 }
@@ -110,7 +121,7 @@ func TestReplacementClaimRefreshesTheRunCredential(t *testing.T) {
 	parent.tokens["orchestrator"] = token
 	first := newBranchWith(t, parent.url(), "branch-beta", time.Hour, true, []string{"target"})
 	awaitRegistered(t, parent, "target")
-	staleToken, _ := parent.broker.RunToken("target")
+	staleToken, _ := brokerRunToken(parent.broker, "target")
 	if staleToken != first.token(t, "target") {
 		t.Fatal("the parent did not adopt the first instance's credential")
 	}
@@ -121,7 +132,7 @@ func TestReplacementClaimRefreshesTheRunCredential(t *testing.T) {
 		t.Fatal("the replacement branch reused the dead instance's credential")
 	}
 	awaitUntil(t, "the parent to adopt the rotated credential", func() bool {
-		token, ok := parent.broker.RunToken("target")
+		token, ok := brokerRunToken(parent.broker, "target")
 		return ok && token == rotated
 	})
 

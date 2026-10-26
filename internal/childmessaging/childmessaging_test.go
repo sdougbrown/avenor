@@ -151,6 +151,33 @@ func TestProviderResolveAndRunState(t *testing.T) {
 	}
 }
 
+func TestProviderRefusesResolutionOnAnIncompleteListing(t *testing.T) {
+	// The broker reports a partial listing beside the peers it read: the
+	// provider refuses the whole lookup before consulting the partial set,
+	// even for a peer it can see.
+	provider, _ := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"messaging_protocol": 1, "generation": "gen-1",
+			"sessions":    []any{map[string]any{"run_id": "rt_1", "label": "alpha", "status": "running"}},
+			"peers_error": "the broker could not read every peer",
+		})
+	})
+	ctx := context.Background()
+	if err := provider.Prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Resolve(ctx, "rt_1"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("Resolve error = %v, want the incomplete-listing error", err)
+	}
+	if _, err := provider.RunState(ctx, "rt_1"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("RunState error = %v, want the incomplete-listing error", err)
+	}
+}
+
 func TestRenameMapsWireCodes(t *testing.T) {
 	cases := []struct {
 		name     string

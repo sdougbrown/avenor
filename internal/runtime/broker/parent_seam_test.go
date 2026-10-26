@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -309,6 +310,7 @@ func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T
 	if err != nil {
 		t.Fatalf("marshal registration: %v", err)
 	}
+
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
@@ -460,7 +462,7 @@ func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T)
 	// it is the first registration's token. A second register that ran inside
 	// the first's window would apply first and leave the record carrying its
 	// token-2 instead.
-	if got, ok := b.RunToken(key); !ok || got != "token-1" {
+	if got, ok := b.runToken(key); !ok || got != "token-1" {
 		t.Fatalf("run record credential = (%q, %v), want the first registration's token-1", got, ok)
 	}
 }
@@ -594,8 +596,31 @@ func TestConcurrentDeregisterCannotOrphanARegisteredRun(t *testing.T) {
 	if stub.owned != key {
 		t.Fatalf("claim owner = %q, want %q", stub.owned, key)
 	}
-	if got, ok := b.RunToken(key); !ok || got != "token-2" {
+	if got, ok := b.runToken(key); !ok || got != "token-2" {
 		t.Fatalf("run record credential = (%q, %v), want the re-registration's", got, ok)
+	}
+}
+
+// TestParentRegisterRefusesAnOversizeBody pins the request-body cap the parent
+// routes share with withAuth: a registration whose body exceeds the cap is
+// refused before the registry is consulted, and no claim is adopted.
+func TestParentRegisterRefusesAnOversizeBody(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	b.SetParentLink(&parentLinkStub{})
+
+	claim := `{"run_id":"remote-run","label":"remote","token":"t"},`
+	oversize := `{"child_id":"child-1","endpoint":"http://child:1234","generation":"gen-1","runs":[` +
+		strings.Repeat(claim, 40000) + `]}`
+	status, _ := postParentLink(t, b.Addr(), oversize, "")
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize registration = %d, want 413", status)
+	}
+	if b.GetRun("remote-run") != nil {
+		t.Fatal("a refused registration adopted the run")
 	}
 }
 

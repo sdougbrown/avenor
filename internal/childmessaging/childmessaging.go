@@ -160,9 +160,6 @@ func (p *MessageProvider) Resolve(ctx context.Context, ref string) (messaging.Re
 	case 1:
 		return messaging.Resolution{RunID: candidates[0], Label: label, Match: messaging.MatchUnique}, nil
 	case 0:
-		if err != nil {
-			return messaging.Resolution{}, err
-		}
 		return messaging.Resolution{Match: messaging.MatchNone}, nil
 	default:
 		return messaging.Resolution{Match: messaging.MatchAmbiguous, Candidates: candidates}, nil
