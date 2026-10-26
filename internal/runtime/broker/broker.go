@@ -134,6 +134,13 @@ type RunState struct {
 	// LastMessage is the run's most recent completed turn, written by the
 	// recorder and the host turn producer. Nil means no turn was recorded.
 	LastMessage *LastAgentMessage
+
+	// descendant records that this broker holds only because a registered child
+	// broker claimed the run. Set when the record is adopted and read under the
+	// broker lock, it is the run record's own provenance: a descendant record is
+	// never one of this broker's own runs, so it publishes no claim and its
+	// removal is not a change to the run set this broker owns.
+	descendant bool
 }
 
 func (st *RunState) Lock()   { st.Mu.Lock() }
@@ -1467,17 +1474,17 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusConflict, err.Error(), "invalid-request")
 		return
 	}
-	// The claim is applied: the runs the child owns now have records here and the
-	// runs it stopped owning lose theirs. The run observer fires once per retired
-	// run as they are deleted, plus once after the settled set, so a host that
-	// publishes this broker's own runs re-publishes each step.
+	// The claim is applied: the runs the child owns now have records here and
+	// the runs it stopped owning lose theirs. Every touched record is one the
+	// broker adopted for a descendant's claim, so none of it is a change to the
+	// run set this broker owns and the run observer that publishes it stays
+	// silent.
 	for _, runID := range claim.Retired {
 		b.DeleteRun(runID)
 	}
 	for _, run := range body.Runs {
 		b.ownRun(run)
 	}
-	b.runSetChanged()
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"generation":         b.store.Generation(),
 		"messaging_protocol": messaging.ProtocolVersion,
@@ -1742,22 +1749,38 @@ func (b *Broker) RunToken(runID string) (string, bool) {
 // Sessions returns the runs this broker owns with the metadata its peers see.
 func (b *Broker) Sessions() []SessionInfo { return b.sessions() }
 
-// ParentRunClaims reports the runs this broker serves minus the runs its
-// parent-link seam reports as a child branch's claim, each with the credential
-// its run authenticates with. One builder serves every host that publishes a
-// claim, and the ownership filter comes from the seam the broker already holds,
-// so no caller can publish a child's runs as its own with a stale or missing
-// filter.
+// ParentRunClaims reports this broker's own runs, each with the credential its
+// run authenticates with. A run is this broker's own only if the record itself
+// says so: a record adopted for a registered child's claim is never published,
+// not even in the window where the child's claim moved on but the record has
+// not been retired yet, so no descendant credential can travel upward as a
+// local one. One builder serves every host that publishes a claim; the run set,
+// the credential and the provenance are read under one broker lock hold, and
+// the seam's ownership test stays as a second filter for a claim the records
+// alone cannot see.
 func (b *Broker) ParentRunClaims() []messaging.RunClaim {
-	seam, _ := b.parentSeam()
-	sessions := b.sessions()
-	claims := make([]messaging.RunClaim, 0, len(sessions))
-	for _, info := range sessions {
-		if seam != nil && seam.Owns(info.RunID) {
+	b.mu.RLock()
+	candidates := make([]messaging.RunClaim, 0, len(b.runs))
+	for runID, st := range b.runs {
+		if st.descendant {
 			continue
 		}
-		token, _ := b.RunToken(info.RunID)
-		claims = append(claims, messaging.RunClaim{RunID: info.RunID, Label: info.Label, Token: token})
+		claim := messaging.RunClaim{RunID: runID, Token: st.Token}
+		st.Mu.Lock()
+		if st.Info != nil {
+			claim.Label = st.Info.Label
+		}
+		st.Mu.Unlock()
+		candidates = append(candidates, claim)
+	}
+	b.mu.RUnlock()
+	seam, _ := b.parentSeam()
+	claims := make([]messaging.RunClaim, 0, len(candidates))
+	for _, claim := range candidates {
+		if seam != nil && seam.Owns(claim.RunID) {
+			continue
+		}
+		claims = append(claims, claim)
 	}
 	return claims
 }
@@ -1955,9 +1978,9 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 
 // ownRun adopts a run a registered child broker owns. The record keeps the
 // credential that branch authenticates the run with, so a forwarded ask and a
-// relay into that branch use the one credential the run already has. A caller
-// that adopts a whole set notifies the run observer once when the set is
-// applied.
+// relay into that branch use the one credential the run already has. Adoption
+// never signals the run observer: an adopted record is not one of this
+// broker's own runs, so the run set it publishes is unchanged.
 func (b *Broker) ownRun(claim messaging.RunClaim) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -1967,6 +1990,7 @@ func (b *Broker) ownRun(claim messaging.RunClaim) string {
 		if claim.Token != "" {
 			st.Token = claim.Token
 		}
+		st.descendant = true
 		b.runs[claim.RunID] = st
 		return st.Token
 	}
@@ -2090,11 +2114,15 @@ func (b *Broker) RenameRun(runID, name string) error {
 }
 
 // DeleteRun removes a run from the broker. Safe to call even if the run
-// does not exist.
+// does not exist. Removing a run the broker owns is a change to the run set
+// it publishes; removing a record the broker only adopted for a descendant's
+// claim is not, so that removal stays silent.
 func (b *Broker) DeleteRun(runID string) {
 	b.mu.Lock()
-	_, ok := b.runs[runID]
+	st, ok := b.runs[runID]
+	var descendant bool
 	if ok {
+		descendant = st.descendant
 		delete(b.runs, runID)
 	}
 	b.mu.Unlock()
@@ -2104,7 +2132,9 @@ func (b *Broker) DeleteRun(runID string) {
 	// No owner is left to wait for or cancel this run's asks, and asks
 	// addressed to it can never be answered.
 	b.store.RemoveRun(runID)
-	b.runSetChanged()
+	if !descendant {
+		b.runSetChanged()
+	}
 }
 
 func (b *Broker) RunCount() int {
