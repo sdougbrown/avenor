@@ -52,6 +52,7 @@ async function createMultiSupervisorHarness(options: {
   resultTool?: any
   inspectTool?: any
   brokerReceiveTool?: any
+  subAgentEnv?: { brokerUrl: string; runId: string; token: string }
   /** Supervisor mock; provides isCurrentInstance for singleton-scope tests. */
   supervisor?: { isCurrentInstance?: (supervisorId: string) => boolean }
 }) {
@@ -80,7 +81,7 @@ async function createMultiSupervisorHarness(options: {
       ...(options.brokerReceiveTool !== undefined && { brokerReceiveTool: options.brokerReceiveTool }),
       ...(options.supervisor !== undefined && { Supervisor: options.supervisor as any }),
     },
-    extOptions: { pollIntervalMs: options.pollIntervalMs ?? 5 },
+    extOptions: { pollIntervalMs: options.pollIntervalMs ?? 5, ...(options.subAgentEnv !== undefined && { subAgentEnv: options.subAgentEnv }) },
     ui: { confirm },
     onEmit: (channel, payload) => {
       if (channel === CHANNEL_POLL_COMPLETED) {
@@ -1901,6 +1902,7 @@ describe('Avenor Pi extension', () => {
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'worker', supervisor_id: B, wait: false }, undefined, undefined, h.ctx)
     allDone = true
     await h.waitPollMatching(payload => payload.entries.filter((e: { status: string }) => e.status === 'done').length === 2)
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:2'))
 
     // The same label and run id exist on both supervisors. Without an explicit
     // supervisor, no tracked run may be consumed.
@@ -1951,6 +1953,140 @@ describe('Avenor Pi extension', () => {
     expect(settled).toBeUndefined()
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
     expect(completions).toHaveLength(1)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('flushes a nested orchestrator completion in sub-agent broker mode', async () => {
+    const SOCK = '/tmp/child-completion.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'child answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const previousFetch = globalThis.fetch
+    // The child broker poll has no server here; an empty queue keeps it off the network.
+    globalThis.fetch = mock(async () => Response.json([])) as unknown as typeof fetch
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' },
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+    try {
+      h.ctx.isIdle = () => false
+      await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+      done = true
+      await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
+
+      // Children that spawn runs keep their own queue; a completed settlement
+      // must flush it even though turn_end recording stays host-only.
+      const settled = await h.eventHandlers.agent_before_settle(
+        { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+        h.ctx,
+      )
+      expect(settled?.continue).toBe(true)
+      expect(String(settled?.entries?.[0]?.content ?? '')).toContain('Sub-agent "worker" finished')
+      expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
+      const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
+      expect(completions).toHaveLength(0)
+    } finally {
+      globalThis.fetch = previousFetch
+      await h.eventHandlers.session_shutdown()
+    }
+  })
+
+  it('emits one terminal event when a blocking spawn replaces an already-notified run', async () => {
+    const SOCK = '/tmp/terminal-once.sock'
+    let done = false
+    let emitEnded: (() => void) | undefined
+    const observeRun = mock(async () => ({
+      subscribe: (cb: (snapshot: unknown) => void) => {
+        emitEnded = () => cb({ last_event: { event: 'session.end' }, transcript: [], tools: [], live_tools: [], pending_permission: false, ended: true })
+        return () => {}
+      },
+      snapshot: () => ({ last_event: undefined, transcript: [], tools: [], live_tools: [], pending_permission: false, ended: false }),
+      close: async () => {},
+    }))
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'blocking answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      observeRun,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    const spawned = h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    await waitFor(() => Boolean(emitEnded))
+    done = true
+    // Polling observes the terminal run first and emits the event; the blocking
+    // spawn then resolves and upserts the same run with its own status.
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'worker' && e.status === 'done'))
+    emitEnded?.()
+    await spawned
+
+    const terminal = h.emitted.filter(([channel]) => channel === CHANNEL_RUN_TERMINAL).map(([, payload]) => payload as Record<string, unknown>)
+    expect(terminal.filter(t => t.label === 'worker')).toHaveLength(1)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('does not resurrect a notice when an idle send fails after the run was consumed', async () => {
+    const SOCK = '/tmp/failed-send.sock'
+    let done = false
+    let sendStarted!: () => void
+    const sendStartedGate = new Promise<void>(resolve => { sendStarted = resolve })
+    let releaseSend!: () => void
+    const sendGate = new Promise<void>(resolve => { releaseSend = resolve })
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const resultTool = mock(async () => ({ run_id: 'r1', label: 'worker', status: 'done', ready: true, output: 'answer' }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    h.sendUserMessage.mockImplementation(async () => {
+      sendStarted()
+      await sendGate
+      throw new Error('send failed')
+    })
+    done = true
+    await sendStartedGate
+
+    // Consume the run while the idle send is still in flight, then let the send
+    // fail: the failure must not re-add the notice for a run that is gone.
+    const result = await h.registeredTools.avenor_result.execute('t2', { run_id: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    expect(result.details).toMatchObject({ run_id: 'r1', ready: true })
+    releaseSend()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled).toBeUndefined()
 
     await h.eventHandlers.session_shutdown()
   })

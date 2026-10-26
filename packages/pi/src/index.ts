@@ -73,9 +73,8 @@ import {
   type WatchDeps,
   type WatchRunRef,
 } from './watch.js'
-import type { TrackedRun, RunStatusEntry } from './types.js'
+import type { TrackedRun, RunStatusEntry, CompletionNotice } from './types.js'
 import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji } from './types.js'
-import { CompletionQueue, type CompletionNotice } from './completion-queue.js'
 import { countNestedRuns } from './nested-count.js'
 import { resolveAgentProfile } from './agent-profile.js'
 import {
@@ -412,7 +411,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let pollingErrorCount = 0
     const pollingErrors: PollErrorPayload[] = []
     let lastStatusEntries: RunStatusEntry[] = []
-    const completionQueue = new CompletionQueue()
+    const completionQueue = new Map<string, CompletionNotice>()
     let sessionGeneration = 0
     // Suppress last-turn writes after a closed-socket failure until the default
     // binding is evicted by disposeHostProvider/disposeHostProviders, or a new
@@ -777,6 +776,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         blocking: current?.blocking ?? blocking,
         permissionNotified: current?.permissionNotified,
         consumed: current?.consumed,
+        terminalEventEmitted: current?.terminalEventEmitted,
       })
     }
 
@@ -1139,25 +1139,26 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             // a successful result removes it.
             if (run.blocking) {
               if (!completionQueue.has(entryKey)) {
-                completionQueue.set(notice)
+                completionQueue.set(entryKey, notice)
                 widgetDirty = true
               }
               continue
             }
 
             if (sessionCtx?.isIdle() === true) {
-              if (await sendCompletionNotice(notice)) {
-                if (sessionAtPollStart === sessionGeneration) {
+              const sent = await sendCompletionNotice(notice)
+              if (sessionAtPollStart === sessionGeneration && trackedRuns.get(entryKey) === run) {
+                if (sent) {
                   completionQueue.delete(entryKey)
                   trackedRuns.delete(entryKey)
                   widgetDirty = true
+                } else {
+                  completionQueue.set(entryKey, notice)
+                  widgetDirty = true
                 }
-              } else {
-                completionQueue.set(notice)
-                widgetDirty = true
               }
             } else if (!completionQueue.has(entryKey)) {
-              completionQueue.set(notice)
+              completionQueue.set(entryKey, notice)
               widgetDirty = true
             }
           } else if (
@@ -1624,7 +1625,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     })
 
     pi.on('agent_before_settle', async event => {
-      if (isSubAgentBrokerMode) return
       // Escape/abort and errors must not force a continuation. Notices stay
       // unread for a later safe settlement.
       if (event.outcome !== 'completed') return
@@ -1632,7 +1632,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const generation = sessionGeneration
       const deliverable: CompletionNotice[] = []
       let pruned = false
-      for (const notice of completionQueue.entries()) {
+      for (const notice of completionQueue.values()) {
         if (generation !== sessionGeneration) return
         const run = trackedRuns.get(notice.key)
         if (!run || run.consumed) {

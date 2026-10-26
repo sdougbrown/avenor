@@ -20,6 +20,19 @@ export interface TrackedRun {
   terminalEventEmitted?: boolean
 }
 
+/** One terminal completion waiting for a safe model-facing delivery. */
+export interface CompletionNotice {
+  /** Canonical supervisor + public run id key. */
+  key: string
+  runId: string
+  supervisorId?: string
+  runtimeId?: string
+  label: string
+  agent?: string
+  status: TerminalStatus
+  text: string
+}
+
 /**
  * Find a live status for a tracked run from the unqualified live-status list.
  *
