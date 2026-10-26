@@ -1754,7 +1754,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     const resumeAfterCompaction = () => {
       compacting = false
       // Compaction rejected any prompt that was in flight: no confirmation can
-      // arrive, so hand delivery back to the poll.
+      // arrive, so hand delivery back to the poll. The retry budget is
+      // per-notice and survives compaction, so a capped run still waits for
+      // settlement instead of resuming sends.
       for (const run of trackedRuns.values()) {
         if (!run.pendingNotice) continue
         run.idleSendInFlight = false

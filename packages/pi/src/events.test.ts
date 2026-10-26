@@ -4,6 +4,7 @@ import {
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
+  createDeliveryErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -288,6 +289,46 @@ describe('Avenor telemetry event bridge', () => {
 
     expect(payload.message).toBe('short msg')
     expect(payload.error).toBe('short err')
+  })
+
+  it('copies and freezes a delivery error with its retry count', () => {
+    const payload = createDeliveryErrorPayload({
+      source: 'idle-send',
+      runId: 'run-1',
+      label: 'worker',
+      message: 'idle completion send was never confirmed',
+      error: new Error('no message_end after 3 attempts'),
+      attempts: 3,
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload).toEqual({
+      source: 'idle-send',
+      runId: 'run-1',
+      label: 'worker',
+      message: 'idle completion send was never confirmed',
+      error: 'Error: no message_end after 3 attempts',
+      attempts: 3,
+      timestamp: 1_700_000_000_000,
+    })
+    expect(Object.isFrozen(payload)).toBe(true)
+  })
+
+  it('uses unknown error for an empty delivery failure and bounds both texts', () => {
+    const payload = createDeliveryErrorPayload({
+      source: 'idle-send',
+      runId: 'run-1',
+      label: 'worker',
+      message: '\u001b[31m\n\t  \n',
+      error: 'b'.repeat(800),
+      attempts: 1,
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload.message).toBe('unknown error')
+    expect(payload.error).toHaveLength(600)
+    expect(payload.error).toEndWith('…')
+    expect(Object.isFrozen(payload)).toBe(true)
   })
 
   it('forwards handlers to the shared bus without owning global state', () => {

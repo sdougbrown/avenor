@@ -170,7 +170,7 @@ that moment.
 - **Idle.** The notice is sent as a user message and starts its own turn. It
   counts as unread until Pi confirms the message landed, and while compaction is
   running the send waits for it to finish. A send that is accepted but never
-  confirmed is re-sent up to three times; once that budget is spent the notice
+  confirmed is sent at most three times; once that budget is spent the notice
   stays unread for the next settlement and the failure is emitted on
   `avenor:delivery:error`.
 - **Busy.** The notice is queued and the footer shows `unread:N`. The next

@@ -2568,11 +2568,12 @@ describe('Avenor Pi extension', () => {
 
   it('clears the notice when a late confirmation arrives after a re-arm', async () => {
     const SOCK = '/tmp/idle-late-confirm.sock'
-    let done = false
+    let workerDone = false
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
       if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === SOCK) {
-        return done
+        if (args.runId === 'r2') return { run_id: 'r2', label: 'steady', status: 'running', runtime_id: 'rt2' }
+        return workerDone
           ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'late answer' }
           : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
       }
@@ -2581,29 +2582,40 @@ describe('Avenor Pi extension', () => {
     const h = await createMultiSupervisorHarness({
       statusTool,
       idleSendTimeoutMs: 60,
-      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'steady' ? 'r2' : 'r1',
+        label: args.label ?? 'worker',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'steady' ? 'rt2' : 'rt1',
+      })),
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
-    done = true
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'steady', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    workerDone = true
 
     const deliveries = () => h.sendUserMessage.mock.calls
       .map(([t]) => String(t))
       .filter(t => t.includes('Sub-agent "worker" finished'))
 
     await waitFor(() => deliveries().length >= 1)
-    // The send stays accepted-but-unconfirmed and the session is busy, so
-    // nothing is re-sent and the first prompt is the only thing still queued.
+    // The send stays accepted-but-unconfirmed and the session turns busy, so
+    // the timeout must hand delivery back to the poll without re-sending. The
+    // steady sibling keeps the loop alive, so a poll completing after the send
+    // timeout has certainly run the re-arm branch against the busy session.
+    h.ctx.isIdle = () => false
+    const busyAt = Date.now()
+    await waitFor(() => h.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_POLL_COMPLETED
+      && (payload as { timestamp?: number }).timestamp >= busyAt + 60))
+    expect(deliveries()).toHaveLength(1)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+
     // The confirmation matches on the notice text alone, so it can arrive
     // while the send is still marked in flight.
-    h.ctx.isIdle = () => false
-    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
-
-    const delivered = deliveries().length
-    expect(delivered).toBe(1)
     await confirmDelivery(h, deliveries()[0]!)
     expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
-    expect(deliveries()).toHaveLength(delivered)
+    expect(deliveries()).toHaveLength(1)
 
     // The confirmed notice must not be delivered a second time at settlement.
     const settled = await h.eventHandlers.agent_before_settle(
@@ -2653,9 +2665,9 @@ describe('Avenor Pi extension', () => {
     expect(footer()).not.toContain('errors:')
     expect(h.emitted.some(([channel]) => channel === CHANNEL_POLL_ERROR)).toBe(false)
 
-    // Nothing new is sent once the cap is exhausted, and the unread notice is
-    // still delivered at settlement.
-    await new Promise(resolve => setTimeout(resolve, 100))
+    // The cap tick leaves no active run and no in-flight send, so the poll
+    // loop stops and nothing can re-send: the unread notice is still
+    // delivered at settlement.
     expect(deliveries()).toHaveLength(3)
     const settled = await h.eventHandlers.agent_before_settle(
       { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
@@ -2663,6 +2675,51 @@ describe('Avenor Pi extension', () => {
     )
     expect(settled?.entries).toHaveLength(1)
     expect(String(settled?.entries[0]?.content)).toContain('capped answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('resets the idle-send retry budget when a session start hands delivery back to the poll', async () => {
+    const SOCK = '/tmp/idle-cap-session-start.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'capped again answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      idleSendTimeoutMs: 20,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    done = true
+
+    const deliveries = () => h.sendUserMessage.mock.calls
+      .map(([t]) => String(t))
+      .filter(t => t.includes('Sub-agent "worker" finished'))
+    const deliveryErrors = () => h.emitted
+      .filter(([channel]) => channel === CHANNEL_DELIVERY_ERROR)
+      .map(([, payload]) => payload as { runId?: string; attempts?: number })
+
+    await waitFor(() => deliveries().length >= 3)
+    await waitFor(() => deliveryErrors().some(payload => payload.runId === 'r1' && payload.attempts === 3))
+
+    // The session replacement clears the capped notice and hands delivery back
+    // to the poll with a fresh retry budget: the rebuilt notice is sent again
+    // instead of staying capped.
+    await h.eventHandlers.session_start({}, h.ctx)
+    await waitFor(() => deliveries().length >= 4)
+
+    // The fresh budget is bounded the same way: three more unconfirmed sends
+    // exhaust it and the delivery error repeats.
+    await waitFor(() => deliveryErrors().filter(payload => payload.attempts === 3).length >= 2)
+    expect(deliveries()).toHaveLength(6)
 
     await h.eventHandlers.session_shutdown()
   })
