@@ -1040,6 +1040,7 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 	t.Setenv("AVENOR_RUN_ID", "stale-run")
 	t.Setenv("AVENOR_BROKER_TOKEN", "stale-token")
 	t.Setenv("PI_AGENT", "stale-agent")
+	t.Setenv(token.EnvBrokerParentToken, "parent-token")
 	commands := make([]*exec.Cmd, 0, 2)
 	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
 		captured = exec.Command("cat", args...)
@@ -1076,6 +1077,9 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 		if env[key] != val {
 			t.Fatalf("%s = %q, want %q", key, env[key], val)
 		}
+	}
+	if v, ok := env[token.EnvBrokerParentToken]; ok {
+		t.Fatalf("pi child env carries the parent-link credential: %q", v)
 	}
 
 	// With no broker identity at all, stale AVENOR_*/PI_AGENT env must be
@@ -1137,5 +1141,8 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 		if v, ok := agentEnv[key]; ok {
 			t.Errorf("%s = %q leaked into child env with only PI_AGENT set", key, v)
 		}
+	}
+	if v, ok := agentEnv[token.EnvBrokerParentToken]; ok {
+		t.Fatalf("pi child env carries the parent-link credential: %q", v)
 	}
 }
