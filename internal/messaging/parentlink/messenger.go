@@ -247,6 +247,10 @@ func (m *Messenger) RecordRelay(route messaging.RelayRoute) error {
 // Registry exposes the descendant registry for a host that reports on it.
 func (m *Messenger) Registry() *Registry { return m.registry }
 
+// Key reports the run ID this broker addresses childID's runID by, which is how
+// a claim and every later hop name a descendant's run.
+func (m *Messenger) Key(childID, runID string) string { return ParentRunKey(childID, runID) }
+
 var (
 	_ messaging.Messenger  = (*Messenger)(nil)
 	_ messaging.ParentLink = (*Messenger)(nil)

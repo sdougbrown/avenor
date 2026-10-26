@@ -79,74 +79,6 @@ func TestSessionRenameLevelsAndResolution(t *testing.T) {
 	}
 }
 
-// A self-rename of a run whose harness named it: SessionRename reports and
-// publishes the stored label the rename accepted, while the resolved display
-// name the run is reached by stays the harness-supplied name.
-func TestSessionRenameUnderHarnessName(t *testing.T) {
-	sup, _ := newStage2Supervisor(t, 4)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	log := newItestEventLog(sup.control.SubscribeEvents(ctx))
-	if _, err := sup.broker.CreateRun("rt_h", "launch-name"); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	if err := sup.broker.SetHarnessName("rt_h", "harness-name"); err != nil {
-		t.Fatalf("set harness name: %v", err)
-	}
-
-	result, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: "rt_h"}, "", "model-name")
-	if err != nil {
-		t.Fatalf("rename: %v", err)
-	}
-	// The result reports the stored label the rename accepted, not the resolved
-	// display name: the harness name would have made both fields read
-	// "harness-name" and the rename invisible.
-	if result.Label != "model-name" || result.PreviousLabel != "launch-name" {
-		t.Fatalf("rename result = %+v, want launch-name -> model-name", result)
-	}
-	ev := log.waitFor(t, "session.renamed", func(ev events.Event) bool { return ev.Event == "session.renamed" })
-	if ev.Fields["label"] != "model-name" || ev.Fields["previous_label"] != "launch-name" {
-		t.Fatalf("session.renamed fields = %v, want launch-name -> model-name", ev.Fields)
-	}
-	// Peers still see the harness name: the rename changed the model-set label
-	// underneath it, and it wins until the harness clears it.
-	if got := sup.broker.DisplayName("rt_h"); got != "harness-name" {
-		t.Fatalf("display name = %q, want harness-name", got)
-	}
-}
-
-// peerLabel resolves what peers see: a registered run's broker display name —
-// where the harness-supplied name wins — and the launch label only in the
-// window before the run is registered at the broker.
-func TestPeerLabelResolvesHarnessName(t *testing.T) {
-	sup, _ := newStage2Supervisor(t, 4)
-	if _, err := sup.broker.CreateRun("rt_x", "launch-name"); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	child := &childRuntime{id: "rt_x", runID: "rt_x", label: "launch-name", displayName: "launch-name"}
-
-	if err := sup.broker.SetHarnessName("rt_x", "harness-name"); err != nil {
-		t.Fatalf("set harness name: %v", err)
-	}
-	child.mu.Lock()
-	got := sup.peerLabel(child)
-	child.mu.Unlock()
-	if got != "harness-name" {
-		t.Fatalf("peer label = %q, want harness-name", got)
-	}
-
-	// A child whose broker run does not exist yet keeps its launch label.
-	// Neither child is registered on the supervisor; peerLabel only reads the
-	// child and the broker.
-	unregistered := &childRuntime{id: "rt_y", runID: "rt_y", label: "launch-y", displayName: "launch-y"}
-	unregistered.mu.Lock()
-	got = sup.peerLabel(unregistered)
-	unregistered.mu.Unlock()
-	if got != "launch-y" {
-		t.Fatalf("pre-registration label = %q, want launch-y", got)
-	}
-}
-
 func TestSessionRenameAmbiguousLabel(t *testing.T) {
 	sup, _ := newStage2Supervisor(t, 4)
 	for _, id := range []string{"rt_b", "rt_a"} {
@@ -440,4 +372,110 @@ func TestSessionRenameIndexesRuntimeHistory(t *testing.T) {
 		return
 	}
 	t.Fatalf("session.renamed is absent from the runtime history: %v", history.Events)
+}
+
+// TestHarnessNameObserverMirrorsIntoTheRuntimeLabel pins the supervisor-level
+// wiring of the broker's harness-name observer: SetHarnessName writes the
+// broker's label half, and the observer wired at construction copies the
+// broker's resolved name into the runtime's display name, the copy status and
+// label reservation read.
+func TestHarnessNameObserverMirrorsIntoTheRuntimeLabel(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "harnessname"), MaxRuntimes: 2})
+	if sup.broker == nil {
+		t.Fatal("the test supervisor has no broker")
+	}
+	const runID = "rt_harness"
+	if _, ok := sup.broker.EnsureRun(runID, "launch-label"); !ok {
+		t.Fatal("ensure the run record: not created")
+	}
+	sup.controlMu.Lock()
+	sup.runtimes[runID] = &childRuntime{id: runID, label: "launch-label", displayName: "launch-label", done: make(chan struct{})}
+	sup.controlMu.Unlock()
+	// The synthetic runtime leaves the map before the lifecycle cleanup walks
+	// runtimes it does not model.
+	t.Cleanup(func() {
+		sup.controlMu.Lock()
+		delete(sup.runtimes, runID)
+		sup.controlMu.Unlock()
+	})
+
+	if err := sup.broker.SetHarnessName(runID, "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+	if got := runtimeDisplayName(sup, runID); got != "harness-name" {
+		t.Fatalf("runtime display name after harness name = %q, want harness-name", got)
+	}
+
+	// Clearing the harness name rewrites the mirror to the resolved fallback.
+	if err := sup.broker.SetHarnessName(runID, ""); err != nil {
+		t.Fatalf("clear harness name: %v", err)
+	}
+	if got := runtimeDisplayName(sup, runID); got != "launch-label" {
+		t.Fatalf("runtime display name after clear = %q, want launch-label", got)
+	}
+}
+
+// runtimeDisplayName reads one runtime's display name under its lock.
+func runtimeDisplayName(sup *Supervisor, runID string) string {
+	sup.controlMu.Lock()
+	child := sup.runtimes[runID]
+	sup.controlMu.Unlock()
+	if child == nil {
+		return ""
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	return child.displayName
+}
+
+// TestSessionRenameUnderAHarnessName pins the primary rename path against the
+// harness overlay: SessionRename writes the model-set label underneath while
+// the resolved display name keeps winning with the harness name, and clearing
+// the harness name falls back to the renamed model-set label.
+func TestSessionRenameUnderAHarnessName(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "harnessrename"), MaxRuntimes: 2})
+	if sup.broker == nil {
+		t.Fatal("the test supervisor has no broker")
+	}
+	const runID = "rt_hrn"
+	if _, ok := sup.broker.EnsureRun(runID, "launch-label"); !ok {
+		t.Fatal("ensure the run record: not created")
+	}
+	sup.controlMu.Lock()
+	sup.runtimes[runID] = &childRuntime{id: runID, label: "launch-label", displayName: "launch-label", done: make(chan struct{})}
+	sup.controlMu.Unlock()
+	t.Cleanup(func() {
+		sup.controlMu.Lock()
+		delete(sup.runtimes, runID)
+		sup.controlMu.Unlock()
+	})
+
+	if err := sup.broker.SetHarnessName(runID, "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+	renamed, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: runID}, "", "model-name")
+	if err != nil {
+		t.Fatalf("rename under a harness name: %v", err)
+	}
+	// The result carries the resolved display name (the harness overlay wins),
+	// while the model-set label is written underneath — pinned by the fallback
+	// below, which surfaces it when the harness name clears. The previous label
+	// is the resolved name before the write (the harness overlay), not the raw
+	// model label underneath it.
+	if renamed.Label != "harness-name" {
+		t.Fatalf("rename result label = %q, want the resolved harness name", renamed.Label)
+	}
+	if renamed.PreviousLabel != "harness-name" {
+		t.Fatalf("rename result previous label = %q, want the resolved harness name", renamed.PreviousLabel)
+	}
+	if got := runtimeDisplayName(sup, runID); got != "harness-name" {
+		t.Fatalf("runtime display name after rename = %q, want the harness name to keep winning", got)
+	}
+
+	if err := sup.broker.SetHarnessName(runID, ""); err != nil {
+		t.Fatalf("clear harness name: %v", err)
+	}
+	if got := runtimeDisplayName(sup, runID); got != "model-name" {
+		t.Fatalf("runtime display name after clear = %q, want the renamed model-set label", got)
+	}
 }

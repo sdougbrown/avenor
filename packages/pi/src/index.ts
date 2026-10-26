@@ -600,8 +600,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function publishSessionName(ctx: ExtensionContext): Promise<void> {
       if (!subAgentEnv) return publishChain
       const env = subAgentEnv
-      const name = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } })
-        .sessionManager?.getSessionName?.()
+      // The event context does not always carry a session manager. A manager
+      // that is missing is not the same as a cleared name: with nothing to read
+      // the publish is skipped, because sending an empty name would clobber the
+      // broker's copy of a name the harness may still hold. A manager that is
+      // present but reports undefined is a real clear and still publishes.
+      const manager = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } }).sessionManager
+      if (!manager || typeof manager.getSessionName !== 'function') return publishChain
+      const name = manager.getSessionName()
       if (publishedSessionName && publishedSessionName.name === name) return publishChain
       if (refusedSessionName === name) return publishChain
       // Record the attempt before it lands so a second read of the same name

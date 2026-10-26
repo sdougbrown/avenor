@@ -14,6 +14,8 @@ export async function startExtensionHarness(options: {
   ui?: Record<string, any>
   /** The harness's user-defined session name, as pi's session manager reports it. */
   sessionName?: () => string | undefined
+  /** Replaces the whole session-manager mock; without it the default reports `sessionName`. */
+  sessionManager?: unknown
   onEmit?: (channel: string, payload: unknown) => void
   sendUserMessage?: any
 } = {}) {
@@ -81,7 +83,7 @@ export async function startExtensionHarness(options: {
 
   const ctx = {
     cwd: '/tmp',
-    sessionManager: { getSessionName: options.sessionName ?? (() => undefined) },
+    sessionManager: options.sessionManager ?? { getSessionName: options.sessionName ?? (() => undefined) },
     ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) },
   }
   await eventHandlers.session_start({}, ctx)
