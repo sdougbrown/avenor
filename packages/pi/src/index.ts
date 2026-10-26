@@ -412,6 +412,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     const pollingErrors: PollErrorPayload[] = []
     let lastStatusEntries: RunStatusEntry[] = []
     let sessionGeneration = 0
+    // True from session_before_compact until session_compact/_failed. An idle
+    // completion sent during compaction can be rejected by the prompt path, so
+    // delivery waits and leaves the notice unread.
+    let compacting = false
     // Suppress last-turn writes after a closed-socket failure until the default
     // binding is evicted by disposeHostProvider/disposeHostProviders, or a new
     // session starts. Evicting other supervisors must not reset this flag.
@@ -862,18 +866,27 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
     }
 
-    async function sendUserMessageLogged(text: string, failureLog: string): Promise<boolean> {
+    /**
+     * Fire-and-forget delivery. Pi's extension-facing `sendUserMessage` returns
+     * void and the runtime swallows async rejections, so a send is only known to
+     * have landed when the user message comes back through `message_end`. Only a
+     * synchronous throw is observable here.
+     */
+    function sendUserMessageLogged(text: string, failureLog: string): void {
       try {
-        await Promise.resolve(pi.sendUserMessage(text, { deliverAs: 'followUp' }))
-        return true
+        pi.sendUserMessage(text, { deliverAs: 'followUp' })
       } catch (err) {
         console.error(failureLog, err)
-        return false
       }
     }
 
     function clearPendingNotices(): void {
-      for (const run of trackedRuns.values()) run.pendingNotice = undefined
+      for (const run of trackedRuns.values()) {
+        run.pendingNotice = undefined
+        // An in-flight send belongs to the session that was just replaced; its
+        // confirmation can no longer match, so delivery is handed back to the poll.
+        run.idleSendInFlight = false
+      }
     }
 
     /**
@@ -914,8 +927,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return true
     }
 
-    function sendCompletionNotice(notice: CompletionNotice): Promise<boolean> {
-      return sendUserMessageLogged(notice.text, 'avenor tick: sendUserMessage failed')
+    function sendCompletionNotice(notice: CompletionNotice): void {
+      sendUserMessageLogged(notice.text, 'avenor tick: sendUserMessage failed')
     }
 
     async function pollRuns(): Promise<RunStatusEntry[]> {
@@ -1196,24 +1209,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               continue
             }
 
-            if (sessionCtx?.isIdle() === true) {
-              run.pendingNotice = undefined
-              widgetDirty = true
+            // Idle delivery is unconfirmed until the user message comes back
+            // through message_end. Keep the notice and the run tracked so a
+            // dropped prompt stays unread instead of being lost; the in-flight
+            // flag keeps polling from sending it twice. Compaction can reject a
+            // prompt, so wait for it to finish and leave the notice unread.
+            if (sessionCtx?.isIdle() === true && !compacting) {
+              run.pendingNotice = notice
               run.idleSendInFlight = true
-              void sendCompletionNotice(notice).then(sent => {
-                // Clear the flag on whatever currently occupies the key before
-                // any bail-out: a new generation or a replacement run inherited
-                // it from upsertTrackedRun and would otherwise stay skipped.
-                const current = trackedRuns.get(entryKey)
-                if (current) current.idleSendInFlight = false
-                if (sessionAtPollStart !== sessionGeneration || current !== run) return
-                if (sent) {
-                  trackedRuns.delete(entryKey)
-                } else {
-                  current.pendingNotice = notice
-                }
-                updateWidget(lastStatusEntries)
-              })
+              widgetDirty = true
+              sendCompletionNotice(notice)
               continue
             } else if (!run.pendingNotice) {
               run.pendingNotice = notice
@@ -1226,7 +1231,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           ) {
             run.permissionNotified = true
             if (run.lastStatus) {
-              void sendUserMessageLogged(
+              sendUserMessageLogged(
                 buildWaitingText({ runId: run.runId, label: run.label, agent: run.agent }, run.lastStatus),
                 'avenor tick: sendUserMessage for permission failed',
               )
@@ -1623,6 +1628,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     pi.on('session_start', async (_event, ctx) => {
       sessionCtx = ctx
       sessionGeneration++
+      compacting = false
       clearPendingNotices()
       lastStatusEntries = []
       lastTurnSocketClosed = false
@@ -1652,6 +1658,41 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
       sessionCtx = null
     })
+
+    // Delivery confirmation for idle completions. A send is only proven to
+    // have landed when the user message comes back here, so the matching
+    // notice and its tracked run are cleared now rather than optimistically at
+    // send time. A run consumed while the send was in flight is already gone,
+    // and nothing matches on its behalf.
+    pi.on('message_end', event => {
+      if (event.message?.role !== 'user') return
+      const text = extractTurnText([event.message]).text
+      if (text === '') return
+      let confirmed = false
+      for (const [key, run] of trackedRuns) {
+        if (!run.idleSendInFlight) continue
+        if (run.pendingNotice?.text !== text) continue
+        run.pendingNotice = undefined
+        run.idleSendInFlight = false
+        trackedRuns.delete(key)
+        confirmed = true
+      }
+      if (confirmed) updateWidget(lastStatusEntries)
+    })
+
+    pi.on('session_before_compact', () => {
+      compacting = true
+    })
+
+    // Compaction rejects prompts in flight, so idle delivery is deferred while
+    // it runs. Once it finishes, resume polling to deliver whatever notices are
+    // still unread.
+    const resumeAfterCompaction = () => {
+      compacting = false
+      if (Array.from(trackedRuns.values()).some(run => run.pendingNotice)) startPolling()
+    }
+    pi.on('session_compact', resumeAfterCompaction)
+    pi.on('session_compact_failed', resumeAfterCompaction)
 
     pi.on('before_agent_start', async (_event, ctx) => {
       // A session renamed between turns is picked up here, before the turn whose
@@ -1689,6 +1730,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       for (const run of trackedRuns.values()) {
         if (generation !== sessionGeneration) return
         if (!run.pendingNotice) continue
+        // An idle send is already delivering this notice; settlement must not
+        // deliver the same completion a second time.
+        if (run.idleSendInFlight) continue
         if (run.consumed) {
           run.pendingNotice = undefined
           pruned = true

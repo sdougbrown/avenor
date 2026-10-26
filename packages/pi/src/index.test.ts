@@ -97,9 +97,16 @@ async function createMultiSupervisorHarness(options: {
       }
     },
   })
-  // Production session contexts always expose isIdle; the shared fixture omits
-  // it, so the supervisor harness defaults to idle.
-  return { ...h, ctx: Object.assign(h.ctx, { isIdle: () => true }), confirm, waitPolls, waitPollMatching }
+  return { ...h, confirm, waitPolls, waitPollMatching }
+}
+
+/** Confirm an idle completion the way Pi does: the prompt we sent comes back
+ * through message_end as a user message. */
+function confirmDelivery(h: { eventHandlers: Record<string, any> }, text: string) {
+  return h.eventHandlers.message_end({
+    type: 'message_end',
+    message: { role: 'user', content: text, timestamp: Date.now() },
+  })
 }
 
 /** Open the watch inspector for a run and send one follow-up through it. */
@@ -1529,6 +1536,8 @@ describe('Avenor Pi extension', () => {
     expect(String(completionText)).toContain('> advisor final answer')
     expect(String(completionText)).toContain('`019fc5c7-f8e5-76c0-9075-9ec6c836d3de`')
     expect(String(completionText)).not.toContain('019fc5c7-b8c0-761e-a23a-0295e921aaf6')
+    // The idle send only stops being tracked once Pi confirms it landed.
+    await confirmDelivery(h, String(completionText))
 
     const terminal = h.emitted.filter(([c]) => c === CHANNEL_RUN_TERMINAL).map(([, p]) => p as Record<string, unknown>)
     const advisorTerminal = terminal.find(t => t.status === 'done' && t.label === 'advisor')
@@ -1890,7 +1899,6 @@ describe('Avenor Pi extension', () => {
       inspectTool,
       spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
     })
-    h.ctx.isIdle = () => false
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     done = true
@@ -1902,6 +1910,13 @@ describe('Avenor Pi extension', () => {
     releaseInspect()
     await waitFor(() => h.setStatus.mock.calls.length > statusCallsBefore)
     expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
+    // Exactly one terminal event: the stale poll path that resumes after the
+    // inspect resolves must not emit a second one.
+    const terminals = h.emitted
+      .filter(([channel]) => channel === CHANNEL_RUN_TERMINAL)
+      .map(([, payload]) => payload as Record<string, unknown>)
+      .filter(payload => payload.runId === 'r1')
+    expect(terminals).toHaveLength(1)
 
     const settled = await h.eventHandlers.agent_before_settle(
       { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
@@ -2005,6 +2020,11 @@ describe('Avenor Pi extension', () => {
     await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'worker' && e.status === 'done'))
     await waitFor(() => h.sendUserMessage.mock.calls.some(([t]) => String(t).includes('idle answer')))
 
+    // An idle send is unconfirmed until it lands, so the notice stays unread
+    // while the prompt is in flight.
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+
     const settled = await h.eventHandlers.agent_before_settle(
       { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
       h.ctx,
@@ -2013,6 +2033,9 @@ describe('Avenor Pi extension', () => {
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
     expect(completions).toHaveLength(1)
     expect(completions[0]).toContain('idle answer')
+
+    await confirmDelivery(h, completions[0]!)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
 
     await h.eventHandlers.session_shutdown()
   })
@@ -2129,26 +2152,24 @@ describe('Avenor Pi extension', () => {
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
 
-    const senders: Array<() => void> = []
-    h.sendUserMessage.mockImplementation(() => new Promise<void>(resolve => { senders.push(resolve) }))
     done = true
 
-    // Both sends must start while the first is still in flight. An awaited
-    // send would leave the second run parked behind the gate.
-    await waitFor(() => senders.length === 2)
-    expect(senders).toHaveLength(2)
-    for (const resolve of senders) resolve()
-
+    // The send is fire-and-forget, so both terminal runs in one poll cycle must
+    // start their own delivery instead of parking behind the first.
     await waitFor(() => h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('Sub-agent "')).length >= 2)
     const completions = h.sendUserMessage.mock.calls
       .map(([t]) => String(t))
       .filter(t => t.includes('Sub-agent "') && t.includes('finished'))
     expect(completions.filter(t => t.includes('"alpha"'))).toHaveLength(1)
     expect(completions.filter(t => t.includes('"beta"'))).toHaveLength(1)
-    await waitFor(() => !String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:'))
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:2'))
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:2')
+
+    for (const completion of completions) await confirmDelivery(h, completion)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
 
     // No notice was left queued for a later settlement, and no duplicate send
-    // is pending after both completions resolved.
+    // is pending after both completions were confirmed.
     const settled = await h.eventHandlers.agent_before_settle(
       { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
       h.ctx,
@@ -2275,13 +2296,11 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
-  it('does not resurrect a notice when an idle send fails after the run was consumed', async () => {
-    const SOCK = '/tmp/failed-send.sock'
+  it('does not resurrect a notice when the run is consumed while its idle send is in flight', async () => {
+    const SOCK = '/tmp/consumed-during-send.sock'
     let done = false
     let sendStarted!: () => void
     const sendStartedGate = new Promise<void>(resolve => { sendStarted = resolve })
-    let releaseSend!: () => void
-    const sendGate = new Promise<void>(resolve => { releaseSend = resolve })
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
       if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === SOCK) {
@@ -2299,42 +2318,39 @@ describe('Avenor Pi extension', () => {
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
-    h.sendUserMessage.mockImplementation(async () => {
-      sendStarted()
-      await sendGate
-      throw new Error('send failed')
-    })
+    h.sendUserMessage.mockImplementation(() => { sendStarted() })
     done = true
     await sendStartedGate
 
-    // Consume the result before the idle send fails. The failure must not restore its notice.
+    // Consume the result while the prompt is in flight: that deletes the run
+    // and its notice. The late delivery confirmation must not re-insert either.
     const result = await h.registeredTools.avenor_result.execute('t2', { run_id: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     expect(result.details).toMatchObject({ run_id: 'r1', ready: true })
-    releaseSend()
-    await new Promise(resolve => setTimeout(resolve, 0))
+    await confirmDelivery(h, String(h.sendUserMessage.mock.calls.at(-1)?.[0]))
 
     expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
+    await h.registeredCommands['avenor-status'].handler('', h.ctx)
+    const after = h.setWidget.mock.calls.filter(([name]) => name === 'avenor-status-detail').at(-1)?.[1] as string[] | undefined
+    expect(after ?? []).toHaveLength(0)
     const settled = await h.eventHandlers.agent_before_settle(
       { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
       h.ctx,
     )
     expect(settled).toBeUndefined()
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
+    expect(completions).toHaveLength(1)
 
     await h.eventHandlers.session_shutdown()
   })
 
-  it('re-queues an idle completion when the send fails and the run is still live', async () => {
-    const SOCK = '/tmp/idle-send-requeue.sock'
+  it('keeps an unconfirmed idle send unread until message_end confirms it', async () => {
+    const SOCK = '/tmp/idle-unconfirmed.sock'
     let done = false
-    let sendStarted!: () => void
-    const sendStartedGate = new Promise<void>(resolve => { sendStarted = resolve })
-    let releaseSend!: () => void
-    const sendGate = new Promise<void>(resolve => { releaseSend = resolve })
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
       if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === SOCK) {
         return done
-          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'requeued answer' }
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'unconfirmed answer' }
           : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
       }
       return { run_id: args.runId, label: args.runId, status: 'done' }
@@ -2345,30 +2361,29 @@ describe('Avenor Pi extension', () => {
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
-    h.sendUserMessage.mockImplementation(async () => {
-      sendStarted()
-      await sendGate
-      throw new Error('send failed')
-    })
     done = true
-    await sendStartedGate
-    releaseSend()
+    await waitFor(() => h.sendUserMessage.mock.calls.some(([t]) => String(t).includes('unconfirmed answer')))
 
-    // The run is still tracked and live, so the failed idle send restores its notice.
+    // Accepted by the void API but not yet confirmed: the notice stays unread
+    // and a settlement must not deliver the same completion again.
     await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
-    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+    const settledWhileInFlight = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settledWhileInFlight).toBeUndefined()
 
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
+    expect(completions).toHaveLength(1)
+
+    await confirmDelivery(h, completions[0]!)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
     const settled = await h.eventHandlers.agent_before_settle(
       { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
       h.ctx,
     )
-    expect(settled?.continue).toBe(true)
-    const delivered = (settled?.entries ?? []).filter(entry => entry.type === 'custom_message' && entry.customType === 'avenor-completion')
-    expect(delivered).toHaveLength(1)
-    expect(String(delivered[0]?.content ?? '')).toContain('requeued answer')
-    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
-    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
-    expect(completions).toHaveLength(1)
+    expect(settled).toBeUndefined()
+    expect(h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('Sub-agent "worker" finished'))).toHaveLength(1)
 
     await h.eventHandlers.session_shutdown()
   })
@@ -2396,38 +2411,31 @@ describe('Avenor Pi extension', () => {
       })),
     })
 
-    const senders: Array<() => void> = []
-    h.sendUserMessage.mockImplementation(() => new Promise<void>(resolve => { senders.push(resolve) }))
-
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     done = true
-    // The idle send for the terminal run is in flight when the session restarts.
-    await waitFor(() => senders.length === 1)
+    // The idle send is still unconfirmed when the session restarts.
+    await waitFor(() => h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('"worker"')).length === 1)
 
     await h.eventHandlers.session_start({}, h.ctx)
-    senders[0]!()
-    await new Promise(resolve => setTimeout(resolve, 0))
 
     // Polling stopped when the only tracked run went terminal; a still-running
     // sibling restarts it. The terminal run must be re-sent instead of being
     // skipped forever by a stale in-flight flag.
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'steady', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await waitFor(() => h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('"worker"')).length >= 2)
-    senders[1]?.()
-    await new Promise(resolve => setTimeout(resolve, 0))
 
     await h.eventHandlers.session_shutdown()
   })
 
-  it('drops a queued notice when an idle send starts', async () => {
-    const SOCK = '/tmp/idle-queue-drain.sock'
+  it('defers an idle completion until compaction finishes', async () => {
+    const SOCK = '/tmp/idle-compaction.sock'
     let done = false
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
       if (!args.runId) return { runs: [], count: 0 }
       if (args.supervisorId === SOCK) {
         if (args.runId === 'r2') return { run_id: 'r2', label: 'steady', status: 'running', runtime_id: 'rt2' }
         return done
-          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'queued answer' }
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'deferred answer' }
           : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
       }
       return { run_id: args.runId, label: args.runId, status: 'done' }
@@ -2444,33 +2452,27 @@ describe('Avenor Pi extension', () => {
 
     h.ctx.isIdle = () => false
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    // A running sibling keeps polling alive while the worker is terminal.
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'steady', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     done = true
     await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
-    const aborted = await h.eventHandlers.agent_before_settle(
-      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'aborted' },
-      h.ctx,
-    )
-    expect(aborted).toBeUndefined()
 
-    const senders: Array<() => void> = []
-    h.sendUserMessage.mockImplementation(() => new Promise<void>(resolve => { senders.push(resolve) }))
+    // Compaction rejects prompts, so an idle session must wait for it to finish.
+    await h.eventHandlers.session_before_compact({ type: 'session_before_compact' })
     h.ctx.isIdle = () => true
-    // A still-running sibling restarts polling so the terminal run is revisited.
-    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'steady', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
-    await waitFor(() => senders.length === 1)
+    // Two completed poll cycles: the first emit lands before its entry loop runs,
+    // so the terminal run's branch has definitely been evaluated by the second.
+    await h.waitPollMatching(() => true)
+    await h.waitPollMatching(() => true)
+    expect(h.sendUserMessage).not.toHaveBeenCalled()
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
 
-    // The notice is being delivered, so it must stop counting as unread...
-    await waitFor(() => !String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:'))
-    // ...and a settlement during the flight must not deliver it a second time.
-    const settled = await h.eventHandlers.agent_before_settle(
-      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
-      h.ctx,
-    )
-    expect(settled).toBeUndefined()
-
-    senders[0]!()
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('"worker"')).length).toBe(1)
+    await h.eventHandlers.session_compact({ type: 'session_compact' })
+    await waitFor(() => h.sendUserMessage.mock.calls.some(([t]) => String(t).includes('deferred answer')))
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
+    expect(completions).toHaveLength(1)
+    await confirmDelivery(h, completions[0]!)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
 
     await h.eventHandlers.session_shutdown()
   })

@@ -167,7 +167,9 @@ run when it ends. Each finished run produces one notice — label, terminal
 status, bounded output preview — and where it lands depends on your session at
 that moment.
 
-- **Idle.** The notice is sent as a user message and starts its own turn.
+- **Idle.** The notice is sent as a user message and starts its own turn. It
+  counts as unread until Pi confirms the message landed, and while compaction is
+  running the send waits for it to finish.
 - **Busy.** The notice is queued and the footer shows `unread:N`. The next
   settlement that completes normally appends each queued notice as an
   `avenor-completion` custom message under a single continuation, so three runs
@@ -194,7 +196,7 @@ One string under the status key `avenor`, in this order:
 |---|---|
 | `🟢 label — running [phase] 🔒 +2` | one per non-terminal run: status emoji, label, status, phase label, `🔒` for a pending permission, `+N` for that run's active descendants |
 | `total:N` | direct active runs plus discovered active descendants; present only when active descendants exist |
-| `unread:N` | notices queued for a settlement to carry them |
+| `unread:N` | notices not yet delivered: queued for a settlement, or in flight for an idle session |
 | `errors:N` | recent poll failures; cleared by a cycle that adds no new error |
 
 Missing `unread:N` or `errors:N` means zero. Without `total:N`, count the active run lines. `unread:N` counts notices,

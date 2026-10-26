@@ -85,6 +85,8 @@ export async function startExtensionHarness(options: {
     cwd: '/tmp',
     sessionManager: options.sessionManager ?? { getSessionName: options.sessionName ?? (() => undefined) },
     ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) },
+    // Pi 1.4 ExtensionContext always exposes idle state; idle delivery reads it.
+    isIdle: () => true,
   }
   await eventHandlers.session_start({}, ctx)
   return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, setStatus, setWidget }
