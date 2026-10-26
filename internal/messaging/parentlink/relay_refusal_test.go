@@ -3,85 +3,18 @@ package parentlink
 import (
 	"errors"
 	"net/http"
-	"slices"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
-// TestRelayRefusalRetiresTheRefusedRunOnTheHost pins the host half of a
-// refusal: when a child refuses the relay for one run — its credential or the
-// run itself — the relay not only drops the claim but also retires the host
-// broker's own record for that run, so the run stops being served locally.
-// A branch that merely failed retires nothing.
-func TestRelayRefusalRetiresTheRefusedRunOnTheHost(t *testing.T) {
-	cases := []struct {
-		name       string
-		status     int
-		body       string
-		wantRetire []string
-	}{
-		{
-			name:       "a refused credential",
-			status:     http.StatusUnauthorized,
-			body:       `{"code":"auth-rejected","error":"the branch refused the credential"}`,
-			wantRetire: []string{"run-b"},
-		},
-		{
-			name:       "a branch that does not know the run",
-			status:     http.StatusNotFound,
-			body:       `{}`,
-			wantRetire: []string{"run-b"},
-		},
-		{
-			name:       "a branch that is no longer the one it registered as",
-			status:     http.StatusConflict,
-			body:       `{"code":"generation-mismatch","error":"the branch no longer answers as the generation the relay carried"}`,
-			wantRetire: []string{"run-b", "run-c"},
-		},
-		{
-			name:   "a failure that says nothing about the branch",
-			status: http.StatusInternalServerError,
-			body:   `{}`,
-		},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			stub := newStubBroker(t, func(req stubRequest) (int, string) {
-				return testCase.status, testCase.body
-			})
-			registry := NewRegistry()
-			relay := newTestRelay(t, registry, "child-one", stub.URL(), "gen-a", "run-b", "run-c")
-			var retired []string
-			relay.retire = func(runIDs []string) { retired = append(retired, runIDs...) }
-			ctx := testContext(t)
-
-			err := relay.Ask(ctx, messaging.SendRequest{
-				From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-				To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
-				MessageID: "msg-1",
-			})
-			wantError := messaging.ErrTargetUnavailable
-			if testCase.wantRetire == nil {
-				wantError = ErrParentUnavailable
-			}
-			if !errors.Is(err, wantError) {
-				t.Fatalf("Ask = %v, want %v", err, wantError)
-			}
-			// A whole-child retirement reports the runs it held in no order.
-			slices.Sort(retired)
-			if !slices.Equal(retired, testCase.wantRetire) {
-				t.Fatalf("the relay retired %v, want %v", retired, testCase.wantRetire)
-			}
-		})
-	}
-}
-
 // TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch pins the relay's
-// refusal rule: a child that refuses the relay because it is no longer the
-// branch it registered as stops being a routing target, a child that retired
-// one run loses that run alone, and a child that merely failed keeps its
-// claim and is retried.
+// refusal rule: a generation mismatch retires the whole registration — but
+// only while it still matches what the relay was posted against, so a branch
+// that refreshed its claim while the refusal was in flight keeps it; a run
+// whose child refused its claim or credential stops being routed alone, its
+// claim and host record going together; and a child that failed without
+// saying anything about its branch keeps its claim and is retried.
 func TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch(t *testing.T) {
 	cases := []struct {
 		name string
@@ -228,7 +161,7 @@ func TestRelayRefusalRetiresTheAdoptedRunRecords(t *testing.T) {
 	var retired []string
 	relay, err := newRelay(Options{
 		Generation: func() string { return "gen-a" },
-		RetireRuns: func(runIDs []string) { retired = append(retired, runIDs...) },
+		RetireRun:  func(runID, token string) { retired = append(retired, runID) },
 	}, registry)
 	if err != nil {
 		t.Fatalf("newRelay: %v", err)

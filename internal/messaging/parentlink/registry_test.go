@@ -2,7 +2,6 @@ package parentlink
 
 import (
 	"errors"
-	"slices"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -23,7 +22,7 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register first child: %v", err)
 	}
-	if len(first.Retired) != 0 {
+	if len(first.Adopted) != 2 || len(first.Retired) != 0 {
 		t.Fatalf("first claim = %+v, want both runs adopted and none retired", first)
 	}
 	next, ok := registry.Hop("run-a")
@@ -42,7 +41,7 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if !errors.Is(err, ErrRunClaimed) || !errors.Is(err, messaging.ErrInvalidRequest) {
 		t.Fatalf("conflicting claim = %v, want ErrRunClaimed", err)
 	}
-	if len(refused.Retired) != 0 {
+	if len(refused.Adopted) != 0 || len(refused.Retired) != 0 {
 		t.Fatalf("refused claim = %+v, want nothing adopted and nothing retired", refused)
 	}
 	if owner, ok := registry.Owner("run-a"); !ok || owner != "one" {
@@ -58,12 +57,12 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 		ChildID:    "one",
 		Endpoint:   "http://one-again",
 		Generation: "gen-one-two",
-		Runs:       []messaging.RunClaim{{RunID: "run-c"}},
+		Runs:       []messaging.RunClaim{{RunID: "run-c", Token: "tok-c"}},
 	})
 	if err != nil {
 		t.Fatalf("re-register first child: %v", err)
 	}
-	if len(second.Retired) != 2 {
+	if len(second.Adopted) != 1 || len(second.Retired) != 2 {
 		t.Fatalf("re-registration = %+v, want run-c adopted and two retired", second)
 	}
 	if registry.Owns("run-a") || registry.Owns("run-b") {
@@ -73,18 +72,22 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 		t.Fatalf("hop for run-c = (%+v, %v), want the replacement generation", next, ok)
 	}
 
-	// Deregistering retires the child and reports everything it held.
-	runs, err := registry.Deregister("one", "gen-one-two")
+	// Deregistering retires the child and reports everything it held, with the
+	// credential each claim was registered under.
+	retired, err := registry.Deregister("one", messaging.DescendantRegistration{
+		Endpoint: "http://one-again", Generation: "gen-one-two",
+		Runs: []messaging.RunClaim{{RunID: "run-c", Token: "tok-c"}},
+	})
 	if err != nil {
 		t.Fatalf("deregister child: %v", err)
 	}
-	if len(runs) != 1 || runs[0] != "run-c" {
-		t.Fatalf("deregistered runs = %v, want run-c", runs)
+	if len(retired) != 1 || retired["run-c"] != "tok-c" {
+		t.Fatalf("deregistered runs = %v, want run-c with the credential it claimed", retired)
 	}
 	if _, ok := registry.Hop("run-c"); ok {
 		t.Fatal("a deregistered child still owns a run")
 	}
-	if _, err := registry.Deregister("one", "g1"); !errors.Is(err, messaging.ErrTargetUnavailable) {
+	if _, err := registry.Deregister("one", messaging.DescendantRegistration{}); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("deregistering an unknown child = %v, want ErrTargetUnavailable", err)
 	}
 }
@@ -140,65 +143,6 @@ func TestRegistryNamespacesBranchSupervisorRuns(t *testing.T) {
 	}
 }
 
-// TestRegistryReportsWhetherARegistrationChangedTheRunSet pins the changed
-// report: a claim that adopts or retires a run changed the owned run set, a
-// refresh that re-registers the same runs did not, and a rotated credential
-// alone is not a run-set change.
-func TestRegistryReportsWhetherARegistrationChangedTheRunSet(t *testing.T) {
-	registry := NewRegistry()
-	claim, err := registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "g1",
-		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t1"}},
-	})
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	if !claim.Changed {
-		t.Fatal("the first claim of a run reported no change")
-	}
-	claim, err = registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "g1",
-		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t1"}},
-	})
-	if err != nil {
-		t.Fatalf("re-register: %v", err)
-	}
-	if claim.Changed || len(claim.Retired) != 0 {
-		t.Fatalf("an unchanged re-registration = %+v, want nothing changed", claim)
-	}
-	// A rotated credential refreshes the claim without changing the run set.
-	claim, err = registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "g1",
-		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t2"}},
-	})
-	if err != nil {
-		t.Fatalf("re-register with a new token: %v", err)
-	}
-	if claim.Changed {
-		t.Fatal("a credential refresh alone reported a run-set change")
-	}
-	claim, err = registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "g1",
-		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t2"}, {RunID: "run-b"}},
-	})
-	if err != nil {
-		t.Fatalf("register an added run: %v", err)
-	}
-	if !claim.Changed {
-		t.Fatal("adopting a new run reported no change")
-	}
-	claim, err = registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "g1",
-		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "t2"}},
-	})
-	if err != nil {
-		t.Fatalf("register without the retired run: %v", err)
-	}
-	if !claim.Changed || len(claim.Retired) != 1 {
-		t.Fatalf("retiring a run = %+v, want a change and one retired run", claim)
-	}
-}
-
 // TestRegistryRefusesARunIDCarryingTheNamespacingSeparator pins the run ID a
 // descendant may claim: a run ID carrying "@" reads as a branch-namespaced
 // key, so a child claiming one could forge another branch's supervisor
@@ -213,7 +157,7 @@ func TestRegistryRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
 		if !errors.Is(err, ErrInvalidRunID) || !errors.Is(err, messaging.ErrInvalidRequest) {
 			t.Fatalf("claim of %q = %v, want ErrInvalidRunID", runID, err)
 		}
-		if len(claim.Runs) != 0 || len(claim.Retired) != 0 {
+		if len(claim.Runs) != 0 || len(claim.Adopted) != 0 || len(claim.Retired) != 0 {
 			t.Fatalf("refused claim of %q = %+v, want nothing applied", runID, claim)
 		}
 		if registry.Owns(runID) {
@@ -221,16 +165,14 @@ func TestRegistryRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
 		}
 	}
 	// The child itself is not left registered by a refused claim.
-	if _, err := registry.Deregister("one", "g1"); !errors.Is(err, messaging.ErrTargetUnavailable) {
+	if _, err := registry.Deregister("one", messaging.DescendantRegistration{}); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("deregistering the refused child = %v, want the child never registered", err)
 	}
 }
 
 // TestRegistryExportNarrowsToTheCallersBranch pins the export rule at the
-// registry: a branch sees only this broker's own runs — its own branch's runs
-// come from its own listing, so a re-exported alias of its own supervisor would
-// only shadow it — a sibling branch's runs stay hidden, and this broker's own
-// caller sees its descendants.
+// registry: a branch sees its own runs and this broker's own runs, a sibling
+// branch's runs stay hidden, and this broker's own caller sees its descendants.
 func TestRegistryExportNarrowsToTheCallersBranch(t *testing.T) {
 	registry := NewRegistry()
 	if _, err := registry.Register(messaging.DescendantRegistration{
@@ -248,33 +190,12 @@ func TestRegistryExportNarrowsToTheCallersBranch(t *testing.T) {
 	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: "asker"}, {RunID: "asker-mate"}, {RunID: "target"}}
 
 	exported := runIDsOf(registry.Export(peers, "asker"))
-	if !exported["orchestrator"] || exported["asker"] || exported["asker-mate"] || exported["target"] {
-		t.Fatalf("export to a branch = %v, want this broker's own runs only", exported)
+	if !exported["orchestrator"] || !exported["asker"] || !exported["asker-mate"] || exported["target"] {
+		t.Fatalf("export to a branch = %v, want the owner's runs and its own branch only", exported)
 	}
 	exported = runIDsOf(registry.Export(peers, "orchestrator"))
 	if !exported["orchestrator"] || !exported["asker"] || !exported["target"] {
 		t.Fatalf("export to this broker's own caller = %v, want every owned descendant", exported)
-	}
-}
-
-// TestRegistryExportLeavesTheOwningsBranchItsCanonicalSupervisor pins the
-// supervisor alias: a branch's supervisor registers at its parent under the
-// branch-namespaced key, so an export that returned the run to the owning
-// branch's own caller would hand it a phantom remote peer beside the canonical
-// run it already lists locally.
-func TestRegistryExportLeavesTheOwningsBranchItsCanonicalSupervisor(t *testing.T) {
-	registry := NewRegistry()
-	if _, err := registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "g1",
-		Runs: []messaging.RunClaim{{RunID: messaging.SupervisorRunID}},
-	}); err != nil {
-		t.Fatalf("register child: %v", err)
-	}
-	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: ParentRunKey("one", messaging.SupervisorRunID)}}
-
-	exported := runIDsOf(registry.Export(peers, ParentRunKey("one", messaging.SupervisorRunID)))
-	if !exported["orchestrator"] || exported["supervisor@one"] {
-		t.Fatalf("export to the owning branch = %v, want no alias of its own supervisor", exported)
 	}
 }
 
@@ -311,94 +232,13 @@ func TestRegistryHopsWithTheCredentialTheChildRegistered(t *testing.T) {
 	if hop, ok := registry.Hop("run-a"); !ok || hop.Token != "tok-2" {
 		t.Fatalf("Hop after a rotated credential = (%+v, %v), want tok-2", hop, ok)
 	}
-	if _, err := registry.Deregister("one", "g1"); err != nil {
+	if _, err := registry.Deregister("one", messaging.DescendantRegistration{
+		Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: "run-a", Token: "tok-2"}},
+	}); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 	if _, ok := registry.Hop("run-a"); ok {
 		t.Fatal("the deregistered child still routes its run")
-	}
-}
-
-// TestRetirementSkipsAReplacedClaim pins the generation-aware retirement: a
-// refusal that observed the child under an older generation retires nothing
-// once a fresher registration replaced the claim, so a restart's replacement
-// survives a relay refusal that raced it.
-func TestRetirementSkipsAReplacedClaim(t *testing.T) {
-	registry := NewRegistry()
-	if _, err := registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "gen-one",
-		Runs: []messaging.RunClaim{{RunID: "run-a"}, {RunID: "run-b"}},
-	}); err != nil {
-		t.Fatalf("register child: %v", err)
-	}
-
-	// A per-run retirement observed under the replaced generation keeps the run
-	// a fresher registration re-claimed.
-	if _, err := registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "gen-two",
-		Runs: []messaging.RunClaim{{RunID: "run-a"}},
-	}); err != nil {
-		t.Fatalf("re-register child: %v", err)
-	}
-	registry.Forget("run-a", "gen-one")
-	if !registry.Owns("run-a") {
-		t.Fatal("the replaced run lost its claim to a stale refusal")
-	}
-	registry.Forget("run-a", "gen-two")
-	if registry.Owns("run-a") {
-		t.Fatal("the refusal under the observed generation did not retire the run")
-	}
-
-	// A whole-child retirement observed under a replaced generation keeps the
-	// replacement claim, and the one under the observed generation retires it.
-	if _, err := registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "gen-three",
-		Runs: []messaging.RunClaim{{RunID: "run-c"}},
-	}); err != nil {
-		t.Fatalf("register the replacement claim: %v", err)
-	}
-	runs, err := registry.Deregister("one", "gen-one")
-	if err != nil {
-		t.Fatalf("Deregister with a stale generation: %v", err)
-	}
-	if len(runs) != 0 || !registry.Owns("run-c") {
-		t.Fatalf("stale deregistration retired %v, want the replacement claim kept", runs)
-	}
-	runs, err = registry.Deregister("one", "gen-three")
-	if err != nil {
-		t.Fatalf("Deregister: %v", err)
-	}
-	if len(runs) != 1 || runs[0] != "run-c" {
-		t.Fatalf("deregistered runs = %v, want run-c", runs)
-	}
-}
-
-// TestForcedDeregisterRetiresEveryClaim pins that the forced variant ignores
-// the generation pin entirely: a dead child whose generation no view can pin is
-// released wholesale, and an unknown child is refused like an ordinary one.
-func TestForcedDeregisterRetiresEveryClaim(t *testing.T) {
-	registry := NewRegistry()
-	if _, err := registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "gen-one",
-		Runs: []messaging.RunClaim{{RunID: "run-a"}, {RunID: "run-b"}},
-	}); err != nil {
-		t.Fatalf("register child: %v", err)
-	}
-	if _, err := registry.ForceDeregister("missing"); !errors.Is(err, messaging.ErrTargetUnavailable) {
-		t.Fatalf("ForceDeregister of an unknown child = %v, want target-unavailable", err)
-	}
-	runs, err := registry.ForceDeregister("one")
-	if err != nil {
-		t.Fatalf("ForceDeregister: %v", err)
-	}
-	slices.Sort(runs)
-	if len(runs) != 2 || runs[0] != "run-a" || runs[1] != "run-b" {
-		t.Fatalf("forced runs = %v, want run-a and run-b", runs)
-	}
-	if registry.Owns("run-a") || registry.Owns("run-b") {
-		t.Fatal("the forced deregistration left claims behind")
-	}
-	if _, ok := registry.Hop("run-a"); ok {
-		t.Fatal("the forced deregistration left a hop behind")
 	}
 }

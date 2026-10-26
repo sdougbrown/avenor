@@ -293,30 +293,6 @@ func TestParentPeerExportHidesSiblingBranches(t *testing.T) {
 	}
 }
 
-// TestBranchDoesNotListItsOwnSupervisorTwice pins the peer join across the
-// link: a branch's supervisor registers at its parent under a namespaced key,
-// but the branch lists the run locally under its canonical ID, so the parent's
-// listing must not hand the alias back — the branch would otherwise see a
-// phantom remote peer for itself and address it through the parent.
-func TestBranchDoesNotListItsOwnSupervisorTwice(t *testing.T) {
-	parent := startBranch(t, "", "orchestrator")
-	childID := newTestChildID()
-	child := newBranchWith(t, parent.url(), childID, DefaultRefreshInterval, true, []string{messaging.SupervisorRunID})
-	awaitRegistered(t, parent, "supervisor@"+childID)
-
-	status, body := getSessions(t, child.broker.Addr(), messaging.SupervisorRunID, child.token(t, messaging.SupervisorRunID))
-	if status != http.StatusOK {
-		t.Fatalf("sessions = (%d, %v), want 200", status, body)
-	}
-	listed := sessionRunIDs(t, body)
-	if !listed[messaging.SupervisorRunID] || !listed["orchestrator"] {
-		t.Fatalf("branch listing = %v, want its own supervisor and the parent's own run", listed)
-	}
-	if listed["supervisor@"+childID] {
-		t.Fatalf("branch listing = %v, want no namespaced alias of its own supervisor", listed)
-	}
-}
-
 // TestBranchRetiresItsClaimOnClose pins that a closed branch stops being a
 // routing target at its parent.
 func TestBranchRetiresItsClaimOnClose(t *testing.T) {

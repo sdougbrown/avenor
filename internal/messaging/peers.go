@@ -2,65 +2,30 @@ package messaging
 
 import (
 	"encoding/json"
-	"fmt"
 
 	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
-// UnreadablePeerRecordsDetail is the detail suffix an incomplete peer listing
-// carries when it dropped unreadable session records.
-func UnreadablePeerRecordsDetail(count int) string {
-	return fmt.Sprintf("%d session records unreadable", count)
-}
-
-// decodePeerRecords decodes a peer listing into the contract's peer records.
-// It owns the decode loop, the empty-session guard and the run-id fallback, so
-// a field added to the peer contract reaches every provider's list, resolve
-// and run-state paths instead of stopping at a per-package copy.
-//
-// The peer's own id is the identity the listing publishes. A session record's
-// run_id is the record's content, so it cannot rename the peer.
-//
-// A record that cannot be read is dropped and the listing is reported as
-// incomplete, so a caller keeps the peers it can see.
-func decodePeerRecords(peers []Peer) ([]PeerRecord, error) {
+// DecodePeerRecords is the one peer decoder every surface uses to turn a
+// broker's peer listing into the contract's peer records. It owns the decode
+// loop, the empty-session guard and the run-id fallback, so a field added to
+// the peer contract reaches every provider's list, resolve and run-state paths
+// instead of stopping at a per-package copy.
+func DecodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 	records := make([]PeerRecord, 0, len(peers))
-	unreadable := 0
 	for _, peer := range peers {
 		var record PeerRecord
 		if len(peer.Session) > 0 {
 			if err := json.Unmarshal(peer.Session, &record); err != nil {
-				unreadable++
-				continue
+				return nil, err
 			}
 		}
-		if peer.RunID != "" {
+		if record.RunID == "" {
 			record.RunID = peer.RunID
 		}
 		records = append(records, record)
 	}
-	if unreadable > 0 {
-		return records, fmt.Errorf("%w: %s", ErrIncompleteListing, UnreadablePeerRecordsDetail(unreadable))
-	}
 	return records, nil
-}
-
-// PeerListing decodes a peer listing a transport read. It is the one decoder
-// every surface uses to turn a listing into records. A transport that could
-// not read every peer returns the peers it did read together with an error:
-// those peers are decoded and kept, and the error travels with them, so a
-// caller answers for a peer it can see and refuses to answer for a peer it
-// cannot. A listing that could not be read at all returns no peers and the
-// error alone.
-func PeerListing(peers []Peer, err error) ([]PeerRecord, error) {
-	records, decodeErr := decodePeerRecords(peers)
-	if err != nil && len(peers) == 0 {
-		return nil, err
-	}
-	if decodeErr != nil {
-		return records, decodeErr
-	}
-	return records, err
 }
 
 // LabelCandidates collects the run ids in records whose broker label equals

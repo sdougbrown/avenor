@@ -1097,18 +1097,13 @@ func (c *Client) MessagePeers(req messaging.PeersRequest) (messaging.PeersResult
 }
 
 // MessagePeersContext lists the visible peers and stops waiting when ctx is
-// done. A listing that could not be completed keeps the peers it did read and
-// reports the incompleteness alongside them.
+// done.
 func (c *Client) MessagePeersContext(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	var result control.MessagePeersResult
 	if err := c.CallContext(ctx, "message_peers", control.NewMessagePeersParams(req), &result); err != nil {
 		return messaging.PeersResult{}, err
 	}
-	out := result.PeersResult()
-	if result.PeersError != "" {
-		return out, fmt.Errorf("%w: %s", messaging.ErrIncompleteListing, result.PeersError)
-	}
-	return out, nil
+	return result.PeersResult(), nil
 }
 
 // MessagePreflight reports the supervisor transport's protocol and generation.
