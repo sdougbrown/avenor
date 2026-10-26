@@ -39,6 +39,22 @@ func TestBranchIdentityIsDerivedFromTheControlSocketPath(t *testing.T) {
 	}
 }
 
+func TestBranchIdentityExternalValueEdgeCases(t *testing.T) {
+	tests := []struct {
+		identity string
+		want     string
+	}{
+		{"", ""},
+		{"/tmp/!!!.sock", "branch-87f8d59bddde8844"},
+		{"/tmp/a b!!c.sock", "a-b-c-7ae18db745f81441"},
+	}
+	for _, tt := range tests {
+		if got := BranchID(tt.identity); got != tt.want {
+			t.Errorf("BranchID(%q) = %q, want %q", tt.identity, got, tt.want)
+		}
+	}
+}
+
 // TestUncleanRestartReclaimsTheRunsUnderItsDurableIdentity pins the recovery
 // path: a branch that dies without retracting its claim comes back under the
 // same durable identity, reclaims the runs it still owns, retires the ones it
