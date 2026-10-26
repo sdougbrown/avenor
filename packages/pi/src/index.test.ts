@@ -2283,6 +2283,56 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('re-queues an idle completion when the send fails and the run is still live', async () => {
+    const SOCK = '/tmp/idle-send-requeue.sock'
+    let done = false
+    let sendStarted!: () => void
+    const sendStartedGate = new Promise<void>(resolve => { sendStarted = resolve })
+    let releaseSend!: () => void
+    const sendGate = new Promise<void>(resolve => { releaseSend = resolve })
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'requeued answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    h.sendUserMessage.mockImplementation(async () => {
+      sendStarted()
+      await sendGate
+      throw new Error('send failed')
+    })
+    done = true
+    await sendStartedGate
+    releaseSend()
+
+    // The run is still tracked and live, so the failed idle send restores its notice.
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled?.continue).toBe(true)
+    const delivered = (settled?.entries ?? []).filter(entry => entry.type === 'custom_message' && entry.customType === 'avenor-completion')
+    expect(delivered).toHaveLength(1)
+    expect(String(delivered[0]?.content ?? '')).toContain('requeued answer')
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
+    expect(completions).toHaveLength(1)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('re-sends an idle completion after a new session generation interrupts the send', async () => {
     const SOCK = '/tmp/idle-generation.sock'
     let done = false

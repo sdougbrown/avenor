@@ -794,32 +794,42 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     }
 
     /**
-     * Look a run up in the per-supervisor tracking namespace. When a
-     * supervisor is supplied, resolve exactly. Without one, prefer the
+     * Resolve a canonical run id in the per-supervisor tracking namespace.
+     * When a supervisor is supplied, resolve exactly. Without one, prefer the
      * singleton namespace and only fall back to a run id walk when it is
      * unambiguous across supervisors. Duplicate run ids across supervisors
      * without an explicit supervisor return undefined so callers never bind
      * flags or telemetry to the wrong supervisor's run.
-     *
-     * A label is only a resolution input: canonical identity remains the
-     * supervisor namespace plus the public run id. Labels resolve within the
-     * requested supervisor, or across supervisors only when unique.
      */
-    function getTrackedRun(runId: string, supervisorId?: string): TrackedRun | undefined {
+    function trackedRunsById(runId: string, supervisorId?: string): TrackedRun[] {
       if (supervisorId !== undefined) {
-        return trackedRuns.get(trackedRunKey(supervisorId, runId))
-          ?? findTrackedByLabel(runId, supervisorId)
+        const exact = trackedRuns.get(trackedRunKey(supervisorId, runId))
+        return exact ? [exact] : []
       }
       const singleton = trackedRuns.get(trackedRunKey(undefined, runId))
-      if (singleton) return singleton
-      let match: TrackedRun | undefined
+      if (singleton) return [singleton]
+      const matches: TrackedRun[] = []
       for (const run of trackedRuns.values()) {
-        if (run.runId !== runId) continue
-        if (match) return undefined // ambiguous without a supervisor
-        match = run
+        if (run.runId === runId) matches.push(run)
       }
-      if (match) return match
-      return findTrackedByLabel(runId)
+      return matches
+    }
+
+    function getTrackedRunById(runId: string, supervisorId?: string): TrackedRun | undefined {
+      const matches = trackedRunsById(runId, supervisorId)
+      return matches.length === 1 ? matches[0] : undefined
+    }
+
+    /**
+     * Resolve a user-supplied run reference. A canonical identity always wins;
+     * a label is only a fallback, and an ambiguous canonical id never falls
+     * through to a label.
+     */
+    function getTrackedRun(runId: string, supervisorId?: string): TrackedRun | undefined {
+      const exact = getTrackedRunById(runId, supervisorId)
+      if (exact) return exact
+      if (trackedRunsById(runId, supervisorId).length > 1) return undefined
+      return findTrackedByLabel(runId, supervisorId)
     }
 
     /** Resolve the tracked run a successful result belongs to from the
@@ -852,14 +862,18 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
     }
 
-    async function sendCompletionNotice(notice: CompletionNotice): Promise<boolean> {
+    async function sendUserMessageLogged(text: string, failureLog: string): Promise<boolean> {
       try {
-        await Promise.resolve(pi.sendUserMessage(notice.text, { deliverAs: 'followUp' }))
+        await Promise.resolve(pi.sendUserMessage(text, { deliverAs: 'followUp' }))
         return true
       } catch (err) {
-        console.error('avenor tick: sendUserMessage failed', err)
+        console.error(failureLog, err)
         return false
       }
+    }
+
+    function sendCompletionNotice(notice: CompletionNotice): Promise<boolean> {
+      return sendUserMessageLogged(notice.text, 'avenor tick: sendUserMessage failed')
     }
 
     async function pollRuns(): Promise<RunStatusEntry[]> {
@@ -1183,14 +1197,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           ) {
             run.permissionNotified = true
             if (run.lastStatus) {
-              try {
-                pi.sendUserMessage(
-                  buildWaitingText({ runId: run.runId, label: run.label, agent: run.agent }, run.lastStatus),
-                  { deliverAs: 'followUp' },
-                )
-              } catch (err) {
-                console.error('avenor tick: sendUserMessage for permission failed', err)
-              }
+              void sendUserMessageLogged(
+                buildWaitingText({ runId: run.runId, label: run.label, agent: run.agent }, run.lastStatus),
+                'avenor tick: sendUserMessage for permission failed',
+              )
             }
           } else if (!entry.pendingPermission && run.permissionNotified) {
             run.permissionNotified = false
@@ -1837,7 +1847,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             } else {
               // Hand control back to the agent and let the polling tick
               // deliver this run's completion, exactly like a wait=false spawn.
-              const tracked = getTrackedRun(result.run_id, supervisorId)
+              const tracked = getTrackedRunById(result.run_id, supervisorId)
               if (tracked) tracked.blocking = false
               return {
                 content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted: "${stop.label ?? stop.runId}" ${describeStoppingPoint(stop)}. Handle that first; this run's final result is delivered automatically.` }],
@@ -1877,7 +1887,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         upsertTrackedRun(runRef, status, wait)
 
         if (status.status === 'waiting') {
-          const tracked = getTrackedRun(result.run_id, supervisorId)
+          const tracked = getTrackedRunById(result.run_id, supervisorId)
           if (tracked) {
             tracked.permissionNotified = true
             tracked.blocking = false
@@ -1929,7 +1939,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
         }
 
-        const fallthrough = getTrackedRun(result.run_id, supervisorId)
+        const fallthrough = getTrackedRunById(result.run_id, supervisorId)
         if (fallthrough) fallthrough.blocking = false
         return {
           content: [{ type: 'text', text: `${label} is ${status.status}. Use avenor_status or avenor_inspect to check progress.` }],
