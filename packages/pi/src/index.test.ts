@@ -1934,6 +1934,88 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('releases a label-resolved tracked run when the result reconciles to another run', async () => {
+    const SOCK = '/tmp/result-reconcile-other.sock'
+    let alphaDone = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId !== SOCK) return { run_id: args.runId, label: args.runId, status: 'running' }
+      if (args.runId === 'ra') {
+        return alphaDone
+          ? { run_id: 'ra', label: 'alpha', status: 'done', runtime_id: 'rt-a', final_output: 'alpha answer' }
+          : { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+      }
+      return { run_id: 'rb', label: 'beta', status: 'done', runtime_id: 'rt-b', final_output: 'beta answer' }
+    })
+    // The caller asks for the label alpha; the result tool reconciles to run rb.
+    const resultTool = mock(async () => ({ run_id: 'rb', label: 'beta', status: 'done', ready: true, output: 'beta answer' }))
+    const spawnTool = mock(async (args: { label?: string }) => ({
+      run_id: args.label === 'alpha' ? 'ra' : 'rb',
+      label: args.label ?? 'spawned',
+      supervisor_id: SOCK,
+      runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
+    }))
+    const h = await createMultiSupervisorHarness({ statusTool, resultTool, spawnTool })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const result = await h.registeredTools.avenor_result.execute('t3', { run_id: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    expect(result.details).toMatchObject({ run_id: 'rb', ready: true })
+    const betaTerminal = h.emitted
+      .filter(([channel]) => channel === CHANNEL_RUN_TERMINAL)
+      .map(([, payload]) => payload as Record<string, unknown>)
+      .filter(payload => payload.runId === 'rb')
+    expect(betaTerminal).toHaveLength(1)
+
+    // alpha must not stay blocking forever: its own later completion is delivered.
+    alphaDone = true
+    await waitFor(() => h.sendUserMessage.mock.calls.some(([t]) => String(t).includes('Sub-agent "alpha" finished')))
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "'))
+    expect(completions.filter(t => t.includes('Sub-agent "alpha" finished'))).toHaveLength(1)
+    expect(completions.filter(t => t.includes('Sub-agent "beta" finished'))).toHaveLength(0)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('reuses a cached completion notice instead of re-inspecting a terminal run', async () => {
+    const SOCK = '/tmp/notice-cache.sock'
+    let workerDone = false
+    const inspectTool = mock(async () => makeInspectResult({ status: 'done' }))
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId !== SOCK) return { run_id: args.runId, label: args.runId, status: 'running' }
+      if (args.runId === 'r1') {
+        return workerDone
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: 'r2', label: 'other', status: 'running', runtime_id: 'rt2' }
+    })
+    const spawnTool = mock(async (args: { label?: string }) => ({
+      run_id: args.label === 'worker' ? 'r1' : 'r2',
+      label: args.label ?? 'spawned',
+      supervisor_id: SOCK,
+      runtime_id: args.label === 'worker' ? 'rt1' : 'rt2',
+    }))
+    const h = await createMultiSupervisorHarness({ statusTool, inspectTool, spawnTool })
+    h.ctx.isIdle = () => false
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'other', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    workerDone = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'worker' && e.status === 'done'))
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
+    // Keep polling the second, still-running run so the terminal run is revisited.
+    await waitFor(() => statusTool.mock.calls.filter(call => call[0]?.runId === 'r1').length >= 3)
+
+    expect(inspectTool).toHaveBeenCalledTimes(1)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('does not consume a colliding label without an explicit supervisor', async () => {
     const A = '/tmp/queue-collision-a.sock'
     const B = '/tmp/queue-collision-b.sock'

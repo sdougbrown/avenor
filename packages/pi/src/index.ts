@@ -780,6 +780,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const key = trackedRunKey(run.supervisorId, run.runId)
       const current = trackedRuns.get(key)
       trackedRuns.set(key, {
+        ...current,
         runId: run.runId,
         agent: run.agent ?? status?.agent ?? current?.agent ?? 'unknown',
         label: run.label ?? status?.label ?? current?.label ?? run.runId,
@@ -788,14 +789,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         startTime: current?.startTime ?? Date.now(),
         lastStatus: status ?? current?.lastStatus,
         blocking: current?.blocking ?? blocking,
-        nestedCount: current?.nestedCount,
-        idleSendInFlight: current?.idleSendInFlight,
-        idleSentAt: current?.idleSentAt,
-        idleSendAttempts: current?.idleSendAttempts,
-        permissionNotified: current?.permissionNotified,
-        consumed: current?.consumed,
-        terminalEventEmitted: current?.terminalEventEmitted,
-        pendingNotice: current?.pendingNotice,
       })
     }
 
@@ -1203,10 +1196,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               widgetDirty = true
               continue
             }
-            // Resolve the output before committing any notice. A concurrent
-            // avenor_result can consume and remove the run while this await is
-            // in flight, so revalidate the tracked identity afterwards.
-            const finalOutput = await resolveFinalOutput(run, run.lastStatus)
+            // Reuse a notice that is already built so a terminal run held
+            // unread is not re-inspected on every poll. Revalidate the tracked
+            // identity after any await before committing it.
+            const finalOutput = run.pendingNotice ? undefined : await resolveFinalOutput(run, run.lastStatus)
             if (sessionAtPollStart !== sessionGeneration) continue
             if (trackedRuns.get(entryKey) !== run) continue
             if (run.consumed) {
@@ -1232,7 +1225,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               }
             }
 
-            const notice: CompletionNotice = {
+            const notice: CompletionNotice = run.pendingNotice ?? {
               status: entry.status as CompletionNotice['status'],
               text: buildCompletionText({ runId: run.runId, label: run.label }, run.lastStatus!, finalOutput),
             }
@@ -2039,6 +2032,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             label,
             agent: params.agent,
             status: status.status,
+            nestedCount: tracked?.nestedCount,
             backend: status.backend,
           })
           trackedRuns.delete(runKey)
@@ -2191,6 +2185,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               resultRun.consumed = true
               trackedRuns.delete(trackedRunKey(resultRun.supervisorId, resultRun.runId))
               updateWidget(lastStatusEntries)
+              // A label may resolve to one tracked run while the canonical result
+              // reconciles to another. Release the label-resolved run so its own
+              // completion is still delivered by polling.
+              if (tracked && resultRun !== tracked) {
+                const trackedKey = trackedRunKey(tracked.supervisorId, tracked.runId)
+                if (trackedRuns.get(trackedKey) === tracked) {
+                  tracked.blocking = previousBlocking ?? false
+                }
+              }
             } else if (tracked && trackedRuns.get(trackedRunKey(tracked.supervisorId, tracked.runId)) === tracked) {
               // The result could not be bound to a tracked run unambiguously;
               // release the blocking flag so polling may deliver it later.
