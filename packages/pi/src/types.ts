@@ -23,21 +23,17 @@ export interface TrackedRun {
   permissionNotified?: boolean
   /** true once avenor_result has successfully returned this run's final result to
    * the caller. Set only on a successful (non-interrupted) result; the run is
-   * dropped from tracking and its queued notice is discarded immediately. */
+   * dropped from tracking and its pending notice is discarded immediately. */
   consumed?: boolean
   /** true once CHANNEL_RUN_TERMINAL has been emitted for this run. */
   terminalEventEmitted?: boolean
+  /** One terminal completion waiting for a safe model-facing delivery. Run
+   * identity lives on this tracked run. */
+  pendingNotice?: CompletionNotice
 }
 
 /** One terminal completion waiting for a safe model-facing delivery. */
 export interface CompletionNotice {
-  /** Canonical supervisor + public run id key. */
-  key: string
-  runId: string
-  supervisorId?: string
-  runtimeId?: string
-  label: string
-  agent?: string
   status: TerminalStatus
   text: string
 }

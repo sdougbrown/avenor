@@ -1774,6 +1774,46 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('clears an unread pending notice when a session starts', async () => {
+    const SOCK = '/tmp/session-start-clears.sock'
+    let done = false
+    let gate: Promise<void> | undefined
+    let releaseGate!: () => void
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        if (gate) await gate
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+    h.ctx.isIdle = () => false
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    done = true
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
+
+    // Park the next poll so the session-start clear is observable before polling
+    // can recompute the notice for the still-tracked terminal run.
+    gate = new Promise<void>(resolve => { releaseGate = resolve })
+    await h.eventHandlers.session_start({}, h.ctx)
+
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled).toBeUndefined()
+
+    releaseGate()
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('retains a notice after a non-ready result and does not flush it on an aborted settlement', async () => {
     const SOCK = '/tmp/queue-nonready.sock'
     let done = false
