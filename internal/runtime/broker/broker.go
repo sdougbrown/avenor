@@ -313,7 +313,7 @@ type Broker struct {
 
 	// Ask lifecycle state and the delegate seam for local messaging.
 	store     *askstore.Store
-	messenger messaging.Messenger
+	messenger messaging.Seam
 
 	// parent is the broker-hierarchy link: the descendant registry its parent
 	// routes write, and the ownership test the ask store's publication uses for
@@ -370,11 +370,11 @@ func (b *Broker) Store() *askstore.Store { return b.store }
 
 // LocalMessenger returns the broker's own messaging implementation. A host
 // that owns a parent link composes it for every target that is still local.
-func (b *Broker) LocalMessenger() messaging.Messenger { return localMessenger{broker: b} }
+func (b *Broker) LocalMessenger() messaging.Seam { return localMessenger{broker: b} }
 
 // SetMessenger installs the delegate seam for local messaging. A nil messenger
 // restores the broker's own implementation.
-func (b *Broker) SetMessenger(m messaging.Messenger) {
+func (b *Broker) SetMessenger(m messaging.Seam) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if m == nil {
@@ -436,7 +436,7 @@ func (b *Broker) renameAuthority() RenameHandler {
 	return b.renameHandler
 }
 
-func (b *Broker) seam() messaging.Messenger {
+func (b *Broker) seam() messaging.Seam {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.messenger == nil {
@@ -988,9 +988,9 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		// The asker is the reply's destination. A live edge is completed with
 		// the reply; an absent edge falls back to fire-and-forget, which only
 		// this layer can do because it owns the queues. The reply carries no
-		// generation, so the messenger looks the edge up in the store's current
+		// generation, so the seam looks the edge up in the store's current
 		// generation.
-		outcome, err := b.seam().Reply(r.Context(), messaging.ReplyRequest{
+		replied, err := b.seam().Reply(r.Context(), messaging.ReplyRequest{
 			From:          messaging.Identity{RunID: fullBody.FromRunID},
 			ToRunID:       fullBody.ToRunID,
 			MessageID:     replyTo,
@@ -1005,10 +1005,11 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		outcome := replied.Outcome
 		if outcome == messaging.OutcomeEdgeAbsent {
 			// No live edge owns this ID, so the reply degrades to a delivery
 			// rather than completing an edge the store already retired.
-			err = b.seam().Deliver(r.Context(), messaging.DeliverRequest{
+			err = b.seam().Tell(r.Context(), messaging.TellRequest{
 				FromRunID: fullBody.FromRunID,
 				ToRunID:   fullBody.ToRunID,
 				Kind:      fullBody.Type,
@@ -1035,7 +1036,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fire-and-forget: deliver to the target's control queue.
-	err = b.seam().Deliver(r.Context(), messaging.DeliverRequest{
+	err = b.seam().Tell(r.Context(), messaging.TellRequest{
 		FromRunID: fullBody.FromRunID,
 		ToRunID:   fullBody.ToRunID,
 		Kind:      fullBody.Type,
@@ -1232,10 +1233,12 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 // reads as a complete one.
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 	generation := b.store.Generation()
-	peers, listingErr := b.seam().Peers(r.Context())
+	peers, listingErr := b.seam().Peers(r.Context(), messaging.PeersRequest{
+		Generation: generation,
+	})
 
-	sessions := make([]SessionInfo, 0, len(peers))
-	for _, peer := range peers {
+	sessions := make([]SessionInfo, 0, len(peers.Peers))
+	for _, peer := range peers.Peers {
 		// Every run arrives as an encoded session record: the local messenger
 		// encodes its own snapshot, so this single listing needs no second
 		// snapshot to prefer local records over remote ones.
@@ -1680,7 +1683,7 @@ func (b *Broker) PollAgentMessages(ctx context.Context, runID string, onMessage 
 	}
 }
 
-// pollAgentMessagesOnce delivers runID's queued agent messages to onMessage and
+// pollAgentMessagesOnce tells runID's queued agent messages to onMessage and
 // leaves every other control message queued for the consumers that act on it.
 func (b *Broker) pollAgentMessagesOnce(runID string, onMessage func(wrappedContent string)) {
 	st := b.GetRun(runID)
@@ -2220,7 +2223,10 @@ func (x brokerBackend) Receive(sender string, limit int) ([]messaging.InboundMes
 
 func (x brokerBackend) Peers() ([]messaging.Peer, error) {
 	// The store's backend carries no request context; peers are a snapshot.
-	return x.broker.seam().Peers(context.Background())
+	res, err := x.broker.seam().Peers(context.Background(), messaging.PeersRequest{
+		Generation: x.broker.store.Generation(),
+	})
+	return res.Peers, err
 }
 
 // localMessenger serves local messaging from the broker's own queues and ask
@@ -2251,7 +2257,7 @@ func (m localMessenger) Withdraw(ctx context.Context, req messaging.WithdrawRequ
 	return m.broker.store.Withdraw(m.key(req.Sender, req.MessageID, req.Generation))
 }
 
-func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
+func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	// An empty body is no payload at all, which keeps the reply's stored
 	// payload valid JSON on the wire.
 	var payload json.RawMessage
@@ -2259,10 +2265,11 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 		payload = json.RawMessage(req.Body)
 	}
 	key := m.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, m.broker.store.Generation())
-	return m.broker.store.Reply(key, req.From.RunID, payload)
+	outcome, err := m.broker.store.Reply(key, req.From.RunID, payload)
+	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
 }
 
-func (m localMessenger) Deliver(ctx context.Context, req messaging.DeliverRequest) error {
+func (m localMessenger) Tell(ctx context.Context, req messaging.TellRequest) error {
 	return m.broker.SendTo(req.FromRunID, req.ToRunID, req.Kind, req.Payload, req.CorrelationID)
 }
 
@@ -2270,7 +2277,12 @@ func (m localMessenger) Reachable(runID string) bool {
 	return m.broker.GetRun(runID) != nil
 }
 
-func (m localMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
+func (m localMessenger) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	msgs, err := m.broker.store.Receive(req.Sender.RunID, messaging.ReceiveLimit(req.Limit))
+	return messaging.ReceiveResult{Messages: msgs, Generation: m.broker.store.Generation()}, err
+}
+
+func (m localMessenger) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	sessions := m.broker.sessions()
 	peers := make([]messaging.Peer, 0, len(sessions))
 	for _, info := range sessions {
@@ -2280,8 +2292,16 @@ func (m localMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 		}
 		peers = append(peers, messaging.Peer{RunID: info.RunID, Session: raw})
 	}
-	return peers, nil
+	return messaging.PeersResult{Peers: peers, Generation: m.broker.store.Generation()}, nil
 }
+
+func (m localMessenger) Preflight(ctx context.Context) (messaging.PreflightResult, error) {
+	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: m.broker.store.Generation()}, nil
+}
+
+// Close reports nothing to release: the local seam publishes into the broker's
+// own store and queues, which the broker closes.
+func (m localMessenger) Close() error { return nil }
 
 func (m localMessenger) key(sender messaging.Identity, messageID, generation string) messaging.FenceKey {
 	return messaging.FenceKey{Sender: sender.RunID, MessageID: messageID, Generation: generation}

@@ -141,15 +141,15 @@ func TestTransportCloseUnblocksWait(t *testing.T) {
 	}
 }
 
-// blockingMessenger holds cleanup after observing shutdown cancellation.
-type blockingMessenger struct {
-	messaging.Messenger
+// blockingSeam holds cleanup after observing shutdown cancellation.
+type blockingSeam struct {
+	messaging.Seam
 	entered        chan struct{}
 	canceled       chan struct{}
 	releaseCleanup chan struct{}
 }
 
-func (m blockingMessenger) block(ctx context.Context) error {
+func (m blockingSeam) block(ctx context.Context) error {
 	m.entered <- struct{}{}
 	<-ctx.Done()
 	close(m.canceled)
@@ -157,24 +157,24 @@ func (m blockingMessenger) block(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (m blockingMessenger) Send(ctx context.Context, _ messaging.SendRequest) (messaging.SendResult, error) {
+func (m blockingSeam) Send(ctx context.Context, _ messaging.SendRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
 }
 
-func (m blockingMessenger) Wait(ctx context.Context, _ messaging.WaitRequest) (messaging.WaitResult, error) {
+func (m blockingSeam) Wait(ctx context.Context, _ messaging.WaitRequest) (messaging.WaitResult, error) {
 	return messaging.WaitResult{Outcome: messaging.OutcomeEdgeAbsent}, m.block(ctx)
 }
 
-func (m blockingMessenger) Reply(ctx context.Context, _ messaging.ReplyRequest) (messaging.Outcome, error) {
-	return messaging.OutcomeNotSent, m.block(ctx)
+func (m blockingSeam) Reply(ctx context.Context, _ messaging.ReplyRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
 }
 
-func (m blockingMessenger) Withdraw(ctx context.Context, _ messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+func (m blockingSeam) Withdraw(ctx context.Context, _ messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
 }
 
-func (m blockingMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
-	return nil, m.block(ctx)
+func (m blockingSeam) Peers(ctx context.Context, _ messaging.PeersRequest) (messaging.PeersResult, error) {
+	return messaging.PeersResult{}, m.block(ctx)
 }
 
 // TestDelegatedOperationsJoinClose pins that every delegated operation is
@@ -253,8 +253,8 @@ func TestDelegatedOperationsJoinClose(t *testing.T) {
 						close(releaseCleanup)
 					}
 				}()
-				tr := NewRouted(store, func() messaging.Messenger {
-					return blockingMessenger{entered: entered, canceled: canceled, releaseCleanup: releaseCleanup}
+				tr := NewRouted(store, func() messaging.Seam {
+					return blockingSeam{entered: entered, canceled: canceled, releaseCleanup: releaseCleanup}
 				})
 				called := make(chan opOutcome, 1)
 				go func() {
@@ -322,7 +322,7 @@ func TestRoutedResolutionJoinsClose(t *testing.T) {
 			}
 		}()
 		var tr messaging.Transport
-		tr = NewRouted(store, func() messaging.Messenger {
+		tr = NewRouted(store, func() messaging.Seam {
 			_, err := tr.Preflight(context.Background())
 			entered <- err
 			<-release

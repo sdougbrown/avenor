@@ -70,7 +70,7 @@ func TestLocalMessagingSeamServesTheHTTPChildPaths(t *testing.T) {
 	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
 		t.Fatalf("tell = (%d, %v), want 200 sent", status, body)
 	}
-	delivered := rec.Delivers()
+	delivered := rec.Tells()
 	if len(delivered) != 1 || delivered[0].ToRunID != "target" || delivered[0].Kind != "agent_message" {
 		t.Fatalf("deliveries = %+v, want the tell through the seam", delivered)
 	}
@@ -136,7 +136,7 @@ func TestLocalMessagingSeamServesTheHTTPChildPaths(t *testing.T) {
 	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeEdgeAbsent) {
 		t.Fatalf("absent-edge reply = (%d, %v), want 200 edge-absent", status, body)
 	}
-	if delivered := rec.Delivers(); len(delivered) != 2 || delivered[1].ToRunID != "sender" {
+	if delivered := rec.Tells(); len(delivered) != 2 || delivered[1].ToRunID != "sender" {
 		t.Fatalf("deliveries = %+v, want the absent-edge fallback through the seam", delivered)
 	}
 	if edges := b.Store().ActiveCount(); edges != edgesAfterAsk {
@@ -206,12 +206,14 @@ func TestLocalMessagingSeamAnswersAskTargetLookup(t *testing.T) {
 // broker does not own in front of the /sessions listing while every other
 // operation stays local.
 type seamPeerSource struct {
-	messaging.Messenger
+	messaging.Seam
 	peers []messaging.Peer
 	err   error
 }
 
-func (s seamPeerSource) Peers(context.Context) ([]messaging.Peer, error) { return s.peers, s.err }
+func (s seamPeerSource) Peers(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+	return messaging.PeersResult{Peers: s.peers}, s.err
+}
 
 // TestSessionsListsSeamPeersForHTTPChildren pins that the authenticated
 // /sessions listing a local HTTP child reads comes from the installed
@@ -223,7 +225,7 @@ func TestSessionsListsSeamPeersForHTTPChildren(t *testing.T) {
 		Backend: "seam-backend", Model: "seam-model", Dir: "/work", Status: "thinking", Kind: "agent",
 	})
 
-	local, err := b.LocalMessenger().Peers(context.Background())
+	local, err := b.LocalMessenger().Peers(context.Background(), messaging.PeersRequest{Generation: b.Store().Generation()})
 	if err != nil {
 		t.Fatalf("local peers: %v", err)
 	}
@@ -232,8 +234,8 @@ func TestSessionsListsSeamPeersForHTTPChildren(t *testing.T) {
 		t.Fatalf("remote session: %v", err)
 	}
 	b.SetMessenger(seamPeerSource{
-		Messenger: b.LocalMessenger(),
-		peers:     append(local, messaging.Peer{RunID: "remote-peer", Session: remoteSession}),
+		Seam:  b.LocalMessenger(),
+		peers: append(local.Peers, messaging.Peer{RunID: "remote-peer", Session: remoteSession}),
 	})
 	t.Cleanup(func() { b.SetMessenger(nil) })
 
@@ -290,9 +292,9 @@ func TestSessionsListsSeamPeersForHTTPChildren(t *testing.T) {
 func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
 	b, senderToken, _ := startSeamBroker(t)
 	b.SetMessenger(seamPeerSource{
-		Messenger: b.LocalMessenger(),
-		peers:     []messaging.Peer{{RunID: "only-peer"}},
-		err:       errors.New("parent link down"),
+		Seam:  b.LocalMessenger(),
+		peers: []messaging.Peer{{RunID: "only-peer"}},
+		err:   errors.New("parent link down"),
 	})
 	t.Cleanup(func() { b.SetMessenger(nil) })
 

@@ -183,7 +183,7 @@ type stubMessenger struct {
 	waits    []messaging.WaitRequest
 	withdraw []messaging.WithdrawRequest
 	replies  []messaging.ReplyRequest
-	delivers []messaging.DeliverRequest
+	tells    []messaging.TellRequest
 
 	reachable map[string]bool
 	peers     []messaging.Peer
@@ -220,17 +220,17 @@ func (s *stubMessenger) Withdraw(_ context.Context, req messaging.WithdrawReques
 	return s.withdrawResult, s.withdrawErr
 }
 
-func (s *stubMessenger) Reply(_ context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
+func (s *stubMessenger) Reply(_ context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.replies = append(s.replies, req)
-	return messaging.OutcomeEdgeAbsent, nil
+	return messaging.SendResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
 }
 
-func (s *stubMessenger) Deliver(_ context.Context, req messaging.DeliverRequest) error {
+func (s *stubMessenger) Tell(_ context.Context, req messaging.TellRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.delivers = append(s.delivers, req)
+	s.tells = append(s.tells, req)
 	return nil
 }
 
@@ -240,11 +240,21 @@ func (s *stubMessenger) Reachable(runID string) bool {
 	return s.reachable[runID]
 }
 
-func (s *stubMessenger) Peers(_ context.Context) ([]messaging.Peer, error) {
+func (s *stubMessenger) Peers(_ context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.peers, s.peersErr
+	return messaging.PeersResult{Peers: s.peers}, s.peersErr
 }
+
+func (s *stubMessenger) Receive(_ context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return messaging.ReceiveResult{}, nil
+}
+
+func (s *stubMessenger) Preflight(_ context.Context) (messaging.PreflightResult, error) {
+	return messaging.PreflightResult{}, nil
+}
+
+func (s *stubMessenger) Close() error { return nil }
 
 // sentRuns reports the runs the local seam was asked to send to.
 func (s *stubMessenger) sentRuns() []string {

@@ -13,9 +13,9 @@ import (
 // broker's own queues and ask store first, forwards upward only what no local
 // run can answer, and relays downward into the queue of the run a registered
 // child owns. A broker with neither a parent nor a registered child composes
-// nothing but its own local messenger, so its behavior is unchanged.
+// nothing but its own local seam, so its behavior is unchanged.
 type Messenger struct {
-	local messaging.Messenger
+	local messaging.Seam
 	// childID is this branch's identity at its parent, which namespaces the keys
 	// the parent addresses this branch's own runs by.
 	childID string
@@ -33,9 +33,9 @@ type Messenger struct {
 // children is built with the same call and no parent URL. The generation is
 // always required, because the relay reads it on every hop it takes into a
 // child, and a parent URL adds the run set the link publishes.
-func New(opts Options, local messaging.Messenger) (*Messenger, error) {
+func New(opts Options, local messaging.Seam) (*Messenger, error) {
 	if local == nil {
-		return nil, fmt.Errorf("%w: a parent-aware messenger composes a local messenger", messaging.ErrInvalidRequest)
+		return nil, fmt.Errorf("%w: a parent-aware messenger composes a local seam", messaging.ErrInvalidRequest)
 	}
 	m := &Messenger{local: local, childID: opts.ChildID, registry: NewRegistry()}
 	if opts.ParentURL != "" {
@@ -98,7 +98,7 @@ func (m *Messenger) Send(ctx context.Context, req messaging.SendRequest) (messag
 func (m *Messenger) sendToChild(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	if req.NoReply {
 		// A tell allocates no edge, so nothing is admitted here.
-		if err := m.down.Tell(ctx, messaging.DeliverRequest{
+		if err := m.down.Tell(ctx, messaging.TellRequest{
 			FromRunID:     req.From.RunID,
 			ToRunID:       req.To.RunID,
 			Kind:          "agent_message",
@@ -150,23 +150,24 @@ func (m *Messenger) Withdraw(ctx context.Context, req messaging.WithdrawRequest)
 // Reply completes the ask edge MessageID names. A relayed ask records its reply
 // route on the hop it arrived on, so the reply follows that hop instead of
 // degrading into a second delivery.
-func (m *Messenger) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
-	outcome, err := m.local.Reply(ctx, req)
-	if err != nil || outcome != messaging.OutcomeEdgeAbsent || m.up == nil {
-		return outcome, err
+func (m *Messenger) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
+	res, err := m.local.Reply(ctx, req)
+	if err != nil || res.Outcome != messaging.OutcomeEdgeAbsent || m.up == nil {
+		return res, err
 	}
-	return m.up.Reply(ctx, req)
+	outcome, err := m.up.Reply(ctx, req)
+	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
 }
 
-// Deliver publishes a fire-and-forget message.
-func (m *Messenger) Deliver(ctx context.Context, req messaging.DeliverRequest) error {
+// Tell publishes a fire-and-forget message.
+func (m *Messenger) Tell(ctx context.Context, req messaging.TellRequest) error {
 	if m.registry.Owns(req.ToRunID) {
 		return m.down.Tell(ctx, req)
 	}
 	if m.up == nil || m.local.Reachable(req.ToRunID) {
-		return m.local.Deliver(ctx, req)
+		return m.local.Tell(ctx, req)
 	}
-	return m.up.Deliver(ctx, req)
+	return m.up.Tell(ctx, req)
 }
 
 // Reachable reports whether runID can be reached from here. A branch with a
@@ -186,12 +187,13 @@ func (m *Messenger) Reachable(runID string) bool {
 // addresses them by, which is an alias: the branch already lists them under the
 // IDs it knows them by. A listing the parent could not finish reports the error
 // beside the peers that were reached.
-func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
-	peers, err := m.local.Peers(ctx)
+func (m *Messenger) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
+	result, err := m.local.Peers(ctx, req)
+	peers := result.Peers
 	caller, _ := messaging.CallerRun(ctx)
 	peers = m.registry.Export(peers, caller)
 	if m.up == nil {
-		return peers, err
+		return messaging.PeersResult{Peers: peers, Generation: result.Generation}, err
 	}
 	remote, upErr := m.up.Peers(ctx)
 	if upErr != nil {
@@ -215,7 +217,18 @@ func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 		seen[peer.RunID] = struct{}{}
 		peers = append(peers, peer)
 	}
-	return peers, err
+	return messaging.PeersResult{Peers: peers, Generation: result.Generation}, err
+}
+
+// Receive drains the messages queued for the caller. A branch serves them from
+// the same local seam every other operation falls back to.
+func (m *Messenger) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return m.local.Receive(ctx, req)
+}
+
+// Preflight reports the protocol and generation of the local seam.
+func (m *Messenger) Preflight(ctx context.Context) (messaging.PreflightResult, error) {
+	return m.local.Preflight(ctx)
 }
 
 // Owns reports whether runID belongs to a registered child broker.
@@ -250,6 +263,6 @@ func (m *Messenger) RecordRelay(route messaging.RelayRoute) error {
 func (m *Messenger) Registry() *Registry { return m.registry }
 
 var (
-	_ messaging.Messenger  = (*Messenger)(nil)
+	_ messaging.Seam       = (*Messenger)(nil)
 	_ messaging.ParentLink = (*Messenger)(nil)
 )

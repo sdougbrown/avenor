@@ -212,14 +212,14 @@ func TestMessengerForwardsAReplyWhenTheLocalEdgeIsAbsent(t *testing.T) {
 		t.Fatalf("RecordRelay: %v", err)
 	}
 
-	outcome, err := messenger.Reply(ctx, messaging.ReplyRequest{
+	answer, err := messenger.Reply(ctx, messaging.ReplyRequest{
 		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
 		ToRunID:   "run-x",
 		MessageID: "msg-1",
 		Body:      `{"message":"pong"}`,
 	})
-	if err != nil || outcome != messaging.OutcomeReplied {
-		t.Fatalf("Reply = (%q, %v), want the relayed edge completed", outcome, err)
+	if err != nil || answer.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Reply = (%+v, %v), want the relayed edge completed", answer, err)
 	}
 	forwarded := parent.lastRequest(t, pathSend)
 	if forwarded.Body["reply_to"] != "msg-1" {
@@ -248,12 +248,12 @@ func TestMessengerPeersJoinsTheParentsIncompleteListing(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	peers, err := messenger.Peers(ctx)
+	peers, err := messenger.Peers(ctx, messaging.PeersRequest{})
 	if !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("Peers error = %v, want the parent's incomplete listing joined", err)
 	}
 	seen := map[string]bool{}
-	for _, peer := range peers {
+	for _, peer := range peers.Peers {
 		seen[peer.RunID] = true
 	}
 	if !seen["run-x"] || !seen["run-y"] {
@@ -284,12 +284,12 @@ func TestMessengerPeersUnionsTheParentsPeersWithoutDuplicates(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	peers, err := messenger.Peers(ctx)
+	peers, err := messenger.Peers(ctx, messaging.PeersRequest{})
 	if err != nil {
 		t.Fatalf("Peers: %v", err)
 	}
 	seen := map[string]int{}
-	for _, peer := range peers {
+	for _, peer := range peers.Peers {
 		seen[peer.RunID]++
 	}
 	for _, runID := range []string{"run-a", "run-x", "run-y"} {
@@ -327,12 +327,12 @@ func TestMessengerPeersShadowsAParentRunSharingALocalRunID(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	peers, err := messenger.Peers(ctx)
+	peers, err := messenger.Peers(ctx, messaging.PeersRequest{})
 	if err != nil {
 		t.Fatalf("Peers: %v", err)
 	}
 	seen := map[string]int{}
-	for _, peer := range peers {
+	for _, peer := range peers.Peers {
 		seen[peer.RunID]++
 	}
 	if seen["run-collide"] != 1 {

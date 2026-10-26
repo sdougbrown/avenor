@@ -13,12 +13,12 @@ type RecordedSend struct {
 	Request messaging.SendRequest
 }
 
-// Recorder is a messaging.Messenger that records the operations it serves and
-// forwards them to the messenger it wraps, so a test can observe that a broker
+// Recorder is a messaging.Seam that records the operations it serves and
+// forwards them to the seam it wraps, so a test can observe that a broker
 // path reached the messaging seam. ReachableFunc, when set, answers Reachable
-// instead of the wrapped messenger.
+// instead of the wrapped seam.
 type Recorder struct {
-	Local         messaging.Messenger
+	Local         messaging.Seam
 	ReachableFunc func(runID string) bool
 
 	mu        sync.Mutex
@@ -26,7 +26,7 @@ type Recorder struct {
 	waits     []messaging.WaitRequest
 	withdraws []messaging.WithdrawRequest
 	replies   []messaging.ReplyRequest
-	delivers  []messaging.DeliverRequest
+	tells     []messaging.TellRequest
 	peerCalls int
 }
 
@@ -51,18 +51,18 @@ func (r *Recorder) Withdraw(ctx context.Context, req messaging.WithdrawRequest) 
 	return r.Local.Withdraw(ctx, req)
 }
 
-func (r *Recorder) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
+func (r *Recorder) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	r.mu.Lock()
 	r.replies = append(r.replies, req)
 	r.mu.Unlock()
 	return r.Local.Reply(ctx, req)
 }
 
-func (r *Recorder) Deliver(ctx context.Context, req messaging.DeliverRequest) error {
+func (r *Recorder) Tell(ctx context.Context, req messaging.TellRequest) error {
 	r.mu.Lock()
-	r.delivers = append(r.delivers, req)
+	r.tells = append(r.tells, req)
 	r.mu.Unlock()
-	return r.Local.Deliver(ctx, req)
+	return r.Local.Tell(ctx, req)
 }
 
 func (r *Recorder) Reachable(runID string) bool {
@@ -72,12 +72,22 @@ func (r *Recorder) Reachable(runID string) bool {
 	return r.Local.Reachable(runID)
 }
 
-func (r *Recorder) Peers(ctx context.Context) ([]messaging.Peer, error) {
+func (r *Recorder) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	r.mu.Lock()
 	r.peerCalls++
 	r.mu.Unlock()
-	return r.Local.Peers(ctx)
+	return r.Local.Peers(ctx, req)
 }
+
+func (r *Recorder) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return r.Local.Receive(ctx, req)
+}
+
+func (r *Recorder) Preflight(ctx context.Context) (messaging.PreflightResult, error) {
+	return r.Local.Preflight(ctx)
+}
+
+func (r *Recorder) Close() error { return r.Local.Close() }
 
 // Sends returns the sends the recorder served.
 func (r *Recorder) Sends() []RecordedSend {
@@ -107,11 +117,11 @@ func (r *Recorder) Replies() []messaging.ReplyRequest {
 	return append([]messaging.ReplyRequest(nil), r.replies...)
 }
 
-// Delivers returns the deliveries the recorder served.
-func (r *Recorder) Delivers() []messaging.DeliverRequest {
+// Tells returns the tells the recorder served.
+func (r *Recorder) Tells() []messaging.TellRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]messaging.DeliverRequest(nil), r.delivers...)
+	return append([]messaging.TellRequest(nil), r.tells...)
 }
 
 // PeerCalls returns how many peer lookups the recorder served.

@@ -540,9 +540,9 @@ func (l *Link) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging
 		fmt.Errorf("%w: parent broker answered without a reply outcome", ErrUnsupportedParentProtocol)
 }
 
-// Deliver forwards a tell to the parent broker, which hands it to the branch
-// that owns the target.
-func (l *Link) Deliver(ctx context.Context, req messaging.DeliverRequest) error {
+// Tell forwards a tell to the parent broker, which hands it to the branch that
+// owns the target.
+func (l *Link) Tell(ctx context.Context, req messaging.TellRequest) error {
 	sender, token, generation, err := l.credentials(ctx, req.FromRunID)
 	if err != nil {
 		return err
