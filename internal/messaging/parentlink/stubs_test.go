@@ -178,21 +178,29 @@ func testContext(t *testing.T) context.Context {
 // stubMessenger is one local messaging seam: it records the calls the
 // parent-aware messenger makes and answers them from scripted verdicts.
 type stubMessenger struct {
-	mu       sync.Mutex
-	sends    []messaging.SendRequest
-	waits    []messaging.WaitRequest
-	withdraw []messaging.WithdrawRequest
-	replies  []messaging.ReplyRequest
-	delivers []messaging.DeliverRequest
+	mu         sync.Mutex
+	sends      []messaging.SendRequest
+	waits      []messaging.WaitRequest
+	withdraw   []messaging.WithdrawRequest
+	replies    []messaging.ReplyRequest
+	tells      []messaging.TellRequest
+	receives   []messaging.ReceiveRequest
+	preflights int
 
 	reachable map[string]bool
 	peers     []messaging.Peer
+	peersGen  string
 	peersErr  error
 
 	sendResult     messaging.SendResult
 	sendErr        error
 	withdrawResult messaging.WithdrawResult
 	withdrawErr    error
+
+	receiveResult   messaging.ReceiveResult
+	receiveErr      error
+	preflightResult messaging.PreflightResult
+	preflightErr    error
 }
 
 func newStubMessenger() *stubMessenger {
@@ -220,17 +228,17 @@ func (s *stubMessenger) Withdraw(_ context.Context, req messaging.WithdrawReques
 	return s.withdrawResult, s.withdrawErr
 }
 
-func (s *stubMessenger) Reply(_ context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
+func (s *stubMessenger) Reply(_ context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.replies = append(s.replies, req)
-	return messaging.OutcomeEdgeAbsent, nil
+	return messaging.SendResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
 }
 
-func (s *stubMessenger) Deliver(_ context.Context, req messaging.DeliverRequest) error {
+func (s *stubMessenger) Tell(_ context.Context, req messaging.TellRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.delivers = append(s.delivers, req)
+	s.tells = append(s.tells, req)
 	return nil
 }
 
@@ -240,11 +248,27 @@ func (s *stubMessenger) Reachable(runID string) bool {
 	return s.reachable[runID]
 }
 
-func (s *stubMessenger) Peers(_ context.Context) ([]messaging.Peer, error) {
+func (s *stubMessenger) Peers(_ context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.peers, s.peersErr
+	return messaging.PeersResult{Peers: s.peers, Generation: s.peersGen}, s.peersErr
 }
+
+func (s *stubMessenger) Receive(_ context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.receives = append(s.receives, req)
+	return s.receiveResult, s.receiveErr
+}
+
+func (s *stubMessenger) Preflight(_ context.Context) (messaging.PreflightResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.preflights++
+	return s.preflightResult, s.preflightErr
+}
+
+func (s *stubMessenger) Close() error { return nil }
 
 // sentRuns reports the runs the local seam was asked to send to.
 func (s *stubMessenger) sentRuns() []string {
@@ -267,4 +291,19 @@ func (s *stubMessenger) withdrawnMessages() []string {
 		ids = append(ids, withdrawal.MessageID)
 	}
 	return ids
+}
+
+// receivedRequests reports the receive requests the local seam was asked to
+// drain, in order.
+func (s *stubMessenger) receivedRequests() []messaging.ReceiveRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]messaging.ReceiveRequest(nil), s.receives...)
+}
+
+// preflightCount reports how many times the local seam was prefetched.
+func (s *stubMessenger) preflightCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.preflights
 }

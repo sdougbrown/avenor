@@ -10,7 +10,7 @@ transport carries it.
 
 | Package | Role |
 |---|---|
-| `internal/messaging` | Leaf contract: request/result types, the `Transport` and `Messenger` interfaces, the outcome vocabulary, the v1 wire error classes, the message-ID minter. Depends on the standard library only. |
+| `internal/messaging` | Leaf contract: request/result types, the `Transport` and `Seam` interfaces, the outcome vocabulary, the v1 wire error classes, the message-ID minter. Depends on the standard library only. |
 | `internal/messaging/askstore` | Ask state: admission, edges, terminal fences, pruning and generation rotation, over an optional delivery backend. |
 | `internal/messaging/askclient` | The single Go ask client. Owns send→wait→withdraw ordering and renders results for the tool surfaces. |
 | `internal/messaging/inprocess` | Runs the transport in the same process, over the store. |
