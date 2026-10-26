@@ -213,9 +213,6 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 	case 1:
 		return p.peerResolution(candidates[0], label), nil
 	case 0:
-		if err != nil {
-			return messaging.Resolution{}, err
-		}
 		return messaging.Resolution{Match: messaging.MatchNone}, nil
 	default:
 		return messaging.Resolution{Match: messaging.MatchAmbiguous, Candidates: candidates}, nil

@@ -295,7 +295,8 @@ func TestSupervisorParentAcceptsSupervisorChildren(t *testing.T) {
 	if parentSup.parentLink.Registry().Owns(messaging.SupervisorRunID) {
 		t.Fatal("a child supervisor claim took the parent's own supervisor run ID")
 	}
-	if token, ok := parentSup.broker.RunToken(messaging.SupervisorRunID); !ok || token != parentSup.brokerToken {
+	st := parentSup.broker.GetRun(messaging.SupervisorRunID)
+	if st == nil || st.Token != parentSup.brokerToken {
 		t.Fatal("the parent's own supervisor record was overwritten by a child claim")
 	}
 

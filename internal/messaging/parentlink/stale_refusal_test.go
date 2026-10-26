@@ -43,7 +43,7 @@ func TestDelayedRefusalKeepsTheReplacementRouted(t *testing.T) {
 	if st := parent.broker.GetRun(deltaRunKey("target")); st == nil {
 		t.Fatal("the delayed refusal deleted the replacement branch's run record")
 	}
-	if token, ok := parent.broker.RunToken(deltaRunKey("target")); !ok || token != "token-new" {
+	if token, ok := brokerRunToken(parent.broker, deltaRunKey("target")); !ok || token != "token-new" {
 		t.Fatalf("run record credential = (%q, %v), want the replacement's", token, ok)
 	}
 
@@ -69,7 +69,7 @@ func TestDelayedRefusalKeepsARestartedRunsCredential(t *testing.T) {
 	stale.release()
 	expectRefusedAsk(t, <-refusal)
 
-	if token, ok := parent.broker.RunToken(deltaRunKey("target")); !ok || token != "token-new" {
+	if token, ok := brokerRunToken(parent.broker, deltaRunKey("target")); !ok || token != "token-new" {
 		t.Fatalf("run record credential = (%q, %v), want the credential the branch refreshed", token, ok)
 	}
 	if st := parent.broker.GetRun(deltaRunKey("target")); st == nil {
@@ -108,7 +108,7 @@ func TestDelayedDeregisterKeepsTheReplacementRouted(t *testing.T) {
 	if st := parent.broker.GetRun(deltaRunKey("target")); st == nil {
 		t.Fatal("the delayed deregistration deleted the replacement branch's run record")
 	}
-	if token, ok := parent.broker.RunToken(deltaRunKey("target")); !ok || token != "token-new" {
+	if token, ok := brokerRunToken(parent.broker, deltaRunKey("target")); !ok || token != "token-new" {
 		t.Fatalf("run record credential = (%q, %v), want the replacement's", token, ok)
 	}
 }
@@ -302,7 +302,7 @@ func TestDelayedRefusalKeepsTheClaimARefreshedGenerationCarries(t *testing.T) {
 	if st := parent.broker.GetRun(deltaRunKey("target")); st == nil {
 		t.Fatal("the delayed refusal deleted the re-registered run's record")
 	}
-	if token, ok := parent.broker.RunToken(deltaRunKey("target")); !ok || token != "token-old" {
+	if token, ok := brokerRunToken(parent.broker, deltaRunKey("target")); !ok || token != "token-old" {
 		t.Fatalf("run record credential = (%q, %v), want the credential the registration kept", token, ok)
 	}
 
@@ -332,7 +332,7 @@ func TestDelayedRefusalKeepsTheClaimAnotherChildTookOver(t *testing.T) {
 	if owner, ok := parent.link.Registry().Owner(ParentRunKey("branch-echo", "target")); !ok || owner != "branch-echo" {
 		t.Fatalf("run owner = (%q, %v), want branch-echo: the refusal retired the child that took the run over", owner, ok)
 	}
-	if token, ok := parent.broker.RunToken(ParentRunKey("branch-echo", "target")); !ok || token != "token-echo" {
+	if token, ok := brokerRunToken(parent.broker, ParentRunKey("branch-echo", "target")); !ok || token != "token-echo" {
 		t.Fatalf("run record credential = (%q, %v), want the taking-over child's", token, ok)
 	}
 	if st := parent.broker.GetRun(ParentRunKey("branch-echo", "target")); st == nil {
@@ -367,7 +367,7 @@ func TestDelayedRefusalKeepsTheClaimTheMovedEndpointCarries(t *testing.T) {
 	if st := parent.broker.GetRun(deltaRunKey("target")); st == nil {
 		t.Fatal("the delayed refusal deleted the re-registered run's record")
 	}
-	if token, ok := parent.broker.RunToken(deltaRunKey("target")); !ok || token != "token-old" {
+	if token, ok := brokerRunToken(parent.broker, deltaRunKey("target")); !ok || token != "token-old" {
 		t.Fatalf("run record credential = (%q, %v), want the credential the registration kept", token, ok)
 	}
 
