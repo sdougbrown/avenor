@@ -1977,7 +1977,7 @@ func (s *Supervisor) installParentLink() {
 		Generation: s.broker.Store().Generation,
 		Runs:       s.parentRunClaims,
 		RetireRun:  func(runID, token string) { s.broker.DeleteRunIfToken(runID, token) },
-		ChildID: parentlink.BranchID(s.config.ControlSocket, host),
+		ChildID:    parentlink.BranchID(s.config.ControlSocket, host),
 	}
 	link, err := parentlink.New(options, s.broker.LocalMessenger())
 	if err != nil {
@@ -1986,8 +1986,10 @@ func (s *Supervisor) installParentLink() {
 	}
 	s.parentLink = link
 	s.broker.SetMessenger(link)
-	s.broker.SetParentLink(link)
+	// The credential goes first, so the parent routes never serve without it:
+	// the broker is already serving HTTP here.
 	s.broker.SetParentLinkToken(s.config.BrokerParentToken)
+	s.broker.SetParentLink(link)
 	s.broker.SetRunObserver(link.RunChanged)
 	if options.ParentURL == "" {
 		return

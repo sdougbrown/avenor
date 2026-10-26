@@ -68,7 +68,7 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 	)
 	link, err = parentlink.Install(parentlink.Options{
 		ParentURL:  "http://" + parentBroker.Addr(),
-		ChildID:    parentlink.BranchID("test/" + b.Addr(), testHost()),
+		ChildID:    parentlink.BranchID("test/"+b.Addr(), testHost()),
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
 		Runs: func() []messaging.RunClaim {
