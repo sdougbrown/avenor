@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -243,6 +244,29 @@ func TestMCPMessageProviderPeerRunStateMissIsTargetUnavailable(t *testing.T) {
 	p := newTestMessageProvider(t, cl)
 	if _, err := p.peerRunState(context.Background(), "rt-missing"); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("peerRunState miss error = %v, want ErrTargetUnavailable", err)
+	}
+}
+
+func TestMCPMessageProviderRefusesResolutionOnAPeersError(t *testing.T) {
+	// The listing came back with a transport error beside the peers it read:
+	// the provider refuses the whole lookup the way a listing it could not
+	// read at all is refused, even for a peer the partial set contains.
+	peersErr := fmt.Errorf("%w: dial http://10.0.0.1:9 failed", messaging.ErrIncompleteListing)
+	cl := &fakeMessageControlClient{
+		fakeClient: &fakeClient{},
+		peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+			return messaging.PeersResult{
+				Peers:      []messaging.Peer{testPeer("rt-a", "alpha", "running")},
+				Generation: "gen-1",
+			}, peersErr
+		},
+	}
+	p := newTestMessageProvider(t, cl)
+	if _, err := p.Resolve(context.Background(), "rt-a"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("Resolve error = %v, want the incomplete-listing error", err)
+	}
+	if _, err := p.peerRunState(context.Background(), "rt-a"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("peerRunState error = %v, want the incomplete-listing error", err)
 	}
 }
 

@@ -114,11 +114,7 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		RefreshInterval: refresh,
 		Endpoint:        branch.url(),
 		Generation:      b.Store().Generation,
-		Runs: func() []messaging.RunClaim {
-			return RunClaims(b.Sessions(),
-				func(info broker.SessionInfo) (string, string) { return info.RunID, info.Label },
-				link.Owns, b.RunToken)
-		},
+		Runs:            func() []messaging.RunClaim { return b.ParentRunClaims() },
 		// A relay carries the name this branch resolves for the asker, which is
 		// the name the receiving branch cannot resolve itself.
 		DisplayName: b.DisplayName,

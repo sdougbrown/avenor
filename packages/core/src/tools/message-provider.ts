@@ -288,10 +288,10 @@ export function installAskClaims(
 /**
  * Build the bound host provider: one supervisor, one generation, one control
  * client. It never reads an ambient singleton or retargets, and it never
- * preflights per call. Listing-backed lookups can answer peers actually read,
- * but a requested peer absent from an incomplete listing remains unknown and
- * preserves the listing error, even when other peers were read. Self and
- * public-ID resolution bypass the listing.
+ * preflights per call. Listing-backed lookups fail fast: an incomplete
+ * listing refuses every resolution and state read, even for a peer the
+ * partial set contains, so a wire `peers_error` resolves the same way the Go
+ * providers do. Self and public-ID resolution bypass the listing.
  */
 export function createHostMessageProvider(options: HostProviderOptions): MessageProvider {
   const { surface, supervisorId, generation, client, pendingAsks, pollGeneration } = options
@@ -346,6 +346,12 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         if (external?.runtimeId) return unique(external)
       }
       const { peers, detail } = await listedPeers()
+      if (detail) {
+        // The listing was incomplete, so any match it holds may be shadowed by
+        // a peer it missed. Refuse the whole lookup the way the Go providers
+        // refuse an incomplete listing, and carry the transport's detail.
+        throw new Error(`the peer listing is incomplete: ${detail}`)
+      }
       const exact = peers.find(peer => peer.run_id === ref)
       if (exact) {
         return {
@@ -365,23 +371,18 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         }
       }
       if (candidates.length > 1) return { runId: '', match: 'ambiguous', candidates }
-      if (detail) {
-        // The listing was incomplete, so this peer may be in the part that was
-        // not read. Refuse rather than claim the peer does not exist.
-        throw new Error(`the peer listing is incomplete: ${detail}`)
-      }
       return { runId: '', match: 'none' }
     },
 
     async state(runId: string): Promise<RunFacts> {
       if (runId === SUPERVISOR_RUN_ID) {
         const { peers, detail } = await listedPeers()
-        const peer = peers.find(entry => entry.run_id === SUPERVISOR_RUN_ID)
-        if (!peer && detail) {
-          // The listing was incomplete, so the supervisor may be in the part
-          // that was not read. Refuse rather than report an unknown status.
+        if (detail) {
+          // The listing was incomplete, so the status it holds may be stale or
+          // shadowed. Refuse the read the way the Go providers do.
           throw new Error(`the peer listing is incomplete: ${detail}`)
         }
+        const peer = peers.find(entry => entry.run_id === SUPERVISOR_RUN_ID)
         const translation = translateRunFacts(peer?.status ?? '', '')
         return {
           live: translation.live,
@@ -694,9 +695,9 @@ export interface ChildProviderOptions {
  * Build a child provider over the surface's inherited broker. A child never
  * learns a public run id, and it cannot read a sentinel, so it is never
  * resumable from here: the supervisor owns a resume. Listing-backed lookups
- * can answer peers actually read, but a requested peer absent from an
- * incomplete listing remains unknown and preserves the listing error, even
- * when other peers were read. Self resolution bypasses the listing.
+ * fail fast: an incomplete listing refuses every resolution and state read,
+ * even for a peer the partial set contains, so a wire `peers_error` resolves
+ * the same way the Go providers do. Self resolution bypasses the listing.
  */
 export function createChildMessageProvider(options: ChildProviderOptions): MessageProvider {
   const { surface, runId, broker, pendingAsks, pollGeneration } = options
@@ -716,28 +717,29 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
       if (ref === '') return { runId: '', match: 'none' }
       if (ref === runId) return { runId, label: ref, match: 'unique' }
       const { peers, detail } = await listedPeers()
+      if (detail) {
+        // The listing was incomplete, so any match it holds may be shadowed by
+        // a peer it missed. Refuse the whole lookup the way the Go providers
+        // refuse an incomplete listing, and carry the transport's detail.
+        throw new Error(`the peer listing is incomplete: ${detail}`)
+      }
       const exact = peers.find(peer => peer.run_id === ref)
       if (exact) return { runId: exact.run_id, label: firstNonEmpty(exact.label, exact.run_id), match: 'unique' }
       const candidates = peers.filter(peer => peer.label === ref).map(peer => peer.run_id)
       if (candidates.length === 1) return { runId: candidates[0], label: ref, match: 'unique' }
       if (candidates.length > 1) return { runId: '', match: 'ambiguous', candidates }
-      if (detail) {
-        // The listing was incomplete, so this peer may be in the part that was
-        // not read. Refuse rather than claim the peer does not exist.
-        throw new Error(`the peer listing is incomplete: ${detail}`)
-      }
       return { runId: '', match: 'none' }
     },
 
     async state(targetRunId: string): Promise<RunFacts> {
       const { peers, detail } = await listedPeers()
+      if (detail) {
+        // The listing was incomplete, so the status it holds may be stale or
+        // shadowed. Refuse the read the way the Go providers do.
+        throw new Error(`the peer listing is incomplete: ${detail}`)
+      }
       const peer = peers.find(entry => entry.run_id === targetRunId)
       if (!peer) {
-        if (detail) {
-          // The listing was incomplete, so the run may be in the part that was
-          // not read. Refuse rather than claim the run does not exist.
-          throw new Error(`the peer listing is incomplete: ${detail}`)
-        }
         throw new Error(`run ${targetRunId} is not visible`)
       }
       const translation = translateRunFacts(peer.status ?? '', '')
