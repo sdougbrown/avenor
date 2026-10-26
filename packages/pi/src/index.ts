@@ -795,6 +795,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       )
     }
 
+    /** Latch the per-notice retry budget as spent and report the exhausted
+     * delivery. Idempotent, so the timeout re-arm and the compaction
+     * hand-back cannot double-report the same notice. */
+    function capIdleSend(run: TrackedRun): void {
+      if (run.idleSendCapped) return
+      run.idleSendCapped = true
+      recordDeliveryError(run, run.idleSendAttempts ?? 0)
+    }
+
     function clearPollingErrors(): void {
       pollingErrorCount = 0
       pollingErrors.length = 0
@@ -1191,8 +1200,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             // Once the retry budget is spent, stop sending and leave the notice
             // for settlement; surface the delivery failure on its own channel.
             if ((run.idleSendAttempts ?? 0) >= MAX_IDLE_SEND_ATTEMPTS) {
-              run.idleSendCapped = true
-              recordDeliveryError(run, run.idleSendAttempts!)
+              capIdleSend(run)
             }
           }
           // An idle send is already in flight for this run: the send's own
@@ -1755,12 +1763,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       compacting = false
       // Compaction rejected any prompt that was in flight: no confirmation can
       // arrive, so hand delivery back to the poll. The retry budget is
-      // per-notice and survives compaction, so a capped run still waits for
-      // settlement instead of resuming sends.
+      // per-notice and survives compaction, so a run whose budget is spent
+      // waits for settlement instead of resuming sends.
       for (const run of trackedRuns.values()) {
         if (!run.pendingNotice) continue
         run.idleSendInFlight = false
         run.idleSentAt = undefined
+        // Compaction can end the in-flight send before its timeout runs: latch
+        // the budget here too, or the next idle tick would send past the cap.
+        if ((run.idleSendAttempts ?? 0) >= MAX_IDLE_SEND_ATTEMPTS) capIdleSend(run)
       }
       if (Array.from(trackedRuns.values()).some(run => run.pendingNotice)) startPolling()
     }

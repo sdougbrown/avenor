@@ -2782,6 +2782,51 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('caps an idle send whose timeout is preempted by compaction', async () => {
+    const SOCK = '/tmp/idle-cap-compaction.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'compacted answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      idleSendTimeoutMs: 200,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    done = true
+
+    const deliveries = () => h.sendUserMessage.mock.calls
+      .map(([t]) => String(t))
+      .filter(t => t.includes('Sub-agent "worker" finished'))
+    const polls = () => h.emitted.filter(([channel]) => channel === CHANNEL_POLL_COMPLETED).length
+
+    await waitFor(() => deliveries().length >= 3)
+    // Compaction finishes before the third send's timeout can fire, so the
+    // hand-back is what must latch the exhausted budget.
+    await h.eventHandlers.session_before_compact()
+    await h.eventHandlers.session_compact()
+    expect(h.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_DELIVERY_ERROR
+      && (payload as { runId?: string; attempts?: number }).runId === 'r1'
+      && (payload as { attempts?: number }).attempts === 3)).toBe(true)
+
+    // The next idle tick cannot send past the latched cap.
+    const pollsAtResume = polls()
+    await waitFor(() => polls() > pollsAtResume)
+    expect(deliveries()).toHaveLength(3)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('re-sends an idle completion after a new session generation interrupts the send', async () => {
     const SOCK = '/tmp/idle-generation.sock'
     let done = false
