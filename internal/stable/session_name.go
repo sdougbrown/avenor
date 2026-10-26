@@ -48,7 +48,7 @@ func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name stri
 		return messaging.RenameResult{}, &router.ToolError{Code: "not_permitted", Message: renameBrokerDenied}
 	}
 
-	previous := s.broker.StoredLabel(runID)
+	previous := s.broker.DisplayName(runID)
 	renamed, err := s.applySessionName(runID, name)
 	if err != nil {
 		return messaging.RenameResult{}, err
@@ -59,25 +59,20 @@ func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name stri
 	return messaging.RenameResult{RunID: runID, Label: renamed, PreviousLabel: previous}, nil
 }
 
-// applySessionName writes one display name to the broker's SessionInfo.Label
-// and, for a locally owned run, the child runtime's display-name copy. The
-// broker's resolved name is the one peers see; readers go through the runtime's
-// mirrored displayName. Both writes happen under s.controlMu, which
-// labelHolderLocked, List and RuntimeStatus also hold while they read, so a
-// reader never sees the new broker name beside the old runtime name and a
-// concurrent keyed spawn sees the old name held or the new name held, never
-// both free. The supervisor session is broker-only: it has no child runtime to
-// update.
+// applySessionName writes one display name to both stores that carry it: the
+// broker's SessionInfo.Label and, for a locally owned run, the child runtime's
+// displayName. Both writes happen under s.controlMu, which labelHolderLocked,
+// List and RuntimeStatus also hold while they read displayName, so a reader
+// never sees the new broker name beside the old runtime name and a concurrent
+// keyed spawn sees the old name held or the new name held, never both free. The
+// supervisor session is broker-only: it has no child runtime to update.
 func (s *Supervisor) applySessionName(runID, name string) (string, error) {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
 	if err := s.broker.RenameRun(runID, name); err != nil {
 		return "", err
 	}
-	// The stored label, not the resolved display name: a harness-supplied name
-	// keeps winning in DisplayName, so reading the resolved name here would
-	// publish a rename event whose label did not change.
-	renamed := s.broker.StoredLabel(runID)
+	renamed := s.broker.DisplayName(runID)
 	if child := s.runtimes[runID]; child != nil {
 		child.mu.Lock()
 		child.displayName = renamed

@@ -114,12 +114,6 @@ func peersList(ctx context.Context, p Provider, action string) (Result, error) {
 // through unchanged. Phase-1 admission owns the name's length and pattern,
 // counted in runes like the published schema; the rename authority owns every
 // other name rule plus resolution and permission.
-//
-// The reported labels are RenameResult's stored write-tracking view, not the
-// resolved display name `list` renders: a rename under a harness-supplied
-// session name writes SessionInfo.Label while peers keep seeing the harness
-// name until it is cleared. The rendered sentence reports the stored update as
-// such; it does not claim the peer-visible name changed.
 func peersRename(ctx context.Context, p Provider, action string, input peersInput) (Result, error) {
 	renamed, err := p.Rename(ctx, messaging.RenameRequest{SessionID: input.SessionID, Name: input.Name})
 	if err != nil {

@@ -156,11 +156,7 @@ func (st *RunState) Lock()   { st.Mu.Lock() }
 func (st *RunState) Unlock() { st.Mu.Unlock() }
 
 // displayName reports the name peers see for this run.
-func (st *RunState) displayName() string { return st.DisplayName() }
-
-// DisplayName reports the name peers see for this run: the harness-supplied
-// name wins, then the model-set (or launch) name, else the run ID.
-func (st *RunState) DisplayName() string {
+func (st *RunState) displayName() string {
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
 	return st.labelLocked()
@@ -174,12 +170,6 @@ func (st *RunState) labelLocked() string {
 	if st.HarnessName != "" {
 		return st.HarnessName
 	}
-	return st.labelStoredLocked()
-}
-
-// labelStoredLocked resolves the stored label: the model-set (or launch) name,
-// else the run ID — the labelLocked ladder minus the harness rung.
-func (st *RunState) labelStoredLocked() string {
 	if st.Info != nil && st.Info.Label != "" {
 		return st.Info.Label
 	}
@@ -1584,14 +1574,14 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusBadRequest, messaging.SessionNameRuleMessage(body.Name), "invalid-name")
 			return
 		}
-		previous := b.StoredLabel(caller)
+		previous := b.DisplayName(caller)
 		if err := b.RenameRun(caller, body.Name); err != nil {
 			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
 			return
 		}
 		writeJSONBody(w, http.StatusOK, map[string]any{
 			"run_id":         caller,
-			"label":          b.StoredLabel(caller),
+			"label":          b.DisplayName(caller),
 			"previous_label": previous,
 		})
 		return
@@ -2003,20 +1993,6 @@ func newRunState(runID, name string) *RunState {
 		PermissionDecisions: make(map[string]string),
 		Info:                &SessionInfo{RunID: runID, Label: name},
 	}
-}
-
-// StoredLabel reports the model-set or launch label stored for runID — the name
-// RenameRun accepts — or the run ID when the run was never labelled. Unlike
-// DisplayName it never resolves the harness-supplied name, so a caller that
-// tracks the stored name reads what the last write wrote.
-func (b *Broker) StoredLabel(runID string) string {
-	st := b.GetRun(runID)
-	if st == nil {
-		return runID
-	}
-	st.Mu.Lock()
-	defer st.Mu.Unlock()
-	return st.labelStoredLocked()
 }
 
 // DisplayName reports the name peers see for runID: the harness-supplied

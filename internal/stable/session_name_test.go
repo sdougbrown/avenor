@@ -79,42 +79,6 @@ func TestSessionRenameLevelsAndResolution(t *testing.T) {
 	}
 }
 
-// A self-rename of a run whose harness named it: SessionRename reports and
-// publishes the stored label the rename accepted, while the resolved display
-// name the run is reached by stays the harness-supplied name.
-func TestSessionRenameUnderHarnessName(t *testing.T) {
-	sup, _ := newStage2Supervisor(t, 4)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	log := newItestEventLog(sup.control.SubscribeEvents(ctx))
-	if _, err := sup.broker.CreateRun("rt_h", "launch-name"); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	if err := sup.broker.SetHarnessName("rt_h", "harness-name"); err != nil {
-		t.Fatalf("set harness name: %v", err)
-	}
-
-	result, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: "rt_h"}, "", "model-name")
-	if err != nil {
-		t.Fatalf("rename: %v", err)
-	}
-	// The result reports the stored label the rename accepted, not the resolved
-	// display name: the harness name would have made both fields read
-	// "harness-name" and the rename invisible.
-	if result.Label != "model-name" || result.PreviousLabel != "launch-name" {
-		t.Fatalf("rename result = %+v, want launch-name -> model-name", result)
-	}
-	ev := log.waitFor(t, "session.renamed", func(ev events.Event) bool { return ev.Event == "session.renamed" })
-	if ev.Fields["label"] != "model-name" || ev.Fields["previous_label"] != "launch-name" {
-		t.Fatalf("session.renamed fields = %v, want launch-name -> model-name", ev.Fields)
-	}
-	// Peers still see the harness name: the rename changed the model-set label
-	// underneath it, and it wins until the harness clears it.
-	if got := sup.broker.DisplayName("rt_h"); got != "harness-name" {
-		t.Fatalf("display name = %q, want harness-name", got)
-	}
-}
-
 func TestSessionRenameAmbiguousLabel(t *testing.T) {
 	sup, _ := newStage2Supervisor(t, 4)
 	for _, id := range []string{"rt_b", "rt_a"} {
