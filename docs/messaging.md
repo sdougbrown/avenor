@@ -186,7 +186,7 @@ The local adapter drives the broker's own router:
 
 | Path | Purpose |
 |---|---|
-| `/sessions` | Authenticated preflight and peer listing: the broker's generation, its `messaging_protocol` marker, and the peers the installed messenger can see. A listing the messenger could not finish is reported as `peers_error` beside the partial `sessions` array, and the adapter rejects it instead of treating the partial list as complete. |
+| `/sessions` | Authenticated preflight and peer listing: the broker's generation, its `messaging_protocol` marker, and the peers the installed messenger can see. A listing the messenger could not finish is reported as `peers_error` beside the partial `sessions` array, and the adapter rejects it instead of treating the partial list as complete. The policy is shared across surfaces: a provider that resolves a target or reads a run state from the listing — the Go child and MCP providers and the TypeScript host and child providers alike — refuses the lookup when the listing is incomplete, even when the target is in the partial set; only the peers tool serves the partial list beside the detail. |
 | `/send` | Admit one message or ask. |
 | `/wait_reply` | Wait for the ask's terminal state. |
 | `/cancel_message` | Withdraw an ask. |
