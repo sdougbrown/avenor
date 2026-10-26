@@ -9,9 +9,7 @@ package broker
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +26,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // ControlMessage is a message pushed from Avenor to the sidecar for delivery to Claude.
@@ -482,13 +481,14 @@ func (b *Broker) MessengerTransport() messaging.Transport {
 	return inprocess.NewRouted(b.store, b.seam)
 }
 
+// MakeToken returns a random opaque credential via the shared hex generator.
+// It panics if crypto/rand fails, matching its use as an infallible helper.
 func MakeToken() string {
-	b := make([]byte, 16)
-	_, err := rand.Read(b)
+	credential, err := token.NewHex(16)
 	if err != nil {
 		panic(fmt.Sprintf("crypto/rand: %v", err))
 	}
-	return hex.EncodeToString(b)
+	return credential
 }
 
 // Start binds the broker to an ephemeral loopback port.

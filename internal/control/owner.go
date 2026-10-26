@@ -1,8 +1,6 @@
 package control
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // OwnerCapability is the bearer credential of the process that owns a control
@@ -26,15 +25,15 @@ type OwnerCapability struct {
 // GenerateOwnerCapability mints a fresh 128-bit capability ID and 256-bit
 // secret. Both are lowercase hex.
 func GenerateOwnerCapability() (OwnerCapability, error) {
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
+	id, err := token.NewHex(16)
+	if err != nil {
 		return OwnerCapability{}, fmt.Errorf("generate owner capability id: %w", err)
 	}
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
+	secret, err := token.NewHex(32)
+	if err != nil {
 		return OwnerCapability{}, fmt.Errorf("generate owner capability secret: %w", err)
 	}
-	return OwnerCapability{ID: hex.EncodeToString(id), Secret: hex.EncodeToString(secret)}, nil
+	return OwnerCapability{ID: id, Secret: secret}, nil
 }
 
 const (

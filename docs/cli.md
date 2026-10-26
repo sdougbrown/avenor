@@ -284,6 +284,8 @@ avenor stable --control-socket /tmp/avenor.sock
 | `--lease-sweep-interval` | `10s` | Expire workflow leases whose heartbeat stopped at this cadence (0 = disable; leases expire only on restart recovery) |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout before killing children |
 | `--permission-claim-timeout` | `0` (disabled) | Optional permission claim deadline; with 0, fallback occurs only after all control clients disconnect |
+| `--broker-parent-url` | (none) | `http://` address of the parent broker to join. The credential comes from the `AVENOR_PARENT_BROKER_TOKEN` environment variable (required when this flag is set); a credential without a URL runs this broker as the tree's parent broker |
+| `--broker-parent-token` | (none) | Explicit parent-link credential overriding `AVENOR_PARENT_BROKER_TOKEN`; prefer the env var, since argv is world-readable via `/proc/<pid>/cmdline` |
 
 ### Example
 
@@ -731,6 +733,29 @@ avenor claude-channel-cleanup --dir /path/to/project
 
 The cleanup command is safe to run at any time — it only removes entries with names starting with `avenor-channel-` and leaves all other MCP servers intact. If no avenor-channel entries exist, it reports `removed 0` and exits successfully.
 
+## avenor parent-token
+
+Print a fresh 256-bit random parent-link credential as 64 lowercase hex characters. Use it to mint the shared credential that links a child branch supervisor's broker to its parent's broker. See [messaging.md](messaging.md#linking-a-branch) for how the token is carried and consumed.
+
+```
+avenor parent-token
+```
+
+### Flags
+
+None.
+
+### Example
+
+Mint a token and hand it to both sides of a parent link:
+
+```sh
+avenor parent-token
+# Output: 3f9c1a… (64 hex characters, one line)
+```
+
+Each invocation prints a different token; the value is never persisted by this command.
+
 ## Common Patterns
 
 ### Long-lived supervisor with on-demand agents
@@ -853,6 +878,7 @@ See [loop.md](loop.md) for how exit codes interact with multi-phase loops.
 ## Environment Variables
 
 - `AVENOR_OPENCODE_URL` — Default server URL if `--server-url` not set (only consulted for subprocess discovery)
+- `AVENOR_PARENT_BROKER_TOKEN` — Parent-link credential consumed by `avenor stable` on both sides of a parent link; required with `--broker-parent-url`, and a credential without a URL runs the broker as the tree's parent broker. Prefer this over `--broker-parent-token`
 - `MCP_AUTH_TOKEN` — Bearer token for HTTP MCP server if `--auth-token` not set
 - `OPENCODE_CONFIG_DIR` — Directory to search for opencode config; defaults to `~/.config/opencode/`
 

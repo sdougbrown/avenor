@@ -15,8 +15,6 @@
 package admission
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +23,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/sdougbrown/avenor/internal/token"
 	"time"
 )
 
@@ -117,7 +117,7 @@ func CreateRootInRuntimeState(capacity int) (*Budget, error) {
 
 	// CreateRoot uses O_EXCL, and the cryptographically random suffix keeps
 	// independent root supervisors from contending for a predictable name.
-	suffix, err := newToken()
+	suffix, err := token.NewHex(16)
 	if err != nil {
 		return nil, fmt.Errorf("admission: generate runtime state name: %w", err)
 	}
@@ -132,7 +132,7 @@ func CreateRoot(path string, capacity int) (*Budget, error) {
 	if capacity <= 0 {
 		capacity = DefaultTreeBudget
 	}
-	rootID, err := newToken()
+	rootID, err := token.NewHex(16)
 	if err != nil {
 		return nil, fmt.Errorf("admission: generate root id: %w", err)
 	}
@@ -275,20 +275,20 @@ func (b *Budget) Acquire(holder string) (string, error) {
 			RootID: bf.RootID,
 		}
 	}
-	token, err := newToken()
+	credential, err := token.NewHex(16)
 	if err != nil {
 		return "", fmt.Errorf("admission: generate token: %w", err)
 	}
-	bf.Active[token] = &reservation{
+	bf.Active[credential] = &reservation{
 		PID:    os.Getpid(),
 		Holder: holder,
 		At:     time.Now().UnixNano(),
-		Token:  token,
+		Token:  credential,
 	}
 	if err := writeBudget(b.f, bf); err != nil {
 		return "", err
 	}
-	return token, nil
+	return credential, nil
 }
 
 // Release returns a held capacity slot to the tree budget. It is safe to call
@@ -464,14 +464,6 @@ func writeBudget(f *os.File, bf *budgetFile) error {
 		return fmt.Errorf("admission: sync: %w", err)
 	}
 	return nil
-}
-
-func newToken() (string, error) {
-	var buf [16]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf[:]), nil
 }
 
 // pidAlive reports whether a process with the given PID exists. A PID whose

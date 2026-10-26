@@ -1,8 +1,6 @@
 package mcpserver
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -18,6 +16,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 var execCommand = exec.Command
@@ -27,16 +26,6 @@ var startupTimeout = 10 * time.Second
 // afterSupervisorReady is a no-op production hook used to coordinate the
 // post-readiness socket-replacement test before its first identity probe.
 var afterSupervisorReady = func() {}
-
-const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
-
-func newControlIdentityToken() (string, error) {
-	var token [32]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		return "", fmt.Errorf("generate control identity token: %w", err)
-	}
-	return hex.EncodeToString(token[:]), nil
-}
 
 type supervisorLifecycle struct {
 	mu         sync.Mutex
@@ -129,7 +118,7 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 		return nil, fmt.Errorf("create supervisor readiness pipe: %w", err)
 	}
 	defer readyReader.Close()
-	identityToken, err := newControlIdentityToken()
+	identityToken, err := token.NewHexToken()
 	if err != nil {
 		_ = readyWriter.Close()
 		return nil, err
@@ -141,16 +130,23 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 		env = os.Environ()
 	}
 	const readyEnv = "AVENOR_CONTROL_READY_FD="
-	const identityEnv = controlIdentityTokenEnv + "="
-	testHookEnvs := []string{runtime.EnvTestHooks + "=", runtime.EnvTestOwnerPublishDelay + "="}
+	const identityEnv = token.EnvControlIdentityToken + "="
+	// Credential and ownership plumbing must not leak into the nested
+	// supervisor: a parent-link token in the environment with no
+	// --broker-parent-url would make the nested broker serve parent-link
+	// routes under the operator's shared credential.
+	strippedEnvs := []string{
+		readyEnv,
+		identityEnv,
+		token.EnvBrokerParentToken + "=",
+		runtime.EnvTestHooks + "=",
+		runtime.EnvTestOwnerPublishDelay + "=",
+	}
 	cmd.Env = make([]string, 0, len(env)+2)
 	for _, entry := range env {
-		if strings.HasPrefix(entry, readyEnv) || strings.HasPrefix(entry, identityEnv) {
-			continue
-		}
 		skip := false
-		for _, hook := range testHookEnvs {
-			if strings.HasPrefix(entry, hook) {
+		for _, prefix := range strippedEnvs {
+			if strings.HasPrefix(entry, prefix) {
 				skip = true
 				break
 			}
