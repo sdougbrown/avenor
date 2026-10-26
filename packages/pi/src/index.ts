@@ -117,6 +117,9 @@ const POLL_INTERVAL_MS = 3_000
 // accepted prompt may never come back through message_end. Re-arm delivery
 // after this long instead of leaving the run skipped with its notice unread.
 const IDLE_SEND_TIMEOUT_MS = 10_000
+// An unconfirmable send is retried at most this many times before the notice is
+// left for settlement and the failure is recorded.
+const MAX_IDLE_SEND_ATTEMPTS = 3
 const INSPECT_LIMIT = 128
 const COMPLETION_OUTPUT_CHARS = 600
 const INSPECT_JSON_STRING_CHARS = 600
@@ -788,6 +791,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         nestedCount: current?.nestedCount,
         idleSendInFlight: current?.idleSendInFlight,
         idleSentAt: current?.idleSentAt,
+        idleSendAttempts: current?.idleSendAttempts,
         permissionNotified: current?.permissionNotified,
         consumed: current?.consumed,
         terminalEventEmitted: current?.terminalEventEmitted,
@@ -896,6 +900,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         // confirmation can no longer match, so delivery is handed back to the poll.
         run.idleSendInFlight = false
         run.idleSentAt = undefined
+        run.idleSendAttempts = undefined
       }
     }
 
@@ -1152,6 +1157,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // stopping point (e.g. an unanswered permission) from re-interrupting
           // re-issued waits on every poll cycle.
           const prevStatus = prevStatuses.get(entryKey)
+          let idleSendCapped = false
           // An accepted-but-unconfirmed send has no confirmation callback. If the
           // prompt never comes back through message_end, re-arm delivery rather
           // than skipping the run forever with its notice unread.
@@ -1163,6 +1169,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             run.idleSendInFlight = false
             run.idleSentAt = undefined
             widgetDirty = true
+            // Once the retry budget is spent, stop sending and leave the notice
+            // for settlement; surface the failure instead of polling forever.
+            if ((run.idleSendAttempts ?? 0) >= MAX_IDLE_SEND_ATTEMPTS) {
+              idleSendCapped = true
+              recordPollingError(
+                'idle-send',
+                'idle completion send was never confirmed',
+                new Error(`no message_end after ${run.idleSendAttempts} attempts`),
+                run.runId,
+              )
+            }
           }
           // An idle send is already in flight for this run: the send's own
           // resolution owns deletion or re-queueing.
@@ -1236,10 +1253,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             // dropped prompt stays unread instead of being lost; the in-flight
             // flag keeps polling from sending it twice. Compaction can reject a
             // prompt, so wait for it to finish and leave the notice unread.
-            if (sessionCtx?.isIdle() === true && !compacting) {
+            if (sessionCtx?.isIdle() === true && !compacting && !idleSendCapped) {
               run.pendingNotice = notice
               run.idleSendInFlight = true
               run.idleSentAt = Date.now()
+              run.idleSendAttempts = (run.idleSendAttempts ?? 0) + 1
               widgetDirty = true
               sendCompletionNotice(notice)
               continue
@@ -1688,15 +1706,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // Delivery confirmation for idle completions. A send is only proven to
     // have landed when the user message comes back here, so the matching
     // notice and its tracked run are cleared now rather than optimistically at
-    // send time. A run consumed while the send was in flight is already gone,
-    // and nothing matches on its behalf.
+    // send time. The match is on the notice text alone: a re-arm or compaction
+    // may have cleared the in-flight flag while this prompt was still queued,
+    // and nothing else sends this exact text. A run consumed while the send was
+    // in flight is already gone, and nothing matches on its behalf.
     pi.on('message_end', event => {
       if (event.message?.role !== 'user') return
       const text = extractTurnText([event.message]).text
       if (text === '') return
       let confirmed = false
       for (const [key, run] of trackedRuns) {
-        if (!run.idleSendInFlight) continue
         if (run.pendingNotice?.text !== text) continue
         run.pendingNotice = undefined
         run.idleSendInFlight = false

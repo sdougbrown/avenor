@@ -2407,7 +2407,7 @@ describe('Avenor Pi extension', () => {
     })
     const h = await createMultiSupervisorHarness({
       statusTool,
-      idleSendTimeoutMs: 20,
+      idleSendTimeoutMs: 100,
       spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
     })
 
@@ -2421,8 +2421,10 @@ describe('Avenor Pi extension', () => {
     // The void send is accepted but never comes back through message_end. The
     // notice stays unread and the timeout re-sends instead of leaving the lone
     // terminal run skipped forever.
-    await waitFor(() => deliveries().length === 1)
+    await waitFor(() => deliveries().length >= 1)
     expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+    // Only the re-send depends on the timeout, so this is the one assertion
+    // that must wait for a second delivery.
     await waitFor(() => deliveries().length >= 2)
     expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
 
@@ -2437,6 +2439,103 @@ describe('Avenor Pi extension', () => {
       h.ctx,
     )
     expect(settled).toBeUndefined()
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('clears the notice when a late confirmation arrives after a re-arm', async () => {
+    const SOCK = '/tmp/idle-late-confirm.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'late answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      idleSendTimeoutMs: 60,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    done = true
+
+    const deliveries = () => h.sendUserMessage.mock.calls
+      .map(([t]) => String(t))
+      .filter(t => t.includes('Sub-agent "worker" finished'))
+
+    await waitFor(() => deliveries().length >= 1)
+    // The send stays accepted-but-unconfirmed. A later tick clears the in-flight
+    // flag when the send times out; the session is busy, so nothing is re-sent
+    // and the first prompt is the only thing still queued.
+    h.ctx.isIdle = () => false
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+
+    const delivered = deliveries().length
+    expect(delivered).toBe(1)
+    await confirmDelivery(h, deliveries()[0]!)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).not.toContain('unread:')
+    expect(deliveries()).toHaveLength(delivered)
+
+    // The confirmed notice must not be delivered a second time at settlement.
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled).toBeUndefined()
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('stops re-arming idle sends after the attempt cap and leaves the notice unread', async () => {
+    const SOCK = '/tmp/idle-attempt-cap.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'capped answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      idleSendTimeoutMs: 20,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    done = true
+
+    const deliveries = () => h.sendUserMessage.mock.calls
+      .map(([t]) => String(t))
+      .filter(t => t.includes('Sub-agent "worker" finished'))
+    const footer = () => String(h.setStatus.mock.calls.at(-1)?.[1])
+
+    await waitFor(() => deliveries().length >= 3)
+    // The cap stops further sends and surfaces the failure instead of looping.
+    await waitFor(() => footer().includes('errors:'))
+    expect(footer()).toContain('unread:1')
+    expect(h.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_POLL_ERROR && (payload as { source?: string }).source === 'idle-send',
+    )).toBe(true)
+
+    // Nothing new is sent once the cap is exhausted, and the unread notice is
+    // still delivered at settlement.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(deliveries()).toHaveLength(3)
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled?.entries).toHaveLength(1)
+    expect(String(settled?.entries[0]?.content)).toContain('capped answer')
 
     await h.eventHandlers.session_shutdown()
   })

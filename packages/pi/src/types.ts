@@ -22,6 +22,9 @@ export interface TrackedRun {
   /** When the in-flight idle send started, used to re-arm a send that was
    * accepted by the void API but never confirmed through message_end. */
   idleSentAt?: number
+  /** Idle sends attempted for the current notice. Bounds the re-arm loop so an
+   * unconfirmable send stops instead of retrying forever. */
+  idleSendAttempts?: number
   /** true if we've injected a permission notification via sendUserMessage */
   permissionNotified?: boolean
   /** true once avenor_result has successfully returned this run's final result to

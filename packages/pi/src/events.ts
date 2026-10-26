@@ -23,7 +23,7 @@ export const CHANNEL_RUN_TERMINAL = 'avenor:run:terminal' as const
 /** Emitted when a best-effort polling operation fails. */
 export const CHANNEL_POLL_ERROR = 'avenor:poll:error' as const
 
-export type PollErrorSource = 'singleton-list' | 'run-status' | 'spawn-status'
+export type PollErrorSource = 'singleton-list' | 'run-status' | 'spawn-status' | 'idle-send'
 
 export interface PollErrorPayload {
   /** Polling operation that failed. */
