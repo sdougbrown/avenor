@@ -425,9 +425,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     const pollingErrors: PollErrorPayload[] = []
     let lastStatusEntries: RunStatusEntry[] = []
     let sessionGeneration = 0
-    // True from session_before_compact until session_compact/_failed. An idle
-    // completion sent during compaction can be rejected by the prompt path, so
-    // delivery waits and leaves the notice unread.
+    // True from session_before_compact until session_compact, session_start,
+    // or the next before_agent_start — a cancelled compaction never fires
+    // session_compact, so the turn boundary clears the gate defensively. An
+    // idle completion sent during compaction can be rejected by the prompt
+    // path, so delivery waits and leaves the notice unread.
     let compacting = false
     // Suppress last-turn writes after a closed-socket failure until the default
     // binding is evicted by disposeHostProvider/disposeHostProviders, or a new
@@ -799,9 +801,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * delivery. Idempotent, so the timeout re-arm and the compaction
      * hand-back cannot double-report the same notice. */
     function capIdleSend(run: TrackedRun): void {
-      if (run.idleSendCapped) return
-      run.idleSendCapped = true
-      recordDeliveryError(run, run.idleSendAttempts ?? 0)
+      if (!run.idleSend || run.idleSend.capped) return
+      run.idleSend.capped = true
+      recordDeliveryError(run, run.idleSend.attempts)
     }
 
     function clearPollingErrors(): void {
@@ -926,10 +928,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         // An in-flight send belongs to the session that was just replaced; its
         // confirmation can no longer match, so delivery is handed back to the
         // poll with a fresh retry budget.
-        run.idleSendInFlight = false
-        run.idleSentAt = undefined
-        run.idleSendAttempts = undefined
-        run.idleSendCapped = undefined
+        run.idleSend = undefined
       }
     }
 
@@ -1189,23 +1188,18 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // An accepted-but-unconfirmed send has no confirmation callback. If the
           // prompt never comes back through message_end, re-arm delivery rather
           // than skipping the run forever with its notice unread.
-          if (
-            run.idleSendInFlight
-            && run.idleSentAt !== undefined
-            && Date.now() - run.idleSentAt >= idleSendTimeoutMs
-          ) {
-            run.idleSendInFlight = false
-            run.idleSentAt = undefined
+          const idle = run.idleSend
+          if (idle?.inFlight && idle.sentAt !== undefined && Date.now() - idle.sentAt >= idleSendTimeoutMs) {
+            idle.inFlight = false
+            idle.sentAt = undefined
             widgetDirty = true
             // Once the retry budget is spent, stop sending and leave the notice
             // for settlement; surface the delivery failure on its own channel.
-            if ((run.idleSendAttempts ?? 0) >= MAX_IDLE_SEND_ATTEMPTS) {
-              capIdleSend(run)
-            }
+            if (idle.attempts >= MAX_IDLE_SEND_ATTEMPTS) capIdleSend(run)
           }
           // An idle send is already in flight for this run: the send's own
           // resolution owns deletion or re-queueing.
-          if (run.idleSendInFlight && isTerminalStatus(entry.status)) continue
+          if (run.idleSend?.inFlight && isTerminalStatus(entry.status)) continue
           const wasTerminal = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
           const wasStopped = wasTerminal || !!prevStatus?.pendingPermission
           if ((entry.pendingPermission || isTerminalStatus(entry.status)) && !wasStopped) {
@@ -1220,22 +1214,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
 
           if (isTerminalStatus(entry.status)) {
-            if (run.consumed) {
-              trackedRuns.delete(entryKey)
-              widgetDirty = true
-              continue
-            }
             // Reuse a notice that is already built so a terminal run held
             // unread is not re-inspected on every poll. Revalidate the tracked
             // identity after any await before committing it.
             const finalOutput = run.pendingNotice ? undefined : await resolveFinalOutput(run, run.lastStatus)
             if (sessionAtPollStart !== sessionGeneration) continue
             if (trackedRuns.get(entryKey) !== run) continue
-            if (run.consumed) {
-              trackedRuns.delete(entryKey)
-              widgetDirty = true
-              continue
-            }
             const wasTerminalBefore = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
             if (emitRunTerminal({
               run,
@@ -1275,11 +1259,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             // dropped prompt stays unread instead of being lost; the in-flight
             // flag keeps polling from sending it twice. Compaction can reject a
             // prompt, so wait for it to finish and leave the notice unread.
-            if (sessionCtx?.isIdle() === true && !compacting && !run.idleSendCapped) {
+            if (sessionCtx?.isIdle() === true && !compacting && !run.idleSend?.capped) {
               run.pendingNotice = notice
-              run.idleSendInFlight = true
-              run.idleSentAt = Date.now()
-              run.idleSendAttempts = (run.idleSendAttempts ?? 0) + 1
+              run.idleSend = {
+                inFlight: true,
+                sentAt: Date.now(),
+                attempts: (run.idleSend?.attempts ?? 0) + 1,
+                capped: false,
+              }
               widgetDirty = true
               sendCompletionNotice(notice)
               continue
@@ -1308,7 +1295,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         // A lone terminal run with an unconfirmed send must keep polling so the
         // timeout above can re-arm its delivery.
         const hasActive = entries.some(entry => !isTerminalStatus(entry.status))
-          || Array.from(trackedRuns.values()).some(run => run.idleSendInFlight)
+          || Array.from(trackedRuns.values()).some(run => run.idleSend?.inFlight)
         if (hasActive && pollingActive && generation === pollingGeneration) {
           setTimeout(() => {
             void tick().catch(err => {
@@ -1734,8 +1721,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // notice and its tracked run are cleared now rather than optimistically at
     // send time. The match is on the notice text alone: a re-arm or compaction
     // may have cleared the in-flight flag while this prompt was still queued,
-    // and nothing else sends this exact text. A run consumed while the send was
-    // in flight is already gone, and nothing matches on its behalf.
+    // and nothing else sends this exact text. A run whose result was delivered
+    // while the send was in flight is already gone, and nothing matches on its
+    // behalf.
     pi.on('message_end', event => {
       if (event.message?.role !== 'user') return
       const text = extractTurnText([event.message]).text
@@ -1744,8 +1732,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       for (const [key, run] of trackedRuns) {
         if (run.pendingNotice?.text !== text) continue
         run.pendingNotice = undefined
-        run.idleSendInFlight = false
-        run.idleSentAt = undefined
+        run.idleSend = undefined
         trackedRuns.delete(key)
         confirmed = true
       }
@@ -1766,22 +1753,33 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // per-notice and survives compaction, so a run whose budget is spent
       // waits for settlement instead of resuming sends.
       for (const run of trackedRuns.values()) {
-        if (!run.pendingNotice) continue
-        run.idleSendInFlight = false
-        run.idleSentAt = undefined
+        // A permission notice sent into the compaction window was rejected with
+        // the prompt; re-arm it so the run's ask is delivered again.
+        if (run.permissionNotified && run.lastStatus?.pending_permission) run.permissionNotified = false
+        if (!run.idleSend) continue
+        run.idleSend.inFlight = false
+        run.idleSend.sentAt = undefined
         // Compaction can end the in-flight send before its timeout runs: latch
         // the budget here too, or the next idle tick would send past the cap.
-        if ((run.idleSendAttempts ?? 0) >= MAX_IDLE_SEND_ATTEMPTS) capIdleSend(run)
+        if (run.idleSend.attempts >= MAX_IDLE_SEND_ATTEMPTS) capIdleSend(run)
       }
-      if (Array.from(trackedRuns.values()).some(run => run.pendingNotice)) startPolling()
+      // A re-armed permission notice needs a poll tick even when no completion
+      // notice is pending.
+      const hasUndelivered = Array.from(trackedRuns.values()).some(run =>
+        run.pendingNotice
+        || (!run.permissionNotified && !!run.lastStatus?.pending_permission))
+      if (hasUndelivered) startPolling()
     }
     pi.on('session_compact', resumeAfterCompaction)
-    pi.on('session_compact_failed', resumeAfterCompaction)
 
     pi.on('before_agent_start', async (_event, ctx) => {
       // A session renamed between turns is picked up here, before the turn whose
       // messages will carry the old name any further.
       void publishSessionName(ctx)
+      // Compaction runs between turns and can be cancelled by another handler,
+      // in which case session_compact never fires; the turn boundary proves
+      // no compaction is in flight, so clear the delivery gate defensively.
+      compacting = false
       if (trackedRuns.size === 0) return
 
       const entries = await pollRuns()
@@ -1808,24 +1806,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // unread for a later safe settlement.
       if (event.outcome !== 'completed') return
 
-      const generation = sessionGeneration
       const deliverable: Array<{ run: TrackedRun; notice: CompletionNotice }> = []
-      let pruned = false
       for (const run of trackedRuns.values()) {
-        if (generation !== sessionGeneration) return
         if (!run.pendingNotice) continue
         // An idle send is already delivering this notice; settlement must not
         // deliver the same completion a second time.
-        if (run.idleSendInFlight) continue
-        if (run.consumed) {
-          run.pendingNotice = undefined
-          pruned = true
-          continue
-        }
+        if (run.idleSend?.inFlight) continue
         deliverable.push({ run, notice: run.pendingNotice })
       }
       if (deliverable.length === 0) {
-        if (pruned) updateWidget(lastStatusEntries)
         return
       }
 
@@ -2040,7 +2029,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
         }
 
-        upsertTrackedRun(runRef, status, wait)
+        // A concurrent avenor_result may have consumed and deleted this run
+        // while the wait was in flight. Do not resurrect a consumed run: the
+        // fresh entry would lose the terminal-event once-guard and emit a
+        // second terminal event for the same run.
+        if (trackedRuns.has(trackedRunKey(supervisorId, result.run_id))) {
+          upsertTrackedRun(runRef, status, wait)
+        }
 
         if (status.status === 'waiting') {
           const tracked = getTrackedRunById(result.run_id, supervisorId)
@@ -2205,11 +2200,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // Reconcile against that id even when the caller only passed a label.
           resultRun = reconcileResultRun(tracked, result, params.supervisor_id)
           if (completed) {
-            // Only mark the run consumed (and suppress the automatic completion)
-            // when the result was actually delivered. If this call was
-            // interrupted — aborted by signal, timed out, or still waiting —
-            // the caller did not receive the output, so leave `consumed` unset
-            // and let the polling tick deliver the completion later.
+            // Only drop the run (and suppress the automatic completion) when
+            // the result was actually delivered. If this call was interrupted
+            // — aborted by signal, timed out, or still waiting — the caller
+            // did not receive the output, so keep the run tracked and let the
+            // polling tick deliver the completion later.
             if (resultRun) {
               emitRunTerminal({
                 run: resultRun,
@@ -2220,7 +2215,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
                 nestedCount: resultRun.nestedCount,
                 backend: resultRun.lastStatus?.backend,
               })
-              resultRun.consumed = true
               trackedRuns.delete(trackedRunKey(resultRun.supervisorId, resultRun.runId))
               updateWidget(lastStatusEntries)
               // A label may resolve to one tracked run while the canonical result

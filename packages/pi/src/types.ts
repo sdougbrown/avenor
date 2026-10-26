@@ -16,24 +16,12 @@ export interface TrackedRun {
   blocking?: boolean
   /** Active descendants seen by the last poll, carried into terminal telemetry. */
   nestedCount?: number
-  /** true while an idle completion send is in flight; terminal processing for
-   * this run is skipped until the send resolves. */
-  idleSendInFlight?: boolean
-  /** When the in-flight idle send started, used to re-arm a send that was
-   * accepted by the void API but never confirmed through message_end. */
-  idleSentAt?: number
-  /** Idle sends attempted for the current notice. Bounds the re-arm loop so an
-   * unconfirmable send stops instead of retrying forever. */
-  idleSendAttempts?: number
-  /** true once the idle-send retry budget for this notice is spent. Stops
-   * re-sends even while a sibling run keeps the poll loop ticking. */
-  idleSendCapped?: boolean
+  /** Idle-send lifecycle for the current notice. Present only while a notice
+   * is awaiting or awaiting confirmation of a model-facing send; one reset
+   * clears the whole lifecycle, so no hand-back can forget a field. */
+  idleSend?: IdleSendState
   /** true if we've injected a permission notification via sendUserMessage */
   permissionNotified?: boolean
-  /** true once avenor_result has successfully returned this run's final result to
-   * the caller. Set only on a successful (non-interrupted) result; the run is
-   * dropped from tracking and its pending notice is discarded immediately. */
-  consumed?: boolean
   /** true once CHANNEL_RUN_TERMINAL has been emitted for this run. */
   terminalEventEmitted?: boolean
   /** One terminal completion waiting for a safe model-facing delivery. Run
@@ -45,6 +33,21 @@ export interface TrackedRun {
 export interface CompletionNotice {
   status: TerminalStatus
   text: string
+}
+
+/** The idle-send lifecycle of one pending notice. */
+export interface IdleSendState {
+  /** A send is in flight and unconfirmed; terminal processing for the run is
+   * skipped until the send resolves. */
+  inFlight: boolean
+  /** When the in-flight send started, used to re-arm a send that was accepted
+   * by the void API but never confirmed through message_end. */
+  sentAt?: number
+  /** Sends attempted for the current notice; bounds the re-arm loop. */
+  attempts: number
+  /** true once the retry budget is spent. Stops re-sends even while a sibling
+   * run keeps the poll loop ticking. */
+  capped: boolean
 }
 
 /**

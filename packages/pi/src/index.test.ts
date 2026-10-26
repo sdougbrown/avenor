@@ -2382,6 +2382,53 @@ describe('Avenor Pi extension', () => {
     }
   })
 
+  it('does not emit a second terminal event when avenor_result consumes a run a blocking spawn still waits on', async () => {
+    const SOCK = '/tmp/race-consume-spawn.sock'
+    let done = false
+    let emitEnded: (() => void) | undefined
+    const observeRun = mock(async () => ({
+      subscribe: (cb: (snapshot: unknown) => void) => {
+        emitEnded = () => cb({ last_event: { event: 'session.end' }, transcript: [], tools: [], live_tools: [], pending_permission: false, ended: true })
+        return () => {}
+      },
+      snapshot: () => ({ last_event: undefined, transcript: [], tools: [], live_tools: [], pending_permission: false, ended: false }),
+      close: async () => {},
+    }))
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'race answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const resultTool = mock(async () => ({ run_id: 'r1', label: 'worker', status: 'done', ready: true, output: 'race answer' }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      observeRun,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    // The blocking spawn holds its wait open while avenor_result resolves the
+    // same run and consumes it.
+    const spawned = h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    await waitFor(() => Boolean(emitEnded))
+    await h.registeredTools.avenor_result.execute('t2', { run_id: 'worker' }, undefined, undefined, h.ctx)
+    expect(h.emitted.filter(([channel]) => channel === CHANNEL_RUN_TERMINAL)).toHaveLength(1)
+
+    // The spawn wait then resolves with the terminal status; the consumed run
+    // must not be resurrected, or the once-guard would be lost and the event
+    // would fire a second time.
+    done = true
+    emitEnded?.()
+    await spawned
+    expect(h.emitted.filter(([channel]) => channel === CHANNEL_RUN_TERMINAL)).toHaveLength(1)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('emits one terminal event when a blocking spawn replaces an already-notified run', async () => {
     const SOCK = '/tmp/terminal-once.sock'
     let done = false
@@ -2823,6 +2870,46 @@ describe('Avenor Pi extension', () => {
     await waitFor(() => polls() > pollsAtResume)
     expect(deliveries()).toHaveLength(3)
     expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('re-sends a permission notice the compaction window rejected', async () => {
+    const SOCK = '/tmp/permission-compaction.sock'
+    let permission = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return permission
+          ? { run_id: 'r1', label: 'worker', status: 'waiting', runtime_id: 'rt1', pending_permission: { description: 'allow write' } }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+    h.ctx.isIdle = () => false
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const waitingNotices = () => h.sendUserMessage.mock.calls
+      .map(([t]) => String(t))
+      .filter(t => t.includes('is waiting for input'))
+
+    // The permission notice is sent exactly once while the run stays blocked.
+    permission = true
+    await waitFor(() => waitingNotices().length >= 1)
+    await waitFor(() => statusTool.mock.calls.filter(call => call[0]?.runId === 'r1' && call[0]?.supervisorId === SOCK).length >= 2)
+    expect(waitingNotices()).toHaveLength(1)
+
+    // The compaction window rejects any in-flight prompt; the hand-back must
+    // re-arm the notice so the still-blocked run's ask is delivered again.
+    await h.eventHandlers.session_before_compact()
+    await h.eventHandlers.session_compact()
+    await waitFor(() => waitingNotices().length >= 2)
+    expect(waitingNotices()).toHaveLength(2)
 
     await h.eventHandlers.session_shutdown()
   })
