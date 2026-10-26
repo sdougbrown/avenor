@@ -103,11 +103,7 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		RefreshInterval: refresh,
 		Endpoint:        branch.url(),
 		Generation:      b.Store().Generation,
-		Runs: func() []messaging.RunClaim {
-			return RunClaims(b.Sessions(),
-				func(info broker.SessionInfo) (string, string) { return info.RunID, info.Label },
-				link.Owns, b.RunToken)
-		},
+		Runs:            func() []messaging.RunClaim { return b.ParentRunClaims() },
 		// Retiring the claim drops the host's run record with it, so a refused
 		// descendant stops being served locally.
 		RetireRun: func(runID, token string) { b.DeleteRunIfToken(runID, token) },

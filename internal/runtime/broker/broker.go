@@ -117,7 +117,7 @@ type RunState struct {
 	RunID string
 	// Token is the credential this run authenticates with. A replacement branch
 	// claim rotates it, so it is guarded by the broker's own mutex, not by Mu:
-	// read it through Broker.RunToken or Broker.runStateFor.
+	// read it through Broker.runToken or Broker.runStateFor.
 	Token               string
 	ControlQueue        []*ControlMessage
 	RegisteredAt        time.Time
@@ -214,7 +214,7 @@ func (b *Broker) SendTo(fromRunID, toRunID, kind string, payload json.RawMessage
 	_, ok := b.runs[toRunID]
 	b.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("run not found: %s", toRunID)
+		return fmt.Errorf("%w: %s", messaging.ErrTargetUnavailable, toRunID)
 	}
 	if correlationID == "" {
 		correlationID = MakeToken()
@@ -1275,8 +1275,18 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	const maxBody = 1 << 20 // 1 MiB
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if len(bodyBytes) > maxBody {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 	var body messaging.DescendantRegistration
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -1347,8 +1357,18 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	const maxBody = 1 << 20 // 1 MiB
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if len(bodyBytes) > maxBody {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 	var body messaging.DescendantRegistration
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -1440,7 +1460,7 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// The branch that owns the asker is the one that knows its display name;
 	// the canonical run ID travels unchanged.
 	if err := b.SendTo(body.FromRunID, body.ToRunID, body.Type, body.Payload, body.MessageID); err != nil {
-		if strings.Contains(err.Error(), "run not found") {
+		if errors.Is(err, messaging.ErrTargetUnavailable) {
 			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 			return
 		}
@@ -1602,14 +1622,11 @@ func (b *Broker) runStateFor(runID string) (*RunState, string, bool) {
 	return st, st.Token, true
 }
 
-// RunToken reports the credential this broker authenticates runID with.
-func (b *Broker) RunToken(runID string) (string, bool) {
+// runToken reports the credential this broker authenticates runID with.
+func (b *Broker) runToken(runID string) (string, bool) {
 	_, token, ok := b.runStateFor(runID)
 	return token, ok
 }
-
-// Sessions returns the runs this broker owns with the metadata its peers see.
-func (b *Broker) Sessions() []SessionInfo { return b.sessions() }
 
 // ParentRunClaims reports this broker's own runs, each with the credential its
 // run authenticates with. A run is this broker's own only if the record itself
