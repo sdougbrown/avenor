@@ -1443,13 +1443,23 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	const maxBody = 1 << 20 // 1 MiB
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if len(bodyBytes) > maxBody {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 	var body struct {
 		ChildID    string               `json:"child_id"`
 		Endpoint   string               `json:"endpoint"`
 		Generation string               `json:"generation"`
 		Runs       []messaging.RunClaim `json:"runs"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -1502,10 +1512,20 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	const maxBody = 1 << 20 // 1 MiB
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if len(bodyBytes) > maxBody {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 	var body struct {
 		ChildID string `json:"child_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
