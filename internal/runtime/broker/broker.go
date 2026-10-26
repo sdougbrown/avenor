@@ -2016,9 +2016,6 @@ func (b *Broker) SetHarnessName(runID, name string) error {
 	// name is a run-set change the way a rename is.
 	b.runSetChanged()
 	b.harnessNameChanged(runID, name)
-	// The label is part of what this broker publishes about the run, so a host
-	// with a parent link re-publishes it now instead of at the next refresh.
-	b.runSetChanged()
 	return nil
 }
 
