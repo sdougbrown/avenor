@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -455,6 +456,132 @@ func TestLocalMessengerKeepsAskAdmissionContracts(t *testing.T) {
 	}
 	if queued := countAgentMessages(t, b, "target"); queued != 1 {
 		t.Fatalf("target queue = %d messages, want the single legacy ask", queued)
+	}
+}
+
+// TestLocalMessengerReceiveDrainsBoundedAgentMessages pins the direct
+// seam's bounded drain: a named limit returns the head of the agent queue
+// with its identities, payloads and order intact and leaves the remainder
+// queued, and an absent limit clamps to the default bound.
+func TestLocalMessengerReceiveDrainsBoundedAgentMessages(t *testing.T) {
+	b, _, _ := startSeamBroker(t)
+	ctx := context.Background()
+
+	const total = 40
+	for i := 0; i < total; i++ {
+		payload, err := json.Marshal(AgentMessage{
+			ID: fmt.Sprintf("drain-%02d", i), From: "sender", FromRunID: "sender", ToRunID: "target", Message: fmt.Sprintf("body-%02d", i),
+		})
+		if err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		if err := b.SendTo("sender", "target", "agent_message", payload, fmt.Sprintf("drain-%02d", i)); err != nil {
+			t.Fatalf("queue message: %v", err)
+		}
+	}
+	if queued := countAgentMessages(t, b, "target"); queued != total {
+		t.Fatalf("target queue = %d messages, want %d", queued, total)
+	}
+
+	res, err := b.LocalMessenger().Receive(ctx, messaging.ReceiveRequest{
+		Sender: messaging.Identity{RunID: "target"},
+		Limit:  5,
+	})
+	if err != nil {
+		t.Fatalf("bounded receive: %v", err)
+	}
+	if len(res.Messages) != 5 {
+		t.Fatalf("bounded receive = %d messages, want 5", len(res.Messages))
+	}
+	for i, msg := range res.Messages {
+		if msg.MessageID != fmt.Sprintf("drain-%02d", i) || msg.FromRunID != "sender" || msg.Sender != "sender" || msg.Kind != "agent_message" {
+			t.Fatalf("drained[%d] = %+v, want the %dth queued message in order", i, msg, i)
+		}
+		var am AgentMessage
+		if err := json.Unmarshal(msg.Payload, &am); err != nil || am.Message != fmt.Sprintf("body-%02d", i) {
+			t.Fatalf("drained[%d] payload = %s (%v), want body-%02d", i, msg.Payload, err, i)
+		}
+	}
+	if res.Generation != b.Store().Generation() {
+		t.Fatalf("receive generation = %q, want %q", res.Generation, b.Store().Generation())
+	}
+	if queued := countAgentMessages(t, b, "target"); queued != total-5 {
+		t.Fatalf("target queue after the bounded drain = %d messages, want the %d remainder", queued, total-5)
+	}
+
+	// An absent limit clamps to the default bound: 35 queued, 32 drained, 3 left.
+	res, err = b.LocalMessenger().Receive(ctx, messaging.ReceiveRequest{Sender: messaging.Identity{RunID: "target"}})
+	if err != nil {
+		t.Fatalf("default receive: %v", err)
+	}
+	if len(res.Messages) != messaging.DefaultReceiveLimit {
+		t.Fatalf("default receive = %d messages, want the %d clamp", len(res.Messages), messaging.DefaultReceiveLimit)
+	}
+	for i, msg := range res.Messages {
+		if msg.MessageID != fmt.Sprintf("drain-%02d", 5+i) {
+			t.Fatalf("drained[%d] = %q, want drain-%02d in order", i, msg.MessageID, 5+i)
+		}
+	}
+	if queued := countAgentMessages(t, b, "target"); queued != total-5-messaging.DefaultReceiveLimit {
+		t.Fatalf("target queue after the default drain = %d messages, want the remainder", queued)
+	}
+}
+
+// TestLocalMessengerPreflightReportsTheStoreGeneration pins that the direct
+// seam's preflight reports the shared protocol and the store's actual
+// generation, following a reset that rotates it.
+func TestLocalMessengerPreflightReportsTheStoreGeneration(t *testing.T) {
+	b, _, _ := startSeamBroker(t)
+	ctx := context.Background()
+
+	pre, err := b.LocalMessenger().Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	if pre.Protocol != messaging.ProtocolVersion {
+		t.Fatalf("preflight protocol = %d, want %d", pre.Protocol, messaging.ProtocolVersion)
+	}
+	if pre.Generation == "" || pre.Generation != b.Store().Generation() {
+		t.Fatalf("preflight generation = %q, want the store's %q", pre.Generation, b.Store().Generation())
+	}
+
+	b.Store().Reset()
+	if b.Store().Generation() == pre.Generation {
+		t.Fatalf("reset did not rotate the generation: %q", pre.Generation)
+	}
+
+	post, err := b.LocalMessenger().Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight after reset: %v", err)
+	}
+	if post.Protocol != messaging.ProtocolVersion {
+		t.Fatalf("preflight protocol after reset = %d, want %d", post.Protocol, messaging.ProtocolVersion)
+	}
+	if post.Generation != b.Store().Generation() || post.Generation == pre.Generation {
+		t.Fatalf("preflight after reset = %q, want the store's rotated %q", post.Generation, b.Store().Generation())
+	}
+}
+
+// TestLocalMessengerCloseLeavesTheBrokerUsable pins that closing the direct
+// seam releases nothing: the store and the queues stay usable.
+func TestLocalMessengerCloseLeavesTheBrokerUsable(t *testing.T) {
+	b, _, _ := startSeamBroker(t)
+	ctx := context.Background()
+
+	if err := b.LocalMessenger().Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	payload, err := json.Marshal(AgentMessage{ID: "after-close", From: "sender", FromRunID: "sender", ToRunID: "target", Message: "still works"})
+	if err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if err := b.LocalMessenger().Tell(ctx, messaging.TellRequest{FromRunID: "sender", ToRunID: "target", Kind: "agent_message", Payload: payload}); err != nil {
+		t.Fatalf("tell after close: %v", err)
+	}
+	res, err := b.LocalMessenger().Receive(ctx, messaging.ReceiveRequest{Sender: messaging.Identity{RunID: "target"}, Limit: 1})
+	if err != nil || len(res.Messages) != 1 || res.Messages[0].MessageID != "after-close" {
+		t.Fatalf("receive after close = (%+v, %v), want the queued message", res, err)
 	}
 }
 
