@@ -2377,7 +2377,7 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	}
 	key := m.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, m.broker.store.Generation())
 	outcome, err := m.broker.store.Reply(key, req.From.RunID, payload)
-	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
+	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
 }
 
 func (m localMessenger) Tell(ctx context.Context, req messaging.TellRequest) error {

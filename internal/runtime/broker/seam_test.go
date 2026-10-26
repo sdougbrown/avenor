@@ -521,6 +521,52 @@ func TestLocalMessengerKeepsAskAdmissionContracts(t *testing.T) {
 	}
 }
 
+// TestLocalMessengerReplyReportsTheStoreGeneration pins the direct seam's
+// reply result: it carries the store's current generation, including after a
+// reset rotates it, so a reply result never reads as an edge no generation
+// ever admitted.
+func TestLocalMessengerReplyReportsTheStoreGeneration(t *testing.T) {
+	b, _, _ := startSeamBroker(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	gen := b.Store().Generation()
+	if _, err := b.LocalMessenger().Send(ctx, messaging.SendRequest{
+		From:      messaging.Identity{RunID: "sender", Sender: "sender"},
+		To:        messaging.Identity{RunID: "target", Sender: "target"},
+		MessageID: msgID, Generation: gen, Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	replied, err := b.LocalMessenger().Reply(ctx, messaging.ReplyRequest{
+		From: messaging.Identity{RunID: "target", Sender: "target"}, ToRunID: "sender", MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Reply = (%+v, %v), want the ask answered", replied, err)
+	}
+	if replied.Generation != gen {
+		t.Fatalf("Reply generation = %q, want the store's %q", replied.Generation, gen)
+	}
+
+	// After a reset the edge is gone, but the result still carries the
+	// store's rotated generation rather than an emptied one.
+	b.Store().Reset()
+	rotated := b.Store().Generation()
+	replied, err = b.LocalMessenger().Reply(ctx, messaging.ReplyRequest{
+		From: messaging.Identity{RunID: "target", Sender: "target"}, ToRunID: "sender", MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Reply after reset = (%+v, %v), want edge-absent", replied, err)
+	}
+	if replied.Generation != rotated {
+		t.Fatalf("Reply generation after reset = %q, want the store's rotated %q", replied.Generation, rotated)
+	}
+}
+
 // TestLocalMessengerReceiveDrainsBoundedAgentMessages pins the direct
 // seam's bounded drain: a named limit returns the head of the agent queue
 // with its identities, payloads and order intact and leaves the remainder

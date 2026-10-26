@@ -123,6 +123,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 	if m := t.routed(); m != nil {
 		res, err := m.Reply(child, req)
 		res.MessageID = req.MessageID
+		res.Generation = t.store.Generation()
 		return res, err
 	}
 	outcome, err := t.store.Reply(
@@ -130,7 +131,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 		req.From.RunID,
 		[]byte(req.Body),
 	)
-	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
+	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: t.store.Generation()}, err
 }
 
 func (t *Transport) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {

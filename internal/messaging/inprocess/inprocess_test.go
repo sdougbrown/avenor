@@ -408,6 +408,89 @@ func TestRoutedReceiveAndPreflightReachSeam(t *testing.T) {
 	}
 }
 
+// TestReplyReportsTheStoreGeneration pins the reply result's generation: the
+// store-only reply reports the local store's current generation, including
+// after a reset rotates it, so a reply result never reads as an edge no
+// generation ever admitted.
+func TestReplyReportsTheStoreGeneration(t *testing.T) {
+	store, _ := messagetest.NewMemoryStore(t)
+	tr := New(store)
+	ctx := context.Background()
+
+	msgID := mintID(t, time.Minute)
+	gen := store.Generation()
+	if _, err := tr.Send(ctx, messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	replied, err := tr.Reply(ctx, messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Reply = (%+v, %v), want the ask answered", replied, err)
+	}
+	if replied.Generation != gen {
+		t.Fatalf("Reply generation = %q, want the store's %q", replied.Generation, gen)
+	}
+
+	// After a reset the edge is gone, but the result still carries the
+	// store's rotated generation rather than an emptied one.
+	store.Reset()
+	rotated := store.Generation()
+	replied, err = tr.Reply(ctx, messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Reply after reset = (%+v, %v), want edge-absent", replied, err)
+	}
+	if replied.Generation != rotated {
+		t.Fatalf("Reply generation after reset = %q, want the store's rotated %q", replied.Generation, rotated)
+	}
+}
+
+// seamReplySeam stands in for a routed seam whose reply result carries no
+// generation of its own.
+type seamReplySeam struct {
+	messaging.Seam
+	res messaging.SendResult
+	err error
+}
+
+func (s seamReplySeam) Reply(context.Context, messaging.ReplyRequest) (messaging.SendResult, error) {
+	return s.res, s.err
+}
+
+// TestRoutedReplyReportsTheLocalGeneration pins the routed reply's generation:
+// the seam's result and error pass through, but the reported generation stays
+// the local endpoint's rather than the seam's.
+func TestRoutedReplyReportsTheLocalGeneration(t *testing.T) {
+	store, _ := messagetest.NewMemoryStore(t)
+	gen := store.Generation()
+	var seam messaging.Seam
+	tr := NewRouted(store, func() messaging.Seam { return seam })
+	ctx := context.Background()
+
+	msgID := mintID(t, time.Minute)
+	if _, err := tr.Send(ctx, messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	seamErr := errors.New("reply through the seam")
+	seam = seamReplySeam{res: messaging.SendResult{Outcome: messaging.OutcomeNotSent}, err: seamErr}
+	replied, err := tr.Reply(ctx, messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if !errors.Is(err, seamErr) {
+		t.Fatalf("routed Reply error = %v, want the seam's error", err)
+	}
+	if replied.Generation != gen {
+		t.Fatalf("routed Reply generation = %q, want the local endpoint's %q", replied.Generation, gen)
+	}
+}
+
 func TestRoutedResolutionJoinsClose(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store, _ := messagetest.NewMemoryStore(t)
