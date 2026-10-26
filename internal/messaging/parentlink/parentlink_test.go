@@ -24,10 +24,15 @@ const awaitDeadline = 5 * time.Second
 // branch is one broker wired to its parent exactly the way the supervisor wires
 // it.
 type branch struct {
-	broker *broker.Broker
-	link   *Messenger
-	tokens map[string]string
+	broker  *broker.Broker
+	link    *Messenger
+	tokens  map[string]string
+	childID string
 }
+
+// key reports the run ID the parent addresses this branch's runID by: the
+// branch-namespaced claim key its registration carries.
+func (b *branch) key(runID string) string { return ParentRunKey(b.childID, runID) }
 
 // branchSeq names each test branch with a distinct durable identity, the way a
 // supervisor derives one from its control socket path.
@@ -85,7 +90,7 @@ func newBranchWith(t *testing.T, parentURL, childID string, refresh time.Duratio
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	branch := &branch{broker: b, tokens: map[string]string{}}
+	branch := &branch{broker: b, tokens: map[string]string{}, childID: childID}
 	for _, runID := range runs {
 		token, err := b.CreateRun(runID, runID)
 		if err != nil {
@@ -256,35 +261,16 @@ func TestParentPublishesHarnessSessionName(t *testing.T) {
 	if err := child.broker.SetHarnessName("child-run", "harness-name"); err != nil {
 		t.Fatalf("set harness name: %v", err)
 	}
-	// SetHarnessName itself is a run-set change, so the republish that carries
-	// the label to the parent fires without a manual nudge.
-	// The label the parent sees travels on the claim the child publishes, not
-	// on the registry's child-broker record, so poll the resolved display name.
-	deadline := time.Now().Add(awaitDeadline)
-	for {
-		if got := parent.broker.DisplayName("child-run"); got == "harness-name" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("parent display name = %q, want harness-name", parent.broker.DisplayName("child-run"))
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	// A run change is what republishes this branch's claims to the parent.
+	child.link.RunChanged()
 
-	// Clearing the harness name republishes through the same path, and the
-	// parent falls back to the launch label.
-	if err := child.broker.SetHarnessName("child-run", ""); err != nil {
-		t.Fatalf("clear harness name: %v", err)
-	}
-	deadline = time.Now().Add(awaitDeadline)
-	for {
-		if got := parent.broker.DisplayName("child-run"); got == "child-run" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("parent display name = %q, want child-run after clearing the harness name", parent.broker.DisplayName("child-run"))
-		}
-		time.Sleep(2 * time.Millisecond)
+	// The claim the child publishes carries the harness-resolved label, so the
+	// adopted run record's name is what peers see here.
+	awaitUntil(t, "the parent's display name to become harness-name", func() bool {
+		return parent.broker.DisplayName("child-run") == "harness-name"
+	})
+	if got := parent.broker.DisplayName("child-run"); got != "harness-name" {
+		t.Fatalf("parent display name = %q, want harness-name", got)
 	}
 }
 

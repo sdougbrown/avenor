@@ -209,6 +209,10 @@ func (m *Messenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
 // Owns reports whether runID belongs to a registered child broker.
 func (m *Messenger) Owns(runID string) bool { return m.registry.Owns(runID) }
 
+// Key reports the run ID this broker addresses childID's runID by, which is
+// how a claim and every later hop name a descendant's run.
+func (m *Messenger) Key(childID, runID string) string { return ParentRunKey(childID, runID) }
+
 // Register adopts one child broker's claim on the runs it owns. A run this
 // broker itself owns is refused: it never belongs to a descendant, and
 // routing it into a child would bypass the queue the local ask store admits

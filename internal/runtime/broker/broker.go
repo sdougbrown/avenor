@@ -149,11 +149,7 @@ func (st *RunState) Lock()   { st.Mu.Lock() }
 func (st *RunState) Unlock() { st.Mu.Unlock() }
 
 // displayName reports the name peers see for this run.
-func (st *RunState) displayName() string { return st.DisplayName() }
-
-// DisplayName reports the name peers see for this run: the harness-supplied
-// name wins, then the model-set (or launch) name, else the run ID.
-func (st *RunState) DisplayName() string {
+func (st *RunState) displayName() string {
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
 	return st.labelLocked()
@@ -167,12 +163,6 @@ func (st *RunState) labelLocked() string {
 	if st.HarnessName != "" {
 		return st.HarnessName
 	}
-	return st.labelStoredLocked()
-}
-
-// labelStoredLocked resolves the stored label: the model-set (or launch) name,
-// else the run ID — the labelLocked ladder minus the harness rung.
-func (st *RunState) labelStoredLocked() string {
 	if st.Info != nil && st.Info.Label != "" {
 		return st.Info.Label
 	}
@@ -332,6 +322,22 @@ type Broker struct {
 	// authenticated /rename endpoint delegates to.
 	renameMu      sync.RWMutex
 	renameHandler RenameHandler
+
+	// harnessNameMu guards harnessNameObserver, the host-installed callback
+	// SetHarnessName calls after it writes a harness session name, so a host
+	// that keeps its own copy of the label follows the write.
+	harnessNameMu       sync.RWMutex
+	harnessNameObserver func(runID, name string)
+
+	// parentRegisterMu serializes one registration's guard, register and apply:
+	// the guard reads the run records and the link's ownership under two lock
+	// domains, so a second registration whose own sequence interleaved with this
+	// one could retire a record between this guard and this register and leave
+	// the registry and the run records disagreeing about who owns a run. A
+	// deregistration's retirement runs under the same mutex, so it cannot land
+	// between one registration's register and its apply and leave that apply
+	// holding records the link no longer owns.
+	parentRegisterMu sync.Mutex
 
 	pruneMu   sync.Mutex
 	pruneStop context.CancelFunc
@@ -1291,6 +1297,12 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusBadRequest, "child_id, endpoint and generation are required", "invalid-request")
 		return
 	}
+	// The guard, the register and the apply of one registration run as one
+	// critical section, so a concurrent registration cannot slip a retirement
+	// between this guard's read and this register, nor between this register
+	// and the records it applies.
+	b.parentRegisterMu.Lock()
+	defer b.parentRegisterMu.Unlock()
 	for _, claim := range body.Runs {
 		switch {
 		case claim.RunID == "":
@@ -1300,6 +1312,11 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 			// A run ID carrying "@" reads as a branch-namespaced key, so a child
 			// claiming one could forge another branch's supervisor identity.
 			writeCodedError(w, http.StatusBadRequest, "a claimed run id cannot contain \"@\"", "invalid-request")
+			return
+		case b.GetRun(link.Key(body.ChildID, claim.RunID)) != nil && !link.Owns(link.Key(body.ChildID, claim.RunID)):
+			// A record this broker minted itself under a claim key is not a child's
+			// to take: the claim is refused whole so the record keeps its credential.
+			writeCodedError(w, http.StatusConflict, "run already registered", "invalid-request")
 			return
 		}
 	}
@@ -1315,8 +1332,13 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 	for _, runID := range claim.Retired {
 		b.DeleteRun(runID)
 	}
+	adopted := make(map[string]struct{}, len(claim.Adopted))
+	for _, key := range claim.Adopted {
+		adopted[key] = struct{}{}
+	}
 	for _, run := range claim.Runs {
-		b.ownRun(run)
+		_, isNew := adopted[run.Key]
+		b.ownRun(run, isNew)
 	}
 	b.runSetChanged()
 	runKeys := make(map[string]string, len(claim.Runs))
@@ -1363,6 +1385,14 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		writeCodedError(w, http.StatusBadRequest, "child_id is required", "invalid-request")
 		return
 	}
+	// The retirement runs under the registration critical section: retiring the
+	// link's ownership between a concurrent registration's register and its
+	// apply would leave that apply recreating records the link no longer owns,
+	// and the next claim of those keys would be refused for good. A stale view
+	// is still refused whole: the matching refusal below runs under this mutex
+	// too, so a replacement that registered first keeps its claims and records.
+	b.parentRegisterMu.Lock()
+	defer b.parentRegisterMu.Unlock()
 	retired, err := link.Deregister(body.ChildID, body)
 	switch {
 	case errors.Is(err, messaging.ErrGenerationMismatch):
@@ -1460,41 +1490,25 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// renameRequest is the wire body /rename and /session_name share. withAuth
-// authenticates the request from the run_id and token this body carries, so
-// the run the body names is always the run that authenticated.
-type renameRequest struct {
-	RunID     string `json:"run_id"`
-	Token     string `json:"token"`
-	Name      string `json:"name"`
-	SessionID string `json:"session_id"`
-}
-
-// decodeRenameCaller reads the shared body and returns it with the caller
-// withAuth authenticated. It reports false after writing the error response
-// for an unreadable or malformed body.
-func decodeRenameCaller(w http.ResponseWriter, r *http.Request) (renameRequest, string, bool) {
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeCodedError(w, http.StatusBadRequest, "request body is unreadable", "invalid-request")
-		return renameRequest{}, "", false
-	}
-	var body renameRequest
-	if err := json.Unmarshal(bodyBytes, &body); err != nil {
-		writeCodedError(w, http.StatusBadRequest, "request body is not a rename request", "invalid-request")
-		return renameRequest{}, "", false
-	}
-	return body, authenticatedCaller(r), true
-}
-
 // handleRename renames one run's display name. It rejects a malformed request
 // and a body whose run_id is not the run withAuth authenticated, then delegates
 // the decision: with a handler installed the supervisor's SessionRename decides
 // every row; without one the broker can only rename the authenticated caller's
 // own record.
 func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
-	body, caller, ok := decodeRenameCaller(w, r)
-	if !ok {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeCodedError(w, http.StatusBadRequest, "request body is unreadable", "invalid-request")
+		return
+	}
+	var body struct {
+		RunID     string `json:"run_id"`
+		Token     string `json:"token"`
+		Name      string `json:"name"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		writeCodedError(w, http.StatusBadRequest, "request body is not a rename request", "invalid-request")
 		return
 	}
 	if body.RunID == "" {
@@ -1508,6 +1522,7 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 
 	// Replacing this block would let a caller act as another run: the body
 	// only repeats who authenticated, and it must agree.
+	caller := authenticatedCaller(r)
 	if body.RunID != caller {
 		writeCodedError(w, http.StatusForbidden, "run_id does not match this run", "not-permitted")
 		return
@@ -1522,14 +1537,14 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusBadRequest, messaging.SessionNameRuleMessage(body.Name), "invalid-name")
 			return
 		}
-		previous := b.StoredLabel(caller)
+		previous := b.DisplayName(caller)
 		if err := b.RenameRun(caller, body.Name); err != nil {
 			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
 			return
 		}
 		writeJSONBody(w, http.StatusOK, map[string]any{
 			"run_id":         caller,
-			"label":          b.StoredLabel(caller),
+			"label":          b.DisplayName(caller),
 			"previous_label": previous,
 		})
 		return
@@ -1784,14 +1799,21 @@ func (b *Broker) UpdateSessionInfo(runID string, info *SessionInfo) {
 }
 
 // handleSessionName records a run's harness-supplied session name. The caller
-// names itself by construction: withAuth authenticates the request from the
-// same run_id field this body carries, so the credential and the named run
-// always agree, and a run naming another run cannot authenticate at all.
-// An empty name clears the harness name so the run falls back to its model-set
-// name.
+// names itself, never another run: the body only repeats who withAuth
+// authenticated, and it must agree. An empty name clears the harness name so
+// the run falls back to its model-set name.
 func (b *Broker) handleSessionName(w http.ResponseWriter, r *http.Request) {
-	body, caller, ok := decodeRenameCaller(w, r)
-	if !ok {
+	var body struct {
+		RunID string `json:"run_id"`
+		Name  string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeCodedError(w, http.StatusBadRequest, "request body is not a session name", "invalid-request")
+		return
+	}
+	caller := authenticatedCaller(r)
+	if body.RunID != caller {
+		writeCodedError(w, http.StatusForbidden, "run_id does not match this run", "not-permitted")
 		return
 	}
 	if body.Name != "" && !messaging.ValidSessionName(body.Name) {
@@ -1857,9 +1879,12 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 // authenticates the run with, so a forwarded ask and a relay into that branch
 // use the one credential the run already has; a replacement branch presents a
 // rotated credential, and the record follows the claim it accepted so both
-// directions keep authenticating. A caller that adopts a whole set notifies the
-// run observer once when the set is applied.
-func (b *Broker) ownRun(claim messaging.ClaimedRun) string {
+// directions keep authenticating. A record the register guard already saw but
+// that was minted by this broker between the guard and the register — a claim
+// the link did not already own — keeps its own credential: it is not the
+// child's to take. A caller that adopts a whole set notifies the run observer
+// once when the set is applied.
+func (b *Broker) ownRun(claim messaging.ClaimedRun, newlyAdopted bool) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	st, exists := b.runs[claim.Key]
@@ -1871,7 +1896,7 @@ func (b *Broker) ownRun(claim messaging.ClaimedRun) string {
 		b.runs[claim.Key] = st
 		return st.Token
 	}
-	if claim.Token != "" {
+	if !newlyAdopted && claim.Token != "" {
 		st.Token = claim.Token
 	}
 	if claim.Label != "" {
@@ -1898,20 +1923,6 @@ func newRunState(runID, name string) *RunState {
 		PermissionDecisions: make(map[string]string),
 		Info:                &SessionInfo{RunID: runID, Label: name},
 	}
-}
-
-// StoredLabel reports the model-set or launch label stored for runID — the name
-// RenameRun accepts — or the run ID when the run was never labelled. Unlike
-// DisplayName it never resolves the harness-supplied name, so a caller that
-// tracks the stored name reads what the last write wrote.
-func (b *Broker) StoredLabel(runID string) string {
-	st := b.GetRun(runID)
-	if st == nil {
-		return runID
-	}
-	st.Mu.Lock()
-	defer st.Mu.Unlock()
-	return st.labelStoredLocked()
 }
 
 // DisplayName reports the name peers see for runID: the harness-supplied
@@ -1985,7 +1996,10 @@ func (b *Broker) LastAgentMessage(runID string) (LastAgentMessage, bool) {
 // SetHarnessName records the user-defined session name the harness supplied for
 // runID, or clears it when name is empty. It writes only the harness half of the
 // label, so a model rename is neither clobbered by it nor able to hide it: the
-// harness name is what peers see until the harness clears it.
+// harness name is what peers see until the harness clears it. An observer set
+// through SetHarnessNameObserver is called after the write with the run's
+// resolved name, so a host that keeps its own copy of the label follows the
+// write it did not perform.
 func (b *Broker) SetHarnessName(runID, name string) error {
 	st := b.GetRun(runID)
 	if st == nil {
@@ -1994,10 +2008,29 @@ func (b *Broker) SetHarnessName(runID, name string) error {
 	st.Mu.Lock()
 	st.HarnessName = name
 	st.Mu.Unlock()
-	// The resolved label is what a host publishes about this run, so a harness
-	// name change is a run-set change even though the set itself did not change.
+	// The label is what a host publishes about this run, so a harness session
+	// name is a run-set change the way a rename is.
 	b.runSetChanged()
+	b.harnessNameChanged(runID, name)
 	return nil
+}
+
+// SetHarnessNameObserver sets the callback SetHarnessName calls after it writes
+// a harness session name (or clears one). Nil leaves the write local to the
+// broker.
+func (b *Broker) SetHarnessNameObserver(fn func(runID, name string)) {
+	b.harnessNameMu.Lock()
+	defer b.harnessNameMu.Unlock()
+	b.harnessNameObserver = fn
+}
+
+func (b *Broker) harnessNameChanged(runID, name string) {
+	b.harnessNameMu.RLock()
+	fn := b.harnessNameObserver
+	b.harnessNameMu.RUnlock()
+	if fn != nil {
+		fn(runID, name)
+	}
 }
 
 // RenameRun changes the model-set display name for runID. An empty name resets

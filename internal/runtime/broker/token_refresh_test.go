@@ -59,7 +59,7 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 				b.ownRun(messaging.ClaimedRun{
 					RunClaim: messaging.RunClaim{RunID: "asker", Label: "asker", Token: fmt.Sprintf("rotation-%d", round)},
 					Key:      "asker",
-				})
+				}, false)
 			})
 		}
 	}()
@@ -134,7 +134,7 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 			b.ownRun(messaging.ClaimedRun{
 				RunClaim: messaging.RunClaim{RunID: "asker", Label: "asker", Token: steady},
 				Key:      "asker",
-			})
+			}, false)
 		}
 	}()
 	for caller := 0; ; caller++ {
@@ -175,7 +175,7 @@ func TestDeleteRunIfTokenKeepsARecordItsCredentialLeftBehind(t *testing.T) {
 	}
 
 	// The run restarts inside the live branch and presents a fresh credential.
-	b.ownRun(messaging.ClaimedRun{RunClaim: messaging.RunClaim{RunID: "asker", Label: "asker", Token: "token-new"}, Key: "asker"})
+	b.ownRun(messaging.ClaimedRun{RunClaim: messaging.RunClaim{RunID: "asker", Label: "asker", Token: "token-new"}, Key: "asker"}, false)
 	if b.DeleteRunIfToken("asker", stale) {
 		t.Fatal("a retirement carrying the rotated-away credential deleted the record")
 	}

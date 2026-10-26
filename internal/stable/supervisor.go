@@ -265,10 +265,10 @@ type childRuntime struct {
 	// before the runtime is published and never rewritten: event metadata,
 	// provider label environment and launch provenance describe the launch.
 	label string
-	// displayName is the launch label the run carries until its broker run is
-	// registered; from then on the broker's resolved display name is what
-	// peers see, and readers go through peerLabel. applySessionName rewrites
-	// it under s.controlMu -> child.mu for the pre-registration window.
+	// displayName is the run's current display name, the one messaging peers
+	// see. A spawn sets it, applySessionName rewrites it, and the broker's
+	// harness-name observer rewrites it — each under s.controlMu -> child.mu,
+	// the locks List, RuntimeStatus and labelHolderLocked read it under.
 	displayName      string
 	agent            string
 	agentProfile     string
@@ -771,6 +771,19 @@ func NewSupervisor(cfg Config) *Supervisor {
 		// caller and the optional target to the one authority.
 		sup.broker.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
 			return sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: callerRunID}, sessionID, name)
+		})
+		// The harness writes a session name straight to the broker's own label
+		// half. The runtime copy follows it under the same locks /rename writes
+		// under, so status and label reservation read the resolved name the
+		// broker does however the name was set.
+		sup.broker.SetHarnessNameObserver(func(runID, name string) {
+			sup.controlMu.Lock()
+			defer sup.controlMu.Unlock()
+			if child := sup.runtimes[runID]; child != nil {
+				child.mu.Lock()
+				child.displayName = sup.broker.DisplayName(runID)
+				child.mu.Unlock()
+			}
 		})
 		sup.installParentLink()
 	}
@@ -1479,26 +1492,13 @@ func (s *Supervisor) spawn(params SpawnParams) (SpawnResult, error) {
 	return s.spawnReserved(params, res)
 }
 
-// peerLabel reports the name peers see for a child: the broker's resolved
-// display name once the child's run is registered there — the harness-supplied
-// name wins there, then the model-set or launch name — else the launch label
-// the child still carries in the window before registration. The caller must
-// hold child.mu.
-func (s *Supervisor) peerLabel(child *childRuntime) string {
-	st := s.broker.GetRun(child.runID)
-	if st != nil {
-		return st.DisplayName()
-	}
-	return child.displayName
-}
-
 // labelHolderLocked returns the ID of a live (non-completed) runtime holding
 // the given label, or "" if none. The caller must hold s.controlMu; each
 // child's mu is locked and unlocked here.
 func (s *Supervisor) labelHolderLocked(label string) string {
 	for _, child := range s.runtimes {
 		child.mu.Lock()
-		holding := s.peerLabel(child) == label && !child.lc.isCompleted()
+		holding := child.displayName == label && !child.lc.isCompleted()
 		child.mu.Unlock()
 		if holding {
 			return child.id
@@ -3981,7 +3981,7 @@ func (s *Supervisor) listRuntimes() []map[string]any {
 			"runtime_id":         rt.id,
 			"session_id":         rt.session.SessionID,
 			"run_id":             rt.runID,
-			"label":              s.peerLabel(rt),
+			"label":              rt.displayName,
 			"agent":              identity.Agent,
 			"agent_profile":      identity.AgentProfile,
 			"model":              identity.Model,
@@ -5087,7 +5087,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 		"runtime_id":         rt.id,
 		"session_id":         rt.session.SessionID,
 		"run_id":             rt.runID,
-		"label":              s.peerLabel(rt),
+		"label":              rt.displayName,
 		"agent":              identity.Agent,
 		"agent_profile":      identity.AgentProfile,
 		"model":              identity.Model,
