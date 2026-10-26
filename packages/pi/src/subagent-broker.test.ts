@@ -4,6 +4,7 @@ import {
   formatInboundAskBody,
   parseControlMessage,
   postBroker,
+  publishHarnessName,
   readSubAgentEnv,
 } from './subagent-broker.js'
 import { waitUntilAborted } from './test-fixtures.js'
@@ -116,6 +117,25 @@ describe('postBroker', () => {
     await postBroker(env, '/send', { run_id: 'other', token: 'stolen' }, fetchMock as unknown as typeof fetch)
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(JSON.parse(String(init.body))).toEqual({ run_id: 'rt_1', token: 'tok' })
+  })
+})
+
+describe('publishHarnessName', () => {
+  it('sends the harness session name as this run\'s own name', async () => {
+    const fetchMock = mock(async () => ({ ok: true, json: async () => ({ run_id: 'rt_1', label: 'my-session' }) }))
+    await publishHarnessName(env, 'my-session', fetchMock as unknown as typeof fetch)
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('http://127.0.0.1:1/session_name')
+    expect(JSON.parse(String(init.body))).toEqual({ name: 'my-session', run_id: 'rt_1', token: 'tok' })
+  })
+
+  it('clears the name the harness no longer has', async () => {
+    const fetchMock = mock(async () => ({ ok: true, json: async () => ({}) }))
+    await publishHarnessName(env, undefined, fetchMock as unknown as typeof fetch)
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ name: '', run_id: 'rt_1', token: 'tok' })
   })
 })
 

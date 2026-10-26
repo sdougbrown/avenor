@@ -245,6 +245,49 @@ func queuedAgentMessages(t *testing.T, b *broker.Broker, runID string) []*broker
 	return queued
 }
 
+// TestParentPublishesHarnessSessionName pins that the label a branch publishes
+// is the name it resolves locally: a harness-supplied session name reaches the
+// parent's peer view without a second name field on the claim.
+func TestParentPublishesHarnessSessionName(t *testing.T) {
+	parent := startBranch(t, "", "parent-run")
+	child := startBranch(t, parent.url(), "child-run")
+	awaitRegistered(t, parent, "child-run")
+
+	if err := child.broker.SetHarnessName("child-run", "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+	// SetHarnessName itself is a run-set change, so the republish that carries
+	// the label to the parent fires without a manual nudge.
+	// The label the parent sees travels on the claim the child publishes, not
+	// on the registry's child-broker record, so poll the resolved display name.
+	deadline := time.Now().Add(awaitDeadline)
+	for {
+		if got := parent.broker.DisplayName("child-run"); got == "harness-name" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("parent display name = %q, want harness-name", parent.broker.DisplayName("child-run"))
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Clearing the harness name republishes through the same path, and the
+	// parent falls back to the launch label.
+	if err := child.broker.SetHarnessName("child-run", ""); err != nil {
+		t.Fatalf("clear harness name: %v", err)
+	}
+	deadline = time.Now().Add(awaitDeadline)
+	for {
+		if got := parent.broker.DisplayName("child-run"); got == "child-run" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("parent display name = %q, want child-run after clearing the harness name", parent.broker.DisplayName("child-run"))
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // TestLocalAskNeverCrossesTheParentLink pins that a target this branch owns is
 // answered here even when the parent broker is gone: no lookup and no
 // publication crosses the link.

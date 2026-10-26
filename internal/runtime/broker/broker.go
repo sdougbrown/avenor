@@ -130,9 +130,15 @@ type RunState struct {
 	Mu                  sync.Mutex
 	Notify              chan struct{}
 
-	// Session metadata for peer discovery. It is also the display name's
-	// single source: Info.Label is the name the run was launched with or
-	// last renamed to.
+	// HarnessName is the user-defined session name the harness process supplied
+	// for this run: the human named the session in their tool. It is stored apart
+	// from Info.Label so a model rename never erases it and it never blocks a
+	// later rename. Like Info, it is guarded by Mu and read only through
+	// displayName, so label resolution has one reader.
+	HarnessName string
+	// Session metadata for peer discovery. Info.Label is the name the run was
+	// launched with or last renamed to; displayName resolves it against
+	// HarnessName.
 	Info *SessionInfo
 	// LastMessage is the run's most recent completed turn, written by the
 	// recorder and the host turn producer. Nil means no turn was recorded.
@@ -149,11 +155,31 @@ type RunState struct {
 func (st *RunState) Lock()   { st.Mu.Lock() }
 func (st *RunState) Unlock() { st.Mu.Unlock() }
 
-// displayName reports the name peers see for this run. A run registered
-// without a label carries its run ID.
-func (st *RunState) displayName() string {
+// displayName reports the name peers see for this run.
+func (st *RunState) displayName() string { return st.DisplayName() }
+
+// DisplayName reports the name peers see for this run: the harness-supplied
+// name wins, then the model-set (or launch) name, else the run ID.
+func (st *RunState) DisplayName() string {
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
+	return st.labelLocked()
+}
+
+// labelLocked resolves the one display name peers see. A harness's own session
+// name wins whenever the harness supplied one, because the human chose it; the
+// model-set (or launch) name is the fallback, and a run with neither carries its
+// run ID.
+func (st *RunState) labelLocked() string {
+	if st.HarnessName != "" {
+		return st.HarnessName
+	}
+	return st.labelStoredLocked()
+}
+
+// labelStoredLocked resolves the stored label: the model-set (or launch) name,
+// else the run ID — the labelLocked ladder minus the harness rung.
+func (st *RunState) labelStoredLocked() string {
 	if st.Info != nil && st.Info.Label != "" {
 		return st.Info.Label
 	}
@@ -463,6 +489,7 @@ func (b *Broker) Start() error {
 	router.HandleFunc("/cancel_message", b.withMethod("POST", b.withAuth(b.handleCancelMessage)))
 	router.HandleFunc("/sessions", b.withMethod("GET", b.withAuth(b.handleSessions)))
 	router.HandleFunc("/rename", b.withMethod("POST", b.withAuth(b.handleRename)))
+	router.HandleFunc("/session_name", b.withMethod("POST", b.withAuth(b.handleSessionName)))
 	router.HandleFunc("/last_message", b.withMethod("GET", b.withAuth(b.handleLastMessage)))
 	router.HandleFunc("/permission_request", b.withMethod("POST", b.withAuth(b.handlePermissionRequest)))
 	router.HandleFunc("/permission", b.withMethod("POST", b.withAuth(b.handlePermission)))
@@ -1453,25 +1480,41 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// renameRequest is the wire body /rename and /session_name share. withAuth
+// authenticates the request from the run_id and token this body carries, so
+// the run the body names is always the run that authenticated.
+type renameRequest struct {
+	RunID     string `json:"run_id"`
+	Token     string `json:"token"`
+	Name      string `json:"name"`
+	SessionID string `json:"session_id"`
+}
+
+// decodeRenameCaller reads the shared body and returns it with the caller
+// withAuth authenticated. It reports false after writing the error response
+// for an unreadable or malformed body.
+func decodeRenameCaller(w http.ResponseWriter, r *http.Request) (renameRequest, string, bool) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeCodedError(w, http.StatusBadRequest, "request body is unreadable", "invalid-request")
+		return renameRequest{}, "", false
+	}
+	var body renameRequest
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		writeCodedError(w, http.StatusBadRequest, "request body is not a rename request", "invalid-request")
+		return renameRequest{}, "", false
+	}
+	return body, authenticatedCaller(r), true
+}
+
 // handleRename renames one run's display name. It rejects a malformed request
 // and a body whose run_id is not the run withAuth authenticated, then delegates
 // the decision: with a handler installed the supervisor's SessionRename decides
 // every row; without one the broker can only rename the authenticated caller's
 // own record.
 func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeCodedError(w, http.StatusBadRequest, "request body is unreadable", "invalid-request")
-		return
-	}
-	var body struct {
-		RunID     string `json:"run_id"`
-		Token     string `json:"token"`
-		Name      string `json:"name"`
-		SessionID string `json:"session_id"`
-	}
-	if err := json.Unmarshal(bodyBytes, &body); err != nil {
-		writeCodedError(w, http.StatusBadRequest, "request body is not a rename request", "invalid-request")
+	body, caller, ok := decodeRenameCaller(w, r)
+	if !ok {
 		return
 	}
 	if body.RunID == "" {
@@ -1485,7 +1528,6 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 
 	// Replacing this block would let a caller act as another run: the body
 	// only repeats who authenticated, and it must agree.
-	caller := authenticatedCaller(r)
 	if body.RunID != caller {
 		writeCodedError(w, http.StatusForbidden, "run_id does not match this run", "not-permitted")
 		return
@@ -1500,14 +1542,14 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusBadRequest, messaging.SessionNameRuleMessage(body.Name), "invalid-name")
 			return
 		}
-		previous := b.DisplayName(caller)
+		previous := b.StoredLabel(caller)
 		if err := b.RenameRun(caller, body.Name); err != nil {
 			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
 			return
 		}
 		writeJSONBody(w, http.StatusOK, map[string]any{
 			"run_id":         caller,
-			"label":          b.DisplayName(caller),
+			"label":          b.StoredLabel(caller),
 			"previous_label": previous,
 		})
 		return
@@ -1571,9 +1613,8 @@ func (b *Broker) sessions() []SessionInfo {
 	sessions := make([]SessionInfo, 0, len(b.runs))
 	for _, st := range b.runs {
 		st.Mu.Lock()
-		info := SessionInfo{RunID: st.RunID}
+		info := SessionInfo{RunID: st.RunID, Label: st.labelLocked()}
 		if st.Info != nil {
-			info.Label = st.Info.Label
 			info.Kind = st.Info.Kind
 			info.Backend = st.Info.Backend
 			info.Model = st.Info.Model
@@ -1766,7 +1807,8 @@ func partitionAgentMessages(queue []*ControlMessage) (agent, other []*ControlMes
 // every non-empty incoming field wins, an empty field never clears, and RunID
 // is always stamped. Label is deliberately not patchable: it
 // is owned by CreateRun/EnsureRun/RenameRun, so a later metadata write can
-// never undo a rename.
+// never undo a rename. The harness-supplied name is a separate field for the
+// same reason and is only reachable through SetHarnessName.
 func (b *Broker) UpdateSessionInfo(runID string, info *SessionInfo) {
 	st := b.GetRun(runID)
 	if st == nil {
@@ -1795,6 +1837,31 @@ func (b *Broker) UpdateSessionInfo(runID string, info *SessionInfo) {
 		}
 	}
 	st.Info.RunID = runID
+}
+
+// handleSessionName records a run's harness-supplied session name. The caller
+// names itself by construction: withAuth authenticates the request from the
+// same run_id field this body carries, so the credential and the named run
+// always agree, and a run naming another run cannot authenticate at all.
+// An empty name clears the harness name so the run falls back to its model-set
+// name.
+func (b *Broker) handleSessionName(w http.ResponseWriter, r *http.Request) {
+	body, caller, ok := decodeRenameCaller(w, r)
+	if !ok {
+		return
+	}
+	if body.Name != "" && !messaging.ValidSessionName(body.Name) {
+		writeCodedError(w, http.StatusBadRequest, messaging.SessionNameRuleMessage(body.Name), "invalid-name")
+		return
+	}
+	if err := b.SetHarnessName(caller, body.Name); err != nil {
+		writeCodedError(w, http.StatusNotFound, err.Error(), "invalid-request")
+		return
+	}
+	writeJSONBody(w, http.StatusOK, map[string]any{
+		"run_id": caller,
+		"label":  b.DisplayName(caller),
+	})
 }
 
 // --- accessors ---
@@ -1890,9 +1957,23 @@ func newRunState(runID, name string) *RunState {
 	}
 }
 
-// DisplayName reports the name peers see for runID: SessionInfo.Label, or the
-// run ID when the run was never labelled. This is the one reader of the one
-// display-name field.
+// StoredLabel reports the model-set or launch label stored for runID — the name
+// RenameRun accepts — or the run ID when the run was never labelled. Unlike
+// DisplayName it never resolves the harness-supplied name, so a caller that
+// tracks the stored name reads what the last write wrote.
+func (b *Broker) StoredLabel(runID string) string {
+	st := b.GetRun(runID)
+	if st == nil {
+		return runID
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	return st.labelStoredLocked()
+}
+
+// DisplayName reports the name peers see for runID: the harness-supplied
+// session name, else the model-set or launch name, else the run ID. This is the
+// one reader of the resolved display name.
 func (b *Broker) DisplayName(runID string) string { return b.displayName(runID) }
 
 // MatchLabel returns every run whose display name is exactly label, sorted by
@@ -1949,10 +2030,7 @@ func (b *Broker) LastAgentMessage(runID string) (LastAgentMessage, bool) {
 	}
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
-	label := runID
-	if st.Info != nil && st.Info.Label != "" {
-		label = st.Info.Label
-	}
+	label := st.labelLocked()
 	if st.LastMessage == nil {
 		return LastAgentMessage{RunID: runID, Label: label}, false
 	}
@@ -1961,8 +2039,26 @@ func (b *Broker) LastAgentMessage(runID string) (LastAgentMessage, bool) {
 	return record, true
 }
 
-// RenameRun changes the display name peers see for runID. An empty name resets
-// the run to its run ID.
+// SetHarnessName records the user-defined session name the harness supplied for
+// runID, or clears it when name is empty. It writes only the harness half of the
+// label, so a model rename is neither clobbered by it nor able to hide it: the
+// harness name is what peers see until the harness clears it.
+func (b *Broker) SetHarnessName(runID, name string) error {
+	st := b.GetRun(runID)
+	if st == nil {
+		return fmt.Errorf("run not found: %s", runID)
+	}
+	st.Mu.Lock()
+	st.HarnessName = name
+	st.Mu.Unlock()
+	// The resolved label is what a host publishes about this run, so a harness
+	// name change is a run-set change even though the set itself did not change.
+	b.runSetChanged()
+	return nil
+}
+
+// RenameRun changes the model-set display name for runID. An empty name resets
+// the run to its run ID. A harness-supplied name, if any, still wins.
 func (b *Broker) RenameRun(runID, name string) error {
 	st := b.GetRun(runID)
 	if st == nil {
