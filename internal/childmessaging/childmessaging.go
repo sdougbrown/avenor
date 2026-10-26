@@ -158,8 +158,6 @@ func (p *MessageProvider) Resolve(ctx context.Context, ref string) (messaging.Re
 		return messaging.Resolution{RunID: candidates[0], Label: label, Match: messaging.MatchUnique}, nil
 	case 0:
 		if err != nil {
-			// The listing was incomplete, so this peer may be in the part that
-			// was not read. Refuse rather than claim the peer does not exist.
 			return messaging.Resolution{}, err
 		}
 		return messaging.Resolution{Match: messaging.MatchNone}, nil

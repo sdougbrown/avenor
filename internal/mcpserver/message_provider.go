@@ -211,8 +211,6 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 		return p.peerResolution(candidates[0], label), nil
 	case 0:
 		if err != nil {
-			// The listing was incomplete, so this peer may be in the part that
-			// was not read. Refuse rather than claim the peer does not exist.
 			return messaging.Resolution{}, err
 		}
 		return messaging.Resolution{Match: messaging.MatchNone}, nil

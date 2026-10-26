@@ -290,7 +290,10 @@ export function installAskClaims(
 /**
  * Build the bound host provider: one supervisor, one generation, one control
  * client. It never reads an ambient singleton or retargets, and it never
- * preflights per call.
+ * preflights per call. Listing-backed lookups can answer peers actually read,
+ * but a requested peer absent from an incomplete listing remains unknown and
+ * preserves the listing error, even when other peers were read. Self and
+ * public-ID resolution bypass the listing.
  */
 export function createHostMessageProvider(options: HostProviderOptions): MessageProvider {
   const { surface, supervisorId, generation, client, pendingAsks, pollGeneration } = options
@@ -365,8 +368,6 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       }
       if (candidates.length > 1) return { runId: '', match: 'ambiguous', candidates }
       if (detail) {
-        // The listing was incomplete, so this peer may be in the part that was
-        // not read. Refuse rather than claim the peer does not exist.
         throw new Error(`the peer listing is incomplete: ${detail}`)
       }
       return { runId: '', match: 'none' }
@@ -377,8 +378,6 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         const { peers, detail } = await listedPeers()
         const peer = peers.find(entry => entry.run_id === SUPERVISOR_RUN_ID)
         if (!peer && detail) {
-          // The listing was incomplete, so the supervisor may be in the part
-          // that was not read. Refuse rather than report an unknown status.
           throw new Error(`the peer listing is incomplete: ${detail}`)
         }
         const translation = translateRunFacts(peer?.status ?? '', '')
@@ -692,7 +691,10 @@ export interface ChildProviderOptions {
 /**
  * Build a child provider over the surface's inherited broker. A child never
  * learns a public run id, and it cannot read a sentinel, so it is never
- * resumable from here: the supervisor owns a resume.
+ * resumable from here: the supervisor owns a resume. Listing-backed lookups
+ * can answer peers actually read, but a requested peer absent from an
+ * incomplete listing remains unknown and preserves the listing error, even
+ * when other peers were read. Self resolution bypasses the listing.
  */
 export function createChildMessageProvider(options: ChildProviderOptions): MessageProvider {
   const { surface, runId, broker, pendingAsks, pollGeneration } = options
@@ -718,8 +720,6 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
       if (candidates.length === 1) return { runId: candidates[0], label: ref, match: 'unique' }
       if (candidates.length > 1) return { runId: '', match: 'ambiguous', candidates }
       if (detail) {
-        // The listing was incomplete, so this peer may be in the part that was
-        // not read. Refuse rather than claim the peer does not exist.
         throw new Error(`the peer listing is incomplete: ${detail}`)
       }
       return { runId: '', match: 'none' }
@@ -730,8 +730,6 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
       const peer = peers.find(entry => entry.run_id === targetRunId)
       if (!peer) {
         if (detail) {
-          // The listing was incomplete, so the run may be in the part that was
-          // not read. Refuse rather than claim the run does not exist.
           throw new Error(`the peer listing is incomplete: ${detail}`)
         }
         throw new Error(`run ${targetRunId} is not visible`)
