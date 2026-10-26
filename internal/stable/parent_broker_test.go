@@ -63,7 +63,7 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 		ParentURL:  "http://" + parentBroker.Addr(),
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
-		Runs: func() []messaging.RunClaim { return b.ParentRunClaims() },
+		Runs:       func() []messaging.RunClaim { return b.ParentRunClaims() },
 	}, b)
 	if err != nil {
 		t.Fatalf("build branch messenger: %v", err)

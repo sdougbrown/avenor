@@ -77,7 +77,7 @@ func newBranch(t *testing.T, parentURL string, strict bool, runs []string) *bran
 		ParentURL:  parentURL,
 		Endpoint:   branch.url(),
 		Generation: b.Store().Generation,
-		Runs: func() []messaging.RunClaim { return b.ParentRunClaims() },
+		Runs:       func() []messaging.RunClaim { return b.ParentRunClaims() },
 	}, b)
 	if err != nil {
 		t.Fatalf("build parent link: %v", err)

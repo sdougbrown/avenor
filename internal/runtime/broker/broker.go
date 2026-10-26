@@ -1415,8 +1415,7 @@ func incompletePeerListing(unreadable int) string {
 	}
 	return fmt.Sprintf("%s: %s", messaging.IncompletePeerListing, messaging.UnreadablePeerRecordsDetail(unreadable))
 }
-	return fmt.Sprintf("%s: %s", messaging.IncompletePeerListing, messaging.UnreadablePeerRecordsDetail(unreadable))
-}
+
 // --- parent link ---
 
 // parentLinkAuthorized reports whether a parent-link request may act. A broker
