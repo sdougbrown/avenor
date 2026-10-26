@@ -20,7 +20,7 @@ func TestSessionsStampsRunIDForUnlabeledRun(t *testing.T) {
 	}
 
 	found := false
-	for _, info := range b.Sessions() {
+	for _, info := range b.sessions() {
 		if info.RunID != "rt_bare" {
 			continue
 		}
@@ -58,7 +58,7 @@ func TestHarnessNameIsWhatPeersSee(t *testing.T) {
 	if got := b.DisplayName("rt_h"); got != "my-session" {
 		t.Fatalf("DisplayName = %q, want my-session", got)
 	}
-	for _, info := range b.Sessions() {
+	for _, info := range b.sessions() {
 		if info.RunID != "rt_h" {
 			continue
 		}

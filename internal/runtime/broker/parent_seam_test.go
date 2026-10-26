@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,6 +302,7 @@ func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T
 	if err != nil {
 		t.Fatalf("marshal registration: %v", err)
 	}
+
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
@@ -319,6 +321,29 @@ func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T
 	}
 	if b.GetRun(messaging.SupervisorRunID+"@victim") != nil {
 		t.Fatal("the refused registration adopted the forged run")
+	}
+}
+
+// TestParentRegisterRefusesAnOversizeBody pins the request-body cap the parent
+// routes share with withAuth: a registration whose body exceeds the cap is
+// refused before the registry is consulted, and no claim is adopted.
+func TestParentRegisterRefusesAnOversizeBody(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	b.SetParentLink(&parentLinkStub{})
+
+	claim := `{"run_id":"remote-run","label":"remote","token":"t"},`
+	oversize := `{"child_id":"child-1","endpoint":"http://child:1234","generation":"gen-1","runs":[` +
+		strings.Repeat(claim, 40000) + `]}`
+	status, _ := postParentLink(t, b.Addr(), oversize, "")
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize registration = %d, want 413", status)
+	}
+	if b.GetRun("remote-run") != nil {
+		t.Fatal("a refused registration adopted the run")
 	}
 }
 
