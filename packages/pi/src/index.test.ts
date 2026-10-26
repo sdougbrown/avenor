@@ -652,9 +652,10 @@ describe('Avenor Pi extension', () => {
       }
       return Response.json({})
     }) as unknown as typeof fetch
-    // The session manager is absent entirely: neither session_start nor a turn
-    // may crash, and neither may publish a name (an empty one would clobber
-    // whatever label the broker still holds).
+    // The session manager is present but has no getSessionName method (the
+    // typeof guard, not the absent-manager branch): neither session_start nor a
+    // turn may crash, and neither may publish a name (an empty one would
+    // clobber whatever label the broker still holds).
     const harness = await startExtensionHarness({
       extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
       sessionManager: {},
