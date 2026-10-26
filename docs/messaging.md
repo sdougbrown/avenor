@@ -10,7 +10,7 @@ transport carries it.
 
 | Package | Role |
 |---|---|
-| `internal/messaging` | Leaf contract: request/result types, the `Transport` and `AskRoute` interfaces, the outcome vocabulary, the v1 wire error classes, the message-ID minter. Depends on the standard library only. |
+| `internal/messaging` | Leaf contract: request/result types, the `Transport` and `Messenger` interfaces, the outcome vocabulary, the v1 wire error classes, the message-ID minter. Depends on the standard library only. |
 | `internal/messaging/askstore` | Ask state: admission, edges, terminal fences, pruning and generation rotation, over an optional delivery backend. |
 | `internal/messaging/askclient` | The single Go ask client. Owns send→wait→withdraw ordering and renders results for the tool surfaces. |
 | `internal/messaging/inprocess` | Runs the transport in the same process, over the store. |
@@ -195,7 +195,7 @@ The local adapter drives the broker's own router:
 
 | Path | Purpose |
 |---|---|
-| `/sessions` | Authenticated preflight: the broker's generation and its `messaging_protocol` marker. |
+| `/sessions` | Authenticated preflight and peer listing: the broker's generation, its `messaging_protocol` marker, the peers the installed messenger can see, and the runs the broker owns. A listing the messenger could not finish is reported as `peers_error` beside the partial `sessions` array; the adapter keeps the peers it read and reports the listing as incomplete instead of treating the partial list as complete. |
 | `/send` | Admit one message or ask. |
 | `/wait_reply` | Wait for the ask's terminal state. |
 | `/cancel_message` | Withdraw an ask. |

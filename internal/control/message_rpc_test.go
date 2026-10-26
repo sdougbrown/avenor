@@ -24,6 +24,7 @@ type recordingTransport struct {
 	withReq  messaging.WithdrawRequest
 	recvReq  messaging.ReceiveRequest
 	peersReq messaging.PeersRequest
+	peersErr error
 	waitErr  error
 	waitRes  messaging.WaitResult
 	sendErr  error
@@ -65,6 +66,9 @@ func (r *recordingTransport) Receive(_ context.Context, req messaging.ReceiveReq
 func (r *recordingTransport) Peers(_ context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	r.calls = append(r.calls, "peers")
 	r.peersReq = req
+	if r.peersErr != nil {
+		return messaging.PeersResult{Generation: req.Generation, Peers: []messaging.Peer{{RunID: "rt_b", Session: json.RawMessage(`{"run_id":"rt_b"}`)}}}, r.peersErr
+	}
 	return messaging.PeersResult{Generation: req.Generation, Peers: []messaging.Peer{{RunID: "rt_b", Session: json.RawMessage(`{"run_id":"rt_b"}`)}}}, nil
 }
 
@@ -177,6 +181,47 @@ func TestMessageRPCDispatch(t *testing.T) {
 	result, _ = r.Result.(map[string]any)
 	if r.Error != nil || result["protocol"] != float64(1) || result["generation"] != "gen_1" {
 		t.Fatalf("message_preflight result = %+v", r)
+	}
+}
+
+// TestMessagePeersKeepsAPartialListing pins that a peer listing the broker
+// could not complete still returns the peers it did read, with the reason the
+// listing was incomplete, so the caller keeps them instead of losing the
+// whole set.
+func TestMessagePeersKeepsAPartialListing(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s, cap := NewTestServer(state)
+	tr := &recordingTransport{peersErr: fmt.Errorf("%w: /private/host/endpoint failed", messaging.ErrIncompleteListing)}
+	handler := &mockStableHandler{messageTransport: tr}
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	owner := dialOwner(t, s, cap)
+	defer owner.Close()
+
+	_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: 1, Method: "message_peers", Params: json.RawMessage(`{"sender_run_id":"supervisor","generation":"g"}`)})
+	r := readResp(t, owner)
+	if r.Error != nil {
+		t.Fatalf("message_peers: %+v", r.Error)
+	}
+	result, _ := r.Result.(map[string]any)
+	peers, _ := result["peers"].([]any)
+	if len(peers) != 1 {
+		t.Fatalf("message_peers peers = %#v, want the peer the listing did read", result["peers"])
+	}
+	if result["peers_error"] == nil || result["peers_error"] == "" {
+		t.Fatalf("message_peers result = %#v, want the incomplete listing reported", result)
+	}
+	reason, _ := result["peers_error"].(string)
+	if strings.Contains(reason, "/private/host/endpoint") {
+		t.Fatalf("message_peers reason = %q, want the failure's own text kept out of the served reason", reason)
+	}
+	if reason != messaging.IncompletePeerListing {
+		t.Fatalf("message_peers reason = %q, want the shared incomplete-listing reason", reason)
 	}
 }
 

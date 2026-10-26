@@ -13,7 +13,13 @@ import (
 
 // Transport is the in-process messaging transport.
 type Transport struct {
-	store    *askstore.Store
+	store *askstore.Store
+	// asks serves the ask operations from the store alone. A routed transport
+	// falls back to it when its resolver names no messenger.
+	asks *askstore.Asker
+	// resolve names the messenger ask, reply and peer operations delegate to.
+	// It is nil when the transport serves them from the store alone.
+	resolve  func() messaging.Messenger
 	ctx      context.Context
 	cancel   context.CancelFunc
 	inflight sync.WaitGroup
@@ -21,10 +27,32 @@ type Transport struct {
 	closed   bool
 }
 
-// New builds a transport over store.
+// New builds a transport that serves messaging from store alone.
 func New(store *askstore.Store) messaging.Transport {
+	return newTransport(store, nil)
+}
+
+// NewRouted builds a transport over store whose ask, reply and peer operations
+// delegate to the messenger resolve returns. Resolution happens per call, so a
+// transport built before its host installs a messenger still reaches it.
+func NewRouted(store *askstore.Store, resolve func() messaging.Messenger) messaging.Transport {
+	return newTransport(store, resolve)
+}
+
+func newTransport(store *askstore.Store, resolve func() messaging.Messenger) messaging.Transport {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Transport{store: store, ctx: ctx, cancel: cancel}
+	// The store's ask seam is always available: a routed transport falls back
+	// to it when its resolver names no messenger.
+	return &Transport{store: store, asks: askstore.NewAsker(store), resolve: resolve, ctx: ctx, cancel: cancel}
+}
+
+// messenger returns the installed messenger, or nil when the transport serves
+// messaging from the store alone.
+func (t *Transport) messenger() messaging.Messenger {
+	if t.resolve == nil {
+		return nil
+	}
+	return t.resolve()
 }
 
 func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
@@ -36,20 +64,22 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: req.Generation}, messaging.ErrTransportClosed
 	}
 	defer cancel()
-	res, err := t.store.Admit(child, askstore.AdmitRequest{
-		Sender:     req.From,
-		Target:     req.To.RunID,
-		MessageID:  req.MessageID,
-		Generation: req.Generation,
-		Body:       req.Body,
-		NoReply:    req.NoReply,
-	})
-	out := messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}
-	if err != nil && !messaging.IsSendOutcome(out.Outcome) {
-		// A terminal fence reports its own outcome, which a send cannot carry.
-		out.Outcome = messaging.OutcomeNotSent
+	if m := t.messenger(); m != nil {
+		res, err := m.Send(child, req, false)
+		return sendResult(res, err), err
 	}
+	res, err := t.asks.Send(child, req, false)
+	out := sendResult(res, err)
 	return out, err
+}
+
+// sendResult keeps the verdict a send already reached. Only a fence outcome a
+// send cannot carry is re-reported as not-sent.
+func sendResult(res messaging.SendResult, err error) messaging.SendResult {
+	if err != nil && !messaging.IsSendOutcome(res.Outcome) {
+		res.Outcome = messaging.OutcomeNotSent
+	}
+	return res
 }
 
 func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
@@ -61,7 +91,11 @@ func (t *Transport) Wait(ctx context.Context, req messaging.WaitRequest) (messag
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, nil
 	}
 	defer cancel()
-	res, err := t.store.Wait(child, t.key(req.Sender, req.MessageID, req.Generation), req.Timeout)
+	if m := t.messenger(); m != nil {
+		res, err := m.Wait(child, req)
+		return waitResult(res, err, t.isClosed())
+	}
+	res, err := t.asks.Wait(child, req)
 	return waitResult(res, err, t.isClosed())
 }
 
@@ -76,14 +110,16 @@ func waitResult(res messaging.WaitResult, err error, closed bool) (messaging.Wai
 }
 
 func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
-	if t.isClosed() {
+	child, cancel, ok := t.child(ctx)
+	if !ok {
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID}, messaging.ErrTransportClosed
 	}
-	outcome, err := t.store.Reply(
-		t.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, t.store.Generation()),
-		req.From.RunID,
-		[]byte(req.Body),
-	)
+	defer cancel()
+	if m := t.messenger(); m != nil {
+		outcome, err := m.Reply(child, req)
+		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
+	}
+	outcome, err := t.asks.Reply(child, req)
 	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
 }
 
@@ -91,7 +127,15 @@ func (t *Transport) Withdraw(ctx context.Context, req messaging.WithdrawRequest)
 	if err := t.open(req.Generation); err != nil {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, err
 	}
-	return t.store.Withdraw(t.key(req.Sender, req.MessageID, req.Generation))
+	child, cancel, ok := t.child(ctx)
+	if !ok {
+		return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, messaging.ErrTransportClosed
+	}
+	defer cancel()
+	if m := t.messenger(); m != nil {
+		return m.Withdraw(child, req)
+	}
+	return t.asks.Withdraw(child, req)
 }
 
 func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
@@ -106,6 +150,15 @@ func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 	if err := t.open(req.Generation); err != nil {
 		return messaging.PeersResult{}, err
 	}
+	child, cancel, ok := t.child(ctx)
+	if !ok {
+		return messaging.PeersResult{}, messaging.ErrTransportClosed
+	}
+	defer cancel()
+	if m := t.messenger(); m != nil {
+		peers, err := m.Peers(child)
+		return messaging.PeersResult{Peers: peers, Generation: t.store.Generation()}, err
+	}
 	peers, err := t.store.Peers()
 	return messaging.PeersResult{Peers: peers, Generation: t.store.Generation()}, err
 }
@@ -118,15 +171,13 @@ func (t *Transport) Preflight(ctx context.Context) (messaging.PreflightResult, e
 }
 
 // Close releases client-side resources, unblocks in-flight waits with a
-// possibly-pending outcome and joins its goroutines.
+// possibly-pending outcome and joins its watchers and admitted routed calls.
 func (t *Transport) Close() error {
 	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return nil
+	if !t.closed {
+		t.closed = true
+		t.cancel()
 	}
-	t.closed = true
-	t.cancel()
 	t.mu.Unlock()
 	t.inflight.Wait()
 	return nil
@@ -148,16 +199,21 @@ func (t *Transport) open(generation string) error {
 	return nil
 }
 
-// child returns a context cancelled by either ctx or transport shutdown, and
-// registers the watcher so Close can join it. Registration happens under the
-// transport lock, so Close can never observe an unregistered in-flight call.
-func (t *Transport) child(ctx context.Context) (context.Context, context.CancelFunc, bool) {
+// child admits a context watcher and, for routed transports, the entire call.
+// Its completion function must be deferred by the caller. Admission precedes
+// messenger resolution and is locked against Close; resolution runs unlocked.
+// Store-only calls join just their watcher so Close never waits on a store lock.
+func (t *Transport) child(ctx context.Context) (context.Context, func(), bool) {
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
 		return nil, nil, false
 	}
+	joined := t.resolve != nil
 	t.inflight.Add(1)
+	if joined {
+		t.inflight.Add(1)
+	}
 	t.mu.Unlock()
 	child, cancel := context.WithCancel(ctx)
 	go func() {
@@ -168,11 +224,12 @@ func (t *Transport) child(ctx context.Context) (context.Context, context.CancelF
 		case <-child.Done():
 		}
 	}()
-	return child, cancel, true
-}
-
-func (t *Transport) key(sender messaging.Identity, messageID, generation string) messaging.FenceKey {
-	return messaging.FenceKey{Sender: sender.RunID, MessageID: messageID, Generation: generation}
+	return child, func() {
+		cancel()
+		if joined {
+			t.inflight.Done()
+		}
+	}, true
 }
 
 var _ messaging.Transport = (*Transport)(nil)

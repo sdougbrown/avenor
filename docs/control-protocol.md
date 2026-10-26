@@ -398,6 +398,8 @@ These typed messaging methods delegate to the supervisor's in-process transport 
 
 The read-only half of the typed messaging surface. They are ungated, like `status` and `result`, and answer the same snake_case DTOs (`messages`, `peers`, `protocol`/`generation`). `message_receive` is a blocking verb with the same rules as `message_wait`: a negative `timeout_ms` is `-32602`, a value above the ceiling is clamped to it, and the receive runs off the connection's read loop under the shared per-connection slot budget.
 
+`message_peers` also answers `peers_error` when the listing read only part of the peer set. The `peers` beside it are the ones that were read, so a client keeps them and reports the listing as incomplete rather than reading a partial set as a complete one.
+
 #### `shutdown`
 
 ```json

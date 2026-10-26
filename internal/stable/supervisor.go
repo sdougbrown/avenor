@@ -26,7 +26,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/looprunner"
 	"github.com/sdougbrown/avenor/internal/messaging"
-	"github.com/sdougbrown/avenor/internal/messaging/inprocess"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
@@ -744,8 +743,9 @@ func NewSupervisor(cfg Config) *Supervisor {
 		sup.registerBrokerRun()
 		// Both the in-process transport and the HTTP router read this store,
 		// so an ask the supervisor makes is the same ask a child can answer
-		// over HTTP.
-		sup.messaging = inprocess.New(sup.broker.Store())
+		// over HTTP. The transport enters the broker's messaging seam at call
+		// time, so a messenger installed after this point is still reached.
+		sup.messaging = sup.broker.MessengerTransport()
 		// POST /rename decides nothing itself: it forwards the authenticated
 		// caller and the optional target to the one authority.
 		sup.broker.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {

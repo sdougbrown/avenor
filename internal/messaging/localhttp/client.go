@@ -353,6 +353,9 @@ func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 		}
 		result.Peers = append(result.Peers, messaging.Peer{RunID: session.RunID, Session: raw})
 	}
+	if body.PeersError != "" {
+		return result, fmt.Errorf("%w: %s", messaging.ErrIncompleteListing, body.PeersError)
+	}
 	return result, nil
 }
 
@@ -474,6 +477,7 @@ type envelope struct {
 	Generation        string            `json:"generation"`
 	MessagingProtocol int               `json:"messaging_protocol"`
 	Sessions          []json.RawMessage `json:"sessions"`
+	PeersError        string            `json:"peers_error"`
 	Fence             *httpbase.Fence   `json:"fence"`
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -112,6 +113,265 @@ func TestTransportCloseUnblocksWait(t *testing.T) {
 		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{}`,
 	}); !errors.Is(err, messaging.ErrTransportClosed) {
 		t.Fatalf("Reply after Close = %v, want ErrTransportClosed", err)
+	}
+}
+
+// blockingMessenger holds cleanup after observing shutdown cancellation.
+type blockingMessenger struct {
+	messaging.Messenger
+	entered        chan struct{}
+	canceled       chan struct{}
+	releaseCleanup chan struct{}
+}
+
+func (m blockingMessenger) block(ctx context.Context) error {
+	m.entered <- struct{}{}
+	<-ctx.Done()
+	close(m.canceled)
+	<-m.releaseCleanup
+	return ctx.Err()
+}
+
+func (m blockingMessenger) Send(ctx context.Context, _ messaging.SendRequest, _ bool) (messaging.SendResult, error) {
+	return messaging.SendResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
+}
+
+func (m blockingMessenger) Wait(ctx context.Context, _ messaging.WaitRequest) (messaging.WaitResult, error) {
+	return messaging.WaitResult{Outcome: messaging.OutcomeEdgeAbsent}, m.block(ctx)
+}
+
+func (m blockingMessenger) Reply(ctx context.Context, _ messaging.ReplyRequest) (messaging.Outcome, error) {
+	return messaging.OutcomeNotSent, m.block(ctx)
+}
+
+func (m blockingMessenger) Withdraw(ctx context.Context, _ messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+	return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
+}
+
+func (m blockingMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
+	return nil, m.block(ctx)
+}
+
+// TestDelegatedOperationsJoinClose pins that every delegated operation is
+// bound to the transport's shutdown: Close cancels the call it is serving and
+// waits for it, and no delegated operation starts once the transport closed.
+func TestDelegatedOperationsJoinClose(t *testing.T) {
+	store, _ := messagetest.NewMemoryStore(t)
+	gen := store.Generation()
+	msgID := mintID(t, time.Minute)
+
+	type opOutcome struct {
+		outcome messaging.Outcome
+		err     error
+	}
+	cases := []struct {
+		name          string
+		closedOutcome messaging.Outcome
+		call          func(context.Context, messaging.Transport) (messaging.Outcome, error)
+	}{
+		{
+			name:          "send",
+			closedOutcome: messaging.OutcomeNotSent,
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				res, err := tr.Send(ctx, messaging.SendRequest{
+					From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{}`,
+				})
+				return res.Outcome, err
+			},
+		},
+		{
+			name:          "wait",
+			closedOutcome: messaging.OutcomeEdgeAbsent,
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				res, err := tr.Wait(ctx, messaging.WaitRequest{
+					Sender: alice, MessageID: msgID, Generation: gen, Timeout: time.Minute,
+				})
+				return res.Outcome, err
+			},
+		},
+		{
+			name:          "reply",
+			closedOutcome: messaging.OutcomeNotSent,
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				res, err := tr.Reply(ctx, messaging.ReplyRequest{
+					From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+				})
+				return res.Outcome, err
+			},
+		},
+		{
+			name:          "withdraw",
+			closedOutcome: messaging.OutcomeNotSent,
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				res, err := tr.Withdraw(ctx, messaging.WithdrawRequest{
+					Sender: alice, MessageID: msgID, Generation: gen,
+				})
+				return res.Outcome, err
+			},
+		},
+		{
+			name: "peers",
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				_, err := tr.Peers(ctx, messaging.PeersRequest{Sender: alice, Generation: gen})
+				return "", err
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				entered := make(chan struct{}, 1)
+				canceled := make(chan struct{})
+				releaseCleanup := make(chan struct{})
+				defer func() {
+					if releaseCleanup != nil {
+						close(releaseCleanup)
+					}
+				}()
+				tr := NewRouted(store, func() messaging.Messenger {
+					return blockingMessenger{entered: entered, canceled: canceled, releaseCleanup: releaseCleanup}
+				})
+				called := make(chan opOutcome, 1)
+				go func() {
+					outcome, err := tc.call(context.Background(), tr)
+					called <- opOutcome{outcome: outcome, err: err}
+				}()
+				<-entered
+
+				closed := make(chan error, 1)
+				go func() { closed <- tr.Close() }()
+				<-canceled
+				synctest.Wait()
+				select {
+				case err := <-closed:
+					t.Fatalf("Close returned before delegated cleanup finished: %v", err)
+				default:
+				}
+				assertRefused := func() {
+					t.Helper()
+					outcome, err := tc.call(context.Background(), tr)
+					if !errors.Is(err, messaging.ErrTransportClosed) || outcome != tc.closedOutcome {
+						t.Fatalf("%s after shutdown = (%q, %v), want (%q, ErrTransportClosed)", tc.name, outcome, err, tc.closedOutcome)
+					}
+					select {
+					case <-entered:
+						t.Fatal("delegated method started after shutdown")
+					default:
+					}
+				}
+				assertRefused()
+				closedAgain := make(chan error, 1)
+				go func() { closedAgain <- tr.Close() }()
+				synctest.Wait()
+				select {
+				case err := <-closedAgain:
+					t.Fatalf("concurrent Close returned before delegated cleanup finished: %v", err)
+				default:
+				}
+
+				close(releaseCleanup)
+				releaseCleanup = nil
+				if err := <-closed; err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				if err := <-closedAgain; err != nil {
+					t.Fatalf("concurrent Close: %v", err)
+				}
+				if out := <-called; !errors.Is(out.err, context.Canceled) {
+					t.Fatalf("delegated %s error = %v, want shutdown cancellation", tc.name, out.err)
+				}
+				assertRefused()
+			})
+		})
+	}
+}
+
+func TestRoutedResolutionJoinsClose(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store, _ := messagetest.NewMemoryStore(t)
+		entered := make(chan error, 1)
+		release := make(chan struct{})
+		defer func() {
+			if release != nil {
+				close(release)
+			}
+		}()
+		var tr messaging.Transport
+		tr = NewRouted(store, func() messaging.Messenger {
+			_, err := tr.Preflight(context.Background())
+			entered <- err
+			<-release
+			return nil
+		})
+		called := make(chan error, 1)
+		go func() {
+			_, err := tr.Peers(context.Background(), messaging.PeersRequest{Generation: store.Generation()})
+			called <- err
+		}()
+		if err := <-entered; err != nil {
+			t.Fatalf("resolver's local Preflight: %v", err)
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- tr.Close() }()
+		synctest.Wait()
+		select {
+		case err := <-closed:
+			t.Fatalf("Close returned before admitted resolution finished: %v", err)
+		default:
+		}
+		close(release)
+		release = nil
+		if err := <-closed; err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if err := <-called; err != nil {
+			t.Fatalf("Peers: %v", err)
+		}
+	})
+}
+
+// TestRoutedTransportFallsBackToTheStore pins that a routed transport whose
+// resolver names no messenger still serves the ask operations from the store.
+// A transport built before its host installs a messenger is a supported shape,
+// so the fallback must answer rather than crash.
+func TestRoutedTransportFallsBackToTheStore(t *testing.T) {
+	store, _ := messagetest.NewMemoryStore(t)
+	tr := NewRouted(store, func() messaging.Messenger { return nil })
+	t.Cleanup(func() { _ = tr.Close() })
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("message id: %v", err)
+	}
+	sent, err := tr.Send(ctx, messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: store.Generation(), Body: `{"message":"ping"}`,
+	})
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("Send = (%+v, %v), want sent", sent, err)
+	}
+	replied, err := tr.Reply(ctx, messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Reply = (%+v, %v), want replied", replied, err)
+	}
+	waited, err := tr.Wait(ctx, messaging.WaitRequest{
+		Sender: alice, MessageID: msgID, Generation: store.Generation(), Timeout: time.Second,
+	})
+	if err != nil || waited.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Wait = (%+v, %v), want replied", waited, err)
+	}
+	withdrawn, err := tr.Withdraw(ctx, messaging.WithdrawRequest{
+		Sender: alice, MessageID: msgID, Generation: store.Generation(),
+	})
+	if err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+	if withdrawn.Outcome != messaging.OutcomeWithdrawn && withdrawn.Outcome != messaging.OutcomeEdgeAbsent &&
+		withdrawn.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Withdraw = %+v, want a terminal outcome", withdrawn)
 	}
 }
 

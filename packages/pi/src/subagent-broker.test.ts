@@ -382,6 +382,18 @@ describe('child broker routes', () => {
     expect(headers['X-Avenor-Run-Token']).toBe('tok')
   })
 
+  it('keeps the peers a partial listing read and names the incompleteness', async () => {
+    const { fetchImpl } = stubFetch({
+      '/sessions': () => Response.json({
+        sessions: [{ run_id: 'supervisor', label: 'main', kind: 'supervisor', status: 'running' }],
+        peers_error: 'the broker could not read every peer',
+      }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).peers()
+    expect(result.peers.map(peer => peer.run_id)).toEqual(['supervisor'])
+    expect(result.detail).toBe('the broker could not read every peer')
+  })
+
   it('renames through the authenticated /rename path', async () => {
     const { calls, fetchImpl } = stubFetch({
       '/rename': () => Response.json({ run_id: 'rt_1', label: 'renamed', previous_label: 'old' }),

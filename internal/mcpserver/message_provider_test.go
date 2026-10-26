@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -243,6 +244,36 @@ func TestMCPMessageProviderPeerRunStateMissIsTargetUnavailable(t *testing.T) {
 	p := newTestMessageProvider(t, cl)
 	if _, err := p.peerRunState(context.Background(), "rt-missing"); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("peerRunState miss error = %v, want ErrTargetUnavailable", err)
+	}
+}
+
+// TestMCPMessageProviderKeepsAPartialPeerListing pins that a peer listing
+// the broker could not complete still answers for the peer it did read, and
+// refuses to claim that a peer it did not read does not exist.
+func TestMCPMessageProviderKeepsAPartialPeerListing(t *testing.T) {
+	cl := &fakeMessageControlClient{
+		fakeClient: &fakeClient{},
+		peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+			return messaging.PeersResult{
+				Peers:      []messaging.Peer{testPeer("rt-seen", "seen", "running")},
+				Generation: "gen-1",
+			}, fmt.Errorf("%w: the broker could not read every peer", messaging.ErrIncompleteListing)
+		},
+	}
+	p := newTestMessageProvider(t, cl)
+	resolved, err := p.Resolve(context.Background(), "rt-seen")
+	if err != nil || resolved.RunID != "rt-seen" {
+		t.Fatalf("visible peer = %+v, %v, want the peer the listing did read", resolved, err)
+	}
+	state, err := p.peerRunState(context.Background(), "rt-seen")
+	if err != nil {
+		t.Fatalf("visible peer state = %+v, %v, want the peer the listing did read", state, err)
+	}
+	if _, err := p.peerRunState(context.Background(), "rt-missing"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("missing peer state = %v, want the incomplete listing reported", err)
+	}
+	if _, err := p.Resolve(context.Background(), "rt-missing"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("missing peer = %v, want the incomplete listing reported", err)
 	}
 }
 

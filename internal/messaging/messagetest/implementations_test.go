@@ -1,6 +1,7 @@
 package messagetest_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -21,6 +22,36 @@ func TestMessagingImplementations(t *testing.T) {
 		runImplementation(t, func(*testing.T, messaging.Identity) messaging.Transport {
 			return inprocess.New(store)
 		})
+	})
+
+	t.Run("inprocess-routed", func(t *testing.T) {
+		store, backend := messagetest.NewMemoryStore(t)
+		backend.AddPeer("store-peer")
+		seam := messagetest.PeersMessenger{
+			Messenger: messagetest.NewStoreMessenger(store, backend),
+			Reported:  []messaging.Peer{{RunID: "seam-peer"}},
+		}
+		runImplementation(t, func(t *testing.T, id messaging.Identity) messaging.Transport {
+			return inprocess.NewRouted(store, func() messaging.Messenger { return seam })
+		})
+		// The routed transport reads its peers from the messenger, not from
+		// the store behind it, so a transport that stopped delegating would
+		// serve the store's peers instead.
+		tr := inprocess.NewRouted(store, func() messaging.Messenger { return seam })
+		t.Cleanup(func() { _ = tr.Close() })
+		peers, err := tr.Peers(context.Background(), messaging.PeersRequest{Generation: store.Generation()})
+		if err != nil {
+			t.Fatalf("Peers: %v", err)
+		}
+		found := false
+		for _, peer := range peers.Peers {
+			if peer.RunID == "seam-peer" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("peers = %+v, want the peers the messenger reported", peers.Peers)
+		}
 	})
 
 	t.Run("localhttp", func(t *testing.T) {

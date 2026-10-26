@@ -203,6 +203,45 @@ func TestRenameMapsWireCodes(t *testing.T) {
 	}
 }
 
+// TestPartialPeerListingKeepsThePeersItRead pins that a listing the broker
+// could not complete still answers for the peers it did read, and refuses to
+// claim that a peer it did not read does not exist.
+func TestPartialPeerListingKeepsThePeersItRead(t *testing.T) {
+	provider, _ := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"messaging_protocol": 1, "generation": "gen-1",
+			"sessions": []any{
+				map[string]any{"run_id": "child_run", "label": "child", "status": "running"},
+				map[string]any{"run_id": "rt_1", "label": "alpha", "status": "ended"},
+			},
+			"peers_error": "the broker could not read every peer",
+		})
+	})
+	ctx := context.Background()
+	if err := provider.Prepare(ctx); err != nil {
+		t.Fatal(err)
+	}
+	visible, err := provider.Resolve(ctx, "rt_1")
+	if err != nil || visible.RunID != "rt_1" {
+		t.Fatalf("visible peer = %+v, %v, want the peer the listing did read", visible, err)
+	}
+	state, err := provider.RunState(ctx, "rt_1")
+	if err != nil {
+		t.Fatalf("visible peer state = %+v, %v, want the peer the listing did read", state, err)
+	}
+	if _, err := provider.RunState(ctx, "rt_missing"); !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("missing peer state = %v, want the incomplete listing reported", err)
+	}
+	unknown, err := provider.Resolve(ctx, "rt_missing")
+	if !errors.Is(err, messaging.ErrIncompleteListing) {
+		t.Fatalf("unknown peer = %+v, %v, want the incomplete listing reported", unknown, err)
+	}
+}
+
 func TestLastSeparatesUnknownTargetFromEmptyRecord(t *testing.T) {
 	provider, _ := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
