@@ -211,7 +211,7 @@ func (b *Broker) SendTo(fromRunID, toRunID, kind string, payload json.RawMessage
 	_, ok := b.runs[toRunID]
 	b.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("run not found: %s", toRunID)
+		return fmt.Errorf("%w: %s", messaging.ErrTargetUnavailable, toRunID)
 	}
 	if correlationID == "" {
 		correlationID = MakeToken()
@@ -1587,7 +1587,7 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// The branch that owns the asker is the one that knows its display name;
 	// the canonical run ID travels unchanged.
 	if err := b.SendTo(body.FromRunID, body.ToRunID, body.Type, body.Payload, body.MessageID); err != nil {
-		if strings.Contains(err.Error(), "run not found") {
+		if errors.Is(err, messaging.ErrTargetUnavailable) {
 			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 			return
 		}
