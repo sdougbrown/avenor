@@ -52,6 +52,10 @@ type Options struct {
 	// Generation reports this broker's current ask generation. Required: the
 	// link pins it and the relay binds every hop to it.
 	Generation func() string
+	// DisplayName reports the display name this broker resolves for a run. A
+	// relay carries it, so the branch that receives the ask reads the name the
+	// asking branch gave it instead of an unresolved run ID.
+	DisplayName func(runID string) string
 	// RetireRun retires the host broker's own record for a run this branch stops
 	// owning after a relay found the owning branch gone: the retirement is
 	// conditional on the record still carrying the credential the run's claim
@@ -73,9 +77,9 @@ type askKey struct {
 	MessageID string
 }
 
-// askRoute is the hop one forwarded ask was admitted on, so a wait or a
+// askHop is the hop one forwarded ask was admitted on, so a wait or a
 // withdrawal reaches the store that owns the edge instead of this one.
-type askRoute struct {
+type askHop struct {
 	generation string
 	recordedAt time.Time
 }
@@ -104,7 +108,7 @@ type Link struct {
 	generation string
 	tokens     map[string]string
 	keys       map[string]string
-	asks       map[askKey]askRoute
+	asks       map[askKey]askHop
 	relays     map[string]relayRoute
 	closed     bool
 	closedCh   chan struct{}
@@ -151,7 +155,7 @@ func NewLink(opts Options) (*Link, error) {
 		client:   httpbase.New(ErrUnsupportedParentProtocol, timeout),
 		tokens:   map[string]string{},
 		keys:     map[string]string{},
-		asks:     map[askKey]askRoute{},
+		asks:     map[askKey]askHop{},
 		relays:   map[string]relayRoute{},
 		closedCh: make(chan struct{}),
 		dirty:    make(chan struct{}, 1),
@@ -258,10 +262,9 @@ func (l *Link) noteGenerationLocked(generation string) {
 	l.generation = generation
 }
 
-// noteKeysLocked records the run ID the parent addresses each claimed run by. A
-// reserved branch-supervisor run is namespaced by the branch that claims it, so
-// every upward operation names it the way the parent knows it; a run the parent
-// reports no key for stays canonical.
+// noteKeysLocked records the run ID the parent addresses each claimed run by. Every
+// run the child claims is namespaced by that claim, so every upward operation names
+// it the way the parent knows it; a run the parent reports no key for stays canonical.
 func (l *Link) noteKeysLocked(claims []messaging.RunClaim, keys map[string]string) {
 	recorded := make(map[string]string, len(claims))
 	for _, claim := range claims {
@@ -341,7 +344,7 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 			// edge even though its answer never arrived. Recording the hop is
 			// what lets a later wait or withdrawal follow that edge instead of
 			// falling back to this branch's empty store.
-			l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation})
+			l.recordAsk(req.From.RunID, req.MessageID, askHop{generation: generation})
 		}
 		return fail(messaging.OutcomePossiblyPending, fmt.Errorf("%w: %v", ErrParentUnavailable, err))
 	}
@@ -354,7 +357,7 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 		if !req.NoReply && outcome == messaging.OutcomePossiblyPending {
 			// The parent answered without saying whether it admitted the edge,
 			// so the hop is recorded for the same reason a lost answer is.
-			l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation})
+			l.recordAsk(req.From.RunID, req.MessageID, askHop{generation: generation})
 		}
 		return fail(outcome, err)
 	}
@@ -368,7 +371,7 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 		// The edge exists, or the parent answered without saying whether it
 		// admitted it: either way a later wait or withdrawal follows the hop it
 		// was admitted on instead of this branch's empty store.
-		l.recordAsk(req.From.RunID, req.MessageID, askRoute{generation: generation})
+		l.recordAsk(req.From.RunID, req.MessageID, askHop{generation: generation})
 	}
 	if outcome != messaging.OutcomeSent && outcome != messaging.OutcomeWithdrawn {
 		return fail(outcome, nil)
@@ -381,7 +384,7 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 // one the parent pinned.
 func (l *Link) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error) {
 	key := askKey{Sender: req.Sender.RunID, MessageID: req.MessageID}
-	route, ok := l.askRoute(req.Sender.RunID, req.MessageID)
+	route, ok := l.hopOf(req.Sender.RunID, req.MessageID)
 	if !ok {
 		return messaging.WaitResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
 	}
@@ -449,7 +452,7 @@ func (l *Link) Wait(ctx context.Context, req messaging.WaitRequest) (messaging.W
 // recalled.
 func (l *Link) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	key := askKey{Sender: req.Sender.RunID, MessageID: req.MessageID}
-	route, ok := l.askRoute(req.Sender.RunID, req.MessageID)
+	route, ok := l.hopOf(req.Sender.RunID, req.MessageID)
 	if !ok {
 		return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent}, nil
 	}
@@ -639,8 +642,8 @@ func (l *Link) RecordRelay(route messaging.RelayRoute) error {
 	return nil
 }
 
-// askRoute reports the hop an ask this branch forwarded was admitted on.
-func (l *Link) askRoute(senderRunID, messageID string) (askRoute, bool) {
+// hopOf reports the hop an ask this branch forwarded was admitted on.
+func (l *Link) hopOf(senderRunID, messageID string) (askHop, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	route, ok := l.asks[askKey{Sender: senderRunID, MessageID: messageID}]
@@ -655,7 +658,7 @@ func (l *Link) relayRoute(messageID string) (relayRoute, bool) {
 	return route, ok
 }
 
-func (l *Link) recordAsk(senderRunID, messageID string, route askRoute) {
+func (l *Link) recordAsk(senderRunID, messageID string, route askHop) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()

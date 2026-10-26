@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -21,7 +21,6 @@ import (
 type parentLinkStub struct {
 	owned        string
 	register     func(messaging.DescendantRegistration) (messaging.DescendantClaim, error)
-	deregister   func(childID string, reg messaging.DescendantRegistration) (map[string]string, error)
 	recordRelay  func(messaging.RelayRoute) error
 	recorded     []messaging.RelayRoute
 	deregistered bool
@@ -39,9 +38,6 @@ func (p *parentLinkStub) Register(reg messaging.DescendantRegistration) (messagi
 }
 
 func (p *parentLinkStub) Deregister(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
-	if p.deregister != nil {
-		return p.deregister(childID, reg)
-	}
 	p.deregistered = true
 	return nil, nil
 }
@@ -65,7 +61,7 @@ func TestAdmissionForADescendantRunTouchesNoLink(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = b.Stop() })
 	link := &parentLinkStub{owned: "remote"}
-	b.SetParentLink(link)
+	b.InstallParentLink(link, "", nil)
 
 	now := time.Now().UTC()
 	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
@@ -78,7 +74,7 @@ func TestAdmissionForADescendantRunTouchesNoLink(t *testing.T) {
 		MessageID:  msgID,
 		Generation: b.Store().Generation(),
 		Body:       `{"message":"cross-branch"}`,
-	}, false)
+	})
 	if err != nil || res.Outcome != messaging.OutcomeSent {
 		t.Fatalf("admission for a descendant = (%+v, %v), want sent", res, err)
 	}
@@ -109,7 +105,7 @@ func TestRelayRecordsTheReplyRouteBeforeExposingTheAsk(t *testing.T) {
 	link := &parentLinkStub{recordRelay: func(messaging.RelayRoute) error {
 		return messaging.ErrTransportClosed
 	}}
-	b.SetParentLink(link)
+	b.InstallParentLink(link, "", nil)
 
 	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
 		"from_run_id":     "asker",
@@ -157,6 +153,53 @@ func TestRelayRecordsTheReplyRouteBeforeExposingTheAsk(t *testing.T) {
 	}
 }
 
+// TestRelayWithoutASenderNamesTheAskAsTheBranchResolvesIt pins handleRelay's
+// from_sender fallback: a relay that omits the name — the mixed-version case —
+// is still delivered with the sender name the receiving branch resolves for the
+// asking run, not an empty Sender.
+func TestRelayWithoutASenderNamesTheAskAsTheBranchResolvesIt(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	if _, err := b.CreateRun("asker", ""); err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	if err := b.SetHarnessName("asker", "asker-name"); err != nil {
+		t.Fatalf("name the asker: %v", err)
+	}
+	token, err := b.CreateRun("branch-run", "branch-run")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	b.InstallParentLink(&parentLinkStub{}, "", nil)
+
+	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
+		"from_run_id": "asker",
+		"to_run_id":   "branch-run",
+		"type":        "agent_message",
+		"payload":     map[string]any{"message": "relayed"},
+		"message_id":  "av1.abc.def",
+		"generation":  b.Store().Generation(),
+	})
+	if status != http.StatusOK {
+		t.Fatalf("relay without a sender = (%d, %v), want 200", status, body)
+	}
+	st := b.GetRun("branch-run")
+	st.Mu.Lock()
+	var sender string
+	for _, msg := range st.ControlQueue {
+		if msg.ID == "av1.abc.def" {
+			sender = msg.Sender
+		}
+	}
+	st.Mu.Unlock()
+	if sender != "asker-name" {
+		t.Fatalf("relayed ask sender = %q, want the name the branch resolves for the asker", sender)
+	}
+}
+
 // TestRelayRefusesAReplacementGeneration pins that a relay names the generation
 // the branch pinned when it registered, so a relay prepared for a replaced broker
 // is refused instead of landing in the replacement.
@@ -170,7 +213,7 @@ func TestRelayRefusesAReplacementGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	b.SetParentLink(&parentLinkStub{})
+	b.InstallParentLink(&parentLinkStub{}, "", nil)
 
 	status, body := postAuthBroker(t, b.Addr(), "/relay", "branch-run", token, map[string]any{
 		"from_run_id":   "asker",
@@ -187,6 +230,211 @@ func TestRelayRefusesAReplacementGeneration(t *testing.T) {
 	if queued := countAgentMessages(t, b, "branch-run"); queued != 0 {
 		t.Fatalf("run queue = %d messages, want the refused relay withheld", queued)
 	}
+}
+
+// parentRegistryStub is the registry half of a parent link for the
+// registration concurrency regressions: it holds the one accepted
+// registration's view under a mutex, models the registry's view-matched
+// deregistration, and can pause one choreographed registration after it has
+// recorded its registry view but before its claim returns for record
+// application — the last point where the registry and the run records can
+// still disagree.
+type parentRegistryStub struct {
+	viewMu     sync.Mutex
+	owned      string
+	generation string
+	token      string
+	endpoint   string
+
+	registers   int
+	pauseAt     int           // the 1-indexed Register call to pause; 0 pauses none
+	entered     chan struct{} // closed when the paused call reaches its gate
+	release     chan struct{} // closed to let the paused call return its claim
+	releaseOnce sync.Once
+}
+
+func (s *parentRegistryStub) Owns(runID string) bool {
+	s.viewMu.Lock()
+	defer s.viewMu.Unlock()
+	return s.owned != "" && runID == s.owned
+}
+
+func (s *parentRegistryStub) Key(childID, runID string) string { return runID + "@" + childID }
+
+func (s *parentRegistryStub) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+	claim := messaging.DescendantClaim{}
+	s.viewMu.Lock()
+	s.registers++
+	call := s.registers
+	for _, run := range reg.Runs {
+		claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: run.RunID + "@" + reg.ChildID})
+	}
+	// Record the registry view before the claim returns: from here the
+	// registry resolves this registration's endpoint, generation and
+	// credential for every later hop.
+	if len(reg.Runs) > 0 {
+		s.owned = reg.Runs[0].RunID + "@" + reg.ChildID
+		s.generation = reg.Generation
+		s.token = reg.Runs[0].Token
+		s.endpoint = reg.Endpoint
+	}
+	pause := call == s.pauseAt
+	s.viewMu.Unlock()
+	if pause {
+		close(s.entered)
+		<-s.release
+	}
+	return claim, nil
+}
+
+func (s *parentRegistryStub) Deregister(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
+	// Model the registry's view matching: a child the registry does not hold
+	// is unavailable, and the endpoint and generation must resolve to the
+	// registration the parent holds, with the run it still holds appearing in
+	// the closing branch's view under the credential it was registered with.
+	s.viewMu.Lock()
+	defer s.viewMu.Unlock()
+	if s.owned == "" {
+		return nil, messaging.ErrTargetUnavailable
+	}
+	if reg.Generation != s.generation || reg.Endpoint != s.endpoint {
+		return nil, messaging.ErrGenerationMismatch
+	}
+	for _, run := range reg.Runs {
+		if run.RunID+"@"+childID == s.owned {
+			if run.Token != s.token {
+				return nil, messaging.ErrGenerationMismatch
+			}
+			retired, token := s.owned, s.token
+			s.owned, s.generation, s.token, s.endpoint = "", "", "", ""
+			return map[string]string{retired: token}, nil
+		}
+	}
+	return nil, messaging.ErrGenerationMismatch
+}
+
+// releasePaused lets a paused registration return its claim; the tests also
+// call it deferred so a failed assertion cannot leak the paused goroutine.
+func (s *parentRegistryStub) releasePaused() { s.releaseOnce.Do(func() { close(s.release) }) }
+
+// accepted reports the registry's current view.
+func (s *parentRegistryStub) accepted() (owned, generation, token string) {
+	s.viewMu.Lock()
+	defer s.viewMu.Unlock()
+	return s.owned, s.generation, s.token
+}
+
+func (s *parentRegistryStub) RecordRelay(messaging.RelayRoute) error {
+	panic("parentlink: relay is not part of a registration")
+}
+
+// parentRouteResult carries one parent-route POST's outcome so the racing
+// requests' goroutines can report without touching the testing state.
+type parentRouteResult struct {
+	status int
+	body   map[string]any
+	err    error
+}
+
+// postParentRoute posts one parent-route body with an Authorization header.
+// Each call uses its own client with a timeout, so a request the critical
+// section holds cannot hang the test past its window.
+func postParentRoute(addr, path, authHeader string, body map[string]any) parentRouteResult {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return parentRouteResult{err: err}
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+path, bytes.NewReader(raw))
+	if err != nil {
+		return parentRouteResult{err: err}
+	}
+	req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return parentRouteResult{err: err}
+	}
+	defer resp.Body.Close()
+	var decoded map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&decoded)
+	return parentRouteResult{status: resp.StatusCode, body: decoded}
+}
+
+// registrationBody builds one child registration's body.
+func registrationBody(endpoint, generation, token string) map[string]any {
+	return map[string]any{
+		"child_id":   "child-1",
+		"endpoint":   endpoint,
+		"generation": generation,
+		"runs":       []map[string]any{{"run_id": "rt_x", "label": "claim", "token": token}},
+	}
+}
+
+// parkedOnRegistrationMutex reports whether the runtime's goroutine dump shows
+// a contender parked acquiring the broker's registration mutex directly inside
+// the named parent-route handler. The lock frames must sit immediately above
+// the handler's frame, so a goroutine blocked anywhere else never matches — not
+// on the run records' mutex under ownRun and DeleteRunIfToken, not on the link
+// field's read lock under parentLink, and not on a paused registration's gate.
+func parkedOnRegistrationMutex(stack, handler string) bool {
+	for _, goroutine := range strings.Split(stack, "\n\n") {
+		lines := strings.Split(goroutine, "\n")
+		for i, line := range lines {
+			if !strings.Contains(line, handler+"(") {
+				continue
+			}
+			locked, parked := false, false
+			for j := i - 1; j >= 0; j-- {
+				frame := lines[j]
+				if strings.HasPrefix(frame, "\t") {
+					continue // the frame's file location line
+				}
+				if !strings.Contains(frame, "sync.") {
+					break // back to frames outside the lock path
+				}
+				switch {
+				case strings.Contains(frame, "(*Mutex).Lock("), strings.Contains(frame, "(*Mutex).lockSlow("):
+					locked = true
+				case strings.Contains(frame, "SemacquireMutex"):
+					parked = true
+				}
+			}
+			if locked && parked {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// waitForRegistrationMuContender blocks until the named parent-route handler
+// has a goroutine parked on the registration mutex — positive evidence that a
+// racing request reached the critical section and is waiting for the sibling
+// that holds it. The poll sleeps only to bound its own granularity; the test
+// proceeds on the observed park, never on an elapsed interval. It reports the
+// racer completing without ever parking — a critical section gone, which the
+// test stages into the state its assertions refuse — and the fail-safe
+// deadline exists so a missing critical section fails the test instead of
+// hanging it: a handler that never parks is exactly the regression these
+// tests pin.
+func waitForRegistrationMuContender(t *testing.T, handler string, done <-chan struct{}) bool {
+	t.Helper()
+	stack := make([]byte, 1<<20)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(stack, true)
+		if parkedOnRegistrationMutex(string(stack[:n]), handler) {
+			return true
+		}
+		select {
+		case <-done:
+			return false
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	t.Fatalf("no %s goroutine parked on the registration mutex", handler)
+	return false
 }
 
 // postParentLink posts a registration body to /parent/register with an
@@ -213,8 +461,9 @@ func postParentLink(t *testing.T, addr, body, authHeader string) (int, map[strin
 
 // TestParentRegisterRequiresTheParentLinkToken pins the parent-route bearer
 // credential: with a token set, a registration without the header or with a
-// wrong Bearer is refused, and the correct Bearer is accepted; with no token
-// set, the loopback caller is accepted, the same trust the local routes run on.
+// wrong Bearer is refused, and the correct Bearer is accepted; a broker with
+// no configured credential serves no parent routes at all, which
+// TestParentRoutesRefuseWithoutTheLinkCredential pins on the parentlink side.
 func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 	raw, err := json.Marshal(map[string]any{
 		"child_id":   "child-1",
@@ -235,30 +484,15 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 			t.Fatalf("start broker: %v", err)
 		}
 		t.Cleanup(func() { _ = b.Stop() })
-		b.SetParentLink(&parentLinkStub{
+		b.InstallParentLink(&parentLinkStub{
 			register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 				return messaging.DescendantClaim{
-					Runs:    []messaging.ClaimedRun{{RunClaim: messaging.RunClaim{RunID: "remote-run", Label: "remote", Token: "child-token"}, Key: "remote-run"}},
-					Adopted: []string{"remote-run"},
+					Runs: []messaging.ClaimedRun{{RunClaim: messaging.RunClaim{RunID: "remote-run", Label: "remote", Token: "child-token"}, Key: "remote-run"}},
 				}, nil
 			},
-		})
-		if token != "" {
-			b.SetParentLinkToken(token)
-		}
+		}, token, nil)
 		return b
 	}
-
-	t.Run("no token set accepts the loopback caller", func(t *testing.T) {
-		b := startWithLink(t, "")
-		status, body := postParentLink(t, b.Addr(), string(raw), "")
-		if status != http.StatusOK {
-			t.Fatalf("registration with no token set = (%d, %v), want 200", status, body)
-		}
-		if b.GetRun("remote-run") == nil {
-			t.Fatal("the adopted run has no record")
-		}
-	})
 
 	t.Run("no Authorization header is refused", func(t *testing.T) {
 		b := startWithLink(t, "parent-token")
@@ -294,313 +528,6 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 	})
 }
 
-// TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator pins the
-// handler's refusal of a run ID the run-key namespacing reserves: a claimed
-// run ID carrying "@" reads as a branch-namespaced key, so the registration
-// is a 400 and nothing is adopted.
-func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
-	raw, err := json.Marshal(map[string]any{
-		"child_id":   "child-1",
-		"endpoint":   "http://child:1234",
-		"generation": "gen-1",
-		"runs": []map[string]any{
-			{"run_id": messaging.SupervisorRunID + "@victim", "label": "forged", "token": "child-token"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal registration: %v", err)
-	}
-
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	t.Cleanup(func() { _ = b.Stop() })
-	b.SetParentLink(&parentLinkStub{
-		register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-			t.Fatal("the handler passed a namespaced run id to the link")
-			return messaging.DescendantClaim{}, nil
-		},
-	})
-
-	status, body := postParentLink(t, b.Addr(), string(raw), "")
-	if status != http.StatusBadRequest || body["code"] != "invalid-request" {
-		t.Fatalf("registration with a namespaced run id = (%d, %v), want 400 invalid-request", status, body)
-	}
-	if b.GetRun(messaging.SupervisorRunID+"@victim") != nil {
-		t.Fatal("the refused registration adopted the forged run")
-	}
-}
-
-// TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing pins the
-// registration critical section: the guard, the register and the apply of one
-// registration run as one sequence, so a second registration cannot run its
-// register inside the first's window. The first registration is held inside
-// its register call — the middle of the critical section — and the second
-// request is only then handed to its handler, so the second's lock acquisition
-// is ordered after the first's window opened. The second's register is then
-// proven not to run until the window closes: without the guard its register
-// and apply land in the gap and the two credentials diverge.
-func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	key := "rt_x@child-1"
-	var mu sync.Mutex
-	first := true
-	// firstHeld is closed by the first registration's register call as it
-	// blocks inside the critical section; secondEntered is closed if the
-	// second registration's register call ever runs.
-	firstHeld := make(chan struct{})
-	secondEntered := make(chan struct{})
-	release := make(chan struct{})
-	link := &parentLinkStub{}
-	link.register = func(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-		claim := messaging.DescendantClaim{}
-		for _, run := range reg.Runs {
-			runKey := run.RunID + "@" + reg.ChildID
-			claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: runKey})
-			claim.Adopted = append(claim.Adopted, runKey)
-		}
-		mu.Lock()
-		isFirst := first
-		first = false
-		if len(reg.Runs) > 0 {
-			// The stub takes the claimed key so the second registration's guard
-			// reads the first's record as the link's own and is accepted.
-			link.owned = reg.Runs[0].RunID + "@" + reg.ChildID
-		}
-		mu.Unlock()
-		if isFirst {
-			close(firstHeld)
-			<-release
-		} else {
-			close(secondEntered)
-		}
-		return claim, nil
-	}
-	b.SetParentLink(link)
-
-	body := func(token string) string {
-		raw, err := json.Marshal(map[string]any{
-			"child_id":   "child-1",
-			"endpoint":   "http://child:1234",
-			"generation": "gen-1",
-			"runs":       []map[string]any{{"run_id": "rt_x", "label": "claim", "token": token}},
-		})
-		if err != nil {
-			t.Fatalf("marshal registration: %v", err)
-		}
-		return string(raw)
-	}
-
-	firstStatus := make(chan int, 1)
-	go func() {
-		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(body("token-1"))))
-		if err != nil {
-			firstStatus <- -1
-			return
-		}
-		defer resp.Body.Close()
-		firstStatus <- resp.StatusCode
-	}()
-	<-firstHeld
-
-	// The second request's body is a pipe the test writes only after the first
-	// register call holds the critical section: the handler is left reading the
-	// registration until then, so its lock acquisition — and, without the
-	// guard, its register — is ordered after the first's window opened.
-	pr, pw := io.Pipe()
-	secondStatus := make(chan int, 1)
-	go func() {
-		req, err := http.NewRequest(http.MethodPost, "http://"+b.Addr()+"/parent/register", pr)
-		if err != nil {
-			secondStatus <- -1
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			secondStatus <- -1
-			return
-		}
-		defer resp.Body.Close()
-		secondStatus <- resp.StatusCode
-	}()
-	if _, err := pw.Write([]byte(body("token-2"))); err != nil {
-		t.Fatalf("write the gated registration body: %v", err)
-	}
-	if err := pw.Close(); err != nil {
-		t.Fatalf("close the gated registration body: %v", err)
-	}
-
-	// While the first registration holds the critical section the second's
-	// register must not run. The assertion is bounded because a blocked
-	// handler produces no signal to wait on: a guard-less window lets the
-	// second handler straight through to its register, well inside the bound.
-	select {
-	case <-secondEntered:
-		close(release)
-		<-firstStatus
-		<-secondStatus
-		t.Fatal("the second registration's register ran inside the first's critical section")
-	case <-time.After(500 * time.Millisecond):
-	}
-
-	close(release)
-	if status := <-firstStatus; status != http.StatusOK {
-		t.Fatalf("first registration = %d, want 200", status)
-	}
-	if status := <-secondStatus; status != http.StatusOK {
-		t.Fatalf("second registration = %d, want 200", status)
-	}
-	// The record's credential is settled by whichever apply created it, and a
-	// newly adopted claim does not replace it — so under the critical section
-	// it is the first registration's token. A second register that ran inside
-	// the first's window would apply first and leave the record carrying its
-	// token-2 instead.
-	if got, ok := b.runToken(key); !ok || got != "token-1" {
-		t.Fatalf("run record credential = (%q, %v), want the first registration's token-1", got, ok)
-	}
-}
-
-// TestConcurrentDeregisterCannotOrphanARegisteredRun pins the deregistration
-// half of the registration critical section: a deregistration's retirement and
-// record deletes run under the same mutex as a registration's guard, register
-// and apply, so a close cannot retire the link's ownership between one
-// registration's register and its apply. The registration the close raced is a
-// same-view retry — the one registration whose view a closing branch can still
-// match — and a retirement landing in its window would leave the apply
-// recreating a record the link no longer owns, a state whose next claim is
-// refused for good.
-func TestConcurrentDeregisterCannotOrphanARegisteredRun(t *testing.T) {
-	b := New("")
-	if err := b.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	defer b.Stop()
-
-	key := "rt_x@child-1"
-	var mu sync.Mutex
-	generation := ""
-	token := ""
-	calls := 0
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	stub := &parentLinkStub{}
-	stub.register = func(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-		claim := messaging.DescendantClaim{}
-		mu.Lock()
-		held := stub.owned
-		mu.Unlock()
-		for _, run := range reg.Runs {
-			runKey := run.RunID + "@" + reg.ChildID
-			claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: runKey})
-			if runKey != held {
-				claim.Adopted = append(claim.Adopted, runKey)
-			}
-		}
-		mu.Lock()
-		calls++
-		block := calls == 2
-		if len(reg.Runs) > 0 {
-			stub.owned = reg.Runs[0].RunID + "@" + reg.ChildID
-			generation = reg.Generation
-			token = reg.Runs[0].Token
-		}
-		mu.Unlock()
-		if block {
-			close(entered)
-			<-release
-		}
-		return claim, nil
-	}
-	stub.deregister = func(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if reg.Generation != generation {
-			return nil, messaging.ErrGenerationMismatch
-		}
-		retired := stub.owned
-		stub.owned = ""
-		return map[string]string{retired: token}, nil
-	}
-	b.SetParentLink(stub)
-
-	body := func(payloadGeneration, payloadToken string) string {
-		raw, err := json.Marshal(map[string]any{
-			"child_id":   "child-1",
-			"endpoint":   "http://child:1234",
-			"generation": payloadGeneration,
-			"runs":       []map[string]any{{"run_id": "rt_x", "label": "claim", "token": payloadToken}},
-		})
-		if err != nil {
-			t.Fatalf("marshal registration: %v", err)
-		}
-		return string(raw)
-	}
-	post := func(payload string) int {
-		t.Helper()
-		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(payload)))
-		if err != nil {
-			t.Fatalf("post registration: %v", err)
-		}
-		defer resp.Body.Close()
-		return resp.StatusCode
-	}
-
-	if status := post(body("gen-1", "token-1")); status != http.StatusOK {
-		t.Fatalf("first registration = %d, want 200", status)
-	}
-
-	// The retry of the same registration is held between its register and its
-	// apply — the window a concurrent close must not retire in.
-	secondDone := make(chan struct{})
-	go func() {
-		defer close(secondDone)
-		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(body("gen-1", "token-1"))))
-		if err == nil {
-			resp.Body.Close()
-		}
-	}()
-	<-entered
-
-	deregisterDone := make(chan struct{})
-	go func() {
-		defer close(deregisterDone)
-		resp, err := http.Post("http://"+b.Addr()+"/parent/deregister", "application/json", bytes.NewReader([]byte(body("gen-1", "token-1"))))
-		if err == nil {
-			resp.Body.Close()
-		}
-	}()
-	// While the retry holds the critical section the close cannot proceed, so
-	// the record the retry would recreate survives until the gate releases:
-	// one check pins the no-orphan window without a spin.
-	if b.GetRun(key) == nil {
-		t.Fatal("the record vanished while the retry held the critical section: the close slipped inside the window")
-	}
-	close(release)
-	<-secondDone
-	<-deregisterDone
-
-	// The branch recovers: the next registration of the key succeeds and leaves
-	// the record carrying the new claim's credential under an owned claim.
-	if status := post(body("gen-2", "token-2")); status != http.StatusOK {
-		t.Fatalf("re-registration = %d, want 200: the recreated record refused the branch's claim for good", status)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if stub.owned != key {
-		t.Fatalf("claim owner = %q, want %q", stub.owned, key)
-	}
-	if got, ok := b.runToken(key); !ok || got != "token-2" {
-		t.Fatalf("run record credential = (%q, %v), want the re-registration's", got, ok)
-	}
-}
-
 // TestParentRegisterRefusesAnOversizeBody pins the request-body cap the parent
 // routes share with withAuth: a registration whose body exceeds the cap is
 // refused before the registry is consulted, and no claim is adopted.
@@ -610,12 +537,13 @@ func TestParentRegisterRefusesAnOversizeBody(t *testing.T) {
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
+	b.SetParentLinkToken("parent-token")
 	b.SetParentLink(&parentLinkStub{})
 
 	claim := `{"run_id":"remote-run","label":"remote","token":"t"},`
 	oversize := `{"child_id":"child-1","endpoint":"http://child:1234","generation":"gen-1","runs":[` +
 		strings.Repeat(claim, 40000) + `]}`
-	status, _ := postParentLink(t, b.Addr(), oversize, "")
+	status, _ := postParentLink(t, b.Addr(), oversize, "Bearer parent-token")
 	if status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize registration = %d, want 413", status)
 	}
@@ -641,7 +569,7 @@ func TestRelayRefusesATargetTheCallerDidNotAuthenticate(t *testing.T) {
 	if _, err := b.CreateRun("other-run", "other-run"); err != nil {
 		t.Fatalf("create other run: %v", err)
 	}
-	b.SetParentLink(&parentLinkStub{})
+	b.InstallParentLink(&parentLinkStub{}, "", nil)
 
 	// A relay authenticated as one run cannot target another: the guard
 	// refuses before the target's queue is touched.
@@ -675,5 +603,177 @@ func TestRelayRefusesATargetTheCallerDidNotAuthenticate(t *testing.T) {
 	}
 	if queued := countAgentMessages(t, b, "branch-run"); queued != 1 {
 		t.Fatalf("run queue = %d messages, want the relayed ask", queued)
+	}
+}
+
+// TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing pins the
+// registration critical section: one registration's guard, its register and
+// its record application run as one sequence, so a second registration cannot
+// land its claim's records between the first's recorded registry view and its
+// apply and leave the registry's credential and the run record's credential
+// disagreeing. The first registration pauses after it has recorded its
+// registry view and before its claim returns — the last point where the
+// registry and the run records can still disagree — and the second races it
+// with a different credential.
+func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	const key = "rt_x@child-1"
+	stub := &parentRegistryStub{
+		pauseAt: 1,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(stub.releasePaused)
+	b.InstallParentLink(stub, "parent-token", nil)
+
+	post := func(token string) <-chan parentRouteResult {
+		done := make(chan parentRouteResult, 1)
+		go func() {
+			done <- postParentRoute(b.Addr(), "/parent/register", "Bearer parent-token", registrationBody("http://child:1234", "gen-1", token))
+		}()
+		return done
+	}
+	var second parentRouteResult
+
+	// The first registration pauses inside its register call, holding the
+	// critical section with its registry view recorded.
+	firstDone := post("token-1")
+	<-stub.entered
+
+	// The second registration claims the same run under a different credential.
+	secondDone := post("token-2")
+
+	// The paused first registration holds the registration mutex, so a free
+	// mutex here proves the critical section the two handlers serialize on is
+	// gone. In that world the second registration runs to completion while the
+	// first is held, and letting it land before the first resumes is what makes
+	// the divergence observable: the first's delayed apply then writes a record
+	// credential the registry no longer holds, which the assertions below
+	// refuse. With the critical section intact the try-lock fails, and the
+	// second registration can only run wholly after the first's apply.
+	secondReleasedEarly := b.parentRegisterMu.TryLock()
+	if secondReleasedEarly {
+		b.parentRegisterMu.Unlock()
+		second = <-secondDone
+	}
+
+	// Released, both registrations settle and both are served.
+	stub.releasePaused()
+	first := <-firstDone
+	if !secondReleasedEarly {
+		second = <-secondDone
+	}
+	if first.err != nil || second.err != nil {
+		t.Fatalf("registrations = (%v, %v), want two responses", first.err, second.err)
+	}
+	if first.status != http.StatusOK || second.status != http.StatusOK {
+		t.Fatalf("registrations = (%d, %d), want both 200", first.status, second.status)
+	}
+
+	// The registry and the run record agree on the credential the final claim
+	// carried: the second registration's apply followed the first's.
+	owned, _, registryToken := stub.accepted()
+	if owned != key {
+		t.Fatalf("registry owner = %q, want %q", owned, key)
+	}
+	if token, ok := b.runToken(key); !ok || token != registryToken {
+		t.Fatalf("run record credential = (%q, %v), want the registry's %q", token, ok, registryToken)
+	}
+}
+
+// TestConcurrentDeregisterCannotOrphanARegisteredRun pins the deregistration
+// half of the registration critical section: a close carrying the branch's
+// last accepted view cannot retire the registry between a same-view
+// re-registration's recorded view and its record application. The
+// re-registration pauses after its view is recorded and before its claim
+// returns; the close is released only once it is observed parked on the
+// registration mutex, so with the critical section it retires only after the
+// paused registration has applied. Without it the close never parks and the
+// observation fails the test: a retirement landing in that window would leave
+// the delayed apply recreating a record the registry no longer owns.
+func TestConcurrentDeregisterCannotOrphanARegisteredRun(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	const key = "rt_x@child-1"
+	stub := &parentRegistryStub{
+		pauseAt: 2,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(stub.releasePaused)
+	b.InstallParentLink(stub, "parent-token", nil)
+	view := registrationBody("http://child:1234", "gen-1", "token-1")
+
+	// The registration the close will race settles first.
+	established := postParentRoute(b.Addr(), "/parent/register", "Bearer parent-token", view)
+	if established.err != nil || established.status != http.StatusOK {
+		t.Fatalf("the registration the close will race = (%d, %v), want 200", established.status, established.err)
+	}
+
+	// A same-view retry of that registration pauses between its recorded
+	// registry view and its claim's record application — the only window a
+	// close carrying the branch's last accepted view could still retire in.
+	retryDone := make(chan parentRouteResult, 1)
+	go func() {
+		retryDone <- postParentRoute(b.Addr(), "/parent/register", "Bearer parent-token", view)
+	}()
+	<-stub.entered
+
+	// The close carries the exact accepted endpoint, generation, run and
+	// credential view, so the registry's view matching accepts it.
+	closeDone := make(chan parentRouteResult, 1)
+	closeReturned := make(chan struct{})
+	go func() {
+		closeDone <- postParentRoute(b.Addr(), "/parent/deregister", "Bearer parent-token", view)
+		close(closeReturned)
+	}()
+
+	// The close must be inside the critical section before the paused
+	// registration is released. With the critical section it parks on the
+	// registration mutex and the park is observed on the runtime's goroutine
+	// stacks; if it completes instead, the critical section the two handlers
+	// serialize on is gone, and the release below stages the orphan the
+	// assertions refuse.
+	waitForRegistrationMuContender(t, "handleParentDeregister", closeReturned)
+
+	// Released, the re-registration applies before the close retires anything.
+	stub.releasePaused()
+	retry := <-retryDone
+	closed := <-closeDone
+	if retry.err != nil || retry.status != http.StatusOK {
+		t.Fatalf("same-view re-registration = (%d, %v), want 200", retry.status, retry.err)
+	}
+	if closed.err != nil || closed.status != http.StatusOK {
+		t.Fatalf("deregistration = (%d, %v), want 200", closed.status, closed.err)
+	}
+
+	// Nothing is orphaned: the retirement took the registry's claim and the
+	// freshly applied record went with it.
+	if owned, _, _ := stub.accepted(); owned != "" {
+		t.Fatalf("registry owner after the close = %q, want none", owned)
+	}
+	if b.GetRun(key) != nil {
+		t.Fatal("the close left an orphan record the registry no longer owns")
+	}
+
+	// The branch recovers: a fresh registration succeeds and the registry and
+	// the record agree on its credential.
+	fresh := postParentRoute(b.Addr(), "/parent/register", "Bearer parent-token", registrationBody("http://child:1234", "gen-2", "token-2"))
+	if fresh.err != nil || fresh.status != http.StatusOK {
+		t.Fatalf("re-registration after the close = (%d, %v), want 200", fresh.status, fresh.err)
+	}
+	owned, generation, token := stub.accepted()
+	if owned != key || generation != "gen-2" || token != "token-2" {
+		t.Fatalf("registry view after re-registration = (%q, %q, %q), want the fresh claim", owned, generation, token)
+	}
+	if got, ok := b.runToken(key); !ok || got != token {
+		t.Fatalf("run record credential = (%q, %v), want the registry's %q", got, ok, token)
 	}
 }

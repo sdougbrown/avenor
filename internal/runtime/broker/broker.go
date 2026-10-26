@@ -226,6 +226,13 @@ func (b *Broker) Send(runID string, kind string, payload json.RawMessage, correl
 // The fromRunID must belong to a registered run whose token matches the
 // authenticated caller's token.
 func (b *Broker) SendTo(fromRunID, toRunID, kind string, payload json.RawMessage, correlationID string) error {
+	return b.sendToAs(fromRunID, toRunID, kind, payload, correlationID, b.displayName(fromRunID))
+}
+
+// sendToAs is SendTo with the sender named by the caller. The local seam always
+// resolves the asker's name here; a relay instead carries the name the relaying
+// branch resolved, because the receiving branch has no record of the asking run.
+func (b *Broker) sendToAs(fromRunID, toRunID, kind string, payload json.RawMessage, correlationID, sender string) error {
 	b.mu.RLock()
 	_, ok := b.runs[toRunID]
 	b.mu.RUnlock()
@@ -240,7 +247,7 @@ func (b *Broker) SendTo(fromRunID, toRunID, kind string, payload json.RawMessage
 		Type:      kind,
 		RunID:     toRunID,
 		FromRunID: fromRunID,
-		Sender:    b.displayName(fromRunID),
+		Sender:    sender,
 		Payload:   payload,
 	}
 	return b.PushControl(toRunID, msg)
@@ -400,6 +407,19 @@ func (b *Broker) SetParentLinkToken(token string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.parentLinkToken = token
+}
+
+// InstallParentLink installs everything a parent broker serves its parent-link
+// routes with: the descendant registry those routes write, the bearer credential
+// they require, and the callback that re-publishes this broker's owned runs when
+// its run set changes. A nil link leaves the parent routes unserved, which is
+// what a standalone broker reports.
+func (b *Broker) InstallParentLink(link messaging.ParentLink, token string, observer func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.parentLink = link
+	b.parentLinkToken = token
+	b.runObserver = observer
 }
 
 func (b *Broker) parentSeam() (messaging.ParentLink, string) {
@@ -964,7 +984,8 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			MessageID:  msgID,
 			Generation: fullBody.Generation,
 			Body:       string(fullBody.Payload),
-		}, true)
+			Legacy:     true,
+		})
 		if err != nil {
 			writeSendError(w, err)
 			return
@@ -1288,7 +1309,7 @@ func incompletePeerListing(unreadable int) string {
 // broker's run registration already runs on.
 func parentLinkAuthorized(r *http.Request, token string) bool {
 	if token == "" {
-		return true
+		return false
 	}
 	return bearerAuthorized(r, token)
 }
@@ -1477,6 +1498,7 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 		RunID          string          `json:"run_id"`
 		Token          string          `json:"token"`
 		FromRunID      string          `json:"from_run_id"`
+		FromSender     string          `json:"from_sender"`
 		ToRunID        string          `json:"to_run_id"`
 		Type           string          `json:"type"`
 		Payload        json.RawMessage `json:"payload"`
@@ -1514,9 +1536,15 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The branch that owns the asker is the one that knows its display name;
-	// the canonical run ID travels unchanged.
-	if err := b.SendTo(body.FromRunID, body.ToRunID, body.Type, body.Payload, body.MessageID); err != nil {
+	// The branch that owns the asker is the one that knows its display name,
+	// so the relay carries the name it resolved; the receiving branch cannot
+	// resolve a foreign run ID, and both branches compose through the same
+	// sendTo path so they cannot diverge.
+	sender := body.FromSender
+	if sender == "" {
+		sender = b.DisplayName(body.FromRunID)
+	}
+	if err := b.sendToAs(body.FromRunID, body.ToRunID, body.Type, body.Payload, body.MessageID, sender); err != nil {
 		if errors.Is(err, messaging.ErrTargetUnavailable) {
 			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 			return
@@ -2017,12 +2045,16 @@ func (b *Broker) DisplayName(runID string) string { return b.displayName(runID) 
 
 // MatchLabel returns every run whose display name is exactly label, sorted by
 // run ID so the caller can tell an ambiguous label from a unique one instead of
-// the broker guessing.
+// the broker guessing. A record the broker holds only for a registered child's
+// claim is never matched: the name belongs to the branch that owns the run.
 func (b *Broker) MatchLabel(label string) []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	matches := make([]string, 0, 1)
 	for runID, st := range b.runs {
+		if st.descendant {
+			continue
+		}
 		if st.displayName() == label {
 			matches = append(matches, runID)
 		}
@@ -2125,6 +2157,14 @@ func (b *Broker) RenameRun(runID, name string) error {
 	if st == nil {
 		return fmt.Errorf("run not found: %s", runID)
 	}
+	b.mu.RLock()
+	descendant := st.descendant
+	b.mu.RUnlock()
+	if descendant {
+		// The run's display name belongs to the branch that owns it; a rename
+		// written to this broker's copy would be reverted by the next claim.
+		return fmt.Errorf("run %s is owned by a child broker", runID)
+	}
 	if name == "" {
 		name = runID
 	}
@@ -2151,6 +2191,8 @@ func (b *Broker) DeleteRun(runID string) {
 	if ok {
 		descendant = st.descendant
 		delete(b.runs, runID)
+	}
+	if ok {
 	}
 	b.mu.Unlock()
 	if !ok {
@@ -2312,8 +2354,8 @@ type localMessenger struct {
 	broker *Broker
 }
 
-func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
-	res, err := m.broker.store.Admit(ctx, askstore.AdmitRequestFrom(req, legacy))
+func (m localMessenger) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	res, err := m.broker.store.Admit(ctx, askstore.AdmitRequestFrom(req, req.Legacy))
 	return messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err
 }
 

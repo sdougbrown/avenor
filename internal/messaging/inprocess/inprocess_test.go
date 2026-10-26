@@ -56,6 +56,31 @@ func TestWithdrawFencesPausedSend(t *testing.T) {
 	}
 }
 
+// TestTransportAdmitsALegacySendWithoutAMessenger pins the transport's legacy
+// forwarding: with no messenger installed, Transport.Send admits an unversioned
+// (legacy) ask through the store, so a regression that drops the Legacy flag
+// fails here instead of surfacing as ErrGenerationMismatch on the wire.
+func TestTransportAdmitsALegacySendWithoutAMessenger(t *testing.T) {
+	store, backend := messagetest.NewMemoryStore(t)
+	transport := New(store)
+	gen := store.Generation()
+
+	res, err := transport.Send(context.Background(), messaging.SendRequest{
+		From:       alice,
+		To:         bob,
+		MessageID:  "legacy-id",
+		Generation: gen,
+		Body:       `{"message":"legacy"}`,
+		Legacy:     true,
+	})
+	if err != nil || res.Outcome != messaging.OutcomeSent {
+		t.Fatalf("legacy send = (%+v, %v), want sent", res, err)
+	}
+	if delivered := backend.Queued(bob.RunID); delivered != 1 {
+		t.Fatalf("target queue = %d deliveries, want the legacy ask delivered", delivered)
+	}
+}
+
 func TestTransportCloseUnblocksWait(t *testing.T) {
 	store, _ := messagetest.NewMemoryStore(t)
 	tr := New(store)
@@ -132,7 +157,7 @@ func (m blockingMessenger) block(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (m blockingMessenger) Send(ctx context.Context, _ messaging.SendRequest, _ bool) (messaging.SendResult, error) {
+func (m blockingMessenger) Send(ctx context.Context, _ messaging.SendRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
 }
 

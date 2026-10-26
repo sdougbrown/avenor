@@ -60,10 +60,10 @@ func (t *Transport) Send(ctx context.Context, req messaging.SendRequest) (messag
 	}
 	defer cancel()
 	if m := t.messenger(); m != nil {
-		res, err := m.Send(child, req, false)
+		res, err := m.Send(child, req)
 		return sendResult(res, err), err
 	}
-	res, err := t.store.Admit(child, askstore.AdmitRequestFrom(req, false))
+	res, err := t.store.Admit(child, askstore.AdmitRequestFrom(req, req.Legacy))
 	out := sendResult(messaging.SendResult{Outcome: res.Outcome, MessageID: res.MessageID, Generation: res.Generation}, err)
 	return out, err
 }

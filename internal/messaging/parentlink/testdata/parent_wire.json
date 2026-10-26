@@ -17,7 +17,7 @@
     "reply": ["run_id", "token", "from_run_id", "to_run_id", "type", "payload", "reply_to", "generation"],
     "wait": ["run_id", "token", "waiting_for", "generation", "timeout_ms"],
     "withdraw": ["run_id", "token", "cancel_message_id", "generation"],
-    "relay": ["run_id", "token", "from_run_id", "to_run_id", "type", "payload", "message_id", "generation", "edge_generation", "expects_reply"]
+    "relay": ["run_id", "token", "from_run_id", "from_sender", "to_run_id", "type", "payload", "message_id", "generation", "edge_generation", "expects_reply"]
   },
   "responses": [
     {

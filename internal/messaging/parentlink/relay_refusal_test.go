@@ -62,16 +62,16 @@ func TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch(t *testing.T) {
 
 			err := relay.Ask(ctx, messaging.SendRequest{
 				From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-				To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
+				To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"},
 				MessageID: "msg-1",
 			})
 			if !errors.Is(err, testCase.wantError) {
 				t.Fatalf("Ask = %v, want %v", err, testCase.wantError)
 			}
-			if _, ok := registry.Hop("run-b"); ok == testCase.wantRunGone {
+			if _, ok := registry.Hop(ParentRunKey("child-one", "run-b")); ok == testCase.wantRunGone {
 				t.Fatalf("the relayed run routes = %v, want %v", ok, !testCase.wantRunGone)
 			}
-			if _, ok := registry.Hop("run-c"); ok == testCase.wantSiblingGone {
+			if _, ok := registry.Hop(ParentRunKey("child-one", "run-c")); ok == testCase.wantSiblingGone {
 				t.Fatalf("the child's other run routes = %v, want %v", ok, !testCase.wantSiblingGone)
 			}
 
@@ -79,7 +79,7 @@ func TestRelayRefusalStopsTheBranchAndKeepsAHealthyBranch(t *testing.T) {
 			// that is gone is not.
 			again := relay.Ask(ctx, messaging.SendRequest{
 				From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-				To:        messaging.Identity{RunID: "run-c", Sender: "bob"},
+				To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-c"), Sender: "bob"},
 				MessageID: "msg-2",
 			})
 			if testCase.wantSiblingGone {
@@ -125,7 +125,7 @@ func TestRelayRefusesARunWithoutACredential(t *testing.T) {
 
 	err = relay.Ask(ctx, messaging.SendRequest{
 		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-		To:        messaging.Identity{RunID: "run-c", Sender: "bob"},
+		To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-c"), Sender: "bob"},
 		MessageID: "msg-1",
 	})
 	if !errors.Is(err, messaging.ErrTargetUnavailable) {
@@ -134,13 +134,13 @@ func TestRelayRefusesARunWithoutACredential(t *testing.T) {
 	if got := stub.countPath(pathRelay); got != 0 {
 		t.Fatalf("the credential-less run saw %d relays, want the pre-flight guard to fire before any HTTP call", got)
 	}
-	if _, ok := registry.Hop("run-c"); !ok {
+	if _, ok := registry.Hop(ParentRunKey("child-one", "run-c")); !ok {
 		t.Fatal("the claim without a credential was forgotten, want it kept for a replacement registration")
 	}
 
 	if err := relay.Ask(ctx, messaging.SendRequest{
 		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-		To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
+		To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"},
 		MessageID: "msg-2",
 	}); err != nil {
 		t.Fatalf("Ask the credentialed sibling = %v, want the relay delivered", err)
@@ -179,14 +179,14 @@ func TestRelayRefusalRetiresTheAdoptedRunRecords(t *testing.T) {
 
 	if err := relay.Ask(ctx, messaging.SendRequest{
 		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-		To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
+		To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-b"), Sender: "bob"},
 		MessageID: "msg-1",
 	}); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("Ask run-b = %v, want ErrTargetUnavailable", err)
 	}
 	if err := relay.Ask(ctx, messaging.SendRequest{
 		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
-		To:        messaging.Identity{RunID: "run-c", Sender: "bob"},
+		To:        messaging.Identity{RunID: ParentRunKey("child-one", "run-c"), Sender: "bob"},
 		MessageID: "msg-2",
 	}); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("Ask run-c = %v, want ErrTargetUnavailable", err)
@@ -195,7 +195,7 @@ func TestRelayRefusalRetiresTheAdoptedRunRecords(t *testing.T) {
 	if len(retired) != 2 {
 		t.Fatalf("retired = %v, want exactly two retired runs", retired)
 	}
-	for _, want := range []string{"run-b", "run-c"} {
+	for _, want := range []string{ParentRunKey("child-one", "run-b"), ParentRunKey("child-one", "run-c")} {
 		n := 0
 		for _, got := range retired {
 			if got == want {
@@ -206,10 +206,10 @@ func TestRelayRefusalRetiresTheAdoptedRunRecords(t *testing.T) {
 			t.Fatalf("retired = %v, want exactly one %s", retired, want)
 		}
 	}
-	if _, ok := registry.Hop("run-b"); ok {
+	if _, ok := registry.Hop(ParentRunKey("child-one", "run-b")); ok {
 		t.Fatal("run-b still routes after its record was retired")
 	}
-	if _, ok := registry.Hop("run-c"); ok {
+	if _, ok := registry.Hop(ParentRunKey("child-one", "run-c")); ok {
 		t.Fatal("run-c still routes after the branch was deregistered")
 	}
 }

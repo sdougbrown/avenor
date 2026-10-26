@@ -17,38 +17,72 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 		ChildID:    "one",
 		Endpoint:   "http://one",
 		Generation: "gen-one",
-		Runs:       []messaging.RunClaim{{RunID: "run-a"}, {RunID: "run-b"}},
+		Runs:       []messaging.RunClaim{{RunID: "run-a", Label: "alpha"}, {RunID: "run-b"}},
 	})
 	if err != nil {
 		t.Fatalf("register first child: %v", err)
 	}
-	if len(first.Adopted) != 2 || len(first.Retired) != 0 {
-		t.Fatalf("first claim = %+v, want both runs adopted and none retired", first)
+	if len(first.Retired) != 0 {
+		t.Fatalf("first claim = %+v, want no run retired", first)
 	}
-	next, ok := registry.Hop("run-a")
+	if !registry.Owns(ParentRunKey("one", "run-a")) || !registry.Owns(ParentRunKey("one", "run-b")) {
+		t.Fatal("the first claim did not adopt both runs")
+	}
+	next, ok := registry.Hop(ParentRunKey("one", "run-a"))
 	if !ok || next.Endpoint != "http://one" || next.Generation != "gen-one" {
 		t.Fatalf("hop for run-a = (%+v, %v), want the child's endpoint and generation", next, ok)
 	}
+	if next.RunID != "run-a" {
+		t.Fatalf("hop for run-a targets %q, want the canonical run ID the branch knows", next.RunID)
+	}
 
-	// Another child cannot claim a run this one already owns, and a refused
-	// claim applies nothing at all.
-	refused, err := registry.Register(messaging.DescendantRegistration{
+	// A sibling may claim the same literal run ID — every claim is namespaced
+	// by the branch that makes it — so both runs stay their own routing target.
+	if _, err := registry.Register(messaging.DescendantRegistration{
 		ChildID:    "two",
 		Endpoint:   "http://two",
 		Generation: "gen-two",
 		Runs:       []messaging.RunClaim{{RunID: "run-a"}},
-	})
-	if !errors.Is(err, ErrRunClaimed) || !errors.Is(err, messaging.ErrInvalidRequest) {
-		t.Fatalf("conflicting claim = %v, want ErrRunClaimed", err)
+	}); err != nil {
+		t.Fatalf("a sibling claims the same literal run ID: %v, want it adopted under its own key", err)
 	}
-	if len(refused.Adopted) != 0 || len(refused.Retired) != 0 {
-		t.Fatalf("refused claim = %+v, want nothing adopted and nothing retired", refused)
+	if owner, ok := registry.Owner(ParentRunKey("two", "run-a")); !ok || owner != "two" {
+		t.Fatalf("owner of the sibling's run-a = (%q, %v), want the sibling", owner, ok)
 	}
-	if owner, ok := registry.Owner("run-a"); !ok || owner != "one" {
-		t.Fatalf("owner of run-a = (%q, %v) after a refused claim, want the first child", owner, ok)
+	if owner, ok := registry.Owner(ParentRunKey("one", "run-a")); !ok || owner != "one" {
+		t.Fatalf("owner of run-a = (%q, %v) after the sibling's claim, want the first child", owner, ok)
 	}
-	if next, ok := registry.Hop("run-a"); !ok || next.Endpoint != "http://one" || next.Generation != "gen-one" {
-		t.Fatalf("hop for run-a = (%+v, %v) after a refused claim, want the surviving child's hop", next, ok)
+
+	// A re-claim by the child that owns the run is the same run: the namespaced
+	// key is what identifies it, so the claim is adopted, not refused.
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID:    "one",
+		Endpoint:   "http://one-again-claim",
+		Generation: "gen-one-again",
+		Runs:       []messaging.RunClaim{{RunID: "run-a"}},
+	}); err != nil {
+		t.Fatalf("re-claim by the owning child = %v, want it adopted", err)
+	}
+	if owner, ok := registry.Owner(ParentRunKey("one", "run-a")); !ok || owner != "one" {
+		t.Fatalf("owner of run-a = (%q, %v) after a re-claim, want the first child", owner, ok)
+	}
+	if registry.Owns(ParentRunKey("one", "run-b")) {
+		t.Fatal("a run the re-claim stopped naming is still owned")
+	}
+	if next, ok := registry.Hop(ParentRunKey("one", "run-a")); !ok || next.Generation != "gen-one-again" {
+		t.Fatalf("hop for the re-claimed run = (%+v, %v), want the replacement generation", next, ok)
+	}
+	// A run ID that itself contains "@" would mint a namespaced key the owning
+	// branch cannot relay to — the canonical ID the relay posts to would not
+	// exist there — so a claim carrying one is refused up front, and a crafted
+	// run ID can no longer collide with a sibling's namespaced key.
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID:    "one",
+		Endpoint:   "http://one",
+		Generation: "gen-one",
+		Runs:       []messaging.RunClaim{{RunID: "run-x@two"}},
+	}); !errors.Is(err, messaging.ErrInvalidRequest) {
+		t.Fatalf("a claim whose run ID contains @ = %v, want ErrInvalidRequest", err)
 	}
 
 	// A re-registration replaces the claim, so the runs it stopped naming are
@@ -62,13 +96,13 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-register first child: %v", err)
 	}
-	if len(second.Adopted) != 1 || len(second.Retired) != 2 {
-		t.Fatalf("re-registration = %+v, want run-c adopted and two retired", second)
+	if len(second.Retired) != 1 {
+		t.Fatalf("re-registration = %+v, want the run it stopped naming retired", second)
 	}
-	if registry.Owns("run-a") || registry.Owns("run-b") {
+	if registry.Owns(ParentRunKey("one", "run-a")) || registry.Owns(ParentRunKey("one", "run-b")) {
 		t.Fatal("a retired run is still owned")
 	}
-	if next, ok := registry.Hop("run-c"); !ok || next.Generation != "gen-one-two" {
+	if next, ok := registry.Hop(ParentRunKey("one", "run-c")); !ok || next.Generation != "gen-one-two" {
 		t.Fatalf("hop for run-c = (%+v, %v), want the replacement generation", next, ok)
 	}
 
@@ -81,10 +115,10 @@ func TestRegistryClaimsRunsAndRetiresTheOnesAChildStopsOwning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deregister child: %v", err)
 	}
-	if len(retired) != 1 || retired["run-c"] != "tok-c" {
-		t.Fatalf("deregistered runs = %v, want run-c with the credential it claimed", retired)
+	if len(retired) != 1 || retired[ParentRunKey("one", "run-c")] != "tok-c" {
+		t.Fatalf("deregistered runs = %v, want run-c's claim key with the credential it claimed", retired)
 	}
-	if _, ok := registry.Hop("run-c"); ok {
+	if _, ok := registry.Hop(ParentRunKey("one", "run-c")); ok {
 		t.Fatal("a deregistered child still owns a run")
 	}
 	if _, err := registry.Deregister("one", messaging.DescendantRegistration{}); !errors.Is(err, messaging.ErrTargetUnavailable) {
@@ -107,7 +141,7 @@ func TestRegistryNamespacesBranchSupervisorRuns(t *testing.T) {
 		}
 	}
 	for _, child := range []string{"one", "two"} {
-		key := messaging.SupervisorRunID + "@" + child
+		key := ParentRunKey(child, messaging.SupervisorRunID)
 		if owner, ok := registry.Owner(key); !ok || owner != child {
 			t.Fatalf("owner of %q = (%q, %v), want %q", key, owner, ok, child)
 		}
@@ -127,46 +161,24 @@ func TestRegistryNamespacesBranchSupervisorRuns(t *testing.T) {
 	if registry.Owns(messaging.SupervisorRunID) {
 		t.Fatal("a descendant claim took the parent's own supervisor run ID")
 	}
-	// A canonical run ID that two branches both claim is still a genuine
-	// duplicate and is refused.
-	if _, err := registry.Register(messaging.DescendantRegistration{
-		ChildID: "three", Endpoint: "http://three", Generation: "g-three",
-		Runs: []messaging.RunClaim{{RunID: "run-a"}},
-	}); err != nil {
-		t.Fatalf("register three: %v", err)
-	}
-	if _, err := registry.Register(messaging.DescendantRegistration{
-		ChildID: "four", Endpoint: "http://four", Generation: "g-four",
-		Runs: []messaging.RunClaim{{RunID: "run-a"}},
-	}); !errors.Is(err, ErrRunClaimed) {
-		t.Fatalf("duplicate canonical claim = %v, want ErrRunClaimed", err)
-	}
-}
-
-// TestRegistryRefusesARunIDCarryingTheNamespacingSeparator pins the run ID a
-// descendant may claim: a run ID carrying "@" reads as a branch-namespaced
-// key, so a child claiming one could forge another branch's supervisor
-// identity. The registration is refused before anything is applied.
-func TestRegistryRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
-	registry := NewRegistry()
-	for _, runID := range []string{messaging.SupervisorRunID + "@victim", "run@a", "@"} {
-		claim, err := registry.Register(messaging.DescendantRegistration{
-			ChildID: "one", Endpoint: "http://one", Generation: "g1",
-			Runs: []messaging.RunClaim{{RunID: runID}},
-		})
-		if !errors.Is(err, ErrInvalidRunID) || !errors.Is(err, messaging.ErrInvalidRequest) {
-			t.Fatalf("claim of %q = %v, want ErrInvalidRunID", runID, err)
-		}
-		if len(claim.Runs) != 0 || len(claim.Adopted) != 0 || len(claim.Retired) != 0 {
-			t.Fatalf("refused claim of %q = %+v, want nothing applied", runID, claim)
-		}
-		if registry.Owns(runID) {
-			t.Fatalf("the refused run %q was adopted", runID)
+	// Two branches that mint the same run ID own two different runs: a branch
+	// mints its own run IDs from its own counter, so the literal ID is not a
+	// claim on another branch's run.
+	for _, child := range []string{"one", "two"} {
+		if _, err := registry.Register(messaging.DescendantRegistration{
+			ChildID: child, Endpoint: "http://" + child, Generation: "g-" + child,
+			Runs: []messaging.RunClaim{{RunID: "rt_1", Label: "first child"}},
+		}); err != nil {
+			t.Fatalf("%s claims rt_1: %v, want its own namespaced run", child, err)
 		}
 	}
-	// The child itself is not left registered by a refused claim.
-	if _, err := registry.Deregister("one", messaging.DescendantRegistration{}); !errors.Is(err, messaging.ErrTargetUnavailable) {
-		t.Fatalf("deregistering the refused child = %v, want the child never registered", err)
+	for _, child := range []string{"one", "two"} {
+		if owner, ok := registry.Owner(ParentRunKey(child, "rt_1")); !ok || owner != child {
+			t.Fatalf("owner of rt_1 in %s = (%q, %v), want that branch", child, owner, ok)
+		}
+	}
+	if registry.Owns("rt_1") {
+		t.Fatal("a sibling branch's run ID is claimed as a canonical run")
 	}
 }
 
@@ -187,36 +199,15 @@ func TestRegistryExportNarrowsToTheCallersBranch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register second child: %v", err)
 	}
-	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: "asker"}, {RunID: "asker-mate"}, {RunID: "target"}}
+	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: ParentRunKey("one", "asker")}, {RunID: ParentRunKey("two", "target")}}
 
-	exported := runIDsOf(registry.Export(peers, "asker"))
-	if !exported["orchestrator"] || exported["asker"] || exported["asker-mate"] || exported["target"] {
+	exported := runIDsOf(registry.Export(peers, ParentRunKey("one", "asker")))
+	if !exported["orchestrator"] || exported[ParentRunKey("one", "asker")] || exported[ParentRunKey("two", "target")] {
 		t.Fatalf("export to a branch = %v, want this broker's own runs only", exported)
 	}
 	exported = runIDsOf(registry.Export(peers, "orchestrator"))
-	if !exported["orchestrator"] || !exported["asker"] || !exported["target"] {
+	if !exported["orchestrator"] || !exported[ParentRunKey("one", "asker")] || !exported[ParentRunKey("two", "target")] {
 		t.Fatalf("export to this broker's own caller = %v, want every owned descendant", exported)
-	}
-}
-
-// TestRegistryExportLeavesTheOwningsBranchItsCanonicalSupervisor pins the
-// supervisor alias: a branch's supervisor registers at its parent under the
-// branch-namespaced key, so an export that returned the run to the owning
-// branch's own caller would hand it a phantom remote peer beside the canonical
-// run it already lists locally.
-func TestRegistryExportLeavesTheOwningsBranchItsCanonicalSupervisor(t *testing.T) {
-	registry := NewRegistry()
-	if _, err := registry.Register(messaging.DescendantRegistration{
-		ChildID: "one", Endpoint: "http://one", Generation: "g1",
-		Runs: []messaging.RunClaim{{RunID: messaging.SupervisorRunID}},
-	}); err != nil {
-		t.Fatalf("register child: %v", err)
-	}
-	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: ParentRunKey("one", messaging.SupervisorRunID)}}
-
-	exported := runIDsOf(registry.Export(peers, ParentRunKey("one", messaging.SupervisorRunID)))
-	if !exported["orchestrator"] || exported["supervisor@one"] {
-		t.Fatalf("export to the owning branch = %v, want no alias of its own supervisor", exported)
 	}
 }
 
@@ -240,7 +231,7 @@ func TestRegistryHopsWithTheCredentialTheChildRegistered(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register child: %v", err)
 	}
-	hop, ok := registry.Hop("run-a")
+	hop, ok := registry.Hop(ParentRunKey("one", "run-a"))
 	if !ok || hop.Token != "tok-1" {
 		t.Fatalf("Hop = (%+v, %v), want the registered credential", hop, ok)
 	}
@@ -250,7 +241,7 @@ func TestRegistryHopsWithTheCredentialTheChildRegistered(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("re-register child: %v", err)
 	}
-	if hop, ok := registry.Hop("run-a"); !ok || hop.Token != "tok-2" {
+	if hop, ok := registry.Hop(ParentRunKey("one", "run-a")); !ok || hop.Token != "tok-2" {
 		t.Fatalf("Hop after a rotated credential = (%+v, %v), want tok-2", hop, ok)
 	}
 	if _, err := registry.Deregister("one", messaging.DescendantRegistration{
@@ -259,7 +250,28 @@ func TestRegistryHopsWithTheCredentialTheChildRegistered(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
-	if _, ok := registry.Hop("run-a"); ok {
+	if _, ok := registry.Hop(ParentRunKey("one", "run-a")); ok {
 		t.Fatal("the deregistered child still routes its run")
+	}
+}
+
+// TestRegistryExportLeavesTheOwningsBranchItsCanonicalSupervisor pins the
+// export rule for the branch's own supervisor alias: the namespaced alias is
+// the parent's address for the branch's supervisor, and the branch that owns it
+// already lists the run canonically, so re-exporting the alias would hand the
+// branch a duplicate it cannot dedup.
+func TestRegistryExportLeavesTheOwningsBranchItsCanonicalSupervisor(t *testing.T) {
+	registry := NewRegistry()
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID: "one", Endpoint: "http://one", Generation: "g1",
+		Runs: []messaging.RunClaim{{RunID: messaging.SupervisorRunID}},
+	}); err != nil {
+		t.Fatalf("register child: %v", err)
+	}
+	peers := []messaging.Peer{{RunID: "orchestrator"}, {RunID: ParentRunKey("one", messaging.SupervisorRunID)}}
+
+	exported := runIDsOf(registry.Export(peers, ParentRunKey("one", messaging.SupervisorRunID)))
+	if !exported["orchestrator"] || exported[ParentRunKey("one", messaging.SupervisorRunID)] {
+		t.Fatalf("export to the owning branch = %v, want no alias of its own supervisor", exported)
 	}
 }

@@ -117,9 +117,10 @@ type Config struct {
 
 	// BrokerParentToken is the credential the parent link uses in both
 	// directions: it is presented to the parent broker and required from the
-	// child brokers that register with this one's broker. Empty leaves the
-	// parent routes to the loopback, same-user trust the local broker already
-	// runs on.
+	// child brokers that register with this one's broker. Empty leaves this
+	// broker's parent routes unserved: without a credential to check, a
+	// registration from any caller on this machine could replace a live branch's
+	// claim wholesale.
 	BrokerParentToken string
 }
 
@@ -1982,13 +1983,23 @@ func (s *Supervisor) installParentLink() {
 		return
 	}
 	host, _ := os.Hostname()
+	if s.config.BrokerParentURL != "" && s.config.BrokerParentToken == "" {
+		// Fail fast: parent routes refuse every request without a credential,
+		// so a link would retry its registration against a 401 forever. The
+		// misconfiguration surfaces here as one startup error instead.
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: parent broker link disabled: BrokerParentURL is set but BrokerParentToken is empty\n")
+		return
+	}
 	options := parentlink.Options{
 		ParentURL:  s.config.BrokerParentURL,
 		Token:      s.config.BrokerParentToken,
 		Endpoint:   s.brokerURL(),
 		Generation: s.broker.Store().Generation,
 		Runs:       s.parentRunClaims,
-		RetireRun:  func(runID, token string) { s.broker.DeleteRunIfToken(runID, token) },
+		// The relay carries the asker's display name, so the branch that receives
+		// the ask reads the name the asking branch gave it.
+		DisplayName: s.broker.DisplayName,
+		RetireRun:   func(runID, token string) { s.broker.DeleteRunIfToken(runID, token) },
 		// The control socket path plus the host it lives on is this supervisor's
 		// stable identity: a restart comes back under the same child ID and
 		// reclaims its runs, and a same-path branch on another host stays distinct.
@@ -2000,12 +2011,8 @@ func (s *Supervisor) installParentLink() {
 		return
 	}
 	s.parentLink = link
+	s.broker.InstallParentLink(link, s.config.BrokerParentToken, link.RunChanged)
 	s.broker.SetMessenger(link)
-	// The credential goes first, so the parent routes never serve without it:
-	// the broker is already serving HTTP here.
-	s.broker.SetParentLinkToken(s.config.BrokerParentToken)
-	s.broker.SetParentLink(link)
-	s.broker.SetRunObserver(link.RunChanged)
 	if options.ParentURL == "" {
 		return
 	}
