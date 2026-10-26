@@ -878,7 +878,7 @@ See [loop.md](loop.md) for how exit codes interact with multi-phase loops.
 ## Environment Variables
 
 - `AVENOR_OPENCODE_URL` — Default server URL if `--server-url` not set (only consulted for subprocess discovery)
-- `AVENOR_PARENT_BROKER_TOKEN` — Parent-link credential consumed by `avenor stable --broker-parent-url`; prefer this over `--broker-parent-token`
+- `AVENOR_PARENT_BROKER_TOKEN` — Parent-link credential consumed by `avenor stable` on both sides of a parent link; required with `--broker-parent-url`, and a credential without a URL runs the broker as the tree's parent broker. Prefer this over `--broker-parent-token`
 - `MCP_AUTH_TOKEN` — Bearer token for HTTP MCP server if `--auth-token` not set
 - `OPENCODE_CONFIG_DIR` — Directory to search for opencode config; defaults to `~/.config/opencode/`
 
