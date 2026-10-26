@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,7 +256,7 @@ func TestParentRegisterRefusesARunTheBrokerOwns(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("register claiming a run the broker owns = %d, want 409", status)
 	}
-	if _, ok := b.RunToken("web"); !ok {
+	if _, ok := b.runToken("web"); !ok {
 		t.Fatal("the owned run lost its credential to the refused claim")
 	}
 }
@@ -360,6 +361,7 @@ func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T
 	if err != nil {
 		t.Fatalf("marshal registration: %v", err)
 	}
+
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
@@ -385,10 +387,10 @@ func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T
 }
 
 // TestParentRegisterFiresTheRunObserverOnlyWhenTheSetChanged pins the handler's
-// observer rule: a claim that adopted or retired a run notifies the run
-// observer, and a refresh that re-registers the runs the child already claimed
-// leaves the observer alone — an idle branch's periodic re-registration must
-// not re-publish the parent's peer set.
+// observer rule: no registration outcome notifies the run observer — adopted
+// and retired runs are descendant-only claims the broker's own run set never
+// held, so an idle branch's registration (or its periodic refresh) never
+// publishes the parent's peer set.
 func TestParentRegisterFiresTheRunObserverOnlyWhenTheSetChanged(t *testing.T) {
 	raw := func(runID string) []byte {
 		body, err := json.Marshal(map[string]any{
@@ -422,14 +424,14 @@ func TestParentRegisterFiresTheRunObserverOnlyWhenTheSetChanged(t *testing.T) {
 		return b, &fired
 	}
 
-	t.Run("a claim that adopted a run fires the observer", func(t *testing.T) {
+	t.Run("a claim that adopted a run does not fire the observer", func(t *testing.T) {
 		b, fired := start(t, true)
 		status, _ := postParentLink(t, b.Addr(), string(raw("remote-run")), "")
 		if status != http.StatusOK {
 			t.Fatalf("registration = %d, want 200", status)
 		}
-		if *fired == 0 {
-			t.Fatal("an adopting registration did not notify the run observer")
+		if *fired != 0 {
+			t.Fatalf("an adopting registration notified the run observer %d times", *fired)
 		}
 	})
 
@@ -443,6 +445,29 @@ func TestParentRegisterFiresTheRunObserverOnlyWhenTheSetChanged(t *testing.T) {
 			t.Fatalf("an unchanged re-registration notified the run observer %d times", *fired)
 		}
 	})
+}
+
+// TestParentRegisterRefusesAnOversizeBody pins the request-body cap the parent
+// routes share with withAuth: a registration whose body exceeds the cap is
+// refused before the registry is consulted, and no claim is adopted.
+func TestParentRegisterRefusesAnOversizeBody(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	b.SetParentLink(&parentLinkStub{})
+
+	claim := `{"run_id":"remote-run","label":"remote","token":"t"},`
+	oversize := `{"child_id":"child-1","endpoint":"http://child:1234","generation":"gen-1","runs":[` +
+		strings.Repeat(claim, 40000) + `]}`
+	status, _ := postParentLink(t, b.Addr(), oversize, "")
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize registration = %d, want 413", status)
+	}
+	if b.GetRun("remote-run") != nil {
+		t.Fatal("a refused registration adopted the run")
+	}
 }
 
 // TestRelayRefusesATargetTheCallerDidNotAuthenticate pins the relay's target
