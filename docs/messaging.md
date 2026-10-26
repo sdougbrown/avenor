@@ -10,11 +10,7 @@ transport carries it.
 
 | Package | Role |
 |---|---|
-<<<<<<< HEAD
 | `internal/messaging` | Leaf contract: request/result types, the `Transport` and `Messenger` interfaces, the outcome vocabulary, the v1 wire error classes, the message-ID minter. Depends on the standard library only. |
-=======
-| `internal/messaging` | Leaf contract: request/result types, the `Transport` interface, the outcome vocabulary, the v1 wire error classes, the message-ID minter. Depends on the standard library only. |
->>>>>>> ba1e6a0 (📝 Drop the removed AskRoute seam from the messaging doc)
 | `internal/messaging/askstore` | Ask state: admission, edges, terminal fences, pruning and generation rotation, over an optional delivery backend. |
 | `internal/messaging/askclient` | The single Go ask client. Owns send→wait→withdraw ordering and renders results for the tool surfaces. |
 | `internal/messaging/inprocess` | Runs the transport in the same process, over the store. |
@@ -252,6 +248,7 @@ whose generation no view can pin, so an ordinary deregistration no-ops forever.
 For that case the operator posts `{"child_id": "<old child>", "force": true}`
 instead. A forced deregistration skips the generation check, retires every claim
 the dead child holds, and reports the retired run count; the branch then
-re-registers under its new identity and reclaims the runs. The forced variant requires a configured parent-link token:
+re-registers under its new identity and reclaims the runs.
+The forced variant requires a configured parent-link token:
 the same credential the ordinary one accepts, and a link with no token
 configured refuses the force outright.
