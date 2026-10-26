@@ -204,15 +204,23 @@ func TestLocalMessagingSeamAnswersAskTargetLookup(t *testing.T) {
 
 // seamPeerSource overrides only peer listing, so a test can put a peer the
 // broker does not own in front of the /sessions listing while every other
-// operation stays local.
+// operation stays local. Its generation closure reports the local endpoint's
+// current generation at call time, so a listing that resets the store
+// mid-call resolves the post-reset generation instead of an empty or stale
+// one.
 type seamPeerSource struct {
 	messaging.Seam
-	peers []messaging.Peer
-	err   error
+	peers      []messaging.Peer
+	err        error
+	generation func() string
+	before     func()
 }
 
 func (s seamPeerSource) Peers(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
-	return messaging.PeersResult{Peers: s.peers}, s.err
+	if s.before != nil {
+		s.before()
+	}
+	return messaging.PeersResult{Peers: s.peers, Generation: s.generation()}, s.err
 }
 
 // TestSessionsListsSeamPeersForHTTPChildren pins that the authenticated
@@ -234,8 +242,9 @@ func TestSessionsListsSeamPeersForHTTPChildren(t *testing.T) {
 		t.Fatalf("remote session: %v", err)
 	}
 	b.SetMessenger(seamPeerSource{
-		Seam:  b.LocalMessenger(),
-		peers: append(local.Peers, messaging.Peer{RunID: "remote-peer", Session: remoteSession}),
+		Seam:       b.LocalMessenger(),
+		peers:      append(local.Peers, messaging.Peer{RunID: "remote-peer", Session: remoteSession}),
+		generation: func() string { return b.Store().Generation() },
 	})
 	t.Cleanup(func() { b.SetMessenger(nil) })
 
@@ -292,9 +301,10 @@ func TestSessionsListsSeamPeersForHTTPChildren(t *testing.T) {
 func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
 	b, senderToken, _ := startSeamBroker(t)
 	b.SetMessenger(seamPeerSource{
-		Seam:  b.LocalMessenger(),
-		peers: []messaging.Peer{{RunID: "only-peer"}},
-		err:   errors.New("parent link down"),
+		Seam:       b.LocalMessenger(),
+		peers:      []messaging.Peer{{RunID: "only-peer"}},
+		err:        errors.New("parent link down"),
+		generation: func() string { return b.Store().Generation() },
 	})
 	t.Cleanup(func() { b.SetMessenger(nil) })
 
@@ -328,6 +338,48 @@ func TestSessionsReportsAnIncompletePeerListing(t *testing.T) {
 	var record messaging.PeerRecord
 	if err := json.Unmarshal(listed.Peers[0].Session, &record); err != nil || record.RunID != "only-peer" {
 		t.Fatalf("partial peer session = %s (%v), want only-peer", listed.Peers[0].Session, err)
+	}
+}
+
+// TestSessionsReportsTheListingGeneration pins that the /sessions
+// generation is the one the peer listing resolved, not the one the handler
+// read before it asked: a seam that resets the store while listing reports
+// the post-reset generation.
+func TestSessionsReportsTheListingGeneration(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+
+	pre := b.Store().Generation()
+	var listed string
+	b.SetMessenger(seamPeerSource{
+		Seam:  b.LocalMessenger(),
+		peers: []messaging.Peer{{RunID: "only-peer"}},
+		generation: func() string {
+			listed = b.Store().Generation()
+			return listed
+		},
+		before: func() { b.Store().Reset() },
+	})
+	t.Cleanup(func() { b.SetMessenger(nil) })
+
+	resp, err := getSessions(b.Addr(), "sender", senderToken)
+	if err != nil {
+		t.Fatalf("sessions: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("sessions status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Generation string `json:"generation"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if listed == "" || listed == pre {
+		t.Fatalf("the seam resolved generation %q, want the post-reset generation distinct from %q", listed, pre)
+	}
+	if body.Generation != listed {
+		t.Fatalf("sessions generation = %q, want the listing's %q", body.Generation, listed)
 	}
 }
 

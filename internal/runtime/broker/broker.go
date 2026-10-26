@@ -1232,9 +1232,8 @@ func (b *Broker) handleCancelMessage(w http.ResponseWriter, r *http.Request) {
 // carries peers_error beside whatever it did return, so a partial list never
 // reads as a complete one.
 func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
-	generation := b.store.Generation()
 	peers, listingErr := b.seam().Peers(r.Context(), messaging.PeersRequest{
-		Generation: generation,
+		Generation: b.store.Generation(),
 	})
 
 	sessions := make([]SessionInfo, 0, len(peers.Peers))
@@ -1257,7 +1256,7 @@ func (b *Broker) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 	body := map[string]any{
 		"sessions":           sessions,
-		"generation":         generation,
+		"generation":         peers.Generation,
 		"messaging_protocol": messaging.ProtocolVersion,
 	}
 	if listingErr != nil {
