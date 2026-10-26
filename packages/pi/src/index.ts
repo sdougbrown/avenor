@@ -806,6 +806,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       recordDeliveryError(run, run.idleSend.attempts)
     }
 
+    /** Hand an unconfirmed idle send back to the poll: clear the in-flight
+     * mark and latch the budget when it is spent. Shared by the poll-tick
+     * timeout and the compaction hand-back, which must stay in lockstep. */
+    function rearmIdleSend(run: TrackedRun): void {
+      const idle = run.idleSend
+      if (!idle) return
+      idle.inFlight = false
+      idle.sentAt = undefined
+      if (idle.attempts >= MAX_IDLE_SEND_ATTEMPTS) capIdleSend(run)
+    }
+
     function clearPollingErrors(): void {
       pollingErrorCount = 0
       pollingErrors.length = 0
@@ -1190,12 +1201,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // than skipping the run forever with its notice unread.
           const idle = run.idleSend
           if (idle?.inFlight && idle.sentAt !== undefined && Date.now() - idle.sentAt >= idleSendTimeoutMs) {
-            idle.inFlight = false
-            idle.sentAt = undefined
+            rearmIdleSend(run)
             widgetDirty = true
-            // Once the retry budget is spent, stop sending and leave the notice
-            // for settlement; surface the delivery failure on its own channel.
-            if (idle.attempts >= MAX_IDLE_SEND_ATTEMPTS) capIdleSend(run)
           }
           // An idle send is already in flight for this run: the send's own
           // resolution owns deletion or re-queueing.
@@ -1720,23 +1727,27 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // have landed when the user message comes back here, so the matching
     // notice and its tracked run are cleared now rather than optimistically at
     // send time. The match is on the notice text alone: a re-arm or compaction
-    // may have cleared the in-flight flag while this prompt was still queued,
-    // and nothing else sends this exact text. A run whose result was delivered
-    // while the send was in flight is already gone, and nothing matches on its
-    // behalf.
+    // may have cleared the in-flight flag while this prompt was still queued.
+    // Run ids are only unique per
+    // supervisor, so identical notice text can name runs in two namespaces;
+    // candidates already sending win, then any run this notice has actually
+    // been sent for, and a run whose notice was never sent is never deleted —
+    // one landed prompt cannot confirm a sibling's unsent notice. A run whose
+    // result was delivered while the send was in flight is already gone, and
+    // nothing matches on its behalf.
     pi.on('message_end', event => {
       if (event.message?.role !== 'user') return
       const text = extractTurnText([event.message]).text
       if (text === '') return
-      let confirmed = false
-      for (const [key, run] of trackedRuns) {
-        if (run.pendingNotice?.text !== text) continue
+      const matches = [...trackedRuns].filter(([, run]) => run.pendingNotice?.text === text)
+      let targets = matches.filter(([, run]) => run.idleSend?.inFlight)
+      if (targets.length === 0) targets = matches.filter(([, run]) => run.idleSend !== undefined)
+      for (const [key, run] of targets) {
         run.pendingNotice = undefined
         run.idleSend = undefined
         trackedRuns.delete(key)
-        confirmed = true
       }
-      if (confirmed) updateWidget(lastStatusEntries)
+      if (targets.length > 0) updateWidget(lastStatusEntries)
     })
 
     pi.on('session_before_compact', () => {
@@ -1757,11 +1768,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         // the prompt; re-arm it so the run's ask is delivered again.
         if (run.permissionNotified && run.lastStatus?.pending_permission) run.permissionNotified = false
         if (!run.idleSend) continue
-        run.idleSend.inFlight = false
-        run.idleSend.sentAt = undefined
-        // Compaction can end the in-flight send before its timeout runs: latch
-        // the budget here too, or the next idle tick would send past the cap.
-        if (run.idleSend.attempts >= MAX_IDLE_SEND_ATTEMPTS) capIdleSend(run)
+        rearmIdleSend(run)
       }
       // A re-armed permission notice needs a poll tick even when no completion
       // notice is pending.

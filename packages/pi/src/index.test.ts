@@ -2057,6 +2057,63 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('does not let one landed prompt confirm a colliding sibling without a send', async () => {
+    const A = '/tmp/confirm-collision-a.sock'
+    const B = '/tmp/confirm-collision-b.sock'
+    let aDone = false
+    let bDone = false
+    // Identical run id, label, and output: the notice texts collide exactly.
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      const done = args.supervisorId === A ? aDone : bDone
+      return {
+        run_id: 'rt_1',
+        label: 'worker',
+        status: done ? 'done' : 'running',
+        runtime_id: 'rt_1',
+        ...(done && { final_output: 'same answer' }),
+      }
+    })
+    const spawnTool = mock(async (args: { supervisorId?: string }) => ({
+      run_id: 'rt_1',
+      label: 'worker',
+      supervisor_id: args.supervisorId,
+      runtime_id: 'rt_1',
+    }))
+    const h = await createMultiSupervisorHarness({ statusTool, spawnTool })
+
+    const spawnA = { agent: 'explore', label: 'worker', supervisor_id: A, wait: false }
+    const spawnB = { agent: 'explore', label: 'worker', supervisor_id: B, wait: false }
+
+    // A finishes while the session is idle: its notice is sent as a prompt.
+    await h.registeredTools.avenor_spawn.execute('t1', spawnA, undefined, undefined, h.ctx)
+    aDone = true
+    await waitFor(() => h.sendUserMessage.mock.calls.some(([t]) => String(t).includes('same answer')))
+
+    // B finishes while the session is busy: its notice queues, never sent.
+    h.ctx.isIdle = () => false
+    await h.registeredTools.avenor_spawn.execute('t2', spawnB, undefined, undefined, h.ctx)
+    bDone = true
+    await h.waitPollMatching(payload => payload.entries.filter((e: { status: string }) => e.status === 'done').length === 2)
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:2'))
+
+    // The one landed prompt confirms only the run whose send is in flight; the
+    // colliding sibling's unsent notice survives.
+    const sent = h.sendUserMessage.mock.calls.map(([t]) => String(t)).find(t => t.includes('same answer'))!
+    await confirmDelivery(h, sent)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+
+    // The surviving notice is still delivered at settlement.
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled?.entries).toHaveLength(1)
+    expect(String(settled?.entries[0]?.content)).toContain('same answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('does not consume a colliding label without an explicit supervisor', async () => {
     const A = '/tmp/queue-collision-a.sock'
     const B = '/tmp/queue-collision-b.sock'
