@@ -74,7 +74,8 @@ import {
   type WatchRunRef,
 } from './watch.js'
 import type { TrackedRun, RunStatusEntry } from './types.js'
-import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji, decideCompletion } from './types.js'
+import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji } from './types.js'
+import { CompletionQueue, type CompletionNotice } from './completion-queue.js'
 import { countNestedRuns } from './nested-count.js'
 import { resolveAgentProfile } from './agent-profile.js'
 import {
@@ -411,6 +412,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let pollingErrorCount = 0
     const pollingErrors: PollErrorPayload[] = []
     let lastStatusEntries: RunStatusEntry[] = []
+    const completionQueue = new CompletionQueue()
+    let sessionGeneration = 0
     // Suppress last-turn writes after a closed-socket failure until the default
     // binding is evicted by disposeHostProvider/disposeHostProviders, or a new
     // session starts. Evicting other supervisors must not reset this flag.
@@ -777,6 +780,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       })
     }
 
+    function findTrackedByLabel(label: string, supervisorId?: string): TrackedRun | undefined {
+      let match: TrackedRun | undefined
+      for (const run of trackedRuns.values()) {
+        if (supervisorId !== undefined && run.supervisorId !== supervisorId) continue
+        if (run.label !== label) continue
+        if (match) return undefined // ambiguous label
+        match = run
+      }
+      return match
+    }
+
     /**
      * Look a run up in the per-supervisor tracking namespace. When a
      * supervisor is supplied, resolve exactly. Without one, prefer the
@@ -784,10 +798,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * unambiguous across supervisors. Duplicate run ids across supervisors
      * without an explicit supervisor return undefined so callers never bind
      * flags or telemetry to the wrong supervisor's run.
+     *
+     * A label is only a resolution input: canonical identity remains the
+     * supervisor namespace plus the public run id. Labels resolve within the
+     * requested supervisor, or across supervisors only when unique.
      */
     function getTrackedRun(runId: string, supervisorId?: string): TrackedRun | undefined {
       if (supervisorId !== undefined) {
         return trackedRuns.get(trackedRunKey(supervisorId, runId))
+          ?? findTrackedByLabel(runId, supervisorId)
       }
       const singleton = trackedRuns.get(trackedRunKey(undefined, runId))
       if (singleton) return singleton
@@ -797,7 +816,23 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (match) return undefined // ambiguous without a supervisor
         match = run
       }
-      return match
+      if (match) return match
+      return findTrackedByLabel(runId)
+    }
+
+    /** Resolve the tracked run a successful result belongs to from the
+     * canonical run id the result tool reports, accepting a runtime-id alias
+     * for the label-resolved run. */
+    function reconcileResultRun(
+      tracked: TrackedRun | undefined,
+      result: { run_id?: string },
+      supervisorId?: string,
+    ): TrackedRun | undefined {
+      const runId = result.run_id
+      if (!runId) return tracked
+      if (tracked && (tracked.runId === runId || tracked.runtimeId === runId)) return tracked
+      const namespace = tracked?.supervisorId ?? supervisorId
+      return trackedRuns.get(trackedRunKey(namespace, runId))
     }
 
     async function resolveFinalOutput(run: Pick<TrackedRun, 'runId' | 'supervisorId'>, status: StatusResult): Promise<string | undefined> {
@@ -812,6 +847,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         return finalOutputPreview(inspected.status, inspected.snapshot)
       } catch {
         return undefined
+      }
+    }
+
+    async function sendCompletionNotice(notice: CompletionNotice): Promise<boolean> {
+      try {
+        await Promise.resolve(pi.sendUserMessage(notice.text, { deliverAs: 'followUp' }))
+        return true
+      } catch (err) {
+        console.error('avenor tick: sendUserMessage failed', err)
+        return false
       }
     }
 
@@ -950,7 +995,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       if (!sessionCtx) return
 
       const lines = renderStatusLines(entries)
+      const unread = completionQueue.size
       const errorSuffix = pollingErrorCount > 0 ? `errors:${pollingErrorCount}` : ''
+      const unreadSuffix = unread > 0 ? `unread:${unread}` : ''
       if (lines.length > 0) {
         sessionCtx.ui.setWidget('avenor-status', lines)
         const statusStr = lines.map(line => line.slice(0, 60)).join('  ')
@@ -962,12 +1009,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const total = lines.length + nestedTotal
         const statusWithTotal = [
           nestedTotal > 0 ? `${statusStr}  total:${total}` : statusStr,
+          unreadSuffix,
           errorSuffix,
         ].filter(Boolean).join('  ')
         sessionCtx.ui.setStatus('avenor', statusWithTotal)
       } else {
         sessionCtx.ui.setWidget('avenor-status', undefined)
-        sessionCtx.ui.setStatus('avenor', errorSuffix)
+        sessionCtx.ui.setStatus('avenor', [unreadSuffix, errorSuffix].filter(Boolean).join('  '))
       }
     }
 
@@ -992,6 +1040,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (!pollingActive || generation !== pollingGeneration) return
 
         updateWidget(entries)
+        let widgetDirty = false
+        const sessionAtPollStart = sessionGeneration
 
         // Publish a copied, frozen payload so subscribers cannot mutate status entries.
         emitAvenorEvent(
@@ -1030,50 +1080,86 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
 
           if (isTerminalStatus(entry.status)) {
-            const action = decideCompletion(run)
-            if (action === 'skip') {
-              // Result is spoken for: either avenor_result is actively waiting
-              // (blocking — it will deliver the result and set consumed when it
-              // returns) or it already returned successfully (consumed). In the
-              // consumed case the automatic message is suppressed but the run
-              // is no longer needed, so clean it up here.
-              if (run.consumed) trackedRuns.delete(entryKey)
+            if (run.consumed) {
+              completionQueue.delete(entryKey)
+              trackedRuns.delete(entryKey)
+              widgetDirty = true
               continue
             }
-            const wasTerminalBefore = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
-            if (!wasTerminalBefore) {
-              sessionCtx?.ui.notify(
-                `Sub-agent "${entry.label}" finished: ${entry.status}`,
-                entry.status === 'done' ? 'info' : 'warning',
-              )
-            }
-            // Deliver the completion on this same terminal tick rather than
-            // deferring to a later cycle, so a run that is the last active one
-            // is never left dangling when polling stops.
+            // Resolve the output before committing any notice. A concurrent
+            // avenor_result can consume and remove the run while this await is
+            // in flight, so revalidate the tracked identity afterwards.
             const finalOutput = await resolveFinalOutput(run, run.lastStatus)
-            try {
-              pi.sendUserMessage(
-                buildCompletionText({ runId: run.runId, label: run.label }, run.lastStatus!, finalOutput),
-                { deliverAs: 'followUp' },
-              )
-            } catch (err) {
-              console.error('avenor tick: sendUserMessage failed', err)
+            if (sessionAtPollStart !== sessionGeneration) continue
+            if (trackedRuns.get(entryKey) !== run) continue
+            if (run.consumed) {
+              completionQueue.delete(entryKey)
+              trackedRuns.delete(entryKey)
+              widgetDirty = true
+              continue
             }
-            emitAvenorEvent(
-              pi.events,
-              CHANNEL_RUN_TERMINAL,
-              createRunTerminalPayload({
-                runId: entry.runId,
-                supervisorId: entry.supervisorId,
-                runtimeId: entry.runtimeId,
-                label: entry.label,
-                agent: entry.agent,
-                status: entry.status,
-                nestedCount: entry.nestedCount,
-                backend: entry.backend,
-              }),
-            )
-            trackedRuns.delete(entryKey)
+            if (!run.terminalEventEmitted) {
+              run.terminalEventEmitted = true
+              const wasTerminalBefore = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
+              if (!wasTerminalBefore && !run.blocking) {
+                sessionCtx?.ui.notify(
+                  `Sub-agent "${entry.label}" finished: ${entry.status}`,
+                  entry.status === 'done' ? 'info' : 'warning',
+                )
+              }
+              emitAvenorEvent(
+                pi.events,
+                CHANNEL_RUN_TERMINAL,
+                createRunTerminalPayload({
+                  runId: entry.runId,
+                  supervisorId: entry.supervisorId,
+                  runtimeId: entry.runtimeId,
+                  label: entry.label,
+                  agent: entry.agent,
+                  status: entry.status,
+                  nestedCount: entry.nestedCount,
+                  backend: entry.backend,
+                }),
+              )
+            }
+
+            const notice: CompletionNotice = {
+              key: entryKey,
+              runId: run.runId,
+              supervisorId: run.supervisorId,
+              runtimeId: entry.runtimeId,
+              label: run.label,
+              agent: run.agent,
+              status: entry.status as CompletionNotice['status'],
+              text: buildCompletionText({ runId: run.runId, label: run.label }, run.lastStatus!, finalOutput),
+            }
+
+            // A blocking result call owns delivery while it is in flight. Keep
+            // the notice unread so a non-ready/aborted call leaves it intact;
+            // a successful result removes it.
+            if (run.blocking) {
+              if (!completionQueue.has(entryKey)) {
+                completionQueue.set(notice)
+                widgetDirty = true
+              }
+              continue
+            }
+
+            if (sessionCtx?.isIdle() === true) {
+              if (await sendCompletionNotice(notice)) {
+                if (sessionAtPollStart === sessionGeneration) {
+                  completionQueue.delete(entryKey)
+                  trackedRuns.delete(entryKey)
+                  widgetDirty = true
+                }
+              } else {
+                completionQueue.set(notice)
+                widgetDirty = true
+              }
+            } else if (!completionQueue.has(entryKey)) {
+              completionQueue.set(notice)
+              widgetDirty = true
+            }
           } else if (
             entry.pendingPermission &&
             !run.blocking &&
@@ -1094,6 +1180,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             run.permissionNotified = false
           }
         }
+        if (widgetDirty) updateWidget(entries)
 
         const hasActive = entries.some(entry => !isTerminalStatus(entry.status))
         if (hasActive && pollingActive && generation === pollingGeneration) {
@@ -1480,6 +1567,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
     pi.on('session_start', async (_event, ctx) => {
       sessionCtx = ctx
+      sessionGeneration++
+      completionQueue.clear()
       lastStatusEntries = []
       lastTurnSocketClosed = false
       pollingErrorCount = 0
@@ -1497,6 +1586,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       disposeHostProviders()
       hostPendingAsks.clear()
       subAgentPendingAsks.clear()
+      sessionGeneration++
+      completionQueue.clear()
       await stopPolling()
       // Release any still-blocking waiters so their tool calls return instead
       // of parking on a session that no longer exists.
@@ -1529,6 +1620,54 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           content: `Active sub-agents:\n${lines.join('\n')}`,
           display: true,
         },
+      }
+    })
+
+    pi.on('agent_before_settle', async event => {
+      if (isSubAgentBrokerMode) return
+      // Escape/abort and errors must not force a continuation. Notices stay
+      // unread for a later safe settlement.
+      if (event.outcome !== 'completed') return
+
+      const generation = sessionGeneration
+      const deliverable: CompletionNotice[] = []
+      let pruned = false
+      for (const notice of completionQueue.entries()) {
+        if (generation !== sessionGeneration) return
+        const run = trackedRuns.get(notice.key)
+        if (!run || run.consumed) {
+          completionQueue.delete(notice.key)
+          pruned = true
+          continue
+        }
+        deliverable.push(notice)
+      }
+      if (deliverable.length === 0) {
+        if (pruned) updateWidget(lastStatusEntries)
+        return
+      }
+
+      for (const notice of deliverable) {
+        completionQueue.delete(notice.key)
+        trackedRuns.delete(notice.key)
+      }
+      updateWidget(lastStatusEntries)
+      return {
+        entries: [
+          ...event.entries,
+          ...deliverable.map(notice => ({
+            type: 'custom_message' as const,
+            customType: 'avenor-completion',
+            content: notice.text,
+            display: true,
+            details: {
+              run_id: notice.runId,
+              supervisor_id: notice.supervisorId,
+              status: notice.status,
+            },
+          })),
+        ],
+        continue: true,
       }
     })
 
@@ -1695,7 +1834,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               }
             }
           } else {
-            trackedRuns.delete(trackedRunKey(supervisorId, result.run_id))
+            const runKey = trackedRunKey(supervisorId, result.run_id)
+            completionQueue.delete(runKey)
+            trackedRuns.delete(runKey)
             return {
               content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
               details: {
@@ -1737,20 +1878,27 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
         if (isTerminalStatus(status.status)) {
           const finalOutput = await resolveFinalOutput({ runId: result.run_id, supervisorId }, status)
-          emitAvenorEvent(
-            pi.events,
-            CHANNEL_RUN_TERMINAL,
-            createRunTerminalPayload({
-              runId: result.run_id,
-              supervisorId,
-              runtimeId: status.runtime_id ?? runRef.runtimeId,
-              label,
-              agent: params.agent,
-              status: status.status,
-              backend: status.backend,
-            }),
-          )
-          trackedRuns.delete(trackedRunKey(supervisorId, result.run_id))
+          const runKey = trackedRunKey(supervisorId, result.run_id)
+          const tracked = trackedRuns.get(runKey)
+          if (!tracked?.terminalEventEmitted) {
+            if (tracked) tracked.terminalEventEmitted = true
+            emitAvenorEvent(
+              pi.events,
+              CHANNEL_RUN_TERMINAL,
+              createRunTerminalPayload({
+                runId: result.run_id,
+                supervisorId,
+                runtimeId: status.runtime_id ?? runRef.runtimeId,
+                label,
+                agent: params.agent,
+                status: status.status,
+                backend: status.backend,
+              }),
+            )
+          }
+          completionQueue.delete(runKey)
+          trackedRuns.delete(runKey)
+          updateWidget(lastStatusEntries)
           return {
             content: [{ type: 'text', text: buildCompletionText({ runId: result.run_id, label }, status, finalOutput) }],
             details: {
@@ -1847,6 +1995,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const previousBlocking = tracked?.blocking
         if (tracked) tracked.blocking = true
         let completed = false
+        let resultRun = tracked
 
         // Key on the resolved run (getTrackedRun may have matched by label or
         // filled in a supervisor) so the waiter's own stopping point is
@@ -1874,28 +2023,55 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             result = await resultAfterInterrupt(params, blockingWait.stopped, tracked)
           }
           completed = result.ready
+          // The result tool resolves labels and reports the canonical run id.
+          // Reconcile against that id even when the caller only passed a label.
+          resultRun = reconcileResultRun(tracked, result, params.supervisor_id)
           if (completed) {
             // Only mark the run consumed (and suppress the automatic completion)
             // when the result was actually delivered. If this call was
             // interrupted — aborted by signal, timed out, or still waiting —
             // the caller did not receive the output, so leave `consumed` unset
             // and let the polling tick deliver the completion later.
-            if (tracked) tracked.consumed = true
-            emitAvenorEvent(
-              pi.events,
-              CHANNEL_RUN_TERMINAL,
-              createRunTerminalPayload({
-                runId: params.run_id,
-                supervisorId: tracked?.supervisorId ?? params.supervisor_id,
-                runtimeId: tracked?.runtimeId ?? result.runtime_id,
-                label: tracked?.label ?? result.label ?? params.run_id,
-                agent: tracked?.agent ?? 'unknown',
-                status: result.status ?? 'done',
-              }),
-            )
-            if (tracked) trackedRuns.delete(trackedRunKey(tracked.supervisorId, tracked.runId))
-          } else if (tracked && result.status === 'waiting') {
-            tracked.permissionNotified = true
+            if (resultRun && !resultRun.terminalEventEmitted) {
+              resultRun.terminalEventEmitted = true
+              emitAvenorEvent(
+                pi.events,
+                CHANNEL_RUN_TERMINAL,
+                createRunTerminalPayload({
+                  runId: resultRun.runId,
+                  supervisorId: resultRun.supervisorId ?? params.supervisor_id,
+                  runtimeId: resultRun.runtimeId ?? result.runtime_id,
+                  label: resultRun.label ?? result.label ?? params.run_id,
+                  agent: resultRun.agent ?? 'unknown',
+                  status: result.status ?? 'done',
+                }),
+              )
+            } else if (!resultRun) {
+              emitAvenorEvent(
+                pi.events,
+                CHANNEL_RUN_TERMINAL,
+                createRunTerminalPayload({
+                  runId: result.run_id ?? params.run_id,
+                  supervisorId: params.supervisor_id,
+                  runtimeId: result.runtime_id,
+                  label: result.label ?? params.run_id,
+                  agent: 'unknown',
+                  status: result.status ?? 'done',
+                }),
+              )
+            }
+            if (resultRun) {
+              resultRun.consumed = true
+              completionQueue.delete(trackedRunKey(resultRun.supervisorId, resultRun.runId))
+              trackedRuns.delete(trackedRunKey(resultRun.supervisorId, resultRun.runId))
+              updateWidget(lastStatusEntries)
+            } else if (tracked && trackedRuns.get(trackedRunKey(tracked.supervisorId, tracked.runId)) === tracked) {
+              // The result could not be bound to a tracked run unambiguously;
+              // release the blocking flag so polling may deliver it later.
+              tracked.blocking = previousBlocking ?? false
+            }
+          } else if (resultRun && result.status === 'waiting') {
+            resultRun.permissionNotified = true
           }
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
@@ -1903,8 +2079,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
         } finally {
           blockingWait?.dispose()
-          if (!completed && tracked && getTrackedRun(params.run_id, params.supervisor_id) === tracked) {
-            tracked.blocking = previousBlocking ?? false
+          const toReset = resultRun ?? tracked
+          if (!completed && toReset && trackedRuns.get(trackedRunKey(toReset.supervisorId, toReset.runId)) === toReset) {
+            toReset.blocking = previousBlocking ?? false
           }
         }
       },
@@ -2124,6 +2301,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             : run.supervisorId === target
           if (matches) {
             trackedRuns.delete(key)
+            completionQueue.delete(key)
             removed++
           }
         }

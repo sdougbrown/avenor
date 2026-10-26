@@ -16,6 +16,8 @@ export interface TrackedRun {
    * the caller. Set only on a successful (non-interrupted) result; suppresses the
    * automatic completion notification without deleting the run. */
   consumed?: boolean
+  /** true once CHANNEL_RUN_TERMINAL has been emitted for this run. */
+  terminalEventEmitted?: boolean
 }
 
 /**
