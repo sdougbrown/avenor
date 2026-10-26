@@ -72,6 +72,15 @@ func TestScrubIdentityEnv(t *testing.T) {
 		want    []string
 	}{
 		{
+			name: "parent broker credential is scrubbed",
+			environ: []string{
+				"AVENOR_PARENT_BROKER_TOKEN=credential",
+				"AVENOR_BROKER_TOKEN=kept",
+				"PATH=/usr/bin",
+			},
+			want: []string{"AVENOR_BROKER_TOKEN=kept", "PATH=/usr/bin"},
+		},
+		{
 			name:    "nil environ",
 			environ: nil,
 			want:    nil,

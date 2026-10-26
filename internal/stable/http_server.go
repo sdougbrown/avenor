@@ -6,8 +6,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -213,6 +216,10 @@ func (s *Supervisor) startHTTPServer(absDir string) (*managedHTTPServer, error) 
 
 	cmd := httpExecCommand("opencode", "serve", "--port", fmt.Sprintf("%d", port))
 	cmd.Dir = absDir
+	// The agent-host child must not inherit the supervisor's environment whole:
+	// it would carry the parent-link credential into a process that only serves
+	// the workspace, the same leak class the runtime launchers close.
+	cmd.Env = runtime.ScrubIdentityEnv(os.Environ())
 	cmd.Stderr = s.stderrWriter()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 

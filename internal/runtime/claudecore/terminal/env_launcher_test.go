@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // printMarkerCmd reports whether the child can still see any of the parent's
@@ -227,5 +229,31 @@ exit 1
 	if !strings.Contains(cmdLine, "exec claude --session-id abc") {
 		t.Errorf("command not found in new-session argv element at index %d (%q). Full log:\n%s",
 			lastCmdIdx, cmdLine, strings.Join(lines, "\n"))
+	}
+}
+
+// The tmux prefix also unsets the parent-link credential: a pane inherits the
+// tmux server's environment, which carries the credential the documented
+// setup way, so the shell-level unset is the only strip point on that path.
+func TestTmuxPrefixUnsetsTheParentCredential(t *testing.T) {
+	args := tmuxNewSessionArgs(StartOptions{
+		Name:    "avenor-test",
+		Dir:     "/tmp/x",
+		Cols:    220,
+		Rows:    50,
+		Command: "exec claude",
+	})
+	shellCmd := args[len(args)-1]
+	// The prefix may span several "unset ..." segments (Claude session vars,
+	// then the shared scrub set); the credential must be unset by one of them.
+	words := strings.Fields(shellCmd)
+	var unset bool
+	for _, w := range words {
+		if strings.TrimSuffix(w, ";") == token.EnvBrokerParentToken {
+			unset = true
+		}
+	}
+	if !unset {
+		t.Fatalf("tmux command = %q, want some unset segment to include %s", shellCmd, token.EnvBrokerParentToken)
 	}
 }

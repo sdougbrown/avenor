@@ -3,6 +3,8 @@ package runtime
 import (
 	"strconv"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // Environment variables that describe the launch a harness child belongs to.
@@ -38,9 +40,11 @@ var identityEnvNames = []string{
 	envParentRunID,
 }
 
-// scrubbedEnvNames is everything a child must not inherit: launch identity plus
-// the test-only switches. Only identityEnvNames is ever emitted.
-var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay)
+// scrubbedEnvNames is everything a child must not inherit: launch identity,
+// the test-only switches, and the parent-link credential — a spawned agent is
+// not the parent broker, so carrying the credential would let it authenticate
+// against parent routes it was never meant to serve.
+var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken)
 
 var identityEnvKeys = func() map[string]struct{} {
 	keys := make(map[string]struct{}, len(scrubbedEnvNames))
@@ -50,12 +54,12 @@ var identityEnvKeys = func() map[string]struct{} {
 	return keys
 }()
 
-// IdentityEnvNames returns every environment name that describes launch
-// identity, including the superseded name that is scrubbed but never emitted.
-// A shell launcher that cannot set its child's environment needs the names to
-// remove inherited values itself.
-func IdentityEnvNames() []string {
-	return append([]string(nil), identityEnvNames...)
+// ScrubbedEnvNames returns every environment name a child must not inherit:
+// launch identity, the test-only switches, and the parent-link credential.
+// A shell launcher that assembles its child's environment by hand unsets
+// these instead of calling ScrubIdentityEnv.
+func ScrubbedEnvNames() []string {
+	return append([]string(nil), scrubbedEnvNames...)
 }
 
 // Launch kinds reported in LaunchProvenance.Kind.
@@ -143,9 +147,11 @@ func LaunchEnv(environ []string, p *LaunchProvenance) []string {
 	return append(ScrubIdentityEnv(environ), p.IdentityEnv()...)
 }
 
-// ScrubIdentityEnv returns environ without inherited launch identity. Matching
-// is on the exact key, so duplicates and bare-key entries are removed too,
-// while near-miss names and every other variable keep their order.
+// ScrubIdentityEnv returns environ without the names a child must not inherit
+// (ScrubbedEnvNames): launch identity, the test-only switches, and the
+// parent-link credential. Matching is on the exact key, so duplicates and
+// bare-key entries are removed too, while near-miss names and every other
+// variable keep their order.
 func ScrubIdentityEnv(environ []string) []string {
 	if len(environ) == 0 {
 		return nil

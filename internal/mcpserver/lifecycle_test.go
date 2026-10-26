@@ -21,6 +21,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 func TestStartSupervisorLeavesStaleSocketForChild(t *testing.T) {
@@ -84,28 +85,60 @@ func TestStartSupervisorOmitsLaunchWrapperPolicyByDefault(t *testing.T) {
 	}
 }
 
-// TestStartSupervisorScrubsTestHookEnv proves the autostarted supervisor child
-// never inherits the control test hooks.
-func TestStartSupervisorScrubsTestHookEnv(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(runtime.EnvTestHooks, "1")
-	t.Setenv(runtime.EnvTestOwnerPublishDelay, "5s")
-	var child *exec.Cmd
-	origExec := execCommand
-	execCommand = func(string, ...string) *exec.Cmd {
-		child = exec.Command("/nonexistent/avenor-test-stub")
-		return child
+// TestSupervisorScrubChildEnv proves the autostarted
+// supervisor child never inherits secrets it must not carry: the control test
+// hooks and the parent-link credential.
+func TestSupervisorScrubChildEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(t *testing.T)
+		scrubbed []string
+	}{
+		{
+			name: "hooks",
+			setup: func(t *testing.T) {
+				t.Setenv(runtime.EnvTestHooks, "1")
+				t.Setenv(runtime.EnvTestOwnerPublishDelay, "5s")
+			},
+			scrubbed: []string{runtime.EnvTestHooks, runtime.EnvTestOwnerPublishDelay},
+		},
+		{
+			name: "parent-token",
+			setup: func(t *testing.T) {
+				t.Setenv(token.EnvBrokerParentToken, "leaked-credential")
+			},
+			scrubbed: []string{token.EnvBrokerParentToken},
+		},
 	}
-	defer func() { execCommand = origExec }()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			tt.setup(t)
+			var child *exec.Cmd
+			origExec := execCommand
+			execCommand = func(string, ...string) *exec.Cmd {
+				child = exec.Command("/nonexistent/avenor-test-stub")
+				return child
+			}
+			t.Cleanup(func() { execCommand = origExec })
 
-	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
-	if child == nil {
-		t.Fatal("startSupervisor never built a child command")
-	}
-	for _, entry := range child.Env {
-		if strings.HasPrefix(entry, runtime.EnvTestHooks+"=") || strings.HasPrefix(entry, runtime.EnvTestOwnerPublishDelay+"=") {
-			t.Fatalf("test hook %q reached the supervisor child environment", entry)
-		}
+			_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+			if child == nil {
+				t.Fatal("startSupervisor never built a child command")
+			}
+			kept := 0
+			for _, entry := range child.Env {
+				for _, name := range tt.scrubbed {
+					if strings.HasPrefix(entry, name+"=") {
+						t.Fatalf("%q reached the supervisor child environment", entry)
+					}
+				}
+				kept++
+			}
+			if kept < 2 {
+				t.Fatalf("child env keeps only %d entries: the scrub dropped the environment", kept)
+			}
+		})
 	}
 }
 
@@ -438,8 +471,8 @@ func TestMCPSupervisorChild(t *testing.T) {
 		return
 	}
 	path := os.Getenv("AVENOR_MCP_SUPERVISOR_SOCKET")
-	identityToken := os.Getenv(controlIdentityTokenEnv)
-	_ = os.Unsetenv(controlIdentityTokenEnv)
+	identityToken := os.Getenv(token.EnvControlIdentityToken)
+	_ = os.Unsetenv(token.EnvControlIdentityToken)
 	// A real child removes a proven-stale path under the control lock before
 	// binding; the stub does the same so a predecessor's leftover socket does
 	// not block it.

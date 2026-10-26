@@ -2,9 +2,7 @@ package board
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // Server is the board dashboard HTTP server.
@@ -42,16 +41,16 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 
-	token := cfg.Token
-	if token == "" {
-		tokenBytes := make([]byte, 16)
-		if _, err := rand.Read(tokenBytes); err != nil {
+	boardToken := cfg.Token
+	if boardToken == "" {
+		newTok, err := token.NewHex(16)
+		if err != nil {
 			return nil, fmt.Errorf("avenor board: failed to generate token: %w", err)
 		}
-		token = hex.EncodeToString(tokenBytes)
+		boardToken = newTok
 	}
 
-	s := &Server{cfg: cfg, token: token}
+	s := &Server{cfg: cfg, token: boardToken}
 
 	mux := http.NewServeMux()
 

@@ -2,9 +2,7 @@ package control
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 var ErrRuntimeNotFound = errors.New("runtime not found")
@@ -50,12 +49,11 @@ func NewHTTPDebugServer(addr string, control *ControlServer) (*HTTPDebugServer, 
 	if err != nil {
 		return nil, err
 	}
-	tokenBytes := make([]byte, 16)
-	if _, err := rand.Read(tokenBytes); err != nil {
+	tok, err := token.NewHex(16)
+	if err != nil {
 		panic("avenor: failed to generate debug token: " + err.Error())
 	}
-	token := hex.EncodeToString(tokenBytes)
-	h := &HTTPDebugServer{control: control, facade: control.OwnerFacade(), token: token}
+	h := &HTTPDebugServer{control: control, facade: control.OwnerFacade(), token: tok}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status/", h.handleStatusRuntime)
 	mux.HandleFunc("/status", h.handleStatus)
@@ -71,7 +69,7 @@ func NewHTTPDebugServer(addr string, control *ControlServer) (*HTTPDebugServer, 
 	// the print in non-TTY environments is intentional; operators that need the
 	// token in non-interactive setups should inject it via another channel.
 	if stat, serr := os.Stderr.Stat(); serr == nil && (stat.Mode()&os.ModeCharDevice) != 0 {
-		fmt.Fprintf(os.Stderr, "avenor: http debug token: %s\n", token)
+		fmt.Fprintf(os.Stderr, "avenor: http debug token: %s\n", tok)
 	}
 	return h, nil
 }
