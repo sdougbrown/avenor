@@ -493,25 +493,31 @@ func (l *Link) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (mes
 }
 
 // Reply sends a reply up the hop a relayed ask arrived on, so an asker in
-// another branch sees its own edge complete instead of a second delivery.
-func (l *Link) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.Outcome, error) {
+// another branch sees its own edge complete instead of a second delivery. The
+// result names the request's message id on every path and carries the edge
+// generation the reply followed: the edge generation the route was admitted
+// under, or the generation the parent named in its answer when it supplied one.
+func (l *Link) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
+	fail := func(outcome messaging.Outcome, generation string, err error) (messaging.SendResult, error) {
+		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: generation}, err
+	}
 	route, ok := l.relayRoute(req.MessageID)
 	if !ok || route.askerRunID != req.ToRunID {
-		return messaging.OutcomeEdgeAbsent, nil
+		return fail(messaging.OutcomeEdgeAbsent, "", nil)
 	}
 	// The reply names the generation its edge was admitted under. A parent that
 	// was replaced refuses it, and nothing is replayed onto the replacement.
 	if current, pinned := l.pinnedGeneration(); pinned && current != route.edgeGeneration {
 		l.dropRelay(req.MessageID)
-		return messaging.OutcomeLost, nil
+		return fail(messaging.OutcomeLost, route.edgeGeneration, nil)
 	}
 	sender, token, _, err := l.credentials(ctx, req.From.RunID)
 	if err != nil {
-		return messaging.OutcomeNotSent, err
+		return fail(messaging.OutcomeNotSent, route.edgeGeneration, err)
 	}
 	payload, err := payloadFor(req.Body)
 	if err != nil {
-		return messaging.OutcomeNotSent, err
+		return fail(messaging.OutcomeNotSent, route.edgeGeneration, err)
 	}
 	status, raw, err := l.post(ctx, pathSend, map[string]any{
 		"from_run_id": sender,
@@ -522,22 +528,30 @@ func (l *Link) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging
 		"generation":  route.edgeGeneration,
 	}, sender, token, 0)
 	if err != nil {
-		return messaging.OutcomePossiblyPending, fmt.Errorf("%w: %v", ErrParentUnavailable, err)
+		return fail(messaging.OutcomePossiblyPending, route.edgeGeneration, fmt.Errorf("%w: %v", ErrParentUnavailable, err))
 	}
 	body, err := decode(status, raw)
 	if err != nil {
 		if errors.Is(err, messaging.ErrGenerationMismatch) {
 			l.dropRelay(req.MessageID)
-			return messaging.OutcomeLost, err
+			return fail(messaging.OutcomeLost, route.edgeGeneration, err)
 		}
-		return body.outcomeOf(), err
+		return fail(body.outcomeOf(), route.edgeGeneration, err)
 	}
 	l.dropRelay(req.MessageID)
-	if body.Outcome == messaging.OutcomeReplied || body.Outcome == messaging.OutcomeEdgeAbsent {
-		return body.Outcome, nil
+	// The parent's own generation, when it supplied one, is the generation the
+	// reply completed under; otherwise the edge generation the route was
+	// admitted under. Neither is emptied: a result without a generation would
+	// read as an edge no generation ever admitted.
+	generation := route.edgeGeneration
+	if body.Generation != "" {
+		generation = body.Generation
 	}
-	return messaging.OutcomePossiblyPending,
-		fmt.Errorf("%w: parent broker answered without a reply outcome", ErrUnsupportedParentProtocol)
+	if body.Outcome == messaging.OutcomeReplied || body.Outcome == messaging.OutcomeEdgeAbsent {
+		return fail(body.Outcome, generation, nil)
+	}
+	return fail(messaging.OutcomePossiblyPending, generation,
+		fmt.Errorf("%w: parent broker answered without a reply outcome", ErrUnsupportedParentProtocol))
 }
 
 // Tell forwards a tell to the parent broker, which hands it to the branch that
@@ -565,12 +579,14 @@ func (l *Link) Tell(ctx context.Context, req messaging.TellRequest) error {
 	return err
 }
 
-// Peers lists the runs the parent broker exports to this branch. A parent that
+// Peers lists the runs the parent broker exports to this branch. The result
+// carries the generation the parent answered with, so a caller that only sees
+// the result knows which parent generation the listing is from. A parent that
 // cannot finish the listing reports the error beside the peers it did return, so
 // a partial list never reads as a complete one. Before the first successful
 // registration the link syncs once, so a listing is never answered with a
 // silent empty list just because no claim was published yet.
-func (l *Link) Peers(ctx context.Context) ([]messaging.Peer, error) {
+func (l *Link) Peers(ctx context.Context) (messaging.PeersResult, error) {
 	caller, _ := messaging.CallerRun(ctx)
 	runID, token, ok := l.listingCredentials(caller)
 	if !ok {
@@ -579,16 +595,16 @@ func (l *Link) Peers(ctx context.Context) ([]messaging.Peer, error) {
 		// an empty answer would read as "the parent has no peers" when the claim
 		// was simply never published.
 		if err := l.Sync(ctx); err != nil {
-			return nil, err
+			return messaging.PeersResult{}, err
 		}
 		runID, token, ok = l.listingCredentials(caller)
 		if !ok {
-			return nil, fmt.Errorf("%w: this branch has no run registered at the parent broker to list peers with", messaging.ErrTargetUnavailable)
+			return messaging.PeersResult{}, fmt.Errorf("%w: this branch has no run registered at the parent broker to list peers with", messaging.ErrTargetUnavailable)
 		}
 	}
 	req, err := http.NewRequest(http.MethodGet, l.opts.ParentURL+pathSessions, nil)
 	if err != nil {
-		return nil, err
+		return messaging.PeersResult{}, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set(messaging.HeaderRunID, runID)
@@ -598,11 +614,11 @@ func (l *Link) Peers(ctx context.Context) ([]messaging.Peer, error) {
 	}
 	status, raw, err := l.client.Do(ctx, req, 0)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrParentUnavailable, err)
+		return messaging.PeersResult{}, fmt.Errorf("%w: %v", ErrParentUnavailable, err)
 	}
 	body, err := decode(status, raw)
 	if err != nil {
-		return nil, err
+		return messaging.PeersResult{}, err
 	}
 	peers := make([]messaging.Peer, 0, len(body.Sessions))
 	for _, record := range body.Sessions {
@@ -614,10 +630,11 @@ func (l *Link) Peers(ctx context.Context) ([]messaging.Peer, error) {
 		}
 		peers = append(peers, messaging.Peer{RunID: session.RunID, Session: record})
 	}
+	result := messaging.PeersResult{Peers: peers, Generation: body.Generation}
 	if body.PeersError != "" {
-		return peers, fmt.Errorf("%w: parent peer listing is incomplete: %s", messaging.ErrTargetUnavailable, body.PeersError)
+		return result, fmt.Errorf("%w: parent peer listing is incomplete: %s", messaging.ErrTargetUnavailable, body.PeersError)
 	}
-	return peers, nil
+	return result, nil
 }
 
 // RecordRelay binds the reply route of a relayed ask. The broker records it

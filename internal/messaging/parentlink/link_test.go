@@ -381,12 +381,12 @@ func TestLinkPeersSyncsBeforeItLists(t *testing.T) {
 	})
 	link := newTestLink(t, stub, "gen-a")
 
-	peers, err := link.Peers(testContext(t))
+	res, err := link.Peers(testContext(t))
 	if err != nil {
 		t.Fatalf("Peers: %v", err)
 	}
-	if len(peers) != 1 || peers[0].RunID != "run-b" {
-		t.Fatalf("peers = %v, want the parent's run", peers)
+	if len(res.Peers) != 1 || res.Peers[0].RunID != "run-b" {
+		t.Fatalf("peers = %v, want the parent's run", res.Peers)
 	}
 	if got := stub.countPath(pathRegister); got != 1 {
 		t.Fatalf("the parent saw %d registrations, want the listing's automatic sync", got)
@@ -409,12 +409,12 @@ func TestLinkPeersReportsAnIncompleteListing(t *testing.T) {
 	})
 	link := newTestLink(t, stub, "gen-a")
 
-	peers, err := link.Peers(testContext(t))
+	res, err := link.Peers(testContext(t))
 	if !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("Peers error = %v, want ErrTargetUnavailable", err)
 	}
-	if len(peers) != 1 || peers[0].RunID != "run-b" {
-		t.Fatalf("peers = %v, want the peers the parent reached", peers)
+	if len(res.Peers) != 1 || res.Peers[0].RunID != "run-b" {
+		t.Fatalf("peers = %v, want the peers the parent reached", res.Peers)
 	}
 }
 

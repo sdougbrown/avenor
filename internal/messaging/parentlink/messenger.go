@@ -149,14 +149,14 @@ func (m *Messenger) Withdraw(ctx context.Context, req messaging.WithdrawRequest)
 
 // Reply completes the ask edge MessageID names. A relayed ask records its reply
 // route on the hop it arrived on, so the reply follows that hop instead of
-// degrading into a second delivery.
+// degrading into a second delivery. The link's result is returned as-is, so the
+// edge generation the reply followed is carried to the caller instead of lost.
 func (m *Messenger) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	res, err := m.local.Reply(ctx, req)
 	if err != nil || res.Outcome != messaging.OutcomeEdgeAbsent || m.up == nil {
 		return res, err
 	}
-	outcome, err := m.up.Reply(ctx, req)
-	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID}, err
+	return m.up.Reply(ctx, req)
 }
 
 // Tell publishes a fire-and-forget message.
@@ -203,7 +203,7 @@ func (m *Messenger) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 	for _, peer := range peers {
 		seen[peer.RunID] = struct{}{}
 	}
-	for _, peer := range remote {
+	for _, peer := range remote.Peers {
 		// A literal run ID names the local run: a parent-exported run that
 		// shares a local run's ID is shadowed by it, because the child could
 		// not address the parent's run under that ID without also reaching its
