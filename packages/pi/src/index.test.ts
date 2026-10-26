@@ -95,7 +95,9 @@ async function createMultiSupervisorHarness(options: {
       }
     },
   })
-  return { ...h, confirm, waitPolls, waitPollMatching }
+  // Production session contexts always expose isIdle; the shared fixture omits
+  // it, so the supervisor harness defaults to idle.
+  return { ...h, ctx: Object.assign(h.ctx, { isIdle: () => true }), confirm, waitPolls, waitPollMatching }
 }
 
 /** Open the watch inspector for a run and send one follow-up through it. */

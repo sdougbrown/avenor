@@ -13,8 +13,8 @@ export interface TrackedRun {
   /** true if we've injected a permission notification via sendUserMessage */
   permissionNotified?: boolean
   /** true once avenor_result has successfully returned this run's final result to
-   * the caller. Set only on a successful (non-interrupted) result; suppresses the
-   * automatic completion notification without deleting the run. */
+   * the caller. Set only on a successful (non-interrupted) result; the run is
+   * dropped from tracking and its queued notice is discarded immediately. */
   consumed?: boolean
   /** true once CHANNEL_RUN_TERMINAL has been emitted for this run. */
   terminalEventEmitted?: boolean
@@ -108,32 +108,4 @@ export function formatRunLine(entry: RunStatusEntry): string {
   const perm = entry.pendingPermission ? ` — blocked: ${entry.permissionDescription ?? 'permission'}` : ''
   const phase = entry.phaseLabel ? ` (${entry.phaseLabel})` : ''
   return `${emoji} ${entry.label} (${entry.agent}) — ${entry.status}${phase}${perm}`
-}
-
-/**
- * CompletionAction represents the decision for a tracked run that has
- * reached terminal status during a polling tick.
- *
- * - `skip` — the result is spoken for: avenor_result is actively waiting
- *   (`blocking`) or has already returned the result successfully
- *   (`consumed`); do not notify.
- * - `send` — the caller has not obtained the result; deliver the completion
- *   steering message and remove the run from tracking.
- */
-export type CompletionAction = 'skip' | 'send'
-
-/**
- * decideCompletion determines whether to skip or send the completion
- * steering message for a tracked run that has reached terminal status.
- *
- * The message is delivered on the same terminal tick — never deferred to a
- * later cycle — so a run that is the last live one still gets its completion.
- * `blocking` suppresses it while avenor_result is awaiting (it will deliver
- * the result itself and set `consumed`), and `consumed` suppresses it once
- * avenor_result has already returned the result successfully.
- */
-export function decideCompletion(run: Pick<TrackedRun, 'blocking' | 'consumed'>): CompletionAction {
-  if (run.blocking) return 'skip'
-  if (run.consumed) return 'skip'
-  return 'send'
 }
