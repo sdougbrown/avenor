@@ -43,6 +43,12 @@ type Options struct {
 	// Generation reports this broker's current ask generation. Required: the
 	// link pins it and the relay binds every hop to it.
 	Generation func() string
+	// RetireRuns deletes the run records this broker adopted for a descendant's
+	// runs when the registry stops routing them — a relay that found a
+	// generation-mismatched branch or a refused credential. The broker owns
+	// its own run records, so it supplies the deletion; nil leaves the records
+	// in place.
+	RetireRuns func(runIDs []string)
 	// Timeout bounds one request to a peer broker. Zero uses the messaging
 	// default.
 	Timeout time.Duration
@@ -124,14 +130,14 @@ func NewLink(opts Options) (*Link, error) {
 }
 
 // Start publishes this branch's claim to the parent broker and then re-publishes
-// it whenever the run set changes.
+// it whenever the run set changes. The publish loop runs regardless of the
+// initial registration's outcome: a branch that starts before its parent is up
+// stays registered on the next run-set change instead of staying silent until
+// its own next upward call.
 func (l *Link) Start(ctx context.Context) error {
-	if err := l.Sync(ctx); err != nil {
-		return err
-	}
 	l.wg.Add(1)
 	go l.publishLoop(ctx)
-	return nil
+	return l.Sync(ctx)
 }
 
 // RunChanged asks the link to re-publish this branch's run set. Changes are

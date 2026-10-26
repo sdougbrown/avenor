@@ -147,3 +147,67 @@ func TestRelayRefusesARunWithoutACredential(t *testing.T) {
 		t.Fatalf("the credentialed sibling saw %d relays, want one", got)
 	}
 }
+
+func TestRelayRefusalRetiresTheAdoptedRunRecords(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		if req.Body["to_run_id"] == "run-c" {
+			return http.StatusConflict, `{"code":"generation-mismatch","error":"the ask store was replaced"}`
+		}
+		return http.StatusUnauthorized, `{"code":"auth-rejected","error":"refused"}`
+	})
+	registry := NewRegistry()
+	var retired []string
+	relay, err := newRelay(Options{
+		Generation: func() string { return "gen-a" },
+		RetireRuns: func(runIDs []string) { retired = append(retired, runIDs...) },
+	}, registry)
+	if err != nil {
+		t.Fatalf("newRelay: %v", err)
+	}
+	t.Cleanup(func() { _ = relay.Close() })
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID:    "child-one",
+		Endpoint:   stub.URL(),
+		Generation: "gen-a",
+		Runs:       []messaging.RunClaim{{RunID: "run-b", Token: "tok-b"}, {RunID: "run-c", Token: "tok-c"}},
+	}); err != nil {
+		t.Fatalf("register child: %v", err)
+	}
+	ctx := testContext(t)
+
+	if err := relay.Ask(ctx, messaging.SendRequest{
+		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
+		To:        messaging.Identity{RunID: "run-b", Sender: "bob"},
+		MessageID: "msg-1",
+	}); !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("Ask run-b = %v, want ErrTargetUnavailable", err)
+	}
+	if err := relay.Ask(ctx, messaging.SendRequest{
+		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
+		To:        messaging.Identity{RunID: "run-c", Sender: "bob"},
+		MessageID: "msg-2",
+	}); !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("Ask run-c = %v, want ErrTargetUnavailable", err)
+	}
+
+	if len(retired) != 2 {
+		t.Fatalf("retired = %v, want exactly two retired runs", retired)
+	}
+	for _, want := range []string{"run-b", "run-c"} {
+		n := 0
+		for _, got := range retired {
+			if got == want {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("retired = %v, want exactly one %s", retired, want)
+		}
+	}
+	if _, ok := registry.Hop("run-b"); ok {
+		t.Fatal("run-b still routes after its record was retired")
+	}
+	if _, ok := registry.Hop("run-c"); ok {
+		t.Fatal("run-c still routes after the branch was deregistered")
+	}
+}

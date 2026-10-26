@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
@@ -210,5 +211,44 @@ func TestLinkRefusesWorkAfterItIsClosed(t *testing.T) {
 		EdgeGeneration: "gen-a",
 	}); !errors.Is(err, messaging.ErrTransportClosed) {
 		t.Fatalf("RecordRelay after the close = %v, want ErrTransportClosed", err)
+	}
+}
+
+// TestAFailedStartStillPublishesOnTheNextRunChange pins recovery from a parent
+// that is not up when the branch starts: Start reports the failed registration,
+// the publish loop keeps running, and the next run-set change registers the
+// branch with the parent once it is answering — a branch whose first
+// registration failed is not stranded until its next upward call.
+func TestAFailedStartStillPublishesOnTheNextRunChange(t *testing.T) {
+	var up atomic.Bool
+	registered := make(chan struct{}, 8)
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch {
+		case req.Path == pathDeregister:
+			return http.StatusOK, `{}`
+		case !up.Load():
+			return http.StatusServiceUnavailable, `{}`
+		default:
+			registered <- struct{}{}
+			return http.StatusOK, `{"generation":"gen-a"}`
+		}
+	})
+	ctx := testContext(t)
+	link := newTestLink(t, stub, "gen-a")
+
+	if err := link.Start(ctx); err == nil {
+		t.Fatal("Start with an unavailable parent = nil, want the failed registration")
+	}
+	if got := stub.countPath(pathRegister); got != 1 {
+		t.Fatalf("registrations = %d, want the failed initial attempt alone", got)
+	}
+
+	// The parent comes up, and the next run-set change registers the branch.
+	up.Store(true)
+	link.RunChanged()
+	select {
+	case <-registered:
+	case <-time.After(awaitDeadline):
+		t.Fatalf("the failed start never re-registered: registrations = %d", stub.countPath(pathRegister))
 	}
 }
