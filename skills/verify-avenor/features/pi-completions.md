@@ -241,9 +241,9 @@ label, `run_id`, `status` and the child's sentinel are the evidence.
 
 ## Known limits today
 
-- The unread queue is in-memory session state: `session_start` and
-  `session_shutdown` clear it, so an undelivered notice does not survive into a
-  new session.
+- The unread queue is in-memory session state. `session_start` clears it but
+  restarts polling, so a still-tracked run's notice is rebuilt; `session_shutdown`
+  stops polling too, so an undelivered notice does not survive shutdown.
 - A notice exists only for a run this session tracks — one it spawned or
   resumed. A run another Pi session owns appears in the status widget but never
   produces a notice here.

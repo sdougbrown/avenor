@@ -150,7 +150,7 @@ Beyond the tools, the extension integrates with Pi's TUI and event system:
 - **Status widget** — persistent widget showing all active runs with status, phase, and permission state
 - **Footer status** — the `avenor` status key carries active runs, the live agent-tree total, the unread notice count, and the current poll-failure count (see [Completion notices](#completion-notices))
 - **Completion notices** — one notice per finished run, delivered immediately when your session is idle and batched into a single continuation when it was busy
-- **Polling diagnostics** — bounded polling errors are emitted on `avenor:poll:error` for companion extensions
+- **Polling diagnostics** — bounded polling errors are emitted on `avenor:poll:error` for companion extensions; a completion-notice delivery that exhausts its retries is emitted separately on `avenor:delivery:error`
 - **Live progress** — blocking `avenor_spawn` calls stream progress updates via `onUpdate`
 - **Context enrichment** — active sub-agents are automatically surfaced in the system prompt via `before_agent_start`
 - **Custom rendering** — The Pi extension renders all Avenor tool calls and results as themed, bounded summaries. Results have collapsed and expanded views.
@@ -169,7 +169,10 @@ that moment.
 
 - **Idle.** The notice is sent as a user message and starts its own turn. It
   counts as unread until Pi confirms the message landed, and while compaction is
-  running the send waits for it to finish.
+  running the send waits for it to finish. A send that is accepted but never
+  confirmed is re-sent up to three times; once that budget is spent the notice
+  stays unread for the next settlement and the failure is emitted on
+  `avenor:delivery:error`.
 - **Busy.** The notice is queued and the footer shows `unread:N`. The next
   settlement that completes normally appends each queued notice as an
   `avenor-completion` custom message under a single continuation, so three runs

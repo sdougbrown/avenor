@@ -78,9 +78,11 @@ import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEm
 import { countNestedRuns } from './nested-count.js'
 import { resolveAgentProfile } from './agent-profile.js'
 import {
+  CHANNEL_DELIVERY_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
+  createDeliveryErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -770,6 +772,29 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       emitAvenorEvent(pi.events, CHANNEL_POLL_ERROR, payload)
     }
 
+    /** A delivery that exhausted its retries is not a polling failure: emit
+     * it on its own channel so `avenor:poll:error` consumers keep a pure
+     * polling contract. The unread notice is the persistent user-facing
+     * surface; this event is the companion-extension signal. */
+    function recordDeliveryError(run: TrackedRun, attempts: number): void {
+      emitAvenorEvent(
+        pi.events,
+        CHANNEL_DELIVERY_ERROR,
+        createDeliveryErrorPayload({
+          source: 'idle-send',
+          runId: run.runId,
+          label: run.label,
+          message: 'idle completion send was never confirmed',
+          error: new Error(`no message_end after ${attempts} attempts`),
+          attempts,
+          timestamp: Date.now(),
+        }),
+      )
+      console.error(
+        `[avenor] idle completion send for run "${run.label}" was never confirmed after ${attempts} attempts; the notice stays unread`,
+      )
+    }
+
     function clearPollingErrors(): void {
       pollingErrorCount = 0
       pollingErrors.length = 0
@@ -890,10 +915,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       for (const run of trackedRuns.values()) {
         run.pendingNotice = undefined
         // An in-flight send belongs to the session that was just replaced; its
-        // confirmation can no longer match, so delivery is handed back to the poll.
+        // confirmation can no longer match, so delivery is handed back to the
+        // poll with a fresh retry budget.
         run.idleSendInFlight = false
         run.idleSentAt = undefined
         run.idleSendAttempts = undefined
+        run.idleSendCapped = undefined
       }
     }
 
@@ -1150,7 +1177,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // stopping point (e.g. an unanswered permission) from re-interrupting
           // re-issued waits on every poll cycle.
           const prevStatus = prevStatuses.get(entryKey)
-          let idleSendCapped = false
           // An accepted-but-unconfirmed send has no confirmation callback. If the
           // prompt never comes back through message_end, re-arm delivery rather
           // than skipping the run forever with its notice unread.
@@ -1163,15 +1189,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             run.idleSentAt = undefined
             widgetDirty = true
             // Once the retry budget is spent, stop sending and leave the notice
-            // for settlement; surface the failure instead of polling forever.
+            // for settlement; surface the delivery failure on its own channel.
             if ((run.idleSendAttempts ?? 0) >= MAX_IDLE_SEND_ATTEMPTS) {
-              idleSendCapped = true
-              recordPollingError(
-                'idle-send',
-                'idle completion send was never confirmed',
-                new Error(`no message_end after ${run.idleSendAttempts} attempts`),
-                run.runId,
-              )
+              run.idleSendCapped = true
+              recordDeliveryError(run, run.idleSendAttempts!)
             }
           }
           // An idle send is already in flight for this run: the send's own
@@ -1246,7 +1267,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             // dropped prompt stays unread instead of being lost; the in-flight
             // flag keeps polling from sending it twice. Compaction can reject a
             // prompt, so wait for it to finish and leave the notice unread.
-            if (sessionCtx?.isIdle() === true && !compacting && !idleSendCapped) {
+            if (sessionCtx?.isIdle() === true && !compacting && !run.idleSendCapped) {
               run.pendingNotice = notice
               run.idleSendInFlight = true
               run.idleSentAt = Date.now()
@@ -1667,6 +1688,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       sessionGeneration++
       compacting = false
       clearPendingNotices()
+      // The replaced session may have stopped polling with terminal runs still
+      // tracked; their cleared notices are rebuilt by a poll tick, so restart
+      // polling the same way resumeAfterCompaction does.
+      if (trackedRuns.size > 0) startPolling()
       lastStatusEntries = []
       lastTurnSocketClosed = false
       pollingErrorCount = 0
@@ -2797,9 +2822,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 // Re-export event channels, adapters, and payload types for companion extensions.
 // These adapters use Pi's shared bus and do not create a second bus.
 export {
+  CHANNEL_DELIVERY_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
+  createDeliveryErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -2811,6 +2838,9 @@ export type {
   AvenorEventChannel,
   AvenorEventMap,
   AvenorRunStatus,
+  DeliveryErrorPayload,
+  DeliveryErrorPayloadInput,
+  DeliveryErrorSource,
   PollCompletedPayload,
   PollErrorPayload,
   PollErrorPayloadInput,

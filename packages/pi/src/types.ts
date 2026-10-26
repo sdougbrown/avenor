@@ -25,6 +25,9 @@ export interface TrackedRun {
   /** Idle sends attempted for the current notice. Bounds the re-arm loop so an
    * unconfirmable send stops instead of retrying forever. */
   idleSendAttempts?: number
+  /** true once the idle-send retry budget for this notice is spent. Stops
+   * re-sends even while a sibling run keeps the poll loop ticking. */
+  idleSendCapped?: boolean
   /** true if we've injected a permission notification via sendUserMessage */
   permissionNotified?: boolean
   /** true once avenor_result has successfully returned this run's final result to

@@ -7,6 +7,7 @@ import { Supervisor, messageTool as realMessageTool } from '@dougbots/avenor-cor
 import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
+  CHANNEL_DELIVERY_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
@@ -447,13 +448,12 @@ describe('Avenor Pi extension', () => {
     )
     await pollCompleted
     await harness.eventHandlers.session_shutdown()
-    await harness.eventHandlers.session_start({}, harness.ctx)
 
+    // The still-tracked run restarts polling at session start; after the stop
+    // reset it, the error count must begin again from 1.
     const emittedBeforeRestart = harness.emitted.length
     pollCompleted = harness.waitForPoll()
-    await harness.registeredTools.avenor_spawn.execute(
-      'tool-2', { agent: 'mule', label: 'restart', wait: false }, undefined, undefined, harness.ctx,
-    )
+    await harness.eventHandlers.session_start({}, harness.ctx)
     await pollCompleted
 
     const restartErrors = harness.emitted.slice(emittedBeforeRestart)
@@ -1828,6 +1828,47 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('restarts polling at session start so a cleared notice is rebuilt', async () => {
+    const SOCK = '/tmp/session-start-repoll.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'repoll answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+    h.ctx.isIdle = () => false
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    done = true
+    // The lone terminal run queues its notice and stops the poll loop.
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
+
+    // A session replacement clears the queued notice; only a restarted poll
+    // loop can rebuild it, with no new spawn or resume to restart polling.
+    const statusCallsBefore = h.setStatus.mock.calls.length
+    await h.eventHandlers.session_start({}, h.ctx)
+    await waitFor(() => h.setStatus.mock.calls.length > statusCallsBefore)
+    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+
+    // The rebuilt notice is still delivered at the next completed settlement.
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled?.entries).toHaveLength(1)
+    expect(String(settled?.entries[0]?.content)).toContain('repoll answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('retains a notice after a non-ready result and does not flush it on an aborted settlement', async () => {
     const SOCK = '/tmp/queue-nonready.sock'
     let done = false
@@ -2551,12 +2592,12 @@ describe('Avenor Pi extension', () => {
       .filter(t => t.includes('Sub-agent "worker" finished'))
 
     await waitFor(() => deliveries().length >= 1)
-    // The send stays accepted-but-unconfirmed. A later tick clears the in-flight
-    // flag when the send times out; the session is busy, so nothing is re-sent
-    // and the first prompt is the only thing still queued.
+    // The send stays accepted-but-unconfirmed and the session is busy, so
+    // nothing is re-sent and the first prompt is the only thing still queued.
+    // The confirmation matches on the notice text alone, so it can arrive
+    // while the send is still marked in flight.
     h.ctx.isIdle = () => false
-    await new Promise(resolve => setTimeout(resolve, 100))
-    expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
 
     const delivered = deliveries().length
     expect(delivered).toBe(1)
@@ -2601,12 +2642,16 @@ describe('Avenor Pi extension', () => {
     const footer = () => String(h.setStatus.mock.calls.at(-1)?.[1])
 
     await waitFor(() => deliveries().length >= 3)
-    // The cap stops further sends and surfaces the failure instead of looping.
-    await waitFor(() => footer().includes('errors:'))
+    // The cap stops further sends and reports the exhausted delivery on its
+    // own channel; the notice stays unread and the poll-error footer stays
+    // clean, since this is not a polling failure.
+    await waitFor(() => h.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_DELIVERY_ERROR
+      && (payload as { source?: string }).source === 'idle-send'
+      && (payload as { runId?: string }).runId === 'r1'))
     expect(footer()).toContain('unread:1')
-    expect(h.emitted.some(([channel, payload]) =>
-      channel === CHANNEL_POLL_ERROR && (payload as { source?: string }).source === 'idle-send',
-    )).toBe(true)
+    expect(footer()).not.toContain('errors:')
+    expect(h.emitted.some(([channel]) => channel === CHANNEL_POLL_ERROR)).toBe(false)
 
     // Nothing new is sent once the cap is exhausted, and the unread notice is
     // still delivered at settlement.
@@ -2618,6 +2663,64 @@ describe('Avenor Pi extension', () => {
     )
     expect(settled?.entries).toHaveLength(1)
     expect(String(settled?.entries[0]?.content)).toContain('capped answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('keeps the idle-send attempt cap while a sibling run keeps polling alive', async () => {
+    const SOCK = '/tmp/idle-cap-sibling.sock'
+    let workerDone = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        if (args.runId === 'r2') return { run_id: 'r2', label: 'steady', status: 'running', runtime_id: 'rt2' }
+        return workerDone
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'sibling cap answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      idleSendTimeoutMs: 20,
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'steady' ? 'r2' : 'r1',
+        label: args.label ?? 'worker',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'steady' ? 'rt2' : 'rt1',
+      })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'steady', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    workerDone = true
+
+    const workerDeliveries = () => h.sendUserMessage.mock.calls
+      .map(([t]) => String(t))
+      .filter(t => t.includes('Sub-agent "worker" finished'))
+    const polls = () => h.emitted.filter(([channel]) => channel === CHANNEL_POLL_COMPLETED).length
+    const footer = () => String(h.setStatus.mock.calls.at(-1)?.[1])
+
+    // The steady sibling keeps the poll loop alive, so the spent retry budget
+    // must stop re-sends on every later tick, not just the capping one.
+    await waitFor(() => workerDeliveries().length >= 3)
+    await waitFor(() => h.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_DELIVERY_ERROR
+      && (payload as { runId?: string }).runId === 'r1'
+      && (payload as { attempts?: number }).attempts === 3))
+    expect(footer()).toContain('unread:1')
+
+    const pollsAtCap = polls()
+    await waitFor(() => polls() >= pollsAtCap + 3)
+    expect(workerDeliveries()).toHaveLength(3)
+
+    // The capped notice is still delivered at the next completed settlement.
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled?.entries).toHaveLength(1)
+    expect(String(settled?.entries[0]?.content)).toContain('sibling cap answer')
 
     await h.eventHandlers.session_shutdown()
   })
