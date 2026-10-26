@@ -70,6 +70,54 @@ func TestWaitReportsTheCancellationToTheCaller(t *testing.T) {
 	}
 }
 
+func TestWaitReportsTheProtocolErrorWhenTheParentAnswersWithoutAWaitVerdict(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "no verdict at all",
+			body: `{"message_id":"msg-1"}`,
+		},
+		{
+			name: "an outcome a wait never reports",
+			body: `{"outcome":"sent","message_id":"msg-1"}`,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			stub := newStubBroker(t, func(req stubRequest) (int, string) {
+				switch req.Path {
+				case pathRegister:
+					return http.StatusOK, `{"generation":"gen-a"}`
+				case pathSend:
+					return http.StatusOK, `{"outcome":"sent"}`
+				case pathWait:
+					return http.StatusOK, testCase.body
+				}
+				return http.StatusOK, `{}`
+			})
+			ctx := testContext(t)
+			link := newTestLink(t, stub, "gen-a")
+
+			if sent, err := link.Send(ctx, askRequest("msg-1")); err != nil || sent.Outcome != messaging.OutcomeSent {
+				t.Fatalf("Send = (%+v, %v), want the ask admitted", sent, err)
+			}
+
+			waited, err := link.Wait(ctx, waitRequest("msg-1"))
+			if waited.Outcome != messaging.OutcomePossiblyPending {
+				t.Fatalf("Wait outcome = %q, want %q", waited.Outcome, messaging.OutcomePossiblyPending)
+			}
+			if !errors.Is(err, ErrUnsupportedParentProtocol) {
+				t.Fatalf("Wait error = %v, want ErrUnsupportedParentProtocol", err)
+			}
+			if got := stub.countPath(pathWait); got != 1 {
+				t.Fatalf("the parent saw %d waits, want the wait to reach it once", got)
+			}
+		})
+	}
+}
+
 // TestWaitReportsTheRefusalWhenTheParentCannotBeReRegistered pins the wait's
 // error contract: a parent that refuses the pinned generation and cannot be
 // re-registered leaves the ask's fate unknown, and the wait reports that

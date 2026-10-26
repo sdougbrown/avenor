@@ -283,6 +283,48 @@ func TestLinkSendClassifiesAFailedTransmission(t *testing.T) {
 	}
 }
 
+func TestLinkSendReportsTheProtocolErrorWhenTheParentAnswersWithoutASendVerdict(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "no verdict at all",
+			body: `{"message_id":"msg-1"}`,
+		},
+		{
+			name: "an outcome a send never reports",
+			body: `{"outcome":"replied","message_id":"msg-1"}`,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			stub := newStubBroker(t, func(req stubRequest) (int, string) {
+				switch req.Path {
+				case pathRegister:
+					return http.StatusOK, `{"generation":"gen-a"}`
+				case pathSend:
+					return http.StatusOK, testCase.body
+				}
+				return http.StatusOK, `{}`
+			})
+			ctx := testContext(t)
+			link := newTestLink(t, stub, "gen-a")
+
+			sent, err := link.Send(ctx, askRequest("msg-1"))
+			if sent.Outcome != messaging.OutcomePossiblyPending {
+				t.Fatalf("Send outcome = %q, want %q", sent.Outcome, messaging.OutcomePossiblyPending)
+			}
+			if !errors.Is(err, ErrUnsupportedParentProtocol) {
+				t.Fatalf("Send error = %v, want ErrUnsupportedParentProtocol", err)
+			}
+			if got := stub.countPath(pathSend); got != 1 {
+				t.Fatalf("the parent saw %d sends, want the ask to reach it once", got)
+			}
+		})
+	}
+}
+
 // TestLinkPeersSyncsBeforeItLists pins the listing's recovery: a Peers call
 // before the first successful registration syncs this branch's claim once and
 // then lists, instead of answering a silent empty list.

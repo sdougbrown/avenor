@@ -1,6 +1,7 @@
 package parentlink
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
@@ -78,5 +79,54 @@ func TestLinkReplyReportsAnUnrecordedAskWithoutPosting(t *testing.T) {
 	}
 	if got := stub.countPath(pathSend); got != 0 {
 		t.Fatalf("the parent saw %d reply posts, want none", got)
+	}
+}
+
+func TestLinkReplyReportsTheProtocolErrorWhenTheParentAnswersWithoutAReplyVerdict(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "no verdict at all",
+			body: `{"message_id":"msg-1"}`,
+		},
+		{
+			name: "an outcome a reply never reports",
+			body: `{"outcome":"sent","message_id":"msg-1"}`,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			stub := newStubBroker(t, func(req stubRequest) (int, string) {
+				switch req.Path {
+				case pathRegister:
+					return http.StatusOK, `{"generation":"gen-a"}`
+				case pathSend:
+					return http.StatusOK, testCase.body
+				}
+				return http.StatusOK, `{}`
+			})
+			ctx := testContext(t)
+			link := newTestLink(t, stub, "gen-a")
+			if err := link.RecordRelay(messaging.RelayRoute{
+				MessageID:      "msg-1",
+				AskerRunID:     "run-x",
+				EdgeGeneration: "gen-a",
+			}); err != nil {
+				t.Fatalf("RecordRelay: %v", err)
+			}
+
+			outcome, err := link.Reply(ctx, replyRequest("msg-1"))
+			if outcome != messaging.OutcomePossiblyPending {
+				t.Fatalf("Reply outcome = %q, want %q", outcome, messaging.OutcomePossiblyPending)
+			}
+			if !errors.Is(err, ErrUnsupportedParentProtocol) {
+				t.Fatalf("Reply error = %v, want ErrUnsupportedParentProtocol", err)
+			}
+			if got := stub.countPath(pathSend); got != 1 {
+				t.Fatalf("the parent saw %d reply posts, want the reply to reach it once", got)
+			}
+		})
 	}
 }
