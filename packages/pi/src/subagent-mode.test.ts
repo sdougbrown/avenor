@@ -61,7 +61,7 @@ function stubBrokerFetch(
       if (path === '/sessions') {
         return { ok: true, status: 200, json: async () => sessionsBody, text: async () => '' } as Response
       }
-      if (pendingSendFailures > 0) {
+      if (path === '/send' && pendingSendFailures > 0) {
         pendingSendFailures--
         return { ok: false, status: 500, json: async () => ({}), text: async () => 'boom' } as Response
       }

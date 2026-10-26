@@ -2,10 +2,12 @@ import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-c
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import {
+  BrokerHttpError,
   createBrokerChildBroker,
   formatInboundAskBody,
   parseControlMessage,
   postBroker,
+  publishHarnessName,
   readSubAgentEnv,
   type InboundAsk,
   type InboundAskBodyOptions,
@@ -578,6 +580,54 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         clearTimeout(subAgentPollTimer)
         subAgentPollTimer = null
       }
+    }
+
+    // The harness owns the session's user-defined name, and the broker lets it
+    // outrank any name the model set for itself. The pi peer this package builds
+    // against exposes the name through the session manager but no rename event,
+    // so it is read on session start and before every turn; an unchanged name is
+    // not republished. `null` means nothing has been published for this session
+    // yet, so a failed publish is retried on the next turn.
+    let publishedSessionName: { name: string | undefined } | null = null
+
+    // Publishes are serialized: the broker applies last-writer-wins, so an
+    // older POST landing after a newer one would leave it holding a stale name.
+    let publishChain: Promise<void> = Promise.resolve()
+    // A name the broker refused as invalid can never be accepted, so it is
+    // remembered and not republished; a different name is still sent.
+    let refusedSessionName: string | null = null
+
+    function publishSessionName(ctx: ExtensionContext): Promise<void> {
+      if (!subAgentEnv) return publishChain
+      const env = subAgentEnv
+      const name = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } })
+        .sessionManager?.getSessionName?.()
+      if (publishedSessionName && publishedSessionName.name === name) return publishChain
+      if (refusedSessionName === name) return publishChain
+      // Record the attempt before it lands so a second read of the same name
+      // while the first is in flight does not publish twice; a failed publish
+      // forgets the attempt so the next turn retries.
+      const attempt = { name }
+      publishedSessionName = attempt
+      publishChain = publishChain.then(async () => {
+        try {
+          await publishHarnessName(env, name)
+          refusedSessionName = null
+        } catch (error) {
+          if (error instanceof BrokerHttpError && error.status === 400 && error.code === 'invalid-name') {
+            // Retrying a name the broker refuses only costs a failed POST every
+            // turn; a name that changes to a different value is sent again.
+            refusedSessionName = name
+            console.error('[avenor] session_name_set refused:', error.message)
+            return
+          }
+          // A later publish may already hold a newer record; only forget this
+          // attempt's own record so that newer name is not re-published twice.
+          if (publishedSessionName === attempt) publishedSessionName = null
+          console.error('[avenor] session_name_set failed:', error instanceof Error ? error.message : error)
+        }
+      })
+      return publishChain
     }
 
     async function startSubAgentPoll(): Promise<void> {
@@ -1428,6 +1478,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       lastTurnSocketClosed = false
       pollingErrorCount = 0
       pollingErrors.length = 0
+      publishedSessionName = null
+      void publishSessionName(ctx)
       if (!isSubAgentBrokerMode) startHostAskPoll()
       void startSubAgentPoll()
     })
@@ -1449,7 +1501,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       sessionCtx = null
     })
 
-    pi.on('before_agent_start', async () => {
+    pi.on('before_agent_start', async (_event, ctx) => {
+      // A session renamed between turns is picked up here, before the turn whose
+      // messages will carry the old name any further.
+      void publishSessionName(ctx)
       if (trackedRuns.size === 0) return
 
       const entries = await pollRuns()

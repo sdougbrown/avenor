@@ -102,6 +102,34 @@ func TestRenameEndpointWithoutHandlerUsesSharedNameRule(t *testing.T) {
 	}
 }
 
+// The decoder /rename and /session_name share rejects a valid-JSON body whose
+// name field has the wrong type. Syntactically broken JSON never reaches the
+// decoder — withAuth refuses it first — so the wrongly typed name is what
+// exercises this path, and the error it writes must not name one endpoint.
+func TestRenameDecoderErrorIsEndpointNeutral(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	token, err := b.CreateRun("rt_1", "before")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	for _, path := range []string{"/rename", "/session_name"} {
+		status, body := postAuthBroker(t, b.Addr(), path, "rt_1", token, map[string]any{"name": 7})
+		if status != http.StatusBadRequest || body["code"] != "invalid-request" {
+			t.Fatalf("%s: status = %d, body %v, want 400 invalid-request", path, status, body)
+		}
+		if msg, _ := body["error"].(string); msg != "request body has invalid fields" {
+			t.Fatalf("%s: error = %q, want the endpoint-neutral decode message", path, msg)
+		}
+		if got := b.DisplayName("rt_1"); got != "before" {
+			t.Fatalf("%s: label after rejected body = %q, want before", path, got)
+		}
+	}
+}
+
 func TestRenameEndpointRows(t *testing.T) {
 	rows := []struct {
 		name       string

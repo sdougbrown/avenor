@@ -201,6 +201,7 @@ The local adapter drives the broker's own router:
 | `/cancel_message` | Withdraw an ask. |
 | `/poll-control` | Drain queued control and agent messages. |
 | `/rename` | Change a display name. The body's `run_id` must be the authenticated caller, and `session_id` is forwarded to the supervisor's one rename authority, so the supervisor decides whether the caller may rename that target. Answers `{run_id, label, previous_label}`. |
+| `/session_name` | Record the harness's own user-defined session name for the authenticated caller's run, or clear it with an empty `name`. The name must satisfy the same 1–64 rune rule as `/rename`; an empty `name` clears. Answers `{run_id, label}` with the resolved label. |
 | `/last_message` | Read one run's recorded last agent turn: `{run_id, label, has_record, final_output, stop_reason, final_output_truncated, at}`. It is the one read endpoint whose target need not be the caller — any authenticated run may read any known run — and an unknown target is `target-unavailable`. |
 
 Before the first send on a connection it calls `/sessions` and requires
