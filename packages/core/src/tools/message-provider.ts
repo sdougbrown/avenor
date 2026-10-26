@@ -387,7 +387,8 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           resumable: false,
           status: translation.status,
         }
-      }      const status = await client.status(runId)
+      }
+      const status = await client.status(runId)
       const translation = translateRunFacts(
         typeof status.status === 'string' ? status.status : '',
         typeof status.phase === 'string' ? status.phase : '',
