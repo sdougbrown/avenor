@@ -213,11 +213,16 @@ type SpawnResult struct {
 	RuntimeID string `json:"runtime_id"`
 	// RunID is the public run id the surface supplied, internal to the resume
 	// path; it is not part of the spawn wire shape.
-	RunID            string `json:"-"`
-	SessionID        string `json:"session_id"`
-	OnEvent          string `json:"on_event"`
-	SentinelFile     string `json:"sentinel_file"`
-	BrokerURL        string `json:"broker_url,omitempty"`
+	RunID        string `json:"-"`
+	SessionID    string `json:"session_id"`
+	OnEvent      string `json:"on_event"`
+	SentinelFile string `json:"sentinel_file"`
+	BrokerURL    string `json:"broker_url,omitempty"`
+	// ParentToken is a broker run token minted for the parent run's channel
+	// messaging: it authorizes against the parent run's broker, not the parent
+	// broker server. The parent-link credential is a different secret —
+	// stable.Config.BrokerParentToken / AVENOR_PARENT_BROKER_TOKEN — and must
+	// never be plumbed through the spawn path in its place.
 	ParentToken      string `json:"parent_token,omitempty"`
 	Agent            string `json:"agent,omitempty"`
 	AgentProfile     string `json:"agent_profile,omitempty"`

@@ -14,16 +14,18 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // unsetValue is what the observer reports for a variable the child did not
 // inherit, so a test can tell "unset" from "empty".
 const unsetValue = "__UNSET__"
 
-// keys returns every environment name the observer serializes: launch identity
-// plus the operational variables that prove the scrub is exact.
+// keys returns every environment name the observer serializes: the full set a
+// child must not inherit, plus the operational variables that prove the scrub
+// is exact.
 func keys() []string {
-	return append(runtime.IdentityEnvNames(),
+	return append(runtime.ScrubbedEnvNames(),
 		runtime.EnvRuntimeID+"_SUFFIX", // near miss of an identity name
 		"AVENOR_TREE_BUDGET",
 		"AVENOR_RUN_ID",
@@ -117,6 +119,7 @@ func PoisonParent(t *testing.T) {
 		"AVENOR_RUN_ID":                  "broker-run",
 		"AVENOR_BROKER_TOKEN":            "broker-token",
 		"AVENOR_BROKER_URL":              "http://stale.invalid",
+		token.EnvBrokerParentToken:       "parent-secret",
 	} {
 		t.Setenv(key, value)
 	}
@@ -144,7 +147,7 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 		key, value, _ := strings.Cut(entry, "=")
 		supplied[key] = value
 	}
-	for _, key := range runtime.IdentityEnvNames() {
+	for _, key := range runtime.ScrubbedEnvNames() {
 		if value, ok := supplied[key]; ok {
 			if observed[key] != value {
 				t.Errorf("%s = %q, want %q", key, observed[key], value)

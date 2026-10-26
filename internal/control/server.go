@@ -24,6 +24,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging/askstore"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/token"
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
@@ -34,8 +35,6 @@ const subscriberBuffer = 256
 const subscriberFlushTimeout = 250 * time.Millisecond
 
 const maxSendToParentMessageBytes = 64 * 1024
-
-const controlIdentityTokenEnv = "AVENOR_CONTROL_IDENTITY_TOKEN"
 
 var dialControlSocket = net.DialTimeout
 
@@ -342,8 +341,8 @@ func (s *ControlServer) Start(socketPath string) error {
 	// Clear it immediately so spawned providers cannot inherit it.
 	identityToken := s.identityTokenOverride
 	if identityToken == "" {
-		identityToken = os.Getenv(controlIdentityTokenEnv)
-		_ = os.Unsetenv(controlIdentityTokenEnv)
+		identityToken = os.Getenv(token.EnvControlIdentityToken)
+		_ = os.Unsetenv(token.EnvControlIdentityToken)
 	}
 
 	if socketPath == "" {
