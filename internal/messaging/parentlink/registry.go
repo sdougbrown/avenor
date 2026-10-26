@@ -285,11 +285,11 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 
 // Export narrows a peer listing to what the authenticated caller may see. This
 // broker's own runs are always exported; a run a registered child owns is
-// exported to this broker's own callers (its owned descendants) and never to a
-// caller in a sibling branch. Nor is it exported back to the owning branch
-// itself: that branch already lists the run under its canonical run ID, and
-// re-exporting it would hand the branch a namespaced alias of its own
-// supervisor that its peer dedup cannot collapse.
+// exported only to non-descendant callers, and is hidden from every descendant
+// caller. Nor is it exported back to the owning branch itself: that branch
+// already lists the run under its canonical run ID, and re-exporting it would
+// hand the branch a namespaced alias of its own supervisor that its peer dedup
+// cannot collapse.
 func (r *Registry) Export(peers []messaging.Peer, caller string) []messaging.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
