@@ -42,9 +42,9 @@ func TestLinkReplyCompletesTheRelayedEdgeAndConsumesTheRoute(t *testing.T) {
 		t.Fatalf("RecordRelay: %v", err)
 	}
 
-	outcome, err := link.Reply(ctx, replyRequest("msg-1"))
-	if err != nil || outcome != messaging.OutcomeReplied {
-		t.Fatalf("Reply = (%q, %v), want the reply completed", outcome, err)
+	res, err := link.Reply(ctx, replyRequest("msg-1"))
+	if err != nil || res.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("Reply = (%+v, %v), want the reply completed", res, err)
 	}
 	forwarded := stub.lastRequest(t, pathSend)
 	if forwarded.Body["reply_to"] != "msg-1" || forwarded.Body["to_run_id"] != "run-x" {
@@ -52,8 +52,8 @@ func TestLinkReplyCompletesTheRelayedEdgeAndConsumesTheRoute(t *testing.T) {
 	}
 
 	again, err := link.Reply(ctx, replyRequest("msg-1"))
-	if again != messaging.OutcomeEdgeAbsent || err != nil {
-		t.Fatalf("second Reply = (%q, %v), want the edge absent", again, err)
+	if again.Outcome != messaging.OutcomeEdgeAbsent || err != nil {
+		t.Fatalf("second Reply = (%+v, %v), want the edge absent", again, err)
 	}
 	if got := stub.countPath(pathSend); got != 1 {
 		t.Fatalf("the parent saw %d reply posts, want the consumed route to end there", got)
@@ -73,9 +73,9 @@ func TestLinkReplyReportsAnUnrecordedAskWithoutPosting(t *testing.T) {
 	})
 	link := newTestLink(t, stub, "gen-a")
 
-	outcome, err := link.Reply(testContext(t), replyRequest("msg-unknown"))
-	if outcome != messaging.OutcomeEdgeAbsent || err != nil {
-		t.Fatalf("Reply = (%q, %v), want the edge absent", outcome, err)
+	res, err := link.Reply(testContext(t), replyRequest("msg-unknown"))
+	if res.Outcome != messaging.OutcomeEdgeAbsent || err != nil {
+		t.Fatalf("Reply = (%+v, %v), want the edge absent", res, err)
 	}
 	if got := stub.countPath(pathSend); got != 0 {
 		t.Fatalf("the parent saw %d reply posts, want none", got)
@@ -118,7 +118,7 @@ func TestLinkReplyReportsTheProtocolErrorWhenTheParentAnswersWithoutAReplyVerdic
 			}
 
 			outcome, err := link.Reply(ctx, replyRequest("msg-1"))
-			if outcome != messaging.OutcomePossiblyPending {
+			if outcome.Outcome != messaging.OutcomePossiblyPending {
 				t.Fatalf("Reply outcome = %q, want %q", outcome, messaging.OutcomePossiblyPending)
 			}
 			if !errors.Is(err, ErrUnsupportedParentProtocol) {

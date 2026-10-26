@@ -41,7 +41,7 @@ func TestMessengerReplyRejectsNonJSONWithoutConsumingTheEdge(t *testing.T) {
 		MessageID: msgID,
 		Body:      `{"payload":`,
 	})
-	if outcome != messaging.OutcomeNotSent || !errors.Is(err, messaging.ErrInvalidRequest) {
+	if outcome.Outcome != messaging.OutcomeNotSent || !errors.Is(err, messaging.ErrInvalidRequest) {
 		t.Fatalf("Reply(not JSON) = (%q, %v), want not-sent invalid-request", outcome, err)
 	}
 
@@ -51,7 +51,7 @@ func TestMessengerReplyRejectsNonJSONWithoutConsumingTheEdge(t *testing.T) {
 		MessageID: msgID,
 		Body:      `{"payload":"pong"}`,
 	})
-	if err != nil || outcome != messaging.OutcomeReplied {
+	if err != nil || outcome.Outcome != messaging.OutcomeReplied {
 		t.Fatalf("Reply(valid) after the refusal = (%q, %v), want replied", outcome, err)
 	}
 	waited, err := m.Wait(ctx, messaging.WaitRequest{

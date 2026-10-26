@@ -61,7 +61,7 @@ func (r *relay) Ask(ctx context.Context, req messaging.SendRequest) error {
 	if err != nil {
 		return err
 	}
-	return r.hop(ctx, req.To.RunID, messaging.DeliverRequest{
+	return r.hop(ctx, req.To.RunID, messaging.TellRequest{
 		FromRunID:     req.From.RunID,
 		ToRunID:       req.To.RunID,
 		Kind:          "agent_message",
@@ -71,7 +71,7 @@ func (r *relay) Ask(ctx context.Context, req messaging.SendRequest) error {
 }
 
 // Tell relays a fire-and-forget message this broker did not admit an edge for.
-func (r *relay) Tell(ctx context.Context, req messaging.DeliverRequest) error {
+func (r *relay) Tell(ctx context.Context, req messaging.TellRequest) error {
 	kind := req.Kind
 	if kind == "" {
 		kind = "agent_message"
@@ -80,7 +80,7 @@ func (r *relay) Tell(ctx context.Context, req messaging.DeliverRequest) error {
 	if err != nil {
 		return err
 	}
-	return r.hop(ctx, req.ToRunID, messaging.DeliverRequest{
+	return r.hop(ctx, req.ToRunID, messaging.TellRequest{
 		FromRunID:     req.FromRunID,
 		ToRunID:       req.ToRunID,
 		Kind:          kind,
@@ -103,7 +103,7 @@ func (r *relay) sender(from messaging.Identity) string {
 // the run by its canonical run ID in that branch: a claim is addressed here
 // under the namespaced key and delivered there as the run the branch itself
 // knows.
-func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverRequest, sender string, expectsReply bool) error {
+func (r *relay) hop(ctx context.Context, target string, req messaging.TellRequest, sender string, expectsReply bool) error {
 	next, ok := r.registry.Hop(target)
 	if !ok {
 		return fmt.Errorf("%w: no registered branch owns run %q", messaging.ErrTargetUnavailable, target)

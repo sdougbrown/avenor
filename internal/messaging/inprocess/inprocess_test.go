@@ -141,15 +141,15 @@ func TestTransportCloseUnblocksWait(t *testing.T) {
 	}
 }
 
-// blockingMessenger holds cleanup after observing shutdown cancellation.
-type blockingMessenger struct {
-	messaging.Messenger
+// blockingSeam holds cleanup after observing shutdown cancellation.
+type blockingSeam struct {
+	messaging.Seam
 	entered        chan struct{}
 	canceled       chan struct{}
 	releaseCleanup chan struct{}
 }
 
-func (m blockingMessenger) block(ctx context.Context) error {
+func (m blockingSeam) block(ctx context.Context) error {
 	m.entered <- struct{}{}
 	<-ctx.Done()
 	close(m.canceled)
@@ -157,24 +157,32 @@ func (m blockingMessenger) block(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (m blockingMessenger) Send(ctx context.Context, _ messaging.SendRequest) (messaging.SendResult, error) {
+func (m blockingSeam) Send(ctx context.Context, _ messaging.SendRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
 }
 
-func (m blockingMessenger) Wait(ctx context.Context, _ messaging.WaitRequest) (messaging.WaitResult, error) {
+func (m blockingSeam) Wait(ctx context.Context, _ messaging.WaitRequest) (messaging.WaitResult, error) {
 	return messaging.WaitResult{Outcome: messaging.OutcomeEdgeAbsent}, m.block(ctx)
 }
 
-func (m blockingMessenger) Reply(ctx context.Context, _ messaging.ReplyRequest) (messaging.Outcome, error) {
-	return messaging.OutcomeNotSent, m.block(ctx)
+func (m blockingSeam) Reply(ctx context.Context, _ messaging.ReplyRequest) (messaging.SendResult, error) {
+	return messaging.SendResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
 }
 
-func (m blockingMessenger) Withdraw(ctx context.Context, _ messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
+func (m blockingSeam) Withdraw(ctx context.Context, _ messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	return messaging.WithdrawResult{Outcome: messaging.OutcomeNotSent}, m.block(ctx)
 }
 
-func (m blockingMessenger) Peers(ctx context.Context) ([]messaging.Peer, error) {
-	return nil, m.block(ctx)
+func (m blockingSeam) Peers(ctx context.Context, _ messaging.PeersRequest) (messaging.PeersResult, error) {
+	return messaging.PeersResult{}, m.block(ctx)
+}
+
+func (m blockingSeam) Receive(ctx context.Context, _ messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return messaging.ReceiveResult{}, m.block(ctx)
+}
+
+func (m blockingSeam) Preflight(ctx context.Context) (messaging.PreflightResult, error) {
+	return messaging.PreflightResult{}, m.block(ctx)
 }
 
 // TestDelegatedOperationsJoinClose pins that every delegated operation is
@@ -241,6 +249,20 @@ func TestDelegatedOperationsJoinClose(t *testing.T) {
 				return "", err
 			},
 		},
+		{
+			name: "receive",
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				_, err := tr.Receive(ctx, messaging.ReceiveRequest{Sender: alice, Generation: gen})
+				return "", err
+			},
+		},
+		{
+			name: "preflight",
+			call: func(ctx context.Context, tr messaging.Transport) (messaging.Outcome, error) {
+				_, err := tr.Preflight(ctx)
+				return "", err
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -253,8 +275,8 @@ func TestDelegatedOperationsJoinClose(t *testing.T) {
 						close(releaseCleanup)
 					}
 				}()
-				tr := NewRouted(store, func() messaging.Messenger {
-					return blockingMessenger{entered: entered, canceled: canceled, releaseCleanup: releaseCleanup}
+				tr := NewRouted(store, func() messaging.Seam {
+					return blockingSeam{entered: entered, canceled: canceled, releaseCleanup: releaseCleanup}
 				})
 				called := make(chan opOutcome, 1)
 				go func() {
@@ -311,6 +333,81 @@ func TestDelegatedOperationsJoinClose(t *testing.T) {
 	}
 }
 
+// scriptedSeam answers Receive and Preflight with distinctive results and
+// errors so a test can prove the routed transport reached it instead of the
+// store.
+type scriptedSeam struct {
+	messaging.Seam
+	messages   []messaging.InboundMessage
+	receiveErr error
+	protocol   int
+	preErr     error
+}
+
+func (s scriptedSeam) Receive(context.Context, messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
+	return messaging.ReceiveResult{Messages: s.messages}, s.receiveErr
+}
+
+func (s scriptedSeam) Preflight(context.Context) (messaging.PreflightResult, error) {
+	return messaging.PreflightResult{Protocol: s.protocol}, s.preErr
+}
+
+// TestRoutedReceiveAndPreflightReachSeam pins the routed Receive and Preflight
+// wiring: both resolve the seam per call, a seam installed after the transport
+// was built is still reached with its results and errors passed through, and
+// the reported generation stays the local endpoint's rather than the seam's.
+func TestRoutedReceiveAndPreflightReachSeam(t *testing.T) {
+	store, _ := messagetest.NewMemoryStore(t)
+	gen := store.Generation()
+	var seam messaging.Seam
+	tr := NewRouted(store, func() messaging.Seam { return seam })
+
+	msgID := mintID(t, time.Minute)
+	if _, err := tr.Send(context.Background(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: gen, Body: `{"message":"ask"}`,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	// Before the seam is installed both operations serve the store alone.
+	rec, err := tr.Receive(context.Background(), messaging.ReceiveRequest{Sender: bob, Generation: gen})
+	if err != nil || len(rec.Messages) != 1 || rec.Messages[0].MessageID != msgID || rec.Generation != gen {
+		t.Fatalf("store-only Receive = (%+v, %v), want the queued ask at generation %q", rec, err, gen)
+	}
+	if pre, err := tr.Preflight(context.Background()); err != nil || pre.Protocol != messaging.ProtocolVersion || pre.Generation != gen {
+		t.Fatalf("store-only Preflight = (%+v, %v), want the local protocol and generation", pre, err)
+	}
+
+	receiveErr := errors.New("receive through the seam")
+	preErr := errors.New("preflight through the seam")
+	seam = scriptedSeam{
+		messages:   []messaging.InboundMessage{{MessageID: "routed-1", Payload: []byte(`{"message":"routed"}`)}},
+		receiveErr: receiveErr,
+		protocol:   7,
+		preErr:     preErr,
+	}
+	rec, err = tr.Receive(context.Background(), messaging.ReceiveRequest{Sender: bob, Generation: gen})
+	if !errors.Is(err, receiveErr) {
+		t.Fatalf("routed Receive error = %v, want the seam's error", err)
+	}
+	if len(rec.Messages) != 1 || rec.Messages[0].MessageID != "routed-1" {
+		t.Fatalf("routed Receive = %+v, want the seam's messages", rec.Messages)
+	}
+	if rec.Generation != gen {
+		t.Fatalf("routed Receive generation = %q, want the local endpoint's %q", rec.Generation, gen)
+	}
+	pre, err := tr.Preflight(context.Background())
+	if !errors.Is(err, preErr) {
+		t.Fatalf("routed Preflight error = %v, want the seam's error", err)
+	}
+	if pre.Protocol != 7 {
+		t.Fatalf("routed Preflight protocol = %d, want the seam's protocol", pre.Protocol)
+	}
+	if pre.Generation != gen {
+		t.Fatalf("routed Preflight generation = %q, want the local endpoint's %q", pre.Generation, gen)
+	}
+}
+
 func TestRoutedResolutionJoinsClose(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store, _ := messagetest.NewMemoryStore(t)
@@ -321,9 +418,13 @@ func TestRoutedResolutionJoinsClose(t *testing.T) {
 				close(release)
 			}
 		}()
+		// The resolver serves its own preflight from a store-only transport: a
+		// routed Preflight delegates back into resolve, so routing this one
+		// would re-enter the resolver it is blocked inside.
+		local := New(store)
 		var tr messaging.Transport
-		tr = NewRouted(store, func() messaging.Messenger {
-			_, err := tr.Preflight(context.Background())
+		tr = NewRouted(store, func() messaging.Seam {
+			_, err := local.Preflight(context.Background())
 			entered <- err
 			<-release
 			return nil

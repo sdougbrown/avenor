@@ -137,7 +137,7 @@ func TestLinkReplyReportsALostRelayWhenTheParentWasReplaced(t *testing.T) {
 		t.Fatalf("Sync after the replacement: %v", err)
 	}
 
-	outcome, err := link.Reply(ctx, messaging.ReplyRequest{
+	res, err := link.Reply(ctx, messaging.ReplyRequest{
 		From:      messaging.Identity{RunID: "run-b", Sender: "bob"},
 		ToRunID:   "run-a",
 		MessageID: "msg-1",
@@ -145,8 +145,8 @@ func TestLinkReplyReportsALostRelayWhenTheParentWasReplaced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reply error = %v, want no error", err)
 	}
-	if outcome != messaging.OutcomeLost {
-		t.Fatalf("Reply outcome = %q, want %q", outcome, messaging.OutcomeLost)
+	if res.Outcome != messaging.OutcomeLost {
+		t.Fatalf("Reply outcome = %q, want %q", res.Outcome, messaging.OutcomeLost)
 	}
 	if stub.countPath(pathSend) != 0 {
 		t.Fatal("a reply on a replaced parent was sent onward")
@@ -222,13 +222,13 @@ func TestLinkReplyReportsALostRelayWhenTheParentRefusesThePinnedGeneration(t *te
 		t.Fatalf("RecordRelay: %v", err)
 	}
 
-	outcome, err := link.Reply(ctx, messaging.ReplyRequest{
+	res, err := link.Reply(ctx, messaging.ReplyRequest{
 		From:      messaging.Identity{RunID: "run-a", Sender: "alice"},
 		ToRunID:   "run-a",
 		MessageID: "msg-1",
 	})
-	if outcome != messaging.OutcomeLost || err == nil {
-		t.Fatalf("Reply = (%q, %v), want lost with the parent's refusal", outcome, err)
+	if res.Outcome != messaging.OutcomeLost || err == nil {
+		t.Fatalf("Reply = (%+v, %v), want lost with the parent's refusal", res, err)
 	}
 	if !errors.Is(err, messaging.ErrGenerationMismatch) {
 		t.Fatalf("Reply error = %v, want ErrGenerationMismatch", err)
@@ -238,8 +238,8 @@ func TestLinkReplyReportsALostRelayWhenTheParentRefusesThePinnedGeneration(t *te
 		ToRunID:   "run-a",
 		MessageID: "msg-1",
 	})
-	if again != messaging.OutcomeEdgeAbsent || err != nil {
-		t.Fatalf("second Reply = (%q, %v), want the dropped route", again, err)
+	if again.Outcome != messaging.OutcomeEdgeAbsent || err != nil {
+		t.Fatalf("second Reply = (%+v, %v), want the dropped route", again, err)
 	}
 }
 

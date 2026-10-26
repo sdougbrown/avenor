@@ -258,17 +258,17 @@ func TestReplyRouteIsDroppedWhenTheParentWasReplaced(t *testing.T) {
 		t.Fatalf("re-register the target branch: %v", err)
 	}
 
-	outcome, err := second.link.up.Reply(context.Background(), messaging.ReplyRequest{
+	res, err := second.link.up.Reply(context.Background(), messaging.ReplyRequest{
 		From:      messaging.Identity{RunID: "target"},
 		ToRunID:   first.key("asker"),
 		MessageID: msgID,
 		Body:      `{"message":"pong"}`,
 	})
 	if err != nil {
-		t.Fatalf("reply to a replaced parent = (%v, %v), want a clean lost verdict", outcome, err)
+		t.Fatalf("reply to a replaced parent = (%+v, %v), want a clean lost verdict", res, err)
 	}
-	if outcome != messaging.OutcomeLost {
-		t.Fatalf("reply to a replaced parent = %v, want lost", outcome)
+	if res.Outcome != messaging.OutcomeLost {
+		t.Fatalf("reply to a replaced parent = %v, want lost", res.Outcome)
 	}
 	if queued := queuedAgentMessages(t, first.broker, "asker"); len(queued) != 0 {
 		t.Fatalf("asker queue = %d messages, want no delivery for a dropped reply route", len(queued))
