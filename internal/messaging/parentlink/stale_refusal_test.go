@@ -21,16 +21,7 @@ import (
 func TestDelayedRefusalKeepsTheReplacementRouted(t *testing.T) {
 	parent := startBranch(t, "", "orchestrator")
 	stale := newBlockingEndpoint(t, http.StatusConflict, "generation-mismatch")
-	relayed := make(chan struct{}, 1)
-	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case relayed <- struct{}{}:
-		default:
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"outcome":"sent"}`))
-	}))
-	t.Cleanup(replacement.Close)
+	relayed, replacement := sentRelayServer(t)
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
 	if !parent.link.Registry().Owns("target") {
@@ -57,19 +48,7 @@ func TestDelayedRefusalKeepsTheReplacementRouted(t *testing.T) {
 	}
 
 	// The replacement stays a routing target: the next ask reaches it.
-	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
-	if answer.err != nil {
-		t.Fatalf("ask the replacement branch: %v", answer.err)
-	}
-	if answer.status != http.StatusOK || answer.body["outcome"] != string(messaging.OutcomeSent) {
-		t.Fatalf("ask the replacement branch = (%d, %v), want 200 sent", answer.status, answer.body)
-	}
-	select {
-	case <-relayed:
-	case <-time.After(awaitDeadline):
-		t.Fatal("the replacement branch never received an ask")
-	}
+	askRoutedTarget(t, parent, "target", "the replacement branch", "the replacement branch", relayed)
 }
 
 // TestDelayedRefusalKeepsARestartedRunsCredential pins the credential half of the
@@ -102,19 +81,7 @@ func TestDelayedRefusalKeepsARestartedRunsCredential(t *testing.T) {
 
 	// The restarted run stays a routing target: the next ask reaches the branch
 	// instead of being admitted into the parent's own store with no consumer.
-	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
-	if answer.err != nil {
-		t.Fatalf("ask the restarted run: %v", answer.err)
-	}
-	if answer.status != http.StatusOK || answer.body["outcome"] != string(messaging.OutcomeSent) {
-		t.Fatalf("ask the restarted run = (%d, %v), want 200 sent", answer.status, answer.body)
-	}
-	select {
-	case <-stale.relayed:
-	case <-time.After(awaitDeadline):
-		t.Fatal("the restarted run's branch never received an ask")
-	}
+	askRoutedTarget(t, parent, "target", "the restarted run", "the restarted run's branch", stale.relayed)
 }
 
 // TestDelayedDeregisterKeepsTheReplacementRouted pins the deregistration half
@@ -219,13 +186,14 @@ func TestDeregisterAcceptsAViewThatNamesARetiredRun(t *testing.T) {
 	}
 }
 
-// deregisterWith posts a deregistration that carries a view of the registration
-// and expects the status and code the parent answers a mismatch with: the view
-// no longer matches the registration the parent holds.
-func deregisterWith(t *testing.T, parent *branch, childID, endpoint, generation string, status int, code string, runs ...string) {
+// postDeregistration posts a deregistration that carries a view of a
+// registration and returns the status and decoded body the parent answers it
+// with, so the caller asserts the response the view earns. Each run is a run ID
+// followed by the credential the registration carried.
+func postDeregistration(t *testing.T, parent *branch, childID, endpoint, generation string, runs ...string) (int, map[string]any) {
 	t.Helper()
 	if len(runs)%2 != 0 {
-		t.Fatalf("deregister with needs a run ID and token per run, got %d arguments", len(runs))
+		t.Fatalf("deregister needs a run ID and token per run, got %d arguments", len(runs))
 	}
 	claims := make([]map[string]string, 0, len(runs)/2)
 	for i := 0; i < len(runs); i += 2 {
@@ -242,13 +210,22 @@ func deregisterWith(t *testing.T, parent *branch, childID, endpoint, generation 
 	}
 	resp, err := http.Post(parent.url()+pathDeregister, "application/json", bytes.NewReader(raw))
 	if err != nil {
-		t.Fatalf("deregister descendant: %v", err)
+		t.Fatalf("post deregistration: %v", err)
 	}
 	defer resp.Body.Close()
 	var decoded map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&decoded)
-	if resp.StatusCode != status || decoded["code"] != code {
-		t.Fatalf("deregister with a stale view = (%d, %v), want %d %s", resp.StatusCode, decoded, status, code)
+	return resp.StatusCode, decoded
+}
+
+// deregisterWith posts a deregistration that carries a view of the registration
+// and expects the status and code the parent answers a mismatch with: the view
+// no longer matches the registration the parent holds.
+func deregisterWith(t *testing.T, parent *branch, childID, endpoint, generation string, status int, code string, runs ...string) {
+	t.Helper()
+	got, decoded := postDeregistration(t, parent, childID, endpoint, generation, runs...)
+	if got != status || decoded["code"] != code {
+		t.Fatalf("deregister with a stale view = (%d, %v), want %d %s", got, decoded, status, code)
 	}
 }
 
@@ -324,19 +301,7 @@ func TestDelayedRefusalKeepsTheClaimARefreshedGenerationCarries(t *testing.T) {
 	}
 
 	// The refreshed claim stays a routing target: the next ask reaches it.
-	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
-	if answer.err != nil {
-		t.Fatalf("ask the run with the refreshed generation: %v", answer.err)
-	}
-	if answer.status != http.StatusOK || answer.body["outcome"] != string(messaging.OutcomeSent) {
-		t.Fatalf("ask the run with the refreshed generation = (%d, %v), want 200 sent", answer.status, answer.body)
-	}
-	select {
-	case <-stale.relayed:
-	case <-time.After(awaitDeadline):
-		t.Fatal("the branch with the refreshed generation never received an ask")
-	}
+	askRoutedTarget(t, parent, "target", "the run with the refreshed generation", "the branch with the refreshed generation", stale.relayed)
 }
 
 // TestDelayedRefusalKeepsTheClaimAnotherChildTookOver pins the owner half of the
@@ -347,16 +312,7 @@ func TestDelayedRefusalKeepsTheClaimARefreshedGenerationCarries(t *testing.T) {
 func TestDelayedRefusalKeepsTheClaimAnotherChildTookOver(t *testing.T) {
 	parent := startBranch(t, "", "orchestrator")
 	stale := newBlockingEndpoint(t, http.StatusNotFound, "target-unavailable")
-	relayed := make(chan struct{}, 1)
-	replacement := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case relayed <- struct{}{}:
-		default:
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"outcome":"sent"}`))
-	}))
-	t.Cleanup(replacement.Close)
+	relayed, replacement := sentRelayServer(t)
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
 	refusal := relayAsk(t, parent, "target", stale)
@@ -379,19 +335,7 @@ func TestDelayedRefusalKeepsTheClaimAnotherChildTookOver(t *testing.T) {
 	}
 
 	// The taking-over child stays a routing target: the next ask reaches it.
-	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
-	if answer.err != nil {
-		t.Fatalf("ask the run the other child took over: %v", answer.err)
-	}
-	if answer.status != http.StatusOK || answer.body["outcome"] != string(messaging.OutcomeSent) {
-		t.Fatalf("ask the run the other child took over = (%d, %v), want 200 sent", answer.status, answer.body)
-	}
-	select {
-	case <-relayed:
-	case <-time.After(awaitDeadline):
-		t.Fatal("the child that took the run over never received an ask")
-	}
+	askRoutedTarget(t, parent, "target", "the run the other child took over", "the child that took the run over", relayed)
 }
 
 // TestDelayedRefusalKeepsTheClaimTheMovedEndpointCarries pins the endpoint half
@@ -402,16 +346,7 @@ func TestDelayedRefusalKeepsTheClaimAnotherChildTookOver(t *testing.T) {
 func TestDelayedRefusalKeepsTheClaimTheMovedEndpointCarries(t *testing.T) {
 	parent := startBranch(t, "", "orchestrator")
 	stale := newBlockingEndpoint(t, http.StatusNotFound, "target-unavailable")
-	relayed := make(chan struct{}, 1)
-	moved := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case relayed <- struct{}{}:
-		default:
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"outcome":"sent"}`))
-	}))
-	t.Cleanup(moved.Close)
+	relayed, moved := sentRelayServer(t)
 
 	registerDescendant(t, parent, "branch-delta", stale.url(), "gen-old", "target", "token-old")
 	refusal := relayAsk(t, parent, "target", stale)
@@ -433,18 +368,44 @@ func TestDelayedRefusalKeepsTheClaimTheMovedEndpointCarries(t *testing.T) {
 
 	// The moved claim stays a routing target: the next ask reaches the endpoint
 	// the registration now carries.
-	secondID := newMsgID(t)
-	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), "target", secondID, parent.broker.Store().Generation())
+	askRoutedTarget(t, parent, "target", "the run at the moved endpoint", "the branch at the moved endpoint", relayed)
+}
+
+// sentRelayServer stands in for a branch endpoint that accepts every relay: it
+// notes the first ask on relayed and answers sent, so a test can prove an ask
+// reached the endpoint a claim now carries.
+func sentRelayServer(t *testing.T) (<-chan struct{}, *httptest.Server) {
+	t.Helper()
+	relayed := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case relayed <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"outcome":"sent"}`))
+	}))
+	t.Cleanup(server.Close)
+	return relayed, server
+}
+
+// askRoutedTarget posts one fresh ask to target and asserts it is admitted (200
+// sent) and reaches relayed within the await deadline, so a test can prove a
+// claim stayed a routing target. asked and who name the target in the ask and
+// channel messages.
+func askRoutedTarget(t *testing.T, parent *branch, target, asked, who string, relayed <-chan struct{}) {
+	t.Helper()
+	answer := sendAsk(parent.broker.Addr(), "orchestrator", parent.token(t, "orchestrator"), target, newMsgID(t), parent.broker.Store().Generation())
 	if answer.err != nil {
-		t.Fatalf("ask the run at the moved endpoint: %v", answer.err)
+		t.Fatalf("ask %s: %v", asked, answer.err)
 	}
 	if answer.status != http.StatusOK || answer.body["outcome"] != string(messaging.OutcomeSent) {
-		t.Fatalf("ask the run at the moved endpoint = (%d, %v), want 200 sent", answer.status, answer.body)
+		t.Fatalf("ask %s = (%d, %v), want 200 sent", asked, answer.status, answer.body)
 	}
 	select {
 	case <-relayed:
 	case <-time.After(awaitDeadline):
-		t.Fatal("the branch at the moved endpoint never received an ask")
+		t.Fatalf("%s never received an ask", who)
 	}
 }
 
@@ -564,33 +525,12 @@ func registerDescendant(t *testing.T, parent *branch, childID, endpoint, generat
 
 // deregisterDescendant retracts a child broker's claim the way a closing branch
 // does, sending the view of its registration the parent last accepted, so a test
-// can hand a run from one child to another while a refusal is in flight. Each
-// run is a run ID followed by the credential the branch's registration carried.
+// can hand a run from one child to another while a refusal is in flight.
 func deregisterDescendant(t *testing.T, parent *branch, childID, endpoint, generation string, runs ...string) {
 	t.Helper()
-	if len(runs)%2 != 0 {
-		t.Fatalf("deregister descendant needs a run ID and token per run, got %d arguments", len(runs))
-	}
-	claims := make([]map[string]string, 0, len(runs)/2)
-	for i := 0; i < len(runs); i += 2 {
-		claims = append(claims, map[string]string{"run_id": runs[i], "token": runs[i+1]})
-	}
-	raw, err := json.Marshal(map[string]any{
-		"child_id":   childID,
-		"endpoint":   endpoint,
-		"generation": generation,
-		"runs":       claims,
-	})
-	if err != nil {
-		t.Fatalf("marshal deregistration: %v", err)
-	}
-	resp, err := http.Post(parent.url()+pathDeregister, "application/json", bytes.NewReader(raw))
-	if err != nil {
-		t.Fatalf("deregister descendant: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("deregister descendant = %d, want 200", resp.StatusCode)
+	got, _ := postDeregistration(t, parent, childID, endpoint, generation, runs...)
+	if got != http.StatusOK {
+		t.Fatalf("deregister descendant = %d, want 200", got)
 	}
 }
 
