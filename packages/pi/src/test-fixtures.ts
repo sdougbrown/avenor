@@ -10,7 +10,7 @@ import type { SubAgentEnv } from './subagent-broker.js'
 /** Keep message delivery on Pi so context mocks cannot hide API misuse. */
 export async function startExtensionHarness(options: {
   deps?: Partial<ExtensionDeps>
-  extOptions?: { pollIntervalMs?: number; subAgentEnv?: SubAgentEnv | null }
+  extOptions?: { pollIntervalMs?: number; idleSendTimeoutMs?: number; subAgentEnv?: SubAgentEnv | null }
   ui?: Record<string, any>
   /** The harness's user-defined session name, as pi's session manager reports it. */
   sessionName?: () => string | undefined

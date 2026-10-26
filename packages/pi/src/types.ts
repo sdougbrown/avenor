@@ -19,6 +19,9 @@ export interface TrackedRun {
   /** true while an idle completion send is in flight; terminal processing for
    * this run is skipped until the send resolves. */
   idleSendInFlight?: boolean
+  /** When the in-flight idle send started, used to re-arm a send that was
+   * accepted by the void API but never confirmed through message_end. */
+  idleSentAt?: number
   /** true if we've injected a permission notification via sendUserMessage */
   permissionNotified?: boolean
   /** true once avenor_result has successfully returned this run's final result to

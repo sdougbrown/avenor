@@ -113,6 +113,10 @@ function asStatusResult(raw: StatusResult | StatusListResult): StatusResult {
 }
 
 const POLL_INTERVAL_MS = 3_000
+// Pi's sendUserMessage returns void and swallows async rejections, so an
+// accepted prompt may never come back through message_end. Re-arm delivery
+// after this long instead of leaving the run skipped with its notice unread.
+const IDLE_SEND_TIMEOUT_MS = 10_000
 const INSPECT_LIMIT = 128
 const COMPLETION_OUTPUT_CHARS = 600
 const INSPECT_JSON_STRING_CHARS = 600
@@ -395,6 +399,9 @@ function trackedRunKey(supervisorId: string | undefined, runId: string): string 
 export interface ExtensionOptions {
   /** Polling cadence; injectable so tests can drive deterministic ticks. */
   pollIntervalMs?: number
+  /** How long an unconfirmed idle completion send waits before re-arming;
+   * injectable so tests can exercise the timeout without fixed sleeps. */
+  idleSendTimeoutMs?: number
   /** Overrides broker-credential autodetection for sub-agent broker mode (tests). */
   subAgentEnv?: SubAgentEnv | null
 }
@@ -402,6 +409,7 @@ export interface ExtensionOptions {
 export function createExtension(deps: ExtensionDeps = defaultDeps, options: ExtensionOptions = {}) {
   return async function (pi: ExtensionAPI) {
     const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS
+    const idleSendTimeoutMs = options.idleSendTimeoutMs ?? IDLE_SEND_TIMEOUT_MS
     let telemetryGeneration = 0
     const trackedRuns = new Map<string, TrackedRun>()
     let pollingActive = false
@@ -779,6 +787,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         blocking: current?.blocking ?? blocking,
         nestedCount: current?.nestedCount,
         idleSendInFlight: current?.idleSendInFlight,
+        idleSentAt: current?.idleSentAt,
         permissionNotified: current?.permissionNotified,
         consumed: current?.consumed,
         terminalEventEmitted: current?.terminalEventEmitted,
@@ -886,6 +895,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         // An in-flight send belongs to the session that was just replaced; its
         // confirmation can no longer match, so delivery is handed back to the poll.
         run.idleSendInFlight = false
+        run.idleSentAt = undefined
       }
     }
 
@@ -1142,6 +1152,18 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // stopping point (e.g. an unanswered permission) from re-interrupting
           // re-issued waits on every poll cycle.
           const prevStatus = prevStatuses.get(entryKey)
+          // An accepted-but-unconfirmed send has no confirmation callback. If the
+          // prompt never comes back through message_end, re-arm delivery rather
+          // than skipping the run forever with its notice unread.
+          if (
+            run.idleSendInFlight
+            && run.idleSentAt !== undefined
+            && Date.now() - run.idleSentAt >= idleSendTimeoutMs
+          ) {
+            run.idleSendInFlight = false
+            run.idleSentAt = undefined
+            widgetDirty = true
+          }
           // An idle send is already in flight for this run: the send's own
           // resolution owns deletion or re-queueing.
           if (run.idleSendInFlight && isTerminalStatus(entry.status)) continue
@@ -1217,6 +1239,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             if (sessionCtx?.isIdle() === true && !compacting) {
               run.pendingNotice = notice
               run.idleSendInFlight = true
+              run.idleSentAt = Date.now()
               widgetDirty = true
               sendCompletionNotice(notice)
               continue
@@ -1242,7 +1265,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         }
         if (widgetDirty) updateWidget(entries)
 
+        // A lone terminal run with an unconfirmed send must keep polling so the
+        // timeout above can re-arm its delivery.
         const hasActive = entries.some(entry => !isTerminalStatus(entry.status))
+          || Array.from(trackedRuns.values()).some(run => run.idleSendInFlight)
         if (hasActive && pollingActive && generation === pollingGeneration) {
           setTimeout(() => {
             void tick().catch(err => {
@@ -1674,6 +1700,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (run.pendingNotice?.text !== text) continue
         run.pendingNotice = undefined
         run.idleSendInFlight = false
+        run.idleSentAt = undefined
         trackedRuns.delete(key)
         confirmed = true
       }
@@ -1689,6 +1716,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // still unread.
     const resumeAfterCompaction = () => {
       compacting = false
+      // Compaction rejected any prompt that was in flight: no confirmation can
+      // arrive, so hand delivery back to the poll.
+      for (const run of trackedRuns.values()) {
+        if (!run.pendingNotice) continue
+        run.idleSendInFlight = false
+        run.idleSentAt = undefined
+      }
       if (Array.from(trackedRuns.values()).some(run => run.pendingNotice)) startPolling()
     }
     pi.on('session_compact', resumeAfterCompaction)
