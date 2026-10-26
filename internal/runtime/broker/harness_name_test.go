@@ -243,3 +243,62 @@ func TestSessionsStampsRunIDForUnlabeledRun(t *testing.T) {
 		t.Fatal("Sessions() did not list rt_bare")
 	}
 }
+
+// TestSetHarnessNameNotifiesRunObserverOnce pins the notification count of a
+// harness session-name write: the run-set observer fires exactly once per set
+// and per clear, and each firing sees the resolved label the write produced.
+// The mirror fires once per write with the name written, and clearing the
+// name falls back to the launch label. The callback order is deliberately not
+// pinned: the run-set firing sits before the mirror here and moves after it
+// when the duplicate firing upstream is collapsed.
+func TestSetHarnessNameNotifiesRunObserverOnce(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	if _, err := b.CreateRun("rt_h", "launch-label"); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	var runFires, mirrorFires int
+	var runLabel, mirrorName string
+	b.SetRunObserver(func() {
+		runFires++
+		runLabel = b.DisplayName("rt_h")
+	})
+	b.SetHarnessNameObserver(func(runID, name string) {
+		mirrorFires++
+		mirrorName = name
+	})
+
+	// Set: the run observer fires exactly once and sees the resolved harness
+	// name; the mirror fires once with the name written.
+	if err := b.SetHarnessName("rt_h", "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+	if runFires != 1 {
+		t.Fatalf("run observer fired %d times on set, want exactly 1", runFires)
+	}
+	if runLabel != "harness-name" {
+		t.Fatalf("run observer label on set = %q, want the resolved harness name", runLabel)
+	}
+	if mirrorFires != 1 || mirrorName != "harness-name" {
+		t.Fatalf("mirror fired %d times (name %q) on set, want 1 / harness-name", mirrorFires, mirrorName)
+	}
+
+	// Clear: the run observer fires exactly once more and sees the resolved
+	// fallback (the launch label); the mirror fires once with the empty name.
+	if err := b.SetHarnessName("rt_h", ""); err != nil {
+		t.Fatalf("clear harness name: %v", err)
+	}
+	if runFires != 2 {
+		t.Fatalf("run observer fired %d times through set+clear, want exactly 2", runFires)
+	}
+	if runLabel != "launch-label" {
+		t.Fatalf("run observer label on clear = %q, want the resolved fallback launch-label", runLabel)
+	}
+	if mirrorFires != 2 || mirrorName != "" {
+		t.Fatalf("mirror fired %d times (name %q) through set+clear, want 2 / empty", mirrorFires, mirrorName)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sync"
 	"testing"
@@ -331,9 +332,13 @@ func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T
 
 // TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing pins the
 // registration critical section: the guard, the register and the apply of one
-// registration run as one sequence, so a second registration cannot land
-// between the first's register and its apply and leave the registry's
-// credential and the run record's credential disagreeing.
+// registration run as one sequence, so a second registration cannot run its
+// register inside the first's window. The first registration is held inside
+// its register call — the middle of the critical section — and the second
+// request is only then handed to its handler, so the second's lock acquisition
+// is ordered after the first's window opened. The second's register is then
+// proven not to run until the window closes: without the guard its register
+// and apply land in the gap and the two credentials diverge.
 func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -341,34 +346,41 @@ func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T)
 	}
 	defer b.Stop()
 
+	key := "rt_x@child-1"
 	var mu sync.Mutex
-	lastToken := ""
-	entered := make(chan struct{})
-	release := make(chan struct{})
 	first := true
-	b.SetParentLink(&parentLinkStub{
-		register: func(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-			claim := messaging.DescendantClaim{}
-			for _, run := range reg.Runs {
-				claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: run.RunID + "@" + reg.ChildID})
-				claim.Adopted = append(claim.Adopted, run.RunID+"@"+reg.ChildID)
-			}
-			mu.Lock()
-			block := first
-			first = false
-			mu.Unlock()
-			if block {
-				close(entered)
-				<-release
-			}
-			mu.Lock()
-			if len(reg.Runs) > 0 {
-				lastToken = reg.Runs[0].Token
-			}
-			mu.Unlock()
-			return claim, nil
-		},
-	})
+	// firstHeld is closed by the first registration's register call as it
+	// blocks inside the critical section; secondEntered is closed if the
+	// second registration's register call ever runs.
+	firstHeld := make(chan struct{})
+	secondEntered := make(chan struct{})
+	release := make(chan struct{})
+	link := &parentLinkStub{}
+	link.register = func(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+		claim := messaging.DescendantClaim{}
+		for _, run := range reg.Runs {
+			runKey := run.RunID + "@" + reg.ChildID
+			claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: runKey})
+			claim.Adopted = append(claim.Adopted, runKey)
+		}
+		mu.Lock()
+		isFirst := first
+		first = false
+		if len(reg.Runs) > 0 {
+			// The stub takes the claimed key so the second registration's guard
+			// reads the first's record as the link's own and is accepted.
+			link.owned = reg.Runs[0].RunID + "@" + reg.ChildID
+		}
+		mu.Unlock()
+		if isFirst {
+			close(firstHeld)
+			<-release
+		} else {
+			close(secondEntered)
+		}
+		return claim, nil
+	}
+	b.SetParentLink(link)
 
 	body := func(token string) string {
 		raw, err := json.Marshal(map[string]any{
@@ -383,47 +395,73 @@ func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T)
 		return string(raw)
 	}
 
-	// The first registration is held inside its register call while the second
-	// registration is posted. With the critical section the second waits and
-	// runs wholly after the first; without it its register and apply land in
-	// the gap and the two credentials diverge.
-	firstDone := make(chan struct{})
+	firstStatus := make(chan int, 1)
 	go func() {
-		defer close(firstDone)
 		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(body("token-1"))))
-		if err == nil {
-			resp.Body.Close()
+		if err != nil {
+			firstStatus <- -1
+			return
 		}
+		defer resp.Body.Close()
+		firstStatus <- resp.StatusCode
 	}()
-	<-entered
-	// Signal the second registration's arrival without a fixed sleep: the
-	// goroutine announces itself before posting, so the release below happens
-	// only after the second POST is in the server's hands and its register
-	// handler is contending on the broker lock.
-	secondStarted := make(chan struct{})
-	secondDone := make(chan struct{})
-	go func() {
-		defer close(secondDone)
-		close(secondStarted)
-		resp, err := http.Post("http://"+b.Addr()+"/parent/register", "application/json", bytes.NewReader([]byte(body("token-2"))))
-		if err == nil {
-			resp.Body.Close()
-		}
-	}()
-	<-secondStarted
-	close(release)
-	<-firstDone
-	<-secondDone
+	<-firstHeld
 
-	mu.Lock()
-	want := lastToken
-	mu.Unlock()
-	if want == "" {
-		t.Fatal("no registration was applied")
+	// The second request's body is a pipe the test writes only after the first
+	// register call holds the critical section: the handler is left reading the
+	// registration until then, so its lock acquisition — and, without the
+	// guard, its register — is ordered after the first's window opened.
+	pr, pw := io.Pipe()
+	secondStatus := make(chan int, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, "http://"+b.Addr()+"/parent/register", pr)
+		if err != nil {
+			secondStatus <- -1
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			secondStatus <- -1
+			return
+		}
+		defer resp.Body.Close()
+		secondStatus <- resp.StatusCode
+	}()
+	if _, err := pw.Write([]byte(body("token-2"))); err != nil {
+		t.Fatalf("write the gated registration body: %v", err)
 	}
-	key := "rt_x@child-1"
-	if token, ok := b.RunToken(key); !ok || token != want {
-		t.Fatalf("run record credential = (%q, %v), want the registry's %q", token, ok, want)
+	if err := pw.Close(); err != nil {
+		t.Fatalf("close the gated registration body: %v", err)
+	}
+
+	// While the first registration holds the critical section the second's
+	// register must not run. The assertion is bounded because a blocked
+	// handler produces no signal to wait on: a guard-less window lets the
+	// second handler straight through to its register, well inside the bound.
+	select {
+	case <-secondEntered:
+		close(release)
+		<-firstStatus
+		<-secondStatus
+		t.Fatal("the second registration's register ran inside the first's critical section")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	close(release)
+	if status := <-firstStatus; status != http.StatusOK {
+		t.Fatalf("first registration = %d, want 200", status)
+	}
+	if status := <-secondStatus; status != http.StatusOK {
+		t.Fatalf("second registration = %d, want 200", status)
+	}
+	// The record's credential is settled by whichever apply created it, and a
+	// newly adopted claim does not replace it — so under the critical section
+	// it is the first registration's token. A second register that ran inside
+	// the first's window would apply first and leave the record carrying its
+	// token-2 instead.
+	if got, ok := b.RunToken(key); !ok || got != "token-1" {
+		t.Fatalf("run record credential = (%q, %v), want the first registration's token-1", got, ok)
 	}
 }
 

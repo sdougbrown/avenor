@@ -459,9 +459,14 @@ func TestSessionRenameUnderAHarnessName(t *testing.T) {
 	}
 	// The result carries the resolved display name (the harness overlay wins),
 	// while the model-set label is written underneath — pinned by the fallback
-	// below, which surfaces it when the harness name clears.
+	// below, which surfaces it when the harness name clears. The previous label
+	// is the resolved name before the write (the harness overlay), not the raw
+	// model label underneath it.
 	if renamed.Label != "harness-name" {
 		t.Fatalf("rename result label = %q, want the resolved harness name", renamed.Label)
+	}
+	if renamed.PreviousLabel != "harness-name" {
+		t.Fatalf("rename result previous label = %q, want the resolved harness name", renamed.PreviousLabel)
 	}
 	if got := runtimeDisplayName(sup, runID); got != "harness-name" {
 		t.Fatalf("runtime display name after rename = %q, want the harness name to keep winning", got)
