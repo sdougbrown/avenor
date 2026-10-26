@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // unsetValue is what the observer reports for a variable the child did not
@@ -118,6 +119,7 @@ func PoisonParent(t *testing.T) {
 		"AVENOR_RUN_ID":                  "broker-run",
 		"AVENOR_BROKER_TOKEN":            "broker-token",
 		"AVENOR_BROKER_URL":              "http://stale.invalid",
+		token.EnvBrokerParentToken:       "parent-secret",
 	} {
 		t.Setenv(key, value)
 	}
