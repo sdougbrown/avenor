@@ -21,11 +21,11 @@ func runParentTokenTo(stdout, stderr io.Writer, args ...string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	token, err := token.NewHexToken()
+	credential, err := token.NewHexToken()
 	if err != nil {
 		fmt.Fprintf(stderr, "avenor parent-token: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, token)
+	fmt.Fprintln(stdout, credential)
 	return 0
 }
