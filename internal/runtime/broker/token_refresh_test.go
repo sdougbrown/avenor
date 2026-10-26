@@ -36,7 +36,7 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 	// replaced-credential check at the end names one the rotation loop is
 	// guaranteed to have replaced rather than one a starved loop may never
 	// have moved past.
-	original, ok := b.RunToken("asker")
+	original, ok := b.runToken("asker")
 	if !ok {
 		t.Fatal("the asking run has no credential")
 	}
@@ -70,7 +70,7 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 		go func() {
 			defer callers.Done()
 			for round := 0; round < 100; round++ {
-				token, ok := b.RunToken("asker")
+				token, ok := b.runToken("asker")
 				if !ok {
 					t.Errorf("the run disappeared while its credential was refreshed")
 					return
@@ -89,7 +89,7 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 					// carries the credential the request used, so retry once with the
 					// credential the record carries now; a refusal under a credential
 					// the record still carries is a real failure.
-					current, ok := b.RunToken("asker")
+					current, ok := b.runToken("asker")
 					if !ok {
 						t.Errorf("the run disappeared while its credential was refreshed")
 						return
@@ -116,7 +116,7 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 	// The periodic re-registration of a live branch rewrites the run's credential
 	// record with the credential it already holds, while the run keeps serving.
 	// Both the route and the send handler authenticate against that record.
-	steady, ok := b.RunToken("asker")
+	steady, ok := b.runToken("asker")
 	if !ok {
 		t.Fatal("the refreshed run lost its record")
 	}
@@ -151,7 +151,7 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 	close(steadyStop)
 	steadyDone.Wait()
 
-	if current, ok := b.RunToken("asker"); !ok || current != steady {
+	if current, ok := b.runToken("asker"); !ok || current != steady {
 		t.Fatalf("credential after re-registration = (%q, %v), want %q", current, ok, steady)
 	}
 	if status, err := authenticatedGet(b.Addr(), "asker", original); err != nil || status != http.StatusUnauthorized {
@@ -169,7 +169,7 @@ func TestDeleteRunIfTokenKeepsARecordItsCredentialLeftBehind(t *testing.T) {
 	if _, err := b.CreateRun("asker", "asker"); err != nil {
 		t.Fatalf("create the run: %v", err)
 	}
-	stale, ok := b.RunToken("asker")
+	stale, ok := b.runToken("asker")
 	if !ok || stale == "" {
 		t.Fatalf("run credential = (%q, %v), want a credential to retire against", stale, ok)
 	}
@@ -179,7 +179,7 @@ func TestDeleteRunIfTokenKeepsARecordItsCredentialLeftBehind(t *testing.T) {
 	if b.DeleteRunIfToken("asker", stale) {
 		t.Fatal("a retirement carrying the rotated-away credential deleted the record")
 	}
-	if token, ok := b.RunToken("asker"); !ok || token != "token-new" {
+	if token, ok := b.runToken("asker"); !ok || token != "token-new" {
 		t.Fatalf("run credential = (%q, %v), want the restarted run's record kept", token, ok)
 	}
 
@@ -188,7 +188,7 @@ func TestDeleteRunIfTokenKeepsARecordItsCredentialLeftBehind(t *testing.T) {
 	if !b.DeleteRunIfToken("asker", "token-new") {
 		t.Fatal("a retirement carrying the record's credential did not delete the record")
 	}
-	if _, ok := b.RunToken("asker"); ok {
+	if _, ok := b.runToken("asker"); ok {
 		t.Fatal("the retirement left the record behind")
 	}
 }

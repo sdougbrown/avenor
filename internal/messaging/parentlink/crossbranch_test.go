@@ -383,12 +383,16 @@ func TestRenamedRunIsRepublishedToTheParent(t *testing.T) {
 	}
 	deadline := time.Now().Add(awaitDeadline)
 	label := func() string {
-		for _, info := range parent.broker.Sessions() {
-			if info.RunID == target {
-				return info.Label
-			}
+		st := parent.broker.GetRun(target)
+		if st == nil {
+			return ""
 		}
-		return ""
+		st.Mu.Lock()
+		defer st.Mu.Unlock()
+		if st.Info == nil {
+			return ""
+		}
+		return st.Info.Label
 	}
 	for label() != "renamed-target" {
 		if time.Now().After(deadline) {

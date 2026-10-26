@@ -62,7 +62,7 @@ func TestChildClaimLeavesTheParentsOwnRunIntact(t *testing.T) {
 	childRun := child.key("rt_1")
 	awaitRegistered(t, parent, childRun)
 
-	owned, _ := parent.broker.RunToken("rt_1")
+	owned, _ := brokerRunToken(parent.broker, "rt_1")
 	if owned != parent.token(t, "rt_1") {
 		t.Fatal("the child's claim re-pointed the parent's own run credential")
 	}
@@ -105,7 +105,7 @@ func TestClaimOnARecordTheParentOwnsUnderTheKeyIsRefused(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("claim on a record the parent owns = (%d, %v), want 409", status, body)
 	}
-	if token, ok := parent.broker.RunToken(key); !ok || token != owned {
+	if token, ok := brokerRunToken(parent.broker, key); !ok || token != owned {
 		t.Fatalf("run record credential = (%q, %v), want the parent's own", token, ok)
 	}
 	if parent.link.Registry().Owns(key) {
@@ -135,7 +135,7 @@ func TestParentRoutesRefuseWithoutTheLinkCredential(t *testing.T) {
 	if owner, ok := parent.link.Registry().Owner(key); !ok || owner != child.childID {
 		t.Fatalf("owner of the live claim = (%q, %v), want the branch that registered", owner, ok)
 	}
-	if token, _ := parent.broker.RunToken(key); token != child.token(t, "target") {
+	if token, _ := brokerRunToken(parent.broker, key); token != child.token(t, "target") {
 		t.Fatal("an unauthenticated claim re-pointed the live branch's credential")
 	}
 

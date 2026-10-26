@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -520,6 +521,30 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 	})
 }
 
+// TestParentRegisterRefusesAnOversizeBody pins the request-body cap the parent
+// routes share with withAuth: a registration whose body exceeds the cap is
+// refused before the registry is consulted, and no claim is adopted.
+func TestParentRegisterRefusesAnOversizeBody(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	b.SetParentLinkToken("parent-token")
+	b.SetParentLink(&parentLinkStub{})
+
+	claim := `{"run_id":"remote-run","label":"remote","token":"t"},`
+	oversize := `{"child_id":"child-1","endpoint":"http://child:1234","generation":"gen-1","runs":[` +
+		strings.Repeat(claim, 40000) + `]}`
+	status, _ := postParentLink(t, b.Addr(), oversize, "Bearer parent-token")
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize registration = %d, want 413", status)
+	}
+	if b.GetRun("remote-run") != nil {
+		t.Fatal("a refused registration adopted the run")
+	}
+}
+
 // TestRelayRefusesATargetTheCallerDidNotAuthenticate pins the relay's target
 // authentication: a relay whose authenticated run does not match the body's
 // to_run_id is refused before the target's queue is touched, while a relay
@@ -645,7 +670,7 @@ func TestConcurrentRegistrationsLeaveTheRegistryAndRecordsAgreeing(t *testing.T)
 	if owned != key {
 		t.Fatalf("registry owner = %q, want %q", owned, key)
 	}
-	if token, ok := b.RunToken(key); !ok || token != registryToken {
+	if token, ok := b.runToken(key); !ok || token != registryToken {
 		t.Fatalf("run record credential = (%q, %v), want the registry's %q", token, ok, registryToken)
 	}
 }
@@ -743,7 +768,7 @@ func TestConcurrentDeregisterCannotOrphanARegisteredRun(t *testing.T) {
 	if owned != key || generation != "gen-2" || token != "token-2" {
 		t.Fatalf("registry view after re-registration = (%q, %q, %q), want the fresh claim", owned, generation, token)
 	}
-	if got, ok := b.RunToken(key); !ok || got != token {
+	if got, ok := b.runToken(key); !ok || got != token {
 		t.Fatalf("run record credential = (%q, %v), want the registry's %q", got, ok, token)
 	}
 }
