@@ -243,7 +243,7 @@ func TestParentRegisterRefusesARunTheBrokerOwns(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("register claiming a run the broker owns = %d, want 409", status)
 	}
-	if _, ok := b.RunToken("supervisor"); !ok {
+	if _, ok := b.runToken("supervisor"); !ok {
 		t.Fatal("the owned run lost its credential to the refused claim")
 	}
 }

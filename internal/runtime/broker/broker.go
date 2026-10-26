@@ -1734,8 +1734,8 @@ func (b *Broker) sessions() []SessionInfo {
 	return sessions
 }
 
-// RunToken reports the credential this broker authenticates runID with.
-func (b *Broker) RunToken(runID string) (string, bool) {
+// runToken reports the credential this broker authenticates runID with.
+func (b *Broker) runToken(runID string) (string, bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	st, ok := b.runs[runID]
@@ -1744,9 +1744,6 @@ func (b *Broker) RunToken(runID string) (string, bool) {
 	}
 	return st.Token, true
 }
-
-// Sessions returns the runs this broker owns with the metadata its peers see.
-func (b *Broker) Sessions() []SessionInfo { return b.sessions() }
 
 // ParentRunClaims reports this broker's own runs, each with the credential its
 // run authenticates with. A run is this broker's own only if the record itself
