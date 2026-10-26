@@ -52,6 +52,7 @@ async function createMultiSupervisorHarness(options: {
   resultTool?: any
   inspectTool?: any
   brokerReceiveTool?: any
+  dial?: any
   subAgentEnv?: { brokerUrl: string; runId: string; token: string }
   /** Supervisor mock; provides isCurrentInstance for singleton-scope tests. */
   supervisor?: { isCurrentInstance?: (supervisorId: string) => boolean }
@@ -79,6 +80,7 @@ async function createMultiSupervisorHarness(options: {
       ...(options.resultTool !== undefined && { resultTool: options.resultTool }),
       ...(options.inspectTool !== undefined && { inspectTool: options.inspectTool }),
       ...(options.brokerReceiveTool !== undefined && { brokerReceiveTool: options.brokerReceiveTool }),
+      ...(options.dial !== undefined && { dial: options.dial }),
       ...(options.supervisor !== undefined && { Supervisor: options.supervisor as any }),
     },
     extOptions: { pollIntervalMs: options.pollIntervalMs ?? 5, ...(options.subAgentEnv !== undefined && { subAgentEnv: options.subAgentEnv }) },
@@ -1906,13 +1908,28 @@ describe('Avenor Pi extension', () => {
     await h.waitPollMatching(payload => payload.entries.filter((e: { status: string }) => e.status === 'done').length === 2)
     await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:2'))
 
+    const terminalPayloads = () => h.emitted
+      .filter(([channel]) => channel === CHANNEL_RUN_TERMINAL)
+      .map(([, payload]) => payload as Record<string, unknown>)
+    const supervisorKey = (id: string) => `supervisor:${createHash('sha256').update(id).digest('hex').slice(0, 16)}`
+    const beforeUntracked = terminalPayloads()
+    expect(beforeUntracked).toHaveLength(2)
+
     // The same label and run id exist on both supervisors. Without an explicit
     // supervisor, no tracked run may be consumed.
     await h.registeredTools.avenor_result.execute('t3', { run_id: 'worker', wait: false }, undefined, undefined, h.ctx)
     expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:2')
+    // An untracked result owns no terminal event: polling or a bound result
+    // path owns delivery, so this call must not invent a singleton terminal.
+    const afterUntracked = terminalPayloads()
+    expect(afterUntracked).toHaveLength(beforeUntracked.length)
+    expect(afterUntracked.every(payload => payload.supervisorKey !== 'singleton')).toBe(true)
 
     await h.registeredTools.avenor_result.execute('t4', { run_id: 'worker', supervisor_id: A, wait: false }, undefined, undefined, h.ctx)
     expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
+    const afterTracked = terminalPayloads()
+    expect(afterTracked).toHaveLength(beforeUntracked.length)
+    expect(afterTracked.filter(payload => payload.supervisorKey === supervisorKey(A))).toHaveLength(1)
 
     const settled = await h.eventHandlers.agent_before_settle(
       { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
@@ -1955,6 +1972,180 @@ describe('Avenor Pi extension', () => {
     expect(settled).toBeUndefined()
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
     expect(completions).toHaveLength(1)
+    expect(completions[0]).toContain('idle answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('delivers a waiting spawn completion without an explicit settlement', async () => {
+    const SOCK = '/tmp/waiting-handback.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        if (done) return { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'waiting answer' }
+        return {
+          run_id: 'r1', label: 'worker', status: 'waiting', runtime_id: 'rt1',
+          pending_permission: { description: 'allow write' },
+        }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const observeRun = mock(async () => ({
+      subscribe: (cb: (snapshot: unknown) => void) => {
+        cb({ last_event: undefined, transcript: [], tools: [], live_tools: [], pending_permission: true, ended: false })
+        return () => {}
+      },
+      snapshot: () => ({ last_event: undefined, transcript: [], tools: [], live_tools: [], pending_permission: true, ended: false }),
+      close: async () => {},
+    }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      observeRun,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    const spawned = await h.registeredTools.avenor_spawn.execute(
+      't1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx,
+    )
+    expect(spawned.details).toMatchObject({ status: 'waiting' })
+
+    // The spawn handed control back at a stopping point, so it no longer owns
+    // delivery: the completion must arrive on its own.
+    done = true
+    await waitFor(() => h.sendUserMessage.mock.calls.some(([t]) => String(t).includes('Sub-agent "worker" finished')))
+    const completion = String(h.sendUserMessage.mock.calls.map(([t]) => String(t)).find(t => t.includes('Sub-agent "worker" finished')))
+    expect(completion).toContain('waiting answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('delivers a non-terminal spawn fallthrough completion without an explicit settlement', async () => {
+    const SOCK = '/tmp/running-handback.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'fallthrough answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const observeRun = mock(async () => ({
+      subscribe: (cb: (snapshot: unknown) => void) => {
+        cb({ last_event: undefined, transcript: [], tools: [], live_tools: [], pending_permission: false, ended: true })
+        return () => {}
+      },
+      snapshot: () => ({ last_event: undefined, transcript: [], tools: [], live_tools: [], pending_permission: false, ended: true }),
+      close: async () => {},
+    }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      observeRun,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+    })
+
+    const spawned = await h.registeredTools.avenor_spawn.execute(
+      't1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx,
+    )
+    expect(spawned.details).toMatchObject({ status: 'running' })
+
+    done = true
+    await waitFor(() => h.sendUserMessage.mock.calls.some(([t]) => String(t).includes('Sub-agent "worker" finished')))
+    const completion = String(h.sendUserMessage.mock.calls.map(([t]) => String(t)).find(t => t.includes('Sub-agent "worker" finished')))
+    expect(completion).toContain('fallthrough answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('starts an idle send for every terminal run without waiting for the first', async () => {
+    const SOCK = '/tmp/idle-concurrent.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        if (args.runId === 'ra') {
+          return done
+            ? { run_id: 'ra', label: 'alpha', status: 'done', runtime_id: 'rt-a', final_output: 'alpha answer' }
+            : { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+        }
+        return done
+          ? { run_id: 'rb', label: 'beta', status: 'done', runtime_id: 'rt-b', final_output: 'beta answer' }
+          : { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'alpha' ? 'ra' : 'rb',
+        label: args.label ?? 'spawned',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'alpha' ? 'rt-a' : 'rt-b',
+      })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const senders: Array<() => void> = []
+    h.sendUserMessage.mockImplementation(() => new Promise<void>(resolve => { senders.push(resolve) }))
+    done = true
+
+    // Both sends must start while the first is still in flight. An awaited
+    // send would leave the second run parked behind the gate.
+    await waitFor(() => senders.length === 2)
+    expect(senders).toHaveLength(2)
+    for (const resolve of senders) resolve()
+
+    await waitFor(() => h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('Sub-agent "')).length >= 2)
+    const completions = h.sendUserMessage.mock.calls
+      .map(([t]) => String(t))
+      .filter(t => t.includes('Sub-agent "') && t.includes('finished'))
+    expect(completions.filter(t => t.includes('"alpha"'))).toHaveLength(1)
+    expect(completions.filter(t => t.includes('"beta"'))).toHaveLength(1)
+    await waitFor(() => !String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:'))
+
+    // No notice was left queued for a later settlement, and no duplicate send
+    // is pending after both completions resolved.
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled).toBeUndefined()
+    expect(h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('Sub-agent "')).length).toBe(2)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('includes nestedCount and backend in a bound result terminal payload', async () => {
+    const SOCK = '/tmp/result-payload.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return { run_id: 'rc', label: 'solo', status: 'running', runtime_id: 'rt-c', backend: 'pi', pid: 424242 }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const resultTool = mock(async () => ({ run_id: 'rc', label: 'solo', status: 'done', ready: true, output: 'solo answer' }))
+    const dial = mock(async () => ({ list: async () => [{ status: 'running' }], close: () => {} }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      dial,
+      spawnTool: mock(async () => ({ run_id: 'rc', label: 'solo', supervisor_id: SOCK, runtime_id: 'rt-c' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'solo', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.waitPollMatching(payload => payload.entries.some((e: { nestedCount?: number }) => e.nestedCount === 1))
+
+    await h.registeredTools.avenor_result.execute('t2', { run_id: 'solo', wait: false }, undefined, undefined, h.ctx)
+    const payload = h.emitted
+      .filter(([channel]) => channel === CHANNEL_RUN_TERMINAL)
+      .map(([, value]) => value as Record<string, unknown>)
+      .find(value => value.runId === 'rc')
+    expect(payload).toMatchObject({ runId: 'rc', label: 'solo', status: 'done', backend: 'pi', nestedCount: 1 })
 
     await h.eventHandlers.session_shutdown()
   })
@@ -2076,8 +2267,7 @@ describe('Avenor Pi extension', () => {
     done = true
     await sendStartedGate
 
-    // Consume the run while the idle send is still in flight, then let the send
-    // fail: the failure must not re-add the notice for a run that is gone.
+    // Consume the result before the idle send fails. The failure must not restore its notice.
     const result = await h.registeredTools.avenor_result.execute('t2', { run_id: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     expect(result.details).toMatchObject({ run_id: 'r1', ready: true })
     releaseSend()

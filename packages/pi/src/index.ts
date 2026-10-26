@@ -774,6 +774,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         startTime: current?.startTime ?? Date.now(),
         lastStatus: status ?? current?.lastStatus,
         blocking: current?.blocking ?? blocking,
+        nestedCount: current?.nestedCount,
+        idleSendInFlight: current?.idleSendInFlight,
         permissionNotified: current?.permissionNotified,
         consumed: current?.consumed,
         terminalEventEmitted: current?.terminalEventEmitted,
@@ -976,6 +978,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         for (const entry of entries) {
           if (entry.backend === 'pi' && entry.pid && !isTerminalStatus(entry.status)) {
             entry.nestedCount = nestedCounts[idx++] ?? 0
+            const tracked = trackedRuns.get(trackedRunKey(entry.supervisorId, entry.runId))
+            if (tracked) tracked.nestedCount = entry.nestedCount
           }
         }
       }
@@ -1066,6 +1070,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // stopping point (e.g. an unanswered permission) from re-interrupting
           // re-issued waits on every poll cycle.
           const prevStatus = prevStatuses.get(entryKey)
+          // An idle send is already in flight for this run: the send's own
+          // resolution owns deletion or re-queueing.
+          if (run.idleSendInFlight && isTerminalStatus(entry.status)) continue
           const wasTerminal = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
           const wasStopped = wasTerminal || !!prevStatus?.pendingPermission
           if ((entry.pendingPermission || isTerminalStatus(entry.status)) && !wasStopped) {
@@ -1146,17 +1153,19 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             }
 
             if (sessionCtx?.isIdle() === true) {
-              const sent = await sendCompletionNotice(notice)
-              if (sessionAtPollStart === sessionGeneration && trackedRuns.get(entryKey) === run) {
+              run.idleSendInFlight = true
+              void sendCompletionNotice(notice).then(sent => {
+                if (sessionAtPollStart !== sessionGeneration || trackedRuns.get(entryKey) !== run) return
+                run.idleSendInFlight = false
                 if (sent) {
                   completionQueue.delete(entryKey)
                   trackedRuns.delete(entryKey)
-                  widgetDirty = true
                 } else {
                   completionQueue.set(entryKey, notice)
-                  widgetDirty = true
                 }
-              }
+                updateWidget(lastStatusEntries)
+              })
+              continue
             } else if (!completionQueue.has(entryKey)) {
               completionQueue.set(entryKey, notice)
               widgetDirty = true
@@ -1863,7 +1872,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
         if (status.status === 'waiting') {
           const tracked = getTrackedRun(result.run_id, supervisorId)
-          if (tracked) tracked.permissionNotified = true
+          if (tracked) {
+            tracked.permissionNotified = true
+            tracked.blocking = false
+          }
           return {
             content: [{ type: 'text', text: buildWaitingText({ runId: result.run_id, label, agent: params.agent }, status) }],
             details: {
@@ -1911,6 +1923,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
         }
 
+        const fallthrough = getTrackedRun(result.run_id, supervisorId)
+        if (fallthrough) fallthrough.blocking = false
         return {
           content: [{ type: 'text', text: `${label} is ${status.status}. Use avenor_status or avenor_inspect to check progress.` }],
           details: {
@@ -2044,19 +2058,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
                   label: resultRun.label ?? result.label ?? params.run_id,
                   agent: resultRun.agent ?? 'unknown',
                   status: result.status ?? 'done',
-                }),
-              )
-            } else if (!resultRun) {
-              emitAvenorEvent(
-                pi.events,
-                CHANNEL_RUN_TERMINAL,
-                createRunTerminalPayload({
-                  runId: result.run_id ?? params.run_id,
-                  supervisorId: params.supervisor_id,
-                  runtimeId: result.runtime_id,
-                  label: result.label ?? params.run_id,
-                  agent: 'unknown',
-                  status: result.status ?? 'done',
+                  nestedCount: resultRun.nestedCount,
+                  backend: resultRun.lastStatus?.backend,
                 }),
               )
             }

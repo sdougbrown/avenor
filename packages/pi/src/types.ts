@@ -8,8 +8,17 @@ export interface TrackedRun {
   runtimeId?: string
   startTime: number
   lastStatus?: StatusResult
-  /** true if spawned with wait=true (blocking mode handles permissions via onUpdate) */
+  /** true when delivery is owned by an in-flight spawn wait (wait=true) or
+   * avenor_result call. A spawn-time blocking wait handles permissions via
+   * onUpdate; a result wait suppresses the automatic completion notice while
+   * it may still deliver the output itself. Clearing it hands delivery back
+   * to the polling tick. */
   blocking?: boolean
+  /** Active descendants seen by the last poll, carried into terminal telemetry. */
+  nestedCount?: number
+  /** true while an idle completion send is in flight; terminal processing for
+   * this run is skipped until the send resolves. */
+  idleSendInFlight?: boolean
   /** true if we've injected a permission notification via sendUserMessage */
   permissionNotified?: boolean
   /** true once avenor_result has successfully returned this run's final result to
