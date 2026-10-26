@@ -14,8 +14,9 @@ import (
 // Transport is the in-process messaging transport.
 type Transport struct {
 	store *askstore.Store
-	// resolve names the seam the transport ask, reply and peer operations
-	// delegate to. It is nil when the transport serves them from the store alone.
+	// resolve names the seam the transport ask, reply, receive, peer and
+	// preflight operations delegate to. It is nil when the transport serves
+	// them from the store alone.
 	resolve  func() messaging.Seam
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -29,9 +30,10 @@ func New(store *askstore.Store) messaging.Transport {
 	return newTransport(store, nil)
 }
 
-// NewRouted builds a transport over store whose ask, reply and peer operations
-// delegate to the seam resolve returns. Resolution happens per call,
-// so a transport built before its host installs a seam still reaches it.
+// NewRouted builds a transport over store whose ask, reply, receive, peer and
+// preflight operations delegate to the seam resolve returns. Resolution
+// happens per call, so a transport built before its host installs a seam still
+// reaches it.
 func NewRouted(store *askstore.Store, resolve func() messaging.Seam) messaging.Transport {
 	return newTransport(store, resolve)
 }
@@ -150,6 +152,16 @@ func (t *Transport) Receive(ctx context.Context, req messaging.ReceiveRequest) (
 	if err := t.open(req.Generation); err != nil {
 		return messaging.ReceiveResult{}, err
 	}
+	child, cancel, ok := t.child(ctx)
+	if !ok {
+		return messaging.ReceiveResult{}, messaging.ErrTransportClosed
+	}
+	defer cancel()
+	if m := t.routed(); m != nil {
+		res, err := m.Receive(child, req)
+		res.Generation = t.store.Generation()
+		return res, err
+	}
 	msgs, err := t.store.Receive(req.Sender.RunID, messaging.ReceiveLimit(req.Limit))
 	return messaging.ReceiveResult{Messages: msgs, Generation: t.store.Generation()}, err
 }
@@ -175,6 +187,16 @@ func (t *Transport) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 func (t *Transport) Preflight(ctx context.Context) (messaging.PreflightResult, error) {
 	if t.isClosed() {
 		return messaging.PreflightResult{}, messaging.ErrTransportClosed
+	}
+	child, cancel, ok := t.child(ctx)
+	if !ok {
+		return messaging.PreflightResult{}, messaging.ErrTransportClosed
+	}
+	defer cancel()
+	if m := t.routed(); m != nil {
+		res, err := m.Preflight(child)
+		res.Generation = t.store.Generation()
+		return res, err
 	}
 	return messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: t.store.Generation()}, nil
 }
