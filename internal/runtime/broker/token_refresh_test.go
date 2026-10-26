@@ -85,21 +85,36 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 				if started == settledStarted && done == settledDone && status != http.StatusOK {
 					// A write that incremented started before the first snapshot can
 					// increment done after the second, which reads as no overlap while
-					// the credential switched mid-request. The record then no longer
-					// carries the credential the request used, so retry once with the
-					// credential the record carries now; a refusal under a credential
-					// the record still carries is a real failure.
-					current, ok := b.runToken("asker")
-					if !ok {
-						t.Errorf("the run disappeared while its credential was refreshed")
-						return
-					}
-					if current != token {
-						status, err = authenticatedGet(b.Addr(), "asker", current)
+					// the credential switched mid-request. A rotation can also complete
+					// between the token read and the request, and a further rotation can
+					// race the retry itself — so a refusal is only evidence when the
+					// retry is itself proven not to overlap a rotation. Retry with the
+					// record's current credential under that proof; a refusal under a
+					// credential the record still carries is a real failure.
+					for retry := 0; retry < 5; retry++ {
+						preStarted, preDone := rotating.snapshot()
+						current, ok := b.runToken("asker")
+						if !ok {
+							t.Errorf("the run disappeared while its credential was refreshed")
+							return
+						}
+						if current == token {
+							break // the record still carries the credential the request used
+						}
+						token = current
+						status, err = authenticatedGet(b.Addr(), "asker", token)
 						if err != nil {
 							t.Errorf("authenticate with the refreshed credential: %v", err)
 							return
 						}
+						postStarted, postDone := rotating.snapshot()
+						if status == http.StatusOK {
+							break
+						}
+						if preStarted != postStarted || preDone != postDone {
+							continue // a rotation raced this retry: not evidence of a defect
+						}
+						break // no overlap and still refused under the record's credential
 					}
 					if status != http.StatusOK {
 						t.Errorf("authentication with the current credential %q = %d, want 200", token, status)
