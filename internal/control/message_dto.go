@@ -112,10 +112,6 @@ type MessagePeer struct {
 type MessagePeersResult struct {
 	Peers      []MessagePeer `json:"peers"`
 	Generation string        `json:"generation,omitempty"`
-	// PeersError names why the listing read only part of the peer set. The
-	// peers beside it are the ones that were read, so a caller keeps them and
-	// reports the listing as incomplete.
-	PeersError string `json:"peers_error,omitempty"`
 }
 
 // MessagePreflightResult is the message_preflight response.

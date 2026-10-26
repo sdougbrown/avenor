@@ -12,7 +12,7 @@
   },
   "request_fields": {
     "register": ["child_id", "endpoint", "generation", "runs"],
-    "deregister": ["child_id", "generation"],
+    "deregister": ["child_id", "endpoint", "generation", "runs"],
     "send": ["run_id", "token", "from_run_id", "to_run_id", "type", "payload", "message_id", "generation", "expects_reply"],
     "reply": ["run_id", "token", "from_run_id", "to_run_id", "type", "payload", "reply_to", "generation"],
     "wait": ["run_id", "token", "waiting_for", "generation", "timeout_ms"],

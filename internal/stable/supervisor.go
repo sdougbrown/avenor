@@ -111,11 +111,8 @@ type Config struct {
 	// supervisor's broker registers its runs with. An ask that no run in this
 	// branch can answer is forwarded to the parent, which owns the one edge the
 	// cross-branch ask has and routes it to the descendant that owns the
-	// target. Empty means this supervisor is a root: it registers upward
-	// nowhere. A non-empty BrokerParentToken with an empty URL still turns the
-	// broker into a hub: it serves the parent routes and requires that
-	// credential from every child that registers, it just has no parent of its
-	// own.
+	// target. Empty means this supervisor is a root: its broker behaves exactly
+	// as a standalone local broker.
 	BrokerParentURL string
 
 	// BrokerParentToken is the credential the parent link uses in both
@@ -1969,29 +1966,27 @@ func (s *Supervisor) installParentLink() {
 	if s.config.BrokerParentURL == "" && s.config.BrokerParentToken == "" {
 		return
 	}
-	// The control socket path plus the host it lives on is this supervisor's
-	// stable identity: a restart comes back under the same child ID and
-	// reclaims its runs, and a same-path branch on another host stays distinct.
-	host, _ := os.Hostname()
 	options := parentlink.Options{
 		ParentURL:  s.config.BrokerParentURL,
 		Token:      s.config.BrokerParentToken,
 		Endpoint:   s.brokerURL(),
 		Generation: s.broker.Store().Generation,
-		Runs:       s.broker.ParentRunClaims,
-		RetireRuns: func(runIDs []string) {
-			for _, runID := range runIDs {
-				s.broker.DeleteRun(runID)
-			}
-		},
-		ChildID: parentlink.BranchID(s.config.ControlSocket, host),
+		Runs:       s.parentRunClaims,
+		RetireRun:  func(runID, token string) { s.broker.DeleteRunIfToken(runID, token) },
+		// The control socket path is this supervisor's stable identity: a
+		// restart comes back under the same child ID and reclaims its runs.
+		ChildID: parentlink.BranchID(s.config.ControlSocket),
 	}
-	link, err := parentlink.Install(options, s.broker)
+	link, err := parentlink.New(options, s.broker.LocalMessenger())
 	if err != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: parent broker link disabled: %v\n", err)
 		return
 	}
 	s.parentLink = link
+	s.broker.SetMessenger(link)
+	s.broker.SetParentLink(link)
+	s.broker.SetParentLinkToken(s.config.BrokerParentToken)
+	s.broker.SetRunObserver(link.RunChanged)
 	if options.ParentURL == "" {
 		return
 	}
@@ -2003,6 +1998,16 @@ func (s *Supervisor) installParentLink() {
 		// until the parent accepts the claim.
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: parent broker registration failed: %v\n", err)
 	}
+}
+
+// parentRunClaims reports the runs this branch owns, which is what it publishes
+// to its parent. A run a child broker owns belongs to that branch's claim, not
+// this one.
+func (s *Supervisor) parentRunClaims() []messaging.RunClaim {
+	owned := func(runID string) bool { return s.parentLink != nil && s.parentLink.Owns(runID) }
+	return parentlink.RunClaims(s.broker.Sessions(),
+		func(info broker.SessionInfo) (string, string) { return info.RunID, info.Label },
+		owned, s.broker.RunToken)
 }
 
 // registerBrokerRun ensures the supervisor has its own run registered in the

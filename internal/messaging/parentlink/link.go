@@ -52,12 +52,13 @@ type Options struct {
 	// Generation reports this broker's current ask generation. Required: the
 	// link pins it and the relay binds every hop to it.
 	Generation func() string
-	// RetireRuns deletes the run records this broker adopted for a descendant's
-	// runs when the registry stops routing them — a relay that found a
-	// generation-mismatched branch or a refused credential. The broker owns
-	// its own run records, so it supplies the deletion; nil leaves the records
-	// in place.
-	RetireRuns func(runIDs []string)
+	// RetireRun retires the host broker's own record for a run this branch stops
+	// owning after a relay found the owning branch gone: the retirement is
+	// conditional on the record still carrying the credential the run's claim
+	// carried in the registration the failed relay was posted against, so a
+	// replacement branch that registered while the refusal was in flight keeps
+	// its record. Nil leaves the record to the host.
+	RetireRun func(runID, token string)
 	// RefreshInterval bounds how long an idle branch stays absent from a
 	// replaced parent. Zero uses DefaultRefreshInterval.
 	RefreshInterval time.Duration
@@ -107,10 +108,14 @@ type Link struct {
 	relays     map[string]relayRoute
 	closed     bool
 	closedCh   chan struct{}
-	// degraded records a parent that predates the run-key namespacing: it
-	// understands only the legacy claim shape, so the branch-supervisor claim is
-	// omitted for the rest of the link's life with that parent.
-	degraded bool
+
+	// published is the claim the parent last accepted and the generation it was
+	// published under: the view a closing branch sends with its deregistration,
+	// so the parent can refuse one that no longer matches what it holds. A
+	// publication that failed left the parent's registration alone, so the view
+	// is updated only when one is accepted.
+	published           []messaging.RunClaim
+	publishedGeneration string
 
 	dirty chan struct{}
 	wg    sync.WaitGroup
@@ -153,19 +158,13 @@ func NewLink(opts Options) (*Link, error) {
 	}, nil
 }
 
-// SetTransport replaces the round tripper the link's parent requests travel
-// on. It must run before the link's first request, and it exists so a test can
-// inject a connection-level fault the way the messagetest suites do.
-func (l *Link) SetTransport(rt http.RoundTripper) {
-	l.client.SetTransport(rt)
-}
-
 // Start publishes this branch's claim to the parent broker and then keeps it
 // published: a run-set change re-publishes it at once, and an idle branch
-// re-publishes it on its refresh interval. The publish loop runs regardless
-// of the initial registration's outcome: a branch that starts before its
-// parent is up stays registered on the next run-set change instead of
-// staying silent until its own next upward call.
+// re-publishes it on its refresh interval.
+//
+// The publication loop runs whether or not the first registration succeeded. A
+// parent that is not up yet, or that was replaced, is reached by that loop; it
+// does not wait for an upward operation that may never come.
 func (l *Link) Start(ctx context.Context) error {
 	l.wg.Add(1)
 	go l.publishLoop(ctx)
@@ -189,8 +188,7 @@ func (l *Link) RunChanged() {
 // publishLoop re-publishes the run set after a change and on every refresh
 // interval. One loop owns every re-registration, so a change and a refresh
 // coalesce instead of stacking goroutines; a parent that is unreachable keeps
-// the claim it last accepted; the next change signaled through RunChanged or
-// the next tick retries it.
+// the claim it last accepted and the next tick retries it.
 func (l *Link) publishLoop(ctx context.Context) {
 	defer l.wg.Done()
 	ticker := time.NewTicker(l.opts.RefreshInterval)
@@ -215,66 +213,21 @@ func (l *Link) publishLoop(ctx context.Context) {
 func (l *Link) Sync(ctx context.Context) error {
 	l.regMu.Lock()
 	defer l.regMu.Unlock()
-	return l.publish(ctx, l.claims())
-}
-
-// claims reports the run set this branch publishes, in the shape its parent
-// speaks: a parent that predates the run-key namespacing never learns the
-// branch-supervisor claim, so the degraded shape omits it.
-func (l *Link) claims() []messaging.RunClaim {
-	claims := l.opts.Runs()
-	l.mu.Lock()
-	degraded := l.degraded
-	l.mu.Unlock()
-	if !degraded {
-		return claims
-	}
-	return withoutSupervisorClaim(claims)
-}
-
-// withoutSupervisorClaim drops the branch-supervisor claim, which is the shape
-// a parent predating the run-key namespacing understands.
-func withoutSupervisorClaim(claims []messaging.RunClaim) []messaging.RunClaim {
-	legacy := make([]messaging.RunClaim, 0, len(claims))
-	for _, claim := range claims {
-		if claim.RunID == messaging.SupervisorRunID {
-			continue
-		}
-		legacy = append(legacy, claim)
-	}
-	return legacy
-}
-
-// claimsSupervisor reports whether the claim carries the branch-supervisor run,
-// the only claim a namespacing parent answers with a run key.
-func claimsSupervisor(claims []messaging.RunClaim) bool {
-	for _, claim := range claims {
-		if claim.RunID == messaging.SupervisorRunID {
-			return true
-		}
-	}
-	return false
-}
-
-// publish registers claims with the parent and applies its response. A response
-// that shows the parent predates the run-key namespacing — a refusal naming the
-// branch-supervisor claim, or an acceptance that names no run key for it —
-// switches the link to the legacy shape and re-registers once, so a claim the
-// parent took in the namespacing shape is replaced by the one it understands.
-func (l *Link) publish(ctx context.Context, claims []messaging.RunClaim) error {
 	// The branch hands its parent the credentials its own runs already use, so
 	// the parent forwards an ask as the run that asked and relays a message back
 	// into the run's own queue.
+	claims := l.opts.Runs()
 	tokens := make(map[string]string, len(claims))
 	for _, claim := range claims {
 		if claim.Token != "" {
 			tokens[claim.RunID] = claim.Token
 		}
 	}
+	generation := l.opts.Generation()
 	status, raw, err := l.post(ctx, pathRegister, map[string]any{
 		"child_id":   l.opts.ChildID,
 		"endpoint":   l.opts.Endpoint,
-		"generation": l.opts.Generation(),
+		"generation": generation,
 		"runs":       claims,
 	}, "", "", registerTimeout)
 	if err != nil {
@@ -282,64 +235,16 @@ func (l *Link) publish(ctx context.Context, claims []messaging.RunClaim) error {
 	}
 	registered, err := decode(status, raw)
 	if err != nil {
-		// A parent with no supervisor exemption refuses the branch-supervisor
-		// claim: a namespacing parent never refuses that claim, so the refusal is
-		// its response. The refused registration adopted nothing, and retrying
-		// without the supervisor claim fails the same way when the refusal was
-		// for another run, so the legacy shape is remembered only when the retry
-		// succeeds.
-		if claimsSupervisor(claims) {
-			if retryErr := l.publish(ctx, withoutSupervisorClaim(claims)); retryErr == nil {
-				l.rememberDegraded()
-				return nil
-			}
-		}
 		return err
-	}
-	// A degraded parent that accepted the full claim but named no run key for the
-	// branch-supervisor run predates the namespacing: it recorded the claim as a
-	// literal run, so the claim is re-registered without it and the replacement
-	// retires the record the parent took. The generation the acceptance reported
-	// is pinned first, so the re-offer below cannot fire on the same generation
-	// change again and recurse forever.
-	if claimsSupervisor(claims) && registered.RunKeys[messaging.SupervisorRunID] == "" {
-		l.mu.Lock()
-		l.noteGenerationLocked(registered.Generation)
-		l.mu.Unlock()
-		l.rememberDegraded()
-		return l.publish(ctx, withoutSupervisorClaim(claims))
-	}
-	// A replaced parent may speak the namespacing the one it replaced lacked:
-	// a generation change retires the degraded shape, so this publication
-	// offers the full claim again instead of waiting for a branch restart.
-	if previous, pinned := l.pinnedGeneration(); l.degraded && pinned && registered.Generation != previous {
-		l.forgetDegraded()
-		return l.publish(ctx, l.claims())
 	}
 	l.mu.Lock()
 	l.tokens = tokens
+	l.published = claims
+	l.publishedGeneration = generation
 	l.noteKeysLocked(claims, registered.RunKeys)
 	l.noteGenerationLocked(registered.Generation)
 	l.mu.Unlock()
 	return nil
-}
-
-// rememberDegraded pins the legacy claim shape for the rest of the link's life
-// with this parent. A parent that namespaced once never stops, so the shape is
-// never revisited.
-func (l *Link) rememberDegraded() {
-	l.mu.Lock()
-	l.degraded = true
-	l.mu.Unlock()
-}
-
-// forgetDegraded retracts the legacy claim shape after the pinned generation
-// changed: the registration that answered under a new generation is a replaced
-// parent, which may speak the namespacing the old one lacked.
-func (l *Link) forgetDegraded() {
-	l.mu.Lock()
-	l.degraded = false
-	l.mu.Unlock()
 }
 
 // noteGenerationLocked pins the parent's generation. The routes recorded against
@@ -384,8 +289,23 @@ func (l *Link) Close() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), deregisterTimeout)
 	defer cancel()
-	// A parent that cannot answer needs no cleanup: the claim dies with it.
-	_, _, _ = l.post(ctx, pathDeregister, map[string]any{"child_id": l.opts.ChildID, "generation": l.opts.Generation()}, "", "", deregisterTimeout)
+	l.mu.Lock()
+	reg := messaging.DescendantRegistration{
+		ChildID:    l.opts.ChildID,
+		Endpoint:   l.opts.Endpoint,
+		Generation: l.publishedGeneration,
+		Runs:       l.published,
+	}
+	l.mu.Unlock()
+	// A parent that cannot answer needs no cleanup: the claim dies with it. The
+	// branch sends the view its parent last accepted, so a parent that holds a
+	// same-identity replacement's registration refuses to retire it.
+	_, _, _ = l.post(ctx, pathDeregister, map[string]any{
+		"child_id":   reg.ChildID,
+		"endpoint":   reg.Endpoint,
+		"generation": reg.Generation,
+		"runs":       reg.Runs,
+	}, "", "", deregisterTimeout)
 	return l.client.Close()
 }
 

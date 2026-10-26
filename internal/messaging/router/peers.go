@@ -93,18 +93,27 @@ func peersList(ctx context.Context, p Provider, action string) (Result, error) {
 	if err != nil && len(peers.Peers) == 0 {
 		return Result{}, refused(err)
 	}
-	records, listingErr := messaging.PeerListing(peers.Peers, err)
-	if listingErr != nil && len(records) == 0 {
-		return Result{}, refused(listingErr)
+	records := make([]messaging.PeerRecord, 0, len(peers.Peers))
+	for _, peer := range peers.Peers {
+		var record messaging.PeerRecord
+		if len(peer.Session) > 0 {
+			if err := json.Unmarshal(peer.Session, &record); err != nil {
+				return Result{}, refused(err)
+			}
+		}
+		if record.RunID == "" {
+			record.RunID = peer.RunID
+		}
+		records = append(records, record)
 	}
 	result := Result{Action: action, Peers: records}
-	if listingErr != nil {
+	if err != nil {
 		// Classify through refused once so the detail carries the same
 		// filesystem-path rule the empty-listing failure uses instead of naming
 		// an absolute path in the text.
 		result.Outcome = messaging.OutcomeLost
 		result.Text = messaging.RenderOutcome(peersListOutcomeKey, result.Outcome, map[string]string{
-			"detail": sanitize(refused(listingErr).Message),
+			"detail": sanitize(refused(err).Message),
 		})
 	}
 	return result, nil

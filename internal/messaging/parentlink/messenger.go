@@ -89,11 +89,8 @@ func (m *Messenger) Send(ctx context.Context, req messaging.SendRequest, legacy 
 	return m.up.Send(ctx, req)
 }
 
-// sendToChild serves an ask whose target run is owned by a registered child
-// branch. The ask is not local to this broker, so it admits the one edge a
-// cross-branch ask owns in this broker's store (the ancestor ask store) and
-// relays the message into the child's queue afterwards; the relay itself admits
-// no second edge. The admission never
+// sendToChild admits the one edge a cross-branch ask owns in this broker's store
+// and relays the message into the child's queue afterwards. The admission never
 // performs network I/O, so the relay cannot run under the store's lock.
 func (m *Messenger) sendToChild(ctx context.Context, req messaging.SendRequest, legacy bool) (messaging.SendResult, error) {
 	if req.NoReply {
@@ -230,15 +227,13 @@ func (m *Messenger) Register(reg messaging.DescendantRegistration) (messaging.De
 	return m.registry.Register(reg)
 }
 
-// Deregister retires one child and reports the runs it had claimed.
-func (m *Messenger) Deregister(childID, generation string) ([]string, error) {
-	return m.registry.Deregister(childID, generation)
-}
-
-// ForceDeregister retires every claim a child holds without pinning a
-// generation.
-func (m *Messenger) ForceDeregister(childID string) ([]string, error) {
-	return m.registry.ForceDeregister(childID)
+// Deregister retires one child and reports the run keys it had claimed with the
+// credential each claim carried, but only while the registration still resolves
+// to the closing branch's view; a registration a same-identity replacement
+// replaced is refused with messaging.ErrGenerationMismatch and nothing is
+// retired.
+func (m *Messenger) Deregister(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
+	return m.registry.Deregister(childID, reg)
 }
 
 // RecordRelay binds a relayed ask's reply route before the ask is exposed.

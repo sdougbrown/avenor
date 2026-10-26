@@ -156,13 +156,13 @@ func (p *mcpMessageProvider) Role() string { return "host" }
 
 // listedPeers lists the broker's visible peers for the supervisor session and
 // decodes them with the contract's own peer decoder, so Resolve and
-// peerRunState read one peer shape. A listing that could not be completed
-// keeps the peers it did read and reports the incompleteness alongside them,
-// so a caller can answer for a peer it can see and refuses to answer for one
-// it cannot.
+// peerRunState read one peer shape.
 func (p *mcpMessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerRecord, error) {
 	peers, err := p.Peers(ctx, messaging.PeersRequest{Sender: messaging.Identity{RunID: messaging.SupervisorRunID}})
-	return messaging.PeerListing(peers.Peers, err)
+	if err != nil {
+		return nil, err
+	}
+	return messaging.DecodePeerRecords(peers.Peers)
 }
 
 // Resolve is the host ladder: the reserved self alias already became the
@@ -198,6 +198,9 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 		}, nil
 	}
 	peers, err := p.listedPeers(ctx)
+	if err != nil {
+		return messaging.Resolution{}, err
+	}
 	// The run-id rung stays a separate pass: an exact run id wins over any
 	// label, so a label collected alongside it must not be able to answer first.
 	for _, peer := range peers {
@@ -210,11 +213,6 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 	case 1:
 		return p.peerResolution(candidates[0], label), nil
 	case 0:
-		if err != nil {
-			// The listing was incomplete, so this peer may be in the part that
-			// was not read. Refuse rather than claim the peer does not exist.
-			return messaging.Resolution{}, err
-		}
 		return messaging.Resolution{Match: messaging.MatchNone}, nil
 	default:
 		return messaging.Resolution{Match: messaging.MatchAmbiguous, Candidates: candidates}, nil
@@ -294,14 +292,14 @@ func runFactsFromStatus(runID string, status map[string]any) messaging.RunFacts 
 // from here; the supervisor owns a resume.
 func (p *mcpMessageProvider) peerRunState(ctx context.Context, runID string) (messaging.RunFacts, error) {
 	peers, err := p.listedPeers(ctx)
+	if err != nil {
+		return messaging.RunFacts{}, err
+	}
 	for _, peer := range peers {
 		if peer.RunID != runID {
 			continue
 		}
 		return messaging.PeerRunFacts(peer), nil
-	}
-	if err != nil {
-		return messaging.RunFacts{}, err
 	}
 	return messaging.RunFacts{}, messaging.ErrTargetUnavailable
 }

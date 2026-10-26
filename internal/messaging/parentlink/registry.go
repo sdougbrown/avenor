@@ -48,12 +48,14 @@ type child struct {
 	id         string
 	endpoint   string
 	generation string
-	// claims holds, per run key, the claim the child registered: the run ID the
-	// owning branch knows the run by, so a namespaced claim still relays to the
-	// canonical run, and the credential the child handed the parent in its
-	// registration, which the relay posts back to the child, so the credential
-	// the child's own runs already use is the one that travels.
-	claims map[string]messaging.RunClaim
+	// runs maps the run ID this broker addresses a claimed run by to the run ID
+	// the owning branch knows it by, so a namespaced claim still relays to the
+	// canonical run.
+	runs map[string]string
+	// tokens holds, per run, the credential the child handed the parent in its
+	// registration. The relay posts it to the child, so the credential the
+	// child's own runs already use is the one that travels.
+	tokens map[string]string
 }
 
 // ParentRunKey reports the run ID a parent broker addresses a descendant's run
@@ -118,7 +120,7 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	}
 	current, ok := r.children[reg.ChildID]
 	if !ok {
-		current = &child{id: reg.ChildID, claims: map[string]messaging.RunClaim{}}
+		current = &child{id: reg.ChildID, runs: map[string]string{}, tokens: map[string]string{}}
 		r.children[reg.ChildID] = current
 	}
 	current.endpoint = reg.Endpoint
@@ -129,22 +131,23 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 		claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: key})
 		adopted[key] = struct{}{}
 		if _, held := r.owners[key]; !held {
-			claim.Changed = true
+			claim.Adopted = append(claim.Adopted, key)
 		}
 		r.owners[key] = reg.ChildID
-		current.claims[key] = run
+		current.runs[key] = run.RunID
+		current.tokens[key] = run.Token
 	}
-	for key := range r.owners {
-		if r.owners[key] != reg.ChildID {
+	for runID := range r.owners {
+		if r.owners[runID] != reg.ChildID {
 			continue
 		}
-		if _, still := adopted[key]; still {
+		if _, still := adopted[runID]; still {
 			continue
 		}
-		delete(r.owners, key)
-		delete(current.claims, key)
-		claim.Retired = append(claim.Retired, key)
-		claim.Changed = true
+		delete(r.owners, runID)
+		delete(current.runs, runID)
+		delete(current.tokens, runID)
+		claim.Retired = append(claim.Retired, runID)
 	}
 	return claim, nil
 }
@@ -175,74 +178,126 @@ func validEndpoint(endpoint string) error {
 	return nil
 }
 
-// Deregister retires one child and reports the runs it had claimed. The
-// generation the caller observed pins the claim it retires: a registration
-// that replaced the claim with a fresher generation survives the retirement,
-// because a refusal that raced the replacement must not wipe the claim that
-// took its place.
-func (r *Registry) Deregister(childID, generation string) ([]string, error) {
+// Deregister retires one child's whole registration and reports the run keys it
+// retired with the credential each claim was registered with, but only while the
+// registration is still the one the closing branch published: the endpoint and
+// pinned generation must resolve to the branch's view, and every claim the
+// registration still holds must carry the run ID and credential that view named. A deregistration is
+// posted fire-and-forget with a client-side timeout, so a same-identity
+// replacement can re-register while it is in flight; the replacement presents a
+// different endpoint, generation or credential set, and retiring its claims
+// would take the healthy branch out of routing and delete its run records.
+func (r *Registry) Deregister(childID string, reg messaging.DescendantRegistration) (map[string]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	current, ok := r.children[childID]
 	if !ok {
 		return nil, fmt.Errorf("%w: child %q is not registered", messaging.ErrTargetUnavailable, childID)
 	}
-	if current.generation != generation {
-		return nil, nil
+	if !registrationMatches(current, reg) {
+		return nil, fmt.Errorf("%w: child %q's registration no longer matches the closing branch's view", messaging.ErrGenerationMismatch, childID)
 	}
-	delete(r.children, childID)
-	var runs []string
-	for runID, owner := range r.owners {
-		if owner != childID {
-			continue
-		}
-		delete(r.owners, runID)
-		runs = append(runs, runID)
-	}
-	return runs, nil
+	return r.retireRegistration(current), nil
 }
 
-// ForceDeregister retires every claim a child holds and deletes its record
-// without pinning a generation. An operator uses it to release a child whose
-// durable identity moved across a restart: the old claims are owned by a dead
-// identity whose generation no view can pin, so the ordinary Deregister would
-// no-op forever. The retired runs are free for a fresh registration by the
-// replacement identity.
-func (r *Registry) ForceDeregister(childID string) ([]string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.children[childID]; !ok {
-		return nil, fmt.Errorf("%w: child %q is not registered", messaging.ErrTargetUnavailable, childID)
+// retireRegistration drops one child's whole registration and reports the run
+// keys it retired with the credential each claim was registered with. Both
+// callers hold r.mu.
+func (r *Registry) retireRegistration(current *child) map[string]string {
+	delete(r.children, current.id)
+	retired := make(map[string]string, len(current.runs))
+	for key := range current.runs {
+		delete(r.owners, key)
+		retired[key] = current.tokens[key]
 	}
-	delete(r.children, childID)
-	var runs []string
-	for runID, owner := range r.owners {
-		if owner != childID {
-			continue
-		}
-		delete(r.owners, runID)
-		runs = append(runs, runID)
-	}
-	return runs, nil
+	return retired
 }
 
-// Forget drops one run's claim, which is what a relay that found its child gone
-// leaves behind. The generation the caller observed pins the claim it retires:
-// a run a fresher registration re-claimed keeps its route.
-func (r *Registry) Forget(runID, generation string) {
+// registrationMatches reports whether a registered child still resolves to the
+// view a closing branch sent: the endpoint and pinned generation match, and
+// every claim the registration still holds appears in the view with the run ID
+// and credential it was registered under. It is claimMatchesHop across a whole
+// registration instead of one run. The view may name more runs than the
+// registration still holds: the parent is a second writer of the claim set, and
+// ForgetIfStale retires individual claims a relay refusal reported gone after
+// the branch's last accepted registration, so a view that still names a retired
+// claim describes the registration the parent last accepted rather than a
+// replacement — a same-identity replacement refreshed the endpoint, generation
+// or credentials, and the comparisons above refuse it. Both callers hold r.mu.
+func registrationMatches(current *child, reg messaging.DescendantRegistration) bool {
+	if current.endpoint != reg.Endpoint || current.generation != reg.Generation {
+		return false
+	}
+	viewed := make(map[string]string, len(reg.Runs))
+	for _, run := range reg.Runs {
+		viewed[run.RunID] = run.Token
+	}
+	for key, runID := range current.runs {
+		if token, ok := viewed[runID]; !ok || token != current.tokens[key] {
+			return false
+		}
+	}
+	return true
+}
+
+// claimMatchesHop reports whether childID's registration still resolves to
+// hop for runKey: the endpoint and pinned generation match the hop, and the
+// claim the relay named still holds the run ID and credential it
+// authenticated with. Both callers hold r.mu.
+func (r *Registry) claimMatchesHop(childID, runKey string, hop Hop) bool {
+	current, ok := r.children[childID]
+	return ok &&
+		current.endpoint == hop.Endpoint &&
+		current.generation == hop.Generation &&
+		current.runs[runKey] == hop.RunID &&
+		current.tokens[runKey] == hop.Token
+}
+
+// ForgetIfStale drops one run's claim, which is what a relay that found its
+// child gone leaves behind, but only while the claim still resolves to hop: the
+// run's endpoint, generation, canonical run ID and the credential the relay
+// authenticated with. A replacement branch that registered while the refusal was
+// in flight has refreshed the claim, and so has a run that restarted inside a live
+// branch, which keeps the endpoint and generation but rotates its credential;
+// retiring either claim would take a healthy run out of routing. It reports
+// whether it dropped the claim.
+func (r *Registry) ForgetIfStale(runID string, hop Hop) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	owner, ok := r.owners[runID]
-	if !ok {
-		return
+	if !ok || owner != hop.ChildID {
+		return false
 	}
-	if current, ok := r.children[owner]; ok && current.generation != generation {
-		return
+	if !r.claimMatchesHop(owner, runID, hop) {
+		return false
 	}
+	current := r.children[owner]
 	delete(r.owners, runID)
-	if current, ok := r.children[owner]; ok {
-		delete(current.claims, runID)
+	delete(current.runs, runID)
+	delete(current.tokens, runID)
+	return true
+}
+
+// ForgetChildIfStale drops every claim one child broker holds — its whole
+// registration — and reports the run keys it retired with the credential each
+// claim was registered with. It applies only while the registration is still the
+// one the failed relay was posted against: the child's endpoint and pinned
+// generation must resolve to the hop, and the claim the relay failed on must
+// still carry the run ID and credential that hop named. A generation refusal is
+// a verdict about the branch, not about one run — the child answered that it no
+// longer carries the generation its registration pinned, so every claim of that
+// registration is equally stale and one refusal retires them together instead of
+// costing one doomed hop per run. A registration a replacement refreshed while
+// the refusal was in flight resolves to a different endpoint or generation, and
+// a run that restarted inside a live branch rotated its credential; either way
+// the failed claim no longer matches and nothing of the registration is touched.
+func (r *Registry) ForgetChildIfStale(childID, failed string, hop Hop) map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.claimMatchesHop(childID, failed, hop) {
+		return nil
 	}
+	return r.retireRegistration(r.children[childID])
 }
 
 // Owns reports whether runID belongs to a registered child broker.
@@ -273,36 +328,35 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 	if current == nil || current.endpoint == "" {
 		return Hop{}, false
 	}
-	claimed := current.claims[runID]
 	return Hop{
 		ChildID:    current.id,
 		Endpoint:   current.endpoint,
 		Generation: current.generation,
-		Token:      claimed.Token,
-		RunID:      claimed.RunID,
+		Token:      current.tokens[runID],
+		RunID:      current.runs[runID],
 	}, true
 }
 
 // Export narrows a peer listing to what the authenticated caller may see. This
 // broker's own runs are always exported; a run a registered child owns is
-// exported to this broker's own callers (its owned descendants) and never to a
-// caller in a sibling branch. Nor is it exported back to the owning branch
-// itself: that branch already lists the run under its canonical run ID, and
-// re-exporting it would hand the branch a namespaced alias of its own
-// supervisor that its peer dedup cannot collapse.
+// exported to a caller in that child's own branch and to this broker's own
+// callers (its owned descendants), but never to a caller in a sibling branch.
 func (r *Registry) Export(peers []messaging.Peer, caller string) []messaging.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	// The caller's branch is read under the same lock as the peers' owners, so
-	// a registration that lands mid-listing cannot split what the caller is
-	// from what it is shown.
-	_, callerIsDescendant := r.owners[caller]
+	// The caller's branch and the peers' owners are read under the same lock, so
+	// a registration that lands mid-listing cannot split what the caller is from
+	// what it is shown.
+	callerBranch, callerIsDescendant := r.owners[caller]
 	exported := make([]messaging.Peer, 0, len(peers))
 	for _, peer := range peers {
-		if _, registered := r.owners[peer.RunID]; registered && callerIsDescendant {
-			continue
+		owner, registered := r.owners[peer.RunID]
+		switch {
+		case !registered:
+			exported = append(exported, peer)
+		case !callerIsDescendant, owner == callerBranch:
+			exported = append(exported, peer)
 		}
-		exported = append(exported, peer)
 	}
 	return exported
 }

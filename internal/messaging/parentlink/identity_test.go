@@ -11,48 +11,59 @@ import (
 
 // TestBranchIDDerivesDurableIdentity pins the identity a branch registers
 // under: the same input always derives the same identity, two identities whose
-// sanitized stems collide stay distinct, the readable stem is sanitized, and
-// the same socket path on two different hosts stays distinct.
+// sanitized stems collide stay distinct, and the readable stem is sanitized.
 func TestBranchIDDerivesDurableIdentity(t *testing.T) {
 	cases := []struct {
 		identity string
-		host     string
 		prefix   string // the sanitized stem the identity must start with
 	}{
-		{identity: "test/avenor.sock", host: "host-a", prefix: "avenor"},
-		{identity: "/x/avenor", host: "host-a", prefix: "avenor"},
-		{identity: "/x/avenor.bak", host: "host-a", prefix: "avenor"},
-		{identity: "dir/my branch!.sock", host: "host-a", prefix: "my-branch"},
-		{identity: "dir/!!avenor!!.sock", host: "host-a", prefix: "avenor"},
-		{identity: "dir/---.sock", host: "host-a", prefix: "branch"},
+		{identity: "test/avenor.sock", prefix: "avenor"},
+		{identity: "/x/avenor", prefix: "avenor"},
+		{identity: "/x/avenor.bak", prefix: "avenor"},
+		{identity: "dir/my branch!.sock", prefix: "my-branch"},
+		{identity: "dir/!!avenor!!.sock", prefix: "avenor"},
+		{identity: "dir/---.sock", prefix: "branch"},
 	}
 	seen := map[string]string{}
 	for _, tc := range cases {
-		id := BranchID(tc.identity, tc.host)
+		id := BranchID(tc.identity)
 		if id == "" || !strings.HasPrefix(id, tc.prefix+"-") {
-			t.Fatalf("BranchID(%q, %q) = %q, want the sanitized stem %q", tc.identity, tc.host, id, tc.prefix)
+			t.Fatalf("BranchID(%q) = %q, want the sanitized stem %q", tc.identity, id, tc.prefix)
 		}
 		if other, dup := seen[id]; dup {
 			t.Fatalf("BranchID(%q) = BranchID(%q) = %q, want distinct identities", tc.identity, other, id)
 		}
 		seen[id] = tc.identity
-		if again := BranchID(tc.identity, tc.host); again != id {
+		if again := BranchID(tc.identity); again != id {
 			t.Fatalf("BranchID(%q) derived %q then %q, want the same identity every time", tc.identity, id, again)
 		}
 	}
-	// A branch on another host that mounts the same socket path is a different
-	// branch: the registry would otherwise key both claims under one identity.
-	first := BranchID("/home/dev/.avenor/agent.sock", "host-a")
-	second := BranchID("/home/dev/.avenor/agent.sock", "host-b")
-	if first == second {
-		t.Fatal("the same socket path on two hosts derived one identity")
-	}
-	// The empty host is not a free pass: the path alone still derives an identity.
-	if id := BranchID("/x/avenor.sock", ""); id == "" {
-		t.Fatal("an empty host derived no identity")
-	}
-	if id := BranchID("", "host-a"); id != "" {
+	if id := BranchID(""); id != "" {
 		t.Fatalf("BranchID(\"\") = %q, want no identity", id)
+	}
+}
+
+// TestBranchIdentityIsDerivedFromTheControlSocketPath pins the identity
+// behavior restart reclamation relies on: repeated calls derive the same
+// identity, and distinct paths with the same stem stay distinct, so an
+// identity that moves with process state or cannot tell the paths apart
+// fails here instead of silently defeating restart reclamation.
+func TestBranchIdentityIsDerivedFromTheControlSocketPath(t *testing.T) {
+	identities := []string{
+		"/run/user/500/avenor/branch-alpha.sock",
+		"/home/agent/.local/state/avenor/branch-alpha.sock",
+		"state/branch-alpha.sock",
+	}
+	seen := make(map[string]string, len(identities))
+	for _, identity := range identities {
+		id := BranchID(identity)
+		if again := BranchID(identity); again != id {
+			t.Fatalf("BranchID(%q) = %q on a second call, want the same durable identity %q", identity, again, id)
+		}
+		if other, collides := seen[id]; collides {
+			t.Fatalf("%q and %q share the branch identity %q", other, identity, id)
+		}
+		seen[id] = identity
 	}
 }
 

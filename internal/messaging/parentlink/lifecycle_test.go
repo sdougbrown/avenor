@@ -1,13 +1,9 @@
 package parentlink
 
 import (
-	"errors"
 	"net/http"
 	"sync/atomic"
 	"testing"
-	"time"
-
-	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 // TestLinkPublishesItsClaimAndCoalescesChanges pins the claim's lifecycle: the
@@ -121,6 +117,72 @@ func TestLinkKeepsItsClaimWhenTheParentIsUnreachable(t *testing.T) {
 	}
 }
 
+// TestLinkClosesWithTheViewTheParentLastAccepted pins the view-update rule on
+// the failure side: a registration the parent accepted but whose response the
+// link fails to decode leaves the recorded view at the last accepted
+// registration, so the close retracts the claim the parent actually holds —
+// where a view of the failed registration would no longer match and the claims
+// would never retire.
+func TestLinkClosesWithTheViewTheParentLastAccepted(t *testing.T) {
+	var registrations atomic.Int32
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			if registrations.Add(1) > 1 {
+				// The parent accepted the registration, but the response is
+				// not an envelope the link can decode.
+				return http.StatusOK, `{not json`
+			}
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathDeregister:
+			return http.StatusOK, `{}`
+		}
+		return http.StatusOK, `{}`
+	})
+	ctx := testContext(t)
+	generation := "gen-1"
+	link, err := NewLink(Options{
+		ParentURL:  stub.URL(),
+		Endpoint:   "http://child-one",
+		ChildID:    "child-one",
+		Runs:       testRuns,
+		Generation: func() string { return generation },
+	})
+	if err != nil {
+		t.Fatalf("NewLink: %v", err)
+	}
+	t.Cleanup(func() { _ = link.Close() })
+
+	if err := link.Sync(ctx); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	// The second registration moves the branch's generation, but its response
+	// fails to decode: the view the link holds stays at the accepted one.
+	generation = "gen-2"
+	if err := link.Sync(ctx); err == nil {
+		t.Fatal("Sync with an undecodable response = nil, want an error")
+	}
+	if pinned, ok := link.pinnedGeneration(); !ok || pinned != "gen-a" {
+		t.Fatalf("pinned generation = (%q, %v), want the accepted registration's", pinned, ok)
+	}
+
+	if err := link.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	deregistered := stub.lastRequest(t, pathDeregister)
+	if deregistered.Body["endpoint"] != "http://child-one" || deregistered.Body["generation"] != "gen-1" {
+		t.Fatalf("deregistration = %v, want registration 1's endpoint and generation", deregistered.Body)
+	}
+	runs, ok := deregistered.Body["runs"].([]any)
+	if !ok || len(runs) != 1 {
+		t.Fatalf("deregistration runs = %v, want registration 1's run set", deregistered.Body["runs"])
+	}
+	run, _ := runs[0].(map[string]any)
+	if run["run_id"] != "run-a" || run["token"] != "tok-a" {
+		t.Fatalf("deregistered claim = %v, want the claim the parent last accepted", run)
+	}
+}
+
 // TestLinkClosesWithoutAParent pins the close of a link whose parent is
 // already gone: the retraction is best effort, so the close still succeeds.
 func TestLinkClosesWithoutAParent(t *testing.T) {
@@ -160,15 +222,11 @@ func TestLinkRefusesAClaimWithoutItsParts(t *testing.T) {
 			name: "no generation",
 			opts: Options{ParentURL: "http://parent", Endpoint: "http://child-one", Runs: testRuns},
 		},
-		{
-			name: "no durable child identity",
-			opts: Options{ParentURL: "http://parent", Endpoint: "http://child-one", Runs: testRuns, Generation: func() string { return "gen-a" }},
-		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if _, err := NewLink(testCase.opts); !errors.Is(err, messaging.ErrInvalidRequest) {
-				t.Fatalf("NewLink = %v, want the missing part refused as ErrInvalidRequest", err)
+			if _, err := NewLink(testCase.opts); err == nil {
+				t.Fatal("NewLink = nil error, want the missing part refused")
 			}
 		})
 	}
@@ -183,76 +241,10 @@ func TestLinkRefusesWorkAfterItIsClosed(t *testing.T) {
 	})
 	ctx := testContext(t)
 	link := newTestLink(t, stub, "gen-a")
-	// A wait and a withdrawal with a recorded ask route refuse the same way:
-	// the closed transport cannot re-sync the credentials the hop needs.
-	link.recordAsk("run-a", "msg-1", askRoute{generation: "gen-a"})
 	if err := link.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if err := link.Sync(ctx); err == nil {
 		t.Fatal("Sync after the close = nil, want an error")
-	}
-
-	// The routed operations refuse the same way: a closed transport carries no
-	// ask, wait, withdrawal, or listing.
-	if _, err := link.Send(ctx, askRequest("msg-1")); err == nil {
-		t.Fatal("Send after the close = nil, want an error")
-	}
-	if _, err := link.Wait(ctx, waitRequest("msg-1")); err == nil {
-		t.Fatal("Wait after the close = nil, want an error")
-	}
-	if _, err := link.Withdraw(ctx, withdrawRequest("msg-1")); err == nil {
-		t.Fatal("Withdraw after the close = nil, want an error")
-	}
-	if _, err := link.Peers(ctx); err == nil {
-		t.Fatal("Peers after the close = nil, want an error")
-	}
-	// A late relay-route record cannot land either: the claim the route would
-	// reply into was retracted by the close.
-	if err := link.RecordRelay(messaging.RelayRoute{
-		MessageID:      "msg-1",
-		AskerRunID:     "run-a",
-		EdgeGeneration: "gen-a",
-	}); !errors.Is(err, messaging.ErrTransportClosed) {
-		t.Fatalf("RecordRelay after the close = %v, want ErrTransportClosed", err)
-	}
-}
-
-// TestAFailedStartStillPublishesOnTheNextRunChange pins recovery from a parent
-// that is not up when the branch starts: Start reports the failed registration,
-// the publish loop keeps running, and the next run-set change registers the
-// branch with the parent once it is answering — a branch whose first
-// registration failed is not stranded until its next upward call.
-func TestAFailedStartStillPublishesOnTheNextRunChange(t *testing.T) {
-	var up atomic.Bool
-	registered := make(chan struct{}, 8)
-	stub := newStubBroker(t, func(req stubRequest) (int, string) {
-		switch {
-		case req.Path == pathDeregister:
-			return http.StatusOK, `{}`
-		case !up.Load():
-			return http.StatusServiceUnavailable, `{}`
-		default:
-			registered <- struct{}{}
-			return http.StatusOK, `{"generation":"gen-a"}`
-		}
-	})
-	ctx := testContext(t)
-	link := newTestLink(t, stub, "gen-a")
-
-	if err := link.Start(ctx); err == nil {
-		t.Fatal("Start with an unavailable parent = nil, want the failed registration")
-	}
-	if got := stub.countPath(pathRegister); got != 1 {
-		t.Fatalf("registrations = %d, want the failed initial attempt alone", got)
-	}
-
-	// The parent comes up, and the next run-set change registers the branch.
-	up.Store(true)
-	link.RunChanged()
-	select {
-	case <-registered:
-	case <-time.After(awaitDeadline):
-		t.Fatalf("the failed start never re-registered: registrations = %d", stub.countPath(pathRegister))
 	}
 }

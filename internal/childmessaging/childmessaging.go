@@ -120,16 +120,16 @@ func (p *MessageProvider) Preflight(ctx context.Context) (messaging.PreflightRes
 
 // listedPeers reads the broker's visible peers for this caller. It decodes them
 // with the contract's own peer decoder, so a field added to the peer contract
-// reaches Resolve and RunState instead of stopping at a local copy. A listing
-// that could not be completed keeps the peers it did read and reports the
-// incompleteness alongside them, so a caller can answer for a peer it can see
-// and refuses to answer for one it cannot.
+// reaches Resolve and RunState instead of stopping at a local copy.
 func (p *MessageProvider) listedPeers(ctx context.Context) ([]messaging.PeerRecord, error) {
 	peers, err := p.transport.Peers(ctx, messaging.PeersRequest{
 		Sender:     messaging.Identity{RunID: p.opts.RunID},
 		Generation: p.Generation(),
 	})
-	return messaging.PeerListing(peers.Peers, err)
+	if err != nil {
+		return nil, err
+	}
+	return messaging.DecodePeerRecords(peers.Peers)
 }
 
 // Resolve is the child ladder: the run's own id, then a runtime id, then an
@@ -143,6 +143,9 @@ func (p *MessageProvider) Resolve(ctx context.Context, ref string) (messaging.Re
 		return messaging.Resolution{RunID: p.opts.RunID, Label: ref, Match: messaging.MatchUnique}, nil
 	}
 	sessions, err := p.listedPeers(ctx)
+	if err != nil {
+		return messaging.Resolution{}, err
+	}
 	for _, session := range sessions {
 		if session.RunID == ref {
 			return messaging.Resolution{
@@ -157,11 +160,6 @@ func (p *MessageProvider) Resolve(ctx context.Context, ref string) (messaging.Re
 	case 1:
 		return messaging.Resolution{RunID: candidates[0], Label: label, Match: messaging.MatchUnique}, nil
 	case 0:
-		if err != nil {
-			// The listing was incomplete, so this peer may be in the part that
-			// was not read. Refuse rather than claim the peer does not exist.
-			return messaging.Resolution{}, err
-		}
 		return messaging.Resolution{Match: messaging.MatchNone}, nil
 	default:
 		return messaging.Resolution{Match: messaging.MatchAmbiguous, Candidates: candidates}, nil
@@ -173,14 +171,14 @@ func (p *MessageProvider) Resolve(ctx context.Context, ref string) (messaging.Re
 // it is never resumable from here: the supervisor owns a resume.
 func (p *MessageProvider) RunState(ctx context.Context, runID string) (messaging.RunFacts, error) {
 	sessions, err := p.listedPeers(ctx)
+	if err != nil {
+		return messaging.RunFacts{}, err
+	}
 	for _, session := range sessions {
 		if session.RunID != runID {
 			continue
 		}
 		return messaging.PeerRunFacts(session), nil
-	}
-	if err != nil {
-		return messaging.RunFacts{}, err
 	}
 	return messaging.RunFacts{}, messaging.ErrTargetUnavailable
 }
