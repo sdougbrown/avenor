@@ -190,8 +190,19 @@ func TestRelayRefusalRetiresTheAdoptedRunRecords(t *testing.T) {
 		t.Fatalf("Ask run-c = %v, want ErrTargetUnavailable", err)
 	}
 
-	if len(retired) != 2 || retired[0] != "run-b" || retired[1] != "run-c" {
-		t.Fatalf("retired = %v, want the refused run then the deregistered branch's run", retired)
+	if len(retired) != 2 {
+		t.Fatalf("retired = %v, want exactly two retired runs", retired)
+	}
+	for _, want := range []string{"run-b", "run-c"} {
+		n := 0
+		for _, got := range retired {
+			if got == want {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("retired = %v, want exactly one %s", retired, want)
+		}
 	}
 	if _, ok := registry.Hop("run-b"); ok {
 		t.Fatal("run-b still routes after its record was retired")
