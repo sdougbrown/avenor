@@ -242,3 +242,22 @@ without a trustable envelope is `possibly-pending`, never `not-sent`.
 
 The v1 host contract in this repository is exercised against the test fixture
 only. It is not a deployable authenticated host protocol.
+
+## Linking a branch
+
+A branch broker registers with its parent under a durable identity (`child_id`,
+derived from its control socket path and host) and re-claims its runs on every
+restart. The parent's `/parent/deregister` route retires one child's claims and
+the run records it owned; the body names the `child_id` and the `generation` the
+caller observed, and a claim a fresher registration replaced is left standing.
+
+The generation pin makes the route unusable for a branch whose durable identity
+itself changed across a restart: its old claims belong to a dead `child_id`
+whose generation no view can pin, so an ordinary deregistration no-ops forever.
+For that case the operator posts `{"child_id": "<old child>", "force": true}`
+instead. A forced deregistration skips the generation check, retires every claim
+the dead child holds, and reports the retired run count; the branch then
+re-registers under its new identity and reclaims the runs.
+The forced variant requires a configured parent-link token:
+the same credential the ordinary one accepts, and a link with no token
+configured refuses the force outright.

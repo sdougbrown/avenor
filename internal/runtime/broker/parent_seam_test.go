@@ -23,6 +23,8 @@ type parentLinkStub struct {
 	recordRelay  func(messaging.RelayRoute) error
 	recorded     []messaging.RelayRoute
 	deregistered bool
+	deregister   func(childID, generation string) ([]string, error)
+	force        func(childID string) ([]string, error)
 }
 
 func (p *parentLinkStub) Owns(runID string) bool { return runID == p.owned }
@@ -34,9 +36,19 @@ func (p *parentLinkStub) Register(reg messaging.DescendantRegistration) (messagi
 	panic("parentlink: registration is not part of an admission")
 }
 
-func (p *parentLinkStub) Deregister(childID string) ([]string, error) {
+func (p *parentLinkStub) Deregister(childID, generation string) ([]string, error) {
 	p.deregistered = true
+	if p.deregister != nil {
+		return p.deregister(childID, generation)
+	}
 	return nil, nil
+}
+
+func (p *parentLinkStub) ForceDeregister(childID string) ([]string, error) {
+	if p.force != nil {
+		return p.force(childID)
+	}
+	panic("parentlink: forced deregistration is not part of an admission")
 }
 
 func (p *parentLinkStub) RecordRelay(route messaging.RelayRoute) error {
@@ -214,7 +226,7 @@ func TestParentRegisterRefusesARunTheBrokerOwns(t *testing.T) {
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	if _, err := b.CreateRun("supervisor", "supervisor"); err != nil {
+	if _, err := b.CreateRun("web", "web"); err != nil {
 		t.Fatalf("create the broker's own run: %v", err)
 	}
 
@@ -234,7 +246,7 @@ func TestParentRegisterRefusesARunTheBrokerOwns(t *testing.T) {
 		"endpoint":   "http://child:1234",
 		"generation": "gen-1",
 		"runs": []map[string]any{
-			{"run_id": "supervisor", "label": "supervisor", "token": "child-token"},
+			{"run_id": "web", "label": "web", "token": "child-token"},
 		},
 	})
 	if err != nil {
@@ -244,7 +256,7 @@ func TestParentRegisterRefusesARunTheBrokerOwns(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("register claiming a run the broker owns = %d, want 409", status)
 	}
-	if _, ok := b.runToken("supervisor"); !ok {
+	if _, ok := b.runToken("web"); !ok {
 		t.Fatal("the owned run lost its credential to the refused claim")
 	}
 }
@@ -275,7 +287,10 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 		t.Cleanup(func() { _ = b.Stop() })
 		b.SetParentLink(&parentLinkStub{
 			register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
-				return messaging.DescendantClaim{Adopted: []string{"remote-run"}}, nil
+				return messaging.DescendantClaim{
+					Runs:    []messaging.ClaimedRun{{RunClaim: messaging.RunClaim{RunID: "remote-run", Label: "remote", Token: "child-token"}, Key: "remote-run"}},
+					Changed: true,
+				}, nil
 			},
 		})
 		if token != "" {
@@ -325,6 +340,109 @@ func TestParentRegisterRequiresTheParentLinkToken(t *testing.T) {
 		}
 		if b.GetRun("remote-run") == nil {
 			t.Fatal("the adopted run has no record")
+		}
+	})
+}
+
+// TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator pins the
+// registration route's refusal of a run ID the run-key namespacing reserves:
+// a claimed run ID carrying "@" reads as a branch-namespaced key, so the
+// registry refuses the claim and the route reports it. The handler re-checks
+// nothing: the registry's refusal is the one enforcement point.
+func TestParentRegisterRefusesARunIDCarryingTheNamespacingSeparator(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   "child-1",
+		"endpoint":   "http://child:1234",
+		"generation": "gen-1",
+		"runs": []map[string]any{
+			{"run_id": messaging.SupervisorRunID + "@victim", "label": "forged", "token": "child-token"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	registry := parentlink.NewRegistry()
+	b.SetParentLink(&parentLinkStub{
+		register: func(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+			return registry.Register(reg)
+		},
+	})
+
+	status, body := postParentLink(t, b.Addr(), string(raw), "")
+	if status != http.StatusConflict || body["code"] != "invalid-request" {
+		t.Fatalf("registration with a namespaced run id = (%d, %v), want 409 invalid-request", status, body)
+	}
+	if b.GetRun(messaging.SupervisorRunID+"@victim") != nil {
+		t.Fatal("the refused registration adopted the forged run")
+	}
+	if registry.Owns(messaging.SupervisorRunID + "@victim") {
+		t.Fatal("the refused claim stayed in the registry")
+	}
+}
+
+// TestParentRegisterFiresTheRunObserverOnlyWhenTheSetChanged pins the handler's
+// observer rule: no registration outcome notifies the run observer — adopted
+// and retired runs are descendant-only claims the broker's own run set never
+// held, so an idle branch's registration (or its periodic refresh) never
+// publishes the parent's peer set.
+func TestParentRegisterFiresTheRunObserverOnlyWhenTheSetChanged(t *testing.T) {
+	raw := func(runID string) []byte {
+		body, err := json.Marshal(map[string]any{
+			"child_id":   "child-1",
+			"endpoint":   "http://child:1234",
+			"generation": "gen-1",
+			"runs":       []map[string]any{{"run_id": runID, "label": "remote", "token": "child-token"}},
+		})
+		if err != nil {
+			t.Fatalf("marshal registration: %v", err)
+		}
+		return body
+	}
+	start := func(t *testing.T, changed bool) (*Broker, *int) {
+		t.Helper()
+		b := New("")
+		if err := b.Start(); err != nil {
+			t.Fatalf("start broker: %v", err)
+		}
+		t.Cleanup(func() { _ = b.Stop() })
+		fired := 0
+		b.SetRunObserver(func() { fired++ })
+		b.SetParentLink(&parentLinkStub{
+			register: func(messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
+				return messaging.DescendantClaim{
+					Runs:    []messaging.ClaimedRun{{RunClaim: messaging.RunClaim{RunID: "remote-run", Label: "remote", Token: "child-token"}, Key: "remote-run"}},
+					Changed: changed,
+				}, nil
+			},
+		})
+		return b, &fired
+	}
+
+	t.Run("a claim that adopted a run does not fire the observer", func(t *testing.T) {
+		b, fired := start(t, true)
+		status, _ := postParentLink(t, b.Addr(), string(raw("remote-run")), "")
+		if status != http.StatusOK {
+			t.Fatalf("registration = %d, want 200", status)
+		}
+		if *fired != 0 {
+			t.Fatalf("an adopting registration notified the run observer %d times", *fired)
+		}
+	})
+
+	t.Run("a refresh of the same claim does not fire the observer", func(t *testing.T) {
+		b, fired := start(t, false)
+		status, _ := postParentLink(t, b.Addr(), string(raw("remote-run")), "")
+		if status != http.StatusOK {
+			t.Fatalf("registration = %d, want 200", status)
+		}
+		if *fired != 0 {
+			t.Fatalf("an unchanged re-registration notified the run observer %d times", *fired)
 		}
 	})
 }
@@ -403,5 +521,243 @@ func TestRelayRefusesATargetTheCallerDidNotAuthenticate(t *testing.T) {
 	}
 	if queued := countAgentMessages(t, b, "branch-run"); queued != 1 {
 		t.Fatalf("run queue = %d messages, want the relayed ask", queued)
+	}
+}
+
+// TestParentRunClaimsRaceWithSetParentLink pins the accessor discipline on the
+// parent link: claims are read while a concurrent writer installs links, so an
+// unlocked read of the broker's parentLink field trips the race detector.
+func TestParentRunClaimsRaceWithSetParentLink(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	for _, runID := range []string{"run-a", "run-b"} {
+		if _, err := b.CreateRun(runID, runID); err != nil {
+			t.Fatalf("create run %q: %v", runID, err)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			b.SetParentLink(&parentLinkStub{owned: "run-a"})
+			b.SetParentLink(nil)
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		claims := b.ParentRunClaims()
+		seen := map[string]bool{}
+		for _, claim := range claims {
+			if claim.RunID != "run-a" && claim.RunID != "run-b" {
+				t.Fatalf("claim %q is not a run this broker serves", claim.RunID)
+			}
+			if seen[claim.RunID] {
+				t.Fatalf("claim %q reported twice", claim.RunID)
+			}
+			seen[claim.RunID] = true
+		}
+	}
+	<-done
+}
+
+// postDeregister posts a deregistration body to /parent/deregister with an
+// optional Authorization header and returns the status and decoded object.
+func postDeregister(t *testing.T, addr, body, authHeader string) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/parent/deregister", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post /parent/deregister: %v", err)
+	}
+	defer resp.Body.Close()
+	var decoded map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&decoded)
+	return resp.StatusCode, decoded
+}
+
+// registryBackedStub backs a parentLinkStub with a real registry, so a test
+// drives the same generation semantics the parent's own messenger runs.
+func registryBackedStub(registry *parentlink.Registry) *parentLinkStub {
+	return &parentLinkStub{
+		register:   registry.Register,
+		deregister: registry.Deregister,
+		force:      registry.ForceDeregister,
+	}
+}
+
+// TestForcedDeregisterRecoversAMovedBranch pins the operator recovery path: a
+// branch whose durable identity changed across a restart leaves its old claims
+// owned by a dead ChildID whose generation no view can pin, so only a forced
+// deregistration retires them and frees the runs for the replacement identity
+// to reclaim.
+func TestForcedDeregisterRecoversAMovedBranch(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	registry := parentlink.NewRegistry()
+	b.SetParentLink(registryBackedStub(registry))
+	b.SetParentLinkToken("parent-token")
+
+	claims := func(childID, generation, runID string) string {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{
+			"child_id":   childID,
+			"endpoint":   "http://child:1234",
+			"generation": generation,
+			"runs":       []map[string]any{{"run_id": runID, "label": runID, "token": "child-token"}},
+		})
+		if err != nil {
+			t.Fatalf("marshal registration: %v", err)
+		}
+		return string(raw)
+	}
+
+	status, _ := postParentLink(t, b.Addr(), claims("child-1", "gen-1", "run-a"), "Bearer parent-token")
+	if status != http.StatusOK {
+		t.Fatalf("registration of the old identity = %d, want 200", status)
+	}
+
+	// A generation-pinned deregistration with a generation the operator cannot
+	// know retires nothing, which is why the recovery path must be forced.
+	status, body := postDeregister(t, b.Addr(), `{"child_id":"child-1","generation":"gen-stale"}`, "Bearer parent-token")
+	if status != http.StatusOK {
+		t.Fatalf("unforced deregistration = (%d, %v), want 200", status, body)
+	}
+	if got := body["runs"]; got != float64(0) {
+		t.Fatalf("unforced deregistration retired %v runs, want none", got)
+	}
+
+	status, body = postDeregister(t, b.Addr(), `{"child_id":"child-1","force":true}`, "Bearer parent-token")
+	if status != http.StatusOK {
+		t.Fatalf("forced deregistration = (%d, %v), want 200", status, body)
+	}
+	if got := body["runs"]; got != float64(1) {
+		t.Fatalf("forced deregistration retired %v runs, want 1", got)
+	}
+	if b.GetRun("run-a") != nil {
+		t.Fatal("the forced deregistration left the dead child's run record in place")
+	}
+
+	// The replacement identity reclaims the run only once the dead claim is gone.
+	status, body = postParentLink(t, b.Addr(), claims("child-2", "gen-2", "run-a"), "Bearer parent-token")
+	if status != http.StatusOK {
+		t.Fatalf("re-registration by the new identity = (%d, %v), want 200", status, body)
+	}
+	if b.GetRun("run-a") == nil {
+		t.Fatal("the replacement registration did not adopt the reclaimed run")
+	}
+}
+
+// TestUnforcedDeregisterKeepsTheStaleReplayProtection pins that a deregistration
+// naming a generation the caller did not observe retires nothing, so a replayed
+// retirement cannot wipe the claim a fresher registration replaced.
+func TestUnforcedDeregisterKeepsTheStaleReplayProtection(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	registry := parentlink.NewRegistry()
+	b.SetParentLink(registryBackedStub(registry))
+
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   "child-1",
+		"endpoint":   "http://child:1234",
+		"generation": "gen-2",
+		"runs":       []map[string]any{{"run_id": "run-a", "label": "run-a", "token": "child-token"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+	status, _ := postParentLink(t, b.Addr(), string(raw), "")
+	if status != http.StatusOK {
+		t.Fatalf("registration = %d, want 200", status)
+	}
+	status, _ = postDeregister(t, b.Addr(), `{"child_id":"child-1","generation":"gen-1"}`, "")
+	if status != http.StatusOK {
+		t.Fatalf("deregistration with a stale generation = %d, want 200", status)
+	}
+	if hop, _ := registry.Hop("run-a"); hop.ChildID != "child-1" {
+		t.Fatal("the stale deregistration retired the claim it did not own")
+	}
+}
+
+// TestForcedDeregisterRequiresTheParentLinkToken pins that the forced variant
+// answers to the same parent-route credential the ordinary one does.
+func TestForcedDeregisterRequiresTheParentLinkToken(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	registry := parentlink.NewRegistry()
+	b.SetParentLink(registryBackedStub(registry))
+	b.SetParentLinkToken("parent-token")
+
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   "child-1",
+		"endpoint":   "http://child:1234",
+		"generation": "gen-1",
+		"runs":       []map[string]any{{"run_id": "run-a", "label": "run-a", "token": "child-token"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+	status, _ := postParentLink(t, b.Addr(), string(raw), "Bearer parent-token")
+	if status != http.StatusOK {
+		t.Fatalf("registration = %d, want 200", status)
+	}
+	status, _ = postDeregister(t, b.Addr(), `{"child_id":"child-1","force":true}`, "")
+	if status != http.StatusUnauthorized {
+		t.Fatalf("forced deregistration with no credential = %d, want 401", status)
+	}
+	if hop, _ := registry.Hop("run-a"); hop.ChildID != "child-1" {
+		t.Fatal("the refused forced deregistration retired the child's claim")
+	}
+}
+
+// TestForcedDeregisterWithoutATokenIsRefused pins the guard on the forced
+// variant: a parent link with no configured token authenticates every caller,
+// so a force that would unroute a live branch is refused outright there.
+func TestForcedDeregisterWithoutATokenIsRefused(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	registry := parentlink.NewRegistry()
+	b.SetParentLink(registryBackedStub(registry))
+
+	raw, err := json.Marshal(map[string]any{
+		"child_id":   "child-1",
+		"endpoint":   "http://child:1234",
+		"generation": "gen-1",
+		"runs":       []map[string]any{{"run_id": "run-a", "label": "run-a", "token": "child-token"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal registration: %v", err)
+	}
+	status, _ := postParentLink(t, b.Addr(), string(raw), "")
+	if status != http.StatusOK {
+		t.Fatalf("registration = %d, want 200", status)
+	}
+	status, body := postDeregister(t, b.Addr(), `{"child_id":"child-1","force":true}`, "")
+	if status != http.StatusForbidden {
+		t.Fatalf("forced deregistration on a tokenless link = (%d, %v), want 403", status, body)
+	}
+	if hop, _ := registry.Hop("run-a"); hop.ChildID != "child-1" {
+		t.Fatal("the refused forced deregistration retired the child's claim")
 	}
 }

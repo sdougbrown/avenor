@@ -632,8 +632,12 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		b.mu.RLock()
 		st, ok := b.runs[cred.RunID]
+		var token string
+		if ok {
+			token = st.Token
+		}
 		b.mu.RUnlock()
-		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(st.Token)) != 1 {
+		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -667,20 +671,27 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.mu.Lock()
-	if st, exists := b.runs[body.RunID]; exists {
-		if body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(st.Token)) != 1 {
-			b.mu.Unlock()
-			http.Error(w, "run already registered", http.StatusConflict)
-			return
-		}
+	st, exists := b.runs[body.RunID]
+	var registered string
+	var registeredID string
+	if exists {
+		registered = st.Token
+		registeredID = st.RunID
+	}
+	if exists && (body.Token == "" || subtle.ConstantTimeCompare([]byte(body.Token), []byte(registered)) != 1) {
+		b.mu.Unlock()
+		http.Error(w, "run already registered", http.StatusConflict)
+		return
+	}
+	if exists {
 		st.Mu.Lock()
 		st.RegisteredAt = time.Now()
 		st.LastSeen = time.Now()
 		st.Mu.Unlock()
 		b.mu.Unlock()
 		resp := map[string]string{
-			"token":  st.Token,
-			"run_id": st.RunID,
+			"token":  registered,
+			"run_id": registeredID,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -690,7 +701,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		token = MakeToken()
 	}
-	st := &RunState{
+	st = &RunState{
 		RunID:               body.RunID,
 		Token:               token,
 		RegisteredAt:        time.Now(),
@@ -705,8 +716,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"token":  st.Token,
-		"run_id": st.RunID,
+		"token":  token,
+		"run_id": body.RunID,
 	})
 }
 
@@ -913,12 +924,16 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 	// Validate that the authenticated caller matches from_run_id's token.
 	b.mu.RLock()
 	fromSt, ok := b.runs[fullBody.FromRunID]
+	var fromToken string
+	if ok {
+		fromToken = fromSt.Token
+	}
 	b.mu.RUnlock()
 	if !ok {
 		writeCodedError(w, http.StatusNotFound, "from run not found", "invalid-request")
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(fullBody.Token), []byte(fromSt.Token)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(fullBody.Token), []byte(fromToken)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -1487,21 +1502,39 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 	// the runs it stopped owning lose theirs. Every touched record is one the
 	// broker adopted for a descendant's claim, so none of it is a change to the
 	// run set this broker owns and the run observer that publishes it stays
-	// silent.
+	// silent — a refresh tick that re-registers an idle branch never fires it.
 	for _, runID := range claim.Retired {
 		b.DeleteRun(runID)
 	}
-	for _, run := range body.Runs {
+	for _, run := range claim.Runs {
 		b.ownRun(run)
 	}
-	writeJSONBody(w, http.StatusOK, map[string]any{
+	runKeys := make(map[string]string, len(claim.Runs))
+	for _, run := range claim.Runs {
+		if run.Key == run.RunID {
+			continue
+		}
+		// The branch names the run the way this broker addresses it, so its own
+		// upward operations authenticate as the run it registered.
+		runKeys[run.RunID] = run.Key
+	}
+	response := map[string]any{
 		"generation":         b.store.Generation(),
 		"messaging_protocol": messaging.ProtocolVersion,
-	})
+	}
+	if len(runKeys) > 0 {
+		response["run_keys"] = runKeys
+	}
+	writeJSONBody(w, http.StatusOK, response)
 }
 
 // handleParentDeregister retires one child broker's claim and the run records
-// it owned, so a closed branch stops being a routing target.
+// it owned, so a closed branch stops being a routing target. A body with
+// "force": true retires the child's claims without pinning a generation: that
+// is the operator's recovery path for a child whose durable identity changed
+// across a restart, whose old claims the ordinary generation-pinned
+// deregistration can never retire. Force requires a configured parent-link
+// token, since a tokenless link authenticates every caller.
 func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) {
 	link, token := b.parentSeam()
 	if link == nil {
@@ -1523,7 +1556,9 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var body struct {
-		ChildID string `json:"child_id"`
+		ChildID    string `json:"child_id"`
+		Generation string `json:"generation"`
+		Force      bool   `json:"force"`
 	}
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -1533,7 +1568,21 @@ func (b *Broker) handleParentDeregister(w http.ResponseWriter, r *http.Request) 
 		writeCodedError(w, http.StatusBadRequest, "child_id is required", "invalid-request")
 		return
 	}
-	runs, err := link.Deregister(body.ChildID)
+	// A forced deregistration deletes a child's registration wholesale, so a
+	// link whose authorization degrades to "accept any caller" when no token is
+	// configured must not serve it: without a configured credential there is no
+	// caller this route can authenticate, and force would let any network peer
+	// unroute a live branch.
+	if body.Force && token == "" {
+		writeCodedError(w, http.StatusForbidden, "the forced deregistration requires a configured parent-link token", "invalid-request")
+		return
+	}
+	var runs []string
+	if body.Force {
+		runs, err = link.ForceDeregister(body.ChildID)
+	} else {
+		runs, err = link.Deregister(body.ChildID, body.Generation)
+	}
 	if err != nil {
 		writeCodedError(w, http.StatusNotFound, err.Error(), "target-unavailable")
 		return
@@ -1970,9 +2019,10 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 	}
 	st := newRunState(runID, name)
 	b.runs[runID] = st
+	token := st.Token
 	b.mu.Unlock()
 	b.runSetChanged()
-	return st.Token, nil
+	return token, nil
 }
 
 // EnsureRun registers a new run under name if one does not already exist for
@@ -1982,38 +2032,45 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 	b.mu.Lock()
 	if st, exists := b.runs[runID]; exists {
+		token := st.Token
 		b.mu.Unlock()
-		return st.Token, false
+		return token, false
 	}
 	st := newRunState(runID, name)
 	b.runs[runID] = st
+	token := st.Token
 	b.mu.Unlock()
 	b.runSetChanged()
-	return st.Token, true
+	return token, true
 }
 
-// ownRun adopts a run a registered child broker owns. The record keeps the
-// credential that branch authenticates the run with, so a forwarded ask and a
-// relay into that branch use the one credential the run already has. Adoption
-// never signals the run observer: an adopted record is not one of this
-// broker's own runs, so the run set it publishes is unchanged.
-func (b *Broker) ownRun(claim messaging.RunClaim) string {
+// ownRun adopts a run a registered child broker owns, under the run ID this
+// broker addresses it by. The record keeps the credential that branch
+// authenticates the run with, so a forwarded ask and a relay into that branch
+// use the one credential the run already has; a replacement branch presents a
+// rotated credential, and the record follows the claim it accepted so both
+// directions keep authenticating. A caller that adopts a whole set notifies the
+// run observer once when the set is applied.
+func (b *Broker) ownRun(claim messaging.ClaimedRun) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	st, exists := b.runs[claim.RunID]
+	st, exists := b.runs[claim.Key]
 	if !exists {
-		st = newRunState(claim.RunID, claim.Label)
+		st = newRunState(claim.Key, claim.Label)
 		if claim.Token != "" {
 			st.Token = claim.Token
 		}
 		st.descendant = true
-		b.runs[claim.RunID] = st
+		b.runs[claim.Key] = st
 		return st.Token
+	}
+	if claim.Token != "" {
+		st.Token = claim.Token
 	}
 	if claim.Label != "" {
 		st.Mu.Lock()
 		if st.Info == nil {
-			st.Info = &SessionInfo{RunID: claim.RunID}
+			st.Info = &SessionInfo{RunID: claim.Key}
 		}
 		st.Info.Label = claim.Label
 		st.Mu.Unlock()

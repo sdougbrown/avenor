@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,13 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging/parentlink"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
+
+// testHost reports the host component the supervisor mixes into its branch
+// identity, so a test that derives an expected identity matches the real one.
+func testHost() string {
+	host, _ := os.Hostname()
+	return host
+}
 
 // startTestParentBroker starts a broker that serves the parent-link routes and
 // relays into the branches that register with it, wired the way the supervisor
@@ -27,6 +35,11 @@ func startTestParentBroker(t *testing.T) (*broker.Broker, *parentlink.Messenger)
 	t.Cleanup(func() { _ = b.Stop() })
 	link, err := parentlink.New(parentlink.Options{
 		Generation: b.Store().Generation,
+		RetireRuns: func(runIDs []string) {
+			for _, runID := range runIDs {
+				b.DeleteRun(runID)
+			}
+		},
 	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build parent messenger: %v", err)
@@ -61,9 +74,17 @@ func startTestBranch(t *testing.T, parentBroker *broker.Broker, runs ...string) 
 	)
 	link, err = parentlink.Install(parentlink.Options{
 		ParentURL:  "http://" + parentBroker.Addr(),
+		ChildID:    parentlink.BranchID("test/"+b.Addr(), testHost()),
 		Endpoint:   "http://" + b.Addr(),
 		Generation: b.Store().Generation,
-		Runs:       func() []messaging.RunClaim { return b.ParentRunClaims() },
+		Runs:       b.ParentRunClaims,
+		// A run this branch stops owning loses its broker record too, so a
+		// refused descendant stops being served locally.
+		RetireRuns: func(runIDs []string) {
+			for _, runID := range runIDs {
+				b.DeleteRun(runID)
+			}
+		},
 	}, b)
 	if err != nil {
 		t.Fatalf("build branch messenger: %v", err)
@@ -186,8 +207,10 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 	if sup.parentLink == nil {
 		t.Fatal("a supervisor with a parent broker URL has no parent link")
 	}
-	if !parentLink.Registry().Owns(messaging.SupervisorRunID) {
-		t.Fatal("the supervisor did not register its own run with its parent broker")
+	// The supervisor registers its own run under its branch identity: every
+	// branch reserves the supervisor run ID, so the parent addresses it there.
+	if branchSupervisorRun := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket, testHost()); !parentLink.Registry().Owns(branchSupervisorRun) {
+		t.Fatalf("the supervisor did not register its own run with its parent broker as %q", branchSupervisorRun)
 	}
 
 	ctx := context.Background()
@@ -236,10 +259,16 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 		t.Fatalf("the target branch admitted %d edges, want 0", edges)
 	}
 
-	// The remote run answers over its own broker surface.
+	// The remote run answers over its own broker surface. The asker it names is
+	// the run ID the ask arrived with, which is the parent's address for this
+	// branch's supervisor.
+	asker := deliveredAsker(t, peerBroker, "rt_remote", msgID)
+	if want := messaging.SupervisorRunID + "@" + parentlink.BranchID(sup.config.ControlSocket, testHost()); asker != want {
+		t.Fatalf("delivered asker = %q, want the supervisor's branch-scoped run ID %q", asker, want)
+	}
 	if status, body := parentLinkedPost(t, peerBroker.Addr(), "/send", "rt_remote", peerTokens["rt_remote"], map[string]any{
 		"from_run_id": "rt_remote",
-		"to_run_id":   messaging.SupervisorRunID,
+		"to_run_id":   asker,
 		"type":        "agent_message",
 		"reply_to":    msgID,
 		"payload":     map[string]any{"message": "cross-branch pong"},
@@ -264,6 +293,105 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 	}
 }
 
+// TestSupervisorParentAcceptsSupervisorChildren pins the branch-supervisor
+// identity: every branch reserves the same supervisor run ID, so a supervisor
+// parent and the supervisors that register with it keep distinct routing
+// targets. The parent's own supervisor run survives its children's claims, each
+// child's supervisor is addressed under its branch identity, and an ask to one
+// of them still relays into that branch and correlates its reply.
+func TestSupervisorParentAcceptsSupervisorChildren(t *testing.T) {
+	parentSup := newTestSupervisor(t, Config{
+		ControlSocket:     newStableSocketPath(t, "root"),
+		MaxRuntimes:       2,
+		BrokerParentToken: "branch-token",
+	})
+	t.Cleanup(func() { _ = parentSup.Shutdown("kill") })
+	if parentSup.parentLink == nil {
+		t.Fatal("a supervisor with a parent token serves no parent routes")
+	}
+	parentURL := "http://" + parentSup.broker.Addr()
+
+	children := make([]*Supervisor, 0, 2)
+	childKeys := make([]string, 0, 2)
+	for _, name := range []string{"child-one", "child-two"} {
+		socket := newStableSocketPath(t, name)
+		child := newTestSupervisor(t, Config{
+			ControlSocket:     socket,
+			MaxRuntimes:       2,
+			BrokerParentURL:   parentURL,
+			BrokerParentToken: "branch-token",
+		})
+		t.Cleanup(func() { _ = child.Shutdown("kill") })
+		children = append(children, child)
+		childKeys = append(childKeys, messaging.SupervisorRunID+"@"+parentlink.BranchID(socket, testHost()))
+	}
+	for _, key := range childKeys {
+		if !parentSup.parentLink.Registry().Owns(key) {
+			t.Fatalf("the parent did not adopt the child supervisor run %q", key)
+		}
+	}
+	// The parent's own supervisor run is still its own: a child's claim never
+	// overwrites it, so the parent's credential still authenticates it.
+	if parentSup.parentLink.Registry().Owns(messaging.SupervisorRunID) {
+		t.Fatal("a child supervisor claim took the parent's own supervisor run ID")
+	}
+	st := parentSup.broker.GetRun(messaging.SupervisorRunID)
+	if st == nil || st.Token != parentSup.brokerToken {
+		t.Fatal("the parent's own supervisor record was overwritten by a child claim")
+	}
+
+	// An ask the parent's supervisor sends to one child's supervisor is admitted
+	// once here and relayed into that branch's own supervisor queue.
+	ctx := context.Background()
+	pre, err := parentSup.messaging.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	msgID := newStableMsgID(t)
+	sent, err := parentSup.messaging.Send(ctx, messaging.SendRequest{
+		From:       messaging.Identity{RunID: messaging.SupervisorRunID, Sender: "supervisor"},
+		To:         messaging.Identity{RunID: childKeys[0]},
+		MessageID:  msgID,
+		Generation: pre.Generation,
+		Body:       `{"message":"branch ping"}`,
+	})
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("ask to a child supervisor = (%+v, %v), want sent", sent, err)
+	}
+	if edges := parentSup.broker.Store().ActiveCount(); edges != 1 {
+		t.Fatalf("the parent holds %d ask edges, want exactly the one cross-branch ask", edges)
+	}
+	queued := parentSup.broker.GetRun(childKeys[0])
+	if queued == nil {
+		t.Fatal("the parent has no record for the child supervisor run")
+	}
+
+	// The child's supervisor answers over its own broker surface, and the reply
+	// follows the hop the ask arrived on.
+	if status, body := parentLinkedPost(t, children[0].broker.Addr(), "/send", messaging.SupervisorRunID,
+		children[0].brokerToken, map[string]any{
+			"from_run_id": messaging.SupervisorRunID,
+			"to_run_id":   messaging.SupervisorRunID,
+			"type":        "agent_message",
+			"reply_to":    msgID,
+			"payload":     map[string]any{"message": "branch pong"},
+		}); status != http.StatusOK {
+		t.Fatalf("child supervisor reply = (%d, %v), want 200", status, body)
+	}
+	waited, err := parentSup.messaging.Wait(ctx, messaging.WaitRequest{
+		Sender:     messaging.Identity{RunID: messaging.SupervisorRunID},
+		MessageID:  msgID,
+		Generation: pre.Generation,
+		Timeout:    5 * time.Second,
+	})
+	if err != nil || waited.Outcome != messaging.OutcomeReplied || waited.Reply == nil {
+		t.Fatalf("wait for the child supervisor's reply = (%+v, %v), want the reply", waited, err)
+	}
+	if edges := parentSup.broker.Store().ActiveCount(); edges != 0 {
+		t.Fatalf("the parent still holds %d ask edges after the reply", edges)
+	}
+}
+
 // TestSupervisorWithoutParentBrokerKeepsLocalMessaging pins that an unconfigured
 // supervisor installs nothing: no parent link and no parent routes.
 func TestSupervisorWithoutParentBrokerKeepsLocalMessaging(t *testing.T) {
@@ -277,6 +405,25 @@ func TestSupervisorWithoutParentBrokerKeepsLocalMessaging(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("standalone broker parent register = (%d, %v), want 404", status, body)
 	}
+}
+
+// deliveredAsker reports the run ID the relayed ask for msgID arrived from, the
+// one a reply has to name for the edge to complete.
+func deliveredAsker(t *testing.T, b *broker.Broker, runID, msgID string) string {
+	t.Helper()
+	st := b.GetRun(runID)
+	if st == nil {
+		t.Fatalf("run %q is not in this broker", runID)
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	for _, msg := range st.ControlQueue {
+		if msg.ID == msgID {
+			return msg.FromRunID
+		}
+	}
+	t.Fatalf("message %q was never delivered to run %q", msgID, runID)
+	return ""
 }
 
 func newStableMsgID(t *testing.T) string {

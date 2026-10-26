@@ -108,6 +108,36 @@ func TestWithdrawalRetractsOnlyTheParentEdge(t *testing.T) {
 	}
 }
 
+// TestRefusedDescendantRetiresItsBrokerRecord pins that a run whose branch
+// refused a relay stops being a target entirely: the claim and the broker's run
+// record go together, so a later ask is refused instead of queued for a run
+// nobody serves.
+func TestRefusedDescendantRetiresItsBrokerRecord(t *testing.T) {
+	parent, first, second := crossBranch(t)
+	if parent.broker.GetRun("target") == nil {
+		t.Fatal("the parent never adopted the target run the branch registered")
+	}
+
+	// The target branch answers as a replacement, so the relay is refused.
+	second.broker.Store().Reset()
+	status, body := ask(t, first, "asker", "target", newMsgID(t))
+	if status != http.StatusNotFound || body["code"] != "target-unavailable" {
+		t.Fatalf("ask to a refused branch = (%d, %v), want 404 target-unavailable", status, body)
+	}
+	if parent.broker.GetRun("target") != nil {
+		t.Fatal("a refused descendant kept its broker record")
+	}
+
+	// A later ask cannot fall back to serving the run locally.
+	status, body = ask(t, first, "asker", "target", newMsgID(t))
+	if status != http.StatusNotFound || body["code"] != "target-unavailable" {
+		t.Fatalf("ask after the record was retired = (%d, %v), want 404 target-unavailable", status, body)
+	}
+	if edges := parent.broker.Store().ActiveCount(); edges != 0 {
+		t.Fatalf("the parent holds %d ask edges for a retired descendant", edges)
+	}
+}
+
 // TestRelayToAGoneBranchRetractsTheParentEdge pins that a relay which never
 // reaches the branch leaves no edge behind.
 func TestRelayToAGoneBranchRetractsTheParentEdge(t *testing.T) {
@@ -260,6 +290,30 @@ func TestParentPeerExportHidesSiblingBranches(t *testing.T) {
 	listed = sessionRunIDs(t, body)
 	if !listed["orchestrator"] || !listed["asker"] || !listed["target"] {
 		t.Fatalf("parent listing = %v, want its own run and its owned descendants", listed)
+	}
+}
+
+// TestBranchDoesNotListItsOwnSupervisorTwice pins the peer join across the
+// link: a branch's supervisor registers at its parent under a namespaced key,
+// but the branch lists the run locally under its canonical ID, so the parent's
+// listing must not hand the alias back — the branch would otherwise see a
+// phantom remote peer for itself and address it through the parent.
+func TestBranchDoesNotListItsOwnSupervisorTwice(t *testing.T) {
+	parent := startBranch(t, "", "orchestrator")
+	childID := newTestChildID()
+	child := newBranchWith(t, parent.url(), childID, DefaultRefreshInterval, true, []string{messaging.SupervisorRunID})
+	awaitRegistered(t, parent, "supervisor@"+childID)
+
+	status, body := getSessions(t, child.broker.Addr(), messaging.SupervisorRunID, child.token(t, messaging.SupervisorRunID))
+	if status != http.StatusOK {
+		t.Fatalf("sessions = (%d, %v), want 200", status, body)
+	}
+	listed := sessionRunIDs(t, body)
+	if !listed[messaging.SupervisorRunID] || !listed["orchestrator"] {
+		t.Fatalf("branch listing = %v, want its own supervisor and the parent's own run", listed)
+	}
+	if listed["supervisor@"+childID] {
+		t.Fatalf("branch listing = %v, want no namespaced alias of its own supervisor", listed)
 	}
 }
 

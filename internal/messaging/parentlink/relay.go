@@ -90,7 +90,10 @@ func (r *relay) Tell(ctx context.Context, req messaging.DeliverRequest) error {
 	}, false)
 }
 
-// hop posts one relay to the child that owns the target run.
+// hop posts one relay to the child that owns the target run. The relay names
+// the run by its canonical run ID in that branch: a namespaced claim (a branch
+// supervisor) is addressed here under the namespaced key and delivered there as
+// the run the branch itself knows.
 func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverRequest, expectsReply bool) error {
 	next, ok := r.registry.Hop(target)
 	if !ok {
@@ -103,10 +106,10 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 		return fmt.Errorf("%w: this broker has no credential for run %q", messaging.ErrTargetUnavailable, target)
 	}
 	body, err := json.Marshal(map[string]any{
-		"run_id":          target,
+		"run_id":          next.RunID,
 		"token":           next.Token,
 		"from_run_id":     req.FromRunID,
-		"to_run_id":       target,
+		"to_run_id":       next.RunID,
 		"type":            req.Kind,
 		"payload":         req.Payload,
 		"message_id":      req.CorrelationID,
@@ -133,8 +136,11 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 		case errors.Is(decErr, messaging.ErrGenerationMismatch):
 			// The child no longer answers as the branch it registered as, so
 			// the whole registration stops being a routing target instead of
-			// costing one doomed round trip per run it owns.
-			retired, _ := r.registry.Deregister(next.ChildID)
+			// costing one doomed round trip per run it owns. The claim and the
+			// host's run records go together: a record left behind would make
+			// this broker serve the run locally, queueing asks that nobody
+			// consumes.
+			retired, _ := r.registry.Deregister(next.ChildID, next.Generation)
 			r.retireRuns(retired)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
@@ -146,15 +152,23 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.DeliverReq
 			errors.Is(decErr, messaging.ErrTargetUnavailable):
 			// The child refused this run's credential or retired the run, so
 			// only this run stops being routed and the child's other runs keep
-			// their route.
-			r.registry.Forget(target)
-			r.retireRuns([]string{target})
+			// their route. The claim and the host's run record go together: a
+			// record left behind would make this broker serve the run locally,
+			// queueing asks that nobody consumes.
+			r.forget(target, next.Generation)
 			return fmt.Errorf("%w: the branch that owns run %q refused the relay: %v",
 				messaging.ErrTargetUnavailable, target, decErr)
 		}
 		return decErr
 	}
 	return nil
+}
+
+// forget drops a run this broker can no longer route to: its claim, and the
+// host broker's own record for it when the host installs one.
+func (r *relay) forget(runID, generation string) {
+	r.registry.Forget(runID, generation)
+	r.retireRuns([]string{runID})
 }
 
 // Close releases the relay's HTTP client.

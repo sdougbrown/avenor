@@ -9,6 +9,7 @@ package parentlink
 import (
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -21,6 +22,12 @@ var ErrRunClaimed = fmt.Errorf("%w: run already claimed by another child broker"
 // ErrRunLocallyOwned reports a registration that claims a run this broker
 // itself owns. A locally owned run is never a descendant's to relay into.
 var ErrRunLocallyOwned = fmt.Errorf("%w: run already owned by this broker", messaging.ErrInvalidRequest)
+
+// ErrInvalidRunID reports a registration that claims a run ID the run-key
+// namespacing reserves: a run ID carrying "@" reads as a branch-namespaced
+// key, so a child claiming one could forge another branch's supervisor
+// identity. Run IDs are minted without the separator.
+var ErrInvalidRunID = fmt.Errorf("%w: run id contains the reserved separator \"@\"", messaging.ErrInvalidRequest)
 
 // ErrParentUnavailable reports a peer broker that could not be reached or
 // refused the hop. It classifies as ErrTargetUnavailable: the target cannot be
@@ -41,15 +48,30 @@ type child struct {
 	id         string
 	endpoint   string
 	generation string
-	// tokens holds, per run, the credential the child handed the parent in its
-	// registration. The relay posts it to the child, so the credential the
-	// child's own runs already use is the one that travels.
-	tokens map[string]string
+	// claims holds, per run key, the claim the child registered: the run ID the
+	// owning branch knows the run by, so a namespaced claim still relays to the
+	// canonical run, and the credential the child handed the parent in its
+	// registration, which the relay posts back to the child, so the credential
+	// the child's own runs already use is the one that travels.
+	claims map[string]messaging.RunClaim
+}
+
+// ParentRunKey reports the run ID a parent broker addresses a descendant's run
+// by. A branch supervisor run is reserved in every branch, so the parent's own
+// supervisor and each descendant's supervisor would otherwise be the same run;
+// it is namespaced by the branch identity that claims it. Every other run ID is
+// minted by the branch that owns it, so it stays canonical.
+func ParentRunKey(childID, runID string) string {
+	if runID != messaging.SupervisorRunID {
+		return runID
+	}
+	return runID + "@" + childID
 }
 
 // Hop is one child broker as a relay next hop: the endpoint a relay is posted
-// to, the generation that endpoint pinned when the child registered, and the
-// credential the child handed its parent for the target run.
+// to, the run ID that branch knows the target by, the generation that endpoint
+// pinned when the child registered, and the credential the child handed its
+// parent for the target run.
 type Hop struct {
 	ChildID    string
 	Endpoint   string
@@ -57,6 +79,10 @@ type Hop struct {
 	// Token is the credential the child handed its parent for this run, which
 	// the relay posts back to the child.
 	Token string
+	// RunID is the target run's canonical run ID in its own branch, which is
+	// what the relay posts to. It differs from the run ID this broker addresses
+	// the run by only for a namespaced branch-supervisor claim.
+	RunID string
 }
 
 // NewRegistry builds an empty descendant registry.
@@ -75,39 +101,50 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	if err := validEndpoint(reg.Endpoint); err != nil {
 		return claim, err
 	}
+	for _, run := range reg.Runs {
+		if strings.Contains(run.RunID, "@") {
+			return messaging.DescendantClaim{}, fmt.Errorf("%w: %q", ErrInvalidRunID, run.RunID)
+		}
+	}
+	keys := make([]string, len(reg.Runs))
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, run := range reg.Runs {
-		if owner, ok := r.owners[run.RunID]; ok && owner != reg.ChildID {
+	for i, run := range reg.Runs {
+		key := ParentRunKey(reg.ChildID, run.RunID)
+		if owner, ok := r.owners[key]; ok && owner != reg.ChildID {
 			return messaging.DescendantClaim{}, fmt.Errorf("%w: %s", ErrRunClaimed, run.RunID)
 		}
+		keys[i] = key
 	}
 	current, ok := r.children[reg.ChildID]
 	if !ok {
-		current = &child{id: reg.ChildID, tokens: map[string]string{}}
+		current = &child{id: reg.ChildID, claims: map[string]messaging.RunClaim{}}
 		r.children[reg.ChildID] = current
 	}
 	current.endpoint = reg.Endpoint
 	current.generation = reg.Generation
 	adopted := make(map[string]struct{}, len(reg.Runs))
-	for _, run := range reg.Runs {
-		adopted[run.RunID] = struct{}{}
-		if _, held := r.owners[run.RunID]; !held {
-			claim.Adopted = append(claim.Adopted, run.RunID)
+	for i, run := range reg.Runs {
+		key := keys[i]
+		claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: key})
+		adopted[key] = struct{}{}
+		if _, held := r.owners[key]; !held {
+			claim.Changed = true
 		}
-		r.owners[run.RunID] = reg.ChildID
-		current.tokens[run.RunID] = run.Token
+		r.owners[key] = reg.ChildID
+		current.claims[key] = run
 	}
-	for runID := range r.owners {
-		if r.owners[runID] != reg.ChildID {
+	for key := range r.owners {
+		if r.owners[key] != reg.ChildID {
 			continue
 		}
-		if _, still := adopted[runID]; still {
+		if _, still := adopted[key]; still {
 			continue
 		}
-		delete(r.owners, runID)
-		delete(current.tokens, runID)
-		claim.Retired = append(claim.Retired, runID)
+		delete(r.owners, key)
+		delete(current.claims, key)
+		claim.Retired = append(claim.Retired, key)
+		claim.Changed = true
 	}
 	return claim, nil
 }
@@ -138,8 +175,40 @@ func validEndpoint(endpoint string) error {
 	return nil
 }
 
-// Deregister retires one child and reports the runs it had claimed.
-func (r *Registry) Deregister(childID string) ([]string, error) {
+// Deregister retires one child and reports the runs it had claimed. The
+// generation the caller observed pins the claim it retires: a registration
+// that replaced the claim with a fresher generation survives the retirement,
+// because a refusal that raced the replacement must not wipe the claim that
+// took its place.
+func (r *Registry) Deregister(childID, generation string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.children[childID]
+	if !ok {
+		return nil, fmt.Errorf("%w: child %q is not registered", messaging.ErrTargetUnavailable, childID)
+	}
+	if current.generation != generation {
+		return nil, nil
+	}
+	delete(r.children, childID)
+	var runs []string
+	for runID, owner := range r.owners {
+		if owner != childID {
+			continue
+		}
+		delete(r.owners, runID)
+		runs = append(runs, runID)
+	}
+	return runs, nil
+}
+
+// ForceDeregister retires every claim a child holds and deletes its record
+// without pinning a generation. An operator uses it to release a child whose
+// durable identity moved across a restart: the old claims are owned by a dead
+// identity whose generation no view can pin, so the ordinary Deregister would
+// no-op forever. The retired runs are free for a fresh registration by the
+// replacement identity.
+func (r *Registry) ForceDeregister(childID string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.children[childID]; !ok {
@@ -158,17 +227,21 @@ func (r *Registry) Deregister(childID string) ([]string, error) {
 }
 
 // Forget drops one run's claim, which is what a relay that found its child gone
-// leaves behind.
-func (r *Registry) Forget(runID string) {
+// leaves behind. The generation the caller observed pins the claim it retires:
+// a run a fresher registration re-claimed keeps its route.
+func (r *Registry) Forget(runID, generation string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	owner, ok := r.owners[runID]
 	if !ok {
 		return
 	}
+	if current, ok := r.children[owner]; ok && current.generation != generation {
+		return
+	}
 	delete(r.owners, runID)
 	if current, ok := r.children[owner]; ok {
-		delete(current.tokens, runID)
+		delete(current.claims, runID)
 	}
 }
 
@@ -200,34 +273,36 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 	if current == nil || current.endpoint == "" {
 		return Hop{}, false
 	}
+	claimed := current.claims[runID]
 	return Hop{
 		ChildID:    current.id,
 		Endpoint:   current.endpoint,
 		Generation: current.generation,
-		Token:      current.tokens[runID],
+		Token:      claimed.Token,
+		RunID:      claimed.RunID,
 	}, true
 }
 
 // Export narrows a peer listing to what the authenticated caller may see. This
 // broker's own runs are always exported; a run a registered child owns is
-// exported to a caller in that child's own branch and to this broker's own
-// callers (its owned descendants), but never to a caller in a sibling branch.
+// exported only to non-descendant callers, and is hidden from every descendant
+// caller. Nor is it exported back to the owning branch itself: that branch
+// already lists the run under its canonical run ID, and re-exporting it would
+// hand the branch a namespaced alias of its own supervisor that its peer dedup
+// cannot collapse.
 func (r *Registry) Export(peers []messaging.Peer, caller string) []messaging.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	// The caller's branch and the peers' owners are read under the same lock, so
-	// a registration that lands mid-listing cannot split what the caller is from
-	// what it is shown.
-	callerBranch, callerIsDescendant := r.owners[caller]
+	// The caller's branch is read under the same lock as the peers' owners, so
+	// a registration that lands mid-listing cannot split what the caller is
+	// from what it is shown.
+	_, callerIsDescendant := r.owners[caller]
 	exported := make([]messaging.Peer, 0, len(peers))
 	for _, peer := range peers {
-		owner, registered := r.owners[peer.RunID]
-		switch {
-		case !registered:
-			exported = append(exported, peer)
-		case !callerIsDescendant, owner == callerBranch:
-			exported = append(exported, peer)
+		if _, registered := r.owners[peer.RunID]; registered && callerIsDescendant {
+			continue
 		}
+		exported = append(exported, peer)
 	}
 	return exported
 }
