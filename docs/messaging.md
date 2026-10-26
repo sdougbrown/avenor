@@ -239,16 +239,19 @@ only. It is not a deployable authenticated host protocol.
 A branch broker registers with its parent under a durable identity (`child_id`,
 derived from its control socket path and host) and re-claims its runs on every
 restart. The parent's `/parent/deregister` route retires one child's claims and
-the run records it owned; the body names the `child_id` and the `generation` the
-caller observed, and a claim a fresher registration replaced is left standing.
+the run records it owned. The body is the registration view the branch holds of
+what its parent last accepted — the `child_id`, the `endpoint` and `generation`
+it registered, and the runs it claimed — and the retirement applies only while
+that registration still matches the view: a same-identity replacement that
+re-registered while the deregistration was in flight keeps its claims and
+records, and the route answers `409 generation-mismatch`. An unknown
+`child_id` is `404 target-unavailable`.
 
-The generation pin makes the route unusable for a branch whose durable identity
-itself changed across a restart: its old claims belong to a dead `child_id`
-whose generation no view can pin, so an ordinary deregistration no-ops forever.
-For that case the operator posts `{"child_id": "<old child>", "force": true}`
-instead. A forced deregistration skips the generation check, retires every claim
-the dead child holds, and reports the retired run count; the branch then
-re-registers under its new identity and reclaims the runs.
-The forced variant requires a configured parent-link token:
-the same credential the ordinary one accepts, and a link with no token
-configured refuses the force outright.
+There is no forced deregistration. An earlier draft let an operator post
+`{"child_id": "<old child>", "force": true}` to skip the generation check and
+retire every claim a dead `child_id` held; that path is gone, and the route
+accepts only the registration view, so it never retires against a stale one.
+The gap it used to cover — a branch whose durable identity itself changed
+across a restart, whose old claims belong to a `child_id` whose generation no
+view can pin — is the register-replacement window, deliberately deferred;
+until it exists, such orphans are left standing.
