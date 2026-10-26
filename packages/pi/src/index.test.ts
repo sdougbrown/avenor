@@ -2283,6 +2283,108 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('re-sends an idle completion after a new session generation interrupts the send', async () => {
+    const SOCK = '/tmp/idle-generation.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        if (args.runId === 'r2') return { run_id: 'r2', label: 'steady', status: 'running', runtime_id: 'rt2' }
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'generation answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'steady' ? 'r2' : 'r1',
+        label: args.label ?? 'worker',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'steady' ? 'rt2' : 'rt1',
+      })),
+    })
+
+    const senders: Array<() => void> = []
+    h.sendUserMessage.mockImplementation(() => new Promise<void>(resolve => { senders.push(resolve) }))
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    done = true
+    // The idle send for the terminal run is in flight when the session restarts.
+    await waitFor(() => senders.length === 1)
+
+    await h.eventHandlers.session_start({}, h.ctx)
+    senders[0]!()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    // Polling stopped when the only tracked run went terminal; a still-running
+    // sibling restarts it. The terminal run must be re-sent instead of being
+    // skipped forever by a stale in-flight flag.
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'steady', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await waitFor(() => h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('"worker"')).length >= 2)
+    senders[1]?.()
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('drops a queued notice when an idle send starts', async () => {
+    const SOCK = '/tmp/idle-queue-drain.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        if (args.runId === 'r2') return { run_id: 'r2', label: 'steady', status: 'running', runtime_id: 'rt2' }
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'queued answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async (args: { label?: string }) => ({
+        run_id: args.label === 'steady' ? 'r2' : 'r1',
+        label: args.label ?? 'worker',
+        supervisor_id: SOCK,
+        runtime_id: args.label === 'steady' ? 'rt2' : 'rt1',
+      })),
+    })
+
+    h.ctx.isIdle = () => false
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    done = true
+    await waitFor(() => String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:1'))
+    const aborted = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'aborted' },
+      h.ctx,
+    )
+    expect(aborted).toBeUndefined()
+
+    const senders: Array<() => void> = []
+    h.sendUserMessage.mockImplementation(() => new Promise<void>(resolve => { senders.push(resolve) }))
+    h.ctx.isIdle = () => true
+    // A still-running sibling restarts polling so the terminal run is revisited.
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'steady', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await waitFor(() => senders.length === 1)
+
+    // The notice is being delivered, so it must stop counting as unread...
+    await waitFor(() => !String(h.setStatus.mock.calls.at(-1)?.[1]).includes('unread:'))
+    // ...and a settlement during the flight must not deliver it a second time.
+    const settled = await h.eventHandlers.agent_before_settle(
+      { type: 'agent_before_settle', entries: [], continue: false, outcome: 'completed' },
+      h.ctx,
+    )
+    expect(settled).toBeUndefined()
+
+    senders[0]!()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('"worker"')).length).toBe(1)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   interface TwoRunFlags {
     alphaDone?: boolean
     alphaWaiting?: boolean

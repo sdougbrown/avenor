@@ -1153,10 +1153,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             }
 
             if (sessionCtx?.isIdle() === true) {
+              completionQueue.delete(entryKey)
+              widgetDirty = true
               run.idleSendInFlight = true
               void sendCompletionNotice(notice).then(sent => {
-                if (sessionAtPollStart !== sessionGeneration || trackedRuns.get(entryKey) !== run) return
-                run.idleSendInFlight = false
+                // Clear the flag on whatever currently occupies the key before
+                // any bail-out: a new generation or a replacement run inherited
+                // it from upsertTrackedRun and would otherwise stay skipped.
+                const current = trackedRuns.get(entryKey)
+                if (current) current.idleSendInFlight = false
+                if (sessionAtPollStart !== sessionGeneration || current !== run) return
                 if (sent) {
                   completionQueue.delete(entryKey)
                   trackedRuns.delete(entryKey)
