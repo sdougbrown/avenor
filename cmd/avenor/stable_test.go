@@ -206,6 +206,41 @@ func TestRunStableBrokerParentFlagPropagation(t *testing.T) {
 	}
 }
 
+// TestRunStableBrokerParentTokenWithoutURL: a credential
+// ($AVENOR_PARENT_BROKER_TOKEN) with no parent URL runs this broker as the
+// tree's parent broker. The credential is preserved on the Config, the URL
+// stays empty, and the credential guard does not fire (the constructor is
+// reached).
+func TestRunStableBrokerParentTokenWithoutURL(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	// An overlong Unix-socket path makes Run fail fast, so the constructor
+	// seam is hit and the config captured before Run's side effects matter.
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+	var captured *stable.Config
+	orig := newSupervisorFn
+	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+		c := cfg
+		captured = &c
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newSupervisorFn = orig })
+
+	// Nonempty env credential; no parent URL (the flag stays at its empty
+	// default).
+	t.Setenv(token.EnvBrokerParentToken, "tok")
+	_ = runStable([]string{"--control-socket", socketPath})
+	if captured == nil {
+		t.Fatal("config was not captured; the constructor seam was not hit (the credential guard must not fire when the URL is empty)")
+	}
+	if captured.BrokerParentURL != "" {
+		t.Fatalf("Config.BrokerParentURL = %q, want empty (no parent URL)", captured.BrokerParentURL)
+	}
+	if captured.BrokerParentToken != "tok" {
+		t.Fatalf("Config.BrokerParentToken = %q, want the env credential preserved", captured.BrokerParentToken)
+	}
+}
+
 // TestRunStableBrokerParentURLRequiresToken: --broker-parent-url without a
 // credential (neither $AVENOR_PARENT_BROKER_TOKEN nor --broker-parent-token)
 // is rejected at the CLI boundary with exit 1 and the guard's error message.
