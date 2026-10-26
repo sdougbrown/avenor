@@ -339,24 +339,24 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 
 // Export narrows a peer listing to what the authenticated caller may see. This
 // broker's own runs are always exported; a run a registered child owns is
-// exported to a caller in that child's own branch and to this broker's own
-// callers (its owned descendants), but never to a caller in a sibling branch.
+// exported to this broker's own callers (its owned descendants) and never to a
+// caller in a sibling branch. Nor is it exported back to the owning branch
+// itself: that branch already lists the run under its canonical run ID, and
+// re-exporting it would hand the branch a namespaced alias of its own
+// supervisor that its peer dedup cannot collapse.
 func (r *Registry) Export(peers []messaging.Peer, caller string) []messaging.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	// The caller's branch and the peers' owners are read under the same lock, so
-	// a registration that lands mid-listing cannot split what the caller is from
-	// what it is shown.
-	callerBranch, callerIsDescendant := r.owners[caller]
+	// The caller's branch is read under the same lock as the peers' owners, so
+	// a registration that lands mid-listing cannot split what the caller is
+	// from what it is shown.
+	_, callerIsDescendant := r.owners[caller]
 	exported := make([]messaging.Peer, 0, len(peers))
 	for _, peer := range peers {
-		owner, registered := r.owners[peer.RunID]
-		switch {
-		case !registered:
-			exported = append(exported, peer)
-		case !callerIsDescendant, owner == callerBranch:
-			exported = append(exported, peer)
+		if _, registered := r.owners[peer.RunID]; registered && callerIsDescendant {
+			continue
 		}
+		exported = append(exported, peer)
 	}
 	return exported
 }
