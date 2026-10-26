@@ -113,6 +113,7 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
+			t.Setenv("AVENOR_TEST_UNRELATED_MARKER", "inherited-value")
 			tt.setup(t)
 			var child *exec.Cmd
 			origExec := execCommand
@@ -126,17 +127,19 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 			if child == nil {
 				t.Fatal("startSupervisor never built a child command")
 			}
-			kept := 0
+			foundMarker := false
 			for _, entry := range child.Env {
 				for _, name := range tt.scrubbed {
 					if strings.HasPrefix(entry, name+"=") {
 						t.Fatalf("%q reached the supervisor child environment", entry)
 					}
 				}
-				kept++
+				if entry == "AVENOR_TEST_UNRELATED_MARKER=inherited-value" {
+					foundMarker = true
+				}
 			}
-			if kept < 2 {
-				t.Fatalf("child env keeps only %d entries: the scrub dropped the environment", kept)
+			if !foundMarker {
+				t.Fatal("the unrelated inherited marker was not preserved in the child environment")
 			}
 		})
 	}
