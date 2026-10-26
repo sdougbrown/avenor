@@ -402,6 +402,31 @@ describe('child broker routes', () => {
     expect(headers['X-Avenor-Run-Token']).toBe('tok')
   })
 
+  it('carries a partial listing error from /sessions as the peers detail', async () => {
+    const { fetchImpl } = stubFetch({
+      '/sessions': () => Response.json({
+        sessions: [{ run_id: 'supervisor', label: 'main' }],
+        peers_error: 'peer sparky has an unreadable session record: unexpected end of JSON input',
+      }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).peers()
+    expect(result.peers).toEqual([{ run_id: 'supervisor', label: 'main' }])
+    expect(result.detail).toBe('peer sparky has an unreadable session record: unexpected end of JSON input')
+  })
+
+  it('leaves a complete listing without a peers detail', async () => {
+    const { fetchImpl } = stubFetch({
+      '/sessions': () => Response.json({
+        sessions: [{ run_id: 'supervisor', label: 'main' }],
+        peers_error: '',
+      }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).peers()
+    expect(result.peers).toEqual([{ run_id: 'supervisor', label: 'main' }])
+    expect(result).toEqual({ peers: [{ run_id: 'supervisor', label: 'main' }] })
+    expect('detail' in result).toBe(false)
+  })
+
   it('renames through the authenticated /rename path', async () => {
     const { calls, fetchImpl } = stubFetch({
       '/rename': () => Response.json({ run_id: 'rt_1', label: 'renamed', previous_label: 'old' }),

@@ -30,7 +30,7 @@ func TestMessengerReplyRejectsNonJSONWithoutConsumingTheEdge(t *testing.T) {
 		MessageID:  msgID,
 		Generation: b.Store().Generation(),
 		Body:       `{"message":"ping"}`,
-	}, false)
+	})
 	if err != nil || sent.Outcome != messaging.OutcomeSent {
 		t.Fatalf("Send = (%+v, %v), want sent", sent, err)
 	}

@@ -25,27 +25,27 @@ func TestHostQualifiedBranchIDsStayDistinct(t *testing.T) {
 	registerDescendant(t, parent, idB, endpointB, "gen-b", "run-b", "token-b")
 
 	// (a) Both runs stay routed to the endpoint their own branch registered.
-	hopA, ok := parent.link.Registry().Hop("run-a")
+	hopA, ok := parent.link.Registry().Hop(ParentRunKey(idA, "run-a"))
 	if !ok || hopA.Endpoint != endpointA {
 		t.Fatalf("hop of run-a = (%+v, %v), want the endpoint branch A registered", hopA, ok)
 	}
-	hopB, ok := parent.link.Registry().Hop("run-b")
+	hopB, ok := parent.link.Registry().Hop(ParentRunKey(idB, "run-b"))
 	if !ok || hopB.Endpoint != endpointB {
 		t.Fatalf("hop of run-b = (%+v, %v), want the endpoint branch B registered", hopB, ok)
 	}
 
 	// (b) Deregistering branch A with its own view retires only A's claim.
 	deregisterDescendant(t, parent, idA, endpointA, "gen-a", "run-a", "token-a")
-	if parent.link.Registry().Owns("run-a") {
+	if parent.link.Registry().Owns(ParentRunKey(idA, "run-a")) {
 		t.Fatal("deregistering branch A left its own run routed")
 	}
-	if !parent.link.Registry().Owns("run-b") {
+	if !parent.link.Registry().Owns(ParentRunKey(idB, "run-b")) {
 		t.Fatal("deregistering branch A retired branch B's claim")
 	}
-	if owner, ok := parent.link.Registry().Owner("run-b"); !ok || owner != idB {
+	if owner, ok := parent.link.Registry().Owner(ParentRunKey(idB, "run-b")); !ok || owner != idB {
 		t.Fatalf("owner of run-b = (%q, %v), want branch B's distinct child ID", owner, ok)
 	}
-	hopB, ok = parent.link.Registry().Hop("run-b")
+	hopB, ok = parent.link.Registry().Hop(ParentRunKey(idB, "run-b"))
 	if !ok || hopB.Endpoint != endpointB {
 		t.Fatalf("after deregistering branch A, hop of run-b = (%+v, %v), want branch B's endpoint", hopB, ok)
 	}

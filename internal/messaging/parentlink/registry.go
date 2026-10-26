@@ -19,16 +19,6 @@ import (
 // already owns.
 var ErrRunClaimed = fmt.Errorf("%w: run already claimed by another child broker", messaging.ErrInvalidRequest)
 
-// ErrRunLocallyOwned reports a registration that claims a run this broker
-// itself owns. A locally owned run is never a descendant's to relay into.
-var ErrRunLocallyOwned = fmt.Errorf("%w: run already owned by this broker", messaging.ErrInvalidRequest)
-
-// ErrInvalidRunID reports a registration that claims a run ID the run-key
-// namespacing reserves: a run ID carrying "@" reads as a branch-namespaced
-// key, so a child claiming one could forge another branch's supervisor
-// identity. Run IDs are minted without the separator.
-var ErrInvalidRunID = fmt.Errorf("%w: run id contains the reserved separator \"@\"", messaging.ErrInvalidRequest)
-
 // ErrParentUnavailable reports a peer broker that could not be reached or
 // refused the hop. It classifies as ErrTargetUnavailable: the target cannot be
 // reached from this branch right now, and nothing is replayed.
@@ -59,15 +49,30 @@ type child struct {
 }
 
 // ParentRunKey reports the run ID a parent broker addresses a descendant's run
-// by. A branch supervisor run is reserved in every branch, so the parent's own
-// supervisor and each descendant's supervisor would otherwise be the same run;
-// it is namespaced by the branch identity that claims it. Every other run ID is
-// minted by the branch that owns it, so it stays canonical.
+// by. Every branch mints run IDs from its own counter (the reserved branch
+// supervisor above all), so sibling branches claim the same literal IDs for
+// runs that are not the same run. A claim is therefore namespaced by the branch
+// identity that makes it; the run ID the owning branch knows the run by travels
+// with the claim and is what a relay posts to.
 func ParentRunKey(childID, runID string) string {
-	if runID != messaging.SupervisorRunID {
+	if childID == "" {
 		return runID
 	}
 	return runID + "@" + childID
+}
+
+// localRunID is the inverse of ParentRunKey: the run ID a branch knows a run by,
+// recovered from the key its parent addresses that run by. It reports false for
+// a key that is not namespaced by that branch.
+func localRunID(key, childID string) (string, bool) {
+	if childID == "" {
+		return "", false
+	}
+	runID, namespaced := strings.CutSuffix(key, "@"+childID)
+	if !namespaced || runID == "" {
+		return "", false
+	}
+	return runID, true
 }
 
 // Hop is one child broker as a relay next hop: the endpoint a relay is posted
@@ -82,8 +87,8 @@ type Hop struct {
 	// the relay posts back to the child.
 	Token string
 	// RunID is the target run's canonical run ID in its own branch, which is
-	// what the relay posts to. It differs from the run ID this broker addresses
-	// the run by only for a namespaced branch-supervisor claim.
+	// what the relay posts to. The run ID this broker addresses the run by
+	// (ChildID's claim key) is the namespaced one.
 	RunID string
 }
 
@@ -95,26 +100,28 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Register replaces one child's claim with the runs it now owns and reports the
-// runs it adopted and the ones it stopped claiming. A run another child already
+// Register replaces one child's claim: the runs it now owns are adopted and the
+// ones it stopped claiming are retired. A run another child already
 // owns is refused and nothing is applied.
 func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.DescendantClaim, error) {
 	claim := messaging.DescendantClaim{}
 	if err := validEndpoint(reg.Endpoint); err != nil {
 		return claim, err
 	}
-	for _, run := range reg.Runs {
-		if strings.Contains(run.RunID, "@") {
-			return messaging.DescendantClaim{}, fmt.Errorf("%w: %q", ErrInvalidRunID, run.RunID)
-		}
-	}
 	keys := make([]string, len(reg.Runs))
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i, run := range reg.Runs {
+		// A claimed run ID that itself contains "@" would mint a namespaced key
+		// the owning branch cannot relay to: the canonical ID the relay posts to
+		// would not exist there. Refuse the claim up front.
+		if strings.Contains(run.RunID, "@") {
+			return messaging.DescendantClaim{}, fmt.Errorf("%w: %s", messaging.ErrInvalidRequest, run.RunID)
+		}
 		key := ParentRunKey(reg.ChildID, run.RunID)
 		if owner, ok := r.owners[key]; ok && owner != reg.ChildID {
 			return messaging.DescendantClaim{}, fmt.Errorf("%w: %s", ErrRunClaimed, run.RunID)
+
 		}
 		keys[i] = key
 	}
@@ -129,10 +136,10 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 	for i, run := range reg.Runs {
 		key := keys[i]
 		claim.Runs = append(claim.Runs, messaging.ClaimedRun{RunClaim: run, Key: key})
-		adopted[key] = struct{}{}
 		if _, held := r.owners[key]; !held {
 			claim.Adopted = append(claim.Adopted, key)
 		}
+		adopted[key] = struct{}{}
 		r.owners[key] = reg.ChildID
 		current.runs[key] = run.RunID
 		current.tokens[key] = run.Token
@@ -339,11 +346,8 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 
 // Export narrows a peer listing to what the authenticated caller may see. This
 // broker's own runs are always exported; a run a registered child owns is
-// exported to this broker's own callers (its owned descendants) and never to a
-// caller in a sibling branch. Nor is it exported back to the owning branch
-// itself: that branch already lists the run under its canonical run ID, and
-// re-exporting it would hand the branch a namespaced alias of its own
-// supervisor that its peer dedup cannot collapse.
+// exported to a caller in that child's own branch and to this broker's own
+// callers (its owned descendants), but never to a caller in a sibling branch.
 func (r *Registry) Export(peers []messaging.Peer, caller string) []messaging.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -353,6 +357,10 @@ func (r *Registry) Export(peers []messaging.Peer, caller string) []messaging.Pee
 	_, callerIsDescendant := r.owners[caller]
 	exported := make([]messaging.Peer, 0, len(peers))
 	for _, peer := range peers {
+		// A run a registered child owns is exported only to non-descendant
+		// callers, and is hidden from every descendant caller: a branch already
+		// lists its own runs under the canonical IDs it knows them by, and a
+		// sibling must not see another branch's runs at all.
 		if _, registered := r.owners[peer.RunID]; registered && callerIsDescendant {
 			continue
 		}

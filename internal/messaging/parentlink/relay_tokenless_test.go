@@ -19,7 +19,7 @@ func TestRegistrationRouteAdmitsATokenlessRunAndTheRelayRefusesItBeforeAnyHTTP(t
 		return http.StatusOK, `{"outcome":"sent"}`
 	})
 	registerDescendant(t, parent, "branch-delta", stub.URL(), "gen-a", "target", "", "sibling", "tok-b")
-	if !parent.link.Registry().Owns("target") {
+	if !parent.link.Registry().Owns(ParentRunKey("branch-delta", "target")) {
 		t.Fatal("the registration route never adopted the tokenless claim")
 	}
 
@@ -27,7 +27,7 @@ func TestRegistrationRouteAdmitsATokenlessRunAndTheRelayRefusesItBeforeAnyHTTP(t
 	asker := parent.token(t, "orchestrator")
 
 	refusedID := newMsgID(t)
-	refused := sendAsk(parent.broker.Addr(), "orchestrator", asker, "target", refusedID, generation)
+	refused := sendAsk(parent.broker.Addr(), "orchestrator", asker, ParentRunKey("branch-delta", "target"), refusedID, generation)
 	if refused.err != nil {
 		t.Fatalf("ask the tokenless run: %v", refused.err)
 	}
@@ -46,7 +46,7 @@ func TestRegistrationRouteAdmitsATokenlessRunAndTheRelayRefusesItBeforeAnyHTTP(t
 	}
 
 	siblingID := newMsgID(t)
-	sibling := sendAsk(parent.broker.Addr(), "orchestrator", asker, "sibling", siblingID, generation)
+	sibling := sendAsk(parent.broker.Addr(), "orchestrator", asker, ParentRunKey("branch-delta", "sibling"), siblingID, generation)
 	if sibling.err != nil {
 		t.Fatalf("ask the credentialed sibling: %v", sibling.err)
 	}

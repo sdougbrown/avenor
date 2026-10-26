@@ -12,6 +12,10 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging/parentlink"
 )
 
+// testLinkToken is the credential the test parent broker's parent routes
+// require, and the one the registration posts present.
+const testLinkToken = "claims-test-link-token"
+
 // parentLinkPause delegates every call to the real parent-link seam and, when
 // armed, holds the caller after Register or Deregister has applied — the window
 // where the registry no longer owns a retired run but the broker has not
@@ -88,8 +92,8 @@ func startParentBroker(t *testing.T) (*Broker, *parentlink.Messenger) {
 	if err != nil {
 		t.Fatalf("build parent messenger: %v", err)
 	}
+	b.InstallParentLink(link, testLinkToken, nil)
 	b.SetMessenger(link)
-	b.SetParentLink(link)
 	return b, link
 }
 
@@ -99,7 +103,13 @@ func postParentRegister(t *testing.T, addr string, body map[string]any) *http.Re
 	if err != nil {
 		t.Fatalf("marshal registration: %v", err)
 	}
-	resp, err := http.Post("http://"+addr+"/parent/register", "application/json", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/parent/register", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("build /parent/register: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testLinkToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("post /parent/register: %v", err)
 	}
@@ -108,6 +118,7 @@ func postParentRegister(t *testing.T, addr string, body map[string]any) *http.Re
 }
 
 func awaitRecordGone(t *testing.T, b *Broker, registry *parentlink.Registry, runID string) {
+	runID = parentlink.ParentRunKey("child-a", runID)
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for b.GetRun(runID) != nil || registry.Owns(runID) {
@@ -194,6 +205,7 @@ func TestParentRunClaimsExcludeARetiredDescendantRecord(t *testing.T) {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+testLinkToken)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			deregisterDone <- -1
@@ -219,6 +231,7 @@ func TestParentRunClaimsExcludeARetiredDescendantRecord(t *testing.T) {
 // awaitAdoptedRecord waits until the registry adopted runID and the
 // broker holds its adopted record.
 func awaitAdoptedRecord(t *testing.T, b *Broker, registry *parentlink.Registry, runID string) {
+	runID = parentlink.ParentRunKey("child-a", runID)
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for !registry.Owns(runID) || b.GetRun(runID) == nil {

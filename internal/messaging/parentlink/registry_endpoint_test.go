@@ -34,10 +34,10 @@ func TestRegistryRefusesAnEndpointItCouldNotPostTo(t *testing.T) {
 			if !errors.Is(err, messaging.ErrInvalidRequest) {
 				t.Fatalf("Register = %v, want ErrInvalidRequest", err)
 			}
-			if len(claim.Adopted) != 0 || len(claim.Retired) != 0 {
-				t.Fatalf("Register = %+v, want nothing adopted and nothing retired", claim)
+			if len(claim.Retired) != 0 {
+				t.Fatalf("Register = %+v, want nothing retired", claim)
 			}
-			if registry.Owns("run-a") {
+			if registry.Owns(ParentRunKey("child-one", "run-a")) {
 				t.Fatal("a refused registration adopted the run")
 			}
 		})
@@ -57,7 +57,7 @@ func TestRegistryAcceptsAnHTTPRegistration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	hop, ok := registry.Hop("run-a")
+	hop, ok := registry.Hop(ParentRunKey("child-one", "run-a"))
 	if !ok || hop.Endpoint != "http://child-one:8080" {
 		t.Fatalf("hop = (%+v, %v), want the registered endpoint", hop, ok)
 	}

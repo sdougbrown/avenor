@@ -32,8 +32,9 @@ func TestDescendantOnlyChangesDoNotPublishTheRunSet(t *testing.T) {
 	parent.broker.SetRunObserver(func() { publications.Add(1) })
 
 	child := startBranch(t, parent.url(), "run-x")
-	awaitRegistered(t, parent, "run-x")
-	if parent.broker.GetRun("run-x") == nil {
+	key := child.key("run-x")
+	awaitRegistered(t, parent, key)
+	if parent.broker.GetRun(key) == nil {
 		t.Fatal("the parent does not hold the adopted record")
 	}
 	if got := publications.Load(); got != 0 {
@@ -97,7 +98,7 @@ func TestRelayRefusalRetiresTheAdoptedRecordQuietly(t *testing.T) {
 		release      = make(chan struct{})
 		armed        atomic.Bool
 	)
-	link, err := Install(Options{
+	link, err := New(Options{
 		Generation: b.Store().Generation,
 		RetireRun: func(runID, token string) {
 			if armed.Load() {
@@ -106,10 +107,12 @@ func TestRelayRefusalRetiresTheAdoptedRecordQuietly(t *testing.T) {
 			}
 			b.DeleteRun(runID)
 		},
-	}, b)
+	}, b.LocalMessenger())
 	if err != nil {
 		t.Fatalf("build parent messenger: %v", err)
 	}
+	b.InstallParentLink(link, testLinkToken, nil)
+	b.SetMessenger(link)
 	t.Cleanup(func() { _ = link.Close() })
 	parent := &branch{broker: b, link: link, tokens: map[string]string{}}
 
@@ -123,7 +126,8 @@ func TestRelayRefusalRetiresTheAdoptedRecordQuietly(t *testing.T) {
 	b.SetRunObserver(func() { publications.Add(1) })
 
 	child := startBranch(t, parent.url(), "run-x")
-	awaitRegistered(t, parent, "run-x")
+	key := child.key("run-x")
+	awaitRegistered(t, parent, key)
 
 	// The child stops publishing, so its run disappears without the parent
 	// learning a new claim: the parent keeps routing a run the child no longer
@@ -139,12 +143,12 @@ func TestRelayRefusalRetiresTheAdoptedRecordQuietly(t *testing.T) {
 	var askStatus int
 	var askBody map[string]any
 	go func() {
-		askStatus, askBody = ask(t, parent, "root-run", "run-x", newMsgID(t))
+		askStatus, askBody = ask(t, parent, "root-run", key, newMsgID(t))
 		close(askDone)
 	}()
 	<-paused
 
-	if parent.link.Registry().Owns("run-x") {
+	if parent.link.Registry().Owns(key) {
 		t.Fatal("the relay left the refused run registered")
 	}
 	claims := parent.broker.ParentRunClaims()
@@ -160,7 +164,7 @@ func TestRelayRefusalRetiresTheAdoptedRecordQuietly(t *testing.T) {
 	if got := publications.Load(); got != 0 {
 		t.Fatalf("the relay's retirement published %d times, want none", got)
 	}
-	if b.GetRun("run-x") != nil {
+	if b.GetRun(key) != nil {
 		t.Fatal("the adopted record was not retired")
 	}
 }
