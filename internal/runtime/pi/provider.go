@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
-	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 const backendID = "pi"
@@ -399,7 +399,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 			// half-configured identity.
 			var brokerURL, brokerRunID, brokerToken string
 			if opts.Broker != nil && opts.RuntimeID != "" && opts.BrokerToken != "" {
-				if brokerURL = broker.URL(opts.Broker.Addr()); brokerURL != "" {
+				if brokerURL = messaging.BrokerURL(opts.Broker.Addr()); brokerURL != "" {
 					brokerRunID = opts.RuntimeID
 					brokerToken = opts.BrokerToken
 				}

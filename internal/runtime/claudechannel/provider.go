@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
@@ -123,7 +124,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 
-	brokerURL := broker.URL(p.broker.Addr())
+	brokerURL := messaging.BrokerURL(p.broker.Addr())
 	if brokerURL == "" {
 		return runtime.Session{}, fmt.Errorf("claude channel: the broker has no listener address; start the broker before launching a run")
 	}

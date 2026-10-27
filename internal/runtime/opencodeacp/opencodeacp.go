@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/acp"
-	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 const backendID = "opencode-acp"
@@ -54,7 +54,7 @@ func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerAddr st
 				"avenor-channel-tools": map[string]any{
 					"type":    "local",
 					"enabled": true,
-					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", broker.URL(brokerAddr)},
+					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", messaging.BrokerURL(brokerAddr)},
 				},
 			},
 			"tools": map[string]any{

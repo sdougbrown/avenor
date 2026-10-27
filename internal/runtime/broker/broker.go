@@ -16,7 +16,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -497,15 +496,6 @@ const defaultListenAddr = "127.0.0.1:0"
 // Start binds the broker to an ephemeral loopback port.
 func (b *Broker) Start() error {
 	return b.StartOn(defaultListenAddr)
-}
-
-// URL is the HTTP base URL a client reaches addr on, or "" when addr is empty.
-// A scoped IPv6 zone is escaped, so the result parses back to the bound host.
-func URL(addr string) string {
-	if addr == "" {
-		return ""
-	}
-	return (&url.URL{Scheme: "http", Host: addr}).String()
 }
 
 // StartOn binds the broker to addr. An empty addr keeps Start's default: an

@@ -2051,7 +2051,7 @@ func (s *Supervisor) brokerURL() string {
 	if addr == "" {
 		return ""
 	}
-	return broker.URL(addr)
+	return messaging.BrokerURL(addr)
 }
 
 // installParentLink wires this broker to its parent broker when the supervisor

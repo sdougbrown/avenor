@@ -1,14 +1,14 @@
-package broker
+package messaging
 
 import (
 	"net/url"
 	"testing"
 )
 
-// TestURLPreservesScopedIPv6Zone pins the formatter's escape of a zoned
+// TestBrokerURLPreservesScopedIPv6Zone pins the formatter's escape of a zoned
 // link-local host, so the URL a child receives parses back to the bound host.
-func TestURLPreservesScopedIPv6Zone(t *testing.T) {
-	got := URL("[fe80::1%eth0]:8787")
+func TestBrokerURLPreservesScopedIPv6Zone(t *testing.T) {
+	got := BrokerURL("[fe80::1%eth0]:8787")
 	parsed, err := url.Parse(got)
 	if err != nil {
 		t.Fatalf("parse %q: %v", got, err)
@@ -24,8 +24,8 @@ func TestURLPreservesScopedIPv6Zone(t *testing.T) {
 	}
 }
 
-func TestURLEmptyAddrIsEmpty(t *testing.T) {
-	if got := URL(""); got != "" {
-		t.Fatalf("URL(\"\") = %q, want empty", got)
+func TestBrokerURLEmptyAddrIsEmpty(t *testing.T) {
+	if got := BrokerURL(""); got != "" {
+		t.Fatalf("BrokerURL(\"\") = %q, want empty", got)
 	}
 }
