@@ -14,20 +14,31 @@ broker peer, so avenor runs become addressable like teammates:
   `POST /send`. The hook answers `{isDelivered: true}` only after the broker
   queues the message; otherwise it answers `{isDelivered: false, reason}`
   (nothing is claimed on a failure, and a refused reply keeps its ask
-  correlation, so a retry still rides the edge). Everything the layer does
-  not own passes through untouched: non-`avenor:` addresses always, and even
-  an `avenor:` address while the layer is disabled or unconfigured. A send
-  that answers a peer's pending inbound ask (`expects_reply`) rides that
-  ask's reply edge, unblocking the asker's own wait.
+  correlation, so a retry still rides the edge). A `/sessions` answer the
+  broker flagged as a partial listing (`peers_error`) refuses the ref
+  outright instead of matching a label against the subset it did return —
+  the rule the Go and TS resolvers apply to the same field. Everything the
+  layer does not own passes through untouched: non-`avenor:` addresses
+  always, and even an `avenor:` address while the layer is disabled or
+  unconfigured. A send that answers a peer's pending inbound ask
+  (`expects_reply`) rides that ask's reply edge, unblocking the asker's own
+  wait.
 - **Ask:** the avenor MCP surface's `message` tool already carries an `ask`
   action; with the peer layer on, a `tool.call` hook serves that action
   through this session's own broker credentials (an `expects_reply` send
   blocking on `/wait_reply`, the same shape the avenor surfaces' ask action
-  takes, bounded by `timeout_ms`, 0–600000 ms). Every other action and every
-  call made while the layer is off passes through to the MCP server. The
-  mod does not register its own tool under `mcp__avenor__*`: the plugin also
-  ships an MCP server named `avenor`, and the host refuses such a
-  registration as a replacement for it.
+  takes, bounded by `timeout_ms`, 0–600000 ms). Resolution and the ask's
+  generation pin come from one `/sessions` read, not two. A failed ask
+  renders the shared ask sentences from `schemas/message.outcome.json`
+  (`not-sent`, `timed-out`, `possibly-pending`, …) — the same text and the
+  same withdraw guidance a pi or Go peer's ask returns — and classifies the
+  failure from the broker's own facts (the row's `outcome`, the 504's
+  `timeout: true`), never from the error's prose; the raw wire text only
+  reaches the log line. Every other action and every call made while the
+  layer is off passes through to the MCP server. The mod does not register
+  its own tool under `mcp__avenor__*`: the plugin also ships an MCP server
+  named `avenor`, and the host refuses such a registration as a replacement
+  for it.
 - **Receive:** the mod holds a long-poll subscription on the broker's
   `POST /poll-control` (agent rows only) for the session's life. An inbound
   ask is submitted as a prompt when the session is idle — it starts its own
@@ -63,7 +74,9 @@ For a top-level session, export the variables in the shell that launches
 `claude`, or set them under `env` in `~/.claude/settings.json` (the session's
 own process then carries them). The layer starts at `session.start`: it
 self-registers, names its run, and begins the subscription; without
-`AVENOR_BROKER_URL` it stays off with one explanatory log line.
+`AVENOR_BROKER_URL` it stays off with one explanatory log line, and so does
+a registration the broker refuses — the reason reaches the session's log
+either way.
 
 Same-UID local tool, per the repo's threat model: the broker's local routes
 trust the loopback user, and the mod keeps its minted token in memory only.
