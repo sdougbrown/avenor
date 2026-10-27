@@ -66,3 +66,31 @@ test('matchSession: a ref that is both a run id and a label resolves to the id',
   assert.equal(hit.match, 'unique')
   assert.equal(hit.runId, 'rt_9')
 })
+
+test('matchSession: a run id in one row beats a label of the same name in another', () => {
+  // The run-id rung is read over the whole listing before the label rung, so a
+  // peer that happens to be named like another run's id still resolves to the
+  // run the ref actually names.
+  const crossRow = [
+    { run_id: 'rt_7', label: 'rt_9' },
+    { run_id: 'rt_9', label: 'unrelated' },
+  ]
+  const hit = matchSession(crossRow, 'rt_9', '')
+  assert.equal(hit.match, 'unique')
+  assert.equal(hit.runId, 'rt_9')
+  // Two runs naming that label would be ambiguous only when no run id matches.
+  const twoLabels = [
+    { run_id: 'rt_7', label: 'rt_9' },
+    { run_id: 'rt_8', label: 'rt_9' },
+  ]
+  assert.equal(matchSession(twoLabels, 'rt_9', '').match, 'ambiguous')
+})
+
+test('matchSession: an empty ref resolves to nothing without reading rows', () => {
+  // `avenor:` with no ref parses to '', and a row may legally carry an empty
+  // label: rather than let an unnamed row win, the empty ref short-circuits the
+  // way the sibling resolvers refuse it. Pinned so the behavior stays chosen.
+  const unnamed = [{ run_id: 'rt_4', label: '' }]
+  assert.deepEqual(matchSession(unnamed, '', ''), { match: 'none', runId: '', candidates: [] })
+  assert.deepEqual(matchSession(LISTING, '', ''), { match: 'none', runId: '', candidates: [] })
+})

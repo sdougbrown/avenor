@@ -13,6 +13,9 @@ import {
   parseControlMessage,
   frameInboundAsk,
   extractReplyMessage,
+  quote,
+  renderAskFailure,
+  askFailureOutcome,
 } from '../hooks/wire.js'
 
 test('mintMessageID: versioned shape with an encoded ten-minute horizon', () => {
@@ -110,6 +113,83 @@ test('frameInboundAsk: the sender is broker-stamped, the reply target is the run
   const bare = frameInboundAsk({ fromRunId: 'rt_8', sender: '', messageId: '', message: 'm', role: '' })
   assert.match(bare, /peer `rt_8`\*\*/)
   assert.doesNotMatch(bare, /message id/)
+})
+
+test('parseControlMessage: sender fallbacks keep the peer addressable', () => {
+  // A row whose payload names only `from` (no from_run_id) still resolves its
+  // sender; a row with no server-stamped sender and no `from` falls back to the
+  // run id it was sent from. The frame a model reads must name a real peer
+  // either way, because the reply instruction is built from it.
+  const fromOnly = parseControlMessage({
+    type: 'agent_message', sender: 'Probe',
+    payload: { id: 'a3', from: 'peer', message: 'hi from the payload' },
+  })
+  assert.equal(fromOnly.fromRunId, 'peer')
+  assert.equal(fromOnly.sender, 'Probe')
+  assert.match(frameInboundAsk(fromOnly), /SendMessage to `avenor:peer`/)
+
+  const bare = parseControlMessage({
+    type: 'agent_message',
+    payload: { id: 'a4', from: 'peer', message: 'no sender anywhere' },
+  })
+  assert.equal(bare.sender, 'peer')
+  const framed = frameInboundAsk(bare)
+  assert.match(framed, /peer `peer`\*\*/)
+  assert.match(framed, /broker run `peer`/)
+
+  // The payload is the sender of record: an envelope-level from_run_id alone
+  // names no address the frame's reply instruction could use, so the row reads
+  // unreadable rather than as a peer message.
+  const envelopeOnly = parseControlMessage({
+    type: 'agent_message', from_run_id: 'peer',
+    payload: { id: 'a5', message: 'run id only' },
+  })
+  assert.equal(envelopeOnly, null)
+})
+
+test('frameInboundAsk: a role rides the frame as a labelled segment', () => {
+  const text = frameInboundAsk({
+    fromRunId: 'rt_7', sender: 'Probe Peer', messageId: 'a1', message: 'why?', role: 'agent',
+  })
+  assert.match(text, /role `agent`\)/)
+})
+
+test('renderAskFailure: the shared sentences, byte-identical to messaging-text', () => {
+  // Copied expectations from packages/core/src/messaging-text.test.ts: the mod
+  // mirrors the templates, so these catch a drift from the schemas.
+  assert.equal(
+    renderAskFailure('av1.m.1', 'mesh-a', 'possibly-pending'),
+    'ask "av1.m.1" to "mesh-a" may still be pending; if no reply arrives, withdraw it with avenor_message action="withdraw" message_id="av1.m.1"',
+  )
+  assert.equal(
+    renderAskFailure('av1.m.1', 'mesh-a', 'timed-out'),
+    'no reply to "av1.m.1" from "mesh-a" before the timeout; withdraw it with avenor_message action="withdraw" message_id="av1.m.1"',
+  )
+  assert.equal(
+    renderAskFailure('av1.m.1', 'mesh-a', 'not-sent'),
+    'ask "av1.m.1" was not sent to "mesh-a"; nothing is pending',
+  )
+  // A failure the contract cannot name still gets guidance, never raw wire text.
+  assert.equal(renderAskFailure('av1.m.1', 'mesh-a', 'invented'), renderAskFailure('av1.m.1', 'mesh-a', 'possibly-pending'))
+})
+
+test('quote: a fact cannot carry a bidi override or a line break', () => {
+  assert.equal(quote('plain'), '"plain"')
+  assert.equal(quote('me\u202esh'), '"me\\u202esh"')
+  assert.equal(quote('two\nlines'), '"two\\nlines"')
+  assert.equal(quote('say "hi"'), '"say \\"hi\\""')
+})
+
+test('askFailureOutcome: classified from the wire facts, never from prose', () => {
+  // The broker's 504 carries the authoritative flag...
+  assert.equal(askFailureOutcome(504, { timeout: true, outcome: 'timed-out' }), 'timed-out')
+  assert.equal(askFailureOutcome(504, {}), 'timed-out')
+  // ...and a declared terminal outcome wins over the fallback.
+  assert.equal(askFailureOutcome(410, { lost: true, outcome: 'lost' }), 'lost')
+  assert.equal(askFailureOutcome(404, { outcome: 'edge-absent' }), 'edge-absent')
+  // An unrelated failure is never timed-out, whatever its text says.
+  assert.equal(askFailureOutcome(400, { error: 'timed-out: nonsense' }), 'possibly-pending')
+  assert.equal(askFailureOutcome(0, null), 'possibly-pending')
 })
 
 test('extractReplyMessage: reply text, timeout and cancellation', () => {
