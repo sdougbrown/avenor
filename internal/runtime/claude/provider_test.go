@@ -965,7 +965,20 @@ func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Error("session context still live; runSession would keep claude running")
 			}
-			return
+			// The Prompt goroutine returns right after the verdict, and Emit
+			// still buffers once the session has ended, so a duplicate shows
+			// up within this window.
+			quiet := time.After(200 * time.Millisecond)
+			for {
+				select {
+				case ev := <-s.Events:
+					if ev.Event == "agent.prompt_failed" {
+						t.Fatalf("emitted agent.prompt_failed (%v) after the launch verdict", ev.Fields["error"])
+					}
+				case <-quiet:
+					return
+				}
+			}
 		case <-deadline:
 			t.Fatal("no session.end for a launch whose input box never appeared")
 		}
