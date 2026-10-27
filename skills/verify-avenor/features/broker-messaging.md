@@ -331,14 +331,16 @@ for s in "$SCRATCH/branch-home"/sockets/*.sock "$SCRATCH/branch-b.sock" \
 done
 # The shutdown RPC returns before the supervisor has finished removing its
 # record, so wait for the removal instead of checking once.
+cleanup_status=0
 if [ -n "$BRANCH_HOME_SOCK" ]; then
-  await_gone "$BRANCH_HOME_SOCK.broker.url" 10 "autostarted branch broker URL record" || exit 1
+  await_gone "$BRANCH_HOME_SOCK.broker.url" 10 "autostarted branch broker URL record" || cleanup_status=1
 fi
 for pid in "$HOST_PID" "$BRANCH_B_PID" "$BRANCH_A_PID" "$HUB_PID"; do
   case "$pid" in ''|*[!0-9]*) continue ;; esac   # unset or not a pid: never kill
   [ "$pid" -gt 0 ] && kill "$pid" 2>/dev/null
 done
 echo "evidence kept in $EV"
+if [ "$cleanup_status" -ne 0 ]; then exit "$cleanup_status"; fi
 ```
 
 ## Limitation
