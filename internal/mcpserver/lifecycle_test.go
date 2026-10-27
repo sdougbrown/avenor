@@ -175,6 +175,9 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 // TestSupervisorForwardsParentLinkWhenURLInEnv, so both are skipped here.
 func TestSupervisorChildStripsEveryBrokerEnvName(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	// An inherited parent URL keeps the credential in the child's environment,
+	// so clear it to test the no-parent-link path whatever the invoking shell set.
+	t.Setenv(token.EnvBrokerParentURL, "")
 	t.Setenv("AVENOR_TEST_UNRELATED_MARKER", "inherited-value")
 	forwarded := map[string]bool{token.EnvBrokerParentURL: true}
 	var stripped []string
