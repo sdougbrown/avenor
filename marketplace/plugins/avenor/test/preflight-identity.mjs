@@ -4,16 +4,17 @@
 // layer can be handed:
 //
 //   A. provisioned — broker URL, run id and token name a run the launcher
-//      already holds, and AVENOR_SESSION_NAME carries the launch label (every
-//      supervisor spawn passes one). The layer joins that run and writes
-//      nothing about it: no /register, no /session_name. The name write is
-//      asserted absent by path — a harness name outranks the record's label in
-//      the broker, so posting the launch label would shadow the name peers
+//      already holds, and AVENOR_LABEL carries the launch label (every avenor
+//      launch exports its identity that way). The layer joins that run and
+//      writes nothing about it: no /register, no /session_name. The name write
+//      is asserted absent by path — a harness name outranks the record's label
+//      in the broker, so posting the launch label would shadow the name peers
 //      address the run by, including through a later authorized rename.
 //   B. half-provisioned — a run id without a token. The layer self-registers
 //      through the broker's open /register route and posts the name it was
-//      handed.
-//   C. bare — no run id at all. The layer mints its own run and posts its name.
+//      handed, here as AVENOR_LABEL alone.
+//   C. bare — no run id at all. The layer mints its own run and posts its name,
+//      handed as the older AVENOR_SESSION_NAME spelling a shell may still set.
 //
 // Run against a real `avenor stable` broker:
 //   node marketplace/plugins/avenor/test/preflight-identity.mjs http://127.0.0.1:<port>
@@ -137,7 +138,7 @@ const layerA = await loadLayer('a', {
   AVENOR_RUN_ID: RUN_A,
   AVENOR_BROKER_TOKEN: 'preflight-provisioned-token',
   // The launch label, exactly as a supervisor spawn passes it.
-  AVENOR_SESSION_NAME: NAME_A,
+  AVENOR_LABEL: NAME_A,
 })
 await layerA.hooks['session.start'](layerA.d, { cwd: '/tmp', isInteractive: true })
 
@@ -198,14 +199,15 @@ const beforeB = await sessions(provisionedA)
 const layerB = await loadLayer('b', {
   AVENOR_BROKER_URL: BROKER,
   AVENOR_RUN_ID: RUN_B,
-  AVENOR_SESSION_NAME: NAME_B,
+  // The launch identity's own spelling, with no peer-credential copy beside it.
+  AVENOR_LABEL: NAME_B,
 })
 await layerB.hooks['session.start'](layerB.d, { cwd: '/tmp', isInteractive: true })
 const afterB = await sessions(provisionedA)
 const rowB = afterB.sessions.find((s) => s.run_id === RUN_B)
 check('B self-registered through /register', Boolean(rowB), rowB)
 check('B issued exactly one /register', issued(layerB, '/register').length === 1, layerB.requests.map((r) => r.method + ' ' + r.path))
-check('B posted the name it was handed', issued(layerB, '/session_name').length === 1,
+check('B posted the launch label it was handed', issued(layerB, '/session_name').length === 1,
   layerB.requests.map((r) => r.method + ' ' + r.path))
 check('B is listed under that name', Boolean(rowB) && rowB.label === NAME_B, rowB)
 check('B added one record', afterB.sessions.length === beforeB.sessions.length + 1,
@@ -220,6 +222,7 @@ const NAME_C = 'pf-bare-session'
 const beforeC = await sessions(provisionedA)
 const layerC = await loadLayer('c', {
   AVENOR_BROKER_URL: BROKER,
+  // The older spelling a hand-exported shell may still set.
   AVENOR_SESSION_NAME: NAME_C,
 })
 await layerC.hooks['session.start'](layerC.d, { cwd: '/tmp', isInteractive: true })

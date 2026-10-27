@@ -125,15 +125,12 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 	// too. Filtering and scrubbing run regardless of which values are injected,
 	// then this launch's identity is added.
 	env := proc.Environ()
-	filtered := env[:0]
-	for _, e := range env {
-		if !strings.HasPrefix(e, "PI_AGENT=") &&
-			!strings.HasPrefix(e, "PI_AGENT_PROFILE=") &&
-			!strings.HasPrefix(e, "AVENOR_BROKER_URL=") &&
-			!strings.HasPrefix(e, "AVENOR_RUN_ID=") &&
-			!strings.HasPrefix(e, "AVENOR_BROKER_TOKEN=") {
-			filtered = append(filtered, e)
+	filtered := make([]string, 0, len(env))
+	for _, e := range runtime.ScrubPeerEnv(env) {
+		if strings.HasPrefix(e, "PI_AGENT=") || strings.HasPrefix(e, "PI_AGENT_PROFILE=") {
+			continue
 		}
+		filtered = append(filtered, e)
 	}
 	if agent != "" {
 		filtered = append(filtered, "PI_AGENT="+agent)
@@ -144,13 +141,13 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 	// Broker credentials let the pi sub-process poll its own inbound asks and
 	// reply via avenor_message as its own run.
 	if brokerURL != "" {
-		filtered = append(filtered, "AVENOR_BROKER_URL="+brokerURL)
+		filtered = append(filtered, runtime.EnvBrokerURL+"="+brokerURL)
 	}
 	if brokerRunID != "" {
-		filtered = append(filtered, "AVENOR_RUN_ID="+brokerRunID)
+		filtered = append(filtered, runtime.EnvBrokerRunID+"="+brokerRunID)
 	}
 	if brokerToken != "" {
-		filtered = append(filtered, "AVENOR_BROKER_TOKEN="+brokerToken)
+		filtered = append(filtered, runtime.EnvBrokerToken+"="+brokerToken)
 	}
 	proc.Env = runtime.LaunchEnv(filtered, provenance)
 	stdin, err := proc.StdinPipe()

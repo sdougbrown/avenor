@@ -104,8 +104,13 @@ func TestStartProvisionsTheSupervisorsBrokerRun(t *testing.T) {
 	if env["AVENOR_BROKER_TOKEN"] != token {
 		t.Errorf("AVENOR_BROKER_TOKEN = %q, want %q", env["AVENOR_BROKER_TOKEN"], token)
 	}
-	if env["AVENOR_SESSION_NAME"] != "child-a" {
-		t.Errorf("AVENOR_SESSION_NAME = %q, want child-a", env["AVENOR_SESSION_NAME"])
+	if env["AVENOR_SESSION_NAME"] != "" {
+		// The label reaches the child once, as the launch identity's AVENOR_LABEL.
+		// A second spelling could disagree with the record's label.
+		t.Errorf("AVENOR_SESSION_NAME = %q, want the peer set only", env["AVENOR_SESSION_NAME"])
+	}
+	if n := len(env); n != len(runtime.PeerEnvNames()) {
+		t.Errorf("launch env = %q, want exactly the peer vocabulary", launcher.captured().Env)
 	}
 	if n := b.RunCount(); n != 1 {
 		t.Errorf("broker holds %d runs, want the one provisioned run", n)

@@ -11,7 +11,6 @@ type peerProvision struct {
 	url   string
 	runID string
 	token string
-	label string
 }
 
 // provisionPeer reports the broker identity this launch hands the child. The
@@ -33,27 +32,25 @@ func provisionPeer(merged runtime.StartOptions) *peerProvision {
 		url:   url,
 		runID: merged.RuntimeID,
 		token: merged.BrokerToken,
-		label: merged.Label,
 	}
 }
 
 // env renders the provision for the launcher. A nil provision renders nothing:
 // a child with no provision joins no broker, and the mods layer stays off
-// there. The label names the identity rather than configuring it: the run it
-// accompanies was registered under that label, and the mods layer posts no
-// name for a provisioned run — a harness name would outrank the label the
-// supervisor owns, and a later authorized rename would write behind it.
+// there. These three names are the whole peer vocabulary (runtime.PeerEnvNames)
+// and are what the launch provisions; the label the supervisor registered the
+// run under travels as the launch identity's AVENOR_LABEL, so exporting it a
+// second time would give one value two spellings that could disagree. The mods
+// layer posts no name for a provisioned run either — a harness name would
+// outrank the label the supervisor owns, and a later authorized rename would
+// write behind it.
 func (p *peerProvision) env() []string {
 	if p == nil {
 		return nil
 	}
-	env := []string{
-		"AVENOR_BROKER_URL=" + p.url,
-		"AVENOR_RUN_ID=" + p.runID,
-		"AVENOR_BROKER_TOKEN=" + p.token,
+	return []string{
+		runtime.EnvBrokerURL + "=" + p.url,
+		runtime.EnvBrokerRunID + "=" + p.runID,
+		runtime.EnvBrokerToken + "=" + p.token,
 	}
-	if p.label != "" {
-		env = append(env, "AVENOR_SESSION_NAME="+p.label)
-	}
-	return env
 }

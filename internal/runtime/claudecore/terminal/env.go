@@ -96,53 +96,40 @@ func UnsetParentClaudeEnvPrefix() string {
 	return b.String()
 }
 
-// avenorPeerEnv is the vocabulary the avenor plugin's mods layer reads to join
-// a broker as an already-provisioned run (marketplace/plugins/avenor/hooks). A
-// child never inherits a launcher's copy: the session that loaded the plugin
-// exports these into everything it spawns, and a tmux server can hold them
-// from a launch days back. Either way the child would join as a run another
-// live session is already using, so every launch strips them and exports only
-// what the caller provisions.
-var avenorPeerEnv = []string{
-	"AVENOR_BROKER_URL",
-	"AVENOR_RUN_ID",
-	"AVENOR_BROKER_TOKEN",
-	"AVENOR_SESSION_NAME",
+// PeerEnv finishes a terminal launch's environment: runtime owns the peer
+// credential vocabulary (runtime.PeerEnvNames), and a child never inherits a
+// launcher's copy.
+//
+// PeerEnv returns env without any inherited avenor peer credentials, followed
+// by extra: this launch's provisioned ones. extra also passes the same filter
+// the scrub layers apply, so a caller cannot smuggle a name back in through it
+// — CLAUDE_CODE_MESSAGING_TOKEN or the parent-link credential among them. Only
+// the peer names themselves are let through there, since provisioning them is
+// the point. Entries that are not KEY=VALUE are dropped, and extra wins over
+// env for every name.
+func PeerEnv(env []string, extra []string) []string {
+	return append(runtime.ScrubPeerEnv(env), callerEnv(extra)...)
 }
 
-// PeerEnv returns env without any inherited avenor peer credentials, followed
-// by extra: this launch's provisioned ones. Entries that are not KEY=VALUE are
-// dropped, and extra wins over env for every name.
-func PeerEnv(env []string, extra []string) []string {
-	out := make([]string, 0, len(env)+len(extra))
-	for _, entry := range env {
-		if isAvenorPeerEnv(entry) {
+// callerEnv returns the entries of a caller-supplied Env that a child may
+// inherit. They are appended after every scrub layer, so without this filter a
+// single StartOptions.Env entry would reintroduce what the scrubs exist to keep
+// out: the parent's Claude Code session or messaging token, an inherited launch
+// identity, or the parent-link credential. Provisioned peer credentials do not
+// go through here; PeerEnv appends them after filtering.
+func callerEnv(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
 			continue
 		}
-		out = append(out, entry)
-	}
-	for _, entry := range extra {
-		if !isEnvEntry(entry) {
+		if isParentClaudeSessionVar(key) || runtime.IsScrubbedEnvName(key) {
 			continue
 		}
 		out = append(out, entry)
 	}
 	return out
-}
-
-func isAvenorPeerEnv(entry string) bool {
-	name, _, _ := strings.Cut(entry, "=")
-	for _, peer := range avenorPeerEnv {
-		if name == peer {
-			return true
-		}
-	}
-	return false
-}
-
-func isEnvEntry(entry string) bool {
-	key, _, ok := strings.Cut(entry, "=")
-	return ok && key != ""
 }
 
 // identityEnvPrefix returns a shell prefix that unsets every name a child must
@@ -159,13 +146,16 @@ func identityEnvPrefix(p *runtime.LaunchProvenance, env []string) string {
 		b.WriteString(" ")
 		b.WriteString(name)
 	}
-	for _, name := range avenorPeerEnv {
+	for _, name := range runtime.PeerEnvNames() {
 		b.WriteString(" ")
 		b.WriteString(name)
 	}
 	b.WriteString("; ")
 	writeExports(&b, p.IdentityEnv())
-	writeExports(&b, env)
+	// The exports land after the unset, so a caller-supplied entry would win
+	// over both the unset and this launch's identity. callerEnv is what keeps
+	// the prefix's invariant true for every caller.
+	writeExports(&b, callerEnv(env))
 	return b.String()
 }
 

@@ -76,7 +76,9 @@ already uses for its peers:
 - `AVENOR_BROKER_TOKEN` — the credential for that run.
 - `AVENOR_SESSION_NAME` — optional display name, posted to the broker's
   `/session_name` by a session that self-registers; the posted name is what
-  `avenor:<label>` resolution and peer lists see. A provisioned run posts
+  `avenor:<label>` resolution and peer lists see. It falls back to
+  `AVENOR_LABEL`, the launch identity every avenor launch exports, so a
+  hand-exported shell can keep using either spelling. A provisioned run posts
   nothing: the supervisor already registered it under the label peers address,
   and the launch copy of this variable only records the identity as the child
   joined it.
@@ -101,11 +103,14 @@ turns on the token:
   in the shell that launches `claude`, or set them under `env` in
   `~/.claude/settings.json`.
 
-A hosted child never inherits a launching session's copy of the four names:
-avenor's terminal launcher strips them (a tmux pane would otherwise pick up
-whatever the tmux server held) and exports only what it provisions. So a
-child is a peer exactly when avenor made it one; a session started by hand in
-a shell that exported them is a peer on its own terms.
+A hosted child never inherits a launching session's copy of those names:
+avenor's terminal launcher strips `AVENOR_BROKER_URL`, `AVENOR_RUN_ID` and
+`AVENOR_BROKER_TOKEN` (a tmux pane would otherwise pick up whatever the tmux
+server held) and exports only what it provisions. `AVENOR_SESSION_NAME` goes
+further: it is never provisioned at all, so it is stripped like the launch
+identity it was duplicating, and the label arrives once, as `AVENOR_LABEL`. So
+a child is a peer exactly when avenor made it one; a session started by hand
+in a shell that exported them is a peer on its own terms.
 
 Without `AVENOR_BROKER_URL` the layer stays off with one explanatory log line,
 and so does a registration the broker refuses — the reason reaches the

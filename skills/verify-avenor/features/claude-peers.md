@@ -14,8 +14,10 @@ from the broker's authenticated run identity, never from message text.
 
 Load the plugin in a Claude session whose environment carries
 `AVENOR_BROKER_URL` (plus optional `AVENOR_RUN_ID`, `AVENOR_BROKER_TOKEN`,
-`AVENOR_SESSION_NAME` — the repo's own peer-credential vocabulary), against an
-`avenor stable` supervisor whose broker that URL names. The layer logs
+`AVENOR_SESSION_NAME` — the repo's own peer-credential vocabulary — or the
+`AVENOR_LABEL` every avenor launch exports, which is what the layer falls back
+to for a display name), against an `avenor stable` supervisor whose broker that
+URL names. The layer logs
 "peer layer on" at `session.start`, self-registers the session as a broker
 run when no token is provisioned, and disables itself below the tested Claude
 Code floor (2.1.311) with one log line instead of erroring.
@@ -94,9 +96,10 @@ nohup env -i PATH="$PWD:$HOME/.local/bin:/usr/bin:/bin" HOME="$HOME" TMPDIR=/tmp
 
 1. **The child carries the provisioned identity.** `ps eww -p <pane pid>` of
 the child's `claude` shows `AVENOR_BROKER_URL`, `AVENOR_RUN_ID=rt_1`,
-   `AVENOR_BROKER_TOKEN`, `AVENOR_SESSION_NAME=child-a`; its transcript's first
-   log line is `peer layer on (provisioned run rt_1, broker http://…)`, and
-   `GET /sessions` (authenticated with the token from that environment) lists
+   `AVENOR_BROKER_TOKEN`, and the launch label once, as `AVENOR_LABEL=child-a`;
+   its transcript's first log line is `peer layer on (provisioned run rt_1,
+   broker http://…)`, and `GET /sessions` (authenticated with the token from
+   that environment) lists
    one record per label — `rt_1`/`child-a` — with no `claude-<hex>`
    self-registration beside it. The child writes nothing about its own
    identity: no `/register`, and no `/session_name` either, so `child-a` stays
@@ -174,7 +177,8 @@ reverted-fix run that fails it.
   `avenor:<label>` ambiguous, and a resume would need a record that still
   authenticates.
 - A hosted child never inherits a launching session's peer credentials:
-  avenor's terminal launcher unsets the four names and exports only what it
+  avenor's terminal launcher unsets the three peer names (and the retired
+  `AVENOR_SESSION_NAME` a launcher may still hold) and exports only what it
   provisions, so the plugin in one session cannot make its children join as
   itself.
 - The plugin must be installed for a spawned child to load it (`--plugin-dir`

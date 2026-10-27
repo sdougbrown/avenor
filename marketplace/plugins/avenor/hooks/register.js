@@ -33,7 +33,7 @@
 //   already holds, with neither a `/register` call nor a `/session_name`
 //   write. Without them the session self-registers through the broker's open
 //   `/register` route as a top-level peer of its own, and names itself from
-//   `AVENOR_SESSION_NAME`.
+//   `AVENOR_SESSION_NAME` (falling back to the launch's `AVENOR_LABEL`).
 //
 // The hook grammar is what Claude Code 2.1.311's module scan enforces; the
 // mechanics come from the #391 spike (391-spike-findings.md). Branches over
@@ -682,6 +682,17 @@ async function envSessionName(d) {
   let value
   try {
     value = await d.env.get("AVENOR_SESSION_NAME")
+  } catch (err) {
+    value = ""
+  }
+  if (typeof value === "string" && value !== "") {
+    return value
+  }
+  // AVENOR_LABEL is the launch identity's own spelling: avenor exports it for
+  // every launch, while AVENOR_SESSION_NAME above is the retired
+  // peer-credential copy that only a hand-exported shell still sets.
+  try {
+    value = await d.env.get("AVENOR_LABEL")
   } catch (err) {
     return ""
   }

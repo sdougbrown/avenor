@@ -40,10 +40,11 @@ var identityEnvNames = []string{
 	envParentRunID,
 }
 
-// scrubbedEnvNames excludes launch identity, test switches, and parent-link
-// configuration from children. The credential grants broker authority; a lone
-// parent URL makes nested supervisor startup fail.
-var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken, token.EnvBrokerParentURL)
+// scrubbedEnvNames excludes launch identity, test switches, parent-link
+// configuration, and the retired label spelling from children. The credential
+// grants broker authority; a lone parent URL makes nested supervisor startup
+// fail.
+var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken, token.EnvBrokerParentURL, envRetiredPeerName)
 
 var identityEnvKeys = func() map[string]struct{} {
 	keys := make(map[string]struct{}, len(scrubbedEnvNames))
@@ -54,11 +55,18 @@ var identityEnvKeys = func() map[string]struct{} {
 }()
 
 // ScrubbedEnvNames returns every environment name a child must not inherit:
-// launch identity, the test-only switches, and the parent-link URL and
-// credential. A shell launcher that assembles its child's environment by hand
-// unsets these instead of calling ScrubIdentityEnv.
+// launch identity, the test-only switches, the parent-link URL and credential,
+// and the retired label spelling. A shell launcher that assembles its child's
+// environment by hand unsets these instead of calling ScrubIdentityEnv.
 func ScrubbedEnvNames() []string {
 	return append([]string(nil), scrubbedEnvNames...)
+}
+
+// IsScrubbedEnvName reports whether name is one a child must not inherit.
+// Callers pass a name, not a NAME=VALUE entry.
+func IsScrubbedEnvName(name string) bool {
+	_, ok := identityEnvKeys[name]
+	return ok
 }
 
 // Launch kinds reported in LaunchProvenance.Kind.

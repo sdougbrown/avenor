@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/internal/identitytest"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // TestPTYLauncherAddsLaunchIdentity asserts in one run what the hosted PTY
@@ -50,12 +52,20 @@ func TestPTYLauncherExportsProvisionedPeerCredentials(t *testing.T) {
 		"AVENOR_BROKER_URL":   "http://127.0.0.1:1",
 		"AVENOR_RUN_ID":       "rt_child",
 		"AVENOR_BROKER_TOKEN": "child-token",
-		"AVENOR_SESSION_NAME": "child label with 'quotes' $(id)",
 	}
 	env := make([]string, 0, len(provisioned))
 	for key, value := range provisioned {
 		env = append(env, key+"="+value)
 	}
+	// A caller entry is appended after the scrub layers, so it must not be able
+	// to reintroduce what they remove or overwrite this launch's identity. The
+	// parent-poisoned values are the ones the child must not see either way.
+	env = append(env,
+		"CLAUDE_CODE_MESSAGING_TOKEN=caller-secret",
+		token.EnvBrokerParentToken+"=caller-parent-secret",
+		runtime.EnvLabel+"=spoofed-label",
+		"AVENOR_SESSION_NAME=spoofed-session",
+	)
 
 	provenance := identitytest.Provenance("rt_child")
 	session, err := (PTYLauncher{}).Start(context.Background(), StartOptions{

@@ -189,8 +189,10 @@ func AssertBrokerPreserved(t *testing.T, observed map[string]string) {
 }
 
 // peerKeys is the avenor peer credential vocabulary a launch either provisions
-// or strips.
-var peerKeys = []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN", "AVENOR_SESSION_NAME"}
+// or strips, listed independently of runtime.PeerEnvNames so a production list
+// change cannot hide a leaked credential. AVENOR_SESSION_NAME is not here: it
+// is retired, never provisioned, and covered by the scrub list instead.
+var peerKeys = []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN"}
 
 // AssertPeerEnv requires the observed peer credentials to be exactly the ones
 // this launch provisioned. A name missing from want must be unset in the child:
