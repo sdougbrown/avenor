@@ -11,6 +11,9 @@
   host answers without the user pressing `esc`
 - Broker run addressing: the supervisor is `supervisor`; a child is its runtime
   ID (`rt_N`). Public spawn run IDs and labels are not broker targets.
+- Hub and branches: a hub supervisor with a fixed `--broker-addr`, branches that
+  join it from `AVENOR_PARENT_BROKER_URL` alone, peer discovery at the hub, and a
+  cross-branch ask answered by the target branch's run.
 
 ## How to get to it (user POV)
 
@@ -133,6 +136,131 @@ esac
 Never kill by process name: shut the supervisor down through its socket and
 remove only `$SCRATCH`. A socket with no listener answers `connection refused`;
 that instance is already gone.
+
+### Hub plus env-only branches
+
+This drive needs no host session. A hub supervisor binds a fixed broker address;
+two branch supervisors join it from `AVENOR_PARENT_BROKER_URL` alone (no
+`--broker-parent-url` flag), which is the same resolution the interactive
+autostart uses. A child on the hub discovers both branches through its peer
+listing and asks one of their runs across the branch boundary.
+
+```sh
+SCRATCH=$(mktemp -d /tmp/avenor-hub.XXXXXX)
+mkdir -p "$SCRATCH/work" "$SCRATCH/evidence"
+export TMPDIR="$SCRATCH"
+# Keep the operator's HOME: the pi backend reads its provider config from it.
+BIN="$PWD/avenor"
+MODEL=ollama-cloud/deepseek-v4.1-flash
+PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+HUB_SOCK="$SCRATCH/hub.sock"
+TOKEN=$("$BIN" parent-token)
+HUB_PID=0; BRANCH_A_PID=0; BRANCH_B_PID=0   # record every pid you start
+
+AVENOR_PARENT_BROKER_TOKEN=$TOKEN "$BIN" stable --control-socket "$HUB_SOCK" \
+  --broker-addr "127.0.0.1:$PORT" &> "$SCRATCH/evidence/hub.log" &
+HUB_PID=$!
+until [ -f "$HUB_SOCK.broker.url" ]; do sleep 0.1; done
+HUB_URL=$(cat "$HUB_SOCK.broker.url")
+
+AVENOR_PARENT_BROKER_URL=$HUB_URL AVENOR_PARENT_BROKER_TOKEN=$TOKEN \
+  "$BIN" stable --control-socket "$SCRATCH/branch-a.sock" &> "$SCRATCH/evidence/branch-a.log" &
+BRANCH_A_PID=$!
+AVENOR_PARENT_BROKER_URL=$HUB_URL AVENOR_PARENT_BROKER_TOKEN=$TOKEN \
+  "$BIN" stable --control-socket "$SCRATCH/branch-b.sock" &> "$SCRATCH/evidence/branch-b.log" &
+BRANCH_B_PID=$!
+for s in "$SCRATCH/branch-a.sock" "$SCRATCH/branch-b.sock"; do
+  until [ -S "$s" ]; do sleep 0.1; done
+done
+```
+
+Branch B's run sleeps once so the cross-branch ask can land mid-turn, then
+answers it; branch A's run only reports the peers it can see.
+
+```sh
+"$BIN" control --socket "$SCRATCH/branch-b.sock" spawn \
+  --backend pi --model "$MODEL" --label branch-target --dir "$SCRATCH/work" \
+  --sentinel-file "$SCRATCH/evidence/branch-target.sentinel" \
+  --on-event "$SCRATCH/evidence/branch-target.events.jsonl" \
+  --prompt 'Do not finish yet. Call the bash tool once with command sleep 45. A peer ask may be delivered into your context while it runs. After the bash call returns, answer the inbound ask with avenor_message action "reply", reply_to set to its message id, message "PONG-FROM-BRANCH", then report that you replied and finish.'
+
+"$BIN" control --socket "$SCRATCH/branch-a.sock" spawn \
+  --backend pi --model "$MODEL" --label branch-other --dir "$SCRATCH/work" \
+  --sentinel-file "$SCRATCH/evidence/branch-other.sentinel" \
+  --on-event "$SCRATCH/evidence/branch-other.events.jsonl" \
+  --prompt 'Call the avenor_peers tool once and report every peer run id and label it returns, then finish.'
+
+"$BIN" control --socket "$HUB_SOCK" spawn \
+  --backend pi --model "$MODEL" --label hub-asker --dir "$SCRATCH/work" \
+  --sentinel-file "$SCRATCH/evidence/hub-asker.sentinel" \
+  --on-event "$SCRATCH/evidence/hub-asker.events.jsonl" \
+  --prompt 'Call the avenor_peers tool once. Find the peer whose label is "branch-target" (its run id contains "@"). Then call the avenor_message tool once with action "ask", target set to that exact run id, message "PING-FROM-HUB", timeout_ms 120000. Report the tool result and finish.'
+
+until [ -f "$SCRATCH/evidence/hub-asker.sentinel" ]; do sleep 0.2; done
+```
+
+**Observable end state (the proof):** the hub child's event log
+(`$SCRATCH/evidence/hub-asker.events.jsonl`) carries the peers result naming
+both env-only branches — run ids ending in `@branch-a-<digest>` and
+`@branch-b-<digest>` (the branch identity is derived from the control socket
+path and host) — and one `avenor_message` `tool.call` whose result has
+`"outcome": "replied"` and `"reply": "PONG-FROM-BRANCH"`; its terminal
+`session.end` repeats the reply. The branch target's sentinel carries `DONE`
+and `STOP_REASON=end_turn`. `branch-a.log` and `branch-b.log` carry no
+`parent broker registration failed` line, so both joined the hub from the
+environment alone.
+
+### Interactive extension autostart joins the hub
+
+This drive proves the env-only join for the surface operators actually use: a
+`pi` host whose extension autostarts `avenor stable` with no broker flags.
+Run the hub from the section above, then start the host with the hub URL and
+credential in its environment and the checkout's extension named on the command
+line (`--extension "$PWD/packages/pi/dist/index.js"` after building it, or the
+installed `@dougbots/avenor-pi` dist: the join is resolved inside the supervisor,
+so no extension change is involved):
+
+```sh
+AVENOR_BIN="$PWD/avenor" AVENOR_HOME="$SCRATCH/branch-home" \
+  AVENOR_PARENT_BROKER_URL=$HUB_URL AVENOR_PARENT_BROKER_TOKEN=$TOKEN \
+  timeout -k 10 240 pi --no-session --no-extensions \
+    --extension "$PWD/packages/pi/dist/index.js" \
+    --no-skills --no-prompt-templates --no-mcp --no-context-files --print \
+    'Call the avenor_spawn tool exactly once: wait false, backend pi, model ollama-cloud/deepseek-v4.1-flash, label branch-target, dir '$SCRATCH/work', prompt "Do not finish early. Call the bash tool once with command sleep 60. After it returns, answer the inbound ask with avenor_message action reply, reply_to set to the ask message id, message PONG-VIA-AUTOSTART, then report that you replied.". After the spawn returns, report the run id and finish; do not wait for the child.' \
+  > "$SCRATCH/evidence/host.out" 2> "$SCRATCH/evidence/host.err" &
+HOST_PID=$!
+until ls "$SCRATCH"/branch-home/sockets/*.sock >/dev/null 2>&1; do sleep 0.1; done
+```
+
+Then repeat the hub-child ask from the previous drive, targeting the peer whose
+label is `branch-target` in the hub's peer listing:
+
+```sh
+"$BIN" control --socket "$HUB_SOCK" spawn \
+  --backend pi --model "$MODEL" --label hub-asker-autostart --dir "$SCRATCH/work" \
+  --sentinel-file "$SCRATCH/evidence/hub-asker.sentinel" \
+  --on-event "$SCRATCH/evidence/hub-asker.events.jsonl" \
+  --prompt 'Call the avenor_peers tool once. Find the peer whose label is "branch-target" (its run id contains "@"). Then call the avenor_message tool once with action "ask", target set to that exact run id, message "PING-AUTOSTART", timeout_ms 120000. Report the tool result and finish.'
+until [ -f "$SCRATCH/evidence/hub-asker.sentinel" ]; do sleep 0.2; done
+```
+
+**Observable end state (the proof):** the hub child's peers result contains
+`supervisor@avenor-mcp-<pid>-<digest>` and `rt_1@avenor-mcp-<pid>-<digest>`:
+the autostarted branch registered its supervisor and its child at the hub even
+though no supervisor command line carried a broker flag. The ask to that child
+returns `"outcome": "replied"` with `"reply": "PONG-VIA-AUTOSTART"`, and the
+branch's `<socket>.broker.url` record is removed when the autostarted supervisor
+is shut down through its socket.
+
+Tear down with the recorded pids and the sockets, never by process name:
+
+```sh
+for s in "$SCRATCH/branch-home"/sockets/*.sock "$SCRATCH/branch-b.sock" \
+         "$SCRATCH/branch-a.sock" "$HUB_SOCK"; do
+  [ -S "$s" ] && "$BIN" control --socket "$s" shutdown graceful
+done
+kill "$HOST_PID" "$BRANCH_B_PID" "$BRANCH_A_PID" "$HUB_PID" 2>/dev/null
+```
 
 ## Limitation
 

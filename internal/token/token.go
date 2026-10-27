@@ -13,6 +13,11 @@ import (
 // must keep it out of nested environments agree on the name.
 const EnvBrokerParentToken = "AVENOR_PARENT_BROKER_TOKEN"
 
+// EnvBrokerParentURL carries the parent broker URL to `avenor stable` when no
+// --broker-parent-url flag is given. An env-only value is how an interactive
+// supervisor autostart joins a hub without command-line changes.
+const EnvBrokerParentURL = "AVENOR_PARENT_BROKER_URL"
+
 // EnvControlIdentityToken carries the supervisor ownership credential through
 // the nested supervisor's inherited readiness pipe. It is defined here so the
 // MCP spawn path and the control server that reads it back agree on the name.

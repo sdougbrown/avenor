@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
@@ -30,8 +31,9 @@ func runStable(args []string) int {
 	mcpLaunchWrapperPolicyPath := fs.String("mcp-launch-wrapper-policy", "", "path to a JSON allowlist of launch_wrapper argv entries permitted for MCP-driven spawns (default: disabled)")
 	workflowRoot := fs.String("workflow-root", "", "workflow store root (default: $XDG_STATE_HOME/avenor/workflows, else $HOME/.avenor/workflows)")
 	workflowAdapterDir := fs.String("workflow-adapter-dir", "", "host-owned trusted adapter manifest directory (default: $XDG_CONFIG_HOME/avenor/workflow-adapters, else $HOME/.config/avenor/workflow-adapters)")
-	brokerParentURL := fs.String("broker-parent-url", "", "http:// address of the parent broker to join. The credential comes from $AVENOR_PARENT_BROKER_TOKEN (or --broker-parent-token as an explicit override); a credential without a URL runs this broker as the tree's parent broker")
+	brokerParentURL := fs.String("broker-parent-url", "", "http:// address of the parent broker to join. An empty flag uses $AVENOR_PARENT_BROKER_URL. The credential comes from $AVENOR_PARENT_BROKER_TOKEN (or --broker-parent-token as an explicit override); a credential without a URL runs this broker as the tree's parent broker")
 	brokerParentToken := fs.String("broker-parent-token", "", "parent-link credential overriding $AVENOR_PARENT_BROKER_TOKEN; prefer the env var, since argv is world-readable via /proc/<pid>/cmdline")
+	brokerAddr := fs.String("broker-addr", "", "address the broker binds, published beside the control socket as <socket>.broker.url. Empty binds an ephemeral loopback port; a durable hub names a concrete interface address and fixed port (e.g. 127.0.0.1:8787). A wildcard bind is refused because the advertised address must be reachable by children and parent branches")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -47,8 +49,12 @@ func runStable(args []string) int {
 	if credential == "" {
 		credential = os.Getenv(token.EnvBrokerParentToken)
 	}
-	if *brokerParentURL != "" && credential == "" {
-		fmt.Fprintf(os.Stderr, "avenor stable: %s or --broker-parent-token must be set when --broker-parent-url is used\n", token.EnvBrokerParentToken)
+	parentURL := *brokerParentURL
+	if parentURL == "" {
+		parentURL = strings.TrimSpace(os.Getenv(token.EnvBrokerParentURL))
+	}
+	if parentURL != "" && credential == "" {
+		fmt.Fprintf(os.Stderr, "avenor stable: %s or --broker-parent-token must be set when %s or --broker-parent-url supplies a parent broker URL\n", token.EnvBrokerParentToken, token.EnvBrokerParentURL)
 		return 1
 	}
 
@@ -89,8 +95,9 @@ func runStable(args []string) int {
 		WorkflowRoot:               *workflowRoot,
 		WorkflowAdapterDir:         *workflowAdapterDir,
 		MCPLaunchWrapperPolicy:     mcpPolicy,
-		BrokerParentURL:            *brokerParentURL,
+		BrokerParentURL:            parentURL,
 		BrokerParentToken:          credential,
+		BrokerAddr:                 *brokerAddr,
 	})
 	if treeBudgetFile == "" {
 		// Root: propagate the tree budget path to descendant processes.

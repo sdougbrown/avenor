@@ -145,6 +145,57 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 	}
 }
 
+// TestSupervisorForwardsParentLinkWhenURLInEnv proves an autostarted
+// supervisor joins the hub the environment names: the parent-link credential is
+// forwarded beside a parent URL, while a credential with no URL is still
+// stripped so a nested broker cannot serve parent routes on the operator's
+// shared secret.
+func TestSupervisorForwardsParentLinkWhenURLInEnv(t *testing.T) {
+	tests := []struct {
+		name      string
+		parentURL string
+		forwarded bool
+	}{
+		{name: "url-in-env", parentURL: "http://127.0.0.1:9", forwarded: true},
+		{name: "no-url", parentURL: "", forwarded: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv(token.EnvBrokerParentURL, tt.parentURL)
+			t.Setenv(token.EnvBrokerParentToken, "shared-link-credential")
+			var child *exec.Cmd
+			origExec := execCommand
+			execCommand = func(string, ...string) *exec.Cmd {
+				child = exec.Command("/nonexistent/avenor-test-stub")
+				return child
+			}
+			t.Cleanup(func() { execCommand = origExec })
+
+			_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+			if child == nil {
+				t.Fatal("startSupervisor never built a child command")
+			}
+			foundToken := false
+			var forwardedURL string
+			for _, entry := range child.Env {
+				if strings.HasPrefix(entry, token.EnvBrokerParentToken+"=") {
+					foundToken = true
+				}
+				if value, ok := strings.CutPrefix(entry, token.EnvBrokerParentURL+"="); ok {
+					forwardedURL = value
+				}
+			}
+			if forwardedURL != tt.parentURL {
+				t.Fatalf("forwarded parent URL = %q, want %q", forwardedURL, tt.parentURL)
+			}
+			if foundToken != tt.forwarded {
+				t.Fatalf("parent credential forwarded = %v, want %v", foundToken, tt.forwarded)
+			}
+		})
+	}
+}
+
 func TestStartSupervisorDefaultSocketPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)

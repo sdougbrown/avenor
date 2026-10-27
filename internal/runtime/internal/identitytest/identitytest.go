@@ -120,6 +120,7 @@ func PoisonParent(t *testing.T) {
 		"AVENOR_BROKER_TOKEN":            "broker-token",
 		"AVENOR_BROKER_URL":              "http://stale.invalid",
 		token.EnvBrokerParentToken:       "parent-secret",
+		token.EnvBrokerParentURL:         "http://parent-broker.invalid:9",
 	} {
 		t.Setenv(key, value)
 	}

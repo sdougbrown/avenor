@@ -131,16 +131,26 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 	}
 	const readyEnv = "AVENOR_CONTROL_READY_FD="
 	const identityEnv = token.EnvControlIdentityToken + "="
-	// Credential and ownership plumbing must not leak into the nested
-	// supervisor: a parent-link token in the environment with no
-	// --broker-parent-url would make the nested broker serve parent-link
-	// routes under the operator's shared credential.
+	// Credential and ownership plumbing must not leak into a nested supervisor
+	// that was not told where to join: a parent-link token in the environment
+	// with no parent URL would make the nested broker serve parent-link routes
+	// under the operator's shared credential. A parent URL in the environment
+	// means this supervisor is meant to join an existing hub, so the matching
+	// credential travels with it.
+	parentURL := ""
+	for _, entry := range env {
+		if value, ok := strings.CutPrefix(entry, token.EnvBrokerParentURL+"="); ok {
+			parentURL = value
+		}
+	}
 	strippedEnvs := []string{
 		readyEnv,
 		identityEnv,
-		token.EnvBrokerParentToken + "=",
 		runtime.EnvTestHooks + "=",
 		runtime.EnvTestOwnerPublishDelay + "=",
+	}
+	if strings.TrimSpace(parentURL) == "" {
+		strippedEnvs = append(strippedEnvs, token.EnvBrokerParentToken+"=")
 	}
 	cmd.Env = make([]string, 0, len(env)+2)
 	for _, entry := range env {

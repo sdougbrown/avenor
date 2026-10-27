@@ -224,6 +224,40 @@ generation follows one rule:
    `possibly-pending`.
 3. The refreshed generation is what the *next* ask pins.
 
+## Running a hub
+
+A hub is a supervisor whose broker binds a fixed, reachable address instead of
+the default ephemeral loopback port:
+
+```sh
+avenor stable --control-socket /run/avenor/hub.sock --broker-addr 192.0.2.10:8787 &
+```
+
+`--broker-addr` names one concrete interface address and port. A wildcard bind
+(`0.0.0.0`, `::`) is refused: the bound address is what children and parent
+branches are told to reach, and a wildcard names no reachable destination. On
+the hub, set `AVENOR_PARENT_BROKER_TOKEN` to the link credential; its parent
+routes are served only while that token is configured. A shell that exports
+`AVENOR_PARENT_BROKER_URL` for its branches must leave that variable unset when
+it starts the hub, or the hub tries to join the URL too.
+
+Once the supervisor owns its control socket it publishes the broker's actual
+URL, ephemeral port included, beside it:
+
+```sh
+cat /run/avenor/hub.sock.broker.url
+# http://192.0.2.10:8787
+```
+
+The record is one line, mode `0600`. A supervisor that loses the control socket
+to a live competitor publishes nothing, so it cannot overwrite or remove that
+supervisor's record, and a supervisor removes its own record on shutdown or
+when a later startup step fails.
+
+The broker is cleartext HTTP with per-run bearer credentials. Run a hub and its
+branches on a trusted network; there is no TLS listener, so a hub exposed beyond
+that network needs a channel that supplies confidentiality.
+
 ## Linking a branch
 
 A child branch joins a parent's broker with one shared credential. Mint it
@@ -235,14 +269,24 @@ avenor parent-token
 
 On the parent supervisor, set `AVENOR_PARENT_BROKER_TOKEN` to that value. Its parent
 routes are served only when a token is configured; an empty token leaves them
-unserved. On each child branch supervisor, pass `--broker-parent-url` with the
-parent broker's address and set the same token in `AVENOR_PARENT_BROKER_TOKEN`.
+unserved. On each child branch supervisor, name the parent broker either with
+`--broker-parent-url` or with `AVENOR_PARENT_BROKER_URL`; an explicit flag wins
+over the env var, so an interactive supervisor autostart joins the hub the
+environment names without command-line changes. Set the same token in
+`AVENOR_PARENT_BROKER_TOKEN`.
 The token is a bearer credential for the parent's parent routes, so it travels
 by environment variable rather than a command-line flag, whose contents are
 world-readable via `/proc/<pid>/cmdline`. `--broker-parent-token` is accepted
 as an explicit override when the environment cannot carry the value, but the
-env var is preferred. Starting a supervisor with `--broker-parent-url` but no
+env var is preferred. Starting a supervisor with an effective parent URL but no
 token (neither the env var nor the flag) exits with an error.
+
+A branch's broker must also be reachable *from* the hub, because the hub relays
+an ask into the branch's own endpoint. On one host the default ephemeral
+loopback bind is enough; across hosts, give each branch `--broker-addr` bound to
+an address the hub can reach, and give the hub one the branches can reach. The
+parent link is not a tunnel: both directions of the deployment must be
+addressable.
 
 The child registers the runs it owns at startup and retracts the claim on
 shutdown. The parent issues each descendant run its own credential at

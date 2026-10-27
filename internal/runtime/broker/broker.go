@@ -491,11 +491,26 @@ func MakeToken() string {
 	return credential
 }
 
+// defaultListenAddr is the loopback address an unconfigured broker binds: an
+// ephemeral port on the loopback interface, so a broker started with no
+// explicit address is reachable only from this machine.
+const defaultListenAddr = "127.0.0.1:0"
+
 // Start binds the broker to an ephemeral loopback port.
 func (b *Broker) Start() error {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	return b.StartOn(defaultListenAddr)
+}
+
+// StartOn binds the broker to addr. An empty addr keeps Start's default: an
+// ephemeral loopback port. The listener's actual address, including the port
+// the kernel assigned, is what Addr reports.
+func (b *Broker) StartOn(addr string) error {
+	if addr == "" {
+		addr = defaultListenAddr
+	}
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 	b.mu.Lock()
 	b.listener = l

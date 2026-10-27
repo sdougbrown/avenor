@@ -8,6 +8,8 @@
 - Cancelling (`cancel <rt_id>`)
 - Graceful shutdown of the supervisor (`shutdown graceful`)
 - Owner reconnect: every mutating verb loads the published owner record and authenticates on its own connection
+- Durable broker address: `--broker-addr` binds a fixed hub listener, and the
+  bound URL is published beside the socket for discovery
 
 ## How to get to it (user POV)
 
@@ -49,16 +51,19 @@ spawn response `sentinel_file` field) contains `DONE`.
 
 ### Published record and owner reconnect
 
-While the supervisor runs, three artifacts sit beside the socket: the socket
+While the supervisor runs, four artifacts sit beside the socket: the socket
 (`0600`), the owner record `<socket>.owner.json` (`0600`, euid-owned; fields
 `version`, `socket`, `socket_identity`, `capability_id`, `secret`, `owner_pid`),
-and the persistent lock `<socket>.control.lock` (`0600`). Confirm them without
+the persistent lock `<socket>.control.lock` (`0600`), and the broker discovery
+record `<socket>.broker.url` (`0600`, one line: the `http://` URL of the broker
+the supervisor actually bound, ephemeral port included). Confirm them without
 printing the secret:
 
 ```sh
 ls -l "$SCRATCH"
-stat -c '%n mode=%a uid=%u type=%F' "$SOCK" "$SOCK.owner.json" "$SOCK.control.lock"
+stat -c '%n mode=%a uid=%u type=%F' "$SOCK" "$SOCK.owner.json" "$SOCK.control.lock" "$SOCK.broker.url"
 sed 's/"secret":"[0-9a-f]*"/"secret":"<redacted>"/' "$SOCK.owner.json"
+cat "$SOCK.broker.url"
 ```
 
 Every mutating `avenor control` invocation is a separate process, so the recipe
@@ -68,17 +73,65 @@ when the process exits. Run two mutating verbs back to back and both must
 succeed. Read-only verbs (`status`, `list`, `tail`) dial without a credential
 and work with no record at all.
 
-After `shutdown graceful` the socket and the record are gone, the lock file and
-the tombstone remain, and the supervisor has exited. The child's default
-artifact directory under `${TMPDIR:-/tmp}/avenor-stable-$(id -u)/` survives all
-of this, so its sentinel and event log are still readable evidence:
+After `shutdown graceful` the socket, the owner record and the broker URL
+record are gone, the lock file and the tombstone remain, and the supervisor has
+exited. The child's default artifact directory under
+`${TMPDIR:-/tmp}/avenor-stable-$(id -u)/` survives all of this, so its sentinel
+and event log are still readable evidence:
 
 ```sh
 test -e "$SOCK" || echo "socket removed"
 test -e "$SOCK.owner.json" || echo "record removed"
+test -e "$SOCK.broker.url" || echo "broker URL removed"
 test -e "$SOCK.control.lock" && echo "lock retained"
 cat "$SOCK.dead"    # STOPPED reason=shutdown pid=<pid> at=<timestamp>
 ```
+
+### Durable broker address (hub)
+
+`--broker-addr` binds the broker to a concrete interface address and port
+instead of the ephemeral loopback default, and the bound URL is what the
+`.broker.url` record publishes. Drive a hub and the guards around it without
+any model call:
+
+```sh
+PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+HUB_SOCK="$SCRATCH/hub.sock"
+./avenor stable --control-socket "$HUB_SOCK" --broker-addr "127.0.0.1:$PORT" \
+  &> "$SCRATCH/hub.log" &
+HUB_PID=$!   # record this
+until [ -f "$HUB_SOCK.broker.url" ]; do sleep 0.1; done
+cat "$HUB_SOCK.broker.url"          # http://127.0.0.1:$PORT
+
+# A second supervisor on the same port fails with exit 1, names the address,
+# and binds nothing of its own.
+./avenor stable --control-socket "$SCRATCH/competitor.sock" \
+  --broker-addr "127.0.0.1:$PORT"; echo "exit=$?"   # exit=1, "address already in use"
+test -e "$SCRATCH/competitor.sock" && echo "unexpected socket"
+
+# A wildcard bind is refused up front, because that address is what children
+# and parent branches are told to reach.
+./avenor stable --control-socket "$SCRATCH/wild.sock" --broker-addr "0.0.0.0:$PORT"; echo "exit=$?"
+
+./avenor control --socket "$HUB_SOCK" shutdown graceful
+until [ ! -e "$HUB_SOCK.broker.url" ]; do sleep 0.1; done
+echo "broker URL record removed"
+
+# A restart on the same port publishes the same durable URL.
+./avenor stable --control-socket "$HUB_SOCK" --broker-addr "127.0.0.1:$PORT" \
+  &> "$SCRATCH/hub-restart.log" &
+until [ -f "$HUB_SOCK.broker.url" ]; do sleep 0.1; done
+test "$(cat "$HUB_SOCK.broker.url")" = "http://127.0.0.1:$PORT" && echo "same durable URL"
+./avenor control --socket "$HUB_SOCK" shutdown graceful
+```
+
+**Observable end state (the proof):** the first and the restarted hub both
+publish `http://127.0.0.1:$PORT` (the same fixed port, not a fresh ephemeral
+one), the occupied bind exits 1 with an `address already in use` message naming
+the address and leaves no socket or broker URL record, the wildcard run exits 1
+with `is a wildcard bind; bind a concrete interface address`, and each graceful
+shutdown removes `<socket>.broker.url` while leaving the tombstone.
+
 
 ## Gotchas
 
@@ -90,6 +143,10 @@ cat "$SOCK.dead"    # STOPPED reason=shutdown pid=<pid> at=<timestamp>
   the live socket, so another process owns that path now.
 - Never delete `<socket>.control.lock` or `<socket>.dead` between runs: the lock
   is what serializes a replacement against the live listener.
+- `<socket>.broker.url` is written only after the supervisor owns the control
+  socket. A supervisor that loses the socket to a live competitor publishes
+  nothing, so the competitor's failure cannot overwrite or remove the live
+  record; do not treat a missing record on a failed start as a defect.
 - `spawn` returns JSON including `runtime_id`, `on_event`, and
   `sentinel_file` — use those paths for evidence rather than guessing.
 - The child runs against a real backend; same cheap-prompt rule as single runs.

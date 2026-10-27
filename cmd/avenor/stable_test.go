@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,14 +14,18 @@ import (
 	"github.com/sdougbrown/avenor/internal/token"
 )
 
-// stableTestEnv isolates HOME (runtime state and sockets) and TMPDIR (the
-// supervisor's artifact root) for a test that runs a real supervisor in
-// process, and returns the scratch directory.
+// stableTestEnv isolates HOME (runtime state and sockets), TMPDIR (the
+// supervisor's artifact root), and the parent-link environment for a test that
+// runs a real supervisor in process, and returns the scratch directory. An
+// inherited parent-link URL or credential would otherwise change what runStable
+// resolves.
 func stableTestEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("TMPDIR", dir)
+	t.Setenv(token.EnvBrokerParentURL, "")
+	t.Setenv(token.EnvBrokerParentToken, "")
 	return dir
 }
 
@@ -278,6 +283,198 @@ func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), token.EnvBrokerParentToken) {
 		t.Fatalf("stderr = %q, want the %s guard error", stderr.String(), token.EnvBrokerParentToken)
+	}
+}
+
+// TestRunStableBrokerParentURLFromEnv: with no --broker-parent-url flag, the
+// parent broker URL is resolved from $AVENOR_PARENT_BROKER_URL, which is how an
+// interactive supervisor autostart joins a hub without command-line changes.
+func TestRunStableBrokerParentURLFromEnv(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+	var captured *stable.Config
+	orig := newSupervisorFn
+	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+		captured = &cfg
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newSupervisorFn = orig })
+
+	t.Setenv(token.EnvBrokerParentURL, "http://127.0.0.1:9")
+	t.Setenv(token.EnvBrokerParentToken, "env-token")
+	_ = runStable([]string{"--control-socket", socketPath})
+	if captured == nil {
+		t.Fatal("config was not captured; the constructor seam was not hit")
+	}
+	if captured.BrokerParentURL != "http://127.0.0.1:9" {
+		t.Fatalf("Config.BrokerParentURL = %q, want the environment URL", captured.BrokerParentURL)
+	}
+	if captured.BrokerParentToken != "env-token" {
+		t.Fatalf("Config.BrokerParentToken = %q, want the environment credential", captured.BrokerParentToken)
+	}
+}
+
+// TestRunStableBrokerParentURLFlagOverridesEnv: an explicit --broker-parent-url
+// wins over $AVENOR_PARENT_BROKER_URL.
+func TestRunStableBrokerParentURLFlagOverridesEnv(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+	var captured *stable.Config
+	orig := newSupervisorFn
+	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+		captured = &cfg
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newSupervisorFn = orig })
+
+	t.Setenv(token.EnvBrokerParentURL, "http://127.0.0.1:8")
+	t.Setenv(token.EnvBrokerParentToken, "tok")
+	_ = runStable([]string{
+		"--control-socket", socketPath,
+		"--broker-parent-url", "http://127.0.0.1:9",
+	})
+	if captured == nil {
+		t.Fatal("config was not captured; the constructor seam was not hit")
+	}
+	if captured.BrokerParentURL != "http://127.0.0.1:9" {
+		t.Fatalf("Config.BrokerParentURL = %q, want the explicit flag value", captured.BrokerParentURL)
+	}
+}
+
+// TestRunStableBrokerParentEnvURLRequiresToken: a parent URL supplied only by
+// the environment is validated exactly like the flag: without a credential the
+// command exits before a supervisor is constructed.
+func TestRunStableBrokerParentEnvURLRequiresToken(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+	orig := newSupervisorFn
+	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+		t.Fatal("a supervisor was constructed despite the missing credential")
+		return nil
+	}
+	t.Cleanup(func() { newSupervisorFn = orig })
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { _ = r.Close() }()
+
+	t.Setenv(token.EnvBrokerParentURL, "http://127.0.0.1:9")
+	code := runStable([]string{"--control-socket", socketPath})
+	_ = w.Close()
+	os.Stderr = oldStderr
+	var stderr bytes.Buffer
+	if _, err := io.Copy(&stderr, r); err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	if code != 1 {
+		t.Fatalf("runStable(env url without token) = %d, want 1", code)
+	}
+	for _, want := range []string{token.EnvBrokerParentToken, token.EnvBrokerParentURL} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want the guard error naming %s", stderr.String(), want)
+		}
+	}
+}
+
+// TestRunStableBrokerAddrFlagPropagation: --broker-addr reaches the supervisor
+// config so the broker binds (and publishes) that address.
+func TestRunStableBrokerAddrFlagPropagation(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+	var captured *stable.Config
+	orig := newSupervisorFn
+	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+		captured = &cfg
+		return orig(cfg)
+	}
+	t.Cleanup(func() { newSupervisorFn = orig })
+
+	_ = runStable([]string{"--control-socket", socketPath, "--broker-addr", "127.0.0.1:0"})
+	if captured == nil {
+		t.Fatal("config was not captured; the constructor seam was not hit")
+	}
+	if captured.BrokerAddr != "127.0.0.1:0" {
+		t.Fatalf("Config.BrokerAddr = %q, want the flag value", captured.BrokerAddr)
+	}
+}
+
+// TestRunStableWildcardBrokerAddrRejected: a wildcard bind is refused before
+// the control socket is bound, because the address is what children and parent
+// branches are told to reach.
+func TestRunStableWildcardBrokerAddrRejected(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, "wildcard.sock")
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { _ = r.Close() }()
+
+	code := runStable([]string{"--control-socket", socketPath, "--broker-addr", "0.0.0.0:8787"})
+	_ = w.Close()
+	os.Stderr = oldStderr
+	var stderr bytes.Buffer
+	if _, err := io.Copy(&stderr, r); err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	if code != 1 {
+		t.Fatalf("runStable(wildcard broker addr) = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "wildcard") {
+		t.Fatalf("stderr = %q, want the wildcard-bind refusal", stderr.String())
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("control socket bound despite the wildcard broker address: %v", err)
+	}
+}
+
+// TestRunStableOccupiedBrokerAddrFailsStartup: an explicit --broker-addr that
+// cannot be bound exits non-zero and names the address instead of running
+// without a broker.
+func TestRunStableOccupiedBrokerAddrFailsStartup(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, "occupied.sock")
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	defer occupied.Close()
+	addr := occupied.Addr().String()
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() { _ = r.Close() }()
+
+	code := runStable([]string{"--control-socket", socketPath, "--broker-addr", addr})
+	_ = w.Close()
+	os.Stderr = oldStderr
+	var stderr bytes.Buffer
+	if _, err := io.Copy(&stderr, r); err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	if code != 1 {
+		t.Fatalf("runStable(occupied broker addr) = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), addr) {
+		t.Fatalf("stderr = %q, want it to name %q", stderr.String(), addr)
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("control socket bound despite the broker bind failure: %v", err)
 	}
 }
 

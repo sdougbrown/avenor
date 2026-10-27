@@ -41,10 +41,12 @@ var identityEnvNames = []string{
 }
 
 // scrubbedEnvNames is everything a child must not inherit: launch identity,
-// the test-only switches, and the parent-link credential — a spawned agent is
-// not the parent broker, so carrying the credential would let it authenticate
-// against parent routes it was never meant to serve.
-var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken)
+// the test-only switches, and the parent-link credential and URL — a spawned
+// agent is not the parent broker, so carrying the credential would let it
+// authenticate against parent routes it was never meant to serve, and carrying
+// only the URL would make a supervisor it starts fail for the missing
+// credential.
+var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken, token.EnvBrokerParentURL)
 
 var identityEnvKeys = func() map[string]struct{} {
 	keys := make(map[string]struct{}, len(scrubbedEnvNames))
