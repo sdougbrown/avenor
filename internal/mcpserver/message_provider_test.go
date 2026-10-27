@@ -718,6 +718,48 @@ func TestMCPMessageProviderRunStateKeepsStatusFailuresThatAreNotAbsences(t *test
 	}
 }
 
+// TestMCPMessageProviderRunStateKeepsTheAbsenceErrorWhenTheListingCannotAnswer
+// proves the listing fallback borrows an answer, never a substitute failure:
+// on a genuine absence answer, a listing without the run and a listing that
+// cannot be read both hand back the status error the call started with.
+func TestMCPMessageProviderRunStateKeepsTheAbsenceErrorWhenTheListingCannotAnswer(t *testing.T) {
+	const branchRunID = "rt_branch@avenor-mcp-42-ab12cd"
+	statusErr := &client.RPCError{Code: -32000, Message: fmt.Sprintf("runtime %q not found", branchRunID)}
+	cases := []struct {
+		name      string
+		peersFunc func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error)
+	}{
+		{
+			name: "the listing does not hold the run",
+			peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+				return messaging.PeersResult{
+					Peers:      []messaging.Peer{testPeer("supervisor", "supervisor", "running")},
+					Generation: "gen-1",
+				}, nil
+			},
+		},
+		{
+			name: "the listing cannot be read",
+			peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+				return messaging.PeersResult{}, errors.New("dial unix /tmp/avenor.sock: connect: connection refused")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := &fakeMessageControlClient{
+				fakeClient: &fakeClient{statusErr: statusErr},
+				peersFunc:  tc.peersFunc,
+			}
+			p := newTestMessageProvider(t, cl)
+
+			if _, err := p.RunState(context.Background(), branchRunID); !errors.Is(err, statusErr) {
+				t.Fatalf("RunState error = %v, want the original status error %v", err, statusErr)
+			}
+		})
+	}
+}
+
 // branchPeerListing is the hub's listing once a registered branch registered
 // the run: a peer row whose id the hub adopted the claim with.
 func branchPeerListing(branchRunID string) func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {

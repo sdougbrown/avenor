@@ -412,9 +412,9 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
   // is the only authority for a run this supervisor does not run. It answers
   // nothing for a listing that could not be read completely or that does not
   // hold the run, so the caller keeps the failure it already had. A stale
-  // generation is not the listing's answer: the surface retries the whole call
-  // once after a re-preflight, and a mismatch swallowed here would report the
-  // status failure instead of letting that retry run.
+  // generation is not the listing's answer: the MCP surface retries the whole
+  // call once after a re-preflight, and a mismatch swallowed here would report
+  // the status failure instead of letting that retry run.
   async function listedState(runId: string): Promise<RunFacts | undefined> {
     let listed: { peers: PeerRecord[]; detail?: string }
     try {

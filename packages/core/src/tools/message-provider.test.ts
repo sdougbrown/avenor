@@ -210,6 +210,9 @@ describe('host message provider', () => {
     const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
     const client = fakeClient({
       status: mock(async (runtimeId?: string) => {
+        // The real supervisor writes this sentence with Go's %q. The branch id
+        // stays in plain-printable range, where interpolation matches it; ids
+        // Go escapes are covered with their wire spellings below.
         throw new RpcError(-32000, `runtime "${runtimeId ?? ''}" not found`)
       }),
       messagePeers: mock(async () => ({
@@ -232,6 +235,20 @@ describe('host message provider', () => {
     const client = fakeClient({
       status: mock(async () => {
         throw new RpcError(-32000, 'runtime "rt_ghost" not found')
+      }),
+    })
+    await expect(provider(client).state('rt_ghost')).rejects.toThrow('runtime "rt_ghost" not found')
+  })
+
+  it('keeps the status error when the listing read fails on a genuine absence answer', async () => {
+    // The listing's own failure is never the answer either: the call keeps the
+    // absence error it started with instead of trading it for a transport one.
+    const client = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_ghost" not found')
+      }),
+      messagePeers: mock(async () => {
+        throw new Error('connect ENOENT /tmp/avenor.sock')
       }),
     })
     await expect(provider(client).state('rt_ghost')).rejects.toThrow('runtime "rt_ghost" not found')
