@@ -76,6 +76,8 @@ func TestParseBrokerURLRefusesAnUnreachableBaseURL(t *testing.T) {
 		{name: "an unbracketed IPv6 host", raw: "http://::1"},
 		{name: "zero port", raw: "http://hub.example.com:0"},
 		{name: "port out of range", raw: "https://hub.example.com:65536"},
+		{name: "a port that is not a number", raw: "http://hub.example.com:abc"},
+		{name: "a query with no value", raw: "https://hub.example.com?"},
 		{name: "IPv4 wildcard", raw: "http://0.0.0.0:8787"},
 		{name: "IPv6 wildcard", raw: "http://[::]"},
 		{name: "a path a route would never reach", raw: "https://hub.example.com/avenor"},

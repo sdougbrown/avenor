@@ -435,9 +435,10 @@ func TestRunStableBrokerAdvertiseURLPropagation(t *testing.T) {
 	}
 }
 
-// TestRunStableInvalidBrokerAdvertiseURLExits pins that a value a peer could not
-// post to stops the process before the control socket is bound, so nothing
-// publishes or registers an address that would never answer.
+// TestRunStableInvalidBrokerAdvertiseURLExits pins the CLI surface of the
+// refusal: the flag reaches startup and returns exit code 1. What the refusal
+// writes and withholds is pinned once, in
+// internal/stable.TestInvalidAdvertiseURLFailsStartup.
 func TestRunStableInvalidBrokerAdvertiseURLExits(t *testing.T) {
 	tmpDir := stableTestEnv(t)
 	socketPath := filepath.Join(tmpDir, "advertise-invalid.sock")
@@ -477,14 +478,8 @@ func TestRunStableInvalidBrokerAdvertiseURLExits(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("runStable(invalid advertise url) = %d, want 1", code)
 	}
-	if !strings.Contains(stderr.String(), "broker advertise URL") || !strings.Contains(stderr.String(), "hub.example.com:8787") {
+	if !strings.Contains(stderr.String(), "broker advertise URL") {
 		t.Fatalf("stderr = %q, want it to name the rejected advertised URL", stderr.String())
-	}
-	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Fatalf("control socket bound despite the rejected advertised URL: %v", err)
-	}
-	if _, err := os.Stat(socketPath + ".broker.url"); !os.IsNotExist(err) {
-		t.Fatalf("broker URL record published despite the rejected advertised URL: %v", err)
 	}
 }
 
