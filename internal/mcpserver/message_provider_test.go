@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -635,6 +636,61 @@ func TestMCPMessageProviderHistoricalTurnRefusesResume(t *testing.T) {
 	var toolErr *router.ToolError
 	if !errors.As(err, &toolErr) || toolErr.Code != "not_resumable" {
 		t.Fatalf("resume error = %v, want the not_resumable tool error", err)
+	}
+}
+
+// TestMCPMessageProviderHistoricalPublicRunIDRefusesResume pins the live
+// drive that falsified the resume-by-run-id claim: after a warm resume moved
+// the shared runtime to a later turn, resuming the first turn's own public run
+// id is refused with the typed not_resumable error instead of continuing the
+// later turn under the first turn's identity. The runtime's current turn stays
+// resumable by its own public run id.
+func TestMCPMessageProviderHistoricalPublicRunIDRefusesResume(t *testing.T) {
+	const (
+		turn1 = "8a941319-00cc-4514-97ac-1a791dd1c71d"
+		turn2 = "37ae41d1-26f6-4c3e-8859-cb4b557da4f3"
+	)
+	dir := t.TempDir()
+	turn1Sentinel := writeSentinel(t, dir, "avenor-run-"+turn1+".done", "DONE\nSESSION=sess-turn1\n")
+	turn2Sentinel := writeSentinel(t, dir, "avenor-run-"+turn2+".done", "DONE\nSESSION=sess-turn2\n")
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status":        "done",
+		"session_id":    "sess-turn2",
+		"sentinel_file": turn2Sentinel,
+	}}}
+	p := newTestMessageProvider(t, cl)
+	for _, info := range []*RunInfo{
+		{SupervisorID: testSupervisorPath, RunID: turn1, Label: "v464", RuntimeID: "rt_1", SentinelPath: turn1Sentinel},
+		{SupervisorID: testSupervisorPath, RunID: turn2, Label: "v464-followup", RuntimeID: "rt_1", SentinelPath: turn2Sentinel},
+	} {
+		if err := p.server.registry.Store(info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rt, err := router.NewRouter(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Resuming the historical turn's own run id must not reach the control
+	// verb: the runtime now serves the later turn, and a silent continuation
+	// would misattribute the later turn's conversation to the first turn.
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		t.Fatal("resume reached the control verb for a historical run id")
+		return messaging.ResumeResult{}, nil
+	}
+	_, err = rt.Execute(context.Background(), json.RawMessage(`{"action":"resume","target":"`+turn1+`","message":"again"}`))
+	var toolErr *router.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "not_resumable" {
+		t.Fatalf("resume by historical run id error = %v, want the not_resumable tool error", err)
+	}
+
+	// The runtime's current turn is still resumable through its own run id.
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		return messaging.ResumeResult{RunID: uuid.NewString(), RuntimeID: "rt_1", Label: "v464-followup-followup"}, nil
+	}
+	if _, err := rt.Execute(context.Background(), json.RawMessage(`{"action":"resume","target":"`+turn2+`","message":"again"}`)); err != nil {
+		t.Fatalf("resume by the current turn's run id error = %v", err)
 	}
 }
 
