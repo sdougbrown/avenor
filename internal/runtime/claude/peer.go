@@ -25,12 +25,12 @@ func provisionPeer(merged runtime.StartOptions) *peerProvision {
 	if merged.Broker == nil || merged.RuntimeID == "" || merged.BrokerToken == "" {
 		return nil
 	}
-	addr := merged.Broker.Addr()
-	if addr == "" {
+	url := merged.Broker.URL()
+	if url == "" {
 		return nil
 	}
 	return &peerProvision{
-		url:   "http://" + addr,
+		url:   url,
 		runID: merged.RuntimeID,
 		token: merged.BrokerToken,
 		label: merged.Label,
@@ -39,8 +39,10 @@ func provisionPeer(merged runtime.StartOptions) *peerProvision {
 
 // env renders the provision for the launcher. A nil provision renders nothing:
 // a child with no provision joins no broker, and the mods layer stays off
-// there. The label is not decorative — without it the mods layer falls back to
-// naming the run by its id, which would replace the label peers address it by.
+// there. The label names the identity rather than configuring it: the run it
+// accompanies was registered under that label, and the mods layer posts no
+// name for a provisioned run — a harness name would outrank the label the
+// supervisor owns, and a later authorized rename would write behind it.
 func (p *peerProvision) env() []string {
 	if p == nil {
 		return nil

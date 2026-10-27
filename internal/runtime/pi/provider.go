@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
-	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
@@ -398,11 +397,12 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 			// token travel together or not at all, so it can never poll with a
 			// half-configured identity.
 			var brokerURL, brokerRunID, brokerToken string
-			if opts.Broker != nil && opts.RuntimeID != "" && opts.BrokerToken != "" {
-				if brokerURL = messaging.BrokerURL(opts.Broker.Addr()); brokerURL != "" {
-					brokerRunID = opts.RuntimeID
-					brokerToken = opts.BrokerToken
-				}
+			peerURL := ""
+			if opts.Broker != nil {
+				peerURL = opts.Broker.URL()
+			}
+			if peerURL != "" && opts.RuntimeID != "" && opts.BrokerToken != "" {
+				brokerURL, brokerRunID, brokerToken = peerURL, opts.RuntimeID, opts.BrokerToken
 			}
 			return StartClientWithAgentProfileThinkingAndDir(
 				ctx, "", opts.Model, "", opts.Agent, opts.AgentProfile, opts.Thinking, opts.Dir,

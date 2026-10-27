@@ -568,6 +568,14 @@ func (b *Broker) Addr() string {
 	return b.listener.Addr().String()
 }
 
+// URL reports the http base this broker's peers address it at, or "" while it
+// is not listening. It is the one spelling of that address: the supervisor's
+// broker links and the launch environment a peer child joins by both read it
+// here, so neither can drift into a bare scheme or a different host form.
+func (b *Broker) URL() string {
+	return messaging.BrokerURL(b.Addr())
+}
+
 func (b *Broker) Stop() error {
 	b.pruneMu.Lock()
 	if b.pruneStop != nil {

@@ -33,6 +33,23 @@ func TestBrokerHealth(t *testing.T) {
 	}
 }
 
+// URL is the one spelling of the broker's http base: the empty string until the
+// broker listens (a caller decides "no provision" from that, never from a bare
+// scheme), and Addr() behind the scheme once it does.
+func TestBrokerURL(t *testing.T) {
+	b := New("")
+	if got := b.URL(); got != "" {
+		t.Fatalf("URL before Start = %q, want empty", got)
+	}
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	if got, want := b.URL(), "http://"+b.Addr(); got != want {
+		t.Errorf("URL = %q, want %q", got, want)
+	}
+}
+
 func TestBrokerRegister(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
