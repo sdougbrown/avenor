@@ -828,17 +828,24 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function upsertTrackedRun(run: WatchRunRef, status?: StatusResult, blocking = false): void {
       const key = trackedRunKey(run.supervisorId, run.runId)
       const current = trackedRuns.get(key)
-      trackedRuns.set(key, {
-        ...current,
+      // Mutate the existing entry in place: a fresh object would leave a result
+      // call that bound to the previous object unable to recognize (and
+      // release) its own claim when its wait resolves.
+      const tracked: TrackedRun = current ?? {
         runId: run.runId,
-        agent: run.agent ?? status?.agent ?? current?.agent ?? 'unknown',
-        label: run.label ?? status?.label ?? current?.label ?? run.runId,
-        supervisorId: run.supervisorId ?? current?.supervisorId,
-        runtimeId: run.runtimeId ?? status?.runtime_id ?? current?.runtimeId,
-        startTime: current?.startTime ?? Date.now(),
-        lastStatus: status ?? current?.lastStatus,
-        blocking: current?.blocking ?? blocking,
-      })
+        startTime: Date.now(),
+        agent: 'unknown',
+        label: run.label ?? run.runId,
+      }
+      tracked.runId = run.runId
+      tracked.agent = run.agent ?? status?.agent ?? current?.agent ?? tracked.agent
+      tracked.label = run.label ?? status?.label ?? current?.label ?? tracked.label
+      tracked.supervisorId = run.supervisorId ?? current?.supervisorId
+      tracked.runtimeId = run.runtimeId ?? status?.runtime_id ?? current?.runtimeId
+      if (!current) tracked.startTime = Date.now()
+      tracked.lastStatus = status ?? current?.lastStatus
+      tracked.blocking = current?.blocking ?? blocking
+      trackedRuns.set(key, tracked)
     }
 
     function findTrackedByLabel(label: string, supervisorId?: string): TrackedRun | undefined {
@@ -949,14 +956,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * Emit the single terminal event for a tracked run. Every terminal path
      * (poll, blocking spawn, avenor_result) goes through here so the event-once
      * guard and payload shape stay identical. A tracked run emits at most once;
-     * an untracked run emits with the caller-supplied identity, unguarded.
+     * an untracked run emits with the canonical result identity, unguarded.
      *
      * @returns whether the event was emitted, so callers can gate one-time
      *   side effects.
      */
     function emitRunTerminal(input: {
       run: TrackedRun | undefined
-      /** Caller-supplied identity, used only when the run is untracked so a
+      /** Canonical result identity, used only when the run is untracked so a
        * result delivered for another session's run still emits telemetry. */
       runId?: string
       supervisorId?: string

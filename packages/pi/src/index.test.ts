@@ -3209,12 +3209,6 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
-    const sendMock = h.sendUserMessage as any
-    const inner = sendMock.mock.impl
-    sendMock.mock.impl = (text: string, opts?: any) => {
-      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
-      return inner(text, opts)
-    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3338,12 +3332,6 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
-    const sendMock = h.sendUserMessage as any
-    const inner = sendMock.mock.impl
-    sendMock.mock.impl = (text: string, opts?: any) => {
-      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
-      return inner(text, opts)
-    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3438,12 +3426,6 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
-    const sendMock = h.sendUserMessage as any
-    const inner = sendMock.mock.impl
-    sendMock.mock.impl = (text: string, opts?: any) => {
-      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
-      return inner(text, opts)
-    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3592,12 +3574,6 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
-    const sendMock = h.sendUserMessage as any
-    const inner = sendMock.mock.impl
-    sendMock.mock.impl = (text: string, opts?: any) => {
-      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
-      return inner(text, opts)
-    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3642,12 +3618,6 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
-    const sendMock = h.sendUserMessage as any
-    const inner = sendMock.mock.impl
-    sendMock.mock.impl = (text: string, opts?: any) => {
-      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
-      return inner(text, opts)
-    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
@@ -3696,12 +3666,6 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
-    const sendMock = h.sendUserMessage as any
-    const inner = sendMock.mock.impl
-    sendMock.mock.impl = (text: string, opts?: any) => {
-      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
-      return inner(text, opts)
-    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3774,12 +3738,6 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
-    const sendMock = h.sendUserMessage as any
-    const inner = sendMock.mock.impl
-    sendMock.mock.impl = (text: string, opts?: any) => {
-      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
-      return inner(text, opts)
-    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3819,12 +3777,6 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
-    const sendMock = h.sendUserMessage as any
-    const inner = sendMock.mock.impl
-    sendMock.mock.impl = (text: string, opts?: any) => {
-      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
-      return inner(text, opts)
-    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3897,12 +3849,6 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
-    const sendMock = h.sendUserMessage as any
-    const inner = sendMock.mock.impl
-    sendMock.mock.impl = (text: string, opts?: any) => {
-      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
-      return inner(text, opts)
-    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     const controller = new AbortController()
