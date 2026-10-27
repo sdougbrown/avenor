@@ -1,6 +1,10 @@
 // Unit tests for the peer layer's pure modules, run with node's own runner:
 //
-//   node --test marketplace/plugins/avenor/test/
+//   node --test marketplace/plugins/avenor/test/addresses.test.mjs \
+//     marketplace/plugins/avenor/test/wire.test.mjs
+//
+// Name the files explicitly: node 24 treats a bare directory argument as a
+// module path, not a test root.
 //
 // These cover the seams a PR inherits: the avenor:* address ladder and the
 // broker wire helpers. The live-broker drive (the hook contract end to end)

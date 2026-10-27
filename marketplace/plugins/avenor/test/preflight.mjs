@@ -8,7 +8,8 @@
 //   5. busy path: turn.start then ask -> session.append row
 //   6. the mcp__avenor__ask tool hook -> /send expects_reply + /wait_reply
 //
-// Run: node .cache/runs/pr1/scripts/preflight.mjs
+// Run: node marketplace/plugins/avenor/test/preflight.mjs http://127.0.0.1:<port>
+// (against a quiet `avenor stable` started from this branch)
 
 import { fileURLToPath } from 'node:url'
 

@@ -50,8 +50,10 @@ session prints on `/reload-plugins` ("reloaded (5 hooks: ...)").
 
 `feature-map acceptance` = all three drives above with both transcripts
 captured, plus `claude plugin validate` exit 0 and the offline suites: pure
-modules under `node --test marketplace/plugins/avenor/test/` (address ladder,
-wire helpers) and the committed live-broker hook-contract drive
+modules under
+`node --test marketplace/plugins/avenor/test/addresses.test.mjs marketplace/plugins/avenor/test/wire.test.mjs`
+(address ladder, wire helpers — name files explicitly; node 24 treats a bare
+directory as a module path) and the committed live-broker hook-contract drive
 `node marketplace/plugins/avenor/test/preflight.mjs http://127.0.0.1:<port>`
 against a quiet `avenor stable` (self-registration/naming, idle tell
 delivery, tell sends ride no edge, ask correlation, reply-edge unblock,
