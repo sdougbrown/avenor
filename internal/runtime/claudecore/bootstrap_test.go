@@ -2,6 +2,7 @@ package claudecore
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -163,5 +164,18 @@ func TestWaitForPaneReadyConfirmsTrustWhenStaleMarkerRemains(t *testing.T) {
 				t.Fatalf("SendCalls = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+func TestWaitForPaneReadyReportsATerminalThatDiedShowingAReadyPane(t *testing.T) {
+	// A PTY keeps its last screen after claude exits, so a dead terminal can
+	// still show the input box. Pasting into it would report a turn that never
+	// ran.
+	term := terminal.NewFakeSession("dead", 1, readyPane)
+	term.SetAlive(false)
+
+	err := WaitForPaneReady(context.Background(), term, 4*PromptInjectCheckInterval)
+	if !errors.Is(err, ErrTerminalGone) {
+		t.Fatalf("WaitForPaneReady = %v, want ErrTerminalGone", err)
 	}
 }

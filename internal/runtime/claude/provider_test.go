@@ -1040,6 +1040,49 @@ func TestAPasteInFlightHoldsOffAnUnreadyLaunchVerdict(t *testing.T) {
 	}
 }
 
+func TestCancelEmitsSessionEndBeforeCancellingTheSession(t *testing.T) {
+	// Once the session context ends, the Events reader drains the buffer and
+	// closes, so a session.end emitted after the cancel can be lost.
+	for name, pane := range map[string]string{
+		"idle after Esc":  "❯ ready",
+		"forced at grace": "✻ Churning… (2m 17s · ↓ 7.2k tokens)",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := &Provider{
+				sessions:    make(map[string]*claudecore.Session),
+				cancelGrace: 200 * time.Millisecond,
+			}
+			s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-cancel-order", EventsBuf: 8})
+			s.Term = terminal.NewFakeSession("test-term", 1, pane)
+			cancel := s.CancelFn
+			t.Cleanup(cancel)
+			var called, endBuffered bool
+			s.CancelFn = func() {
+				if !called {
+					called = true
+					for len(s.Events) > 0 {
+						if ev := <-s.Events; ev.Event == "session.end" {
+							endBuffered = true
+						}
+					}
+				}
+				cancel()
+			}
+			p.sessions[s.SessionID] = s
+
+			if err := p.Cancel(context.Background(), s.SessionID); err != nil {
+				t.Fatalf("Cancel: %v", err)
+			}
+			if !called {
+				t.Fatal("Cancel never cancelled the session")
+			}
+			if !endBuffered {
+				t.Error("session context cancelled before session.end was emitted")
+			}
+		})
+	}
+}
+
 func TestCancelTakesProgStatusIdleAfterWorkingAsCancelled(t *testing.T) {
 	p := &Provider{
 		sessions:    make(map[string]*claudecore.Session),
