@@ -49,10 +49,16 @@ session prints on `/reload-plugins` ("reloaded (5 hooks: ...)").
 ## Proof state
 
 `feature-map acceptance` = all three drives above with both transcripts
-captured, plus `claude plugin validate` exit 0 and the offline hook-contract
-preflight (a driven stub of the engine call object over the real broker) all
-green — the drive recipe, stub harness and captured evidence from the PR 1
-run live in the branch's `.cache/runs/` (uncommitted).
+captured, plus `claude plugin validate` exit 0 and the offline suites: pure
+modules under `node --test marketplace/plugins/avenor/test/` (address ladder,
+wire helpers) and the committed live-broker hook-contract drive
+`node marketplace/plugins/avenor/test/preflight.mjs http://127.0.0.1:<port>`
+against a quiet `avenor stable` (self-registration/naming, idle tell
+delivery, tell sends ride no edge, ask correlation, reply-edge unblock,
+busy-path append, ask-tool service, version gate, disabled pass-through).
+The PR 1 run's captured evidence (transcripts, validation report, review
+grounding drives for turn axes and reload behavior) lives in the branch's
+`.cache/runs/evidence/` (uncommitted by repo policy).
 
 ## Known limits
 
@@ -61,6 +67,9 @@ run live in the branch's `.cache/runs/` (uncommitted).
 - The reply correlation is a heuristic: a send to a peer with a pending
   inbound ask answers the most recent one.
 - Pass-through turn/session hooks log a benign "hook skipped: returned the
-  wrong shape" notice per turn; the events run anyway.
-- A hot reload re-registers the session (fresh run id or a refused stale
-  record); reloads are a dev-time operation over a quiet broker.
+  wrong shape" notice per turn; the events run anyway. Aborted turns still
+  emit `turn.complete` (`reason: "aborted"`, verified live), so the busy/idle
+  counter drains.
+- A hot `/reload-plugins` re-runs no `session.start`; the armed layer keeps
+  serving the session unchanged across the reload (verified both directions
+  live). Restart the session to run new module code.
