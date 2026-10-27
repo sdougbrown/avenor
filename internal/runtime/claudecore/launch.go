@@ -208,12 +208,13 @@ func truncateRunes(s string, max int) string {
 // MarkFinished is the existing guard against double-emitting: a run that already
 // reported avenor_finish, a cancel, or a transcript end_turn keeps that verdict.
 func (s *Session) EmitTerminalGone(ctx context.Context) {
-	fail, agentNotFound := s.detectAgentNotFound(ctx)
+	// Capture once, before MarkFinished: nothing may block between claiming
+	// the verdict and emitting it.
+	screen := s.capture(ctx)
+	fail, agentNotFound := s.detectAgentNotFound(screen)
 	stderrTail := truncateRunes(collapseSpace(s.readStderrLog()), maxDiagnosticText)
 	prompted := s.everPrompted()
-	// Before MarkFinished: nothing may block between claiming the verdict and
-	// emitting it.
-	pane := s.paneText(ctx)
+	pane := summarizePane(screen)
 	// The log has given up everything it has, so drop it here rather than relying
 	// only on runSession's teardown defer: session.end is what lets a one-shot
 	// caller exit, and a process that exits on that event can beat the defer,
@@ -272,11 +273,12 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 // It leaves the session alone when a prompt has landed or is landing (a later
 // prompt that finds the pane busy is not a failed launch), when another
 // verdict already claimed it, and when ctx is cancelled because the session is
-// already ending.
-func (s *Session) FailUnreadyLaunch(ctx context.Context) {
-	pane := s.paneText(ctx)
+// already ending. It reports whether it took the launch, in which case the
+// launch verdict accounts for the caller's prompt.
+func (s *Session) FailUnreadyLaunch(ctx context.Context) bool {
+	pane := summarizePane(s.capture(ctx))
 	if ctx.Err() != nil || !s.takeUnreadyLaunch(pane) {
-		return
+		return false
 	}
 	// Kill before reporting: a one-shot caller exits on session.end, which can
 	// beat runSession's teardown and leave claude parked in a detached tmux
@@ -291,12 +293,13 @@ func (s *Session) FailUnreadyLaunch(ctx context.Context) {
 	// The dead terminal can end runSession first. EmitTerminalGone then claims
 	// and reports this same verdict, and its teardown cancels the session.
 	if !s.MarkFinished() {
-		return
+		return true
 	}
 	s.emitUnreadyLaunch(pane)
 	if s.CancelFn != nil {
 		s.CancelFn()
 	}
+	return true
 }
 
 // unreadyKillTimeout bounds the kill FailUnreadyLaunch runs before reporting.
@@ -325,12 +328,9 @@ func (s *Session) emitUnreadyLaunch(pane string) {
 		map[string]any{"pane": pane})
 }
 
-// paneText is the bottom of the pane as one line of text for a diagnostic,
-// where a dialog's options or a crash's last lines are. Rules and blank lines
-// are dropped, since a full-width rule alone would fill the budget. It goes in
-// its own field, never in the error: failure text is read for provider limits,
-// and a screen can say anything.
-func (s *Session) paneText(ctx context.Context) string {
+// capture is what the terminal shows, or "" when there is no terminal or it
+// cannot be read.
+func (s *Session) capture(ctx context.Context) string {
 	if s.Term == nil {
 		return ""
 	}
@@ -338,6 +338,15 @@ func (s *Session) paneText(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
+	return out
+}
+
+// summarizePane is the bottom of a captured pane as one line of text for a
+// diagnostic, where a dialog's options or a crash's last lines are. Rules and
+// blank lines are dropped, since a full-width rule alone would fill the
+// budget. It goes in its own field, never in the error: failure text is read
+// for provider limits, and a screen can say anything.
+func summarizePane(out string) string {
 	var lines []string
 	for _, line := range strings.Split(normalizePane(out), "\n") {
 		var words []string
@@ -362,21 +371,14 @@ func (s *Session) paneText(ctx context.Context) string {
 }
 
 // detectAgentNotFound looks for the banner in the stderr log first — the only
-// source that survives a tmux pane — then in whatever the terminal can still
-// capture. A PTY keeps its vt10x screen after the child exits, so the pane is a
-// useful second source there.
-func (s *Session) detectAgentNotFound(ctx context.Context) (AgentNotFound, bool) {
+// source that survives a tmux pane — then in screen, whatever the terminal
+// could still capture. A PTY keeps its vt10x screen after the child exits, so
+// the pane is a useful second source there.
+func (s *Session) detectAgentNotFound(screen string) (AgentNotFound, bool) {
 	if fail, ok := DetectAgentNotFound(s.readStderrLog()); ok {
 		return fail, true
 	}
-	if s.Term == nil {
-		return AgentNotFound{}, false
-	}
-	out, err := s.Term.Capture(ctx)
-	if err != nil {
-		return AgentNotFound{}, false
-	}
-	return DetectAgentNotFound(out)
+	return DetectAgentNotFound(screen)
 }
 
 func (s *Session) everPrompted() bool {

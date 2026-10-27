@@ -293,6 +293,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	go func() {
 		if err := s.WaitForPaneReady(s.Ctx); err != nil {
+			// A failed launch reports this prompt in its own verdict.
+			if errors.Is(err, claudecore.ErrPaneNotReady) && s.FailUnreadyLaunch(s.Ctx) {
+				return
+			}
 			s.Emit(events.Event{
 				Event:     "agent.prompt_failed",
 				SessionID: s.SessionID,
@@ -300,9 +304,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 					"error": "terminal not ready",
 				},
 			})
-			if errors.Is(err, claudecore.ErrPaneNotReady) {
-				s.FailUnreadyLaunch(s.Ctx)
-			}
 			return
 		}
 		readySignal := s.WaitForProgStatusReady(s.Ctx)

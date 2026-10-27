@@ -948,6 +948,9 @@ func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
 	for {
 		select {
 		case ev := <-s.Events:
+			if ev.Event == "agent.prompt_failed" {
+				t.Fatalf("emitted agent.prompt_failed (%v) beside the launch verdict", ev.Fields["error"])
+			}
 			if ev.Event != "session.end" {
 				continue
 			}
@@ -965,6 +968,34 @@ func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
 			return
 		case <-deadline:
 			t.Fatal("no session.end for a launch whose input box never appeared")
+		}
+	}
+}
+
+func TestPromptReportsAPromptThatFindsARunningSessionBusy(t *testing.T) {
+	// A session that already ran a turn is not a failed launch, so the
+	// dropped prompt is the only thing to report.
+	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, claudecoretest.ManagedSettingsDialog), 50*time.Millisecond)
+	s.Mu.Lock()
+	s.Prompted = true
+	s.Mu.Unlock()
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			switch ev.Event {
+			case "session.end", "agent.launch_failed":
+				t.Fatalf("reported %s for a session that already ran a turn", ev.Event)
+			case "agent.prompt_failed":
+				return
+			}
+		case <-deadline:
+			t.Fatal("no agent.prompt_failed for a prompt that found the pane busy")
 		}
 	}
 }
