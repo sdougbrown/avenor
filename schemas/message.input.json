@@ -115,11 +115,11 @@
       "properties": {
         "action": {
           "const": "control_reply",
-          "description": "Answer a claude-channel control request; registered only on the claude-channel backend."
+          "description": "Retained in the contract for the retired claude-channel backend's reply path; no surface can deliver one."
         },
         "target": {
           "type": "string",
-          "description": "Opaque claude-channel control message id, passed through unchanged."
+          "description": "Opaque control message id, passed through unchanged."
         },
         "payload": {
           "type": "object",

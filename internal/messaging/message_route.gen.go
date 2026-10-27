@@ -183,8 +183,8 @@ func Check(f MessageRouteFields, c MessageRouteConditions, prev MessageRouteFiel
 			Fair:      (f.Action != nil && *f.Action != "resume" || c.CallerKind == "owner"),
 			Reason: func() *string {
 				var reasons []string
-				if !(f.Action != nil && *f.Action != "control_reply" || c.ControlReplySupported) && "action \"control_reply\" is only available on the claude-channel backend" != "" {
-					reasons = append(reasons, "action \"control_reply\" is only available on the claude-channel backend")
+				if !(f.Action != nil && *f.Action != "control_reply" || c.ControlReplySupported) && "action \"control_reply\" is retained in the contract but no surface can deliver one" != "" {
+					reasons = append(reasons, "action \"control_reply\" is retained in the contract but no surface can deliver one")
 				}
 				if !(f.Action != nil && *f.Action != "resume" || c.CallerKind == "owner") && "a broker-authenticated run may resume only a run it spawned, which a child cannot own" != "" {
 					reasons = append(reasons, "a broker-authenticated run may resume only a run it spawned, which a child cannot own")
@@ -196,8 +196,8 @@ func Check(f MessageRouteFields, c MessageRouteConditions, prev MessageRouteFiel
 			}(),
 			Reasons: func() []string {
 				var reasons []string
-				if !(f.Action != nil && *f.Action != "control_reply" || c.ControlReplySupported) && "action \"control_reply\" is only available on the claude-channel backend" != "" {
-					reasons = append(reasons, "action \"control_reply\" is only available on the claude-channel backend")
+				if !(f.Action != nil && *f.Action != "control_reply" || c.ControlReplySupported) && "action \"control_reply\" is retained in the contract but no surface can deliver one" != "" {
+					reasons = append(reasons, "action \"control_reply\" is retained in the contract but no surface can deliver one")
 				}
 				if !(f.Action != nil && *f.Action != "resume" || c.CallerKind == "owner") && "a broker-authenticated run may resume only a run it spawned, which a child cannot own" != "" {
 					reasons = append(reasons, "a broker-authenticated run may resume only a run it spawned, which a child cannot own")
@@ -347,7 +347,7 @@ var ruleMeta = []RuleMetaEntry{
 	{Field: "Action", RuleType: "check", Expr: "(f.Action != nil && *f.Action == \"tell\" || f.Action != nil && *f.Action == \"ask\" || f.Action != nil && *f.Action == \"reply\" || f.Action != nil && *f.Action == \"resume\" || f.Action != nil && *f.Action == \"withdraw\" || f.Action != nil && *f.Action == \"control_reply\")", Reason: "not a known action (tell, ask, reply, resume, withdraw, control_reply)"},
 	{Field: "Message", RuleType: "enabledWhen", Expr: "(!((f.Action != nil && *f.Action == \"tell\" || f.Action != nil && *f.Action == \"ask\")) || c.TargetLive)", Reason: "target is not live for this action"},
 	{Field: "Message", RuleType: "fairWhen", Expr: "(f.Action != nil && *f.Action != \"resume\" || c.TargetResumable)", Reason: "target is not resumable"},
-	{Field: "Target", RuleType: "enabledWhen", Expr: "(f.Action != nil && *f.Action != \"control_reply\" || c.ControlReplySupported)", Reason: "action \"control_reply\" is only available on the claude-channel backend"},
+	{Field: "Target", RuleType: "enabledWhen", Expr: "(f.Action != nil && *f.Action != \"control_reply\" || c.ControlReplySupported)", Reason: "action \"control_reply\" is retained in the contract but no surface can deliver one"},
 	{Field: "Target", RuleType: "fairWhen", Expr: "(f.Action != nil && *f.Action != \"resume\" || c.CallerKind == \"owner\")", Reason: "a broker-authenticated run may resume only a run it spawned, which a child cannot own"},
 }
 
@@ -397,7 +397,7 @@ func Challenge(fieldName string, f MessageRouteFields, c MessageRouteConditions,
 		if status.Reason != nil {
 			explanations = append(explanations, "* "+*status.Reason)
 		}
-		explanations = append(explanations, "* enabledWhen: action \"control_reply\" is only available on the claude-channel backend")
+		explanations = append(explanations, "* enabledWhen: action \"control_reply\" is retained in the contract but no surface can deliver one")
 		explanations = append(explanations, "* fairWhen: a broker-authenticated run may resume only a run it spawned, which a child cannot own")
 	default:
 		// Try to find by matching against known field names

@@ -369,7 +369,7 @@ One tool for every message between runs, with an explicit `action`. The shared r
 
 `reply` answers an ask that was delivered to this surface. This server receives no inbound asks, so `reply` always answers `edge-absent` with the text "no ask … is pending on this surface; nothing was sent" and sends nothing. A surface that does receive asks — a Pi child — replies for real.
 
-`control_reply` is retained in the contract for the retired claude-channel backend's reply path, and no surface can deliver one any more. Every surface rejects it with code `unsupported_action` and the static reason `action "control_reply" is only available on the claude-channel backend`.
+`control_reply` is retained in the contract for the retired claude-channel backend's reply path, and no surface can deliver one any more. Every surface rejects it with code `unsupported_action` and the static reason `action "control_reply" is retained in the contract but no surface can deliver one`.
 
 Every result is the same snake_case object on every surface: `action`, `outcome` and `text` always, plus `message_id`, `run_id`, `label`, `reply`, `sentinel_file` and `on_event` when the outcome carries them. The text comes from the shared outcome table, not from this server. A router failure is a failed tool call (`isError: true`) whose text is a fixed sentence and whose structured content carries the error `code`.
 
