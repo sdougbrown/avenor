@@ -109,6 +109,45 @@ func TestBrokerURLPublishedBesideControlSocket(t *testing.T) {
 	}
 }
 
+// TestBrokerURLShutdownPreservesChangedRecord pins that shutdown removes only
+// the record this supervisor published: a record another writer replaced is
+// left exactly as that writer left it.
+func TestBrokerURLShutdownPreservesChangedRecord(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	socketPath := newStableSocketPath(t, "brokerurl-changed")
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:   socketPath,
+		MaxRuntimes:     1,
+		Stderr:          io.Discard,
+		ShutdownTimeout: time.Second,
+	})
+	done := startStableRun(t, sup, socketPath)
+	awaitBrokerURLRecord(t, socketPath)
+
+	foreign := "http://foreign.invalid:1/replaced\n"
+	if err := os.WriteFile(BrokerURLPath(socketPath), []byte(foreign), 0o600); err != nil {
+		t.Fatalf("overwrite broker URL record: %v", err)
+	}
+	if err := sup.Shutdown("graceful"); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("Run() = %d, want 0", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run() did not return after a graceful shutdown")
+	}
+	data, err := os.ReadFile(BrokerURLPath(socketPath))
+	if err != nil {
+		t.Fatalf("changed broker URL record removed by shutdown: %v", err)
+	}
+	if got := string(data); got != foreign {
+		t.Fatalf("changed broker URL record = %q, want it untouched as %q", got, foreign)
+	}
+}
+
 // TestCompetingSupervisorLeavesLiveBrokerURLRecord pins that a supervisor that
 // loses the control socket neither overwrites nor removes the live owner's
 // record.
