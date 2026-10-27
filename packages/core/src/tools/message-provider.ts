@@ -851,8 +851,7 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
       if (!peer) {
         throw new Error(`run ${targetRunId} is not visible`)
       }
-      const translation = translateRunFacts(peer.status ?? '', '')
-      return { live: translation.live, resumable: false, status: translation.status }
+      return peerFacts(peer)
     },
 
     tell: (targetRunId, message) => broker.tell(targetRunId, message, newMsgID()),

@@ -254,6 +254,23 @@ describe('host message provider', () => {
     await expect(provider(client).state('rt_ghost')).rejects.toThrow('runtime "rt_ghost" not found')
   })
 
+  it('keeps the status error when a partial listing holds the run', async () => {
+    // A partial listing is not an answer either: even a peer it did read may be
+    // shadowed by one it missed, so the absence error the call started with is
+    // the outcome rather than facts from the partial set.
+    const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
+    const client = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, `runtime "${peerRunId}" not found`)
+      }),
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: peerRunId, session: { run_id: peerRunId, label: 'branch-target', status: 'running' } }],
+        peers_error: 'the broker could not read every peer',
+      })),
+    })
+    await expect(provider(client).state(peerRunId)).rejects.toThrow('runtime "rt_branch@avenor-mcp-42-ab12cd" not found')
+  })
+
   it('keeps a status failure that is not the absence answer, even when the listing holds the run', async () => {
     const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
     const listing = mock(async () => ({
@@ -289,6 +306,16 @@ describe('host message provider', () => {
       messagePeers: listing,
     })
     await expect(provider(other).state(peerRunId)).rejects.toThrow('rt_someone_else')
+
+    // A sentence that matches the absence answer but carries a different wire
+    // code is not the absence answer: only the supervisor's server failure is.
+    const wrongCode = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32601, 'runtime "rt_branch@avenor-mcp-42-ab12cd" not found')
+      }),
+      messagePeers: listing,
+    })
+    await expect(provider(wrongCode).state(peerRunId)).rejects.toThrow('runtime "rt_branch@avenor-mcp-42-ab12cd" not found')
   })
 
   it('recognizes the absence answer Go renders with %q for an id carrying quotes and a backslash', async () => {
@@ -696,6 +723,23 @@ describe('child message provider', () => {
     const child = createChildMessageProvider({ surface: 'pi-child', runId: 'rt_child', broker: childBroker() })
     expect((await child.state('rt_2')).resumable).toBe(false)
     await expect(child.resume({ target: 'rt_2', message: 'x' })).rejects.toMatchObject({ code: 'not_permitted' })
+  })
+
+  it('classifies a peer row through the shared peer facts translation', async () => {
+    // The classification is the shared one (Go's messaging.PeerRunFacts), so a
+    // blocked peer reports failed and not live, and the terminal statuses fold
+    // the same way here as on the host path.
+    const broker = childBroker({
+      peers: async () => ({
+        peers: [
+          { run_id: 'rt_2', label: 'mesh-a', status: 'blocked' },
+          { run_id: 'rt_3', label: 'mesh-b', status: 'ended' },
+        ],
+      }),
+    })
+    const child = createChildMessageProvider({ surface: 'pi-child', runId: 'rt_child', broker })
+    expect(await child.state('rt_2')).toEqual({ live: false, resumable: false, status: 'failed' })
+    expect(await child.state('rt_3')).toEqual({ live: false, resumable: false, status: 'done' })
   })
 
   it('claims a pending ask once and passes the asker to the broker', async () => {
