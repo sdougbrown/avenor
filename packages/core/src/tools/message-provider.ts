@@ -295,15 +295,37 @@ function peerFacts(peer: PeerRecord | undefined): RunFacts {
   return { live: translation.live, resumable: false, status: translation.status }
 }
 
-async function sentinelResumable(filePath: string): Promise<boolean> {
-  if (!filePath) return false
+/**
+ * The terminal sentinel statuses the registry's state fallback answers from,
+ * matching the Go `terminalStatusFromRunInfo` set: a run that settled before a
+ * supervisor restart keeps its outcome discoverable by run id.
+ */
+const TERMINAL_SENTINEL_STATUSES = new Set(['DONE', 'FAILED', 'BLOCKED', 'TIMEOUT', 'KILLED'])
+
+/** Read one sentinel file's status word, or undefined when the file is unreadable. */
+async function readSentinelStatus(filePath: string): Promise<string | undefined> {
   try {
     const content = (await fs.promises.readFile(filePath, 'utf-8')).trim()
-    const status = (content.split('\n')[0] ?? '').trim().toUpperCase()
-    return RESUMABLE_SENTINEL_STATUSES.has(status)
+    return (content.split('\n')[0] ?? '').trim().toUpperCase()
   } catch {
-    return false
+    return undefined
   }
+}
+
+/**
+ * Read one sentinel file's terminal status word, already translated the way
+ * the rest of this file translates statuses, or undefined when the file is
+ * unreadable or holds a status that is not terminal.
+ */
+async function terminalSentinelStatus(filePath: string): Promise<string | undefined> {
+  const status = await readSentinelStatus(filePath)
+  if (!status || !TERMINAL_SENTINEL_STATUSES.has(status)) return undefined
+  return translateRunFacts(status.toLowerCase(), '').status
+}
+
+async function sentinelResumable(filePath: string): Promise<boolean> {
+  const status = await readSentinelStatus(filePath)
+  return status !== undefined && RESUMABLE_SENTINEL_STATUSES.has(status)
 }
 
 function peerRecords(peers: MessagePeersResult): PeerRecord[] {
@@ -496,6 +518,23 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         // through the listing: a denial or a transport failure is this call's
         // outcome and stays the caller's error.
         if (!isRuntimeNotFoundError(error, runId)) throw error
+        // The registry deliberately keeps a dead run discoverable by run id for
+        // its persisted terminal result, so a run that settled before a
+        // supervisor restart reports that outcome here, before the listing
+        // rung. Read the fallback narrowly: a run the registry does not hold,
+        // an unreadable sentinel, or a sentinel without a terminal status keeps
+        // the run's absence answer for the listing rung below.
+        const registered = findExternalRunById(supervisorId, runId)
+        if (registered) {
+          const terminal = await terminalSentinelStatus(registered.sentinelPath)
+          if (terminal) {
+            return {
+              live: false,
+              resumable: await sentinelResumable(registered.sentinelPath),
+              status: terminal,
+            }
+          }
+        }
         const listed = await listedState(runId)
         if (listed) return listed
         throw error
