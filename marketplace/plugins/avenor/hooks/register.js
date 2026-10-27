@@ -28,6 +28,11 @@
 //   ask renders the shared ask sentences (wire.js mirrors
 //   schemas/message.outcome.json), never raw wire text.
 //
+// - Identity: a run id and token in the environment are a provisioned
+//   identity — a spawned child joins the broker as the run its launcher
+//   already holds. Without them the session self-registers through the
+//   broker's open `/register` route as a top-level peer of its own.
+//
 // The hook grammar is what Claude Code 2.1.311's module scan enforces; the
 // mechanics come from the #391 spike (391-spike-findings.md). Branches over
 // event data are ternaries; helpers that take the engine call object `d` are
@@ -201,8 +206,16 @@ async function selfRegister(d) {
   }
   const envRunID = await envRunId(d)
   const envToken = await envBrokerToken(d)
+  // A run id and token together are a provisioned identity: whoever spawned
+  // this session already holds the run, and the record is the broker's. Joining
+  // it needs no round trip, and the open /register route must not be the way
+  // in — it would mint a record for a run the launcher no longer holds (a
+  // supervisor restart), leaving behind a peer nothing routes to.
+  const provisioned = envRunID !== "" && envToken !== ""
   try {
-    const registered = await registerRun(d, brokerURL, envRunID, envToken)
+    const registered = provisioned
+      ? { url: brokerURL, runID: envRunID, token: envToken }
+      : await registerRun(d, brokerURL, envRunID)
     if (registered === null) {
       return false
     }
@@ -211,33 +224,38 @@ async function selfRegister(d) {
     disableLayer("registering with the avenor broker " + brokerURL + " failed: " + errorText(err))
     return false
   }
-  const name = (await envSessionName(d)) || broker.runID
-  try {
-    await brokerPost(d, "/session_name", { name: name })
-  } catch (err) {
-    // The name is cosmetic: an unnamed run is still addressable by run id.
-    await logLayer(d, "session_name failed: " + errorText(err))
+  // Only a name handed in is posted. A provisioned run already carries the
+  // label its launcher registered it under, and posting the run id in its
+  // place would replace that label; a self-registered run is displayed by its
+  // run id either way, so posting nothing changes nothing.
+  const name = await envSessionName(d)
+  if (name !== "") {
+    try {
+      await brokerPost(d, "/session_name", { name: name })
+    } catch (err) {
+      await logLayer(d, "session_name failed: " + errorText(err))
+    }
   }
-  await logLayer(d, "peer layer on (run " + broker.runID + ", broker " + broker.url + ")")
+  const path = provisioned ? "provisioned run " : "self-registered run "
+  await logLayer(d, "peer layer on (" + path + broker.runID + ", broker " + broker.url + ")")
   return true
 }
 
 /**
- * One registration (or the retry of a self-minted identity): a run id from
- * the environment is used as given, so a token supplied alongside it is the
- * provisioned credential; a self-minted id retries once with another suffix
- * when the broker holds a stale record the session cannot authenticate
- * against. Null reports a disable-with-reason the caller logs.
+ * One self-registration through the broker's open /register route, or the
+ * retry of a self-minted identity: a run id from the environment is used as
+ * given; a self-minted one retries once with another suffix when the broker
+ * holds a stale record the session cannot authenticate against. Null reports a
+ * disable-with-reason the caller logs.
  */
-async function registerRun(d, url, envRunID, envToken) {
+async function registerRun(d, url, envRunID) {
   let runID = envRunID
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (!runID) {
       runID = "claude-" + randomHex(3)
     }
-    const registration = envToken !== "" ? { run_id: runID, token: envToken } : { run_id: runID }
     try {
-      const answer = await postJSON(d, url, "/register", registration)
+      const answer = await postJSON(d, url, "/register", { run_id: runID })
       const mintedToken = answer === null || typeof answer !== "object" ? "" : answer.token
       const mintedRunID = answer !== null && typeof answer === "object" &&
         typeof answer.run_id === "string" && answer.run_id !== "" ? answer.run_id : runID
@@ -247,7 +265,7 @@ async function registerRun(d, url, envRunID, envToken) {
       }
       return { url: url, runID: mintedRunID, token: mintedToken }
     } catch (err) {
-      const retryable = envRunID === "" && envToken === "" && attempt === 0 &&
+      const retryable = envRunID === "" && attempt === 0 &&
         errorText(err).indexOf("already registered") !== -1
       if (!retryable) {
         throw err
