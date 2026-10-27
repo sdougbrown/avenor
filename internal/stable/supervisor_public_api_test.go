@@ -1106,6 +1106,76 @@ func TestResumeContinuesParkedRuntime(t *testing.T) {
 	}
 }
 
+// TestRuntimeResultReportsSentinelPath pins the sentinel_file half of
+// RuntimeResult: the terminal reply carries the runtime's sentinel path, and
+// after a warm resume rotates the child onto the next turn's sentinel the
+// reported path follows the rotation.
+func TestRuntimeResultReportsSentinelPath(t *testing.T) {
+	provider := newItestProvider(
+		itestAttempt("ses_result_sentinel", itestSessionEnd("ses_result_sentinel", "end_turn", "first")),
+		itestAttempt("ses_result_sentinel", itestSessionEnd("ses_result_sentinel", "end_turn", "second")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+	dir := h.t.TempDir()
+	raw, err := json.Marshal(map[string]any{
+		"prompt": "go", "dir": dir, "backend": "pony",
+		"sentinel_file": filepath.Join(dir, "first.env"),
+	})
+	if err != nil {
+		t.Fatalf("marshal spawn params: %v", err)
+	}
+	out, err := h.sup.Spawn(raw)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	spawned, ok := out.(SpawnResult)
+	if !ok || spawned.RuntimeID == "" {
+		t.Fatalf("Spawn result = %#v, want SpawnResult", out)
+	}
+	rt := spawned.RuntimeID
+	h.awaitStatus(rt, "done")
+	if _, err := os.Stat(spawned.SentinelFile); err != nil {
+		t.Fatalf("first sentinel on disk: %v", err)
+	}
+	got, err := h.sup.RuntimeResult(rt)
+	if err != nil {
+		t.Fatalf("RuntimeResult: %v", err)
+	}
+	result, _ := got.(map[string]any)
+	if path, _ := result["sentinel_file"].(string); path != spawned.SentinelFile {
+		t.Fatalf("RuntimeResult sentinel_file = %q, want the spawn's %q", path, spawned.SentinelFile)
+	}
+	h.awaitCondition("runtime parked", func() bool {
+		child := h.sup.runtimeByID(rt)
+		child.mu.Lock()
+		defer child.mu.Unlock()
+		return child.lc.isParked()
+	})
+	resumed, err := h.sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{
+		Target: rt, Message: "again", RunID: "follow-up",
+		SentinelFile: filepath.Join(dir, "second.env"),
+	})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h.awaitStatus(rt, "done")
+	if _, err := os.Stat(resumed.SentinelFile); err != nil {
+		t.Fatalf("second sentinel on disk: %v", err)
+	}
+	got, err = h.sup.RuntimeResult(rt)
+	if err != nil {
+		t.Fatalf("RuntimeResult after resume: %v", err)
+	}
+	result, _ = got.(map[string]any)
+	path, _ := result["sentinel_file"].(string)
+	if path != resumed.SentinelFile || path == spawned.SentinelFile {
+		t.Fatalf("RuntimeResult sentinel_file after resume = %q, want the rotated %q", path, resumed.SentinelFile)
+	}
+	// Settle the harness before the TempDir cleanup removes the sentinel
+	// directory, so shutdown's best-effort sentinel writes still have a target.
+	h.shutdown("kill")
+}
+
 func TestWarmResumeKeyedReplayQueuesOnce(t *testing.T) {
 	gate := newItestGate()
 	defer gate.open()

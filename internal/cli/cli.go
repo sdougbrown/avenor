@@ -2188,12 +2188,40 @@ func NewEventWriter(path string) (*eventWriter, error) {
 	if path == "" {
 		return &eventWriter{encoder: json.NewEncoder(io.Discard)}, nil
 	}
-	// O_NOFOLLOW refuses a final symlink, so a link left at --on-event cannot
-	// redirect this run's event log into another artifact's file. The log
-	// carries prompt and turn content, so it is owner-only like every other run
-	// artifact; O_TRUNC keeps a leftover file's mode, so the opened file is
-	// tightened as well.
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	file, err := openEventLogFile(path, os.O_TRUNC)
+	if err != nil {
+		return nil, err
+	}
+	return &eventWriter{
+		file:    file,
+		encoder: json.NewEncoder(file),
+	}, nil
+}
+
+// NewEventWriterExclusive opens an event log that must not exist yet. A
+// resumed turn starts a new log file: O_EXCL guarantees the writer never
+// truncates a prior turn's log (including a hard link to one) or follows a
+// symlink left at the path.
+func NewEventWriterExclusive(path string) (*eventWriter, error) {
+	file, err := openEventLogFile(path, os.O_EXCL)
+	if err != nil {
+		return nil, err
+	}
+	return &eventWriter{
+		file:    file,
+		encoder: json.NewEncoder(file),
+	}, nil
+}
+
+// openEventLogFile opens an event log with the constructor's shared hardening:
+// O_NOFOLLOW refuses a final symlink, so a link left at --on-event cannot
+// redirect this run's event log into another artifact's file. The log carries
+// prompt and turn content, so it is owner-only like every other run artifact;
+// a leftover file keeps its mode, so the opened file is tightened as well.
+// extra carries the caller's truncation discipline: O_TRUNC for a fresh run's
+// log, O_EXCL when the path must not already exist.
+func openEventLogFile(path string, extra int) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|extra|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
 			return nil, fmt.Errorf("event log path %s is a symlink; symlinks are refused", path)
@@ -2204,10 +2232,7 @@ func NewEventWriter(path string) (*eventWriter, error) {
 		file.Close()
 		return nil, err
 	}
-	return &eventWriter{
-		file:    file,
-		encoder: json.NewEncoder(file),
-	}, nil
+	return file, nil
 }
 
 func (w *eventWriter) Write(event events.Event) error {

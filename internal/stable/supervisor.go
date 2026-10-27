@@ -422,16 +422,15 @@ type childRuntime struct {
 	runEnds       map[string]struct{}
 	directAttempt *sessionAttempt
 	// turnMu serializes this runtime's turn-bound work: warm admission
-	// (admitWarmResume) and the fence around turn-bound broker operations
-	// (WithTurn). It is per-runtime so a slow turn-bound operation on one
+	// (admitWarmResume) and any turn-bound operation that holds the same
+	// lock. It is per-runtime so a slow turn-bound operation on one
 	// runtime cannot block another runtime's admission. It anchors the one
 	// lock order shared across the supervisor, outermost to innermost:
 	//
 	//	child.turnMu -> child.writeMu -> s.controlMu -> child.mu -> broker st.Mu
 	//
 	// Every path that takes more than one of these locks takes them in that
-	// order; WithTurn and admitWarmResume reference this comment instead of
-	// restating it.
+	// order; admitWarmResume references this comment instead of restating it.
 	turnMu sync.Mutex
 	// lc is the closed lifecycle state owned by the pure machine
 	// (runtime_lifecycle.go) and committed field by field by the adapter

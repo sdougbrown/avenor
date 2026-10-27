@@ -164,11 +164,13 @@ func IdempotencyHash(p SpawnParams) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// idempotentSpawn gates a spawn through the idempotency store. The
-// store-wide mutex is never held while the runtime starts: begin either
-// returns a stored hit, the caller's in-flight reservation, or an error.
-func (s *Supervisor) idempotentSpawn(p SpawnParams, hash string) (SpawnResult, error) {
-	key := p.IdempotencyKey
+// runIdempotentOperation gates one keyed operation through the idempotency
+// store: begin either returns a stored hit (nil flight), the caller's in-flight
+// reservation, or an error. The holder runs work outside the store mutex and
+// commits its result on success; any failure — including a panic — releases the
+// reserved slot, and waiters observe the holder's outcome either way. This is
+// the single flight protocol for keyed spawns and keyed resumes.
+func (s *Supervisor) runIdempotentOperation(key, hash string, work func() (SpawnResult, error)) (SpawnResult, error) {
 	result, flight, err := s.idempotency.begin(key, hash)
 	if err != nil {
 		return SpawnResult{}, err
@@ -176,34 +178,39 @@ func (s *Supervisor) idempotentSpawn(p SpawnParams, hash string) (SpawnResult, e
 	if flight == nil {
 		return result, nil
 	}
-	// Holder path: spawn outside the store mutex; commit on success, release
-	// the reserved slot on any failure including panic.
-	reserved := false
+	committed := false
 	defer func() {
-		if !reserved {
-			s.idempotency.release(key, flight, fmt.Errorf("spawn panicked"))
+		if !committed {
+			s.idempotency.release(key, flight, fmt.Errorf("keyed operation failed or panicked"))
 		}
 	}()
-	// Keyed first-use: reject a label already held by a live runtime. The
-	// authoritative check is atomic with registration inside spawnReserved;
-	// this pre-check only fast-fails the common case.
-	if p.Label != "" {
-		s.controlMu.Lock()
-		holder := s.labelHolderLocked(p.Label)
-		s.controlMu.Unlock()
-		if holder != "" {
-			reserved = true
-			labelErr := fmt.Errorf("label already in use: %s (runtime %s)", p.Label, holder)
-			s.idempotency.release(key, flight, labelErr)
-			return SpawnResult{}, labelErr
-		}
-	}
-	res, err := s.spawn(p)
-	reserved = true
+	result, err = work()
+	committed = true
 	if err != nil {
 		s.idempotency.release(key, flight, err)
 		return SpawnResult{}, err
 	}
-	s.idempotency.commit(key, flight, res)
-	return res, nil
+	s.idempotency.commit(key, flight, result)
+	return result, nil
+}
+
+// idempotentSpawn gates a spawn through the idempotency store. The
+// store-wide mutex is never held while the runtime starts: begin either
+// returns a stored hit, the caller's in-flight reservation, or an error.
+func (s *Supervisor) idempotentSpawn(p SpawnParams, hash string) (SpawnResult, error) {
+	key := p.IdempotencyKey
+	return s.runIdempotentOperation(key, hash, func() (SpawnResult, error) {
+		// Keyed first-use: reject a label already held by a live runtime. The
+		// authoritative check is atomic with registration inside spawnReserved;
+		// this pre-check only fast-fails the common case.
+		if p.Label != "" {
+			s.controlMu.Lock()
+			holder := s.labelHolderLocked(p.Label)
+			s.controlMu.Unlock()
+			if holder != "" {
+				return SpawnResult{}, fmt.Errorf("label already in use: %s (runtime %s)", p.Label, holder)
+			}
+		}
+		return s.spawn(p)
+	})
 }

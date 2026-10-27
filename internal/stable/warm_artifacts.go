@@ -1,14 +1,11 @@
 package stable
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/sdougbrown/avenor/internal/cli"
-	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
@@ -19,7 +16,7 @@ import (
 type warmResumeArtifacts struct {
 	onEvent     string
 	sentinel    string
-	writer      *warmEventWriter
+	writer      cli.EventSink
 	fileHandler *permission.FileHandler
 	// cleanup removes a reserved artifact directory after a failure; it does
 	// nothing when the paths were caller-supplied and no directory was made.
@@ -27,7 +24,7 @@ type warmResumeArtifacts struct {
 }
 
 // admitWarmResume installs the next turn's artifacts before publishing its
-// prompt. The runtime's turnMu serializes the fence with WithTurn, and writeMu
+// prompt. The runtime's turnMu serializes the fence with turn-bound operations, and writeMu
 // serializes the swap with all event writes and writer teardown. Lock order:
 // see childRuntime.turnMu.
 //
@@ -209,12 +206,11 @@ func (s *Supervisor) reserveWarmResumeArtifacts(child *childRuntime, p SpawnPara
 	}
 	// Reserve a fresh path before opening the writer: earlier turns' event
 	// files must never be truncated, including hard links to those files.
-	file, err := os.OpenFile(onEvent, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	writer, err := cli.NewEventWriterExclusive(onEvent)
 	if err != nil {
 		cleanup()
 		return warmResumeArtifacts{}, err
 	}
-	writer := &warmEventWriter{file: file, encoder: json.NewEncoder(file)}
 	fileHandler, err := s.derivedPermissionHandler(child, sentinel)
 	if err != nil {
 		_ = writer.Close()
@@ -269,24 +265,6 @@ func (s *Supervisor) rotateWarmResumeTurn(child *childRuntime, p SpawnParams, re
 	}
 	child.signalPrompt()
 	return SpawnResult{RunID: p.resume.runID, RuntimeID: child.id, Label: p.Label, SessionID: child.session.SessionID, OnEvent: reserved.onEvent, SentinelFile: reserved.sentinel}
-}
-
-type warmEventWriter struct {
-	mu      sync.Mutex
-	file    *os.File
-	encoder *json.Encoder
-}
-
-func (w *warmEventWriter) Write(event events.Event) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.encoder.Encode(event)
-}
-
-func (w *warmEventWriter) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.file.Close()
 }
 
 // finishUnstartedWarmResume settles an admitted turn if shutdown prevented its

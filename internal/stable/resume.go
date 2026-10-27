@@ -52,27 +52,16 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 			return messaging.ResumeResult{}, err
 		}
 		hash := fmt.Sprintf("%x", sha256.Sum256(intent))
-		result, flight, err := s.idempotency.begin(key, hash)
+		result, err := s.runIdempotentOperation(key, hash, func() (SpawnResult, error) {
+			return s.performResume(prior, runID, req)
+		})
 		if err != nil {
+			var toolErr *router.ToolError
+			if errors.As(err, &toolErr) {
+				return messaging.ResumeResult{}, err
+			}
 			return messaging.ResumeResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
 		}
-		if flight == nil {
-			return resumeResult(result), nil
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				s.idempotency.release(key, flight, fmt.Errorf("resume failed or panicked"))
-			}
-		}()
-		result, err = s.performResume(prior, runID, req)
-		if err != nil {
-			s.idempotency.release(key, flight, err)
-			committed = true
-			return messaging.ResumeResult{}, err
-		}
-		s.idempotency.commit(key, flight, result)
-		committed = true
 		return resumeResult(result), nil
 	}
 	result, err := s.performResume(prior, runID, req)

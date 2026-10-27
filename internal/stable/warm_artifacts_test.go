@@ -133,7 +133,12 @@ func TestWarmResumeWaitsForTurnBoundSend(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	sent := make(chan error, 1)
 	go func() {
-		sent <- sup.WithTurn("rt", child.sentinelFile, func() error { close(entered); <-release; return b.Send("rt", "agent_message", nil, "msg") })
+		child.turnMu.Lock()
+		close(entered)
+		<-release
+		err := b.Send("rt", "agent_message", nil, "msg")
+		child.turnMu.Unlock()
+		sent <- err
 	}()
 	<-entered
 	admitted := make(chan error, 1)
@@ -251,6 +256,56 @@ func TestUnstartedWarmResumeWritesFailureSentinel(t *testing.T) {
 	}
 	if child.lastStopReason != "error" || child.exitCode != 1 {
 		t.Fatalf("failure state: reason=%q exit=%d", child.lastStopReason, child.exitCode)
+	}
+}
+
+// TestWarmResumeRejectsExistingSentinelPath pins the reserve-time sentinel
+// check: when the caller-supplied sentinel path already exists, admission is
+// refused before any artifact is created, so the existing sentinel's content
+// survives and no reserved event file is left behind.
+func TestWarmResumeRejectsExistingSentinelPath(t *testing.T) {
+	root := t.TempDir()
+	sentinel := filepath.Join(root, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("DONE\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	child := &childRuntime{id: "rt", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	newEvents := filepath.Join(root, "new-events")
+	_, _, err := (&Supervisor{}).admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: newEvents, SentinelFile: sentinel})
+	if err == nil || !strings.Contains(err.Error(), "sentinel path already exists") {
+		t.Fatalf("admission over an existing sentinel = %v, want a rejection", err)
+	}
+	data, err := os.ReadFile(sentinel)
+	if err != nil || string(data) != "DONE\n" {
+		t.Fatalf("existing sentinel changed: %q %v", data, err)
+	}
+	if _, err := os.Stat(newEvents); !os.IsNotExist(err) {
+		t.Fatalf("reserved event file survived the rejection: %v", err)
+	}
+	if child.onEvent != filepath.Join(root, "old") || len(child.promptQueue) != 0 {
+		t.Fatal("rejected admission changed the child's turn")
+	}
+}
+
+// TestUnstartedWarmResumeKeepsCompletionSentinel pins the settle guard: when a
+// real completion sentinel already exists at the pending turn's path — for
+// instance written by shutdown — finishUnstartedWarmResume leaves the file and
+// the child's terminal state alone instead of clobbering it with a failure.
+func TestUnstartedWarmResumeKeepsCompletionSentinel(t *testing.T) {
+	sup := newTestSupervisor(t, Config{})
+	path := filepath.Join(t.TempDir(), "sentinel")
+	if err := os.WriteFile(path, []byte("SUCCEEDED\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	child := &childRuntime{id: "rt", sentinelFile: path, warmResumePending: true, session: runtime.Session{SessionID: "session"}}
+	sup.finishUnstartedWarmResume(child)
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(data, []byte("SUCCEEDED\n")) {
+		t.Fatalf("completion sentinel overwritten: %q %v", data, err)
+	}
+	if child.exitCode != 0 || child.lastStopReason != "" {
+		t.Fatalf("failure state applied: exit=%d reason=%q", child.exitCode, child.lastStopReason)
 	}
 }
 
