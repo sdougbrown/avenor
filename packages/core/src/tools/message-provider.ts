@@ -530,7 +530,12 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           if (terminal) {
             return {
               live: false,
-              resumable: await sentinelResumable(registered.sentinelPath),
+              // The Go rung classifies the sentinel status map through
+              // runFactsFromStatus, whose only hit here is a non-empty session
+              // id (applySentinelStatus never sets sentinel_file), so the
+              // registry entry's session decides resumable and the terminal
+              // word — DONE, TIMEOUT or KILLED alike — never gates it.
+              resumable: registered.sessionId !== undefined && registered.sessionId !== '',
               status: terminal,
             }
           }

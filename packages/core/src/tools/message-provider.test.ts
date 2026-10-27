@@ -240,15 +240,18 @@ describe('host message provider', () => {
     await expect(provider(client).state('rt_ghost')).rejects.toThrow('runtime "rt_ghost" not found')
   })
 
-  it('reports a registry run\'s terminal sentinel through the genuine absence answer', async () => {
+  it('reports a registry run\'s terminal sentinel as resumable from its session, whatever the terminal word', async () => {
     // A run that finished before a supervisor restart has no runtime left for
     // the status verb to find, but the registry keeps its terminal sentinel,
     // so the terminal facts answer the call instead of the listing's
-    // never-resumable peer facts for the same run id.
+    // never-resumable peer facts for the same run id. Resumable follows the
+    // session the registry entry carries, the same condition the Go rung
+    // reads from the sentinel's session: a supervisor-imposed termination
+    // (TIMEOUT, KILLED) with a session is just as resumable as DONE, so the
+    // status word never gates it here.
     const supervisorId = '/tmp/avenor-provider.sock'
     const runDir = path.join(home, 'runs', 'run-461')
     fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
-    fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\nSESSION_ID=ses_9\n')
     registerExternalRun({
       runId: 'run-461',
       label: 'mesh-a',
@@ -256,6 +259,7 @@ describe('host message provider', () => {
       sentinelPath: path.join(runDir, 'sentinel.done'),
       eventLogPath: path.join(runDir, 'events.log'),
       runtimeId: 'rt_9',
+      sessionId: 'ses_9',
     })
     try {
       const client = fakeClient({
@@ -266,7 +270,46 @@ describe('host message provider', () => {
           peers: [{ run_id: 'run-461', session: { run_id: 'run-461', label: 'mesh-a', status: 'running' } }],
         })),
       })
-      expect(await provider(client).state('run-461')).toMatchObject({ live: false, resumable: true, status: 'done' })
+      const host = provider(client)
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\n')
+      expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'done' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'TIMEOUT\n')
+      expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'timeout' })
+    } finally {
+      forgetExternalRuns(supervisorId)
+      fs.rmSync(runDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports a registry run\'s terminal sentinel as not resumable without a session', async () => {
+    // A terminal word alone is not a resume: the Go rung answers resumable
+    // only from a non-empty session, so a registry entry without one stays
+    // not resumable even when its sentinel settled DONE or KILLED.
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const runDir = path.join(home, 'runs', 'run-463')
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+    registerExternalRun({
+      runId: 'run-463',
+      label: 'mesh-c',
+      supervisorId,
+      sentinelPath: path.join(runDir, 'sentinel.done'),
+      eventLogPath: path.join(runDir, 'events.log'),
+      runtimeId: 'rt_11',
+    })
+    try {
+      const client = fakeClient({
+        status: mock(async () => {
+          throw new RpcError(-32000, 'runtime "run-463" not found')
+        }),
+        messagePeers: mock(async () => ({
+          peers: [{ run_id: 'run-463', session: { run_id: 'run-463', label: 'mesh-c', status: 'running' } }],
+        })),
+      })
+      const host = provider(client)
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\n')
+      expect(await host.state('run-463')).toMatchObject({ live: false, resumable: false, status: 'done' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'KILLED\n')
+      expect(await host.state('run-463')).toMatchObject({ live: false, resumable: false, status: 'killed' })
     } finally {
       forgetExternalRuns(supervisorId)
       fs.rmSync(runDir, { recursive: true, force: true })
@@ -276,7 +319,9 @@ describe('host message provider', () => {
   it('keeps the absence error when a registry run holds no terminal sentinel', async () => {
     // The registry entry alone is not an answer: a sentinel the call cannot
     // read, or one that has not reached a terminal status, leaves the run's
-    // absence error standing rather than inventing terminal facts.
+    // absence error standing rather than inventing terminal facts — even when
+    // the entry carries a session, since a session never makes a non-terminal
+    // rung an answer.
     const supervisorId = '/tmp/avenor-provider.sock'
     const runDir = path.join(home, 'runs', 'run-462')
     fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
@@ -287,6 +332,7 @@ describe('host message provider', () => {
       sentinelPath: path.join(runDir, 'sentinel.done'),
       eventLogPath: path.join(runDir, 'events.log'),
       runtimeId: 'rt_10',
+      sessionId: 'ses_10',
     })
     try {
       const client = fakeClient({
@@ -304,6 +350,8 @@ describe('host message provider', () => {
       })
       await expect(provider(client).state('run-462')).rejects.toThrow('runtime "run-462" not found')
       fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'RUNNING\n')
+      await expect(provider(client).state('run-462')).rejects.toThrow('runtime "run-462" not found')
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), '')
       await expect(provider(client).state('run-462')).rejects.toThrow('runtime "run-462" not found')
     } finally {
       forgetExternalRuns(supervisorId)
