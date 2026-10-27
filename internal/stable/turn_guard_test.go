@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -63,5 +64,18 @@ func TestTurnGuardDoesNotBlockOtherRuntimes(t *testing.T) {
 	close(release)
 	if err := <-doneA; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTurnGuardRefusesAnUnknownRuntime(t *testing.T) {
+	child := &childRuntime{id: "rt", sentinelFile: "turn-a", mu: sync.Mutex{}}
+	sup := &Supervisor{runtimes: map[string]*childRuntime{"rt": child}}
+	called := false
+	err := sup.WithTurn("missing", "turn-a", func() error { called = true; return nil })
+	if err == nil {
+		t.Fatal("WithTurn succeeded for an unknown runtime")
+	}
+	if called {
+		t.Fatal("WithTurn ran the operation for an unknown runtime")
 	}
 }
