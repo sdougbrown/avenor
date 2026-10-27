@@ -9,13 +9,32 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runstate"
+	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
 )
 
-// admitWarmResume installs the next turn's artifacts before publishing its prompt.
-// The runtime's turnMu serializes the fence with WithTurn, and writeMu
+// warmResumeArtifacts holds everything a successful reservation produced for
+// the next turn. None of it has been installed on the child yet.
+type warmResumeArtifacts struct {
+	onEvent     string
+	sentinel    string
+	writer      *warmEventWriter
+	fileHandler *permission.FileHandler
+	// cleanup removes a reserved artifact directory after a failure; it does
+	// nothing when the paths were caller-supplied and no directory was made.
+	cleanup func()
+}
+
+// admitWarmResume installs the next turn's artifacts before publishing its
+// prompt. The runtime's turnMu serializes the fence with WithTurn, and writeMu
 // serializes the swap with all event writes and writer teardown. Lock order:
 // see childRuntime.turnMu.
+//
+// The sequence is: gate on supervisor and child state, take the admission
+// locks, reserve the next turn's artifacts, then rotate the child onto the
+// reserved turn. Everything that can fail happens before rotation, so a
+// rejection leaves the child exactly as it was.
 func (s *Supervisor) admitWarmResume(child *childRuntime, p SpawnParams) (SpawnResult, bool, error) {
 	child.turnMu.Lock()
 	defer child.turnMu.Unlock()
@@ -29,8 +48,55 @@ func (s *Supervisor) admitWarmResume(child *childRuntime, p SpawnParams) (SpawnR
 	defer child.writeMu.Unlock()
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
+
+	if warm, err := s.gateWarmResume(child, &p); err != nil || !warm {
+		return SpawnResult{}, warm, err
+	}
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	if warm, err := s.gateWarmResumeChild(child); err != nil || !warm {
+		return SpawnResult{}, warm, err
+	}
+	if h := s.testHooks.warmAdmissionAfterCheck; h != nil {
+		h()
+	}
+
+	release, unlockProvider, err := s.lockWarmResumeAdmission(child, p.Label)
+	if err != nil {
+		return SpawnResult{}, true, err
+	}
+	defer func() {
+		if release != nil {
+			release(false)
+		}
+	}()
+	if unlockProvider != nil {
+		defer unlockProvider()
+	}
+
+	reserved, err := s.reserveWarmResumeArtifacts(child, p)
+	if err != nil {
+		return SpawnResult{}, true, err
+	}
+	result := s.rotateWarmResumeTurn(child, p, reserved)
+	if release != nil {
+		release(true)
+		release = nil
+		if p.Label != "" {
+			child.displayName = s.broker.DisplayName(child.id)
+		}
+	}
+	return result, true, nil
+}
+
+// gateWarmResume rejects a warm resume while the supervisor is shutting down
+// or while the requested label is owned by another runtime, and resolves an
+// implicit label from the broker's harness name. It returns warm=false only
+// for the lifecycle refusal, which is not an error. It runs before child.mu so
+// the documented lock order is preserved.
+func (s *Supervisor) gateWarmResume(child *childRuntime, p *SpawnParams) (bool, error) {
 	if s.shuttingDown {
-		return SpawnResult{}, true, fmt.Errorf("supervisor is shutting down")
+		return true, fmt.Errorf("supervisor is shutting down")
 	}
 	if p.resume.implicitLabel && s.broker != nil {
 		if st := s.broker.GetRun(child.id); st != nil {
@@ -42,15 +108,21 @@ func (s *Supervisor) admitWarmResume(child *childRuntime, p SpawnParams) (SpawnR
 		}
 	}
 	if holder := s.labelHolderLocked(p.Label); holder != "" && holder != child.id {
-		return SpawnResult{}, true, fmt.Errorf("label already in use: %s (runtime %s)", p.Label, holder)
+		return true, fmt.Errorf("label already in use: %s (runtime %s)", p.Label, holder)
 	}
-	child.mu.Lock()
-	defer child.mu.Unlock()
+	return true, nil
+}
+
+// gateWarmResumeChild rejects a warm resume for a child that is completed,
+// shutting down, still closing its writer, or otherwise busy, and for a child
+// with pending broker messages. It returns warm=false only for the lifecycle
+// refusal, which is not an error. It requires child.mu.
+func (s *Supervisor) gateWarmResumeChild(child *childRuntime) (bool, error) {
 	if child.lc.isCompleted() || child.lc.isShuttingDown() || child.lc.isWriterClosing() {
-		return SpawnResult{}, false, nil
+		return false, nil
 	}
 	if !child.lc.isParked() || child.warmResumePending || child.promptClaimed || len(child.promptQueue) != 0 {
-		return SpawnResult{}, true, fmt.Errorf("runtime %q is busy", child.id)
+		return true, fmt.Errorf("runtime %q is busy", child.id)
 	}
 	if s.broker != nil {
 		if st := s.broker.GetRun(child.id); st != nil {
@@ -58,48 +130,57 @@ func (s *Supervisor) admitWarmResume(child *childRuntime, p SpawnParams) (SpawnR
 			pending := len(st.ControlQueue) != 0
 			st.Mu.Unlock()
 			if pending {
-				return SpawnResult{}, true, fmt.Errorf("runtime %q has pending broker messages", child.id)
+				return true, fmt.Errorf("runtime %q has pending broker messages", child.id)
 			}
 		}
 	}
+	return true, nil
+}
 
-	if h := s.testHooks.warmAdmissionAfterCheck; h != nil {
-		h()
-	}
-	var release func(bool)
+// lockWarmResumeAdmission takes the broker's warm-admission lock and the
+// provider's warm-message guard for the session. The caller must pass the
+// broker release commit=true only after the turn is published (false releases
+// it without committing), and must always call the returned provider unlock
+// when it is non-nil. Both run while child.mu is held, after s.controlMu, in
+// the documented lock order.
+func (s *Supervisor) lockWarmResumeAdmission(child *childRuntime, label string) (release func(bool), unlockProvider func(), err error) {
 	if s.broker != nil {
-		var err error
-		release, err = s.broker.LockWarmAdmission(child.id, p.Label)
+		release, err = s.broker.LockWarmAdmission(child.id, label)
 		if err != nil {
-			return SpawnResult{}, true, err
+			return nil, nil, err
 		}
-		defer func() {
+	}
+	if guard, ok := child.provider.(warmqueue.WarmMessageAdmission); ok {
+		unlock, admitted := guard.LockWarmMessageAdmission(child.session.SessionID)
+		if !admitted {
 			if release != nil {
 				release(false)
 			}
-		}()
-	}
-	if guard, ok := child.provider.(interface {
-		LockWarmMessageAdmission(string) (func(), bool)
-	}); ok {
-		unlock, admitted := guard.LockWarmMessageAdmission(child.session.SessionID)
-		if !admitted {
-			return SpawnResult{}, true, fmt.Errorf("runtime %q has pending provider messages", child.id)
+			return nil, nil, fmt.Errorf("runtime %q has pending provider messages", child.id)
 		}
-		defer unlock()
+		return release, unlock, nil
 	}
+	return release, nil, nil
+}
 
+// reserveWarmResumeArtifacts picks the next turn's event and sentinel paths,
+// rejects path collisions, exclusively creates the event file, and parses the
+// derived permission handler. Every fallible step happens here, so a failure
+// releases the whole reservation — the new writer is closed and reserved
+// directories removed — and the caller's child state is untouched. Requires
+// child.mu (the collision checks compare against the child's current paths).
+func (s *Supervisor) reserveWarmResumeArtifacts(child *childRuntime, p SpawnParams) (warmResumeArtifacts, error) {
 	onEvent, sentinel := p.OnEvent, p.SentinelFile
 	var dir string
 	if onEvent == "" || sentinel == "" {
 		root := s.runtimeArtifactDir(child.id)
 		if err := os.MkdirAll(root, 0700); err != nil {
-			return SpawnResult{}, true, err
+			return warmResumeArtifacts{}, err
 		}
 		var err error
 		dir, err = os.MkdirTemp(root, "turn-")
 		if err != nil {
-			return SpawnResult{}, true, err
+			return warmResumeArtifacts{}, err
 		}
 		if onEvent == "" {
 			onEvent = filepath.Join(dir, "events.ndjson")
@@ -116,37 +197,61 @@ func (s *Supervisor) admitWarmResume(child *childRuntime, p SpawnParams) (SpawnR
 	for _, pair := range [][2]string{{onEvent, sentinel}, {onEvent, child.onEvent}, {onEvent, child.sentinelFile}, {sentinel, child.onEvent}, {sentinel, child.sentinelFile}} {
 		if sameArtifact(pair[0], pair[1]) {
 			cleanup()
-			return SpawnResult{}, true, fmt.Errorf("warm resume artifact paths must be distinct")
+			return warmResumeArtifacts{}, fmt.Errorf("warm resume artifact paths must be distinct")
 		}
 	}
 	if _, err := os.Lstat(sentinel); err == nil {
 		cleanup()
-		return SpawnResult{}, true, fmt.Errorf("sentinel path already exists: %s", sentinel)
+		return warmResumeArtifacts{}, fmt.Errorf("sentinel path already exists: %s", sentinel)
 	} else if !os.IsNotExist(err) {
 		cleanup()
-		return SpawnResult{}, true, err
+		return warmResumeArtifacts{}, err
 	}
 	// Reserve a fresh path before opening the writer: earlier turns' event
 	// files must never be truncated, including hard links to those files.
 	file, err := os.OpenFile(onEvent, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		cleanup()
-		return SpawnResult{}, true, err
+		return warmResumeArtifacts{}, err
 	}
 	writer := &warmEventWriter{file: file, encoder: json.NewEncoder(file)}
-	old := child.eventWriter
-	child.eventWriter = writer
-	if child.fanoutWriter != nil {
-		child.fanoutWriter.base = writer
+	fileHandler, err := s.derivedPermissionHandler(child, sentinel)
+	if err != nil {
+		_ = writer.Close()
+		cleanup()
+		return warmResumeArtifacts{}, fmt.Errorf("permission handler: %w", err)
 	}
-	child.onEvent, child.sentinelFile = onEvent, sentinel
+	return warmResumeArtifacts{onEvent: onEvent, sentinel: sentinel, writer: writer, fileHandler: fileHandler, cleanup: cleanup}, nil
+}
+
+// derivedPermissionHandler parses the permission handler derived from the next
+// sentinel path when the child derives its handler from the sentinel. The
+// result is held for rotation; parsing must finish before any child state
+// changes so a failure leaves the child untouched.
+func (s *Supervisor) derivedPermissionHandler(child *childRuntime, sentinel string) (*permission.FileHandler, error) {
+	if !child.derivedFileHandler {
+		return nil, nil
+	}
+	if parse := s.testHooks.warmResumePermissionHandler; parse != nil {
+		return parse(sentinel)
+	}
+	return cli.ParsePermissionHandler("file:" + cli.DerivePermBase(sentinel))
+}
+
+// rotateWarmResumeTurn swaps the child onto the reserved turn: it installs the
+// new writer and derived handler, swaps the artifact paths, resets the turn's
+// output state, queues the prompt, closes the previous writer, and signals the
+// prompt. It cannot fail — every fallible step was validated by the
+// reservation — and it requires child.mu and the held admission locks.
+func (s *Supervisor) rotateWarmResumeTurn(child *childRuntime, p SpawnParams, reserved warmResumeArtifacts) SpawnResult {
+	old := child.eventWriter
+	child.eventWriter = reserved.writer
+	if child.fanoutWriter != nil {
+		child.fanoutWriter.base = reserved.writer
+	}
+	child.onEvent, child.sentinelFile = reserved.onEvent, reserved.sentinel
 	if child.derivedFileHandler {
-		fh, err := cli.ParsePermissionHandler("file:" + cli.DerivePermBase(sentinel))
-		if err != nil {
-			cleanup()
-			return SpawnResult{}, true, fmt.Errorf("permission handler: %w", err)
-		}
-		child.fileHandler = fh
+		child.fileHandler = reserved.fileHandler
 	}
 	child.task, child.taskFile = p.Prompt, p.PromptFile
 	child.lastStopReason = ""
@@ -163,14 +268,7 @@ func (s *Supervisor) admitWarmResume(child *childRuntime, p SpawnParams) (SpawnR
 		_ = old.Close()
 	}
 	child.signalPrompt()
-	if release != nil {
-		release(true)
-		release = nil
-		if p.Label != "" {
-			child.displayName = s.broker.DisplayName(child.id)
-		}
-	}
-	return SpawnResult{RunID: p.resume.runID, RuntimeID: child.id, Label: p.Label, SessionID: child.session.SessionID, OnEvent: onEvent, SentinelFile: sentinel}, true, nil
+	return SpawnResult{RunID: p.resume.runID, RuntimeID: child.id, Label: p.Label, SessionID: child.session.SessionID, OnEvent: reserved.onEvent, SentinelFile: reserved.sentinel}
 }
 
 type warmEventWriter struct {

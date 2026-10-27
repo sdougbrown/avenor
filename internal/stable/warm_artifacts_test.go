@@ -2,13 +2,16 @@ package stable
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
@@ -171,6 +174,68 @@ func TestWarmResumeRejectsClaimedDirectPrompt(t *testing.T) {
 	if child.onEvent != filepath.Join(root, "old") {
 		t.Fatal("claimed prompt artifacts changed")
 	}
+}
+
+func TestWarmResumeRejectsDerivedHandlerWithoutChildMutation(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old-events")
+	oldSentinel := filepath.Join(root, "old-sentinel")
+	sink, err := cli.NewEventWriter(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	handler := permission.NewFileHandler("old-base")
+	child := &childRuntime{
+		id:                 "rt",
+		eventWriter:        sink,
+		onEvent:            oldPath,
+		sentinelFile:       oldSentinel,
+		derivedFileHandler: true,
+		fileHandler:        handler,
+		promptCh:           make(chan struct{}, 1),
+		session:            runtime.Session{SessionID: "session"},
+	}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	sup := &Supervisor{}
+	sup.testHooks.warmResumePermissionHandler = func(string) (*permission.FileHandler, error) {
+		return nil, errors.New("forced parse failure")
+	}
+	newPath, newSentinel := filepath.Join(root, "new-events"), filepath.Join(root, "new-sentinel")
+	_, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: newPath, SentinelFile: newSentinel})
+	if !warm || err == nil || !strings.Contains(err.Error(), "permission handler") {
+		t.Fatalf("admission: warm=%v err=%v", warm, err)
+	}
+	if child.eventWriter != sink || child.onEvent != oldPath || child.sentinelFile != oldSentinel || child.fileHandler != handler || len(child.promptQueue) != 0 {
+		t.Fatal("rejected admission mutated the child")
+	}
+	if n := openFDsForPath(t, newPath); n != 0 {
+		t.Fatalf("reserved event file left open: %d fds on %s", n, newPath)
+	}
+	if n := openFDsForPath(t, oldPath); n == 0 {
+		t.Fatal("child's previous writer was closed by the failed admission")
+	}
+}
+
+// openFDsForPath counts this process's open file descriptors pointing at path.
+// It skips the count on platforms without a proc filesystem.
+func openFDsForPath(t *testing.T, path string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("cannot read /proc/self/fd: %v", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		target, err := os.Readlink("/proc/self/fd/" + entry.Name())
+		if err != nil {
+			continue
+		}
+		if target == path {
+			count++
+		}
+	}
+	return count
 }
 
 func containsEvent(data []byte, name string) bool { return bytes.Contains(data, []byte(name)) }

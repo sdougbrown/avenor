@@ -11,6 +11,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
 )
 
 const backendID = "codex-app-server"
@@ -30,23 +31,23 @@ type Provider struct {
 	startClient func(context.Context, runtime.StartOptions) (*client, error)
 
 	// Broker fields for channel-wrapped prompt injection.
-	broker            *broker.Broker
-	runIDs            map[string]string // sessionID → runID
-	pollCancels       map[string]context.CancelFunc
-	pendingMu         sync.Mutex
-	pendingMessages   map[string][]string // sessionID → queued wrapped prompts
-	injectingMessages map[string]int
+	broker      *broker.Broker
+	runIDs      map[string]string // sessionID → runID
+	pollCancels map[string]context.CancelFunc
+	// Queue holds queued channel messages and the warm-admission guard;
+	// LockWarmMessageAdmission is promoted from it.
+	*warmqueue.Queue
 }
 
 func NewWithOptions(opts runtime.StartOptions) *Provider {
 	return &Provider{
-		opts:            opts,
-		threads:         map[string]string{},
-		turns:           map[string]string{},
-		efforts:         map[string]string{},
-		runIDs:          map[string]string{},
-		pollCancels:     map[string]context.CancelFunc{},
-		pendingMessages: map[string][]string{},
+		opts:        opts,
+		threads:     map[string]string{},
+		turns:       map[string]string{},
+		efforts:     map[string]string{},
+		runIDs:      map[string]string{},
+		pollCancels: map[string]context.CancelFunc{},
+		Queue:       warmqueue.NewQueue(),
 	}
 }
 
@@ -98,9 +99,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		p.pollCancels[threadID] = cancel
 		p.mu.Unlock()
 		go p.broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
-			p.pendingMu.Lock()
-			p.pendingMessages[threadID] = append(p.pendingMessages[threadID], wrapped)
-			p.pendingMu.Unlock()
+			p.Queue.Enqueue(threadID, wrapped)
 		})
 	}
 
@@ -314,9 +313,7 @@ func (p *Provider) Close() error {
 	p.mu.Lock()
 	p.runIDs = nil
 	p.mu.Unlock()
-	p.pendingMu.Lock()
-	p.pendingMessages = map[string][]string{}
-	p.pendingMu.Unlock()
+	p.Queue.Reset()
 	if c == nil {
 		return nil
 	}
@@ -384,39 +381,14 @@ func (p *Provider) getClient() (*client, error) {
 	return c, nil
 }
 
-// LockWarmMessageAdmission prevents an admitted turn from overtaking a
-// queued or currently injecting broker message.
-func (p *Provider) LockWarmMessageAdmission(sessionID string) (func(), bool) {
-	p.pendingMu.Lock()
-	if len(p.pendingMessages[sessionID]) != 0 || p.injectingMessages[sessionID] != 0 {
-		p.pendingMu.Unlock()
-		return nil, false
-	}
-	return p.pendingMu.Unlock, true
-}
-
 // injectPendingMessages injects queued channel-wrapped messages for a session
 // at a turn boundary.
 func (p *Provider) injectPendingMessages(ctx context.Context, sessionID string) {
-	p.pendingMu.Lock()
-	msgs := p.pendingMessages[sessionID]
-	p.pendingMessages[sessionID] = nil
-	if len(msgs) != 0 {
-		if p.injectingMessages == nil {
-			p.injectingMessages = make(map[string]int)
-		}
-		p.injectingMessages[sessionID]++
-	}
-	p.pendingMu.Unlock()
-
+	msgs, done := p.Queue.Take(sessionID)
 	if len(msgs) == 0 {
 		return
 	}
-	defer func() {
-		p.pendingMu.Lock()
-		p.injectingMessages[sessionID]--
-		p.pendingMu.Unlock()
-	}()
+	defer done()
 	for _, msg := range msgs {
 		if err := p.Prompt(ctx, sessionID, msg); err != nil {
 			// Non-fatal: continue with remaining messages.

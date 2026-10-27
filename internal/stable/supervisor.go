@@ -626,6 +626,11 @@ type testHooks struct {
 	// test can land a broker send in that read–commit window
 	// deterministically. nil in production.
 	warmAdmissionAfterCheck func()
+	// warmResumePermissionHandler, when non-nil (set by tests before the
+	// admission call), replaces the derived permission handler parse during
+	// warm-resume artifact reservation so a test can force the pre-install
+	// validation failure. nil in production.
+	warmResumePermissionHandler func(sentinel string) (*permission.FileHandler, error)
 }
 
 type Supervisor struct {

@@ -1,18 +1,25 @@
 package codexappserver
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
+)
 
 func TestWarmAdmissionRejectsQueuedAndInjectingMessages(t *testing.T) {
-	p := &Provider{pendingMessages: map[string][]string{"session": {"message"}}, injectingMessages: map[string]int{}}
+	p := &Provider{Queue: warmqueue.NewQueue()}
+	p.Queue.Enqueue("session", "message")
 	if _, ok := p.LockWarmMessageAdmission("session"); ok {
 		t.Fatal("queued message admitted")
 	}
-	p.pendingMessages["session"] = nil
-	p.injectingMessages["session"] = 1
+	msgs, done := p.Queue.Take("session")
+	if len(msgs) != 1 {
+		t.Fatalf("taken messages = %#v", msgs)
+	}
 	if _, ok := p.LockWarmMessageAdmission("session"); ok {
 		t.Fatal("in-flight injection admitted")
 	}
-	p.injectingMessages["session"] = 0
+	done()
 	unlock, ok := p.LockWarmMessageAdmission("session")
 	if !ok {
 		t.Fatal("empty queue rejected")
