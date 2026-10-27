@@ -506,19 +506,13 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		if !ok {
 			return
 		}
-		s.Mu.Lock()
-		finished := s.Finished
-		s.Mu.Unlock()
-		if finished {
+		if !s.BeginPaste() {
 			return
 		}
-
-		if err := pastePromptAndSubmit(s.Ctx, s.Term, prompt); err != nil {
+		err := pastePromptAndSubmit(s.Ctx, s.Term, prompt)
+		if !s.EndPaste(err == nil) || err != nil {
 			return
 		}
-		s.Mu.Lock()
-		s.Prompted = true
-		s.Mu.Unlock()
 		fields := map[string]any{
 			"delivery":      s.Term.Kind(),
 			"prompt_length": len(prompt),

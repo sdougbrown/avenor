@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -210,6 +211,9 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 	fail, agentNotFound := s.detectAgentNotFound(ctx)
 	stderrTail := truncateRunes(collapseSpace(s.readStderrLog()), maxDiagnosticText)
 	prompted := s.everPrompted()
+	// Before MarkFinished: nothing may block between claiming the verdict and
+	// emitting it.
+	pane := s.paneText(ctx)
 	// The log has given up everything it has, so drop it here rather than relying
 	// only on runSession's teardown defer: session.end is what lets a one-shot
 	// caller exit, and a process that exits on that event can beat the defer,
@@ -220,7 +224,13 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 	if !s.MarkFinished() {
 		return
 	}
+	s.Mu.Lock()
+	unready, unreadyPane := s.unreadyLaunch, s.unreadyPane
+	s.Mu.Unlock()
 	switch {
+	case unready:
+		// FailUnreadyLaunch killed the terminal and this watcher saw it first.
+		s.emitUnreadyLaunch(unreadyPane)
 	case agentNotFound:
 		s.emitLaunchFailure(StopReasonAgentNotFound, fail.Message(), map[string]any{
 			"agent":            fail.Agent,
@@ -239,7 +249,7 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 		// a crash leaves the log empty and only the pane shows it.
 		s.emitLaunchFailure(StopReasonLaunchFailed, msg, map[string]any{
 			"stderr": stderrTail,
-			"pane":   s.paneText(ctx),
+			"pane":   pane,
 		})
 	default:
 		s.Emit(events.Event{
@@ -258,46 +268,59 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 // pane showed instead. Claude is still running there, parked on a screen
 // avenor does not answer, such as a settings-approval or MCP-server dialog, so
 // without a terminal status a caller waiting on session.end waits forever.
-// Cancelling the session makes runSession kill the terminal.
 //
-// It leaves a session that already ran a turn alone: a later prompt that finds
-// the pane busy is not a failed launch. A cancelled ctx means the session is
-// already ending, so it reports nothing.
+// It leaves the session alone when a prompt has landed or is landing (a later
+// prompt that finds the pane busy is not a failed launch), when another
+// verdict already claimed it, and when ctx is cancelled because the session is
+// already ending.
 func (s *Session) FailUnreadyLaunch(ctx context.Context) {
-	// Capture first: once this run owns the verdict, nothing may block
-	// between claiming it and emitting it.
 	pane := s.paneText(ctx)
-	if ctx.Err() == nil {
-		claimed, prompted := s.markFinishedUnlessPrompted()
-		if prompted {
-			return
-		}
-		if claimed {
-			s.emitLaunchFailure(StopReasonTerminalNotReady,
-				"claude never showed its input box, so avenor never submitted a prompt; the run never started",
-				map[string]any{"pane": pane})
-		}
+	if ctx.Err() != nil || !s.takeUnreadyLaunch(pane) {
+		return
 	}
+	// Kill before reporting: a one-shot caller exits on session.end, which can
+	// beat runSession's teardown and leave claude parked in a detached tmux
+	// session. Not ctx: tmux kill-session never runs under a cancelled one.
+	if s.Term != nil {
+		killCtx, cancel := context.WithTimeout(context.Background(), unreadyKillTimeout)
+		_ = s.Term.Kill(killCtx)
+		cancel()
+	}
+	// The dead terminal can end runSession first. EmitTerminalGone then claims
+	// and reports this same verdict, and its teardown cancels the session.
+	if !s.MarkFinished() {
+		return
+	}
+	s.emitUnreadyLaunch(pane)
 	if s.CancelFn != nil {
 		s.CancelFn()
 	}
 }
 
-// markFinishedUnlessPrompted is MarkFinished for a launch verdict. It claims
-// nothing once a prompt has landed and reports that in prompted. One critical
-// section covers both, so a concurrent Prompt cannot land between the check
-// and the claim.
-func (s *Session) markFinishedUnlessPrompted() (claimed, prompted bool) {
+// unreadyKillTimeout bounds the kill FailUnreadyLaunch runs before reporting.
+const unreadyKillTimeout = 5 * time.Second
+
+// takeUnreadyLaunch reserves the session for FailUnreadyLaunch, recording the
+// pane to report. It reports false when a prompt has landed or is landing,
+// when the session is finished, or when FailUnreadyLaunch already took it.
+// Once taken, BeginPaste refuses new pastes.
+func (s *Session) takeUnreadyLaunch(pane string) bool {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
-	if s.Prompted {
-		return false, true
+	if s.Prompted || s.pastesInFlight > 0 || s.Finished || s.unreadyLaunch {
+		return false
 	}
-	if s.Finished {
-		return false, false
-	}
-	s.Finished = true
-	return true, false
+	s.unreadyLaunch = true
+	s.unreadyPane = pane
+	return true
+}
+
+// emitUnreadyLaunch reports the verdict FailUnreadyLaunch took. Callers must
+// have won the MarkFinished race.
+func (s *Session) emitUnreadyLaunch(pane string) {
+	s.emitLaunchFailure(StopReasonTerminalNotReady,
+		"claude never showed its input box, so avenor never submitted a prompt; the run never started",
+		map[string]any{"pane": pane})
 }
 
 // paneText is the bottom of the pane as one line of text for a diagnostic,

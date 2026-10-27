@@ -39,6 +39,13 @@ type Session struct {
 	Finished            bool
 	PendingTerminalPerm *TerminalPermission
 
+	// pastesInFlight counts prompt pastes between BeginPaste and EndPaste.
+	// unreadyLaunch is set once FailUnreadyLaunch has taken the session, and
+	// unreadyPane holds the pane it reports.
+	pastesInFlight int
+	unreadyLaunch  bool
+	unreadyPane    string
+
 	// startupWait is how long after launchedAt the first prompt is held;
 	// startupWaitDone is set once the first prompt has claimed it.
 	startupWait     time.Duration
@@ -98,6 +105,32 @@ func (s *Session) MarkFinished() bool {
 	}
 	s.Finished = true
 	return true
+}
+
+// BeginPaste reserves the session for a prompt paste, so FailUnreadyLaunch
+// leaves it alone until EndPaste. It reports false, reserving nothing, once the
+// session is finished or failing as an unready launch.
+func (s *Session) BeginPaste() bool {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if s.Finished || s.unreadyLaunch {
+		return false
+	}
+	s.pastesInFlight++
+	return true
+}
+
+// EndPaste releases a BeginPaste; landed records that the prompt reached
+// Claude. It reports whether the session is still running, so a caller emits
+// nothing after its session.end.
+func (s *Session) EndPaste(landed bool) bool {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.pastesInFlight--
+	if landed {
+		s.Prompted = true
+	}
+	return !s.Finished
 }
 
 func (s *Session) MarkActive() {

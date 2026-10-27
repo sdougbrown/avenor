@@ -17,6 +17,8 @@ type FakeSession struct {
 	alive              bool
 	pasteCalls         [][]string
 	pasteErr           error
+	pasteStarted       chan<- struct{}
+	pasteRelease       <-chan struct{}
 	sendCalls          [][]string
 	sendNotify         chan []string
 	sendErr            error
@@ -139,12 +141,29 @@ func (f *FakeSession) PID() int {
 	return f.pid
 }
 
-// PasteAndEnter records the paste call and returns the configured error.
+// PasteAndEnter records the paste call and returns the configured error. With a
+// gate set via SetPasteGate it signals the start and holds until released.
 func (f *FakeSession) PasteAndEnter(_ context.Context, text string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.pasteCalls = append(f.pasteCalls, []string{text})
-	return f.pasteErr
+	err, started, release := f.pasteErr, f.pasteStarted, f.pasteRelease
+	f.mu.Unlock()
+	if started != nil {
+		started <- struct{}{}
+	}
+	if release != nil {
+		<-release
+	}
+	return err
+}
+
+// SetPasteGate makes PasteAndEnter send on started once called, then wait for
+// release before returning, so a test can act while a paste is in flight.
+func (f *FakeSession) SetPasteGate(started chan<- struct{}, release <-chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pasteStarted = started
+	f.pasteRelease = release
 }
 
 // PasteCalls returns the recorded PasteAndEnter calls.

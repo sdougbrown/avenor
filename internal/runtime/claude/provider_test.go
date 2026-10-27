@@ -919,14 +919,14 @@ func TestPromptSkipsPasteWhenSessionFinishedDuringStartupWait(t *testing.T) {
 	}
 }
 
-func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *claudecore.Session) {
+func newPromptSession(t *testing.T, term *terminal.FakeSession, paneReadyTimeout time.Duration) (*Provider, *claudecore.Session) {
 	t.Helper()
 	p := &Provider{sessions: make(map[string]*claudecore.Session)}
 	term.SetKind("pty")
 	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
 		SessionID:        "ses-unready",
 		EventsBuf:        16,
-		PaneReadyTimeout: 50 * time.Millisecond,
+		PaneReadyTimeout: paneReadyTimeout,
 	})
 	t.Cleanup(s.CancelFn)
 	s.Term = term
@@ -937,7 +937,7 @@ func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *cla
 func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
 	// Claude is alive but parked on a dialog. Without a terminal status the
 	// caller waiting on session.end waits forever.
-	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, claudecoretest.ManagedSettingsDialog))
+	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, claudecoretest.ManagedSettingsDialog), 50*time.Millisecond)
 
 	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -975,7 +975,7 @@ func TestPromptAbstainsWhenTheLaunchExited(t *testing.T) {
 	// a crash. The EmitTerminalGone tests in claudecore pin the watcher's side.
 	term := terminal.NewFakeSession("test-term", 1, "error: bubblewrap is required\n")
 	term.SetAlive(false)
-	p, s := newPromptSession(t, term)
+	p, s := newPromptSession(t, term, 50*time.Millisecond)
 
 	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -993,6 +993,49 @@ func TestPromptAbstainsWhenTheLaunchExited(t *testing.T) {
 				t.Error("Prompt cancelled the session; the exit watcher owns this verdict")
 			}
 			return
+		}
+	}
+}
+
+func TestAPasteInFlightHoldsOffAnUnreadyLaunchVerdict(t *testing.T) {
+	// Two first prompts overlap: one found the input box and is pasting while
+	// the other times out. The paste is the first turn, so the launch did not
+	// fail.
+	term := terminal.NewFakeSession("test-term", 1, claudecoretest.InputBoxReady)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	term.SetPasteGate(started, release)
+	p, s := newPromptSession(t, term, 2*time.Second)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("paste never started")
+	}
+	s.FailUnreadyLaunch(s.Ctx)
+	close(release)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			switch ev.Event {
+			case "session.end", "agent.launch_failed":
+				t.Fatalf("reported %s (%v) while a paste was in flight", ev.Event, ev.Fields["stop_reason"])
+			case "agent.prompt_submitted":
+				if s.Ctx.Err() != nil {
+					t.Error("session context cancelled under a landed paste")
+				}
+				if n := term.KillCalls(); n != 0 {
+					t.Errorf("Kill called %d times under a landed paste", n)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no agent.prompt_submitted for the paste in flight")
 		}
 	}
 }

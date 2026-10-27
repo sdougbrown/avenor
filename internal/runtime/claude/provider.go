@@ -317,10 +317,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			})
 			return
 		}
-		s.Mu.Lock()
-		finished := s.Finished
-		s.Mu.Unlock()
-		if finished {
+		if !s.BeginPaste() {
 			s.Emit(events.Event{
 				Event:     "agent.prompt_failed",
 				SessionID: s.SessionID,
@@ -331,7 +328,11 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			return
 		}
 		s.ArmProgStatusPrompt()
-		if err := s.Term.PasteAndEnter(s.Ctx, prompt); err != nil {
+		err := s.Term.PasteAndEnter(s.Ctx, prompt)
+		if !s.EndPaste(err == nil) {
+			return
+		}
+		if err != nil {
 			s.Emit(events.Event{
 				Event:     "agent.prompt_failed",
 				SessionID: s.SessionID,
@@ -341,9 +342,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			})
 			return
 		}
-		s.Mu.Lock()
-		s.Prompted = true
-		s.Mu.Unlock()
 		fields := map[string]any{
 			"delivery":      s.Term.Kind(),
 			"prompt_length": len(prompt),

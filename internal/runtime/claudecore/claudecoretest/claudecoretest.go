@@ -9,3 +9,6 @@ const ManagedSettingsDialog = " Managed settings require approval\n\n" +
 	" ❯ 1. Yes, I trust these settings\n" +
 	"   2. No, exit Claude Code\n\n" +
 	" Enter to confirm · Esc to exit\n"
+
+// InputBoxReady is a pane whose input box is taking input.
+const InputBoxReady = "❯ Try \"fix lint\"\n"
