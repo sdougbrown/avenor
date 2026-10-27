@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { buildGateCommand, decisionResponseHash, stableStringify } from './command.js'
-import type { Decision, GateDefinition } from './types.js'
+import type { Decision, DecisionSubject, GateDefinition } from './types.js'
 
 function mergeAuthGate(): GateDefinition {
   return {
@@ -181,7 +181,9 @@ describe('buildGateCommand', () => {
       decision: 'satisfy',
       actor: 'a',
       reason: 'r',
-      subject: {},
+      // A transport-written decision file is unvalidated input; this one
+      // carries an empty subject object.
+      subject: {} as DecisionSubject,
     })
     expect(command.subject).toBeUndefined()
   })

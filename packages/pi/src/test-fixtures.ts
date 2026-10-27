@@ -1,7 +1,7 @@
 // Shared test fixtures for the pi extension test suites. Kept out of the
 // *.test.ts files so every suite builds its ExtensionDeps mock from one set.
 import { mock } from 'bun:test'
-import { getSupervisorClient, type InspectResult, type MessageProvider, type RunSnapshot, type StatusResult } from '@dougbots/avenor-core'
+import { getSupervisorClient, type InspectResult, type MessageProvider, type RunPermissionSummary, type RunSnapshot, type StatusResult } from '@dougbots/avenor-core'
 import { RunReducer } from '@dougbots/avenor-core'
 import type { ExtensionDeps } from './index.js'
 import { createExtension } from './index.js'
@@ -17,7 +17,7 @@ export async function startExtensionHarness(options: {
   /** Replaces the whole session-manager mock; without it the default reports `sessionName`. */
   sessionManager?: unknown
   onEmit?: (channel: string, payload: unknown) => void
-  sendUserMessage?: any
+  sendUserMessage?: (text: string, options: { deliverAs: string }) => void
 } = {}) {
   const registeredTools: Record<string, any> = {}
   const registeredCommands: Record<string, any> = {}
@@ -25,7 +25,9 @@ export async function startExtensionHarness(options: {
   const setStatus = mock((..._args: any[]) => {})
   const setWidget = mock((..._args: any[]) => {})
   const notify = mock((..._args: any[]) => {})
-  const sendUserMessage = options.sendUserMessage ?? mock(() => {})
+  const sendUserMessage = mock<(text: string, options: { deliverAs: string }) => void>(
+    options.sendUserMessage ?? (() => {}),
+  )
   const emitted: Array<[string, unknown]> = []
   const mockPi = {
     on: (event: string, handler: any) => { eventHandlers[event] = handler },
@@ -56,7 +58,7 @@ export async function startExtensionHarness(options: {
     inspectTool: mock(async () => makeInspectResult({ status: 'running' })),
     resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true })),
     brokerReceiveTool: mock(async () => ({ asks: [] })),
-    shutdownTool: mock(async () => ({ ok: true })),
+    shutdownTool: mock(async () => ({ ok: true, cleaned_up: [] })),
     killTool: mock(async () => ({ killed: true, run_id: 'run-1' })),
     workflowStatusTool: mock(async () => ({})),
     workflowWaitTool: mock(async () => ({})),
@@ -70,8 +72,8 @@ export async function startExtensionHarness(options: {
     hostProviderFor: mock(async () => makeMessageProvider()),
     getSupervisorClient: getSupervisorClient as any,
     observeRun: mock(() => null),
-    dial: mock(async () => ({ close() {} })),
-    attachOwner: mock(async () => ({ close() {} })),
+    dial: mock(async () => ({ close() {} })) as unknown as ExtensionDeps['dial'],
+    attachOwner: mock(async () => ({ close() {} })) as unknown as ExtensionDeps['attachOwner'],
     // A started session shares an in-process supervisor unless a test says otherwise.
     Supervisor: class {
       static currentInstance() {
@@ -156,6 +158,23 @@ export function waitUntilAborted(init: RequestInit | undefined): Promise<Respons
   })
 }
 
+/** The status tool normalises a pending permission to its required fields. */
+export function statusPermission(
+  permission: RunPermissionSummary | undefined,
+): StatusResult['pending_permission'] | undefined {
+  if (!permission) return undefined
+  return {
+    request_id: permission.request_id ?? '',
+    description: permission.description ?? permission.question ?? permission.tool ?? '',
+    options: permission.options.map(option => ({
+      option_id: option.option_id,
+      label: option.label,
+      kind: option.kind,
+      ...(option.requires_message ? { requires_message: true } : {}),
+    })),
+  }
+}
+
 export function buildSnapshot(): RunSnapshot {
   const reducer = new RunReducer()
   reducer.apply({ event: 'session.start', runtime_id: 'rt-1', run_id: 'run-1', run_label: 'demo', backend: 'pi', agent: 'horse', model: 'model-1', dir: '/tmp/demo' })
@@ -167,6 +186,7 @@ export function buildSnapshot(): RunSnapshot {
 
 export function makeInspectResult(statusOverrides: Partial<StatusResult> = {}): InspectResult {
   const snapshot = buildSnapshot()
+  const permission = statusOverrides.pending_permission ?? statusPermission(snapshot.pending_permission)
   const status: StatusResult = {
     run_id: statusOverrides.run_id ?? 'run-1',
     label: statusOverrides.label ?? 'demo',
@@ -174,7 +194,7 @@ export function makeInspectResult(statusOverrides: Partial<StatusResult> = {}): 
     runtime_id: statusOverrides.runtime_id ?? 'rt-1',
     phase: statusOverrides.phase ?? snapshot.phase,
     phase_label: statusOverrides.phase_label ?? snapshot.phase_label,
-    pending_permission: statusOverrides.pending_permission ?? snapshot.pending_permission,
+    ...(permission ? { pending_permission: permission } : {}),
     session_id: statusOverrides.session_id ?? 'ses-1',
     stop_reason: statusOverrides.stop_reason ?? snapshot.stop_reason,
     backend: statusOverrides.backend ?? 'pi',

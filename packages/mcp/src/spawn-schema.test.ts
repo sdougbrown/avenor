@@ -61,11 +61,10 @@ describe('MCP spawn schema', () => {
 
     expect(expectedFields).not.toContain('mode')
 
-    // Host schema must expose exactly the shared thinking tuple.
-    const thinkingField = spawnInputShape.thinking as z.ZodOptional<
-      z.ZodEnum<typeof THINKING_LEVELS>
-    >
-    expect([...thinkingField.unwrap().options]).toEqual([...THINKING_LEVELS])
+    // Host schema must publish exactly the shared thinking tuple: the enum a
+    // client reads is the values it may send, so extra or missing levels change it.
+    const publishedThinking: unknown = z.toJSONSchema(spawnInputShape.thinking, { target: 'draft-7', io: 'input' })
+    expect(publishedThinking).toMatchObject({ type: 'string', enum: [...THINKING_LEVELS] })
   })
 
   it('matches the shared strict selector validation for mixed fields', () => {

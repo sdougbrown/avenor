@@ -3,17 +3,11 @@
     "strict": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "outDir": "./dist",
     "target": "ESNext",
-    "declaration": true,
     "esModuleInterop": true,
-    "types": ["node", "bun", "bun-types"],
-    "skipLibCheck": true,
-    "paths": {
-      "@dougbots/avenor-core": ["../core/src/index.ts"],
-      "@dougbots/avenor-core/*": ["../core/src/*"]
-    }
+    "types": ["node", "bun"],
+    "noEmit": true,
+    "skipLibCheck": true
   },
-  "include": ["src"],
-  "references": [{ "path": "../core" }]
+  "include": ["src"]
 }

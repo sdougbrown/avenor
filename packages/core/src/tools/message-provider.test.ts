@@ -289,7 +289,7 @@ describe('host message provider', () => {
 
   it('withdraws an ask when the tool call aborts', async () => {
     const client = fakeClient({
-      messageWait: mock(() => new Promise(() => {})),
+      messageWait: mock((_params: Parameters<MessageClient['messageWait']>[0]) => new Promise<never>(() => {})),
     })
     const controller = new AbortController()
     const pending = executeMessage(provider(client), {

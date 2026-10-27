@@ -46,6 +46,18 @@ description = "Test all JS packages"
 depends = ["js-build"]
 run = ["cd packages/core && bun test", "cd packages/mcp && bun test", "cd packages/opencode && bun test", "cd packages/pi && bun test"]
 
+[tasks.js-typecheck]
+description = "Typecheck all JS packages with tsc --noEmit"
+depends = ["js-core-build"]
+run = [
+  "cd packages/core && bun run typecheck",
+  "cd packages/escalation-bridge && bun run typecheck",
+  "cd packages/mcp && bun run typecheck",
+  "cd packages/opencode && bun run typecheck",
+  "cd packages/pi && bun run typecheck",
+  "cd packages/board && bun run typecheck",
+]
+
 [tasks.go-build]
 description = "Build the avenor Go binary (without board frontend)"
 sources = ["**/*.go", "go.mod", "go.sum"]
@@ -75,7 +87,7 @@ depends = ["go-build", "js-build"]
 
 [tasks.test]
 description = "Test Go packages and all JS packages"
-depends = ["go-test", "js-test"]
+depends = ["go-test", "js-typecheck", "js-test"]
 
 [tasks.js-dev]
 description = "Watch all JS packages"

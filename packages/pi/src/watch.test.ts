@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { RunReducer, type InspectResult, type RunObserver, type RunSnapshot, type StatusResult } from '@dougbots/avenor-core'
 import { visibleWidth } from '@earendil-works/pi-tui'
+import { statusPermission } from './test-fixtures.js'
 import {
   RunInspectorOverlay,
   clipText,
@@ -38,6 +39,7 @@ function buildSnapshot(events: unknown[]): RunSnapshot {
 }
 
 function makeInspectResult(snapshot: RunSnapshot, status: Partial<StatusResult> = {}): InspectResult {
+  const permission = status.pending_permission ?? statusPermission(snapshot.pending_permission)
   const mergedStatus: StatusResult = {
     run_id: status.run_id ?? snapshot.identity.run_id ?? 'run-1',
     label: status.label ?? snapshot.identity.run_label ?? 'run-1',
@@ -45,7 +47,7 @@ function makeInspectResult(snapshot: RunSnapshot, status: Partial<StatusResult> 
     runtime_id: status.runtime_id ?? snapshot.identity.runtime_id,
     phase: status.phase ?? snapshot.phase,
     phase_label: status.phase_label ?? snapshot.phase_label,
-    pending_permission: status.pending_permission ?? snapshot.pending_permission,
+    ...(permission ? { pending_permission: permission } : {}),
     session_id: status.session_id ?? snapshot.identity.session_id,
     stop_reason: status.stop_reason ?? snapshot.stop_reason,
     backend: status.backend ?? snapshot.identity.backend,
@@ -411,7 +413,7 @@ describe('openRunInspector', () => {
         select,
         custom: mock(async (factory: any) => {
           const component = factory(tui, theme, keybindings, mock(() => {})) as RunInspectorOverlay
-          component.dispose()
+          component?.dispose()
         }),
       },
     } as any, {
@@ -441,7 +443,7 @@ describe('openRunInspector', () => {
         select,
         custom: mock(async (factory: any) => {
           const component = factory(tui, theme, keybindings, mock(() => {})) as RunInspectorOverlay
-          component.dispose()
+          component?.dispose()
         }),
       },
     } as any, {
@@ -478,7 +480,7 @@ describe('openRunInspector', () => {
         select,
         custom: mock(async (factory: any) => {
           const component = factory(tui, theme, keybindings, mock(() => {})) as RunInspectorOverlay
-          component.dispose()
+          component?.dispose()
         }),
       },
     } as any, {
@@ -509,7 +511,7 @@ describe('openRunInspector', () => {
         custom: mock(async (factory: any) => {
           component = factory(tui, theme, keybindings, done)
           expect(component).toBeInstanceOf(RunInspectorOverlay)
-          component.dispose()
+          component?.dispose()
         }),
       },
     } as any, {

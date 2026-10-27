@@ -26,7 +26,10 @@ export interface ResultResult {
 
 interface ResultToolDeps {
   status: typeof statusTool
-  inspect: typeof inspectTool
+  // Only the final-output fallbacks the inspector can supply are read here.
+  inspect: (
+    args: Parameters<typeof inspectTool>[0],
+  ) => Promise<{ final_output?: string; snapshot: { final_output?: string; assistant_text?: string } }>
   fullOutput?(runtimeId: string | undefined, supervisorId?: string): Promise<string | undefined>
   sleep(ms: number, signal?: AbortSignal): Promise<void>
   now(): number

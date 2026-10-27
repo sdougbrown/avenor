@@ -141,7 +141,7 @@ function selectedOptional(record: RecordValue | undefined, key: string): string 
   return optionalScalar(record?.[key])
 }
 
-function hasStatusIdentity(record: RecordValue | undefined): boolean {
+function hasStatusIdentity(record: RecordValue | undefined): record is RecordValue {
   return !!record && !!(stringValue(record.run_id) || stringValue(record.label) || stringValue(record.status))
 }
 
@@ -437,7 +437,7 @@ export function formatStatusOutput(args: StatusArgs, result: StatusResult | Stat
       metadata: { results: statuses, count: statuses.length },
     }
   }
-  const record = result as RecordValue
+  const record: RecordValue = { ...result }
   const runId = selected(record, 'run_id', args.run_id)
   const label = selected(record, 'label', undefined, runId)
   const state = selected(record, 'status')
@@ -449,7 +449,7 @@ export function formatStatusOutput(args: StatusArgs, result: StatusResult | Stat
 }
 
 export function formatResultOutput(args: ResultArgs, result: ResultResult): RichToolResult {
-  const record = result as RecordValue
+  const record: RecordValue = { ...result }
   const runId = selected(record, 'run_id', args.run_id)
   const label = selected(record, 'label', undefined, runId)
   const state = selected(record, 'status')

@@ -124,7 +124,7 @@ async function stopSpawnServer(server: net.Server, socketPath: string): Promise<
   await new Promise<void>((resolve) => server.close(() => resolve()))
   for (const file of [socketPath, `${socketPath}.owner.json`]) {
     try {
-      await os.promises.unlink(file)
+      await fs.promises.unlink(file)
     } catch {
       // The server may have removed the socket during close.
     }

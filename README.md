@@ -25,13 +25,14 @@ Binaries for all platforms on [GitHub Releases](https://github.com/sdougbrown/av
 This repo is Go-first, with a small JS workspace for package integrations. `mise` is the convenience layer for common local tasks; it wraps the underlying `go` and `bun` CLI commands rather than replacing them.
 
 ```bash
-mise run build      # Go binary + JS packages
-mise run test       # Go tests + JS package tests
+mise run build       # Go binary + JS packages
+mise run test        # Go tests + JS typecheck + JS package tests
 
-mise run go-build   # Go binary only
-mise run go-test    # Go tests only
-mise run js-build   # JS packages only
-mise run js-test    # JS tests only
+mise run go-build    # Go binary only
+mise run go-test     # Go tests only
+mise run js-build    # JS packages only
+mise run js-typecheck # tsc --noEmit across the JS packages
+mise run js-test     # JS tests only
 ```
 
 The direct equivalents are still ordinary commands such as `go build -o avenor ./cmd/avenor`, `go test ./...`, `bun run build`, and `bun run test`.

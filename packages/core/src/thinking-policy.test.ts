@@ -29,7 +29,7 @@ const schemaCanonical =
 
 describe('thinking policy conformance', () => {
   it('THINKING_LEVELS matches the canonical tuple embedded in the Umpire schema', () => {
-    expect([...THINKING_LEVELS]).toEqual(schemaCanonical)
+    expect(schemaCanonical).toEqual([...THINKING_LEVELS])
     for (const level of THINKING_LEVELS) {
       expect(isThinkingLevel(level)).toBe(true)
     }

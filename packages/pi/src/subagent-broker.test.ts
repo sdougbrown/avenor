@@ -94,13 +94,13 @@ describe('formatInboundAskBody', () => {
 
 describe('postBroker', () => {
   it('posts run_id/token plus the given body', async () => {
-    const fetchMock = mock(async () => ({ ok: true, json: async () => ({ queued: true }) }))
+    const fetchMock = mock(async (_url: string, _init?: RequestInit) => ({ ok: true, json: async () => ({ queued: true }) }))
     const out = await postBroker(env, '/send', { type: 'agent_message' }, fetchMock as unknown as typeof fetch)
     expect(out).toEqual({ queued: true })
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const [url, init] = fetchMock.mock.calls[0]!
     expect(url).toBe('http://127.0.0.1:1/send')
-    expect(JSON.parse(String(init.body))).toEqual({
+    expect(JSON.parse(String(init?.body))).toEqual({
       run_id: 'rt_1',
       token: 'tok',
       type: 'agent_message',
@@ -108,34 +108,34 @@ describe('postBroker', () => {
   })
 
   it('throws on a non-ok response', async () => {
-    const fetchMock = mock(async () => ({ ok: false, status: 404, text: async () => 'nope' }))
+    const fetchMock = mock(async (_url: string, _init?: RequestInit) => ({ ok: false, status: 404, text: async () => 'nope' }))
     await expect(postBroker(env, '/send', {}, fetchMock as unknown as typeof fetch)).rejects.toThrow('broker /send: 404 nope')
   })
 
   it('keeps the credentials when the body carries its own', async () => {
-    const fetchMock = mock(async () => ({ ok: true, json: async () => ({}) }))
+    const fetchMock = mock(async (_url: string, _init?: RequestInit) => ({ ok: true, json: async () => ({}) }))
     await postBroker(env, '/send', { run_id: 'other', token: 'stolen' }, fetchMock as unknown as typeof fetch)
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(JSON.parse(String(init.body))).toEqual({ run_id: 'rt_1', token: 'tok' })
+    const [, init] = fetchMock.mock.calls[0]!
+    expect(JSON.parse(String(init?.body))).toEqual({ run_id: 'rt_1', token: 'tok' })
   })
 })
 
 describe('publishHarnessName', () => {
   it('sends the harness session name as this run\'s own name', async () => {
-    const fetchMock = mock(async () => ({ ok: true, json: async () => ({ run_id: 'rt_1', label: 'my-session' }) }))
+    const fetchMock = mock(async (_url: string, _init?: RequestInit) => ({ ok: true, json: async () => ({ run_id: 'rt_1', label: 'my-session' }) }))
     await publishHarnessName(env, 'my-session', fetchMock as unknown as typeof fetch)
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const [url, init] = fetchMock.mock.calls[0]!
     expect(url).toBe('http://127.0.0.1:1/session_name')
-    expect(JSON.parse(String(init.body))).toEqual({ name: 'my-session', run_id: 'rt_1', token: 'tok' })
+    expect(JSON.parse(String(init?.body))).toEqual({ name: 'my-session', run_id: 'rt_1', token: 'tok' })
   })
 
   it('clears the name the harness no longer has', async () => {
-    const fetchMock = mock(async () => ({ ok: true, json: async () => ({}) }))
+    const fetchMock = mock(async (_url: string, _init?: RequestInit) => ({ ok: true, json: async () => ({}) }))
     await publishHarnessName(env, undefined, fetchMock as unknown as typeof fetch)
 
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(JSON.parse(String(init.body))).toEqual({ name: '', run_id: 'rt_1', token: 'tok' })
+    const [, init] = fetchMock.mock.calls[0]!
+    expect(JSON.parse(String(init?.body))).toEqual({ name: '', run_id: 'rt_1', token: 'tok' })
   })
 })
 

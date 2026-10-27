@@ -34,6 +34,7 @@ export type {
   RunIdentity,
   RunReducerLimits,
   RunSnapshot,
+  RunSnapshotView,
   RunSnapshotSeed,
   RunToolState,
   RunTranscriptEntry,

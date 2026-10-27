@@ -507,12 +507,16 @@ export function reduceRunSnapshot(
   }
 }
 
-export type RunSnapshotSeed = Partial<
-  Omit<
-    RunSnapshot,
-    '_seen_seq_by_scope' | '_recent_legacy_keys' | '_last_semantic_fingerprint' | '_last_source_event'
-  >
+/**
+ * A snapshot as the inspect surface and an observer publish it: the reducer's
+ * dedupe bookkeeping stays internal to `RunReducer`.
+ */
+export type RunSnapshotView = Omit<
+  RunSnapshot,
+  '_seen_seq_by_scope' | '_recent_legacy_keys' | '_last_semantic_fingerprint' | '_last_source_event'
 >
+
+export type RunSnapshotSeed = Partial<RunSnapshotView>
 
 export class RunReducer {
   private state: RunSnapshot

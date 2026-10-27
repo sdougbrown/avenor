@@ -33,6 +33,7 @@ import {
   type ProviderResult,
   type RunObserver,
   type RunSnapshot,
+  type RunSnapshotView,
   shutdownTool,
   killTool,
   spawnTool,
@@ -69,7 +70,7 @@ type TrackedRun = {
   supervisorId?: string
   monitoring: boolean
   latestSeq?: number
-  lastSnapshot?: RunSnapshot
+  lastSnapshot?: RunSnapshotView
 }
 
 type HostProviderBinding = {
@@ -85,7 +86,7 @@ type MonitorStopReason = 'permission-routed' | 'shutdown' | 'abort' | 'result'
 
 type MonitorOutcome = {
   kind: 'terminal' | 'waiting' | 'aborted' | 'shutdown' | 'stopped' | 'error'
-  snapshot: RunSnapshot
+  snapshot: RunSnapshotView
   notified?: boolean
   error?: string
 }
@@ -112,13 +113,13 @@ function clipTail(text: string | undefined, limit: number): string | undefined {
   return text.slice(text.length - limit)
 }
 
-export function terminalStatus(snapshot: RunSnapshot, fallback?: StatusResult): string {
+export function terminalStatus(snapshot: RunSnapshotView, fallback?: StatusResult): string {
   if (fallback?.status) return fallback.status
   if (snapshot.phase && TERMINAL_STATUSES.has(snapshot.phase)) return snapshot.phase
   return snapshot.stop_reason ?? 'done'
 }
 
-function formatLiveTool(snapshot: RunSnapshot): string | undefined {
+function formatLiveTool(snapshot: RunSnapshotView): string | undefined {
   const tool = snapshot.live_tools[snapshot.live_tools.length - 1]
   if (!tool) return undefined
   const base = tool.title ?? tool.kind ?? tool.id ?? tool.key
@@ -150,7 +151,7 @@ function formatTranscriptEntry(entry: RunSnapshot['transcript'][number]): string
   }
 }
 
-function formatTranscriptPreview(snapshot: RunSnapshot): string | undefined {
+function formatTranscriptPreview(snapshot: RunSnapshotView): string | undefined {
   const lines = snapshot.transcript
     .slice(-TRANSCRIPT_PREVIEW_ENTRIES)
     .map(formatTranscriptEntry)
@@ -182,7 +183,7 @@ export function hostIdentityMetadata(
 }
 
 export function buildSnapshotMetadata(
-  snapshot: RunSnapshot,
+  snapshot: RunSnapshotView,
   run?: HostIdentityMetadataInput,
   status?: HostIdentityStatus,
 ): Record<string, unknown> {
@@ -204,7 +205,7 @@ export function buildSnapshotMetadata(
   return metadata
 }
 
-export function buildWaitingText(run: TrackedRun, snapshot: RunSnapshot): string {
+export function buildWaitingText(run: TrackedRun, snapshot: RunSnapshotView): string {
   const permission = snapshot.pending_permission
   const lines = [
     `Sub-agent "${run.label}" is waiting for input.`,
@@ -235,7 +236,7 @@ export function buildWaitingText(run: TrackedRun, snapshot: RunSnapshot): string
 
 function buildCompletionText(
   run: TrackedRun,
-  snapshot: RunSnapshot,
+  snapshot: RunSnapshotView,
   status?: StatusResult,
   finalOutput?: string,
 ): string {
@@ -338,7 +339,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     }
   }
 
-  function syncRunSnapshot(run: TrackedRun, snapshot: RunSnapshot): void {
+  function syncRunSnapshot(run: TrackedRun, snapshot: RunSnapshotView): void {
     run.lastSnapshot = snapshot
     if (snapshot.latest_seq !== undefined) run.latestSeq = snapshot.latest_seq
     registerSessionId(snapshot.identity.session_id, snapshot.identity.runtime_id, run.runId)
@@ -414,14 +415,14 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     run: TrackedRun,
     options: {
       abort?: AbortSignal
-      onSnapshot?: (snapshot: RunSnapshot) => void
+      onSnapshot?: (snapshot: RunSnapshotView) => void
     } = {},
   ): Promise<MonitorOutcome> {
     const existing = activeMonitors.get(run.runId)
     if (existing) return existing.promise
 
     run.monitoring = true
-    const handle: ActiveMonitor = { promise: Promise.resolve({ kind: 'stopped', snapshot: run.lastSnapshot as RunSnapshot }) }
+    const handle: ActiveMonitor = { promise: Promise.resolve({ kind: 'stopped', snapshot: run.lastSnapshot ?? createRunSnapshot() }) }
 
     handle.promise = (async () => {
       let observer: RunObserver | undefined
@@ -752,7 +753,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
    */
   async function settledTurnText(sessionId: string, messageId: string): Promise<string[]> {
     const response = await ctx.client.session.message({ path: { id: sessionId, messageID: messageId } })
-    const parts = Array.isArray(response.data?.parts) ? response.data.parts : []
+    const parts: unknown[] = Array.isArray(response.data?.parts) ? response.data.parts : []
     return parts
       .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
       .filter(part => part.type === 'text')
@@ -778,7 +779,9 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     const messageId = typeof info.id === 'string' ? info.id : ''
     if (messageId === '') return
     if (!binding.provider.recordLastTurn) return
-    const publish = publishChain.then(() => publishTurn(binding, info, created, messageId))
+    const recordLastTurn = binding.provider.recordLastTurn
+    const publish = publishChain.then(() =>
+      publishTurn(binding, recordLastTurn, info, created, messageId))
     // A failed publish must not stop every later one, so the chain keeps a
     // resolved tail while the caller still sees the rejection.
     publishChain = publish.catch(() => {})
@@ -790,7 +793,8 @@ export const AvenorPlugin: Plugin = async (ctx) => {
    * queueing, so it sees the turn the publish ahead of it claimed.
    */
   async function publishTurn(
-    binding: HostProviderBinding,
+    binding: HostBinding,
+    recordLastTurn: NonNullable<MessageProvider['recordLastTurn']>,
     info: Record<string, unknown>,
     created: number,
     messageId: string,
@@ -802,7 +806,7 @@ export const AvenorPlugin: Plugin = async (ctx) => {
         { content, stopReason: normalizeTurnStopReason(normalizeFinish(stopReasonOf(info))) },
       ])
       const bounded = boundFinalOutput(turn.text)
-      await binding.provider.recordLastTurn(bounded, turn.stopReason, turn.text.length > bounded.length)
+      await recordLastTurn(bounded, turn.stopReason, turn.text.length > bounded.length)
       // Claimed only once the broker accepted the turn, so a transient failure
       // leaves it unclaimed and the next update for it is retried.
       publishedTurn = { created, id: messageId }

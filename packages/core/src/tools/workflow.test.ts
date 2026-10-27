@@ -5,10 +5,10 @@ import { type WorkflowInspectToolArgs, type WorkflowInspectResult } from './work
 import { type WorkflowEventsToolArgs, type WorkflowEventsResult } from './workflow-events.js'
 import { type WorkflowCompleteToolArgs, type WorkflowCompleteResult } from './workflow-complete.js'
 import { type WorkflowGateToolArgs, type WorkflowGateResult } from './workflow-gate.js'
+import type { WorkflowGateOperation } from '../client.js'
 
 // Mock getSupervisorClient that returns distinct fake clients per supervisor ID
-const getSupervisorClientMock = mock(async (supervisorId: string) => {
-  const clientId = `client-${supervisorId}`
+const getSupervisorClientMock = mock(async (supervisorId?: string) => {
   const client = {
     workflowStatus: mock(async (workflowId: string) => ({
       supervisor: supervisorId,
@@ -56,7 +56,8 @@ const getSupervisorClientMock = mock(async (supervisorId: string) => {
     client,
     isSingleton: false,
     sup: null,
-    supervisorId,
+    // The real helper resolves a default supervisor when the caller omits one.
+    supervisorId: supervisorId ?? '',
   }
 })
 
@@ -186,22 +187,22 @@ describe('workflow tools basic forwarding', () => {
 describe('workflow tools required-arg validation', () => {
   it('status tool throws when workflowId missing', async () => {
     const tool = createWorkflowStatusTool(getSupervisorClientMock)
-    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })).rejects.toThrow('workflowId is required')
+    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' } as WorkflowStatusToolArgs)).rejects.toThrow('workflowId is required')
   })
 
   it('wait tool throws when workflowId missing', async () => {
     const tool = createWorkflowWaitTool(getSupervisorClientMock)
-    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })).rejects.toThrow('workflowId is required')
+    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' } as WorkflowWaitToolArgs)).rejects.toThrow('workflowId is required')
   })
 
   it('inspect tool throws when workflowId missing', async () => {
     const tool = createWorkflowInspectTool(getSupervisorClientMock)
-    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })).rejects.toThrow('workflowId is required')
+    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' } as WorkflowInspectToolArgs)).rejects.toThrow('workflowId is required')
   })
 
   it('events tool throws when workflowId missing', async () => {
     const tool = createWorkflowEventsTool(getSupervisorClientMock)
-    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })).rejects.toThrow('workflowId is required')
+    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' } as WorkflowEventsToolArgs)).rejects.toThrow('workflowId is required')
   })
 
   it('complete tool throws when required fields missing (in Go MCP order)', async () => {
@@ -226,7 +227,7 @@ describe('workflow tools required-arg validation', () => {
       node_id: 'node-1',
       gate_id: 'gate-1',
       activation_id: 'act-1',
-      operation: '',
+      operation: '' as WorkflowGateOperation,
       supervisorId: '/tmp/avenor-mcp-sup-a-123.sock',
     }
     await expect(tool(args)).rejects.toThrow('operation is required')
@@ -241,7 +242,7 @@ describe('workflow tools validation (gate)', () => {
       node_id: 'node-1',
       gate_id: 'gate-1',
       activation_id: 'act-1',
-      operation: 'invalid_op',
+      operation: 'invalid_op' as WorkflowGateOperation,
       supervisorId: '/tmp/avenor-mcp-sup-a-123.sock',
     }
     await expect(tool(args)).rejects.toThrow('unknown gate operation "invalid_op" (allowed: satisfy, reject, waive, external_result)')

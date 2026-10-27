@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { spawnInputShape } from './spawn-schema.js'
@@ -108,7 +109,7 @@ server.registerTool('spawn', {
     roster_entry,
   })
 
-  return spawnTool({
+  return passthroughResult(spawnTool({
     agent,
     dir: repo_dir,
     prompt,
@@ -122,7 +123,7 @@ server.registerTool('spawn', {
     rosterEntry: roster_entry,
     serverUrl: server_url,
     supervisorId: supervisor_id,
-  })
+  }))
 })
 
 server.registerTool('status', {
@@ -133,7 +134,7 @@ server.registerTool('status', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ run_id, view, supervisor_id }) => {
-  return statusTool({ runId: run_id, supervisorId: supervisor_id, view })
+  return passthroughResult(statusTool({ runId: run_id, supervisorId: supervisor_id, view }))
 })
 
 server.registerTool('result', {
@@ -145,7 +146,7 @@ server.registerTool('result', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ run_id, wait, timeout, supervisor_id }) => {
-  return resultTool({ runId: run_id, supervisorId: supervisor_id, wait, timeout })
+  return passthroughResult(resultTool({ runId: run_id, supervisorId: supervisor_id, wait, timeout }))
 })
 
 server.registerTool('answer_permission', {
@@ -158,13 +159,13 @@ server.registerTool('answer_permission', {
     message: z.string().optional().describe('Optional write-in response text. Required only when the selected option declares requiresMessage: true.'),
   },
 }, async ({ run_id, option_id, request_id, supervisor_id, message }) => {
-  return answerPermissionTool({
+  return passthroughResult(answerPermissionTool({
     runId: run_id,
     optionId: option_id,
     requestId: request_id,
     supervisorId: supervisor_id,
     message,
-  })
+  }))
 })
 
 /**
@@ -220,6 +221,17 @@ type ToolReply = {
   content: Array<{ type: 'text'; text: string }>
   structuredContent?: Record<string, unknown>
   isError?: true
+}
+
+/**
+ * The pass-through tools answer with the core tool's result object, which the
+ * MCP result schema carries as free-form fields beside `content`. The schema
+ * defaults `content` to an empty list, so sending it explicitly is what a
+ * client already ends up with, and it keeps the handler's declared result
+ * type honest without hiding the result fields.
+ */
+async function passthroughResult<T extends object>(result: T | Promise<T>): Promise<CallToolResult & T> {
+  return { ...(await result), content: [] }
 }
 
 /** A router tool error is a failure result on every surface; anything else is the transport's to report. */
@@ -283,7 +295,7 @@ server.registerTool('workflow_cancel', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ workflow_id, actor, reason, supervisor_id }) => {
-  return workflowCancelTool({ workflow_id, actor, reason, supervisorId: supervisor_id })
+  return passthroughResult(workflowCancelTool({ workflow_id, actor, reason, supervisorId: supervisor_id }))
 })
 
 server.registerTool('events', {
@@ -295,7 +307,7 @@ server.registerTool('events', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ run_id, types, limit, supervisor_id }) => {
-  return eventsTool({ runId: run_id, types, limit, supervisorId: supervisor_id })
+  return passthroughResult(eventsTool({ runId: run_id, types, limit, supervisorId: supervisor_id }))
 })
 
 server.registerTool('kill', {
@@ -305,7 +317,7 @@ server.registerTool('kill', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ run_id, supervisor_id }) => {
-  return killTool({ runId: run_id, supervisorId: supervisor_id })
+  return passthroughResult(killTool({ runId: run_id, supervisorId: supervisor_id }))
 })
 
 server.registerTool('shutdown', {
@@ -315,7 +327,7 @@ server.registerTool('shutdown', {
     force: z.boolean().optional().describe('Force shutdown instead of graceful'),
   },
 }, async ({ supervisor_id, force }) => {
-  return shutdownTool({ supervisorId: supervisor_id, force })
+  return passthroughResult(shutdownTool({ supervisorId: supervisor_id, force }))
 })
 
 server.registerTool('workflow_status', {
@@ -325,7 +337,7 @@ server.registerTool('workflow_status', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ workflow_id, supervisor_id }) => {
-  return workflowStatusTool({ workflowId: workflow_id, supervisorId: supervisor_id })
+  return passthroughResult(workflowStatusTool({ workflowId: workflow_id, supervisorId: supervisor_id }))
 })
 
 server.registerTool('workflow_wait', {
@@ -336,7 +348,7 @@ server.registerTool('workflow_wait', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ workflow_id, timeout, supervisor_id }) => {
-  return workflowWaitTool({ workflowId: workflow_id, timeout, supervisorId: supervisor_id })
+  return passthroughResult(workflowWaitTool({ workflowId: workflow_id, timeout, supervisorId: supervisor_id }))
 })
 
 server.registerTool('workflow_inspect', {
@@ -346,7 +358,7 @@ server.registerTool('workflow_inspect', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ workflow_id, supervisor_id }) => {
-  return workflowInspectTool({ workflowId: workflow_id, supervisorId: supervisor_id })
+  return passthroughResult(workflowInspectTool({ workflowId: workflow_id, supervisorId: supervisor_id }))
 })
 
 server.registerTool('workflow_events', {
@@ -358,7 +370,7 @@ server.registerTool('workflow_events', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ workflow_id, after_seq, limit, supervisor_id }) => {
-  return workflowEventsTool({ workflowId: workflow_id, afterSeq: after_seq, limit, supervisorId: supervisor_id })
+  return passthroughResult(workflowEventsTool({ workflowId: workflow_id, afterSeq: after_seq, limit, supervisorId: supervisor_id }))
 })
 
 server.registerTool('workflow_complete', {
@@ -377,7 +389,7 @@ server.registerTool('workflow_complete', {
   },
 }, async (args) => {
   const { supervisor_id, ...rest } = args
-  return workflowCompleteTool({ ...rest, supervisorId: supervisor_id })
+  return passthroughResult(workflowCompleteTool({ ...rest, supervisorId: supervisor_id }))
 })
 
 server.registerTool('workflow_gate', {
@@ -402,7 +414,7 @@ server.registerTool('workflow_gate', {
   },
 }, async (args) => {
   const { supervisor_id, ...rest } = args
-  return workflowGateTool({ ...rest, supervisorId: supervisor_id })
+  return passthroughResult(workflowGateTool({ ...rest, supervisorId: supervisor_id }))
 })
 
 server.registerTool('workflow_controller_status', {
@@ -412,45 +424,73 @@ server.registerTool('workflow_controller_status', {
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
 }, async ({ controller_id, supervisor_id }) => {
-  return workflowControllerStatusTool({ controllerId: controller_id, supervisorId: supervisor_id })
+  return passthroughResult(workflowControllerStatusTool({ controllerId: controller_id, supervisorId: supervisor_id }))
 })
+
+export interface HttpServerOptions {
+  authToken: string
+  /** 0 binds an ephemeral port; the bound port is reported back. */
+  port?: number
+}
+
+/**
+ * Serve the MCP endpoint over HTTP with the transport's web-standard
+ * implementation: Hono already hands out a Web `Request`, and the request
+ * checks below answer before the transport sees a message.
+ */
+export async function startHttpServer(
+  options: HttpServerOptions,
+): Promise<{ port: number; stop: () => Promise<void> }> {
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: () => crypto.randomUUID(),
+  })
+  // The Host header carries the bound port, which is only known after the
+  // listener exists, so the request check reads it through this variable.
+  let boundPort = options.port ?? 0
+  const app = new Hono()
+  app.all('/mcp', (c) => {
+    const request = c.req.raw
+    const originHeader = request.headers.get('origin')
+    const hostHeader = request.headers.get('host')
+    const token = parseBearerToken(request.headers.get('authorization'))
+
+    if (!isAllowedOrigin(originHeader)) {
+      return c.text('Forbidden origin', 403)
+    }
+
+    if (!isAllowedHost(hostHeader, boundPort)) {
+      return c.text('Forbidden host', 403)
+    }
+
+    if (token !== options.authToken) {
+      return c.text('Unauthorized', 401, {
+        'WWW-Authenticate': 'Bearer',
+      })
+    }
+
+    return transport.handleRequest(request)
+  })
+  await server.connect(transport)
+  const http = Bun.serve({ fetch: app.fetch, port: boundPort, hostname: '127.0.0.1' })
+  boundPort = http.port ?? boundPort
+  return {
+    port: boundPort,
+    stop: async () => {
+      await server.close()
+      await http.stop(true)
+    },
+  }
+}
 
 if (import.meta.main) {
   if (process.env.MCP_TRANSPORT !== 'sse') {
     const transport = new StdioServerTransport()
     await server.connect(transport)
   } else {
-    const port = Number(process.env.MCP_PORT ?? 3748)
-    const authToken = getMcpAuthToken()
-    const app = new Hono()
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => crypto.randomUUID(),
+    const { port } = await startHttpServer({
+      authToken: getMcpAuthToken(),
+      port: Number(process.env.MCP_PORT ?? 3748),
     })
-    app.all('/mcp', (c) => {
-      const request = c.req.raw
-      const originHeader = request.headers.get('origin')
-      const hostHeader = request.headers.get('host')
-      const authHeader = request.headers.get('authorization')
-      const token = parseBearerToken(authHeader)
-
-      if (!isAllowedOrigin(originHeader)) {
-        return c.text('Forbidden origin', 403)
-      }
-
-      if (!isAllowedHost(hostHeader, port)) {
-        return c.text('Forbidden host', 403)
-      }
-
-      if (token !== authToken) {
-        return c.text('Unauthorized', 401, {
-          'WWW-Authenticate': 'Bearer',
-        })
-      }
-
-      return transport.handleRequest(c.req.raw, c.res, c.req.raw.body)
-    })
-    await server.connect(transport)
-    Bun.serve({ fetch: app.fetch, port, hostname: '127.0.0.1' })
     console.error(`avenor MCP server listening on :${port}`)
   }
 }

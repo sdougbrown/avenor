@@ -1,5 +1,6 @@
 import { describe, it, expect, mock, beforeEach } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { validateSpawnSelection } from '@dougbots/avenor-core'
 import { z } from 'zod'
@@ -129,7 +130,7 @@ mock.module('@dougbots/avenor-core', () => ({
   validateSpawnSelection,
 }))
 
-const { server, getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } = await import('./mcp.js')
+const { server, startHttpServer, getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } = await import('./mcp.js')
 
 describe('avenor MCP server', () => {
   it('registers kill and maps snake_case to camelCase', async () => {
@@ -249,6 +250,85 @@ describe('avenor MCP server', () => {
       } else {
         process.env.MCP_AUTH_TOKEN = original
       }
+    }
+  })
+
+  it('serves the MCP endpoint over HTTP with the web-standard transport', async () => {
+    const authToken = 'http-regression-token'
+    const started = await startHttpServer({ authToken, port: 0 })
+    try {
+      const unauthorized = await fetch(`http://127.0.0.1:${started.port}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      })
+      expect(unauthorized.status).toBe(401)
+
+      const transport = new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${started.port}/mcp`),
+        { requestInit: { headers: { authorization: `Bearer ${authToken}` } } },
+      )
+      const client = new Client({ name: 'http-test-client', version: '0.1.0' })
+      await client.connect(transport)
+      try {
+        const { tools } = await client.listTools()
+        expect(tools.map(tool => tool.name)).toContain('kill')
+      } finally {
+        await client.close()
+      }
+    } finally {
+      await started.stop()
+    }
+  })
+
+  it('answers a pass-through tool call with its result fields over HTTP', async () => {
+    const authToken = 'http-wire-token'
+    const started = await startHttpServer({ authToken, port: 0 })
+    const url = `http://127.0.0.1:${started.port}/mcp`
+    const post = async (message: Record<string, unknown>, sessionId?: string | null) => {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          authorization: `Bearer ${authToken}`,
+          ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+        },
+        body: JSON.stringify(message),
+      })
+      const body = await response.text()
+      const messages = body
+        .split('\n')
+        .filter(line => line.startsWith('data:'))
+        .map(line => JSON.parse(line.slice('data:'.length)) as Record<string, any>)
+      return { response, messages }
+    }
+
+    try {
+      const init = await post({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'wire-test-client', version: '0.1.0' },
+        },
+      })
+      const sessionId = init.response.headers.get('mcp-session-id')
+      expect(sessionId).toBeTruthy()
+      const initialized = await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId)
+      expect(initialized.response.status).toBe(202)
+
+      const call = await post(
+        { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'kill', arguments: { run_id: 'run-1' } } },
+        sessionId,
+      )
+      // The whole reply an MCP client parses, read off the stream: the core tool
+      // fields ride beside the content list the transport's result schema supplies.
+      expect(call.messages.at(-1)?.result).toEqual({ killed: true, content: [] })
+    } finally {
+      await started.stop()
     }
   })
 })

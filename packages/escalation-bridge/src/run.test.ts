@@ -6,7 +6,8 @@ import { describe, expect, test } from 'bun:test'
 
 import { askWebhook, runBridge } from './run.js'
 import { decisionResponseHash } from './command.js'
-import type { ControlClient, WorkflowDetail } from './types.js'
+import type { BridgeOptions } from './run.js'
+import type { ControlClient, DecisionSubject, WorkflowDetail } from './types.js'
 
 function parkedDetail(): WorkflowDetail {
   return {
@@ -62,8 +63,10 @@ class FakeClient implements ControlClient {
     throw new Error(`unexpected method ${method}`)
   }
 
-  commands() {
-    return this.calls.filter((c) => c.method === 'workflow.command').map((c) => c.params!.command)
+  commands(): Record<string, unknown>[] {
+    return this.calls
+      .filter((c) => c.method === 'workflow.command')
+      .map((c) => (c.params as { command: Record<string, unknown> }).command)
   }
 
   isClosed(): boolean {
@@ -79,7 +82,7 @@ function setupDir(): string {
 
 describe('askWebhook', () => {
   test('refuses redirects, surfaces the non-OK status, and POSTs JSON', async () => {
-    let received: { method?: string; contentType?: string; body?: string } | undefined
+    let received: { method: string; contentType: string | null; body: string } | undefined
     let redirectTargetHits = 0
     let base = ''
     const server = Bun.serve({
@@ -115,7 +118,12 @@ describe('askWebhook', () => {
     await expect(askWebhook(`${base}/redirect`, { q: 1 })).rejects.toThrow(Error)
     expect(redirectTargetHits).toBe(0)
 
-    const err = await askWebhook(`${base}/fail`, { q: 1 }).catch((e: Error) => e)
+    const err = await askWebhook(`${base}/fail`, { q: 1 }).then(
+      () => {
+        throw new Error('askWebhook resolved against a failing endpoint')
+      },
+      (e: Error) => e,
+    )
     expect(err.message).toContain('500')
 
     await askWebhook(`${base}/ok`, { q: 1 })
@@ -384,15 +392,14 @@ describe('runBridge', () => {
     expect(sleeps).toContain(5000)
   })
 
-  const runOptions = (dir: string, overrides: Record<string, unknown> = {}) => ({
+  const runOptions = (dir: string, overrides: Partial<BridgeOptions> = {}): BridgeOptions => ({
     socketPath: '/tmp/does-not-matter.sock',
     workflowId: 'wf_1',
     webhookUrl: 'http://127.0.0.1:1/ask',
     decisionDir: dir,
     // Tests that pin a templatePath (missing/malformed/traversal/external)
     // must not have the default template written over it.
-    templatePath:
-      'templatePath' in overrides ? (overrides.templatePath as string) : templateFile(dir),
+    templatePath: overrides.templatePath ?? templateFile(dir),
     sleep: async () => {},
     log: () => {},
     ...overrides,
@@ -629,7 +636,7 @@ describe('runBridge', () => {
       return templatePath
     }
 
-    function boundDetail(pin: Record<string, unknown> | null, overrides: Record<string, unknown> = {}): WorkflowDetail {
+    function boundDetail(pin: DecisionSubject | null, overrides: Record<string, unknown> = {}): WorkflowDetail {
       return {
         instance: { status: 'active' },
         activations: [

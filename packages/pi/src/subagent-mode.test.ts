@@ -162,13 +162,13 @@ describe('sub-agent broker mode (integration)', () => {
 
   it('interrupts a blocking avenor_result when the sub-agent receives an ask', async () => {
     const fetchStub = stubBrokerFetch([])
-    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+    const resultTool = mock((args: { signal?: AbortSignal }) => new Promise<never>((_resolve, reject) => {
       args.signal?.addEventListener('abort', () => reject(new Error('result wait cancelled')))
     }))
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub, deps: { resultTool }, pollIntervalMs: 5 })
-      const resultPromise = harness.registeredTools.avenor_result.execute('t1', { run_id: 'supervisor' })
+      const resultPromise: Promise<{ details?: unknown }> = harness.registeredTools.avenor_result.execute('t1', { run_id: 'supervisor' })
       await waitFor(() => resultTool.mock.calls.length === 1)
 
       fetchStub.setHandler('/poll-control', () => Response.json([
@@ -201,7 +201,7 @@ describe('sub-agent broker mode (integration)', () => {
       harness = await startSubAgentExtension({ fetchStub })
       const { sendUserMessage } = harness
       await waitFor(() => sendUserMessage.mock.calls.length > 0)
-      const [body] = sendUserMessage.mock.calls[0] as [string]
+      const [body] = sendUserMessage.mock.calls[0]!
       expect(body).toContain('later ask')
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
@@ -225,7 +225,7 @@ describe('sub-agent broker mode (integration)', () => {
       await waitFor(() => sendUserMessage.mock.calls.length > 0)
       const polls = fetchStub.calls.filter(call => call.path === '/poll-control').length
       expect(polls).toBeGreaterThanOrEqual(2)
-      const [body] = sendUserMessage.mock.calls[0] as [string]
+      const [body] = sendUserMessage.mock.calls[0]!
       expect(body).toContain('after the error')
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
@@ -635,7 +635,7 @@ describe('avenor_spawn parent run id in sub-agent mode', () => {
     // A child that spawns starts its own supervisor, whose broker never
     // registered the child's own run id. Naming it would prepend a note
     // pointing at a run nothing reads, so the asker would wait out its timeout.
-    const spawnToolMock = mock(async () => ({
+    const spawnToolMock = mock(async (_args: { agent?: string; prompt?: string; wait?: boolean }) => ({
       run_id: 'run-1',
       label: 'grandchild',
       supervisor_id: '/tmp/sock',

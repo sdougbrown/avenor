@@ -154,7 +154,12 @@ export interface ExtensionDeps {
   hostProviderFor?: (supervisorId: string | undefined) => Promise<MessageProvider>
   /** Dial a supervisor for the default host provider; tests inject a fake client. */
   getSupervisorClient?: typeof getSupervisorClient
-  observeRun: typeof observeRun
+  /** A watch transport may decline to observe (no runtime id yet), so a test
+   * double that only asserts the call can answer null. */
+  observeRun: (
+    client: Parameters<typeof observeRun>[0],
+    options?: Parameters<typeof observeRun>[1],
+  ) => RunObserver | null
   dial: typeof dial
   attachOwner: typeof attachOwner
   Supervisor: typeof Supervisor
@@ -224,6 +229,21 @@ export function spawnIdentityMetadata(
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/** The text of a tool result's first text part; image parts carry none. */
+function firstTextPart(content: Array<{ type: string; text?: string }> | undefined): string {
+  return content?.find(part => part.type === 'text')?.text ?? ''
+}
+
+/** The status a tool result records; a stored transcript record may carry no details. */
+function resultStatus(details: unknown): string {
+  return details && typeof details === 'object' && 'status' in details ? String(details.status ?? '') : ''
+}
+
+/** Close an observer a concurrent watch assigned, ignoring a close failure. */
+async function closeObserverQuietly(observer: RunObserver | null): Promise<void> {
+  await observer?.close().catch(() => {})
 }
 
 function normalizeMultilinePreview(text: string | undefined, limit = COMPLETION_OUTPUT_CHARS): string | undefined {
@@ -645,7 +665,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (error instanceof BrokerHttpError && error.status === 400 && error.code === 'invalid-name') {
             // Retrying a name the broker refuses only costs a failed POST every
             // turn; a name that changes to a different value is sent again.
-            refusedSessionName = name
+            refusedSessionName = name ?? null
             console.error('[avenor] session_name_set refused:', error.message)
             return
           }
@@ -913,7 +933,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return trackedRuns.get(trackedRunKey(namespace, runId))
     }
 
-    async function resolveFinalOutput(run: Pick<TrackedRun, 'runId' | 'supervisorId'>, status: StatusResult): Promise<string | undefined> {
+    async function resolveFinalOutput(run: Pick<TrackedRun, 'runId' | 'supervisorId'>, status?: StatusResult): Promise<string | undefined> {
       const preview = finalOutputPreview(status)
       if (preview) return preview
       try {
@@ -1439,7 +1459,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     async function waitForRunWithObserver(
       run: WatchRunRef,
       signal: AbortSignal | undefined,
-      onUpdate: ((update: { content: Array<{ type: 'text'; text: string }>; details?: Record<string, unknown> }) => void) | undefined,
+      onUpdate: ((update: { content: Array<{ type: 'text'; text: string }>; details: Record<string, unknown> }) => void) | undefined,
     ): Promise<{ status?: StatusResult; aborted: boolean }> {
       let observer: RunObserver | null = null
       let unsubscribe: (() => void) | undefined
@@ -1505,7 +1525,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         signal.removeEventListener('abort', abortListener)
       }
       unsubscribe?.()
-      await observer?.close().catch(() => {})
+      // The observer is assigned inside the concurrent watch below, so the
+      // declared union — not control-flow narrowing — is what describes it here.
+      await closeObserverQuietly(observer)
 
       if (outcome === 'aborted') {
         return { aborted: true }
@@ -1523,7 +1545,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     async function waitForRunByPolling(
       run: WatchRunRef,
       signal: AbortSignal | undefined,
-      onUpdate: ((update: { content: Array<{ type: 'text'; text: string }>; details?: Record<string, unknown> }) => void) | undefined,
+      onUpdate: ((update: { content: Array<{ type: 'text'; text: string }>; details: Record<string, unknown> }) => void) | undefined,
     ): Promise<{ status?: StatusResult; aborted: boolean }> {
       let firstPoll = true
       while (!signal?.aborted) {
@@ -1560,7 +1582,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     async function waitForRun(
       run: WatchRunRef,
       signal: AbortSignal | undefined,
-      onUpdate: ((update: { content: Array<{ type: 'text'; text: string }>; details?: Record<string, unknown> }) => void) | undefined,
+      onUpdate: ((update: { content: Array<{ type: 'text'; text: string }>; details: Record<string, unknown> }) => void) | undefined,
     ): Promise<{ status?: StatusResult; aborted: boolean }> {
       const observed = await waitForRunWithObserver(run, signal, onUpdate)
       if (observed.status || observed.aborted) return observed
@@ -1933,7 +1955,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }),
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         if (signal?.aborted) {
-          return { content: [{ type: 'text', text: 'Cancelled' }] }
+          return { content: [{ type: 'text', text: 'Cancelled' }], details: {} }
         }
 
         validateSpawnSelection({
@@ -2027,7 +2049,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             // leave this run undelivered when it was the last active one.
             const raw = await deps.statusTool({ runId: result.run_id, supervisorId })
               .catch(() => undefined)
-            const probed = asStatusResult(raw)
+            const probed = raw ? asStatusResult(raw) : undefined
             if (probed && (isTerminalStatus(probed.status) || probed.status === 'waiting')) {
               // Deliver/wait inline through the normal status handling.
               waitStatus = probed
@@ -2104,7 +2126,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             run: tracked,
             runtimeId: status.runtime_id ?? runRef.runtimeId,
             label,
-            agent: params.agent,
+            agent: tracked?.agent ?? params.agent ?? 'unknown',
             status: status.status,
             nestedCount: tracked?.nestedCount,
             backend: status.backend,
@@ -2142,22 +2164,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         return new Text(agent + agentName + label + wait, 0, 0)
       },
       renderResult(result, { isPartial }, theme) {
+        const status = resultStatus(result.details)
+        const text = firstTextPart(result.content)
         if (isPartial) {
-          const status = result.details?.status ?? 'running'
-          const emoji = statusEmoji(String(status))
-          return new Text(theme.fg('accent', `${emoji} ${result.content?.[0]?.text ?? 'Running…'}`), 0, 0)
+          return new Text(theme.fg('accent', `${statusEmoji(status || 'running')} ${text || 'Running…'}`), 0, 0)
         }
 
-        const status = String(result.details?.status ?? '')
         if (status && isTerminalStatus(status)) {
-          const emoji = statusEmoji(status)
-          const header = theme.fg(status === 'done' ? 'success' : 'error', `${emoji} ${status}`)
-          const body = (result.content?.[0]?.text ?? '').split('\n').map(line => theme.fg('muted', `  ${line}`)).join('\n')
+          const header = theme.fg(status === 'done' ? 'success' : 'error', `${statusEmoji(status)} ${status}`)
+          const body = text.split('\n').map(line => theme.fg('muted', `  ${line}`)).join('\n')
           return new Text(`${header}\n${body}`, 0, 0)
         }
 
-        const text = (result.content?.[0]?.text ?? '').split('\n').map(line => theme.fg('muted', line)).join('\n')
-        return new Text(text, 0, 0)
+        const lines = text.split('\n').map(line => theme.fg('muted', line)).join('\n')
+        return new Text(lines, 0, 0)
       },
     })
 
@@ -2457,7 +2477,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           workflow_id: params.workflow_id,
           actor: params.actor,
           reason: params.reason,
-          supervisor_id: params.supervisor_id,
+          supervisorId: params.supervisor_id,
         })
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

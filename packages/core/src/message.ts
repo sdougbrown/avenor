@@ -215,7 +215,9 @@ const peersApplicability = fixture.peers_applicability
 
 type RouteRule = {
   type: string
+  field?: string
   reason?: string
+  check?: RouteExpr
   when?: RouteExpr
   rules?: RouteRule[]
   branches?: Record<string, RouteRule[]>
@@ -223,6 +225,8 @@ type RouteRule = {
 
 type RouteExpr = {
   op: string
+  field?: string
+  condition?: string
   value?: unknown
   values?: unknown
   expr?: RouteExpr
@@ -276,7 +280,7 @@ function normalizeRouteExpr(expression: RouteExpr): RouteExpr {
 
 function normalizeRouteRule(rule: RouteRule, topLevel: boolean): RouteRule | undefined {
   if (rule.type === 'check') {
-    const check = (rule as unknown as { check?: RouteExpr & { field?: unknown } }).check
+    const check = rule.check
     if (!topLevel || rule.field !== 'action' || !check || check.op !== 'in' || check.field !== 'action' || !Array.isArray(check.value)) {
       throw normalisationError('only the top-level action enum check rule can be omitted')
     }

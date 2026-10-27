@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test'
+import type { Client } from '../client.js'
 
-const historyMock = mock(async () => ({
+const historyMock = mock<Client['history']>(async () => ({
   runtime_id: 'rt-inspect',
   latest_seq: 3,
   events: [
@@ -10,7 +11,7 @@ const historyMock = mock(async () => ({
   ],
 }))
 
-const statusMock = mock(async (runtimeId?: string) => {
+const statusMock = mock<Client['status']>(async (runtimeId?: string) => {
   if (runtimeId === 'friendly-inspect') {
     throw new Error('label is not a runtime id')
   }
@@ -26,7 +27,7 @@ const statusMock = mock(async (runtimeId?: string) => {
   }
 })
 
-const listMock = mock(async () => ([
+const listMock = mock<Client['list']>(async () => ([
   {
     run_id: 'friendly-inspect',
     runtime_id: 'rt-inspect',
@@ -36,14 +37,14 @@ const listMock = mock(async () => ([
   },
 ]))
 
-const closeMock = mock(() => {})
-const getSupervisorClientMock = mock(async () => ({
+const closeMock = mock<Client['close']>(() => {})
+const getSupervisorClientMock = mock(async (_supervisorId?: string) => ({
   client: {
     history: historyMock,
     status: statusMock,
     list: listMock,
     close: closeMock,
-  },
+  } as any,
   isSingleton: false,
   sup: null,
   supervisorId: '/tmp/avenor-inspect.sock',

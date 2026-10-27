@@ -10,7 +10,7 @@ interface HostAsk {
 }
 
 /** Record every provider reply and answer it as delivered. */
-function replyingProvider(replySpy: ReturnType<typeof mock>) {
+function replyingProvider(replySpy: (args: Record<string, unknown>) => Promise<unknown>) {
   return makeMessageProvider({
     reply: async (inboundAskId: string, message: string, askerRunId: string) => {
       await replySpy({ askerRunId, inboundAskId, message })
@@ -21,7 +21,7 @@ function replyingProvider(replySpy: ReturnType<typeof mock>) {
 
 async function startHostExtension(
   brokerReceiveTool: any,
-  replySpy = mock(async (_args: Record<string, unknown>) => {}),
+  replySpy: (args: Record<string, unknown>) => Promise<unknown> = mock(async (_args: Record<string, unknown>) => {}),
   extOptions: { pollIntervalMs?: number } = {},
   provider = replyingProvider(replySpy),
 ) {

@@ -336,9 +336,12 @@ describe('Pi host turn producer', () => {
 
   it('recovers last-turn recording after default binding eviction without session_start', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
-    const client = {
+    const client: {
+      messagePreflight: () => Promise<{ protocol: number; generation: string }>
+      sessionLastSet: (_text: string, _stop: string, _truncated: boolean) => Promise<void>
+    } = {
       messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
-      sessionLastSet: mock(async () => { throw new ClosedSocketError('control socket is closed') }),
+      sessionLastSet: mock(async (_text: string, _stop: string, _truncated: boolean) => { throw new ClosedSocketError('control socket is closed') }),
     }
     const getSupervisorClient = mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: 'sup' }))
     const errorLog = mock((_message?: unknown, ..._rest: unknown[]) => {})
@@ -373,8 +376,8 @@ describe('Pi host turn producer', () => {
 
 describe('Pi resumed-run tracking', () => {
   it('tracks the resumed run on its supervisor and starts polling', async () => {
-    const statusTool = mock(async (args: { runId: string }) => ({
-      run_id: args.runId,
+    const statusTool = mock(async (args: { runId?: string }) => ({
+      run_id: args.runId ?? 'run-9',
       label: 'mesh-9',
       status: 'done',
       runtime_id: 'rt-9',
