@@ -3,23 +3,28 @@
 // noun speaks to a REAL broker, and drives session.start once per identity the
 // layer can be handed:
 //
-//   A. provisioned — broker URL, run id and this launch's one-shot attach
-//      credential name a run the launcher already holds, and AVENOR_LABEL
-//      carries the launch label (every avenor launch exports its identity that
-//      way). The layer trades the credential at /attach for the run's own and
-//      writes nothing else about the run: no /register, no /session_name. The
-//      name write is asserted absent by path — a harness name outranks the
-//      record's label in the broker, so posting the launch label would shadow
-//      the name peers address the run by, including through a later authorized
-//      rename.
+//   A. the provisioned shape — broker URL, run id and a credential together
+//      select the one handshake a provisioned launch makes: `POST /attach`.
+//      The layer writes nothing else about the run (no /register, no
+//      /session_name, asserted by request path), because the launch label is
+//      the supervisor's record label and a harness name would shadow it. A
+//      refused credential disables the layer with the broker's reason instead
+//      of leaving a second reader on the queue.
 //   B. half-provisioned — a run id without a credential. The layer
 //      self-registers through the broker's open /register route and posts the
 //      name it was handed, here as AVENOR_LABEL alone.
 //   C. bare — no run id at all. The layer mints its own run and posts its name,
 //      handed as the older AVENOR_SESSION_NAME spelling a shell may still set.
-//   D. a second session holding A's environment. The attach credential was
-//      spent by A, so the layer disables itself with the broker's reason and
-//      polls nothing: one run keeps one inbound consumer.
+//
+// Case A's credential is one this broker never minted, on purpose: a launch
+// grant is minted in process by the broker that provisions the launch
+// (MintAttach hands it to the supervisor, which puts it in its child's
+// environment) and /register mints none — a register call would rotate the
+// grant already placed in a child's environment. The handshake itself (grant
+// spent once, the run's own credential returned, a nested session refused with
+// `409 attach-consumed`) is proven live by the spawn drive in
+// skills/verify-avenor/features/claude-peers.md, and in Go by
+// broker/attach_test.go and claude/peer_test.go.
 //
 // Run against a real `avenor stable` broker:
 //   node marketplace/plugins/avenor/test/preflight-identity.mjs http://127.0.0.1:<port>
@@ -67,51 +72,24 @@ async function sessions(creds) {
   return JSON.parse(await res.text())
 }
 
-async function labelOf(creds, runId) {
-  const listing = await sessions(creds)
-  const row = listing.sessions.find((s) => s.run_id === runId)
-  return row ? row.label : null
-}
-
 // The broker's open register route writes the record a supervisor's
 // EnsureRun leaves behind when it is handed the token; the label follows
 // through /rename, which is the route an authorized name change takes. The
-// answer's `attach` is the one-shot credential a launch hands its child, and
-// it is what the provisioned layer case presents.
+// answer is the run credential and nothing else: a launch grant is minted in
+// process by the broker that provisions the launch (Broker.MintAttach), never
+// by /register, because a register call would rotate the grant already sitting
+// in a child's environment.
 const STAMP = Date.now().toString(36)
 async function provisionRun(runId, token) {
   const res = await post('/register', { run_id: runId, token })
   if (!res.ok) throw new Error('provision ' + runId + ': ' + res.status + ' ' + res.text)
   const answer = JSON.parse(res.text)
-  if (typeof answer.attach !== 'string' || answer.attach === '') {
-    throw new Error('provision ' + runId + ': the broker minted no attach credential')
-  }
-  return { runId, token, attach: answer.attach }
+  return { runId, token, answer }
 }
 async function labelRun(creds, name) {
   const res = await post('/rename', { name }, creds)
   if (!res.ok) throw new Error('rename ' + creds.runId + ': ' + res.status + ' ' + res.text)
   return JSON.parse(res.text)
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-/**
- * Deadline-bounded wait for a condition a broker round trip has to reach. Every
- * wait in this drive is bounded: a hang is a failure, never a slow pass.
- */
-async function until(match, budgetMs = 15000) {
-  const deadline = Date.now() + budgetMs
-  for (;;) {
-    if (match()) return true
-    if (Date.now() > deadline) return false
-    await sleep(100)
-  }
-}
-
-/** The prompts the layer under test submitted, in arrival order. */
-function submitted(caseName) {
-  return events.filter((e) => e.kind === caseName + ' prompt.submit').map((e) => e.line)
 }
 
 // ---------- the stub engine-call object ----------
@@ -154,21 +132,38 @@ function issued(layer, path) {
   return layer.requests.filter((r) => r.method === 'POST' && r.path === path)
 }
 
-// ---------- A. provisioned identity ----------
-console.log('=== A. a provisioned run joins without writing its identity ===')
+// ---------- A. the provisioned shape ----------
+console.log('=== A. a launch carrying a credential joins only through /attach ===')
 const RUN_A = 'pf-prov-' + STAMP
 const NAME_A = 'pf-child-a'
 const provisionedA = await provisionRun(RUN_A, 'preflight-provisioned-token')
+// The answer is the run credential and nothing else. A launch grant minted here
+// would rotate the one already sitting in a child's environment, and no reader
+// of this answer wants it: the plugin takes token and run id, and a provisioned
+// launch mints in process instead of registering at all.
+check('A register answers the run credential and no attach grant',
+  provisionedA.answer.token === provisionedA.token && provisionedA.answer.attach === undefined,
+  provisionedA.answer)
 await labelRun(provisionedA, NAME_A)
 const beforeA = await sessions(provisionedA)
 
-// The launch hands its child the run id and the one-shot credential minted for
-// this launch, never the run's own.
+// URL, run id and a credential together are what select the provisioned branch.
+// The credential is one this broker never minted: a launch grant is minted in
+// process by the broker that provisions the launch (MintAttach hands it to the
+// supervisor, which puts it in its child's environment), so a broker-only drive
+// cannot hold a spendable one. What this case pins is the branch's entry shape —
+// /attach and nothing else — because that is what keeps the launch label the
+// supervisor registered untouched, and it pins that a refusal disables the layer
+// instead of putting a second reader on the queue. The handshake itself (grant
+// spent once, the run's own credential returned, a nested session refused `409
+// attach-consumed`) is proven live by the spawn drive in the claude-peers
+// feature map, and in Go by broker/attach_test.go and claude/peer_test.go.
 const envA = {
   AVENOR_BROKER_URL: BROKER,
   AVENOR_RUN_ID: RUN_A,
-  AVENOR_BROKER_TOKEN: provisionedA.attach,
-  // The launch label, exactly as a supervisor spawn passes it.
+  AVENOR_BROKER_TOKEN: 'not-a-launch-grant-' + STAMP,
+  // The launch label, exactly as a supervisor spawn passes it. A provisioned
+  // run must not post it: a harness name outranks the record's label.
   AVENOR_LABEL: NAME_A,
 }
 const layerA = await loadLayer('a', envA)
@@ -176,51 +171,18 @@ await layerA.hooks['session.start'](layerA.d, { cwd: '/tmp', isInteractive: true
 
 const afterA = await sessions(provisionedA)
 const rowA = afterA.sessions.find((s) => s.run_id === RUN_A)
-check('A joined the provisioned run as its launch label', Boolean(rowA) && rowA.label === NAME_A, rowA)
+check('A left the run record under its launch label', Boolean(rowA) && rowA.label === NAME_A, rowA)
 check('A issued exactly one /attach', issued(layerA, '/attach').length === 1, layerA.requests.map((r) => r.method + ' ' + r.path))
 check('A issued no /register', issued(layerA, '/register').length === 0, layerA.requests.map((r) => r.method + ' ' + r.path))
 check('A issued no /session_name write', issued(layerA, '/session_name').length === 0,
   layerA.requests.map((r) => r.method + ' ' + r.path))
+check('A polled nothing', issued(layerA, '/poll-control').length === 0,
+  layerA.requests.map((r) => r.method + ' ' + r.path))
 check('A minted no second run', afterA.sessions.length === beforeA.sessions.length,
   { before: beforeA.sessions.length, after: afterA.sessions.length })
 const logsA = events.filter((e) => e.kind === 'a ui.log').map((e) => e.line).join('\n')
-check('A logs the provisioned path', logsA.includes('peer layer on (provisioned run ' + RUN_A), logsA)
-
-// The provisioned token still drives both directions.
-const probeA = await provisionRun('pf-probe-a-' + STAMP, 'preflight-probe-a-token')
-const tellId = 'av1.preflight.' + STAMP
-const tell = await post('/send', {
-  from_run_id: probeA.runId,
-  to_run_id: RUN_A,
-  type: 'agent_message',
-  message_id: tellId,
-  payload: {
-    id: tellId,
-    from: probeA.runId,
-    from_run_id: probeA.runId,
-    to_run_id: RUN_A,
-    message: 'preflight-tell-arrives',
-    role: 'agent',
-  },
-}, probeA)
-check('A probe tell admitted', tell.ok, tell.status)
-const tellA = await until(() => submitted('a').some((t) => t.includes('preflight-tell-arrives')))
-check('A provisioned poll delivered the tell', tellA, submitted('a'))
-
-const sendA = await layerA.hooks['session.send'](layerA.d, {
-  to: 'avenor:' + probeA.runId,
-  text: 'preflight-reply-through-provisioned-token',
-  origin: { kind: 'model' },
-})
-check('A outbound through the provisioned token', Boolean(sendA) && sendA.isDelivered === true, sendA)
-
-// The chain the name write used to break: a harness name outranks the record's
-// own label, so an authorized rename would change a field peers never read.
-const RENAMED_A = 'pf-child-a-renamed'
-const renameA = await labelRun(provisionedA, RENAMED_A)
-const labelAfterRename = await labelOf(provisionedA, RUN_A)
-check('A an authorized rename moves the label peers see', labelAfterRename === RENAMED_A,
-  { answered: renameA.label, listed: labelAfterRename })
+check('A disabled itself with the broker\'s reason for that credential',
+  logsA.includes('refused this launch\'s attach for ' + RUN_A), logsA)
 
 // ---------- B. a run id without a token ----------
 console.log('=== B. a pinned run id without a token still self-registers ===')
@@ -266,42 +228,6 @@ check('C minted id is a claude-<hex>', Boolean(freshC) && /^claude-[0-9a-f]{6}$/
 check('C posted the name it was handed', issued(layerC, '/session_name').length === 1,
   layerC.requests.map((r) => r.method + ' ' + r.path))
 check('C is listed under that name', Boolean(freshC) && freshC.label === NAME_C, freshC)
-
-// ---------- D. one run, one inbound consumer ----------
-console.log('=== D. a second session cannot join a run that already attached ===')
-events.length = 0
-// The same environment A was launched with: exactly what a nested session
-// spawned from A's own shell inherits.
-const layerD = await loadLayer('d', envA)
-await layerD.hooks['session.start'](layerD.d, { cwd: '/tmp', isInteractive: true })
-const logsD = events.filter((e) => e.kind === 'd ui.log').map((e) => e.line).join('\n')
-check('D presented the spent credential once', issued(layerD, '/attach').length === 1,
-  layerD.requests.map((r) => r.method + ' ' + r.path))
-check('D disabled itself with the broker\'s reason',
-  logsD.includes('refused this launch\'s attach') && logsD.includes('already used'), logsD)
-check('D polled nothing', issued(layerD, '/poll-control').length === 0,
-  layerD.requests.map((r) => r.method + ' ' + r.path))
-
-// The refusal is about the second consumer, not the run: A still serves its
-// queue, which is the observable difference between one consumer and two.
-const tellDId = 'av1.preflight.d.' + STAMP
-const tellD = await post('/send', {
-  from_run_id: probeA.runId,
-  to_run_id: RUN_A,
-  type: 'agent_message',
-  message_id: tellDId,
-  payload: {
-    id: tellDId,
-    from: probeA.runId,
-    from_run_id: probeA.runId,
-    to_run_id: RUN_A,
-    message: 'preflight-single-consumer',
-    role: 'agent',
-  },
-}, probeA)
-check('D probe tell admitted', tellD.ok, tellD.status)
-const tellAfterD = await until(() => submitted('a').some((t) => t.includes('preflight-single-consumer')))
-check('the tell still reaches A, the only consumer', tellAfterD, submitted('a'))
 
 console.log(failures === 0 ? 'PREFLIGHT OK' : 'PREFLIGHT FAILED (' + failures + ')')
 process.exit(failures === 0 ? 0 : 1)

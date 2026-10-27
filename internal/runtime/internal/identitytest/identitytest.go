@@ -153,6 +153,12 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 		supplied[key] = value
 	}
 	for _, key := range runtime.ScrubbedEnvNames() {
+		if runtime.IsPeerEnvName(key) {
+			// The peer credential is not launch identity: a launch either strips
+			// an inherited one or provisions its own, and AssertPeerEnv says
+			// which. Requiring "unset" here would fail every provisioned launch.
+			continue
+		}
 		if value, ok := supplied[key]; ok {
 			if observed[key] != value {
 				t.Errorf("%s = %q, want %q", key, observed[key], value)
@@ -176,15 +182,6 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 	}
 	if observed[token.EnvBrokerParentToken] != unsetValue {
 		t.Errorf("%s = %q, want it unset", token.EnvBrokerParentToken, observed[token.EnvBrokerParentToken])
-	}
-}
-
-// AssertBrokerPreserved requires the broker credential pair to survive an
-// identity scrub.
-func AssertBrokerPreserved(t *testing.T, observed map[string]string) {
-	t.Helper()
-	if observed["AVENOR_RUN_ID"] != "broker-run" || observed["AVENOR_BROKER_TOKEN"] != "broker-token" {
-		t.Errorf("broker pair = %q/%q, want it preserved", observed["AVENOR_RUN_ID"], observed["AVENOR_BROKER_TOKEN"])
 	}
 }
 

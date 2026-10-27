@@ -708,11 +708,13 @@ func (b *Broker) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// handleRegister mints a run or re-registers one the caller already holds. The
-// answer also carries a one-shot attach grant (see handleAttach): a caller that
-// just minted the record, or proved it holds the run's own credential, is the
-// provisioning side for that run, so it may hand one child the right to be the
-// run's inbound consumer.
+// handleRegister mints a run or re-registers one the caller already holds. It
+// answers with the run's credential and nothing else: the attach grant a
+// launch hands its child is minted in process, by the supervisor that holds
+// this broker, not over the wire. A register that minted here would rotate a
+// grant already placed in a child's environment, and no response reader wants
+// it anyway (the plugin takes token and run id; the provisioned path never
+// registers at all).
 func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RunID string `json:"run_id"`
@@ -740,16 +742,11 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		st.Mu.Unlock()
 		respToken := st.Token
 		b.mu.Unlock()
-		// The caller proved it holds this run's credential, so it is the
-		// provisioning side and may hand its child a launch grant.
-		attach, _ := b.MintAttach(st.RunID)
-		resp := map[string]string{
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"token":  respToken,
 			"run_id": st.RunID,
-			"attach": attach,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		})
 		return
 	}
 	token := body.Token
@@ -769,14 +766,10 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	b.mu.Unlock()
 	b.runSetChanged()
 
-	// The caller minted this record, so it is the provisioning side for the run
-	// and may hand its child a launch grant.
-	attach, _ := b.MintAttach(st.RunID)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"token":  token,
 		"run_id": st.RunID,
-		"attach": attach,
 	})
 }
 
@@ -2114,15 +2107,16 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 // a credential left behind by an earlier launch can no longer join. It reports
 // false for a run this broker does not hold — nothing would authenticate the
 // attach that followed.
+//
+// This is the in-process provisioning seam: the provider calls it for the child
+// it is about to start, and it is the only way a grant is minted. No HTTP route
+// mints one — `/register` would rotate the grant already placed in a running
+// child's environment, and nothing reads a grant out of that answer anyway.
 func (b *Broker) MintAttach(runID string) (string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if _, ok := b.runs[runID]; !ok {
 		return "", false
-	}
-	if b.attachCreds == nil {
-		b.attachCreds = make(map[string]*attachCredential)
-		b.attachByRun = make(map[string]string)
 	}
 	credential := MakeToken()
 	if prior, ok := b.attachByRun[runID]; ok {

@@ -15,11 +15,13 @@ import (
 // way the child would join the broker as a run another live session is already
 // using.
 //
-// Provisioned values are what a launch hands its own child, and they are one
-// credential's worth (PeerProvision): a backend whose harness authenticates
-// each request exports the run's token, while one whose harness trades a
-// credential at session start exports a one-shot attach credential instead, so
-// a run has one inbound consumer (see Broker.MintAttach).
+// The strip is not a per-backend duty: every name below is in ScrubbedEnvNames,
+// so every launch that goes through LaunchEnv (or unsets that list) removes an
+// inherited copy. Provisioned values are what a launch appends after that
+// scrub, and they are one credential's worth (PeerProvision): a backend whose
+// harness authenticates each request exports the run's token, while one whose
+// harness trades a credential at session start exports a one-shot attach
+// credential instead, so a run has one inbound consumer (see Broker.MintAttach).
 const (
 	EnvBrokerURL   = "AVENOR_BROKER_URL"
 	EnvBrokerRunID = "AVENOR_RUN_ID"
@@ -34,9 +36,12 @@ const envRetiredPeerName = "AVENOR_SESSION_NAME"
 
 var peerEnvNames = []string{EnvBrokerURL, EnvBrokerRunID, EnvBrokerToken}
 
-// PeerEnvNames returns the peer credential vocabulary. Every backend that
-// launches a child strips this whole set and then exports what it provisions,
-// so the strip list has one home rather than a copy per backend.
+// PeerEnvNames returns the peer credential vocabulary: the names a launch
+// either provisions or keeps out of its child. It is a subset of
+// ScrubbedEnvNames, which is the enforcement point — a backend does not strip
+// these itself. The list stays separate so peer-specific code (a provisioner, a
+// terminal prefix, a child-observation fixture) can name exactly what it is
+// talking about.
 func PeerEnvNames() []string {
 	return append([]string(nil), peerEnvNames...)
 }
@@ -44,6 +49,11 @@ func PeerEnvNames() []string {
 // ScrubPeerEnv returns environ without any inherited peer credential. Matching
 // is on the exact key as in ScrubIdentityEnv: duplicates and bare-key entries
 // go, while a near-miss name such as AVENOR_RUN_ID_SUFFIX keeps its order.
+//
+// ScrubbedEnvNames already contains these names, so a launch that scrubs or
+// unsets the shared list has nothing left for this to do. It remains for a
+// caller that holds an environment it has not scrubbed itself and must remove
+// only the peer vocabulary.
 func ScrubPeerEnv(environ []string) []string {
 	kept := make([]string, 0, len(environ))
 	for _, entry := range environ {

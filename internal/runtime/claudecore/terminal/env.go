@@ -96,17 +96,21 @@ func UnsetParentClaudeEnvPrefix() string {
 	return b.String()
 }
 
-// PeerEnv finishes a terminal launch's environment: runtime owns the peer
-// credential vocabulary (runtime.PeerEnvNames), and a child never inherits a
-// launcher's copy.
+// PeerEnv finishes a terminal launch's environment: a child never inherits a
+// launcher's copy of the peer credential, and what this launch provisions is
+// appended last.
 //
-// PeerEnv returns env without any inherited avenor peer credentials, followed
-// by extra: this launch's provisioned ones. extra also passes the same filter
-// the scrub layers apply, so a caller cannot smuggle a name back in through it
-// — CLAUDE_CODE_MESSAGING_TOKEN or the parent-link credential among them. Only
-// the peer names themselves are let through there, since provisioning them is
-// the point. Entries that are not KEY=VALUE are dropped, and extra wins over
-// env for every name.
+// PeerEnv returns env followed by extra: this launch's provisioned entries.
+// extra also passes the same filter the scrub layers apply, so a caller cannot
+// smuggle a name back in through it — CLAUDE_CODE_MESSAGING_TOKEN or the
+// parent-link credential among them. Only the peer names themselves are let
+// through there, since provisioning them is the point. Entries that are not
+// KEY=VALUE are dropped, and extra wins over env for every name.
+//
+// The peer names are in runtime.ScrubbedEnvNames, so the LaunchEnv this
+// composes with has already removed an inherited copy; the peer-only scrub here
+// keeps PeerEnv correct for a caller that hands it an environment it did not
+// scrub itself.
 func PeerEnv(env []string, extra []string) []string {
 	return append(runtime.ScrubPeerEnv(env), callerEnv(extra)...)
 }
@@ -115,8 +119,8 @@ func PeerEnv(env []string, extra []string) []string {
 // inherit. They are appended after every scrub layer, so without this filter a
 // single StartOptions.Env entry would reintroduce what the scrubs exist to keep
 // out: the parent's Claude Code session or messaging token, an inherited launch
-// identity, or the parent-link credential. Provisioned peer credentials do not
-// go through here; PeerEnv appends them after filtering.
+// identity, or the parent-link credential. The peer credential names are the
+// exception, because provisioning them is what a launch's Env is for.
 func callerEnv(entries []string) []string {
 	out := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -124,7 +128,10 @@ func callerEnv(entries []string) []string {
 		if !ok || key == "" {
 			continue
 		}
-		if isParentClaudeSessionVar(key) || runtime.IsScrubbedEnvName(key) {
+		if isParentClaudeSessionVar(key) {
+			continue
+		}
+		if runtime.IsScrubbedEnvName(key) && !runtime.IsPeerEnvName(key) {
 			continue
 		}
 		out = append(out, entry)
@@ -133,11 +140,11 @@ func callerEnv(entries []string) []string {
 }
 
 // identityEnvPrefix returns a shell prefix that unsets every name a child must
-// not inherit (runtime.ScrubbedEnvNames and the avenor peer credentials) and
-// exports this launch's identity, then sources envFile: the caller's own
-// environment, which this launch provisions values into. The unset must happen
-// here, not just in LaunchEnv: a pane inherits the tmux server's environment,
-// which carries the credential the documented setup way. Values are
+// not inherit (runtime.ScrubbedEnvNames, which includes the avenor peer
+// credentials) and exports this launch's identity, then sources envFile: the
+// caller's own environment, which this launch provisions values into. The unset
+// must happen here, not just in LaunchEnv: a pane inherits the tmux server's
+// environment, which carries the credential the documented setup way. Values are
 // single-quoted so labels containing quotes, newlines or command substitution
 // text stay literal data.
 //
@@ -151,10 +158,6 @@ func identityEnvPrefix(p *runtime.LaunchProvenance, envFile string) string {
 	var b strings.Builder
 	b.WriteString("unset")
 	for _, name := range runtime.ScrubbedEnvNames() {
-		b.WriteString(" ")
-		b.WriteString(name)
-	}
-	for _, name := range runtime.PeerEnvNames() {
 		b.WriteString(" ")
 		b.WriteString(name)
 	}

@@ -161,15 +161,21 @@ slow pass. The PR 1 run's captured evidence (transcripts, validation report,
 review grounding drives for turn axes and reload behavior) lives in the
 branch's `.cache/runs/evidence/` (uncommitted by repo policy).
 
-The identity drive covers the four identities a session can be handed: a
-provisioned run trades its launch credential for the run's and issues no
-`/register` and no `/session_name` write (asserted by request path, with the
-launch label set as a supervisor spawn sets it), its label survives, and an
-authorized rename still moves it; a run id without a credential self-registers
-and posts its name; a bare session mints its own run and names it; and a second
-session holding the provisioned environment is refused (`409 attach-consumed`,
-the broker's reason in its log, no `/poll-control` at all) while the tell it
-would have raced still reaches the first session.
+The identity drive covers the identities a session can be handed: a launch
+carrying broker URL, run id and a credential together selects the provisioned
+shape, whose only entry is `POST /attach` — no `/register`, no `/session_name`
+write (asserted by request path, with the launch label set as a supervisor
+spawn sets it), no run minted, and a refused credential disables the layer with
+the broker's reason instead of leaving a second reader on the queue; a run id
+without a credential self-registers and posts its name; a bare session mints its
+own run and names it; and `/register` answers the run credential with no attach
+grant. The drive's provisioned case carries a credential the broker never minted
+on purpose: a launch grant is minted in process, by the broker that provisions
+the launch, so a broker-only script cannot hold a spendable one. The handshake
+itself — grant spent once, the run's own credential returned, a nested session
+refused `409 attach-consumed`, the label surviving an authorized rename — is
+proven by the spawn drive below and by Go (`internal/runtime/broker/attach_test.go`,
+`internal/runtime/claude/peer_test.go`).
 
 PR 2's live proof (2026-10-27, 2.1.311): `.cache/runs/pr2/evidence/proof.md`
 — the provisioned-child drive end to end, with `child-run-transcript.md`,
@@ -189,11 +195,17 @@ reverted-fix run that fails it.
   `avenor:<label>` ambiguous, and a resume would need a record that still
   authenticates.
 - A hosted child never inherits a launching session's peer credentials:
-  avenor's terminal launcher unsets the three peer names (and the retired
-  `AVENOR_SESSION_NAME` a launcher may still hold) and provisions only its own,
-  so the plugin in one session cannot make its children join as itself — and a
+  `runtime.ScrubbedEnvNames` includes the three peer names (and the retired
+  `AVENOR_SESSION_NAME` a launcher may still hold), and every spawning backend
+  strips that list through `runtime.LaunchEnv` — the terminal launchers unset it
+  in the pane command — so a backend that provisions nothing cannot pass a
+  launcher's credential down either. A launch then provisions only its own, so
+  the plugin in one session cannot make its children join as itself — and a
   session that inherits a provisioned environment anyway (a `claude` started
   from inside the child) is refused at `/attach`, its credential already spent.
+  A supervisor started inside a provisioned session therefore inherits no run to
+  hand its own children: it is a root broker unless the parent-link pair names
+  another one.
   A backend that authenticates each request itself rather than trading a
   credential (pi's extension) still receives the run's own token, so a nested
   pi process could poll with it; the claude layer's single-consumer guarantee

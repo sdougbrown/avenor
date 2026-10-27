@@ -11,9 +11,11 @@ import (
 )
 
 // TestIdentityChildEnv asserts in one launch what the ACP child saw: this
-// launch's identity, none of the inherited identity, and the untouched broker
-// pair. An env hook that reintroduces identity must not win, because the scrub
-// runs on the combined environment.
+// launch's identity, none of the inherited identity, and no inherited peer
+// credential either — this backend provisions none, so the shared scrub is the
+// only thing that keeps the launcher's run out of the child. An env hook that
+// reintroduces identity must not win, because the scrub runs on the combined
+// environment.
 func TestIdentityChildEnv(t *testing.T) {
 	identitytest.PoisonParent(t)
 	obsPath := filepath.Join(t.TempDir(), "observed.env")
@@ -43,5 +45,8 @@ func TestIdentityChildEnv(t *testing.T) {
 
 	observed := identitytest.Read(t, obsPath)
 	identitytest.Assert(t, observed, provenance)
-	identitytest.AssertBrokerPreserved(t, observed)
+	// An inherited peer credential names the launcher's run, which another live
+	// session already holds, so the shared scrub removes it: this launch joins
+	// as nothing at all.
+	identitytest.AssertPeerEnv(t, observed, nil)
 }

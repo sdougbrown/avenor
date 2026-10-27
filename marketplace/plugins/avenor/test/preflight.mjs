@@ -902,7 +902,7 @@ if (remintAttempts[1] === remintAttempts[0] || !remintAttempts[1].startsWith('cl
   console.log('FAIL: the retry did not mint a fresh suffix', remintAttempts)
   process.exit(1)
 }
-const remintLine = events.find((e) => e.line === 'peer layer on (run ' + remintAttempts[1] + ', broker ' + BROKER + ')')
+const remintLine = events.find((e) => e.line === 'peer layer on (self-registered run ' + remintAttempts[1] + ', broker ' + BROKER + ')')
 if (!remintLine) {
   console.log('FAIL: the layer did not arm with the reminted run', remintAttempts)
   process.exit(1)

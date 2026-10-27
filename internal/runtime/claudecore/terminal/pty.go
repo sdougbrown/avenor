@@ -45,13 +45,15 @@ func ptyCommand(ctx context.Context, opts StartOptions, baseEnv []string) *exec.
 	}
 	// Scrub the combined environment last, then add this launch's identity. The
 	// hosted process is an independent Claude Code session, and inheriting the
-	// launching session's marker turns a completed turn into a silent hang.
+	// launching session's marker turns a completed turn into a silent hang. The
+	// same scrub removes an inherited peer credential, which would make this
+	// child join the broker as a run another live session already holds.
 	combined := ScrubParentClaudeEnv(append(os.Environ(), env...))
-	// PeerEnv strips a launcher's avenor broker credentials — a session that
-	// loaded the plugin exports them into every child — and appends this
-	// launch's own, which is what makes a spawned claude a provisioned peer. It
-	// also refuses a StartOptions.Env entry named in the scrub lists, since those
-	// are appended after every scrub layer above.
+	// PeerEnv appends this launch's provisioned peer credential, which is what
+	// makes a spawned claude a provisioned peer. It still refuses a
+	// StartOptions.Env entry named in the scrub lists, since those are appended
+	// after every scrub layer above; the peer names themselves are the entries
+	// it lets through.
 	cmd.Env = PeerEnv(runtime.LaunchEnv(combined, opts.Provenance), opts.Env)
 	return cmd
 }

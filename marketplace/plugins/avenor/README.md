@@ -93,6 +93,8 @@ turns on the credential:
   Claude child gets: the avenor supervisor provisions a broker run for every
   child it starts and hands the run id, its one-shot attach credential, its
   label and the broker URL to the child through the launch environment. The
+  credential is minted in process by the broker that provisions the launch; no
+  route mints one, and `/register` answers only the run credential. The
   layer trades that credential at `POST /attach` for the run's own, and then
   behaves as the run — no `/register` call, and no `/session_name` write, so
   the label the supervisor gave the run survives. The child appears in peer

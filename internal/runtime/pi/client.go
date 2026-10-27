@@ -121,12 +121,12 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 	proc.Dir = cwd
 	// Stale PI_AGENT and broker credentials from the parent must never leak into
 	// the child: they would activate sub-agent broker mode or authenticate as
-	// the wrong run. Inherited launch identity would misattribute the child
-	// too. Filtering and scrubbing run regardless of which values are injected,
-	// then this launch's identity is added.
-	env := proc.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, e := range runtime.ScrubPeerEnv(env) {
+	// the wrong run. Inherited launch identity and an inherited peer credential
+	// go too. The shared scrub runs first and this launch appends its own values
+	// after it, so nothing here can be mistaken for something it inherited.
+	env := runtime.LaunchEnv(proc.Environ(), provenance)
+	filtered := make([]string, 0, len(env)+7)
+	for _, e := range env {
 		if strings.HasPrefix(e, "PI_AGENT=") || strings.HasPrefix(e, "PI_AGENT_PROFILE=") {
 			continue
 		}
@@ -149,7 +149,7 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 			runtime.EnvBrokerRunID+"="+brokerRunID,
 			runtime.EnvBrokerToken+"="+brokerToken)
 	}
-	proc.Env = runtime.LaunchEnv(filtered, provenance)
+	proc.Env = filtered
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pi stdin pipe: %w", err)

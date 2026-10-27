@@ -72,13 +72,13 @@ func TestScrubIdentityEnv(t *testing.T) {
 		want    []string
 	}{
 		{
-			name: "parent broker credential is scrubbed",
+			name: "parent broker credential and peer vocabulary are scrubbed",
 			environ: []string{
 				"AVENOR_PARENT_BROKER_TOKEN=credential",
-				"AVENOR_BROKER_TOKEN=kept",
+				"AVENOR_BROKER_TOKEN=inherited",
 				"PATH=/usr/bin",
 			},
-			want: []string{"AVENOR_BROKER_TOKEN=kept", "PATH=/usr/bin"},
+			want: []string{"PATH=/usr/bin"},
 		},
 		{
 			name:    "nil environ",
@@ -91,7 +91,7 @@ func TestScrubIdentityEnv(t *testing.T) {
 			want:    nil,
 		},
 		{
-			name: "exact keys removed, near misses and broker credentials preserved",
+			name: "exact keys removed, near misses preserved",
 			environ: []string{
 				"AVENOR_RUNTIME_ID=rt_parent",
 				"AVENOR_EXECUTION_ID=run_parent",
@@ -103,6 +103,7 @@ func TestScrubIdentityEnv(t *testing.T) {
 				"AVENOR_ATTEMPT=7",
 				"AVENOR_PARENT_RUN_ID=run_grandparent",
 				"AVENOR_RUN_ID=run_broker",
+				"AVENOR_RUN_ID_SUFFIX=near-miss",
 				"AVENOR_BROKER_TOKEN=token",
 				"AVENOR_BROKER_URL=http://127.0.0.1:1",
 				"AVENOR_TREE_BUDGET=100",
@@ -112,9 +113,7 @@ func TestScrubIdentityEnv(t *testing.T) {
 				"PATH=/usr/bin",
 			},
 			want: []string{
-				"AVENOR_RUN_ID=run_broker",
-				"AVENOR_BROKER_TOKEN=token",
-				"AVENOR_BROKER_URL=http://127.0.0.1:1",
+				"AVENOR_RUN_ID_SUFFIX=near-miss",
 				"AVENOR_TREE_BUDGET=100",
 				"AVENOR_PHASE_NAME=kept",
 				"AVENOR_PHASEX=kept",

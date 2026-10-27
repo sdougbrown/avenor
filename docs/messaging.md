@@ -262,9 +262,11 @@ network therefore means every client that can reach the broker port is
 trusted: the credentials are not an admission gate for arbitrary network
 clients. `POST /register` mints a token for any run id it has not seen without
 asking for a parent token, so a client that reaches the port can register
-itself and then use its own credential. Its answer also carries a one-shot
-attach grant for that run, because the registering caller is the run's
-provisioning side. There is no TLS listener, so a hub
+itself and then use its own credential. Its answer is that credential and the
+run id, never a launch attach grant: the broker mints one in process, for the
+launch it is about to start, because a register call would rotate the grant
+already sitting in a running child's environment. There is no TLS listener, so
+a hub
 exposed beyond that network needs a channel that supplies both confidentiality
 and admission control.
 
