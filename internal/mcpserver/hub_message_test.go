@@ -315,6 +315,28 @@ func TestHubHostMessageAddressesABranchRun(t *testing.T) {
 		t.Fatalf("ask result = %#v, want the branch's reply", answer.object)
 	}
 
+	// A second branch run whose id carries a quote and a backslash — an id the
+	// broker's /register accepts and Go's %q escapes in its own sentences — is
+	// addressable through the same wire contract: the tell reaches that run's
+	// queue under the escaped id itself, pinning the cross-language matcher's
+	// input against real supervisor output rather than a hand-written spelling.
+	const escapedRunID = `rt_br"anch\42`
+	escapedToken := registerBranchRun(t, branch.url, escapedRunID)
+	escapedTarget := awaitHubPeer(t, cl, escapedRunID+"@")
+	object, isError = callTool(t, server, map[string]any{
+		"action": "tell", "target": escapedTarget, "message": "TELL-ESCAPED",
+	})
+	if isError {
+		t.Fatalf("tell to the escaped branch run was refused: %#v", object)
+	}
+	if object["outcome"] != string(messaging.OutcomeSent) || object["label"] != escapedRunID {
+		t.Fatalf("tell result = %#v, want sent to the run labelled %q", object, escapedRunID)
+	}
+	escaped := awaitBranchMessage(t, branch.url, escapedRunID, escapedToken)
+	if escaped.Type != "agent_message" || !strings.Contains(string(escaped.Payload), "TELL-ESCAPED") {
+		t.Fatalf("relayed message = %+v, want the tell body", escaped)
+	}
+
 	// A target neither the hub nor a registered branch holds is still refused.
 	object, isError = callTool(t, server, map[string]any{
 		"action": "tell", "target": "rt_ghost", "message": "NOBODY",
