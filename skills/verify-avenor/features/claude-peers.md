@@ -74,7 +74,10 @@ module path) and the committed live-broker hook-contract drive
 against a quiet `avenor stable` (self-registration/naming, idle and
 subagent-turn idle delivery, tell sends ride no edge, ask correlation,
 reply-edge unblock, the `reply` action answering the ask the hook polled and
-passing an unknown `reply_to` through, busy-path append, the ask tool's reply
+passing an unknown `reply_to` through, busy-path append, an unpaired
+`turn.complete` clamping at zero with the next live turn still appending, two
+outstanding asks from one peer (a plain send riding the newest, the `reply`
+action still reaching the older by id), the ask tool's reply
 and timed-out shapes, a cut `/wait_reply` retracting its edge, a refused
 `prompt.submit` falling back to a row while the rest of the batch still lands,
 a `/poll-control` failure pausing the loop without killing it, ask-input
