@@ -18,9 +18,12 @@
 //
 // Sub-steps pin the edges the main run does not reach: 2b a send after a bare
 // tell rides no edge, 4b the reply action answers the ask the hook polled,
-// 5b a subagent turn is not the main loop, 6b a timed-out ask is classified
-// from the wire facts, 9b a failed /poll-control pauses the loop without
-// killing it, 11a a broker-less session stays off with one reason line, 11b a
+// 5b a subagent turn is not the main loop, 5c an unpaired turn.complete clamps
+// at zero without making the next live turn read idle, 5d two outstanding asks
+// from one peer (a plain send rides the newest, the reply action reaches the
+// older by id), 6b a timed-out ask is classified from the wire facts, 9b a
+// failed /poll-control pauses the loop without killing it, 11a a broker-less
+// session stays off with one reason line, 11b a
 // partial listing refuses every ref, 11c one ask reads one listing, 11d a
 // stale self-minted name is reminted then registered, 11e a failed wait
 // retracts its ask.
@@ -414,6 +417,107 @@ if (!subagentReply || subagentReply.isDelivered !== true) {
 }
 await until('the subagent-time ask to unblock', () => subagentWaitReturned)
 await callHook('turn.complete').hook(d, { answer: 'done', turnId: 's1', agentId: 'agent-7' })
+
+console.log('=== 5c. an unpaired turn.complete clamps at zero, so the next live turn still reads busy ===')
+// A turn.complete can arrive for a turn this session never saw start (an
+// aborted turn, a mid-turn reload). The counter clamps at zero there, and the
+// clamp must not hand the following real turn an idle reading: without it the
+// axis sits at -1, the next turn.start brings it back to 0, and the ask below
+// submits instead of appending.
+await callHook('turn.complete').hook(d, { answer: 'a turn this session never saw start', turnId: 'orphan' })
+await callHook('turn.start').hook(d, { text: 'the turn after the orphan complete', turnId: 't2' })
+const askClamp = mintAskID()
+await probeSendTo('claude-parent', { id: askClamp, message: 'the ask after the orphan complete', expectsReply: true, generation: listing.generation })
+let clampWaitReturned = null
+probeWait(askClamp, listing.generation, 30000).then((r) => {
+  clampWaitReturned = r
+  return r
+}).catch((err) => waitRejected('the ask after the orphan complete', err))
+// The marker lands on whichever path the axis chose, so the assertion below
+// fails on the wrong one instead of waiting out the deadline.
+await until('the orphan-complete ask to land',
+  () => events.some((e) => (e.kind === 'session.append' || e.kind === 'prompt.submit') && e.line.includes('the ask after the orphan complete')))
+const clampRow = events.find((e) => e.kind === 'session.append' && e.line.includes('the ask after the orphan complete'))
+const clampSubmit = events.find((e) => e.kind === 'prompt.submit' && e.line.includes('the ask after the orphan complete'))
+console.log(JSON.stringify({ check: 'the axis after an unpaired turn.complete', appended: Boolean(clampRow), submitted: Boolean(clampSubmit) }))
+if (!clampRow || clampSubmit) {
+  console.log('FAIL: the zero-clamp let a live main-loop turn read as idle')
+  process.exit(1)
+}
+const clampAnswer = await callHook('session.send').hook(d, {
+  to: `avenor:${probe.runId}`, text: 'answering the orphan-complete ask', origin: { kind: 'model' },
+})
+if (!clampAnswer || clampAnswer.isDelivered !== true) {
+  console.log('FAIL: the orphan-complete ask had no edge to answer', clampAnswer)
+  process.exit(1)
+}
+const clampShape = await until('the orphan-complete ask to unblock', () => clampWaitReturned)
+if (!clampShape.ok || !(clampShape.body || '').includes('answering the orphan-complete ask')) {
+  console.log('FAIL: the orphan-complete ask did not unblock with its reply', clampShape)
+  process.exit(1)
+}
+await callHook('turn.complete').hook(d, { answer: 'done', turnId: 't2' })
+
+console.log('=== 5d. two outstanding asks from one peer: a plain send rides the newer, the reply action names the older ===')
+// Every other step holds at most one outstanding ask per peer, so a
+// correlation that picked the OLDEST would look identical. With two queued,
+// only the newer one unblocking proves peekReply's newest-wins read; the older
+// must still be waiting at that instant, and the explicit reply action must
+// then reach it by id — the table is keyed per ask, not per peer.
+await drainProbe()
+const olderAsk = mintAskID()
+const newerAsk = mintAskID()
+await probeSendTo('claude-parent', { id: olderAsk, message: 'the older of two outstanding asks', expectsReply: true, generation: listing.generation })
+await probeSendTo('claude-parent', { id: newerAsk, message: 'the newer of two outstanding asks', expectsReply: true, generation: listing.generation })
+let olderWaitReturned = null
+let newerWaitReturned = null
+probeWait(olderAsk, listing.generation, 30000).then((r) => {
+  olderWaitReturned = r
+  return r
+}).catch((err) => waitRejected('the older of two outstanding asks', err))
+probeWait(newerAsk, listing.generation, 30000).then((r) => {
+  newerWaitReturned = r
+  return r
+}).catch((err) => waitRejected('the newer of two outstanding asks', err))
+await until('both outstanding asks to submit',
+  () => ['the older of two outstanding asks', 'the newer of two outstanding asks'].every(
+    (marker) => events.some((e) => e.kind === 'prompt.submit' && e.line.includes(marker))))
+const newestSend = await callHook('session.send').hook(d, {
+  to: `avenor:${probe.runId}`, text: 'answering the newer ask', origin: { kind: 'model' },
+})
+if (!newestSend || newestSend.isDelivered !== true) {
+  console.log('FAIL: the plain send riding the newer ask was not delivered', newestSend)
+  process.exit(1)
+}
+await until('one of the two outstanding asks to unblock', () => olderWaitReturned !== null || newerWaitReturned !== null)
+console.log(JSON.stringify({
+  check: 'which outstanding ask the plain send rode',
+  newer: newerWaitReturned !== null,
+  older: olderWaitReturned !== null,
+}))
+if (newerWaitReturned === null || olderWaitReturned !== null) {
+  console.log('FAIL: the plain send did not ride the newest outstanding ask')
+  process.exit(1)
+}
+if (!newerWaitReturned.ok || !(newerWaitReturned.body || '').includes('answering the newer ask')) {
+  console.log('FAIL: the newer ask unblocked without the reply text', newerWaitReturned)
+  process.exit(1)
+}
+const olderReplyAction = JSON.parse((await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'reply', reply_to: olderAsk, message: 'answering the older ask by id',
+})).result)
+console.log(JSON.stringify({ check: 'the reply action answered the older ask', olderReplyAction }))
+if (olderReplyAction.outcome !== 'replied' || olderReplyAction.message_id !== olderAsk ||
+    olderReplyAction.text !== 'reply to "' + olderAsk + '" delivered') {
+  console.log('FAIL: the reply action did not answer the older outstanding ask', olderReplyAction)
+  process.exit(1)
+}
+const olderShape = await until('the older ask to unblock', () => olderWaitReturned)
+console.log(JSON.stringify({ check: 'the older ask unblocked with its own reply', ok: olderShape.ok }))
+if (!olderShape.ok || !(olderShape.body || '').includes('answering the older ask by id')) {
+  console.log('FAIL: the older ask did not unblock with its own reply', olderShape)
+  process.exit(1)
+}
 
 console.log('=== 6. the avenor message tool ask action, served by the peer layer ===')
 let toolResult = null
