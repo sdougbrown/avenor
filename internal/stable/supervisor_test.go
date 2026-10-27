@@ -2178,7 +2178,7 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 
 	// Pre-register the child's broker run so the EnsureRun inside runTeamChild
 	// settles on this exact token.
-	wantToken, _ := b.EnsureRun(child.id, "")
+	wantToken, _, _ := b.EnsureRun(child.id, "")
 
 	cfg := &teamrunner.TeamConfig{
 		Team: []phaseconfig.Phase{{Name: "review", Prompt: "review"}},

@@ -111,19 +111,21 @@ type LastAgentMessage struct {
 	At         int64  `json:"at,omitempty"`
 }
 
-// attachCredential is one launch's grant to become its run's inbound consumer.
-// A launch is handed one in its environment, and the first session presenting
-// it is the one that joins: the credential is consumed there, so a second
-// session holding the same environment (a nested harness spawned from the
-// provisioned session) is refused instead of polling the same queue.
-type attachCredential struct {
-	runID    string
-	consumed bool
-}
+// ErrRunNotOwned reports that a record already holds the requested run ID but a
+// writer other than this broker minted its credential — in practice the open
+// `/register` route, whose caller chose the token. Adopting such a record would
+// hand its author the credential of the run this broker is about to provision,
+// so provisioning refuses it instead. See Broker.EnsureRun and Broker.identity.
+var ErrRunNotOwned = errors.New("run record was registered by another writer: refusing to adopt its credential")
 
 // RunState holds all per-run broker state.
 type RunState struct {
 	RunID string
+	// owner is the identity of the broker instance that minted this record's
+	// credential, or empty for a record the open `/register` route created: that
+	// caller chose the token, so no supervisor can vouch for it. It is read and
+	// written under the broker's mutex, like Token.
+	owner string
 	// Token is the credential this run authenticates with. A replacement branch
 	// claim rotates it, so it is guarded by the broker's own mutex, not by Mu:
 	// read it through Broker.runToken or Broker.runStateFor.
@@ -318,10 +320,18 @@ func (st *RunState) signalLocked() {
 // communication between agent harnesses and their orchestrators.
 // It owns run-scoped state, message queuing, and lifecycle event ingestion.
 type Broker struct {
-	addr         string
-	listener     net.Listener
-	mu           sync.RWMutex
-	runs         map[string]*RunState
+	addr     string
+	listener net.Listener
+	mu       sync.RWMutex
+	runs     map[string]*RunState
+	// identity names the supervisor instance this broker mints records for, and
+	// is what makes a record "its own": a host sets it from state that outlives
+	// the process (Broker.SetIdentity), so a successor can adopt what its
+	// predecessor minted, while a record the open `/register` route created
+	// carries no identity and is never adopted. It is fixed before the broker
+	// serves, and is never empty: an unconfigured broker falls back to an
+	// identity only this process knows, which simply makes every record local.
+	identity     string
 	server       *http.Server
 	httpToken    string        // optional global HTTP auth token for push-control endpoint
 	pollTimeout  time.Duration // max wait for poll-control before returning empty
@@ -365,28 +375,59 @@ type Broker struct {
 	pruneMu   sync.Mutex
 	pruneStop context.CancelFunc
 
-	// attachCreds holds the per-launch attach grants, and attachByRun the grant
-	// each run still has pending. Both are read and written under mu, the lock
-	// guarding the run records they name.
-	attachCreds map[string]*attachCredential // credential -> grant
-	attachByRun map[string]string            // runID -> the grant still pending
+	// The attach grant tables. attachCreds holds the grants still pending, by
+	// credential; attachByRun names that credential by run, so a relaunch can
+	// replace the one it never spent. attachConsumed is the bounded history that
+	// lets the broker answer `409 attach-consumed` to a second session holding a
+	// spent credential: it holds the one credential the run's current launch
+	// spent, replaced rather than appended, so the tables are bounded by the runs
+	// the broker holds and not by how many times a run was relaunched. All three
+	// are read and written under mu, the lock guarding the records they name.
+	attachCreds    map[string]string // credential -> runID of a grant still pending
+	attachByRun    map[string]string // runID -> the credential still pending
+	attachConsumed map[string]string // runID -> the credential the current launch spent
 }
 
 // New creates a broker on an ephemeral loopback port.
 // The resulting addr is available after Start.
 func New(globalToken string) *Broker {
 	b := &Broker{
-		runs:         make(map[string]*RunState),
-		httpToken:    globalToken,
-		pollTimeout:  2 * time.Second,
-		writeTimeout: 30 * time.Second,
-		store:        askstore.New(askstore.Options{}),
-		attachCreds:  make(map[string]*attachCredential),
-		attachByRun:  make(map[string]string),
+		runs:           make(map[string]*RunState),
+		identity:       "broker:" + MakeToken(),
+		httpToken:      globalToken,
+		pollTimeout:    2 * time.Second,
+		writeTimeout:   30 * time.Second,
+		store:          askstore.New(askstore.Options{}),
+		attachCreds:    make(map[string]string),
+		attachByRun:    make(map[string]string),
+		attachConsumed: make(map[string]string),
 	}
 	b.store.SetBackend(brokerBackend{broker: b})
 	b.messenger = localMessenger{broker: b}
 	return b
+}
+
+// SetIdentity sets the supervisor identity this broker mints run records under.
+// A host passes its own stable identity — the same value across restarts of the
+// supervisor that owns it — so a successor adopts the records its predecessor
+// minted instead of refusing them. The broker has already fixed a
+// process-scoped identity of its own, so an empty value leaves it alone: a
+// record minted that way is adoptable only by this process, never by another
+// writer. Call it before the broker serves.
+func (b *Broker) SetIdentity(identity string) {
+	if identity == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.identity = identity
+}
+
+// ownsRecord reports whether this broker minted st's credential, so that a
+// credential it carries is one this supervisor put there rather than one a
+// registrant chose. The caller holds b.mu.
+func (b *Broker) ownsRecord(st *RunState) bool {
+	return st.owner != "" && st.owner == b.identity
 }
 
 // Store returns the ask store the broker serves.
@@ -753,6 +794,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if token == "" {
 		token = MakeToken()
 	}
+	// No owner: whoever posted this chose the token, so the record is one no
+	// supervisor can adopt for a launch it provisions (see EnsureRun).
 	st := &RunState{
 		RunID:               body.RunID,
 		Token:               token,
@@ -783,7 +826,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 //
 // The route is open like /register: the credential is the authentication, and
 // it is worthless once spent. Nothing here trusts the body's run id beyond
-// checking that it names the run the credential was minted for.
+// checking that it names the run the credential was minted for, which is why
+// only the broker's own provisioning path can mint one (Broker.MintAttach).
 func (b *Broker) handleAttach(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RunID string `json:"run_id"`
@@ -799,18 +843,18 @@ func (b *Broker) handleAttach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b.mu.Lock()
-	grant, ok := b.attachCreds[body.Token]
-	if !ok || grant.runID != body.RunID {
-		b.mu.Unlock()
-		http.Error(w, "unauthorized: unknown attach credential", http.StatusUnauthorized)
-		return
-	}
-	if grant.consumed {
+	if spent, ok := b.attachConsumed[body.RunID]; ok && spent == body.Token {
 		b.mu.Unlock()
 		writeJSONBody(w, http.StatusConflict, map[string]any{
 			"code":  "attach-consumed",
 			"error": "this launch's attach credential was already used: a run takes one inbound consumer, so another session cannot join it",
 		})
+		return
+	}
+	grantRun, ok := b.attachCreds[body.Token]
+	if !ok || grantRun != body.RunID {
+		b.mu.Unlock()
+		http.Error(w, "unauthorized: unknown attach credential", http.StatusUnauthorized)
 		return
 	}
 	st, ok := b.runs[body.RunID]
@@ -819,8 +863,11 @@ func (b *Broker) handleAttach(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
 	}
-	grant.consumed = true
+	// Spending the grant drops it outright and keeps only the one-credential
+	// history the 409 above needs, so relaunches cannot accumulate dead grants.
+	delete(b.attachCreds, body.Token)
 	delete(b.attachByRun, body.RunID)
+	b.attachConsumed[body.RunID] = body.Token
 	runToken := st.Token
 	b.mu.Unlock()
 
@@ -2074,7 +2121,7 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 		b.mu.Unlock()
 		return "", fmt.Errorf("run already registered")
 	}
-	st := newRunState(runID, name)
+	st := b.newRunState(runID, name)
 	b.runs[runID] = st
 	token := st.Token
 	b.mu.Unlock()
@@ -2086,19 +2133,34 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 // the given runID. An empty name registers the run under its run ID, and an
 // existing run keeps the name it already has. Returns the run's token (existing
 // or newly created) and whether the run was newly created.
-func (b *Broker) EnsureRun(runID, name string) (string, bool) {
+//
+// Adoption is what the ownership rule protects: a record this broker's own
+// supervisor minted is adopted with its credential, which is what lets a resume
+// or a relaunch of an existing run keep the identity it already has. A record a
+// different writer minted — the open `/register` route above all, whose caller
+// chose the token — is refused with ErrRunNotOwned, because adopting it would
+// hand that writer the credential of the run this supervisor is provisioning
+// and let it act as that run. Records do not outlive the broker today, so the
+// owner this compares against is the supervisor's stable identity
+// (SetIdentity), not the process: a successor that comes back under the same
+// identity adopts its predecessor's records instead of refusing them.
+func (b *Broker) EnsureRun(runID, name string) (string, bool, error) {
 	b.mu.Lock()
 	if st, exists := b.runs[runID]; exists {
 		token := st.Token
+		owned := b.ownsRecord(st)
 		b.mu.Unlock()
-		return token, false
+		if !owned {
+			return "", false, ErrRunNotOwned
+		}
+		return token, false, nil
 	}
-	st := newRunState(runID, name)
+	st := b.newRunState(runID, name)
 	b.runs[runID] = st
 	token := st.Token
 	b.mu.Unlock()
 	b.runSetChanged()
-	return token, true
+	return token, true, nil
 }
 
 // MintAttach mints the one-shot attach credential a launch hands its child.
@@ -2106,7 +2168,10 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 // launch, and a resume or a retry is a fresh launch with a fresh credential, so
 // a credential left behind by an earlier launch can no longer join. It reports
 // false for a run this broker does not hold — nothing would authenticate the
-// attach that followed.
+// attach that followed — and for a record this broker did not mint, whose
+// credential belongs to whoever registered it: an attach grant there would hand
+// that writer the run, which is the substitution the ownership rule exists to
+// refuse. EnsureRun refuses that record first, so this is the second gate.
 //
 // This is the in-process provisioning seam: the provider calls it for the child
 // it is about to start, and it is the only way a grant is minted. No HTTP route
@@ -2115,27 +2180,28 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 func (b *Broker) MintAttach(runID string) (string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if _, ok := b.runs[runID]; !ok {
+	st, ok := b.runs[runID]
+	if !ok || !b.ownsRecord(st) {
 		return "", false
 	}
 	credential := MakeToken()
 	if prior, ok := b.attachByRun[runID]; ok {
 		delete(b.attachCreds, prior)
 	}
-	b.attachCreds[credential] = &attachCredential{runID: runID}
+	b.attachCreds[credential] = runID
 	b.attachByRun[runID] = credential
 	return credential, true
 }
 
-// attachForget drops every grant a removed run leaves behind. The caller holds
-// the broker lock.
+// attachForget drops every grant a removed run leaves behind, including the
+// spent-credential history its last launch left. The caller holds the broker
+// lock.
 func (b *Broker) attachForget(runID string) {
-	delete(b.attachByRun, runID)
-	for credential, grant := range b.attachCreds {
-		if grant.runID == runID {
-			delete(b.attachCreds, credential)
-		}
+	if pending, ok := b.attachByRun[runID]; ok {
+		delete(b.attachCreds, pending)
+		delete(b.attachByRun, runID)
 	}
+	delete(b.attachConsumed, runID)
 }
 
 // ownRun adopts a run a registered child broker owns, under the run ID this
@@ -2146,13 +2212,16 @@ func (b *Broker) attachForget(runID string) {
 // directions keep authenticating. A record the register guard already saw but
 // that was minted by this broker between the guard and the register — a claim
 // the link did not already own — keeps its own credential: it is not the
-// child's to take.
+// child's to take. Rotating the credential does not make the record this
+// broker's to provision from: a record the open `/register` route created keeps
+// its missing owner, because no launch of this supervisor's should carry a
+// credential its claimant still holds.
 func (b *Broker) ownRun(claim messaging.ClaimedRun, newlyAdopted bool) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	st, exists := b.runs[claim.Key]
 	if !exists {
-		st = newRunState(claim.Key, claim.Label)
+		st = b.newRunState(claim.Key, claim.Label)
 		if claim.Token != "" {
 			st.Token = claim.Token
 		}
@@ -2174,12 +2243,16 @@ func (b *Broker) ownRun(claim messaging.ClaimedRun, newlyAdopted bool) string {
 	return st.Token
 }
 
-func newRunState(runID, name string) *RunState {
+// newRunState builds the record for a run this broker mints, stamped with the
+// identity that makes it this supervisor's own (see ownsRecord). The caller
+// holds the broker lock.
+func (b *Broker) newRunState(runID, name string) *RunState {
 	if name == "" {
 		name = runID
 	}
 	return &RunState{
 		RunID:               runID,
+		owner:               b.identity,
 		Token:               MakeToken(),
 		LastSeen:            time.Now(),
 		Notify:              make(chan struct{}, 1),
@@ -2379,6 +2452,10 @@ func (b *Broker) DeleteRunIfToken(runID, token string) bool {
 	}
 	descendant := st.descendant
 	delete(b.runs, runID)
+	// A removal takes the run's grants with it, on this path exactly as on
+	// DeleteRun: a record retired by a relay fails its token check first, and a
+	// leaked grant would outlive the run it belongs to.
+	b.attachForget(runID)
 	b.mu.Unlock()
 	b.recordRemoved(runID, descendant)
 	return true

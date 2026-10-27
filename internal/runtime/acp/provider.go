@@ -266,7 +266,13 @@ func (p *Provider) launchRun(opts runtime.StartOptions) (runID, brokerToken stri
 	if runID == "" {
 		runID = uuid.New().String()
 	}
-	brokerToken, _ = brokerRef.EnsureRun(runID, opts.Label)
+	brokerToken, _, err := brokerRef.EnsureRun(runID, opts.Label)
+	if err != nil {
+		// A record already holds this run ID under a credential this supervisor did
+		// not mint, so the launch carries no broker identity at all (brokerRef nil,
+		// exactly as with no broker) rather than one someone else registered.
+		return runID, "", nil
+	}
 	return runID, brokerToken, brokerRef
 }
 

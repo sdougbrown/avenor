@@ -90,7 +90,7 @@ func TestStartProvisionsTheSupervisorsBrokerRun(t *testing.T) {
 		t.Fatalf("broker.Start: %v", err)
 	}
 	defer b.Stop()
-	token, _ := b.EnsureRun("rt_7", "child-a")
+	token, _, _ := b.EnsureRun("rt_7", "child-a")
 
 	_, launcher := startTestProvider(t, runtime.StartOptions{
 		Label:       "child-a",

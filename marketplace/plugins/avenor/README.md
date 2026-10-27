@@ -114,7 +114,10 @@ turns on the credential:
   the broker's open `/register` route and the minted token travels only to
   this process. That is the session you started by hand: export the variables
   in the shell that launches `claude`, or set them under `env` in
-  `~/.claude/settings.json`.
+  `~/.claude/settings.json`. A record that route created belongs to whoever
+  registered it, so the supervisor never adopts it for a launch it provisions:
+  a run id registered before the launch reaches the broker leaves that child
+  with no peer identity rather than with a credential its registrant holds.
 
 A hosted child never inherits a launching session's copy of those names:
 avenor's terminal launcher strips `AVENOR_BROKER_URL`, `AVENOR_RUN_ID` and

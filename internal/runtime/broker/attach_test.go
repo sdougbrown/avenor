@@ -32,6 +32,27 @@ func attachPost(t *testing.T, addr, runID, credential string) (int, map[string]a
 	return resp.StatusCode, answer
 }
 
+// ensureRun registers a run in process, failing the test rather than the
+// launch: every case here provisions through the broker's own seam.
+func ensureRun(t *testing.T, b *Broker, runID, label string) string {
+	t.Helper()
+	token, _, err := b.EnsureRun(runID, label)
+	if err != nil {
+		t.Fatalf("EnsureRun(%q): %v", runID, err)
+	}
+	return token
+}
+
+// attachTables reports how many grant entries the broker holds. Boundedness is
+// the one grant property with no HTTP surface — a table that grows by a dead
+// entry per relaunch answers every request correctly — so the boundedness case
+// is the only one that reads the tables.
+func attachTables(b *Broker) (pending, spent int) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.attachCreds) + len(b.attachByRun), len(b.attachConsumed)
+}
+
 // A run takes one inbound consumer. The launch's attach credential is spent by
 // the first session that presents it, so a second session holding the same
 // environment — a nested harness spawned from the provisioned session's own
@@ -42,7 +63,7 @@ func TestAttachSpendsTheLaunchCredentialOnce(t *testing.T) {
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	runToken, _ := b.EnsureRun("rt_1", "child-a")
+	runToken := ensureRun(t, b, "rt_1", "child-a")
 
 	credential, ok := b.MintAttach("rt_1")
 	if !ok {
@@ -87,7 +108,7 @@ func TestMintAttachRotatesTheLaunchCredential(t *testing.T) {
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	b.EnsureRun("rt_1", "child-a")
+	ensureRun(t, b, "rt_1", "child-a")
 
 	first, ok := b.MintAttach("rt_1")
 	if !ok {
@@ -116,8 +137,8 @@ func TestAttachRefusesForeignAndUnknownCredentials(t *testing.T) {
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	b.EnsureRun("rt_1", "child-a")
-	b.EnsureRun("rt_2", "child-b")
+	ensureRun(t, b, "rt_1", "child-a")
+	ensureRun(t, b, "rt_2", "child-b")
 	credential, ok := b.MintAttach("rt_1")
 	if !ok {
 		t.Fatal("MintAttach reported no grant")
@@ -136,30 +157,110 @@ func TestAttachRefusesForeignAndUnknownCredentials(t *testing.T) {
 }
 
 // A removed run takes its grants with it: a credential left behind must not
-// outlive the record it would have joined.
+// outlive the record it would have joined. Both kinds are observable, because a
+// grant that outlived its record is answered from the grant and not from the
+// record: a forgotten one is 401, a leaked one is 404 (never spent) or 409
+// (already spent).
 func TestDeleteRunDropsItsAttachCredential(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	b.EnsureRun("rt_1", "child-a")
-	credential, ok := b.MintAttach("rt_1")
+	ensureRun(t, b, "rt_1", "child-a")
+	spent, ok := b.MintAttach("rt_1")
 	if !ok {
 		t.Fatal("MintAttach reported no grant")
+	}
+	if status, answer := attachPost(t, b.Addr(), "rt_1", spent); status != http.StatusOK {
+		t.Fatalf("attach = (%d, %v), want 200", status, answer)
+	}
+	pending, ok := b.MintAttach("rt_1")
+	if !ok {
+		t.Fatal("MintAttach reported no grant for the relaunch")
 	}
 
 	b.DeleteRun("rt_1")
 
-	b.mu.RLock()
-	_, still := b.attachCreds[credential]
-	_, pending := b.attachByRun["rt_1"]
-	b.mu.RUnlock()
-	if still || pending {
-		t.Fatalf("deleted run left a grant behind (creds=%v, pending=%v)", still, pending)
+	if status, answer := attachPost(t, b.Addr(), "rt_1", pending); status != http.StatusUnauthorized {
+		t.Fatalf("attach with the pending grant of a deleted run = (%d, %v), want 401", status, answer)
 	}
-	if status, _ := attachPost(t, b.Addr(), "rt_1", credential); status != http.StatusUnauthorized {
-		t.Fatalf("attach after the run was deleted = %d, want 401", status)
+	if status, answer := attachPost(t, b.Addr(), "rt_1", spent); status != http.StatusUnauthorized {
+		t.Fatalf("attach with the spent grant of a deleted run = (%d, %v), want 401", status, answer)
+	}
+}
+
+// Retiring a run by credential — the parent link's path, which removes a record
+// a relay could not reach — forgets the run's grants exactly as DeleteRun does,
+// and the same two answers prove it.
+func TestDeleteRunIfTokenDropsItsAttachCredential(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	runToken := ensureRun(t, b, "rt_1", "child-a")
+	spent, ok := b.MintAttach("rt_1")
+	if !ok {
+		t.Fatal("MintAttach reported no grant")
+	}
+	if status, answer := attachPost(t, b.Addr(), "rt_1", spent); status != http.StatusOK {
+		t.Fatalf("attach = (%d, %v), want 200", status, answer)
+	}
+	pending, ok := b.MintAttach("rt_1")
+	if !ok {
+		t.Fatal("MintAttach reported no grant for the relaunch")
+	}
+
+	if b.DeleteRunIfToken("rt_1", "token-from-a-replacement") {
+		t.Fatal("DeleteRunIfToken retired a record a different credential owns")
+	}
+	if !b.DeleteRunIfToken("rt_1", runToken) {
+		t.Fatal("DeleteRunIfToken did not retire the run its credential owns")
+	}
+
+	if status, answer := attachPost(t, b.Addr(), "rt_1", pending); status != http.StatusUnauthorized {
+		t.Fatalf("attach with the pending grant of a retired run = (%d, %v), want 401", status, answer)
+	}
+	if status, answer := attachPost(t, b.Addr(), "rt_1", spent); status != http.StatusUnauthorized {
+		t.Fatalf("attach with the spent grant of a retired run = (%d, %v), want 401", status, answer)
+	}
+}
+
+// A relaunch replaces the grant it never spent and forgets the one its
+// predecessor spent, so the grant tables stay bounded by the runs the broker
+// holds instead of growing with every resume or retry.
+func TestAttachGrantsStayBoundedAcrossRelaunches(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	ensureRun(t, b, "rt_1", "child-a")
+
+	var last string
+	const relaunches = 32
+	for i := 0; i < relaunches; i++ {
+		credential, ok := b.MintAttach("rt_1")
+		if !ok {
+			t.Fatalf("relaunch %d: MintAttach reported no grant", i)
+		}
+		if status, answer := attachPost(t, b.Addr(), "rt_1", credential); status != http.StatusOK {
+			t.Fatalf("relaunch %d: attach = (%d, %v), want 200", i, status, answer)
+		}
+		last = credential
+	}
+
+	if pending, spent := attachTables(b); pending > 1 || spent > 1 {
+		t.Fatalf("grant tables after %d relaunches = (pending=%d, spent=%d), want at most one of each", relaunches, pending, spent)
+	}
+	// The bounded history still answers for the launch that spent it, and the
+	// grants of long-dead launches are refused rather than joined.
+	if status, answer := attachPost(t, b.Addr(), "rt_1", last); status != http.StatusConflict {
+		t.Fatalf("replay of the spent credential = (%d, %v), want 409", status, answer)
+	}
+	if status, answer := attachPost(t, b.Addr(), "rt_1", "a-credential-from-a-dead-launch"); status != http.StatusUnauthorized {
+		t.Fatalf("attach with a dead launch's credential = (%d, %v), want 401", status, answer)
 	}
 }
 
