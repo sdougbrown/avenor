@@ -1,8 +1,6 @@
 package runtime
 
 import (
-	"strings"
-
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
@@ -55,15 +53,7 @@ func PeerEnvNames() []string {
 // caller that holds an environment it has not scrubbed itself and must remove
 // only the peer vocabulary.
 func ScrubPeerEnv(environ []string) []string {
-	kept := make([]string, 0, len(environ))
-	for _, entry := range environ {
-		name, _, _ := strings.Cut(entry, "=")
-		if IsPeerEnvName(name) {
-			continue
-		}
-		kept = append(kept, entry)
-	}
-	return kept
+	return scrubEnv(environ, IsPeerEnvName)
 }
 
 // PeerProvision is the broker identity one launch hands its child: the run the

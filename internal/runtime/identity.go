@@ -170,13 +170,23 @@ func LaunchEnv(environ []string, p *LaunchProvenance) []string {
 // key, so duplicates and bare-key entries are removed too, while near-miss names
 // and every other variable keep their order.
 func ScrubIdentityEnv(environ []string) []string {
+	return scrubEnv(environ, func(key string) bool {
+		_, drop := identityEnvKeys[key]
+		return drop
+	})
+}
+
+// scrubEnv is the one exact-key filter every scrub in this package composes:
+// duplicates and bare-key entries are dropped too, while near-miss names and
+// every other variable keep their order.
+func scrubEnv(environ []string, drop func(key string) bool) []string {
 	if len(environ) == 0 {
 		return nil
 	}
 	kept := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		key, _, _ := strings.Cut(entry, "=")
-		if _, ok := identityEnvKeys[key]; ok {
+		if drop(key) {
 			continue
 		}
 		kept = append(kept, entry)

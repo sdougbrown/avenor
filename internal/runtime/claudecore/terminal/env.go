@@ -107,10 +107,11 @@ func UnsetParentClaudeEnvPrefix() string {
 // through there, since provisioning them is the point. Entries that are not
 // KEY=VALUE are dropped, and extra wins over env for every name.
 //
-// The peer names are in runtime.ScrubbedEnvNames, so the LaunchEnv this
-// composes with has already removed an inherited copy; the peer-only scrub here
-// keeps PeerEnv correct for a caller that hands it an environment it did not
-// scrub itself.
+// The peer names are in runtime.ScrubbedEnvNames, so the LaunchEnv every caller
+// composes with has already removed an inherited copy and this pass finds
+// nothing. It stays so PeerEnv is still correct for a caller that hands it an
+// environment it did not scrub, and it composes runtime's one exact-key filter
+// rather than repeating it.
 func PeerEnv(env []string, extra []string) []string {
 	return append(runtime.ScrubPeerEnv(env), callerEnv(extra)...)
 }
