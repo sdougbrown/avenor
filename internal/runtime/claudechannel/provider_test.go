@@ -3,6 +3,7 @@ package claudechannel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/claudecoretest"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 	"github.com/sdougbrown/avenor/internal/runtime/claudeutil"
 )
@@ -491,7 +493,7 @@ func TestWaitForPaneReadyStopsOnContextCancel(t *testing.T) {
 	cancel()
 
 	term := terminal.NewFakeSession("missing", 0, "")
-	if claudecore.WaitForPaneReady(ctx, term) {
+	if claudecore.WaitForPaneReady(ctx, term, 0) == nil {
 		t.Fatal("waitForPaneReady should stop when context is canceled")
 	}
 }
@@ -509,7 +511,7 @@ func TestWaitForPaneReadyDismissesTrustDialog(t *testing.T) {
 		trustPane,
 		"Tips for getting started\n",
 	})
-	if !claudecore.WaitForPaneReady(context.Background(), term) {
+	if err := claudecore.WaitForPaneReady(context.Background(), term, 0); err != nil {
 		t.Fatal("waitForPaneReady should return true after trust dialog dismissed")
 	}
 	sends := term.SendCalls()
@@ -521,21 +523,169 @@ func TestWaitForPaneReadyDismissesTrustDialog(t *testing.T) {
 	}
 }
 
-// TestWaitForPaneReadyDeadlineReturnsFalse pins the contract that a stalled
-// pane (no welcome marker before PromptInjectTimeout) must return false so the
-// caller drops the prompt instead of pasting into an unknown state. Without
-// this guard, the old behavior of "give up and assume ready" re-introduces
-// the trust-dialog paste-corruption bug.
-func TestWaitForPaneReadyDeadlineReturnsFalse(t *testing.T) {
-	// Capture only ever returns text without any ready marker; the function
-	// must time out and return false rather than treating absence as readiness.
-	// A tight context bounds the test runtime — the function's own deadline
-	// (PromptInjectTimeout=30s) is too long to wait synchronously.
+// TestWaitForPaneReadyDeadlineReturnsErrPaneNotReady pins the contract that a
+// stalled pane (no welcome marker before the deadline) must fail so the caller
+// drops the prompt instead of pasting into an unknown state. Without this
+// guard, the old behavior of "give up and assume ready" re-introduces the
+// trust-dialog paste-corruption bug.
+func TestWaitForPaneReadyDeadlineReturnsErrPaneNotReady(t *testing.T) {
 	term := terminal.NewFakeSession("stalled", 1, "still booting…\n")
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	if claudecore.WaitForPaneReady(ctx, term) {
-		t.Fatal("waitForPaneReady should return false when no ready marker appears before deadline")
+	if err := claudecore.WaitForPaneReady(context.Background(), term, 100*time.Millisecond); !errors.Is(err, claudecore.ErrPaneNotReady) {
+		t.Fatalf("WaitForPaneReady = %v, want ErrPaneNotReady when no ready marker appears before the deadline", err)
+	}
+}
+
+func newPromptSession(t *testing.T, term *terminal.FakeSession, paneReadyTimeout time.Duration) (*Provider, *session) {
+	t.Helper()
+	b := broker.New("")
+	if _, err := b.CreateRun("run-unready", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	p := &Provider{broker: b, sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
+	core := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID:        "ses-unready",
+		RunID:            "run-unready",
+		EventsBuf:        16,
+		PaneReadyTimeout: paneReadyTimeout,
+	})
+	t.Cleanup(core.CancelFn)
+	core.Term = term
+	s := &session{Session: core}
+	p.sessions[s.SessionID] = s
+	return p, s
+}
+
+func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
+	// Claude is alive but parked on a dialog. Without a terminal status the
+	// caller waiting on session.end waits forever.
+	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, claudecoretest.ManagedSettingsDialog), 50*time.Millisecond)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event != "session.end" {
+				continue
+			}
+			if got := ev.Fields["stop_reason"]; got != claudecore.StopReasonTerminalNotReady {
+				t.Errorf("stop_reason = %v, want %s", got, claudecore.StopReasonTerminalNotReady)
+			}
+			if got := ev.Fields["status"]; got != "failed" {
+				t.Errorf("status = %v, want failed", got)
+			}
+			select {
+			case <-s.Ctx.Done():
+			case <-time.After(time.Second):
+				t.Error("session context still live; runSession would keep claude running")
+			}
+			return
+		case <-deadline:
+			t.Fatal("no session.end for a launch whose input box never appeared")
+		}
+	}
+}
+
+func TestPromptAbstainsWhenTheLaunchExited(t *testing.T) {
+	// A dead tmux session fails capture at once. That is claude exiting, so
+	// Prompt reports no verdict and leaves the session running for
+	// runSession's exit watcher to classify; terminal_not_ready would hide an
+	// agent_not_found or a crash. The EmitTerminalGone tests in claudecore pin
+	// the watcher's side.
+	term := terminal.NewFakeSession("test-term", 1, "")
+	term.SetCapErr(errors.New("can't find session"))
+	term.SetAlive(false)
+	p, s := newPromptSession(t, term, 50*time.Millisecond)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	quiet := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "session.end" || ev.Event == "agent.launch_failed" {
+				t.Fatalf("Prompt reported %s (%v) for a terminal that exited", ev.Event, ev.Fields["stop_reason"])
+			}
+		case <-quiet:
+			if s.Ctx.Err() != nil {
+				t.Error("Prompt cancelled the session; the exit watcher owns this verdict")
+			}
+			return
+		}
+	}
+}
+
+func TestAPasteInFlightHoldsOffAnUnreadyLaunchVerdict(t *testing.T) {
+	// Two first prompts overlap: one found the input box and is pasting while
+	// the other times out. The paste is the first turn, so the launch did not
+	// fail.
+	term := terminal.NewFakeSession("test-term", 1, claudecoretest.InputBoxReady)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	term.SetPasteGate(started, release)
+	p, s := newPromptSession(t, term, 2*time.Second)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("paste never started")
+	}
+	s.FailUnreadyLaunch(s.Ctx)
+	close(release)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			switch ev.Event {
+			case "session.end", "agent.launch_failed":
+				t.Fatalf("reported %s (%v) while a paste was in flight", ev.Event, ev.Fields["stop_reason"])
+			case "agent.prompt_submitted":
+				if s.Ctx.Err() != nil {
+					t.Error("session context cancelled under a landed paste")
+				}
+				if n := term.KillCalls(); n != 0 {
+					t.Errorf("Kill called %d times under a landed paste", n)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no agent.prompt_submitted for the paste in flight")
+		}
+	}
+}
+
+func TestRunSessionKillsTheTerminalAfterCancel(t *testing.T) {
+	// The session's context is already cancelled when runSession tears down,
+	// and tmux kill-session under a cancelled context never runs.
+	p := &Provider{sessions: make(map[string]*session), broker: broker.New(""), launcher: terminal.PTYLauncher{}}
+	core := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID: "ses-kill",
+		RunID:     "run-kill",
+		EventsBuf: 8,
+	})
+	term := terminal.NewFakeSession("test-term", 1, "ready")
+	s := &session{Session: core}
+	s.Term = term
+	p.sessions[s.SessionID] = s
+
+	go p.runSession(s.Ctx, s)
+	s.CancelFn()
+	select {
+	case <-s.Done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runSession did not return after cancel")
+	}
+	if term.Alive(context.Background()) {
+		t.Fatal("terminal still alive after teardown; claude is left in a detached tmux session")
 	}
 }
 
@@ -1207,7 +1357,7 @@ func TestCleanupProjectMCPRemovesOnlyAvenorChannelEntries(t *testing.T) {
 func TestPromptWaitsForStartupClearBeforePaste(t *testing.T) {
 	// Welcome screen marker present: WaitForPaneReady returns true.
 	term := terminal.NewFakeSession("test-term", 1, "Tips for getting started\n")
-	if !claudecore.WaitForPaneReady(context.Background(), term) {
+	if err := claudecore.WaitForPaneReady(context.Background(), term, 0); err != nil {
 		t.Fatal("waitForPaneReady should return true when welcome marker is visible")
 	}
 
@@ -1216,7 +1366,7 @@ func TestPromptWaitsForStartupClearBeforePaste(t *testing.T) {
 		"Loading development channels\n",
 		"Tips for getting started\n",
 	})
-	if !claudecore.WaitForPaneReady(context.Background(), term2) {
+	if err := claudecore.WaitForPaneReady(context.Background(), term2, 0); err != nil {
 		t.Fatal("waitForPaneReady should return true after welcome marker appears")
 	}
 }

@@ -3,6 +3,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -291,7 +292,11 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	}
 
 	go func() {
-		if !claudecore.WaitForPaneReady(s.Ctx, s.Term) {
+		if err := s.WaitForPaneReady(s.Ctx); err != nil {
+			// A failed launch reports this prompt in its own verdict.
+			if errors.Is(err, claudecore.ErrPaneNotReady) && s.FailUnreadyLaunch(s.Ctx) {
+				return
+			}
 			s.Emit(events.Event{
 				Event:     "agent.prompt_failed",
 				SessionID: s.SessionID,
@@ -313,10 +318,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			})
 			return
 		}
-		s.Mu.Lock()
-		finished := s.Finished
-		s.Mu.Unlock()
-		if finished {
+		if !s.BeginPaste() {
 			s.Emit(events.Event{
 				Event:     "agent.prompt_failed",
 				SessionID: s.SessionID,
@@ -327,7 +329,11 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			return
 		}
 		s.ArmProgStatusPrompt()
-		if err := s.Term.PasteAndEnter(s.Ctx, prompt); err != nil {
+		err := s.Term.PasteAndEnter(s.Ctx, prompt)
+		if !s.EndPaste(err == nil) {
+			return
+		}
+		if err != nil {
 			s.Emit(events.Event{
 				Event:     "agent.prompt_failed",
 				SessionID: s.SessionID,
@@ -337,9 +343,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 			})
 			return
 		}
-		s.Mu.Lock()
-		s.Prompted = true
-		s.Mu.Unlock()
 		fields := map[string]any{
 			"delivery":      s.Term.Kind(),
 			"prompt_length": len(prompt),
@@ -407,7 +410,9 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 						"stop_reason": "cancelled",
 					},
 				})
-				// runSession's defer will call Term.Kill
+				// A finished session takes no more prompts. Cancelling it ends
+				// runSession, whose defer kills the terminal.
+				s.CancelFn()
 				return nil
 			}
 		}
@@ -426,7 +431,9 @@ func (p *Provider) forceCancel(s *claudecore.Session) error {
 			"stop_reason": "cancelled_forced",
 		},
 	})
-	// runSession's defer will call Term.Kill
+	// A finished session takes no more prompts. Cancelling it ends runSession,
+	// whose defer kills the terminal.
+	s.CancelFn()
 	return nil
 }
 

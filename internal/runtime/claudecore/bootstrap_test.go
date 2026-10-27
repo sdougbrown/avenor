@@ -2,6 +2,7 @@ package claudecore
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -126,8 +127,8 @@ func TestWaitForPaneReadySelectsTrustOptionBeforeConfirming(t *testing.T) {
 		dialog("Yes, I trust this folder"),
 		readyPane,
 	})
-	if !WaitForPaneReady(context.Background(), term) {
-		t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+	if err := WaitForPaneReady(context.Background(), term, 0); err != nil {
+		t.Fatalf("WaitForPaneReady = %v, want nil once the trust dialog is cleared", err)
 	}
 	want := [][]string{{string(terminal.KeyDown)}, {string(terminal.KeyEnter)}}
 	if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
@@ -155,13 +156,39 @@ func TestWaitForPaneReadyConfirmsTrustWhenStaleMarkerRemains(t *testing.T) {
 	for name, captures := range cases {
 		t.Run(name, func(t *testing.T) {
 			term := terminal.NewFakeSessionQueue("trust", 1, captures)
-			if !WaitForPaneReady(context.Background(), term) {
-				t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+			if err := WaitForPaneReady(context.Background(), term, 0); err != nil {
+				t.Fatalf("WaitForPaneReady = %v, want nil once the trust dialog is cleared", err)
 			}
 			want := [][]string{{string(terminal.KeyDown)}, {string(terminal.KeyEnter)}}
 			if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
 				t.Fatalf("SendCalls = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+func TestWaitForPaneReadyReportsATerminalThatDiedShowingAReadyPane(t *testing.T) {
+	// A PTY keeps its last screen after claude exits, so a dead terminal can
+	// still show the input box. Pasting into it would report a turn that never
+	// ran.
+	term := terminal.NewFakeSession("dead", 1, readyPane)
+	term.SetAlive(false)
+
+	err := WaitForPaneReady(context.Background(), term, 4*PromptInjectCheckInterval)
+	if !errors.Is(err, ErrTerminalGone) {
+		t.Fatalf("WaitForPaneReady = %v, want ErrTerminalGone", err)
+	}
+}
+
+func TestWaitForPaneReadyReportsATerminalThatDiedBeforeTheFirstCheck(t *testing.T) {
+	// A deadline shorter than the check interval ends the wait before any
+	// tick, so only the deadline's own liveness check can tell a dead terminal
+	// from a stuck one.
+	term := terminal.NewFakeSession("dead", 1, "still booting…\n")
+	term.SetAlive(false)
+
+	err := WaitForPaneReady(context.Background(), term, PromptInjectCheckInterval/5)
+	if !errors.Is(err, ErrTerminalGone) {
+		t.Fatalf("WaitForPaneReady = %v, want ErrTerminalGone", err)
 	}
 }

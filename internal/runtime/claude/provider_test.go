@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/claudecoretest"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 	"github.com/sdougbrown/avenor/internal/runtime/claudeutil"
 )
@@ -385,6 +387,40 @@ func TestCancelSendsEscThenWaitsForIdle(t *testing.T) {
 	s.Mu.Unlock()
 	if !finished {
 		t.Fatal("session.Finished should be true after Cancel")
+	}
+}
+
+func TestCancelKillsTheTerminal(t *testing.T) {
+	// Cancel finishes the session, and a finished session takes no more
+	// prompts, so leaving claude running only leaks it.
+	for name, pane := range map[string]string{
+		"idle after Esc":  "❯ ready",
+		"forced at grace": "✻ Churning… (2m 17s · ↓ 7.2k tokens)",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := &Provider{
+				sessions:    make(map[string]*claudecore.Session),
+				cancelGrace: 200 * time.Millisecond,
+			}
+			term := terminal.NewFakeSession("test-term", 1, pane)
+			s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-cancel-kill", EventsBuf: 8})
+			defer s.CancelFn()
+			s.Term = term
+			p.sessions[s.SessionID] = s
+			go p.runSession(s.Ctx, s)
+
+			if err := p.Cancel(context.Background(), s.SessionID); err != nil {
+				t.Fatalf("Cancel: %v", err)
+			}
+			select {
+			case <-s.Done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("runSession still running after Cancel")
+			}
+			if term.Alive(context.Background()) {
+				t.Fatal("terminal still alive after Cancel")
+			}
+		})
 	}
 }
 
@@ -881,6 +917,253 @@ func TestPromptSkipsPasteWhenSessionFinishedDuringStartupWait(t *testing.T) {
 		case <-deadline:
 			t.Fatal("no agent.prompt_failed")
 		}
+	}
+}
+
+func newPromptSession(t *testing.T, term *terminal.FakeSession, paneReadyTimeout time.Duration) (*Provider, *claudecore.Session) {
+	t.Helper()
+	p := &Provider{sessions: make(map[string]*claudecore.Session)}
+	term.SetKind("pty")
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID:        "ses-unready",
+		EventsBuf:        16,
+		PaneReadyTimeout: paneReadyTimeout,
+	})
+	t.Cleanup(s.CancelFn)
+	s.Term = term
+	p.sessions[s.SessionID] = s
+	return p, s
+}
+
+func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
+	// Claude is alive but parked on a dialog. Without a terminal status the
+	// caller waiting on session.end waits forever.
+	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, claudecoretest.ManagedSettingsDialog), 50*time.Millisecond)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "agent.prompt_failed" {
+				t.Fatalf("emitted agent.prompt_failed (%v) beside the launch verdict", ev.Fields["error"])
+			}
+			if ev.Event != "session.end" {
+				continue
+			}
+			if got := ev.Fields["stop_reason"]; got != claudecore.StopReasonTerminalNotReady {
+				t.Errorf("stop_reason = %v, want %s", got, claudecore.StopReasonTerminalNotReady)
+			}
+			if got := ev.Fields["status"]; got != "failed" {
+				t.Errorf("status = %v, want failed", got)
+			}
+			select {
+			case <-s.Ctx.Done():
+			case <-time.After(time.Second):
+				t.Error("session context still live; runSession would keep claude running")
+			}
+			// The Prompt goroutine returns right after the verdict, and Emit
+			// still buffers once the session has ended, so a duplicate shows
+			// up within this window.
+			quiet := time.After(200 * time.Millisecond)
+			for {
+				select {
+				case ev := <-s.Events:
+					if ev.Event == "agent.prompt_failed" {
+						t.Fatalf("emitted agent.prompt_failed (%v) after the launch verdict", ev.Fields["error"])
+					}
+				case <-quiet:
+					return
+				}
+			}
+		case <-deadline:
+			t.Fatal("no session.end for a launch whose input box never appeared")
+		}
+	}
+}
+
+func TestPromptReportsAPromptThatFindsARunningSessionBusy(t *testing.T) {
+	// A session that already ran a turn is not a failed launch, so the
+	// dropped prompt is the only thing to report.
+	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, claudecoretest.ManagedSettingsDialog), 50*time.Millisecond)
+	s.Mu.Lock()
+	s.Prompted = true
+	s.Mu.Unlock()
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			switch ev.Event {
+			case "session.end", "agent.launch_failed":
+				t.Fatalf("reported %s for a session that already ran a turn", ev.Event)
+			case "agent.prompt_failed":
+				return
+			}
+		case <-deadline:
+			t.Fatal("no agent.prompt_failed for a prompt that found the pane busy")
+		}
+	}
+}
+
+func TestPromptAbstainsWhenTheLaunchExited(t *testing.T) {
+	// Claude exited before its input box appeared. Prompt reports no verdict
+	// and leaves the session running, so runSession's exit watcher can
+	// classify the exit; terminal_not_ready would hide an agent_not_found or
+	// a crash. The EmitTerminalGone tests in claudecore pin the watcher's side.
+	term := terminal.NewFakeSession("test-term", 1, "error: bubblewrap is required\n")
+	term.SetAlive(false)
+	p, s := newPromptSession(t, term, 50*time.Millisecond)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	quiet := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "session.end" || ev.Event == "agent.launch_failed" {
+				t.Fatalf("Prompt reported %s (%v) for a terminal that exited", ev.Event, ev.Fields["stop_reason"])
+			}
+		case <-quiet:
+			if s.Ctx.Err() != nil {
+				t.Error("Prompt cancelled the session; the exit watcher owns this verdict")
+			}
+			return
+		}
+	}
+}
+
+func TestAPasteInFlightHoldsOffAnUnreadyLaunchVerdict(t *testing.T) {
+	// Two first prompts overlap: one found the input box and is pasting while
+	// the other times out. The paste is the first turn, so the launch did not
+	// fail.
+	term := terminal.NewFakeSession("test-term", 1, claudecoretest.InputBoxReady)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	term.SetPasteGate(started, release)
+	p, s := newPromptSession(t, term, 2*time.Second)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("paste never started")
+	}
+	s.FailUnreadyLaunch(s.Ctx)
+	close(release)
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			switch ev.Event {
+			case "session.end", "agent.launch_failed":
+				t.Fatalf("reported %s (%v) while a paste was in flight", ev.Event, ev.Fields["stop_reason"])
+			case "agent.prompt_submitted":
+				if s.Ctx.Err() != nil {
+					t.Error("session context cancelled under a landed paste")
+				}
+				if n := term.KillCalls(); n != 0 {
+					t.Errorf("Kill called %d times under a landed paste", n)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no agent.prompt_submitted for the paste in flight")
+		}
+	}
+}
+
+func TestAFailedPasteLeavesTheLaunchToFail(t *testing.T) {
+	// A paste that errored never reached Claude, so it must not hold off an
+	// unready verdict.
+	term := terminal.NewFakeSession("test-term", 1, claudecoretest.InputBoxReady)
+	term.SetPasteErr(errors.New("paste failed"))
+	p, s := newPromptSession(t, term, 2*time.Second)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	deadline := time.After(3 * time.Second)
+waitFailed:
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "agent.prompt_failed" {
+				break waitFailed
+			}
+		case <-deadline:
+			t.Fatal("no agent.prompt_failed for the failed paste")
+		}
+	}
+	s.FailUnreadyLaunch(s.Ctx)
+
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "session.end" {
+				if got := ev.Fields["stop_reason"]; got != claudecore.StopReasonTerminalNotReady {
+					t.Errorf("stop_reason = %v, want %s", got, claudecore.StopReasonTerminalNotReady)
+				}
+				return
+			}
+		default:
+			t.Fatal("no session.end after a failed paste")
+		}
+	}
+}
+
+func TestCancelEmitsSessionEndBeforeCancellingTheSession(t *testing.T) {
+	// Once the session context ends, the Events reader drains the buffer and
+	// closes, so a session.end emitted after the cancel can be lost.
+	for name, pane := range map[string]string{
+		"idle after Esc":  "❯ ready",
+		"forced at grace": "✻ Churning… (2m 17s · ↓ 7.2k tokens)",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := &Provider{
+				sessions:    make(map[string]*claudecore.Session),
+				cancelGrace: 200 * time.Millisecond,
+			}
+			s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-cancel-order", EventsBuf: 8})
+			s.Term = terminal.NewFakeSession("test-term", 1, pane)
+			cancel := s.CancelFn
+			t.Cleanup(cancel)
+			var called, endBuffered bool
+			s.CancelFn = func() {
+				if !called {
+					called = true
+					for len(s.Events) > 0 {
+						if ev := <-s.Events; ev.Event == "session.end" {
+							endBuffered = true
+						}
+					}
+				}
+				cancel()
+			}
+			p.sessions[s.SessionID] = s
+
+			if err := p.Cancel(context.Background(), s.SessionID); err != nil {
+				t.Fatalf("Cancel: %v", err)
+			}
+			if !called {
+				t.Fatal("Cancel never cancelled the session")
+			}
+			if !endBuffered {
+				t.Error("session context cancelled before session.end was emitted")
+			}
+		})
 	}
 }
 

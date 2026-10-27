@@ -4,6 +4,7 @@ package claudechannel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -287,7 +288,9 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		p.broker.DeleteRun(s.RunID)
 	}()
 	defer func() {
-		_ = s.Term.Kill(ctx)
+		// Not ctx: it is usually cancelled by now, and tmux kill-session under
+		// a cancelled context never runs, leaving claude in a detached session.
+		_ = s.Term.Kill(context.Background())
 		_ = removeProjectMCPServer(s.mcpProject, s.mcpServer)
 		_ = os.RemoveAll(s.mcpDir)
 		// Deferred, so the log is still there for EmitTerminalGone to classify
@@ -322,7 +325,6 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = s.Term.Kill(ctx)
 			return
 		case <-sessionGone:
 			// Claude exited without calling avenor_finish. EmitTerminalGone
@@ -494,26 +496,23 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	// Prompt() doesn't block; the channel push serves as a backup if Claude is
 	// already listening.
 	go func() {
-		if !claudecore.WaitForPaneReady(s.Ctx, s.Term) {
+		if err := s.WaitForPaneReady(s.Ctx); err != nil {
+			if errors.Is(err, claudecore.ErrPaneNotReady) {
+				s.FailUnreadyLaunch(s.Ctx)
+			}
 			return
 		}
 		startupWait, waitConfigured, ok := s.WaitForStartupMCP(s.Ctx)
 		if !ok {
 			return
 		}
-		s.Mu.Lock()
-		finished := s.Finished
-		s.Mu.Unlock()
-		if finished {
+		if !s.BeginPaste() {
 			return
 		}
-
-		if err := pastePromptAndSubmit(s.Ctx, s.Term, prompt); err != nil {
+		err := pastePromptAndSubmit(s.Ctx, s.Term, prompt)
+		if !s.EndPaste(err == nil) || err != nil {
 			return
 		}
-		s.Mu.Lock()
-		s.Prompted = true
-		s.Mu.Unlock()
 		fields := map[string]any{
 			"delivery":      s.Term.Kind(),
 			"prompt_length": len(prompt),

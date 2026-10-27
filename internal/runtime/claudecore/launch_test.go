@@ -2,6 +2,7 @@ package claudecore
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/claudecoretest"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 )
 
@@ -263,6 +266,371 @@ func TestEmitTerminalGoneFailsWhenNoPromptWasEverSubmitted(t *testing.T) {
 	}
 	if strings.ContainsRune(msg, '\x1b') {
 		t.Errorf("error carries terminal escapes: %q", msg)
+	}
+}
+
+// wrappedCrashPane is Claude Code crashing at startup inside a VM launch
+// wrapper. The crash goes to the guest's terminal, so avenor's stderr log stays
+// empty and the pane is the only place the reason survives. Bun prints the
+// failing source line above the error, and that source can name a rate limit.
+const wrappedCrashPane = `11 | var Ayt=["CLAUDE_BG_DISPATCHER_RATE_LIMIT_TIER"];function x2s(e){return{...e.sub | ... truncated` + "\n\n" +
+	"error: bubblewrap is required for subprocess env scrubbing and isolation. " +
+	"Install with: sudo apt-get install -y bubblewrap\n" +
+	"      at tFo (/$bunfs/root/chunk-hbk8fyrr.js:11:7202)\n" +
+	"Bun v1.4.4 (Linux arm64)\n"
+
+func TestEmitTerminalGoneReportsThePaneWhenStderrIsEmpty(t *testing.T) {
+	s := newTestSession(t, wrappedCrashPane)
+
+	s.EmitTerminalGone(s.Ctx)
+
+	if ev := drainEvent(t, s); ev.Event != "agent.launch_failed" {
+		t.Fatalf("first event = %q, want agent.launch_failed", ev.Event)
+	}
+	end := drainEvent(t, s)
+	if pane, _ := end.Fields["pane"].(string); !strings.Contains(pane, "bubblewrap is required") {
+		t.Errorf("pane = %q, want the crash in it", pane)
+	}
+	assertNotAProviderLimit(t, end)
+}
+
+// approvalDialogPane is a blocking startup dialog avenor does not answer,
+// framed by full-width rules as Claude Code draws it in a 220-column pane.
+var approvalDialogPane = strings.Repeat("─", 220) + "\n" +
+	claudecoretest.ManagedSettingsDialog +
+	strings.Repeat("─", 220) + "\n"
+
+func TestFailUnreadyLaunchEndsTheSessionWithThePane(t *testing.T) {
+	// A first prompt that never found the input box leaves claude parked on
+	// whatever it is showing. Without a terminal status, a caller waiting on
+	// session.end waits forever.
+	s := newTestSession(t, approvalDialogPane)
+	fake := s.Term.(*terminal.FakeSession)
+	eventsAtKill := -1
+	s.Term = hookTerm{FakeSession: fake, onKill: func() { eventsAtKill = len(s.Events) }}
+
+	if took := s.FailUnreadyLaunch(s.Ctx); !took {
+		t.Errorf("FailUnreadyLaunch = %v, want true", took)
+	}
+
+	// A one-shot caller exits on session.end, which can beat runSession's
+	// teardown, so the terminal must be gone before the verdict goes out.
+	if eventsAtKill != 0 {
+		t.Errorf("terminal killed with %d events already emitted, want it killed before the verdict", eventsAtKill)
+	}
+	if fake.Alive(context.Background()) {
+		t.Error("terminal still alive after FailUnreadyLaunch")
+	}
+	if ev := drainEvent(t, s); ev.Event != "agent.launch_failed" {
+		t.Fatalf("first event = %q, want agent.launch_failed", ev.Event)
+	}
+	end := drainEvent(t, s)
+	if end.Event != "session.end" {
+		t.Fatalf("second event = %q, want session.end", end.Event)
+	}
+	if got := end.Fields["status"]; got != "failed" {
+		t.Errorf("status = %v, want failed", got)
+	}
+	if got := end.Fields["stop_reason"]; got != StopReasonTerminalNotReady {
+		t.Errorf("stop_reason = %v, want %s", got, StopReasonTerminalNotReady)
+	}
+	pane, _ := end.Fields["pane"].(string)
+	if !strings.Contains(pane, "Managed settings require approval") {
+		t.Errorf("pane = %q, want the dialog title in it", pane)
+	}
+	if len(pane) > maxDiagnosticText {
+		t.Errorf("pane is %d bytes, want it bounded by %d", len(pane), maxDiagnosticText)
+	}
+	assertNotAProviderLimit(t, end)
+	if s.Ctx.Err() == nil {
+		t.Error("session context still live; runSession would keep the terminal running")
+	}
+}
+
+func TestFailUnreadyLaunchKeepsTheBottomOfALongPane(t *testing.T) {
+	// 200 three-byte runes, a separator and a 12-byte last line put the
+	// 512-byte cut one byte into a rune.
+	s := newTestSession(t, strings.Repeat("€", 200)+"\ntail-marker!\n")
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	drainEvent(t, s)
+	pane, _ := drainEvent(t, s).Fields["pane"].(string)
+	if !utf8.ValidString(pane) {
+		t.Errorf("pane is not valid UTF-8: %q", pane)
+	}
+	if !strings.HasSuffix(pane, "tail-marker!") {
+		t.Errorf("pane = %q, want the last line kept", pane)
+	}
+	if len(pane) > maxDiagnosticText {
+		t.Errorf("pane is %d bytes, want at most %d", len(pane), maxDiagnosticText)
+	}
+}
+
+func TestFailUnreadyLaunchLeavesAPromptedSessionRunning(t *testing.T) {
+	// A later turn that finds the pane busy is not a failed launch: the session
+	// already ran a turn and stays usable.
+	s := newTestSession(t, approvalDialogPane)
+	s.Mu.Lock()
+	s.Prompted = true
+	s.Mu.Unlock()
+
+	if took := s.FailUnreadyLaunch(s.Ctx); took {
+		t.Errorf("FailUnreadyLaunch = %v, want false", took)
+	}
+
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("emitted %q for a session that already ran a turn", ev.Event)
+	default:
+	}
+	if s.Ctx.Err() != nil {
+		t.Error("session context cancelled for a session that already ran a turn")
+	}
+}
+
+func TestFailUnreadyLaunchYieldsToAPromptThatLandsMeanwhile(t *testing.T) {
+	// A concurrent Prompt can paste while FailUnreadyLaunch reads the pane.
+	// That turn started, so the launch did not fail.
+	s := newTestSession(t, approvalDialogPane)
+	s.Term = hookTerm{FakeSession: s.Term.(*terminal.FakeSession), onCapture: func() {
+		s.Mu.Lock()
+		s.Prompted = true
+		s.Mu.Unlock()
+	}}
+
+	if took := s.FailUnreadyLaunch(s.Ctx); took {
+		t.Errorf("FailUnreadyLaunch = %v, want false", took)
+	}
+
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("emitted %q for a session whose first prompt landed", ev.Event)
+	default:
+	}
+	if s.Ctx.Err() != nil {
+		t.Error("session context cancelled for a session whose first prompt landed")
+	}
+}
+
+func TestFailUnreadyLaunchLeavesAClaimedVerdictAlone(t *testing.T) {
+	// The exit watcher or a force cancel already owns the verdict and has not
+	// necessarily emitted it. Cancelling now would let the Events reader drain
+	// an empty buffer and close before that session.end lands.
+	s := newTestSession(t, approvalDialogPane)
+	s.MarkFinished()
+
+	if took := s.FailUnreadyLaunch(s.Ctx); took {
+		t.Errorf("FailUnreadyLaunch = %v, want false", took)
+	}
+
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("emitted %q for a session that already has a verdict", ev.Event)
+	default:
+	}
+	if s.Ctx.Err() != nil {
+		t.Error("session context cancelled under another claimant's verdict")
+	}
+	if n := s.Term.(*terminal.FakeSession).KillCalls(); n != 0 {
+		t.Errorf("Kill called %d times under another claimant's verdict", n)
+	}
+}
+
+func TestFailUnreadyLaunchLeavesAPasteInFlightAlone(t *testing.T) {
+	// An overlapping Prompt found the input box and is pasting. Its paste is
+	// the first turn, so the launch did not fail.
+	s := newTestSession(t, approvalDialogPane)
+	if !s.BeginPaste() {
+		t.Fatal("BeginPaste = false on a live session")
+	}
+
+	if took := s.FailUnreadyLaunch(s.Ctx); took {
+		t.Errorf("FailUnreadyLaunch = %v, want false", took)
+	}
+
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("emitted %q while a paste was in flight", ev.Event)
+	default:
+	}
+	if s.Ctx.Err() != nil {
+		t.Error("session context cancelled while a paste was in flight")
+	}
+	if n := s.Term.(*terminal.FakeSession).KillCalls(); n != 0 {
+		t.Errorf("Kill called %d times while a paste was in flight", n)
+	}
+	if !s.EndPaste(true) {
+		t.Error("EndPaste = false, want the session still running")
+	}
+}
+
+func TestFailUnreadyLaunchYieldsToAVerdictClaimedDuringTheKill(t *testing.T) {
+	// The kill can let runSession's exit watcher claim first. That claimant
+	// emits and tears down; a second session.end or a cancel from here could
+	// beat its emit to the Events reader. The launch was still taken, and the
+	// watcher reports it, so the caller must not report the prompt again.
+	s := newTestSession(t, approvalDialogPane)
+	s.Term = hookTerm{FakeSession: s.Term.(*terminal.FakeSession), onKill: func() { s.MarkFinished() }}
+
+	if took := s.FailUnreadyLaunch(s.Ctx); !took {
+		t.Errorf("FailUnreadyLaunch = %v, want true", took)
+	}
+
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("emitted %q after another claimant took the verdict", ev.Event)
+	default:
+	}
+	if s.Ctx.Err() != nil {
+		t.Error("session context cancelled under another claimant's verdict")
+	}
+}
+
+func TestFailUnreadyLaunchRemovesTheStderrLog(t *testing.T) {
+	// A one-shot caller exits on session.end, before runSession's teardown
+	// would remove the log.
+	s := newTestSession(t, approvalDialogPane)
+	writeStderrLog(t, s, "")
+	path := s.StderrLog
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("stderr log still present after FailUnreadyLaunch: %v", err)
+	}
+}
+
+func TestAFailedPasteReleasesTheSession(t *testing.T) {
+	// A paste that never reached Claude is not a first turn, so an unready
+	// verdict can still end the session.
+	s := newTestSession(t, approvalDialogPane)
+	if !s.BeginPaste() {
+		t.Fatal("BeginPaste = false on a live session")
+	}
+	s.EndPaste(false)
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	drainEvent(t, s)
+	if end := drainEvent(t, s); end.Fields["stop_reason"] != StopReasonTerminalNotReady {
+		t.Errorf("stop_reason = %v, want %s", end.Fields["stop_reason"], StopReasonTerminalNotReady)
+	}
+}
+
+func TestEndPasteReportsASessionThatEndedMeanwhile(t *testing.T) {
+	// The caller reports the paste only while the session runs; nothing may
+	// follow its session.end.
+	s := newTestSession(t, approvalDialogPane)
+	if !s.BeginPaste() {
+		t.Fatal("BeginPaste = false on a live session")
+	}
+	s.MarkFinished()
+
+	if s.EndPaste(true) {
+		t.Error("EndPaste = true for a session that finished during the paste")
+	}
+}
+
+func TestBeginPasteRefusesAnUnreadyLaunch(t *testing.T) {
+	// Once FailUnreadyLaunch has taken the session it kills the terminal, so a
+	// paste starting after that would land nowhere.
+	s := newTestSession(t, approvalDialogPane)
+	if !s.takeUnreadyLaunch("pane") {
+		t.Fatal("takeUnreadyLaunch = false on a fresh session")
+	}
+	if s.BeginPaste() {
+		t.Error("BeginPaste = true after FailUnreadyLaunch took the session")
+	}
+}
+
+func TestEmitTerminalGoneReportsAnUnreadyLaunchItsKillEnded(t *testing.T) {
+	// FailUnreadyLaunch kills the terminal before it claims the verdict, so the
+	// exit watcher can see the dead terminal and claim first. It must report
+	// the same verdict, not a launch that exited on its own.
+	s := newTestSession(t, approvalDialogPane)
+	if !s.takeUnreadyLaunch("Managed settings require approval") {
+		t.Fatal("takeUnreadyLaunch = false on a fresh session")
+	}
+
+	s.EmitTerminalGone(s.Ctx)
+
+	drainEvent(t, s)
+	end := drainEvent(t, s)
+	if got := end.Fields["stop_reason"]; got != StopReasonTerminalNotReady {
+		t.Errorf("stop_reason = %v, want %s", got, StopReasonTerminalNotReady)
+	}
+	if got := end.Fields["pane"]; got != "Managed settings require approval" {
+		t.Errorf("pane = %v, want the pane FailUnreadyLaunch captured", got)
+	}
+}
+
+func TestEmitTerminalGoneCapturesBeforeClaimingTheVerdict(t *testing.T) {
+	// Another claimant's emit must not wait behind a capture: between the claim
+	// and the emit, the Events reader can drain an empty buffer and close.
+	s := newTestSession(t, wrappedCrashPane)
+	var finishedAtCapture bool
+	s.Term = hookTerm{FakeSession: s.Term.(*terminal.FakeSession), onCapture: func() {
+		s.Mu.Lock()
+		finishedAtCapture = finishedAtCapture || s.Finished
+		s.Mu.Unlock()
+	}}
+
+	s.EmitTerminalGone(s.Ctx)
+
+	if finishedAtCapture {
+		t.Error("EmitTerminalGone captured the pane after claiming the verdict")
+	}
+	drainEvent(t, s)
+	end := drainEvent(t, s)
+	if pane, _ := end.Fields["pane"].(string); !strings.Contains(pane, "bubblewrap is required") {
+		t.Errorf("pane = %q, want the crash in it", pane)
+	}
+}
+
+func TestFailUnreadyLaunchReportsAnEmptyPaneWhenCaptureFails(t *testing.T) {
+	s := newTestSession(t, approvalDialogPane)
+	s.Term.(*terminal.FakeSession).SetCapErr(errors.New("can't find session"))
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	drainEvent(t, s)
+	end := drainEvent(t, s)
+	if pane, ok := end.Fields["pane"].(string); !ok || pane != "" {
+		t.Errorf("pane = %#v, want an empty string", end.Fields["pane"])
+	}
+}
+
+// hookTerm runs onCapture before each capture and onKill before each kill.
+type hookTerm struct {
+	*terminal.FakeSession
+	onCapture func()
+	onKill    func()
+}
+
+func (h hookTerm) Capture(ctx context.Context) (string, error) {
+	if h.onCapture != nil {
+		h.onCapture()
+	}
+	return h.FakeSession.Capture(ctx)
+}
+
+func (h hookTerm) Kill(ctx context.Context) error {
+	if h.onKill != nil {
+		h.onKill()
+	}
+	return h.FakeSession.Kill(ctx)
+}
+
+// assertNotAProviderLimit checks that a launch failure stays a launch failure
+// once the CLI reads its failure text for provider limits, which turns a
+// retryable rate limit into retries of a launch that cannot succeed.
+func assertNotAProviderLimit(t *testing.T, end events.Event) {
+	t.Helper()
+	reason, _ := end.Fields["stop_reason"].(string)
+	msg, _ := end.Fields["error"].(string)
+	if limit, _ := runtime.ClassifyProviderLimit(reason, msg); limit != "" {
+		t.Errorf("failure classified as %s from error %q", limit, msg)
 	}
 }
 

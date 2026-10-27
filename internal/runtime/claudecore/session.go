@@ -30,11 +30,21 @@ type Session struct {
 	CancelFn  context.CancelFunc
 	StartedAt time.Time
 
+	// paneReadyTimeout is SessionOptions.PaneReadyTimeout.
+	paneReadyTimeout time.Duration
+
 	Mu                  sync.Mutex
 	Prompted            bool
 	Active              bool
 	Finished            bool
 	PendingTerminalPerm *TerminalPermission
+
+	// pastesInFlight counts prompt pastes between BeginPaste and EndPaste.
+	// unreadyLaunch is set once FailUnreadyLaunch has taken the session, and
+	// unreadyPane holds the pane it reports.
+	pastesInFlight int
+	unreadyLaunch  bool
+	unreadyPane    string
 
 	// startupWait is how long after launchedAt the first prompt is held;
 	// startupWaitDone is set once the first prompt has claimed it.
@@ -61,6 +71,10 @@ type SessionOptions struct {
 	Transcript *TranscriptReader
 	StderrLog  string
 	EventsBuf  int
+
+	// PaneReadyTimeout bounds how long a prompt waits for Claude's input box;
+	// zero means PromptInjectTimeout.
+	PaneReadyTimeout time.Duration
 }
 
 func NewSession(ctx context.Context, opts SessionOptions) *Session {
@@ -78,6 +92,8 @@ func NewSession(ctx context.Context, opts SessionOptions) *Session {
 		Ctx:        sessCtx,
 		CancelFn:   cancel,
 		StartedAt:  time.Now(),
+
+		paneReadyTimeout: opts.PaneReadyTimeout,
 	}
 }
 
@@ -91,13 +107,48 @@ func (s *Session) MarkFinished() bool {
 	return true
 }
 
+// BeginPaste reserves the session for a prompt paste, so FailUnreadyLaunch
+// leaves it alone until EndPaste. It reports false, reserving nothing, once the
+// session is finished or failing as an unready launch.
+func (s *Session) BeginPaste() bool {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if s.Finished || s.unreadyLaunch {
+		return false
+	}
+	s.pastesInFlight++
+	return true
+}
+
+// EndPaste releases a BeginPaste; landed records that the prompt reached
+// Claude. It reports whether the session is still running, so a caller emits
+// nothing after its session.end.
+func (s *Session) EndPaste(landed bool) bool {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.pastesInFlight--
+	if landed {
+		s.Prompted = true
+	}
+	return !s.Finished
+}
+
 func (s *Session) MarkActive() {
 	s.Mu.Lock()
 	s.Active = true
 	s.Mu.Unlock()
 }
 
+// Emit sends ev without blocking past the session's end. A send that fits in
+// the buffer always lands, even once the session has ended: the Events
+// readers drain the buffer on shutdown, so a terminal session.end emitted as
+// the session ends still reaches the consumer.
 func (s *Session) Emit(ev events.Event) {
+	select {
+	case s.Events <- ev:
+		return
+	default:
+	}
 	select {
 	case s.Events <- ev:
 	case <-s.Ctx.Done():

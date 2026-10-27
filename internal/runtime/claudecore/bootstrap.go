@@ -2,6 +2,7 @@ package claudecore
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -65,13 +66,35 @@ func paneHasInputBox(out string) bool {
 	return false
 }
 
-// WaitForPaneReady blocks until Claude's input box is taking input. It
-// auto-dismisses the trust-safety dialog if present. Returns false on context
-// cancel, capture error, send error, or the PromptInjectTimeout deadline —
-// callers must treat any false return as "do not paste, the pane is not in a
-// known-ready state".
-func WaitForPaneReady(ctx context.Context, term terminal.Session) bool {
-	deadline := time.NewTimer(PromptInjectTimeout)
+// Errors WaitForPaneReady returns when the pane never became ready. Only
+// ErrPaneNotReady means claude is running and showing something else; the
+// other failures say nothing about what claude is doing.
+var (
+	// ErrPaneNotReady means the deadline passed with claude still running and
+	// no input box on screen.
+	ErrPaneNotReady = errors.New("claude's input box did not appear before the deadline")
+	// ErrTerminalGone means the terminal ended while avenor waited. The
+	// session's exit watcher classifies the exit.
+	ErrTerminalGone = errors.New("the terminal ended before claude's input box appeared")
+)
+
+// WaitForPaneReady waits for Claude's input box on the session's terminal,
+// bounded by SessionOptions.PaneReadyTimeout.
+func (s *Session) WaitForPaneReady(ctx context.Context) error {
+	return WaitForPaneReady(ctx, s.Term, s.paneReadyTimeout)
+}
+
+// WaitForPaneReady blocks until Claude's input box is taking input, and
+// returns nil then. It auto-dismisses the trust-safety dialog if present.
+// timeout bounds the wait; zero or less means PromptInjectTimeout. Any error
+// means "do not paste, the pane is not in a known-ready state": ctx's error on
+// cancel, ErrTerminalGone, a capture or send error, or ErrPaneNotReady at the
+// deadline.
+func WaitForPaneReady(ctx context.Context, term terminal.Session, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = PromptInjectTimeout
+	}
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(PromptInjectCheckInterval)
 	defer ticker.Stop()
@@ -82,27 +105,36 @@ func WaitForPaneReady(ctx context.Context, term terminal.Session) bool {
 	for {
 		select {
 		case <-ctx.Done():
-			return false
+			return ctx.Err()
 		case <-deadline.C:
-			return false
+			if !term.Alive(ctx) {
+				return ErrTerminalGone
+			}
+			return ErrPaneNotReady
 		case <-ticker.C:
 		}
 
+		// A PTY keeps its last screen after claude exits, and a tmux capture
+		// of a dead session fails, so neither capture says whether claude is
+		// still there.
+		if !term.Alive(ctx) {
+			return ErrTerminalGone
+		}
 		out, err := term.Capture(ctx)
 		if err != nil {
-			return false
+			return err
 		}
 		norm := normalizePane(out)
 		if !strings.Contains(norm, trustDialogHeader) || !strings.Contains(norm, trustDialogOption) {
 			downBase = ""
 			if paneIsReady(out) {
-				return true
+				return nil
 			}
 			continue
 		}
 		if key, ok := trustDialogKey(norm, downBase); ok {
 			if err := term.SendKeys(ctx, key); err != nil {
-				return false
+				return err
 			}
 			if key == terminal.KeyDown {
 				downBase = norm
