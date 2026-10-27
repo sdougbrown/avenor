@@ -203,6 +203,77 @@ describe('host message provider', () => {
     await expect(host.state('supervisor')).rejects.toThrow('the peer listing is incomplete')
   })
 
+  it('addresses a run a registered branch registered, which has no runtime here', async () => {
+    // A hub's control store holds no runtime for a branch's run, so the status
+    // verb answers as the real socket does: no such runtime. The broker that
+    // adopted the claim is the run's only authority.
+    const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
+    const client = fakeClient({
+      status: mock(async (runtimeId?: string) => {
+        throw new RpcError(-32000, `runtime "${runtimeId ?? ''}" not found`)
+      }),
+      messagePeers: mock(async () => ({
+        peers: [
+          { run_id: 'supervisor', session: { run_id: 'supervisor', status: 'running' } },
+          { run_id: peerRunId, session: { run_id: peerRunId, label: 'branch-target', status: 'running' } },
+        ],
+      })),
+    })
+    const host = provider(client)
+    expect(await host.state(peerRunId)).toMatchObject({ live: true, resumable: false, status: 'running' })
+    expect(await host.resolve(peerRunId)).toMatchObject({ runId: peerRunId, label: 'branch-target' })
+
+    const result = await executeMessage(host, { action: 'tell', target: peerRunId, message: 'hub ping' })
+    expect(result.outcome).toBe('sent')
+    expect((client.send.mock.calls[0][0] as any).to_run_id).toBe(peerRunId)
+  })
+
+  it('keeps a status failure for a run the listing does not hold', async () => {
+    const client = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_ghost" not found')
+      }),
+    })
+    await expect(provider(client).state('rt_ghost')).rejects.toThrow('runtime "rt_ghost" not found')
+  })
+
+  it('keeps a status failure that is not the absence answer, even when the listing holds the run', async () => {
+    const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
+    const listing = mock(async () => ({
+      peers: [
+        { run_id: 'supervisor', session: { run_id: 'supervisor', status: 'running' } },
+        { run_id: peerRunId, session: { run_id: peerRunId, label: 'branch-target', status: 'running' } },
+      ],
+    }))
+    // A denial is the supervisor's own refusal, not an absence: answering it
+    // from the listing would report a run the supervisor declined to describe.
+    const denied = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'permission denied', { code: 'not_permitted' })
+      }),
+      messagePeers: listing,
+    })
+    await expect(provider(denied).state(peerRunId)).rejects.toThrow('permission denied')
+
+    // A transport failure carries no control verb answer at all.
+    const transport = fakeClient({
+      status: mock(async () => {
+        throw new Error('connect ENOENT /tmp/avenor.sock')
+      }),
+      messagePeers: listing,
+    })
+    await expect(provider(transport).state(peerRunId)).rejects.toThrow('connect ENOENT /tmp/avenor.sock')
+
+    // An absence answer naming another runtime is not this run's answer.
+    const other = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_someone_else" not found')
+      }),
+      messagePeers: listing,
+    })
+    await expect(provider(other).state(peerRunId)).rejects.toThrow('rt_someone_else')
+  })
+
   it('refuses resolution on an incomplete listing and preserves the transport detail', async () => {
     const client = fakeClient({
       messagePeers: mock(async () => ({

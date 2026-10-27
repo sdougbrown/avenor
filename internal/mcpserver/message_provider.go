@@ -235,29 +235,58 @@ func (p *mcpMessageProvider) peerResolution(runID, label string) messaging.Resol
 }
 
 // RunState reads the supervisor's status for the target and classifies the
-// turn and resume facts through runFactsFromStatus. A status error falls back
+// turn and resume facts through runFactsFromStatus. A status failure falls back
 // to the registry's terminal sentinel, so a run that finished before a
-// supervisor restart still reports as done. The supervisor session is
-// broker-only (it has no runtime), so its state comes from the peer listing
-// the same surface already reads.
+// supervisor restart still reports as done, and then to the broker's peer
+// listing, which is the only authority for a run a registered child broker
+// owns. That second fallback reads only the supervisor's own absence answer for
+// this runtime, so a refusal, a stopped control plane or a transport failure
+// keeps its error, and an unknown run stays refused because a listing without
+// the target changes nothing. The supervisor session is broker-only (it has no
+// runtime anywhere), so its state comes from the peer listing the same surface
+// already reads.
 func (p *mcpMessageProvider) RunState(ctx context.Context, runID string) (messaging.RunFacts, error) {
 	if runID == messaging.SupervisorRunID {
 		return p.peerRunState(ctx, runID)
 	}
 	status, err := p.client.Status(runID)
-	if err != nil {
-		// The supervisor's runtime is gone, but the registry deliberately keeps
-		// a dead run discoverable by run id for its persisted terminal result.
-		// Read that fallback narrowly: no entry, no terminal sentinel, or a
-		// sentinel read error keeps the original status failure.
-		if info := p.server.registry.Lookup(p.supervisorPath, runID); info != nil {
-			if terminal, ok := terminalStatusFromRunInfo(info); ok {
-				return runFactsFromStatus(runID, terminal), nil
-			}
+	if err == nil {
+		return runFactsFromStatus(runID, status), nil
+	}
+	// The registry deliberately keeps a dead run discoverable by run id for its
+	// persisted terminal result. Read that fallback narrowly: no entry, no
+	// terminal sentinel, or a sentinel read error keeps the original failure.
+	if info := p.server.registry.Lookup(p.supervisorPath, runID); info != nil {
+		if terminal, ok := terminalStatusFromRunInfo(info); ok {
+			return runFactsFromStatus(runID, terminal), nil
 		}
+	}
+	if !statusReportsNoRuntime(err, runID) {
 		return messaging.RunFacts{}, err
 	}
-	return runFactsFromStatus(runID, status), nil
+	// A run a registered child broker owns has no runtime here, so the broker
+	// that adopted its claim is the only authority for it. The listing is read
+	// over the same control connection, so a store that cannot answer at all
+	// fails here too and the original failure survives.
+	if facts, peerErr := p.peerRunState(ctx, runID); peerErr == nil {
+		return facts, nil
+	}
+	return messaging.RunFacts{}, err
+}
+
+// statusReportsNoRuntime reports whether a status failure is the supervisor's
+// absence answer for this runtime rather than a refusal or a transport
+// failure. The control plane carries that answer as a server failure (-32000)
+// whose message names the runtime it could not find
+// (Supervisor.RuntimeStatus), with no structured data to key on, so the report
+// is matched exactly: same code, same runtime id, same sentence. Anything else
+// is a failure the caller keeps.
+func statusReportsNoRuntime(err error, runID string) bool {
+	var rpcErr *client.RPCError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != -32000 {
+		return false
+	}
+	return rpcErr.Message == fmt.Sprintf("runtime %q not found", runID)
 }
 
 // runFactsFromStatus classifies one supervisor status map into the turn and

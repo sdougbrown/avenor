@@ -135,6 +135,19 @@ export function isGenerationMismatchError(error: unknown): boolean {
   return error instanceof Error && /generation mismatch/i.test(error.message)
 }
 
+/**
+ * Whether a status failure is the supervisor's absence answer for this runtime
+ * rather than a refusal or a transport failure, mirroring Go's
+ * `statusReportsNoRuntime`. The control plane carries that answer as a server
+ * failure (-32000) whose message names the runtime it could not find, with no
+ * structured data to key on, so the report is matched exactly: same code, same
+ * runtime id, same sentence. Anything else is a failure the caller keeps.
+ */
+function isRuntimeNotFoundError(error: unknown, runId: string): boolean {
+  if (!(error instanceof RpcError) || error.code !== -32000) return false
+  return rpcText(error) === `runtime "${runId}" not found`
+}
+
 /** Reject an abort exactly the way fetch does, so the ask cleanup path runs. */
 function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise
@@ -212,6 +225,17 @@ function translateRunFacts(rawStatus: string, rawPhase: string): { status: strin
   }
   void phase
   return { status, live: !TERMINAL_STATUSES.has(status) }
+}
+
+/**
+ * Classify one broker peer row into the facts the router gates on. The Go
+ * providers share this translation through `messaging.PeerRunFacts`: a peer row
+ * carries no session and no sentinel, so the run is never resumable from here —
+ * the supervisor that spawned it owns a resume.
+ */
+function peerFacts(peer: PeerRecord | undefined): RunFacts {
+  const translation = translateRunFacts(peer?.status ?? '', '')
+  return { live: translation.live, resumable: false, status: translation.status }
 }
 
 async function sentinelResumable(filePath: string): Promise<boolean> {
@@ -327,6 +351,22 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     }
   }
 
+  // listedState reads one target's state from the broker's peer listing, which
+  // is the only authority for a run this supervisor does not run. It answers
+  // nothing for a listing that could not be read completely or that does not
+  // hold the run, so the caller keeps the failure it already had.
+  async function listedState(runId: string): Promise<RunFacts | undefined> {
+    let listed: { peers: PeerRecord[]; detail?: string }
+    try {
+      listed = await listedPeers()
+    } catch {
+      return undefined
+    }
+    if (listed.detail) return undefined
+    const peer = listed.peers.find(entry => entry.run_id === runId)
+    return peer ? peerFacts(peer) : undefined
+  }
+
   const provider: MessageProvider = {
     caller: () => ({ kind: 'owner', runId: SUPERVISOR_RUN_ID }),
     surface: () => surface,
@@ -383,14 +423,22 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           throw new Error(`the peer listing is incomplete: ${detail}`)
         }
         const peer = peers.find(entry => entry.run_id === SUPERVISOR_RUN_ID)
-        const translation = translateRunFacts(peer?.status ?? '', '')
-        return {
-          live: translation.live,
-          resumable: false,
-          status: translation.status,
-        }
+        return peerFacts(peer)
       }
-      const status = await client.status(runId)
+      let status: Record<string, unknown>
+      try {
+        status = await client.status(runId)
+      } catch (error) {
+        // The status verb answers only for the runs this supervisor runs, so a
+        // run a registered child broker owns has no runtime here and reports
+        // from the broker's listing instead. Only that absence answer is read
+        // through the listing: a denial or a transport failure is this call's
+        // outcome and stays the caller's error.
+        if (!isRuntimeNotFoundError(error, runId)) throw error
+        const listed = await listedState(runId)
+        if (listed) return listed
+        throw error
+      }
       const translation = translateRunFacts(
         typeof status.status === 'string' ? status.status : '',
         typeof status.phase === 'string' ? status.phase : '',
