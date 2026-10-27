@@ -125,8 +125,8 @@ type Config struct {
 	BrokerParentToken string
 
 	// BrokerAddr is the broker's bind address; empty uses ephemeral loopback.
-	// Children and parent branches connect to this address, so wildcards are
-	// refused. BrokerURLPath locates its published URL.
+	// Children on this host connect to this address, so wildcards are refused.
+	// BrokerURLPath locates its published URL.
 	BrokerAddr string
 
 	// BrokerAdvertiseURL is the URL off-host peers reach this broker on when it

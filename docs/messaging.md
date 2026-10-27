@@ -284,7 +284,10 @@ prefix or query would break every broker route, so a value carrying one is
 refused. An `https` URL is dialed with the host's system trust store, so the
 terminator's certificate must be one the dialing peer trusts. A value that
 fails validation stops startup instead of falling back to the bound address,
-because the operator replaced that address on purpose.
+because the operator replaced that address on purpose. A value also requires
+the concrete `--broker-addr` bind from the example: over the default ephemeral
+bind the published URL would hide the actually bound port, so that pair stops
+startup too.
 
 The broker is cleartext HTTP with per-run bearer credentials. A trusted
 network therefore means every client that can reach the broker port is

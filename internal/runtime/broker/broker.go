@@ -572,7 +572,7 @@ func (b *Broker) StartOn(addr string) error {
 	// addr never sees, so the refusal follows the bound address.
 	if tcpAddr, ok := l.Addr().(*net.TCPAddr); ok && tcpAddr.IP.IsUnspecified() {
 		_ = l.Close()
-		return fmt.Errorf("broker address %q is a wildcard bind (%s); bind a concrete interface address (e.g. 127.0.0.1:8787 or 192.0.2.10:8787) because children and parent branches are told to reach the bound address", addr, tcpAddr)
+		return fmt.Errorf("broker address %q is a wildcard bind (%s); bind a concrete interface address (e.g. 127.0.0.1:8787 or 192.0.2.10:8787) because children on this host are told to reach the bound address, which a wildcard does not name", addr, tcpAddr)
 	}
 	b.mu.Lock()
 	b.listener = l
