@@ -8,17 +8,24 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/mcpserver"
 	"github.com/sdougbrown/avenor/internal/stable"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
-// stubPolicyEnv replaces the environment and home directory the pickup chain
-// reads, so each test describes its own machine-local config.
-func stubPolicyEnv(t *testing.T, env map[string]string, home string) {
+// stubPolicyEnv replaces the environment and config home the pickup chain
+// reads, so each test describes its own machine-local config. The parent-link
+// variables are neutralized too: runStable exits before its patched supervisor
+// constructor when a parent URL arrives without a token, which would leave a
+// capture at its zero value and make these tests pass or fail for the wrong
+// reason.
+func stubPolicyEnv(t *testing.T, env map[string]string, configHome string) {
 	t.Helper()
-	origGetenv, origHomeDir := mcpLaunchWrapperGetenv, mcpLaunchWrapperHomeDir
+	t.Setenv(token.EnvBrokerParentURL, "")
+	t.Setenv(token.EnvBrokerParentToken, "")
+	origGetenv, origConfigHome := mcpLaunchWrapperGetenv, mcpLaunchWrapperConfigHome
 	mcpLaunchWrapperGetenv = func(key string) string { return env[key] }
-	mcpLaunchWrapperHomeDir = func() (string, error) { return home, nil }
+	mcpLaunchWrapperConfigHome = func() string { return configHome }
 	t.Cleanup(func() {
-		mcpLaunchWrapperGetenv, mcpLaunchWrapperHomeDir = origGetenv, origHomeDir
+		mcpLaunchWrapperGetenv, mcpLaunchWrapperConfigHome = origGetenv, origConfigHome
 	})
 }
 

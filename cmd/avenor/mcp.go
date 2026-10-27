@@ -81,7 +81,7 @@ func runMCP(args []string) int {
 	maxWait := fs.Duration("max-wait", 0, "approximate polling budget for blocking tools (default 25s over HTTP; 0 disables)")
 	var allowedHosts allowedHostList
 	fs.Var(&allowedHosts, "allowed-host", "exact tailnet hostname accepted on the HTTP transport (repeatable)")
-	mcpLaunchWrapperPolicy := fs.String("mcp-launch-wrapper-policy", "", "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts (default: $AVENOR_MCP_LAUNCH_WRAPPER_POLICY, else $HOME/.avenor/launch-wrapper-policy.json); ignored when attaching to an existing supervisor, though a named file that is missing or malformed still fails")
+	mcpLaunchWrapperPolicy := fs.String("mcp-launch-wrapper-policy", "", "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts (default: $AVENOR_MCP_LAUNCH_WRAPPER_POLICY, else launch-wrapper-policy.json under the avenor config home (XDG_CONFIG_HOME/avenor or ~/.config/avenor)); ignored when attaching to an existing supervisor, though a named file that is missing or malformed still fails")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -127,6 +127,11 @@ func runMCP(args []string) int {
 		*authToken = token
 	}
 
+	// Resolve and validate the policy here, then forward only its path: the
+	// autostarted supervisor loads the same file again and owns the policy it
+	// actually enforces. This eager load is validation-only, so a malformed
+	// named file fails the command before any supervisor starts; do not "fix"
+	// the double load by dropping one side without moving validation with it.
 	_, mcpPolicyPath, err := resolveMCPLaunchWrapperPolicy(*mcpLaunchWrapperPolicy)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "avenor mcp: mcp launch wrapper policy: %v\n", err)

@@ -58,14 +58,14 @@ The policy path is picked up in this order, for both `avenor stable` and `avenor
 
 1. `--mcp-launch-wrapper-policy <path>` (wins),
 2. `$AVENOR_MCP_LAUNCH_WRAPPER_POLICY`,
-3. `$HOME/.avenor/launch-wrapper-policy.json`,
+3. `<config home>/launch-wrapper-policy.json` — the shared avenor config home (`$XDG_CONFIG_HOME/avenor`, else `~/.config/avenor`), the same root the host-owned trusted allowlists use,
 4. none of the above: the policy is disabled.
 
 A path named by the flag or the environment must exist and load; a missing or malformed file is an error. The well-known file is optional — absent means disabled — but a malformed one is an error too, never a silent fallback to disabled. Creating that file is the durable, machine-local way to enable the allowlist, so a plugin's versioned `.mcp.json` never has to carry a machine-specific argv.
 
 Approved wrappers are **trusted code with supervisor privileges**: a wrapper process receives the backend environment, including provider API keys and per-run broker credentials. The allowlist is an exposure control on which wrappers MCP clients may invoke — it is **not** sandboxing, and approving a wrapper accepts that residual risk.
 
-The `avenor mcp` command accepts `--mcp-launch-wrapper-policy` only to forward the policy to a supervisor it autostarts; it resolves the same flag → environment → `$HOME/.avenor/launch-wrapper-policy.json` chain and forwards the path it picked. Attaching to an already-running supervisor never changes that supervisor's policy — that supervisor's own pickup chain decided it.
+The `avenor mcp` command accepts `--mcp-launch-wrapper-policy` only to forward the policy to a supervisor it autostarts; it resolves the same flag → environment → `<config home>/launch-wrapper-policy.json` chain and forwards the path it picked. Attaching to an already-running supervisor never changes that supervisor's policy — that supervisor's own pickup chain decided it.
 
 The CLI (`avenor control spawn`) and ordinary control-socket `spawn` calls are operator-trusted surfaces: they are **not** allowlist-gated and keep the pre-existing behavior above.
 

@@ -26,23 +26,23 @@ func fixedGetenv(values map[string]string) func(string) string {
 	return func(key string) string { return values[key] }
 }
 
-func fixedHomeDir(home string) func() (string, error) {
-	return func() (string, error) { return home, nil }
+func fixedConfigHome(dir string) func() string {
+	return func() string { return dir }
 }
 
-func wellKnownPolicyPath(home string) string {
-	return filepath.Join(home, ".avenor", "launch-wrapper-policy.json")
+func wellKnownPolicyPath(configHome string) string {
+	return filepath.Join(configHome, "launch-wrapper-policy.json")
 }
 
 func TestResolveMCPLaunchWrapperPolicyPriority(t *testing.T) {
 	dir := t.TempDir()
 	flagPath := writePolicyAt(t, dir, "flag.json", "/flag/exec")
 	envPath := writePolicyAt(t, dir, "env.json", "/env/exec")
-	home := filepath.Join(dir, "home")
-	wellKnownPath := writePolicyAt(t, home, ".avenor/launch-wrapper-policy.json", "/well-known/exec")
+	configHome := filepath.Join(dir, "config-home")
+	wellKnownPath := writePolicyAt(t, configHome, "launch-wrapper-policy.json", "/well-known/exec")
 
 	env := fixedGetenv(map[string]string{EnvMCPLaunchWrapperPolicy: envPath})
-	homeDir := fixedHomeDir(home)
+	configHomeFn := fixedConfigHome(configHome)
 
 	tests := []struct {
 		name         string
@@ -54,7 +54,7 @@ func TestResolveMCPLaunchWrapperPolicyPriority(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			policy, path, err := ResolveMCPLaunchWrapperPolicy(tt.explicitPath, env, homeDir)
+			policy, path, err := ResolveMCPLaunchWrapperPolicy(tt.explicitPath, env, configHomeFn)
 			if err != nil {
 				t.Fatalf("ResolveMCPLaunchWrapperPolicy() error = %v, want nil", err)
 			}
@@ -68,7 +68,7 @@ func TestResolveMCPLaunchWrapperPolicyPriority(t *testing.T) {
 	}
 
 	t.Run("well-known when nothing else names a path", func(t *testing.T) {
-		policy, path, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), homeDir)
+		policy, path, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), configHomeFn)
 		if err != nil {
 			t.Fatalf("ResolveMCPLaunchWrapperPolicy() error = %v, want nil", err)
 		}
@@ -82,7 +82,7 @@ func TestResolveMCPLaunchWrapperPolicyPriority(t *testing.T) {
 }
 
 func TestResolveMCPLaunchWrapperPolicyAbsentWellKnownFileDisables(t *testing.T) {
-	policy, path, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), fixedHomeDir(t.TempDir()))
+	policy, path, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), fixedConfigHome(t.TempDir()))
 	if err != nil {
 		t.Fatalf("ResolveMCPLaunchWrapperPolicy() error = %v, want nil", err)
 	}
@@ -93,7 +93,7 @@ func TestResolveMCPLaunchWrapperPolicyAbsentWellKnownFileDisables(t *testing.T) 
 
 func TestResolveMCPLaunchWrapperPolicyWhitespaceOnlyEnvDisables(t *testing.T) {
 	env := fixedGetenv(map[string]string{EnvMCPLaunchWrapperPolicy: "  "})
-	policy, path, err := ResolveMCPLaunchWrapperPolicy("", env, fixedHomeDir(t.TempDir()))
+	policy, path, err := ResolveMCPLaunchWrapperPolicy("", env, fixedConfigHome(t.TempDir()))
 	if err != nil {
 		t.Fatalf("ResolveMCPLaunchWrapperPolicy() error = %v, want nil", err)
 	}
@@ -102,9 +102,8 @@ func TestResolveMCPLaunchWrapperPolicyWhitespaceOnlyEnvDisables(t *testing.T) {
 	}
 }
 
-func TestResolveMCPLaunchWrapperPolicyUnresolvableHomeDisables(t *testing.T) {
-	homeErr := func() (string, error) { return "", os.ErrNotExist }
-	policy, path, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), homeErr)
+func TestResolveMCPLaunchWrapperPolicyEmptyConfigHomeDisables(t *testing.T) {
+	policy, path, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), func() string { return "" })
 	if err != nil {
 		t.Fatalf("ResolveMCPLaunchWrapperPolicy() error = %v, want nil", err)
 	}
@@ -123,7 +122,7 @@ func TestResolveMCPLaunchWrapperPolicyInvalidWellKnownFileErrors(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"allowed_argv": [["nice"]]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	policy, resolved, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), fixedHomeDir(home))
+	policy, resolved, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), fixedConfigHome(home))
 	if err == nil {
 		t.Fatal("ResolveMCPLaunchWrapperPolicy() = nil error, want validation failure")
 	}
@@ -141,11 +140,11 @@ func TestResolveMCPLaunchWrapperPolicyInvalidWellKnownFileErrors(t *testing.T) {
 func TestResolveMCPLaunchWrapperPolicyMissingNamedFileErrors(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent.json")
 	home := t.TempDir()
-	writePolicyAt(t, home, ".avenor/launch-wrapper-policy.json", "/well-known/exec")
+	writePolicyAt(t, home, "launch-wrapper-policy.json", "/well-known/exec")
 
 	t.Run("flag", func(t *testing.T) {
 		// A missing flag path fails even though the well-known file would load.
-		_, _, err := ResolveMCPLaunchWrapperPolicy(missing, fixedGetenv(nil), fixedHomeDir(home))
+		_, _, err := ResolveMCPLaunchWrapperPolicy(missing, fixedGetenv(nil), fixedConfigHome(home))
 		if err == nil {
 			t.Fatal("ResolveMCPLaunchWrapperPolicy() = nil error, want missing-file failure")
 		}
@@ -156,7 +155,7 @@ func TestResolveMCPLaunchWrapperPolicyMissingNamedFileErrors(t *testing.T) {
 
 	t.Run("env", func(t *testing.T) {
 		env := fixedGetenv(map[string]string{EnvMCPLaunchWrapperPolicy: missing})
-		_, _, err := ResolveMCPLaunchWrapperPolicy("", env, fixedHomeDir(home))
+		_, _, err := ResolveMCPLaunchWrapperPolicy("", env, fixedConfigHome(home))
 		if err == nil {
 			t.Fatal("ResolveMCPLaunchWrapperPolicy() = nil error, want missing-file failure")
 		}
@@ -164,4 +163,21 @@ func TestResolveMCPLaunchWrapperPolicyMissingNamedFileErrors(t *testing.T) {
 			t.Fatalf("error = %q, want it to name %q", err, missing)
 		}
 	})
+}
+
+func TestResolveMCPLaunchWrapperPolicyWellKnownStatErrorFails(t *testing.T) {
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Joining a file as a directory yields ENOTDIR, which is not fs.ErrNotExist:
+	// the chain must fail closed rather than silently disable the policy.
+	policy, path, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), fixedConfigHome(notADir))
+	if err == nil {
+		t.Fatal("ResolveMCPLaunchWrapperPolicy() = nil error, want stat failure")
+	}
+	if policy != nil || path != "" {
+		t.Fatalf("policy = %#v, path = %q, want nil policy and empty path on error", policy, path)
+	}
 }

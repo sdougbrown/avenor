@@ -23,6 +23,7 @@ func stableTestEnv(t *testing.T) string {
 	t.Setenv("TMPDIR", dir)
 	t.Setenv(token.EnvBrokerParentURL, "")
 	t.Setenv(token.EnvBrokerParentToken, "")
+	t.Setenv(stable.EnvMCPLaunchWrapperPolicy, "")
 	return dir
 }
 
