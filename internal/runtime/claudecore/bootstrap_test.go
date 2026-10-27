@@ -179,3 +179,16 @@ func TestWaitForPaneReadyReportsATerminalThatDiedShowingAReadyPane(t *testing.T)
 		t.Fatalf("WaitForPaneReady = %v, want ErrTerminalGone", err)
 	}
 }
+
+func TestWaitForPaneReadyReportsATerminalThatDiedBeforeTheFirstCheck(t *testing.T) {
+	// A deadline shorter than the check interval ends the wait before any
+	// tick, so only the deadline's own liveness check can tell a dead terminal
+	// from a stuck one.
+	term := terminal.NewFakeSession("dead", 1, "still booting…\n")
+	term.SetAlive(false)
+
+	err := WaitForPaneReady(context.Background(), term, PromptInjectCheckInterval/5)
+	if !errors.Is(err, ErrTerminalGone) {
+		t.Fatalf("WaitForPaneReady = %v, want ErrTerminalGone", err)
+	}
+}
