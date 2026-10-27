@@ -83,6 +83,11 @@ type StartOptions struct {
 	// Provenance is the informational launch identity exported to the hosted
 	// process. Inherited identity is removed before it is added.
 	Provenance *runtime.LaunchProvenance
+	// Env holds KEY=VALUE entries exported to the hosted process after the
+	// launch identity: the caller's own vocabulary rather than the harness's.
+	// Inherited entries of the same names are stripped first. A tmux pane can
+	// only be given values this way, so the field is not a PTY-only seam.
+	Env []string
 }
 
 // Launcher creates and manages terminal sessions.

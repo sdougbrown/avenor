@@ -11,8 +11,12 @@ import (
 )
 
 // TestPTYLauncherAddsLaunchIdentity asserts in one run what the hosted PTY
-// child saw: this launch's identity, none of the inherited identity, and the
-// untouched broker pair.
+// child saw: this launch's identity and none of the inherited identity.
+//
+// The inherited avenor peer credentials go too. A session that loaded the
+// plugin exports them into everything it launches, so an inherited pair would
+// make this child join the broker as the launcher's run — a record another live
+// session is already polling.
 func TestPTYLauncherAddsLaunchIdentity(t *testing.T) {
 	identitytest.PoisonParent(t)
 	obsPath := filepath.Join(t.TempDir(), "observed.env")
@@ -31,5 +35,41 @@ func TestPTYLauncherAddsLaunchIdentity(t *testing.T) {
 
 	observed := identitytest.Read(t, obsPath)
 	identitytest.Assert(t, observed, provenance)
-	identitytest.AssertBrokerPreserved(t, observed)
+	identitytest.AssertPeerEnv(t, observed, nil)
+}
+
+// TestPTYLauncherExportsProvisionedPeerCredentials is the other half of the
+// same contract: what the launcher provisions is what the child sees, even
+// over an inherited pair of the same names.
+func TestPTYLauncherExportsProvisionedPeerCredentials(t *testing.T) {
+	identitytest.PoisonParent(t)
+	obsPath := filepath.Join(t.TempDir(), "observed.env")
+	command := identitytest.Body(obsPath) + "sleep 30"
+
+	provisioned := map[string]string{
+		"AVENOR_BROKER_URL":   "http://127.0.0.1:1",
+		"AVENOR_RUN_ID":       "rt_child",
+		"AVENOR_BROKER_TOKEN": "child-token",
+		"AVENOR_SESSION_NAME": "child label with 'quotes' $(id)",
+	}
+	env := make([]string, 0, len(provisioned))
+	for key, value := range provisioned {
+		env = append(env, key+"="+value)
+	}
+
+	provenance := identitytest.Provenance("rt_child")
+	session, err := (PTYLauncher{}).Start(context.Background(), StartOptions{
+		Name:       "identity-pty-provisioned",
+		Command:    command,
+		Provenance: provenance,
+		Env:        env,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer session.Kill(context.Background())
+
+	observed := identitytest.Read(t, obsPath)
+	identitytest.Assert(t, observed, provenance)
+	identitytest.AssertPeerEnv(t, observed, provisioned)
 }

@@ -25,7 +25,7 @@ func tmuxNewSessionArgs(opts StartOptions) []string {
 		"-c", opts.Dir,
 		"-x", strconv.Itoa(opts.Cols),
 		"-y", strconv.Itoa(opts.Rows),
-		UnsetParentClaudeEnvPrefix() + identityEnvPrefix(opts.Provenance) + opts.Command,
+		UnsetParentClaudeEnvPrefix() + identityEnvPrefix(opts.Provenance, opts.Env) + opts.Command,
 	}
 }
 

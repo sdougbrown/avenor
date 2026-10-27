@@ -113,6 +113,11 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	sessionID := uuid.New().String()
 
+	// The child Claude session joins the broker as the run the supervisor
+	// provisioned for it, through the plugin's mods layer. Nil when nothing was
+	// provisioned; the launch then carries no peer credentials at all.
+	peer := provisionPeer(merged)
+
 	claudeArgs := claudeutil.BuildArgs(sessionID, "", merged)
 
 	stderrLog, err := claudecore.CreateStderrLog()
@@ -141,6 +146,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		Rows:       50,
 		Command:    shellCmd,
 		Provenance: merged.Provenance,
+		Env:        peer.env(),
 	})
 	if err != nil {
 		s.CancelFn()

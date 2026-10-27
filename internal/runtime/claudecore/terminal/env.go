@@ -96,27 +96,89 @@ func UnsetParentClaudeEnvPrefix() string {
 	return b.String()
 }
 
+// avenorPeerEnv is the vocabulary the avenor plugin's mods layer reads to join
+// a broker as an already-provisioned run (marketplace/plugins/avenor/hooks). A
+// child never inherits a launcher's copy: the session that loaded the plugin
+// exports these into everything it spawns, and a tmux server can hold them
+// from a launch days back. Either way the child would join as a run another
+// live session is already using, so every launch strips them and exports only
+// what the caller provisions.
+var avenorPeerEnv = []string{
+	"AVENOR_BROKER_URL",
+	"AVENOR_RUN_ID",
+	"AVENOR_BROKER_TOKEN",
+	"AVENOR_SESSION_NAME",
+}
+
+// PeerEnv returns env without any inherited avenor peer credentials, followed
+// by extra: this launch's provisioned ones. Entries that are not KEY=VALUE are
+// dropped, and extra wins over env for every name.
+func PeerEnv(env []string, extra []string) []string {
+	out := make([]string, 0, len(env)+len(extra))
+	for _, entry := range env {
+		if isAvenorPeerEnv(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	for _, entry := range extra {
+		if !isEnvEntry(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func isAvenorPeerEnv(entry string) bool {
+	name, _, _ := strings.Cut(entry, "=")
+	for _, peer := range avenorPeerEnv {
+		if name == peer {
+			return true
+		}
+	}
+	return false
+}
+
+func isEnvEntry(entry string) bool {
+	key, _, ok := strings.Cut(entry, "=")
+	return ok && key != ""
+}
+
 // identityEnvPrefix returns a shell prefix that unsets every name a child must
-// not inherit (runtime.ScrubbedEnvNames) and exports this launch's identity.
-// The unset must happen here, not just in LaunchEnv: a pane inherits the tmux
-// server's environment, which carries the credential the documented setup way.
-// Values are single-quoted so labels containing quotes, newlines or command
+// not inherit (runtime.ScrubbedEnvNames and the avenor peer credentials) and
+// exports this launch's identity followed by the caller's own env. The unset
+// must happen here, not just in LaunchEnv: a pane inherits the tmux server's
+// environment, which carries the credential the documented setup way. Values
+// are single-quoted so labels containing quotes, newlines or command
 // substitution text stay literal data.
-func identityEnvPrefix(p *runtime.LaunchProvenance) string {
+func identityEnvPrefix(p *runtime.LaunchProvenance, env []string) string {
 	var b strings.Builder
 	b.WriteString("unset")
 	for _, name := range runtime.ScrubbedEnvNames() {
 		b.WriteString(" ")
 		b.WriteString(name)
 	}
+	for _, name := range avenorPeerEnv {
+		b.WriteString(" ")
+		b.WriteString(name)
+	}
 	b.WriteString("; ")
-	for _, entry := range p.IdentityEnv() {
-		key, value, _ := strings.Cut(entry, "=")
+	writeExports(&b, p.IdentityEnv())
+	writeExports(&b, env)
+	return b.String()
+}
+
+func writeExports(b *strings.Builder, entries []string) {
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
+			continue
+		}
 		b.WriteString("export ")
 		b.WriteString(key)
 		b.WriteString("=")
 		b.WriteString(shellquote.Quote(value))
 		b.WriteString("; ")
 	}
-	return b.String()
 }
