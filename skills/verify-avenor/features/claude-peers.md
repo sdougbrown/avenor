@@ -6,8 +6,9 @@ is delivered through the broker (and answered `{isDelivered:true}` by the
 `session.send` hook), inbound asks are long-polled off `POST /poll-control`
 and submitted as prompts when the session is idle, and the avenor message
 tool's `ask` action is served against the session's own broker credentials,
-blocking on `/wait_reply`. Trust comes from the broker's authenticated run
-identity, never from message text.
+blocking on `/wait_reply` and retracting the edge when that wait fails, while
+its `reply` action answers an ask the session itself received. Trust comes
+from the broker's authenticated run identity, never from message text.
 
 ## How a user reaches it
 
@@ -43,6 +44,14 @@ broker URL in their environment; the supervisor is the harness's own
    reply to \"av1...\" from \"<peer>\" before the timeout; withdraw it with
    avenor_message action=\"withdraw\" message_id=\"av1...\""}` — the sentence
    every surface renders, not raw HTTP text.
+4. In the session that received an ask, answer it with the message tool's
+   `reply` action (`{action: "reply", reply_to: "<message id from the
+   frame>", message: "…"}`). Proof: the tool result is the router's reply
+   shape `{"action":"reply","outcome":"replied","message_id":"av1...",
+   "text":"reply to \"av1...\" delivered"}` and the asker's `ask` unblocks;
+   answering the same id again passes through to the MCP server instead, whose
+   `edge-absent` result is the honest answer for an ask the hook no longer
+   holds.
 
 The session transcript JSONL under `~/.claude/projects/<cwd slug>/` is the
 verbatim record (the tmux pane renderer can lag behind a completed turn; read
@@ -52,33 +61,40 @@ session prints on `/reload-plugins` ("reloaded (5 hooks: ...)").
 
 ## Proof state
 
-`feature-map acceptance` = all three drives above with both transcripts
+`feature-map acceptance` = all four drives above with both transcripts
 captured, plus `claude plugin validate` exit 0 and the offline suites: pure
 modules under
 `node --test marketplace/plugins/avenor/test/addresses.test.mjs marketplace/plugins/avenor/test/wire.test.mjs`
 (address ladder incl. empty refs and cross-row run-id wins, wire helpers, the
-mirrored ask sentences and the failure classification — name files explicitly;
-node 24 treats a bare directory as a module path) and the committed
-live-broker hook-contract drive
+mirrored ask and reply sentences, the escaping a peer-controlled fact cannot
+slip through — backslash, bidi, astral format characters — and the failure
+classification — name files explicitly; node 24 treats a bare directory as a
+module path) and the committed live-broker hook-contract drive
 `node marketplace/plugins/avenor/test/preflight.mjs http://127.0.0.1:<port>`
 against a quiet `avenor stable` (self-registration/naming, idle and
 subagent-turn idle delivery, tell sends ride no edge, ask correlation,
-reply-edge unblock, busy-path append, the ask tool's reply and timed-out
-shapes, a refused `prompt.submit` falling back to a row while the rest of the
-batch still lands, ask-input refusals that never reach the peer, a partial
-listing refusing resolution, one-listing ask pinning, the version-shape
-matrix, and the old-release disabled pass-through). Every wait in that drive
-is a deadline-bounded poll, and it exits with a status: a hang is a failure,
-not a slow pass. The PR 1 run's captured evidence (transcripts, validation
-report, review grounding drives for turn axes and reload behavior) lives in
-the branch's `.cache/runs/evidence/` (uncommitted by repo policy).
+reply-edge unblock, the `reply` action answering the ask the hook polled and
+passing an unknown `reply_to` through, busy-path append, the ask tool's reply
+and timed-out shapes, a cut `/wait_reply` retracting its edge, a refused
+`prompt.submit` falling back to a row while the rest of the batch still lands,
+a `/poll-control` failure pausing the loop without killing it, ask-input
+refusals that never reach the peer, a partial listing refusing resolution,
+one-listing ask pinning, the version-shape matrix, a broker-less session
+staying off with one reason line, a stale self-minted name reminted once, and
+the old-release disabled pass-through). Every wait in that drive is a
+deadline-bounded poll, and it exits with a status: a hang is a failure, not a
+slow pass. The PR 1 run's captured evidence (transcripts, validation report,
+review grounding drives for turn axes and reload behavior) lives in the
+branch's `.cache/runs/evidence/` (uncommitted by repo policy).
 
 ## Known limits
 
 - Provisioning (broker URL + run id + token into a spawned child) is PR 2;
   until then children join as self-minted peers or via exported env.
-- The reply correlation is a heuristic: a send to a peer with a pending
-  inbound ask answers the most recent one.
+- The reply correlation is a heuristic: a plain `SendMessage` to a peer with
+  a pending inbound ask answers the most recent one. The message tool's
+  explicit `reply` action names the ask instead, so concurrent asks from one
+  peer can each be answered (the table holds the newest 128 unanswered asks).
 - A peer listing the broker itself reports as partial refuses every ref, so a
   `SendMessage`/`ask` during a broken peer listing fails with that reason
   rather than resolving against the subset.

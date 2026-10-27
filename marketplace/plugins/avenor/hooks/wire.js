@@ -6,9 +6,9 @@
 // packages/pi/src/subagent-broker.ts (buildAgentMessage, parseControlMessage),
 // so a mod, a pi child and a Go child all put the same bytes on the wire.
 // A hooks module imports its own files and "claude-code", nothing else, so the
-// ask templates and their escaping are copied from the schemas rather than
-// imported; change schemas/message.outcome.json and messaging-text.ts first.
-// Nothing here touches the engine call object.
+// ask and reply templates and their escaping are copied from the schemas rather
+// than imported; change schemas/message.outcome.json and messaging-text.ts
+// first. Nothing here touches the engine call object.
 
 const MAX_WAIT_MS = 600000
 
@@ -227,6 +227,23 @@ export function renderAskFailure(messageId, target, outcome) {
   const known = Object.prototype.hasOwnProperty.call(ASK_TEMPLATES, outcome)
   const template = known ? ASK_TEMPLATES[outcome] : ASK_TEMPLATES["possibly-pending"]
   return substitute(template, { message_id: quote(messageId), target: quote(target) })
+}
+
+/**
+ * The reply column of schemas/message.outcome.json, verbatim: the two outcomes
+ * this layer's reply path can produce. Any other outcome belongs to the MCP
+ * surface's own route, which renders it from the generated table.
+ */
+const REPLY_TEMPLATES = {
+  replied: "reply to {message_id} delivered",
+  "not-sent": "reply to {message_id} was not sent; nothing is pending",
+}
+
+/** The shared reply sentence for an outcome the hook produced itself. */
+export function renderReplyText(messageId, outcome) {
+  const known = Object.prototype.hasOwnProperty.call(REPLY_TEMPLATES, outcome)
+  const template = known ? REPLY_TEMPLATES[outcome] : REPLY_TEMPLATES["not-sent"]
+  return substitute(template, { message_id: quote(messageId) })
 }
 
 /**

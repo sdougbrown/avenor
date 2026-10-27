@@ -15,6 +15,7 @@ import {
   extractReplyMessage,
   quote,
   renderAskFailure,
+  renderReplyText,
   askFailureOutcome,
 } from '../hooks/wire.js'
 
@@ -178,6 +179,32 @@ test('quote: a fact cannot carry a bidi override or a line break', () => {
   assert.equal(quote('me\u202esh'), '"me\\u202esh"')
   assert.equal(quote('two\nlines'), '"two\\nlines"')
   assert.equal(quote('say "hi"'), '"say \\"hi\\""')
+})
+
+test('quote: backslash and astral-format escapes are byte-identical to messaging-text', () => {
+  // A value with a literal backslash keeps it doubled, so the fact re-reads as
+  // exactly the label a peer registered — the same bytes Quote writes in Go.
+  assert.equal(quote('back\\slash'), '"back\\\\slash"')
+  assert.equal(quote('trailing\\'), '"trailing\\\\"')
+  // U+110BD (KAITHI NUMBER SIGN) is Cf and astral: it escapes as its UTF-16
+  // surrogate pair, never as a widened single code point.
+  assert.equal(quote('x\u{110BD}y'), '"x\\ud804\\udcbdy"')
+  // A printable astral character is not a format character, so it passes
+  // through whole: only unprintable astral code points are escaped.
+  assert.equal(quote('\u{1F600}'), '"\u{1F600}"')
+  // The neighbouring escapes keep their single-letter forms.
+  assert.equal(quote('tab\there'), '"tab\\there"')
+  assert.equal(quote('cr\rhere'), '"cr\\rhere"')
+})
+
+test('renderReplyText: the shared reply sentences, byte-identical to messaging-text', () => {
+  assert.equal(renderReplyText('av1.m.1', 'replied'), 'reply to "av1.m.1" delivered')
+  assert.equal(
+    renderReplyText('av1.m.1', 'not-sent'),
+    'reply to "av1.m.1" was not sent; nothing is pending',
+  )
+  // A fact a peer controls is quoted, never interpolated raw.
+  assert.equal(renderReplyText('a"b', 'replied'), 'reply to "a\\"b" delivered')
 })
 
 test('askFailureOutcome: classified from the wire facts, never from prose', () => {

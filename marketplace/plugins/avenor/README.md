@@ -34,11 +34,22 @@ broker peer, so avenor runs become addressable like teammates:
   same withdraw guidance a pi or Go peer's ask returns — and classifies the
   failure from the broker's own facts (the row's `outcome`, the 504's
   `timeout: true`), never from the error's prose; the raw wire text only
-  reaches the log line. Every other action and every call made while the
-  layer is off passes through to the MCP server. The mod does not register
-  its own tool under `mcp__avenor__*`: the plugin also ships an MCP server
-  named `avenor`, and the host refuses such a registration as a replacement
-  for it.
+  reaches the log line. A failed `/wait_reply` also retracts the ask
+  (`POST /cancel_message`), as the pi and core ask paths do, so a reply that
+  arrives late finds no edge instead of landing where nothing waits; the
+  retraction is best-effort and never replaces the ask's own outcome.
+  Every other action and every call made while the layer is off passes
+  through to the MCP server. The mod does not register its own tool under
+  `mcp__avenor__*`: the plugin also ships an MCP server named `avenor`, and
+  the host refuses such a registration as a replacement for it.
+- **Reply:** an ask this session *received* lives in the hook's own
+  correlation table, not in an edge the MCP server can claim, so the hook
+  also serves `reply`: `{action: "reply", reply_to: "<message id from the
+  frame>", message}` is sent along the same reply-edge send `SendMessage`
+  uses, and answers the router's reply result (`reply to "av1…" delivered`).
+  A `reply_to` the hook does not hold — an ask it never received, or one it
+  already answered — passes through to the MCP server, whose own
+  `edge-absent` refusal is then the honest answer.
 - **Receive:** the mod holds a long-poll subscription on the broker's
   `POST /poll-control` (agent rows only) for the session's life. An inbound
   ask is submitted as a prompt when the session is idle — it starts its own
@@ -94,9 +105,10 @@ as `GET /sessions` lists it.
 - Provisioning (broker URL, run id, token) is what PR 2 will mint at spawn
   for Claude children; until then a spawned Claude run joins as a self-minted
   peer or needs the supervisor's credentials another way.
-- The reply correlation is a heuristic: a send to a peer with a pending
-  inbound ask answers the most recent one. Multiple concurrent asks from the
-  same peer collapse to the last.
+- The reply correlation is a heuristic: a plain send to a peer with a
+  pending inbound ask answers the most recent one. An explicit `reply`
+  action names the ask instead, so concurrent asks from one peer can each be
+  answered; the table keeps the newest 128 unanswered asks.
 - The pass-through `turn.start`/`turn.complete` counters log one benign
   "hook skipped: returned the wrong shape (no result)" notice per turn; the
   turn events themselves proceed untouched.

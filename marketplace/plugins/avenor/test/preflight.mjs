@@ -16,6 +16,15 @@
 //      that turns the layer on
 //  11. the version gate on an old release -> disabled pass-through
 //
+// Sub-steps pin the edges the main run does not reach: 2b a send after a bare
+// tell rides no edge, 4b the reply action answers the ask the hook polled,
+// 5b a subagent turn is not the main loop, 6b a timed-out ask is classified
+// from the wire facts, 9b a failed /poll-control pauses the loop without
+// killing it, 11a a broker-less session stays off with one reason line, 11b a
+// partial listing refuses every ref, 11c one ask reads one listing, 11d a
+// stale self-minted name is reminted then registered, 11e a failed wait
+// retracts its ask.
+//
 // Every wait is a deadline-bounded poll, not a fixed sleep.
 //
 // Run: node marketplace/plugins/avenor/test/preflight.mjs http://127.0.0.1:<port>
@@ -66,6 +75,16 @@ async function until(what, present, timeoutMs = 30000) {
   }
 }
 
+/**
+ * A probe wait runs alongside the drive, so its rejection must be attributed to
+ * the step that started it: an unhandled rejection ends the process with no
+ * FAIL line and no step name.
+ */
+function waitRejected(what, err) {
+  console.log('FAIL: the probe wait for ' + what + ' rejected: ' + String(err))
+  process.exit(1)
+}
+
 // --- the stub call object: http goes over the real broker ---
 const env = {
   AVENOR_BROKER_URL: BROKER,
@@ -75,6 +94,11 @@ const env = {
 // Step 9 arms this so one prompt.submit is refused, proving the
 // session.append fallback and that the rest of the batch still lands.
 let failNextSubmit = false
+// Step 10 arms this so one /poll-control request throws: the loop has to pause
+// on the failure and keep polling.
+let failNextPoll = false
+// Every pause the inbound loop takes (the only caller of d.clock.sleep).
+let pauses = 0
 const d = {
   env: { get: async (n) => env[n] },
   session: {
@@ -82,7 +106,10 @@ const d = {
   },
   clock: {
     now: async () => Date.now(),
-    sleep: (ms) => new Promise((res) => setTimeout(res, ms)),
+    sleep: async (ms) => {
+      pauses += 1
+      await sleep(ms)
+    },
   },
   ui: { log: async (text) => record('ui.log', text) },
   prompt: {
@@ -103,6 +130,10 @@ d.session.append = async (args) => {
 // No tool noun: the layer deliberately registers no tool (see register.js).
 d.http = {
   fetch: async (url, init = {}) => {
+    if (failNextPoll && url.endsWith('/poll-control')) {
+      failNextPoll = false
+      throw new Error('the poll connection was pulled')
+    }
     const res = await fetch(url, init)
     const text = await res.text()
     return { status: res.status, ok: res.ok, headers: {}, text }
@@ -249,7 +280,7 @@ let probeWaitReturned = null
 probeWait(askA1, listing.generation, 30000).then((r) => {
   probeWaitReturned = r
   return r
-})
+}).catch((err) => waitRejected('the ask correlation', err))
 // the probe polls until the loop picks the ask up
 await until('the ask to be submitted as a prompt',
   () => events.filter((e) => e.kind === 'prompt.submit').length >= 2)
@@ -278,6 +309,50 @@ if (!replyShape || !replyShape.ok || !(replyShape.body || '').includes('pong to 
   process.exit(1)
 }
 
+console.log('=== 4b. the reply action answers the ask this session polled ===')
+// An ask this session receives lives in the hook's own correlation table, not
+// in an edge the MCP server can claim, so the hook has to serve `reply` itself:
+// passing it through would answer edge-absent for an ask that is still waiting.
+await drainProbe()
+const askR1 = mintAskID()
+await probeSendTo('claude-parent', { id: askR1, message: 'answer me with the reply action', expectsReply: true, generation: listing.generation })
+let replyActionWait = null
+probeWait(askR1, listing.generation, 30000).then((r) => {
+  replyActionWait = r
+  return r
+}).catch((err) => waitRejected('the reply-action ask', err))
+await until('the reply-action ask to submit',
+  () => events.some((e) => e.kind === 'prompt.submit' && e.line.includes('answer me with the reply action')))
+const replyActionResult = JSON.parse((await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'reply', reply_to: askR1, message: 'answered by the reply action',
+})).result)
+console.log(JSON.stringify({ check: 'reply action result', replyActionResult }))
+if (replyActionResult.action !== 'reply' || replyActionResult.outcome !== 'replied' ||
+    replyActionResult.message_id !== askR1 ||
+    replyActionResult.text !== 'reply to "' + askR1 + '" delivered') {
+  console.log('FAIL: the reply action did not serve the polled ask', replyActionResult)
+  process.exit(1)
+}
+const replyActionShape = await until('the reply-action ask to unblock', () => replyActionWait)
+console.log(JSON.stringify({ check: 'reply action unblocked the probe', ok: replyActionShape.ok }))
+if (!replyActionShape.ok || !(replyActionShape.body || '').includes('answered by the reply action')) {
+  console.log('FAIL: the reply action did not unblock the asker', replyActionShape)
+  process.exit(1)
+}
+// An edge the reply consumed, and a reply_to the hook never held, are both the
+// MCP server's to answer: the hook passes them through untouched.
+const answeredAgain = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'reply', reply_to: askR1, message: 'answered twice',
+})
+const unknownReply = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'reply', reply_to: 'av1.unknown.0', message: 'nobody asked',
+})
+console.log(JSON.stringify({ check: 'reply pass-through', answeredAgain, unknownReply }))
+if (answeredAgain !== undefined || unknownReply !== undefined) {
+  console.log('FAIL: a reply_to the hook does not hold was served instead of passing through')
+  process.exit(1)
+}
+
 console.log('=== 5. busy path: main turn started, ask appended instead of submitted ===')
 await callHook('turn.start').hook(d, { text: 'busy turn', turnId: 't1' })
 const askB1 = mintAskID()
@@ -287,7 +362,7 @@ let busyWaitReturned = null
 probeWait(askB1, listing.generation, 30000).then((r) => {
   busyWaitReturned = r
   return r
-})
+}).catch((err) => waitRejected('the busy-path ask', err))
 await until('the busy ask to append instead of submit',
   () => events.some((e) => e.kind === 'session.append' && e.line.includes('busy ask should append')))
 const appendRows = events.filter((e) => e.kind === 'session.append')
@@ -322,7 +397,7 @@ let subagentWaitReturned = null
 probeWait(askC1, listing.generation, 30000).then((r) => {
   subagentWaitReturned = r
   return r
-})
+}).catch((err) => waitRejected('the subagent-time ask', err))
 await until('the subagent-time ask to submit',
   () => events.some((e) => e.kind === 'prompt.submit' && e.line.includes('subagent-time ask should submit')))
 const rowsAfterSubagent = events.filter((e) => e.kind === 'session.append')
@@ -448,6 +523,41 @@ if (events.filter((e) => e.kind === 'prompt.submit' && e.line.includes('the refu
   process.exit(1)
 }
 
+console.log('=== 9b. a failed /poll-control pauses the inbound loop, which survives it ===')
+// The loop's contract is that every failure pauses it and no iteration kills
+// it. One thrown poll must cost exactly one pause, and the ask queued meanwhile
+// must still arrive on the next poll with its edge intact.
+await drainProbe()
+const pausesBefore = pauses
+failNextPoll = true
+const askP1 = mintAskID()
+await probeSendTo('claude-parent', { id: askP1, message: 'delivered after a failed poll', expectsReply: true, generation: listing.generation })
+let pollWaitReturned = null
+probeWait(askP1, listing.generation, 30000).then((r) => {
+  pollWaitReturned = r
+  return r
+}).catch((err) => waitRejected('the post-failure ask', err))
+await until('the inbound loop to pause after the failed poll', () => pauses > pausesBefore)
+const afterFailure = await until('the ask behind the failed poll to be delivered',
+  () => events.find((e) => e.kind === 'prompt.submit' && e.line.includes('delivered after a failed poll')))
+console.log(JSON.stringify({
+  check: 'poll failure paused then resumed',
+  pauses: pauses - pausesBefore,
+  delivered: afterFailure.line.slice(0, 60),
+}))
+const afterFailureReply = await callHook('session.send').hook(d, {
+  to: `avenor:${probe.runId}`, text: 'answering after the failed poll', origin: { kind: 'model' },
+})
+if (!afterFailureReply || afterFailureReply.isDelivered !== true) {
+  console.log('FAIL: the reply after a failed poll was not delivered')
+  process.exit(1)
+}
+const afterFailureWait = await until('the post-failure ask to unblock', () => pollWaitReturned)
+if (!afterFailureWait.ok || !(afterFailureWait.body || '').includes('answering after the failed poll')) {
+  console.log('FAIL: the post-failure ask did not unblock with its reply', afterFailureWait)
+  process.exit(1)
+}
+
 console.log('=== 10. the ask hook refuses bad input without touching the broker ===')
 await drainProbe()
 const beforeRefusals = await probePoll()
@@ -555,6 +665,37 @@ for (const shape of offShapes) {
     process.exit(1)
   }
 }
+console.log('=== 11a. a passing version with no broker configured keeps the layer off ===')
+// The graceful disable: the version gate passes, the broker is missing, so the
+// layer explains itself once and stays off — no registration attempt, no
+// subscription, and every send passes through.
+const armedBefore = events.filter((e) => e.line && e.line.includes('peer layer on')).length
+const noBroker = await layerCopy({ version: '2.1.311-prod', base: '2.1.311' }, {})
+const noBrokerLines = events.filter((e) => e.kind === 'ui.log' && e.line.includes('no avenor broker is configured'))
+const armedAfter = events.filter((e) => e.line && e.line.includes('peer layer on')).length
+console.log(JSON.stringify({
+  check: 'no broker keeps the layer off',
+  reasonLines: noBrokerLines.length,
+  reason: noBrokerLines.length === 1 ? noBrokerLines[0].line : null,
+  armed: armedAfter - armedBefore,
+}))
+if (noBrokerLines.length !== 1 || !noBrokerLines[0].line.includes('AVENOR_BROKER_URL')) {
+  console.log('FAIL: a broker-less session did not log its reason exactly once')
+  process.exit(1)
+}
+if (armedAfter !== armedBefore) {
+  console.log('FAIL: a broker-less session armed the layer')
+  process.exit(1)
+}
+const noBrokerSend = await noBroker.hooks['session.send'](noBroker.d, {
+  to: `avenor:${probe.runId}`, text: 'x', origin: { kind: 'model' },
+})
+console.log(JSON.stringify({ check: 'no-broker send passes through', noBrokerSend }))
+if (noBrokerSend !== undefined) {
+  console.log('FAIL: the broker-less layer intercepted an avenor:* send')
+  process.exit(1)
+}
+
 // The shape the floor accepts turns the layer on for real: a fresh run id, so
 // the enabled copy registers and resolves off the live broker.
 const onCopy = await layerCopy({ version: '2.1.311-prod', base: '2.1.311' }, {
@@ -624,6 +765,92 @@ if (listingsRead !== 1) {
   process.exit(1)
 }
 await drainProbe()
+
+console.log('=== 11d. a stale self-minted name is reminted once, then registered ===')
+// A self-minted `claude-<hex>` can collide with a record the broker still holds
+// from an earlier session, which this session cannot authenticate against. One
+// refusal on that basis mints a fresh suffix and retries; the session then owns
+// the reminted run.
+const remintAttempts = []
+await layerCopy({ base: '2.1.311' }, { AVENOR_BROKER_URL: BROKER }, async (url, init = {}) => {
+  if (url.endsWith('/register')) {
+    const body = JSON.parse(init.body === undefined ? '{}' : init.body)
+    remintAttempts.push(body.run_id)
+    if (remintAttempts.length === 1) {
+      return {
+        status: 409,
+        ok: false,
+        headers: {},
+        text: JSON.stringify({ error: 'run "' + body.run_id + '" is already registered' }),
+      }
+    }
+  }
+  const res = await fetch(url, init)
+  const text = await res.text()
+  return { status: res.status, ok: res.ok, headers: {}, text }
+})
+console.log(JSON.stringify({ check: 'self-minted names tried', remintAttempts }))
+if (remintAttempts.length !== 2) {
+  console.log('FAIL: a stale self-minted name did not retry exactly once', remintAttempts)
+  process.exit(1)
+}
+if (remintAttempts[1] === remintAttempts[0] || !remintAttempts[1].startsWith('claude-')) {
+  console.log('FAIL: the retry did not mint a fresh suffix', remintAttempts)
+  process.exit(1)
+}
+const remintLine = events.find((e) => e.line === 'peer layer on (run ' + remintAttempts[1] + ', broker ' + BROKER + ')')
+if (!remintLine) {
+  console.log('FAIL: the layer did not arm with the reminted run', remintAttempts)
+  process.exit(1)
+}
+const afterRemint = await probeSessions()
+const remintRow = afterRemint.sessions.find((s) => s.run_id === remintAttempts[1])
+const refusedRow = afterRemint.sessions.find((s) => s.run_id === remintAttempts[0])
+console.log(JSON.stringify({ check: 'the reminted run is registered', remintRow, refused: Boolean(refusedRow) }))
+if (!remintRow || refusedRow) {
+  console.log('FAIL: the session did not end up registered under the reminted name', remintAttempts)
+  process.exit(1)
+}
+
+console.log('=== 11e. a failed wait retracts its ask, leaving no edge to answer ===')
+// A wait that fails for a reason the broker did not classify — a cut connection
+// rather than its own 504 — leaves the ask's edge live. The hook retracts it, as
+// the pi and core ask paths do, so a reply arriving afterwards finds no edge
+// instead of landing where no waiter will read it.
+let waitCutOnce = false
+const retractRunId = freshRunId('claude-retract')
+const retractCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: retractRunId,
+}, async (url, init = {}) => {
+  if (url.endsWith('/wait_reply') && !waitCutOnce) {
+    waitCutOnce = true
+    throw new Error('the wait connection was cut')
+  }
+  const res = await fetch(url, init)
+  const text = await res.text()
+  return { status: res.status, ok: res.ok, headers: {}, text }
+})
+const cutAsk = JSON.parse((await askHookCall(retractCopy, {
+  target: `avenor:${probe.runId}`, message: 'the wait gets cut', timeout_ms: 5000,
+})).result)
+console.log(JSON.stringify({ check: 'a cut wait reports its failure', cutAsk }))
+if (cutAsk.outcome !== 'possibly-pending' || cutAsk.reply !== undefined) {
+  console.log('FAIL: a cut wait did not report possibly-pending', cutAsk)
+  process.exit(1)
+}
+await drainProbe()
+const retractedReply = await probeSendTo(retractRunId, {
+  id: cutAsk.message_id + '.reply',
+  message: 'a late answer to a retracted ask',
+  replyTo: cutAsk.message_id,
+})
+const retractedBody = JSON.parse(retractedReply.text)
+console.log(JSON.stringify({ check: 'a reply after the retraction finds no edge', retractedBody }))
+if (retractedBody.outcome !== 'edge-absent') {
+  console.log('FAIL: a failed wait left its ask edge live', retractedBody)
+  process.exit(1)
+}
 
 console.log('=== 12. version gate on an old release (runs last: the gate is module state) ===')
 const oldEnv = { ...env, AVENOR_BROKER_URL: BROKER }

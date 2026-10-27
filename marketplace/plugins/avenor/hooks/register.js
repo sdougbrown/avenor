@@ -18,11 +18,14 @@
 //   carries an `ask` action; a `tool.call` hook on `mcp__avenor__message`
 //   serves that action through this session's broker credentials (an
 //   expects_reply send blocking on `/wait_reply` in the hook, the same shape
-//   the avenor surfaces' ask action takes) and passes every other action
-//   through to the MCP server. The hook, not `$.tool.register`: the plugin
-//   also ships an MCP server named "avenor", and a registered tool under
-//   `mcp__avenor__*` would be refused as a replacement for it. A failed ask
-//   renders the shared ask sentences (wire.js mirrors
+//   the avenor surfaces' ask action takes, retracting the edge when that wait
+//   fails, as the pi and core ask paths do). It also answers a peer ask this
+//   session itself received — those asks live in this module's correlation
+//   table, not in an edge store the MCP server could claim — and passes every
+//   other action through to the MCP server. The hook, not `$.tool.register`:
+//   the plugin also ships an MCP server named "avenor", and a registered tool
+//   under `mcp__avenor__*` would be refused as a replacement for it. A failed
+//   ask renders the shared ask sentences (wire.js mirrors
 //   schemas/message.outcome.json), never raw wire text.
 //
 // The hook grammar is what Claude Code 2.1.311's module scan enforces; the
@@ -41,6 +44,7 @@ import {
   frameInboundAsk,
   normalizeAskTimeoutMs,
   renderAskFailure,
+  renderReplyText,
   askFailureOutcome,
   quote,
 } from "./wire.js"
@@ -59,6 +63,7 @@ const layer = { ...OFF }
 let broker = null
 let busyTurns = 0
 const pendingReplies = new Map()
+const MAX_PENDING_ASKS = 128
 
 export async function register(on) {
   await on("session.send", async (d, e) => deliverIfAvenor(d, e))
@@ -141,7 +146,7 @@ async function deliverOutbound(d, ref, text) {
     return undelivered("the broker answered " + JSON.stringify(response))
   }
   if (hasReply) {
-    dropReply(target.runId, askId)
+    dropReply(askId)
   }
   return { isDelivered: true }
 }
@@ -353,14 +358,18 @@ async function turnTicked(d, e, delta) {
 
 async function serveAskHook(d, e) {
   const isAsk = e.action === "ask"
-  if (!isAsk) {
+  const isReply = e.action === "reply"
+  if (!isAsk && !isReply) {
     // Every other action belongs to the MCP surface's own supervisor.
     return undefined
   }
   if (!layer.enabled || broker === null) {
-    // Without the layer the MCP server serves the ask itself, against the
+    // Without the layer the MCP server serves the action itself, against the
     // supervisor it is attached to.
     return undefined
+  }
+  if (isReply) {
+    return serveReply(d, e)
   }
   const ref = parseAvenorAddress(e.target === undefined || e.target === null ? "" : e.target)
   if (ref === null) {
@@ -425,9 +434,71 @@ async function runAsk(d, target, ref, message, rawTimeout) {
   } catch (err) {
     const outcome = askFailureOutcome(httpStatus(err), httpBody(err))
     await logLayer(d, "ask " + messageId + " wait reported " + outcome + ": " + errorText(err))
+    await retractAsk(d, messageId, target.generation)
     return askOutcome(outcome, messageId, renderAskFailure(messageId, ref, outcome))
   }
   return askOutcome("replied", messageId, extractReplyMessage(result))
+}
+
+/**
+ * Retract an ask whose wait failed, the way the pi and core ask paths do: an
+ * edge nothing waits on again costs the asker a full timeout and lands its
+ * reply where no reader will look. Best effort — a retraction that fails is
+ * logged, never allowed to replace the ask's own outcome.
+ */
+async function retractAsk(d, messageId, generation) {
+  try {
+    await brokerPost(d, "/cancel_message", {
+      cancel_message_id: messageId,
+      generation: generation,
+    })
+  } catch (err) {
+    await logLayer(d, "ask " + messageId + " could not be retracted: " + errorText(err))
+  }
+}
+
+/**
+ * Answer a peer ask this session received. The correlation table, not the
+ * broker's edge store, is where those asks live, so the hook sends the reply
+ * itself along the same reply-edge send `session.send` uses. A `reply_to` the
+ * table does not hold passes through to the MCP server, whose own refusal is
+ * then the honest answer.
+ */
+async function serveReply(d, e) {
+  const replyTo = typeof e.reply_to === "string" ? e.reply_to : ""
+  const peer = peerOwingAsk(replyTo)
+  if (peer === "") {
+    return undefined
+  }
+  const message = typeof e.message === "string" ? e.message : ""
+  if (message === "") {
+    await logLayer(d, "reply to " + replyTo + " was not sent: the reply text was empty")
+    return replyOutcome("not-sent", replyTo)
+  }
+  let queued = false
+  try {
+    const response = await brokerPost(d, "/send", buildAgentMessage({
+      fromRunId: broker.runID,
+      toRunId: peer,
+      messageId: replyTo + ".reply",
+      message: message,
+      role: "agent",
+      replyTo: replyTo,
+    }))
+    queued = response.queued === true
+    if (!queued) {
+      await logLayer(d, "reply to " + replyTo + " was not queued: the broker answered " +
+        JSON.stringify(response))
+    }
+  } catch (err) {
+    await logLayer(d, "reply to " + replyTo + " was not sent: " + errorText(err))
+  }
+  if (!queued) {
+    // A refused reply keeps the edge, so the model's retry still rides it.
+    return replyOutcome("not-sent", replyTo)
+  }
+  dropReply(replyTo)
+  return replyOutcome("replied", replyTo)
 }
 
 /**
@@ -444,6 +515,18 @@ function askOutcome(outcome, messageId, replyText) {
     ...(outcome === "replied" ? { reply: replyText } : {}),
   }
   return { result: JSON.stringify(shape) }
+}
+
+/** The reply action's result, in the same router shape. */
+function replyOutcome(outcome, messageId) {
+  return {
+    result: JSON.stringify({
+      action: "reply",
+      outcome: outcome,
+      message_id: messageId,
+      text: renderReplyText(messageId, outcome),
+    }),
+  }
 }
 
 // --- broker client ---
@@ -617,25 +700,46 @@ function undelivered(reason) {
   return { isDelivered: false, reason: reason }
 }
 
-/** A pending inbound ask correlation, keyed by the peer's run id: the most
- * recent ask wins, so a reply sent to that peer rides its edge. Only real
- * asks (expects_reply) correlate — a peer's courtesy reply is a message, not
- * an edge, and remembering it would point the next send at a dead edge. */
+/**
+ * The inbound asks this session can still answer, keyed by the ask's message id
+ * and holding the peer that asked. Only real asks (expects_reply) correlate — a
+ * peer's courtesy reply is a message, not an edge, and remembering it would
+ * point the next send at a dead edge. The table is bounded because a session
+ * can receive asks it never answers: the oldest edge is forgotten first.
+ */
 function rememberReply(ask) {
   if (ask.expectsReply === true && ask.messageId !== "") {
-    pendingReplies.set(ask.fromRunId, ask.messageId)
+    pendingReplies.set(ask.messageId, ask.fromRunId)
+    forgetOldestAsk()
   }
 }
 
+function forgetOldestAsk() {
+  if (pendingReplies.size > MAX_PENDING_ASKS) {
+    const oldest = pendingReplies.keys().next()
+    if (oldest.done !== true) {
+      pendingReplies.delete(oldest.value)
+    }
+  }
+}
+
+/** The newest ask a peer is still owed, so a plain send to it rides that edge. */
 function peekReply(runId) {
-  const askId = pendingReplies.get(runId)
-  return typeof askId === "string" ? askId : null
+  let askId = null
+  for (const [pendingId, peer] of pendingReplies) {
+    askId = peer === runId ? pendingId : askId
+  }
+  return askId
 }
 
-function dropReply(runId, askId) {
-  if (pendingReplies.get(runId) === askId) {
-    pendingReplies.delete(runId)
-  }
+/** The peer an ask this session received belongs to, or "" when it holds none. */
+function peerOwingAsk(askId) {
+  const peer = pendingReplies.get(askId)
+  return typeof peer === "string" ? peer : ""
+}
+
+function dropReply(askId) {
+  pendingReplies.delete(askId)
 }
 
 function disableLayer(reason) {
