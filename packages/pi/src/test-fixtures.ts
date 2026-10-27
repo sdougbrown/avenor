@@ -165,7 +165,7 @@ export function statusPermission(
   if (!permission) return undefined
   return {
     request_id: permission.request_id ?? '',
-    description: permission.description ?? '',
+    description: permission.description ?? permission.question ?? permission.tool ?? '',
     options: permission.options.map(option => ({
       option_id: option.option_id,
       label: option.label,
@@ -186,7 +186,7 @@ export function buildSnapshot(): RunSnapshot {
 
 export function makeInspectResult(statusOverrides: Partial<StatusResult> = {}): InspectResult {
   const snapshot = buildSnapshot()
-  const permission = statusPermission(statusOverrides.pending_permission ?? snapshot.pending_permission)
+  const permission = statusOverrides.pending_permission ?? statusPermission(snapshot.pending_permission)
   const status: StatusResult = {
     run_id: statusOverrides.run_id ?? 'run-1',
     label: statusOverrides.label ?? 'demo',

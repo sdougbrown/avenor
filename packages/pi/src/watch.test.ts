@@ -39,7 +39,7 @@ function buildSnapshot(events: unknown[]): RunSnapshot {
 }
 
 function makeInspectResult(snapshot: RunSnapshot, status: Partial<StatusResult> = {}): InspectResult {
-  const permission = statusPermission(status.pending_permission ?? snapshot.pending_permission)
+  const permission = status.pending_permission ?? statusPermission(snapshot.pending_permission)
   const mergedStatus: StatusResult = {
     run_id: status.run_id ?? snapshot.identity.run_id ?? 'run-1',
     label: status.label ?? snapshot.identity.run_label ?? 'run-1',

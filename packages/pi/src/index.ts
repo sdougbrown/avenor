@@ -236,6 +236,11 @@ function firstTextPart(content: Array<{ type: string; text?: string }> | undefin
   return content?.find(part => part.type === 'text')?.text ?? ''
 }
 
+/** The status a tool result records; a stored transcript record may carry no details. */
+function resultStatus(details: unknown): string {
+  return details && typeof details === 'object' && 'status' in details ? String(details.status ?? '') : ''
+}
+
 /** Close an observer a concurrent watch assigned, ignoring a close failure. */
 async function closeObserverQuietly(observer: RunObserver | null): Promise<void> {
   await observer?.close().catch(() => {})
@@ -2159,23 +2164,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         return new Text(agent + agentName + label + wait, 0, 0)
       },
       renderResult(result, { isPartial }, theme) {
-        const details = result.details as Record<string, unknown>
+        const status = resultStatus(result.details)
+        const text = firstTextPart(result.content)
         if (isPartial) {
-          const status = String(details.status ?? 'running')
-          const emoji = statusEmoji(status)
-          return new Text(theme.fg('accent', `${emoji} ${firstTextPart(result.content) || 'Running…'}`), 0, 0)
+          return new Text(theme.fg('accent', `${statusEmoji(status || 'running')} ${text || 'Running…'}`), 0, 0)
         }
 
-        const status = String(details.status ?? '')
         if (status && isTerminalStatus(status)) {
-          const emoji = statusEmoji(status)
-          const header = theme.fg(status === 'done' ? 'success' : 'error', `${emoji} ${status}`)
-          const body = firstTextPart(result.content).split('\n').map(line => theme.fg('muted', `  ${line}`)).join('\n')
+          const header = theme.fg(status === 'done' ? 'success' : 'error', `${statusEmoji(status)} ${status}`)
+          const body = text.split('\n').map(line => theme.fg('muted', `  ${line}`)).join('\n')
           return new Text(`${header}\n${body}`, 0, 0)
         }
 
-        const text = firstTextPart(result.content).split('\n').map(line => theme.fg('muted', line)).join('\n')
-        return new Text(text, 0, 0)
+        const lines = text.split('\n').map(line => theme.fg('muted', line)).join('\n')
+        return new Text(lines, 0, 0)
       },
     })
 

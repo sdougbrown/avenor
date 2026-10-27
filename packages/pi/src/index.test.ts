@@ -1436,6 +1436,19 @@ describe('Avenor Pi extension', () => {
     expect(rendered).not.toContain('"snapshot"')
   })
 
+  it('renders a spawn result whose stored details are absent', async () => {
+    const harness = await startExtensionHarness({ extOptions: { subAgentEnv: null } })
+    // A transcript record carries whatever details the session stored; pi's HTML
+    // export hands them to renderResult unvalidated, so an absent value must render.
+    const rendered = harness.registeredTools.avenor_spawn.renderResult(
+      { content: [{ type: 'text', text: 'spawned run-1' }], details: undefined },
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, value: string) => value, bold: (value: string) => value },
+      { args: {} },
+    ).render(2_000).join('\n').trimEnd()
+    expect(rendered).toBe('spawned run-1')
+  })
+
   it('tracks colliding run ids from two supervisors independently', async () => {
     const FACTORY = '/tmp/avenor-mcp-factory-retro.sock'
     const ADVISOR = '/tmp/avenor-mcp-advisor.sock'
