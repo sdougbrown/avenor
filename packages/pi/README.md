@@ -14,6 +14,10 @@ which avenor
 export AVENOR_BIN=~/.botfiles/bin/avenor
 ```
 
+You also need Pi 1.4.0 or newer (`pi --version`). Busy-session delivery depends on
+the `agent_before_settle` hook, so a notice raised while you were busy needs that
+version to reach you. A missing notification is not a lost run.
+
 ## Installation
 
 ### From npm (once published)
@@ -144,8 +148,9 @@ Each roster entry must contain `backend` and at least one of `agent` or `model`.
 Beyond the tools, the extension integrates with Pi's TUI and event system:
 
 - **Status widget** — persistent widget showing all active runs with status, phase, and permission state
-- **Footer status** — active runs and polling error counts shown in the Pi footer bar
-- **Polling diagnostics** — bounded polling errors are emitted on `avenor:poll:error` for companion extensions
+- **Footer status** — the `avenor` status key carries active runs, the live agent-tree total, the unread notice count, and the current poll-failure count (see [Completion notices](#completion-notices))
+- **Completion notices** — one notice per finished run, delivered immediately when your session is idle and batched into a single continuation when it was busy
+- **Polling diagnostics** — bounded polling errors are emitted on `avenor:poll:error` for companion extensions; a completion-notice delivery that exhausts its retries is emitted separately on `avenor:delivery:error`
 - **Live progress** — blocking `avenor_spawn` calls stream progress updates via `onUpdate`
 - **Context enrichment** — active sub-agents are automatically surfaced in the system prompt via `before_agent_start`
 - **Custom rendering** — The Pi extension renders all Avenor tool calls and results as themed, bounded summaries. Results have collapsed and expanded views.
@@ -154,6 +159,56 @@ Beyond the tools, the extension integrates with Pi's TUI and event system:
   - `/avenor-errors` — show and clear recent polling errors
   - `/avenor-watch <run_id>` — open a live event feed overlay
   - `/avenor-cancel <run_id>` — cancel a running sub-agent
+
+### Completion notices
+
+A fire-and-forget spawn (`wait: false`) promises one thing: you hear about the
+run when it ends. Each finished run produces one notice — label, terminal
+status, bounded output preview — and where it lands depends on your session at
+that moment.
+
+- **Idle.** The notice is sent as a user message and starts its own turn. It
+  counts as unread until Pi confirms the message landed, and while compaction is
+  running the send waits for it to finish. A send that is accepted but never
+  confirmed is sent at most three times; once that budget is spent the notice
+  stays unread for the next settlement and the failure is emitted on
+  `avenor:delivery:error`.
+- **Busy.** The notice is queued and the footer shows `unread:N`. The next
+  settlement that completes normally appends each queued notice as an
+  `avenor-completion` custom message under a single continuation, so three runs
+  finishing while you work mean three messages and one wake-up. A settlement
+  that ends in abort or error delivers nothing; the notices wait.
+
+Every terminal status queues a notice — `done`, `failed`, `timeout`, `killed`.
+
+`avenor_result` and a blocking `avenor_spawn` (`wait: true`) own delivery while
+they run; `avenor_result` takes the label you spawned with, so you need not keep
+the id. A `ready` result consumes the run: the queued notice is dropped,
+`unread:N` falls by one, and nothing arrives for it later. A result that is not
+`ready` — interrupted by a sibling's stopping point, timed out, or reporting a
+pending permission — consumes nothing, and its notice arrives on the normal
+schedule. A blocking spawn that reaches completion returns the result inline and
+removes the notice; the footer can show a transient `unread:N` for that run while
+the wait is in flight.
+
+#### Footer status
+
+One string under the status key `avenor`, in this order:
+
+| Token | Meaning |
+|---|---|
+| `🟢 label — running [phase] 🔒 +2` | one per non-terminal run: status emoji, label, status, phase label, `🔒` for a pending permission, `+N` for that run's active descendants |
+| `total:N` | direct active runs plus discovered active descendants; present only when active descendants exist |
+| `unread:N` | notices not yet delivered: queued for a settlement, or in flight for an idle session |
+| `errors:N` | recent poll failures; cleared by a cycle that adds no new error |
+
+Missing `unread:N` or `errors:N` means zero. Without `total:N`, count the active run lines. `unread:N` counts notices,
+not runs, and can stay set after the last run exits — an otherwise idle session
+can still advertise `unread:1` until you consume or receive that notice.
+`total:N` tracks live runs and disappears with them. `errors:N` outlives them
+too: it clears when a later poll cycle adds no new error, so it counts recent
+failures rather than a consecutive streak. The bounded history behind
+`/avenor-errors` is longer than `errors:N`; running that command clears both.
 
 ### Tool-result channels
 

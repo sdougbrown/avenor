@@ -8,14 +8,46 @@ export interface TrackedRun {
   runtimeId?: string
   startTime: number
   lastStatus?: StatusResult
-  /** true if spawned with wait=true (blocking mode handles permissions via onUpdate) */
+  /** true when delivery is owned by an in-flight spawn wait (wait=true) or
+   * avenor_result call. A spawn-time blocking wait handles permissions via
+   * onUpdate; a result wait suppresses the automatic completion notice while
+   * it may still deliver the output itself. Clearing it hands delivery back
+   * to the polling tick. */
   blocking?: boolean
+  /** Active descendants seen by the last poll, carried into terminal telemetry. */
+  nestedCount?: number
+  /** Idle-send lifecycle for the current notice. Present only while a notice
+   * is awaiting or awaiting confirmation of a model-facing send; one reset
+   * clears the whole lifecycle, so no hand-back can forget a field. */
+  idleSend?: IdleSendState
   /** true if we've injected a permission notification via sendUserMessage */
   permissionNotified?: boolean
-  /** true once avenor_result has successfully returned this run's final result to
-   * the caller. Set only on a successful (non-interrupted) result; suppresses the
-   * automatic completion notification without deleting the run. */
-  consumed?: boolean
+  /** true once CHANNEL_RUN_TERMINAL has been emitted for this run. */
+  terminalEventEmitted?: boolean
+  /** One terminal completion waiting for a safe model-facing delivery. Run
+   * identity lives on this tracked run. */
+  pendingNotice?: CompletionNotice
+}
+
+/** One terminal completion waiting for a safe model-facing delivery. */
+export interface CompletionNotice {
+  status: TerminalStatus
+  text: string
+}
+
+/** The idle-send lifecycle of one pending notice. */
+export interface IdleSendState {
+  /** A send is in flight and unconfirmed; terminal processing for the run is
+   * skipped until the send resolves. */
+  inFlight: boolean
+  /** When the in-flight send started, used to re-arm a send that was accepted
+   * by the void API but never confirmed through message_end. */
+  sentAt?: number
+  /** Sends attempted for the current notice; bounds the re-arm loop. */
+  attempts: number
+  /** true once the retry budget is spent. Stops re-sends even while a sibling
+   * run keeps the poll loop ticking. */
+  capped: boolean
 }
 
 /**
@@ -93,32 +125,4 @@ export function formatRunLine(entry: RunStatusEntry): string {
   const perm = entry.pendingPermission ? ` — blocked: ${entry.permissionDescription ?? 'permission'}` : ''
   const phase = entry.phaseLabel ? ` (${entry.phaseLabel})` : ''
   return `${emoji} ${entry.label} (${entry.agent}) — ${entry.status}${phase}${perm}`
-}
-
-/**
- * CompletionAction represents the decision for a tracked run that has
- * reached terminal status during a polling tick.
- *
- * - `skip` — the result is spoken for: avenor_result is actively waiting
- *   (`blocking`) or has already returned the result successfully
- *   (`consumed`); do not notify.
- * - `send` — the caller has not obtained the result; deliver the completion
- *   steering message and remove the run from tracking.
- */
-export type CompletionAction = 'skip' | 'send'
-
-/**
- * decideCompletion determines whether to skip or send the completion
- * steering message for a tracked run that has reached terminal status.
- *
- * The message is delivered on the same terminal tick — never deferred to a
- * later cycle — so a run that is the last live one still gets its completion.
- * `blocking` suppresses it while avenor_result is awaiting (it will deliver
- * the result itself and set `consumed`), and `consumed` suppresses it once
- * avenor_result has already returned the result successfully.
- */
-export function decideCompletion(run: Pick<TrackedRun, 'blocking' | 'consumed'>): CompletionAction {
-  if (run.blocking) return 'skip'
-  if (run.consumed) return 'skip'
-  return 'send'
 }

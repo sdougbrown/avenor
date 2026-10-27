@@ -73,14 +73,16 @@ import {
   type WatchDeps,
   type WatchRunRef,
 } from './watch.js'
-import type { TrackedRun, RunStatusEntry } from './types.js'
-import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji, decideCompletion } from './types.js'
+import type { TrackedRun, RunStatusEntry, CompletionNotice } from './types.js'
+import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji } from './types.js'
 import { countNestedRuns } from './nested-count.js'
 import { resolveAgentProfile } from './agent-profile.js'
 import {
+  CHANNEL_DELIVERY_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
+  createDeliveryErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -113,6 +115,13 @@ function asStatusResult(raw: StatusResult | StatusListResult): StatusResult {
 }
 
 const POLL_INTERVAL_MS = 3_000
+// Pi's sendUserMessage returns void and swallows async rejections, so an
+// accepted prompt may never come back through message_end. Re-arm delivery
+// after this long instead of leaving the run skipped with its notice unread.
+const IDLE_SEND_TIMEOUT_MS = 10_000
+// An unconfirmable send is retried at most this many times before the notice is
+// left for settlement and the failure is recorded.
+const MAX_IDLE_SEND_ATTEMPTS = 3
 const INSPECT_LIMIT = 128
 const COMPLETION_OUTPUT_CHARS = 600
 const INSPECT_JSON_STRING_CHARS = 600
@@ -395,6 +404,9 @@ function trackedRunKey(supervisorId: string | undefined, runId: string): string 
 export interface ExtensionOptions {
   /** Polling cadence; injectable so tests can drive deterministic ticks. */
   pollIntervalMs?: number
+  /** How long an unconfirmed idle completion send waits before re-arming;
+   * injectable so tests can exercise the timeout without fixed sleeps. */
+  idleSendTimeoutMs?: number
   /** Overrides broker-credential autodetection for sub-agent broker mode (tests). */
   subAgentEnv?: SubAgentEnv | null
 }
@@ -402,6 +414,7 @@ export interface ExtensionOptions {
 export function createExtension(deps: ExtensionDeps = defaultDeps, options: ExtensionOptions = {}) {
   return async function (pi: ExtensionAPI) {
     const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS
+    const idleSendTimeoutMs = options.idleSendTimeoutMs ?? IDLE_SEND_TIMEOUT_MS
     let telemetryGeneration = 0
     const trackedRuns = new Map<string, TrackedRun>()
     let pollingActive = false
@@ -411,6 +424,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let pollingErrorCount = 0
     const pollingErrors: PollErrorPayload[] = []
     let lastStatusEntries: RunStatusEntry[] = []
+    let sessionGeneration = 0
+    // True from session_before_compact until session_compact, session_start,
+    // or the next before_agent_start — a cancelled compaction never fires
+    // session_compact, so the turn boundary clears the gate defensively. An
+    // idle completion sent during compaction can be rejected by the prompt
+    // path, so delivery waits and leaves the notice unread.
+    let compacting = false
     // Suppress last-turn writes after a closed-socket failure until the default
     // binding is evicted by disposeHostProvider/disposeHostProviders, or a new
     // session starts. Evicting other supervisors must not reset this flag.
@@ -519,18 +539,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     type InterruptedResult = ResultResult & { interrupted_by?: InterruptedBy }
 
     /** Build the early return for a wait interrupted by a sibling stopping
-     * point. When the awaited run itself has since reached a stopping point
-     * (possible when the caller omitted supervisor_id and the registry key
-     * diverged), deliver its real state instead of an interruption notice. */
+     * point. When the awaited run itself has since reached a stopping point,
+     * deliver its real state instead of an interruption notice. The probe and
+     * redelivery use the caller's original run reference, matching the non-
+     * interrupted path: a label may resolve canonically to a newer run than
+     * the one this call first bound to, and the reconciliation below handles
+     * that divergence the same way. A caller that omitted supervisor_id still
+     * probes through the bound run's supervisor. */
     async function resultAfterInterrupt(
       params: { run_id: string; supervisor_id?: string; wait?: boolean; timeout?: string; signal?: AbortSignal },
       stop: StoppingPoint,
       tracked: TrackedRun | undefined,
     ): Promise<InterruptedResult> {
-      // Resolve the run the way getTrackedRun did, so callers that passed a
-      // label or omitted supervisor_id still probe the right supervisor.
-      const runId = tracked?.runId ?? params.run_id
-      const supervisorId = tracked?.supervisorId ?? params.supervisor_id
+      const runId = params.run_id
+      const supervisorId = params.supervisor_id ?? tracked?.supervisorId
       let current: StatusResult | undefined
       try {
         const raw = await deps.statusTool({ runId, supervisorId, view: 'full' })
@@ -754,6 +776,49 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       emitAvenorEvent(pi.events, CHANNEL_POLL_ERROR, payload)
     }
 
+    /** A delivery that exhausted its retries is not a polling failure: emit
+     * it on its own channel so `avenor:poll:error` consumers keep a pure
+     * polling contract. The unread notice is the persistent user-facing
+     * surface; this event is the companion-extension signal. */
+    function recordDeliveryError(run: TrackedRun, attempts: number): void {
+      emitAvenorEvent(
+        pi.events,
+        CHANNEL_DELIVERY_ERROR,
+        createDeliveryErrorPayload({
+          source: 'idle-send',
+          runId: run.runId,
+          label: run.label,
+          message: 'idle completion send was never confirmed',
+          error: new Error(`no message_end after ${attempts} attempts`),
+          attempts,
+          timestamp: Date.now(),
+        }),
+      )
+      console.error(
+        `[avenor] idle completion send for run "${run.label}" was never confirmed after ${attempts} attempts; the notice stays unread`,
+      )
+    }
+
+    /** Latch the per-notice retry budget as spent and report the exhausted
+     * delivery. Idempotent, so the timeout re-arm and the compaction
+     * hand-back cannot double-report the same notice. */
+    function capIdleSend(run: TrackedRun): void {
+      if (!run.idleSend || run.idleSend.capped) return
+      run.idleSend.capped = true
+      recordDeliveryError(run, run.idleSend.attempts)
+    }
+
+    /** Hand an unconfirmed idle send back to the poll: clear the in-flight
+     * mark and latch the budget when it is spent. Shared by the poll-tick
+     * timeout and the compaction hand-back, which must stay in lockstep. */
+    function rearmIdleSend(run: TrackedRun): void {
+      const idle = run.idleSend
+      if (!idle) return
+      idle.inFlight = false
+      idle.sentAt = undefined
+      if (idle.attempts >= MAX_IDLE_SEND_ATTEMPTS) capIdleSend(run)
+    }
+
     function clearPollingErrors(): void {
       pollingErrorCount = 0
       pollingErrors.length = 0
@@ -763,41 +828,89 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function upsertTrackedRun(run: WatchRunRef, status?: StatusResult, blocking = false): void {
       const key = trackedRunKey(run.supervisorId, run.runId)
       const current = trackedRuns.get(key)
-      trackedRuns.set(key, {
+      // Mutate the existing entry in place: a fresh object would leave a result
+      // call that bound to the previous object unable to recognize (and
+      // release) its own claim when its wait resolves.
+      const tracked: TrackedRun = current ?? {
         runId: run.runId,
-        agent: run.agent ?? status?.agent ?? current?.agent ?? 'unknown',
-        label: run.label ?? status?.label ?? current?.label ?? run.runId,
-        supervisorId: run.supervisorId ?? current?.supervisorId,
-        runtimeId: run.runtimeId ?? status?.runtime_id ?? current?.runtimeId,
-        startTime: current?.startTime ?? Date.now(),
-        lastStatus: status ?? current?.lastStatus,
-        blocking: current?.blocking ?? blocking,
-        permissionNotified: current?.permissionNotified,
-        consumed: current?.consumed,
-      })
+        startTime: Date.now(),
+        agent: 'unknown',
+        label: run.label ?? run.runId,
+      }
+      tracked.runId = run.runId
+      tracked.agent = run.agent ?? status?.agent ?? current?.agent ?? tracked.agent
+      tracked.label = run.label ?? status?.label ?? current?.label ?? tracked.label
+      tracked.supervisorId = run.supervisorId ?? current?.supervisorId
+      tracked.runtimeId = run.runtimeId ?? status?.runtime_id ?? current?.runtimeId
+      if (!current) tracked.startTime = Date.now()
+      tracked.lastStatus = status ?? current?.lastStatus
+      tracked.blocking = current?.blocking ?? blocking
+      trackedRuns.set(key, tracked)
+    }
+
+    function findTrackedByLabel(label: string, supervisorId?: string): TrackedRun | undefined {
+      let match: TrackedRun | undefined
+      for (const run of trackedRuns.values()) {
+        if (supervisorId !== undefined && run.supervisorId !== supervisorId) continue
+        if (run.label !== label) continue
+        if (match) return undefined // ambiguous label
+        match = run
+      }
+      return match
     }
 
     /**
-     * Look a run up in the per-supervisor tracking namespace. When a
-     * supervisor is supplied, resolve exactly. Without one, prefer the
+     * Resolve a canonical run id in the per-supervisor tracking namespace.
+     * When a supervisor is supplied, resolve exactly. Without one, prefer the
      * singleton namespace and only fall back to a run id walk when it is
      * unambiguous across supervisors. Duplicate run ids across supervisors
      * without an explicit supervisor return undefined so callers never bind
      * flags or telemetry to the wrong supervisor's run.
      */
-    function getTrackedRun(runId: string, supervisorId?: string): TrackedRun | undefined {
+    function trackedRunsById(runId: string, supervisorId?: string): TrackedRun[] {
       if (supervisorId !== undefined) {
-        return trackedRuns.get(trackedRunKey(supervisorId, runId))
+        const exact = trackedRuns.get(trackedRunKey(supervisorId, runId))
+        return exact ? [exact] : []
       }
       const singleton = trackedRuns.get(trackedRunKey(undefined, runId))
-      if (singleton) return singleton
-      let match: TrackedRun | undefined
+      if (singleton) return [singleton]
+      const matches: TrackedRun[] = []
       for (const run of trackedRuns.values()) {
-        if (run.runId !== runId) continue
-        if (match) return undefined // ambiguous without a supervisor
-        match = run
+        if (run.runId === runId) matches.push(run)
       }
-      return match
+      return matches
+    }
+
+    function getTrackedRunById(runId: string, supervisorId?: string): TrackedRun | undefined {
+      const matches = trackedRunsById(runId, supervisorId)
+      return matches.length === 1 ? matches[0] : undefined
+    }
+
+    /**
+     * Resolve a user-supplied run reference. A canonical identity always wins;
+     * a label is only a fallback, and an ambiguous canonical id never falls
+     * through to a label.
+     */
+    function getTrackedRun(runId: string, supervisorId?: string): TrackedRun | undefined {
+      const exact = getTrackedRunById(runId, supervisorId)
+      if (exact) return exact
+      if (trackedRunsById(runId, supervisorId).length > 1) return undefined
+      return findTrackedByLabel(runId, supervisorId)
+    }
+
+    /** Resolve the tracked run a successful result belongs to from the
+     * canonical run id the result tool reports, accepting a runtime-id alias
+     * for the label-resolved run. */
+    function reconcileResultRun(
+      tracked: TrackedRun | undefined,
+      result: { run_id?: string },
+      supervisorId?: string,
+    ): TrackedRun | undefined {
+      const runId = result.run_id
+      if (!runId) return tracked
+      if (tracked && (tracked.runId === runId || tracked.runtimeId === runId)) return tracked
+      const namespace = tracked?.supervisorId ?? supervisorId
+      return trackedRuns.get(trackedRunKey(namespace, runId))
     }
 
     async function resolveFinalOutput(run: Pick<TrackedRun, 'runId' | 'supervisorId'>, status: StatusResult): Promise<string | undefined> {
@@ -813,6 +926,97 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       } catch {
         return undefined
       }
+    }
+
+    /**
+     * Fire-and-forget delivery. Pi's extension-facing `sendUserMessage` returns
+     * void and the runtime swallows async rejections, so a send is only known to
+     * have landed when the user message comes back through `message_end`. Only a
+     * synchronous throw is observable here.
+     */
+    function sendUserMessageLogged(text: string, failureLog: string): void {
+      try {
+        pi.sendUserMessage(text, { deliverAs: 'followUp' })
+      } catch (err) {
+        console.error(failureLog, err)
+      }
+    }
+
+    function clearPendingNotices(): void {
+      for (const run of trackedRuns.values()) {
+        run.pendingNotice = undefined
+        // An in-flight send belongs to the session that was just replaced; its
+        // confirmation can no longer match, so delivery is handed back to the
+        // poll with a fresh retry budget.
+        run.idleSend = undefined
+      }
+    }
+
+    /**
+     * Emit the single terminal event for a tracked run. Every terminal path
+     * (poll, blocking spawn, avenor_result) goes through here so the event-once
+     * guard and payload shape stay identical. A tracked run emits at most once;
+     * an untracked run emits with the canonical result identity, unguarded.
+     *
+     * @returns whether the event was emitted, so callers can gate one-time
+     *   side effects.
+     */
+    function emitRunTerminal(input: {
+      run: TrackedRun | undefined
+      /** Canonical result identity, used only when the run is untracked so a
+       * result delivered for another session's run still emits telemetry. */
+      runId?: string
+      supervisorId?: string
+      runtimeId?: string
+      label: string
+      agent: string
+      status: string
+      nestedCount?: number
+      backend?: string
+    }): boolean {
+      const { run } = input
+      if (!run) {
+        // An untracked run has no once-guard to honor: the run was never
+        // tracked here (or was already consumed), so every successful result
+        // delivery emits its own terminal event with the caller's identity.
+        if (!input.runId) return false
+        emitAvenorEvent(
+          pi.events,
+          CHANNEL_RUN_TERMINAL,
+          createRunTerminalPayload({
+            runId: input.runId,
+            supervisorId: input.supervisorId,
+            runtimeId: input.runtimeId,
+            label: input.label,
+            agent: input.agent,
+            status: input.status,
+            nestedCount: input.nestedCount,
+            backend: input.backend,
+          }),
+        )
+        return true
+      }
+      if (run.terminalEventEmitted) return false
+      run.terminalEventEmitted = true
+      emitAvenorEvent(
+        pi.events,
+        CHANNEL_RUN_TERMINAL,
+        createRunTerminalPayload({
+          runId: run.runId,
+          supervisorId: run.supervisorId,
+          runtimeId: input.runtimeId,
+          label: input.label,
+          agent: input.agent,
+          status: input.status,
+          nestedCount: input.nestedCount,
+          backend: input.backend,
+        }),
+      )
+      return true
+    }
+
+    function sendCompletionNotice(notice: CompletionNotice): void {
+      sendUserMessageLogged(notice.text, 'avenor tick: sendUserMessage failed')
     }
 
     async function pollRuns(): Promise<RunStatusEntry[]> {
@@ -931,6 +1135,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         for (const entry of entries) {
           if (entry.backend === 'pi' && entry.pid && !isTerminalStatus(entry.status)) {
             entry.nestedCount = nestedCounts[idx++] ?? 0
+            const tracked = trackedRuns.get(trackedRunKey(entry.supervisorId, entry.runId))
+            if (tracked) tracked.nestedCount = entry.nestedCount
           }
         }
       }
@@ -950,7 +1156,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       if (!sessionCtx) return
 
       const lines = renderStatusLines(entries)
+      let unread = 0
+      for (const run of trackedRuns.values()) {
+        if (run.pendingNotice) unread++
+      }
       const errorSuffix = pollingErrorCount > 0 ? `errors:${pollingErrorCount}` : ''
+      const unreadSuffix = unread > 0 ? `unread:${unread}` : ''
       if (lines.length > 0) {
         sessionCtx.ui.setWidget('avenor-status', lines)
         const statusStr = lines.map(line => line.slice(0, 60)).join('  ')
@@ -962,12 +1173,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const total = lines.length + nestedTotal
         const statusWithTotal = [
           nestedTotal > 0 ? `${statusStr}  total:${total}` : statusStr,
+          unreadSuffix,
           errorSuffix,
         ].filter(Boolean).join('  ')
         sessionCtx.ui.setStatus('avenor', statusWithTotal)
       } else {
         sessionCtx.ui.setWidget('avenor-status', undefined)
-        sessionCtx.ui.setStatus('avenor', errorSuffix)
+        sessionCtx.ui.setStatus('avenor', [unreadSuffix, errorSuffix].filter(Boolean).join('  '))
       }
     }
 
@@ -992,6 +1204,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (!pollingActive || generation !== pollingGeneration) return
 
         updateWidget(entries)
+        let widgetDirty = false
+        const sessionAtPollStart = sessionGeneration
 
         // Publish a copied, frozen payload so subscribers cannot mutate status entries.
         emitAvenorEvent(
@@ -1016,6 +1230,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // stopping point (e.g. an unanswered permission) from re-interrupting
           // re-issued waits on every poll cycle.
           const prevStatus = prevStatuses.get(entryKey)
+          // An accepted-but-unconfirmed send has no confirmation callback. If the
+          // prompt never comes back through message_end, re-arm delivery rather
+          // than skipping the run forever with its notice unread.
+          const idle = run.idleSend
+          if (idle?.inFlight && idle.sentAt !== undefined && Date.now() - idle.sentAt >= idleSendTimeoutMs) {
+            rearmIdleSend(run)
+            widgetDirty = true
+          }
+          // An idle send is already in flight for this run: the send's own
+          // resolution owns deletion or re-queueing.
+          if (run.idleSend?.inFlight && isTerminalStatus(entry.status)) continue
           const wasTerminal = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
           const wasStopped = wasTerminal || !!prevStatus?.pendingPermission
           if ((entry.pendingPermission || isTerminalStatus(entry.status)) && !wasStopped) {
@@ -1030,50 +1255,66 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
 
           if (isTerminalStatus(entry.status)) {
-            const action = decideCompletion(run)
-            if (action === 'skip') {
-              // Result is spoken for: either avenor_result is actively waiting
-              // (blocking — it will deliver the result and set consumed when it
-              // returns) or it already returned successfully (consumed). In the
-              // consumed case the automatic message is suppressed but the run
-              // is no longer needed, so clean it up here.
-              if (run.consumed) trackedRuns.delete(entryKey)
+            // Reuse a notice that is already built so a terminal run held
+            // unread is not re-inspected on every poll. Revalidate the tracked
+            // identity after any await before committing it.
+            const finalOutput = run.pendingNotice ? undefined : await resolveFinalOutput(run, run.lastStatus)
+            if (sessionAtPollStart !== sessionGeneration) continue
+            if (trackedRuns.get(entryKey) !== run) continue
+            const wasTerminalBefore = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
+            if (emitRunTerminal({
+              run,
+              runtimeId: entry.runtimeId,
+              label: entry.label,
+              agent: entry.agent,
+              status: entry.status,
+              nestedCount: entry.nestedCount ?? run.nestedCount,
+              backend: entry.backend,
+            })) {
+              if (!wasTerminalBefore && !run.blocking) {
+                sessionCtx?.ui.notify(
+                  `Sub-agent "${entry.label}" finished: ${entry.status}`,
+                  entry.status === 'done' ? 'info' : 'warning',
+                )
+              }
+            }
+
+            const notice: CompletionNotice = run.pendingNotice ?? {
+              status: entry.status as CompletionNotice['status'],
+              text: buildCompletionText({ runId: run.runId, label: run.label }, run.lastStatus!, finalOutput),
+            }
+
+            // A blocking result call owns delivery while it is in flight. Keep
+            // the notice unread so a non-ready/aborted call leaves it intact;
+            // a successful result removes it.
+            if (run.blocking) {
+              if (!run.pendingNotice) {
+                run.pendingNotice = notice
+                widgetDirty = true
+              }
               continue
             }
-            const wasTerminalBefore = prevStatus?.status !== undefined && isTerminalStatus(prevStatus.status)
-            if (!wasTerminalBefore) {
-              sessionCtx?.ui.notify(
-                `Sub-agent "${entry.label}" finished: ${entry.status}`,
-                entry.status === 'done' ? 'info' : 'warning',
-              )
+
+            // Idle delivery is unconfirmed until the user message comes back
+            // through message_end. Keep the notice and the run tracked so a
+            // dropped prompt stays unread instead of being lost; the in-flight
+            // flag keeps polling from sending it twice. Compaction can reject a
+            // prompt, so wait for it to finish and leave the notice unread.
+            if (sessionCtx?.isIdle() === true && !compacting && !run.idleSend?.capped) {
+              run.pendingNotice = notice
+              run.idleSend = {
+                inFlight: true,
+                sentAt: Date.now(),
+                attempts: (run.idleSend?.attempts ?? 0) + 1,
+                capped: false,
+              }
+              widgetDirty = true
+              sendCompletionNotice(notice)
+              continue
+            } else if (!run.pendingNotice) {
+              run.pendingNotice = notice
+              widgetDirty = true
             }
-            // Deliver the completion on this same terminal tick rather than
-            // deferring to a later cycle, so a run that is the last active one
-            // is never left dangling when polling stops.
-            const finalOutput = await resolveFinalOutput(run, run.lastStatus)
-            try {
-              pi.sendUserMessage(
-                buildCompletionText({ runId: run.runId, label: run.label }, run.lastStatus!, finalOutput),
-                { deliverAs: 'followUp' },
-              )
-            } catch (err) {
-              console.error('avenor tick: sendUserMessage failed', err)
-            }
-            emitAvenorEvent(
-              pi.events,
-              CHANNEL_RUN_TERMINAL,
-              createRunTerminalPayload({
-                runId: entry.runId,
-                supervisorId: entry.supervisorId,
-                runtimeId: entry.runtimeId,
-                label: entry.label,
-                agent: entry.agent,
-                status: entry.status,
-                nestedCount: entry.nestedCount,
-                backend: entry.backend,
-              }),
-            )
-            trackedRuns.delete(entryKey)
           } else if (
             entry.pendingPermission &&
             !run.blocking &&
@@ -1081,21 +1322,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           ) {
             run.permissionNotified = true
             if (run.lastStatus) {
-              try {
-                pi.sendUserMessage(
-                  buildWaitingText({ runId: run.runId, label: run.label, agent: run.agent }, run.lastStatus),
-                  { deliverAs: 'followUp' },
-                )
-              } catch (err) {
-                console.error('avenor tick: sendUserMessage for permission failed', err)
-              }
+              sendUserMessageLogged(
+                buildWaitingText({ runId: run.runId, label: run.label, agent: run.agent }, run.lastStatus),
+                'avenor tick: sendUserMessage for permission failed',
+              )
             }
           } else if (!entry.pendingPermission && run.permissionNotified) {
             run.permissionNotified = false
           }
         }
+        if (widgetDirty) updateWidget(entries)
 
+        // A lone terminal run with an unconfirmed send must keep polling so the
+        // timeout above can re-arm its delivery.
         const hasActive = entries.some(entry => !isTerminalStatus(entry.status))
+          || Array.from(trackedRuns.values()).some(run => run.idleSend?.inFlight)
         if (hasActive && pollingActive && generation === pollingGeneration) {
           setTimeout(() => {
             void tick().catch(err => {
@@ -1480,6 +1721,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
     pi.on('session_start', async (_event, ctx) => {
       sessionCtx = ctx
+      sessionGeneration++
+      compacting = false
+      clearPendingNotices()
+      // The replaced session may have stopped polling with terminal runs still
+      // tracked; their cleared notices are rebuilt by a poll tick, so restart
+      // polling the same way resumeAfterCompaction does.
+      if (trackedRuns.size > 0) startPolling()
       lastStatusEntries = []
       lastTurnSocketClosed = false
       pollingErrorCount = 0
@@ -1497,6 +1745,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       disposeHostProviders()
       hostPendingAsks.clear()
       subAgentPendingAsks.clear()
+      sessionGeneration++
+      clearPendingNotices()
       await stopPolling()
       // Release any still-blocking waiters so their tool calls return instead
       // of parking on a session that no longer exists.
@@ -1507,10 +1757,70 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       sessionCtx = null
     })
 
+    // Delivery confirmation for idle completions. A send is only proven to
+    // have landed when the user message comes back here, so the matching
+    // notice and its tracked run are cleared now rather than optimistically at
+    // send time. The match is on the notice text alone: a re-arm or compaction
+    // may have cleared the in-flight flag while this prompt was still queued.
+    // Run ids are only unique per
+    // supervisor, so identical notice text can name runs in two namespaces;
+    // candidates already sending win, then any run this notice has actually
+    // been sent for, and a run whose notice was never sent is never deleted —
+    // one landed prompt cannot confirm a sibling's unsent notice. A run whose
+    // result was delivered while the send was in flight is already gone, and
+    // nothing matches on its behalf.
+    pi.on('message_end', event => {
+      if (event.message?.role !== 'user') return
+      const text = extractTurnText([event.message]).text
+      if (text === '') return
+      const matches = [...trackedRuns].filter(([, run]) => run.pendingNotice?.text === text)
+      let targets = matches.filter(([, run]) => run.idleSend?.inFlight)
+      if (targets.length === 0) targets = matches.filter(([, run]) => run.idleSend !== undefined)
+      for (const [key, run] of targets) {
+        run.pendingNotice = undefined
+        run.idleSend = undefined
+        trackedRuns.delete(key)
+      }
+      if (targets.length > 0) updateWidget(lastStatusEntries)
+    })
+
+    pi.on('session_before_compact', () => {
+      compacting = true
+    })
+
+    // Compaction rejects prompts in flight, so idle delivery is deferred while
+    // it runs. Once it finishes, resume polling to deliver whatever notices are
+    // still unread.
+    const resumeAfterCompaction = () => {
+      compacting = false
+      // Compaction rejected any prompt that was in flight: no confirmation can
+      // arrive, so hand delivery back to the poll. The retry budget is
+      // per-notice and survives compaction, so a run whose budget is spent
+      // waits for settlement instead of resuming sends.
+      for (const run of trackedRuns.values()) {
+        // A permission notice sent into the compaction window was rejected with
+        // the prompt; re-arm it so the run's ask is delivered again.
+        if (run.permissionNotified && run.lastStatus?.pending_permission) run.permissionNotified = false
+        if (!run.idleSend) continue
+        rearmIdleSend(run)
+      }
+      // A re-armed permission notice needs a poll tick even when no completion
+      // notice is pending.
+      const hasUndelivered = Array.from(trackedRuns.values()).some(run =>
+        run.pendingNotice
+        || (!run.permissionNotified && !!run.lastStatus?.pending_permission))
+      if (hasUndelivered) startPolling()
+    }
+    pi.on('session_compact', resumeAfterCompaction)
+
     pi.on('before_agent_start', async (_event, ctx) => {
       // A session renamed between turns is picked up here, before the turn whose
       // messages will carry the old name any further.
       void publishSessionName(ctx)
+      // Compaction runs between turns and can be cancelled by another handler,
+      // in which case session_compact never fires; the turn boundary proves
+      // no compaction is in flight, so clear the delivery gate defensively.
+      compacting = false
       if (trackedRuns.size === 0) return
 
       const entries = await pollRuns()
@@ -1529,6 +1839,47 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           content: `Active sub-agents:\n${lines.join('\n')}`,
           display: true,
         },
+      }
+    })
+
+    pi.on('agent_before_settle', async event => {
+      // Escape/abort and errors must not force a continuation. Notices stay
+      // unread for a later safe settlement.
+      if (event.outcome !== 'completed') return
+
+      const deliverable: Array<{ run: TrackedRun; notice: CompletionNotice }> = []
+      for (const run of trackedRuns.values()) {
+        if (!run.pendingNotice) continue
+        // An idle send is already delivering this notice; settlement must not
+        // deliver the same completion a second time.
+        if (run.idleSend?.inFlight) continue
+        deliverable.push({ run, notice: run.pendingNotice })
+      }
+      if (deliverable.length === 0) {
+        return
+      }
+
+      for (const { run } of deliverable) {
+        run.pendingNotice = undefined
+        trackedRuns.delete(trackedRunKey(run.supervisorId, run.runId))
+      }
+      updateWidget(lastStatusEntries)
+      return {
+        entries: [
+          ...event.entries,
+          ...deliverable.map(({ run, notice }) => ({
+            type: 'custom_message' as const,
+            customType: 'avenor-completion',
+            content: notice.text,
+            display: true,
+            details: {
+              run_id: run.runId,
+              supervisor_id: run.supervisorId,
+              status: notice.status,
+            },
+          })),
+        ],
+        continue: true,
       }
     })
 
@@ -1683,7 +2034,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             } else {
               // Hand control back to the agent and let the polling tick
               // deliver this run's completion, exactly like a wait=false spawn.
-              const tracked = getTrackedRun(result.run_id, supervisorId)
+              const tracked = getTrackedRunById(result.run_id, supervisorId)
               if (tracked) tracked.blocking = false
               return {
                 content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted: "${stop.label ?? stop.runId}" ${describeStoppingPoint(stop)}. Handle that first; this run's final result is delivered automatically.` }],
@@ -1695,7 +2046,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               }
             }
           } else {
-            trackedRuns.delete(trackedRunKey(supervisorId, result.run_id))
+            const runKey = trackedRunKey(supervisorId, result.run_id)
+            trackedRuns.delete(runKey)
             return {
               content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
               details: {
@@ -1718,11 +2070,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
         }
 
-        upsertTrackedRun(runRef, status, wait)
+        // A concurrent avenor_result may have consumed and deleted this run
+        // while the wait was in flight. Do not resurrect a consumed run: the
+        // fresh entry would lose the terminal-event once-guard and emit a
+        // second terminal event for the same run.
+        if (trackedRuns.has(trackedRunKey(supervisorId, result.run_id))) {
+          upsertTrackedRun(runRef, status, wait)
+        }
 
         if (status.status === 'waiting') {
-          const tracked = getTrackedRun(result.run_id, supervisorId)
-          if (tracked) tracked.permissionNotified = true
+          const tracked = getTrackedRunById(result.run_id, supervisorId)
+          if (tracked) {
+            tracked.permissionNotified = true
+            tracked.blocking = false
+          }
           return {
             content: [{ type: 'text', text: buildWaitingText({ runId: result.run_id, label, agent: params.agent }, status) }],
             details: {
@@ -1737,20 +2098,19 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
         if (isTerminalStatus(status.status)) {
           const finalOutput = await resolveFinalOutput({ runId: result.run_id, supervisorId }, status)
-          emitAvenorEvent(
-            pi.events,
-            CHANNEL_RUN_TERMINAL,
-            createRunTerminalPayload({
-              runId: result.run_id,
-              supervisorId,
-              runtimeId: status.runtime_id ?? runRef.runtimeId,
-              label,
-              agent: params.agent,
-              status: status.status,
-              backend: status.backend,
-            }),
-          )
-          trackedRuns.delete(trackedRunKey(supervisorId, result.run_id))
+          const runKey = trackedRunKey(supervisorId, result.run_id)
+          const tracked = trackedRuns.get(runKey)
+          emitRunTerminal({
+            run: tracked,
+            runtimeId: status.runtime_id ?? runRef.runtimeId,
+            label,
+            agent: params.agent,
+            status: status.status,
+            nestedCount: tracked?.nestedCount,
+            backend: status.backend,
+          })
+          trackedRuns.delete(runKey)
+          updateWidget(lastStatusEntries)
           return {
             content: [{ type: 'text', text: buildCompletionText({ runId: result.run_id, label }, status, finalOutput) }],
             details: {
@@ -1763,6 +2123,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
         }
 
+        const fallthrough = getTrackedRunById(result.run_id, supervisorId)
+        if (fallthrough) fallthrough.blocking = false
         return {
           content: [{ type: 'text', text: `${label} is ${status.status}. Use avenor_status or avenor_inspect to check progress.` }],
           details: {
@@ -1847,6 +2209,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const previousBlocking = tracked?.blocking
         if (tracked) tracked.blocking = true
         let completed = false
+        let resultRun = tracked
 
         // Key on the resolved run (getTrackedRun may have matched by label or
         // filled in a supervisor) so the waiter's own stopping point is
@@ -1874,28 +2237,57 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             result = await resultAfterInterrupt(params, blockingWait.stopped, tracked)
           }
           completed = result.ready
+          // The result tool resolves labels and reports the canonical run id.
+          // Reconcile against that id even when the caller only passed a label.
+          resultRun = reconcileResultRun(tracked, result, params.supervisor_id)
           if (completed) {
-            // Only mark the run consumed (and suppress the automatic completion)
-            // when the result was actually delivered. If this call was
-            // interrupted — aborted by signal, timed out, or still waiting —
-            // the caller did not receive the output, so leave `consumed` unset
-            // and let the polling tick deliver the completion later.
-            if (tracked) tracked.consumed = true
-            emitAvenorEvent(
-              pi.events,
-              CHANNEL_RUN_TERMINAL,
-              createRunTerminalPayload({
-                runId: params.run_id,
-                supervisorId: tracked?.supervisorId ?? params.supervisor_id,
-                runtimeId: tracked?.runtimeId ?? result.runtime_id,
-                label: tracked?.label ?? result.label ?? params.run_id,
-                agent: tracked?.agent ?? 'unknown',
-                status: result.status ?? 'done',
-              }),
-            )
-            if (tracked) trackedRuns.delete(trackedRunKey(tracked.supervisorId, tracked.runId))
-          } else if (tracked && result.status === 'waiting') {
-            tracked.permissionNotified = true
+            // Every successful delivery emits the terminal event: a tracked run
+            // is guarded by its once-flag, an untracked run (another session's,
+            // or already consumed) emits with the caller's identity so the
+            // channel never loses a completion. An ambiguous reference — a
+            // label or id that matches several supervisors — binds to nothing
+            // and invents no singleton terminal. Ambiguity mirrors getTrackedRun:
+            // several canonical id matches, or no id match with several labels.
+            const idMatches = trackedRunsById(params.run_id, params.supervisor_id).length
+            const labelMatches = [...trackedRuns.values()].filter(run =>
+              (params.supervisor_id === undefined || run.supervisorId === params.supervisor_id)
+              && run.label === params.run_id).length
+            const ambiguous = idMatches > 1 || (idMatches === 0 && labelMatches > 1)
+            emitRunTerminal({
+              run: resultRun,
+              runId: ambiguous ? undefined : (result.run_id ?? params.run_id),
+              supervisorId: params.supervisor_id,
+              runtimeId: resultRun?.runtimeId ?? result.runtime_id,
+              label: resultRun?.label ?? result.label ?? params.run_id,
+              agent: resultRun?.agent ?? 'unknown',
+              status: result.status ?? 'done',
+              nestedCount: resultRun?.nestedCount,
+              backend: resultRun?.lastStatus?.backend,
+            })
+            // Only drop the run (and suppress the automatic completion) when
+            // the result was actually delivered. If this call was interrupted
+            // — aborted by signal, timed out, or still waiting — the caller
+            // did not receive the output, so keep the run tracked and let the
+            // polling tick deliver the completion later.
+            if (resultRun) {
+              trackedRuns.delete(trackedRunKey(resultRun.supervisorId, resultRun.runId))
+              updateWidget(lastStatusEntries)
+              // A label may resolve to one tracked run while the canonical result
+              // reconciles to another. Release the label-resolved run so its own
+              // completion is still delivered by polling.
+              if (tracked && resultRun !== tracked) {
+                const trackedKey = trackedRunKey(tracked.supervisorId, tracked.runId)
+                if (trackedRuns.get(trackedKey) === tracked) {
+                  tracked.blocking = previousBlocking ?? false
+                }
+              }
+            } else if (tracked && trackedRuns.get(trackedRunKey(tracked.supervisorId, tracked.runId)) === tracked) {
+              // The result could not be bound to a tracked run unambiguously;
+              // release the blocking flag so polling may deliver it later.
+              tracked.blocking = previousBlocking ?? false
+            }
+          } else if (resultRun && result.status === 'waiting') {
+            resultRun.permissionNotified = true
           }
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
@@ -1903,7 +2295,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
         } finally {
           blockingWait?.dispose()
-          if (!completed && tracked && getTrackedRun(params.run_id, params.supervisor_id) === tracked) {
+          // An incomplete call releases only the run it claimed at entry: the
+          // reconciled run may be owned by another in-flight result call, and
+          // its claim must survive this call's exit.
+          if (!completed && tracked && trackedRuns.get(trackedRunKey(tracked.supervisorId, tracked.runId)) === tracked) {
             tracked.blocking = previousBlocking ?? false
           }
         }
@@ -2491,9 +2886,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 // Re-export event channels, adapters, and payload types for companion extensions.
 // These adapters use Pi's shared bus and do not create a second bus.
 export {
+  CHANNEL_DELIVERY_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
+  createDeliveryErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -2505,6 +2902,9 @@ export type {
   AvenorEventChannel,
   AvenorEventMap,
   AvenorRunStatus,
+  DeliveryErrorPayload,
+  DeliveryErrorPayloadInput,
+  DeliveryErrorSource,
   PollCompletedPayload,
   PollErrorPayload,
   PollErrorPayloadInput,

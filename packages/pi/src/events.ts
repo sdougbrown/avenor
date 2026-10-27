@@ -23,7 +23,13 @@ export const CHANNEL_RUN_TERMINAL = 'avenor:run:terminal' as const
 /** Emitted when a best-effort polling operation fails. */
 export const CHANNEL_POLL_ERROR = 'avenor:poll:error' as const
 
+/** Emitted when a completion-notice delivery fails permanently. */
+export const CHANNEL_DELIVERY_ERROR = 'avenor:delivery:error' as const
+
 export type PollErrorSource = 'singleton-list' | 'run-status' | 'spawn-status'
+
+/** Delivery paths whose retries can be exhausted. */
+export type DeliveryErrorSource = 'idle-send'
 
 export interface PollErrorPayload {
   /** Polling operation that failed. */
@@ -46,6 +52,33 @@ export interface PollErrorPayloadInput {
   readonly message: string
   readonly error: unknown
   readonly count: number
+  readonly timestamp: number
+}
+
+export interface DeliveryErrorPayload {
+  /** Delivery path that failed. */
+  readonly source: DeliveryErrorSource
+  /** Run whose completion notice is stuck unread. */
+  readonly runId: string
+  /** Label of the run, as shown in completion notices. */
+  readonly label: string
+  /** Human-readable failure description. */
+  readonly message: string
+  /** Bounded, sanitized error text suitable for debug consumers. */
+  readonly error: string
+  /** Delivery attempts made for this notice. */
+  readonly attempts: number
+  /** Wall-clock timestamp in epoch milliseconds. */
+  readonly timestamp: number
+}
+
+export interface DeliveryErrorPayloadInput {
+  readonly source: DeliveryErrorSource
+  readonly runId: string
+  readonly label: string
+  readonly message: string
+  readonly error: unknown
+  readonly attempts: number
   readonly timestamp: number
 }
 
@@ -73,7 +106,7 @@ export interface RunTerminalPayload {
   readonly label: string
   readonly agent: string
   readonly status: string
-  /** Number of active descendants when the run was removed, if available. */
+  /** Number of active descendants last seen for the run, if available. */
   readonly nestedCount?: number
   readonly backend?: string
 }
@@ -94,6 +127,7 @@ export interface AvenorEventMap {
   [CHANNEL_POLL_COMPLETED]: PollCompletedPayload
   [CHANNEL_RUN_TERMINAL]: RunTerminalPayload
   [CHANNEL_POLL_ERROR]: PollErrorPayload
+  [CHANNEL_DELIVERY_ERROR]: DeliveryErrorPayload
 }
 
 export type AvenorEventChannel = keyof AvenorEventMap
@@ -178,6 +212,21 @@ export function createRunTerminalPayload(
     status: payload.status,
     ...(payload.nestedCount !== undefined && { nestedCount: payload.nestedCount }),
     ...(payload.backend !== undefined && { backend: payload.backend }),
+  })
+}
+
+/** Copy, bound, sanitize, and freeze a delivery failure before publishing it. */
+export function createDeliveryErrorPayload(
+  payload: DeliveryErrorPayloadInput,
+): DeliveryErrorPayload {
+  return Object.freeze({
+    source: payload.source,
+    runId: payload.runId,
+    label: payload.label,
+    message: sanitizeAndBoundText(payload.message),
+    error: sanitizeAndBoundText(payload.error),
+    attempts: payload.attempts,
+    timestamp: payload.timestamp,
   })
 }
 

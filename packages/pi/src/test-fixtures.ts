@@ -10,7 +10,7 @@ import type { SubAgentEnv } from './subagent-broker.js'
 /** Keep message delivery on Pi so context mocks cannot hide API misuse. */
 export async function startExtensionHarness(options: {
   deps?: Partial<ExtensionDeps>
-  extOptions?: { pollIntervalMs?: number; subAgentEnv?: SubAgentEnv | null }
+  extOptions?: { pollIntervalMs?: number; idleSendTimeoutMs?: number; subAgentEnv?: SubAgentEnv | null }
   ui?: Record<string, any>
   /** The harness's user-defined session name, as pi's session manager reports it. */
   sessionName?: () => string | undefined
@@ -85,6 +85,8 @@ export async function startExtensionHarness(options: {
     cwd: '/tmp',
     sessionManager: options.sessionManager ?? { getSessionName: options.sessionName ?? (() => undefined) },
     ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) },
+    // Pi 1.4 ExtensionContext always exposes idle state; idle delivery reads it.
+    isIdle: () => true,
   }
   await eventHandlers.session_start({}, ctx)
   return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, setStatus, setWidget }
