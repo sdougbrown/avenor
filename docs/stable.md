@@ -40,6 +40,14 @@ Flags:
 
 The supervisor does not exit until you signal it (SIGINT/SIGTERM), all child runtimes have finished and the idle timeout expires, or a fatal error occurs.
 
+### Broker availability
+
+If the default broker cannot bind, the supervisor logs `broker messaging
+disabled` and continues. The `pi` and `opencode-acp` backends can run without
+broker messaging. `claude-channel` requires the broker for its channel
+transport and rejects startup without a listener. An explicit `--broker-addr`
+bind failure stops the supervisor instead of entering this degraded mode.
+
 ### Tombstone File
 
 When the supervisor exits (cleanly or not), it writes a tombstone file at `<control-socket>.dead` with the format:
