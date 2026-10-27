@@ -264,20 +264,40 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 // the pane busy is not a failed launch. A cancelled ctx means the session is
 // already ending, so it reports nothing.
 func (s *Session) FailUnreadyLaunch(ctx context.Context) {
-	if s.everPrompted() {
-		return
-	}
 	// Capture first: once this run owns the verdict, nothing may block
 	// between claiming it and emitting it.
 	pane := s.paneText(ctx)
-	if ctx.Err() == nil && s.MarkFinished() {
-		s.emitLaunchFailure(StopReasonTerminalNotReady,
-			"claude never showed its input box, so avenor never submitted a prompt; the run never started",
-			map[string]any{"pane": pane})
+	if ctx.Err() == nil {
+		claimed, prompted := s.markFinishedUnlessPrompted()
+		if prompted {
+			return
+		}
+		if claimed {
+			s.emitLaunchFailure(StopReasonTerminalNotReady,
+				"claude never showed its input box, so avenor never submitted a prompt; the run never started",
+				map[string]any{"pane": pane})
+		}
 	}
 	if s.CancelFn != nil {
 		s.CancelFn()
 	}
+}
+
+// markFinishedUnlessPrompted is MarkFinished for a launch verdict. It claims
+// nothing once a prompt has landed and reports that in prompted. One critical
+// section covers both, so a concurrent Prompt cannot land between the check
+// and the claim.
+func (s *Session) markFinishedUnlessPrompted() (claimed, prompted bool) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if s.Prompted {
+		return false, true
+	}
+	if s.Finished {
+		return false, false
+	}
+	s.Finished = true
+	return true, false
 }
 
 // paneText is the bottom of the pane as one line of text for a diagnostic,

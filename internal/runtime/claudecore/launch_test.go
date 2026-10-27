@@ -2,6 +2,7 @@ package claudecore
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -374,6 +375,70 @@ func TestFailUnreadyLaunchLeavesAPromptedSessionRunning(t *testing.T) {
 	if s.Ctx.Err() != nil {
 		t.Error("session context cancelled for a session that already ran a turn")
 	}
+}
+
+func TestFailUnreadyLaunchYieldsToAPromptThatLandsMeanwhile(t *testing.T) {
+	// A concurrent Prompt can paste while FailUnreadyLaunch reads the pane.
+	// That turn started, so the launch did not fail.
+	s := newTestSession(t, approvalDialogPane)
+	s.Term = captureHookTerm{FakeSession: s.Term.(*terminal.FakeSession), onCapture: func() {
+		s.Mu.Lock()
+		s.Prompted = true
+		s.Mu.Unlock()
+	}}
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("emitted %q for a session whose first prompt landed", ev.Event)
+	default:
+	}
+	if s.Ctx.Err() != nil {
+		t.Error("session context cancelled for a session whose first prompt landed")
+	}
+}
+
+func TestFailUnreadyLaunchLeavesAClaimedVerdictAlone(t *testing.T) {
+	// The exit watcher or a force cancel already ended the session. A second
+	// session.end would contradict its stop reason.
+	s := newTestSession(t, approvalDialogPane)
+	s.MarkFinished()
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("emitted %q for a session that already has a verdict", ev.Event)
+	default:
+	}
+	if s.Ctx.Err() == nil {
+		t.Error("session context still live; runSession would keep the terminal running")
+	}
+}
+
+func TestFailUnreadyLaunchReportsAnEmptyPaneWhenCaptureFails(t *testing.T) {
+	s := newTestSession(t, approvalDialogPane)
+	s.Term.(*terminal.FakeSession).SetCapErr(errors.New("can't find session"))
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	drainEvent(t, s)
+	end := drainEvent(t, s)
+	if pane, ok := end.Fields["pane"].(string); !ok || pane != "" {
+		t.Errorf("pane = %#v, want an empty string", end.Fields["pane"])
+	}
+}
+
+// captureHookTerm runs onCapture before each capture.
+type captureHookTerm struct {
+	*terminal.FakeSession
+	onCapture func()
+}
+
+func (c captureHookTerm) Capture(ctx context.Context) (string, error) {
+	c.onCapture()
+	return c.FakeSession.Capture(ctx)
 }
 
 // assertNotAProviderLimit checks that a launch failure stays a launch failure
