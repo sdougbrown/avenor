@@ -539,18 +539,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     type InterruptedResult = ResultResult & { interrupted_by?: InterruptedBy }
 
     /** Build the early return for a wait interrupted by a sibling stopping
-     * point. When the awaited run itself has since reached a stopping point
-     * (possible when the caller omitted supervisor_id and the registry key
-     * diverged), deliver its real state instead of an interruption notice. */
+     * point. When the awaited run itself has since reached a stopping point,
+     * deliver its real state instead of an interruption notice. The probe and
+     * redelivery use the caller's original run reference, matching the non-
+     * interrupted path: a label may resolve canonically to a newer run than
+     * the one this call first bound to, and the reconciliation below handles
+     * that divergence the same way. A caller that omitted supervisor_id still
+     * probes through the bound run's supervisor. */
     async function resultAfterInterrupt(
       params: { run_id: string; supervisor_id?: string; wait?: boolean; timeout?: string; signal?: AbortSignal },
       stop: StoppingPoint,
       tracked: TrackedRun | undefined,
     ): Promise<InterruptedResult> {
-      // Resolve the run the way getTrackedRun did, so callers that passed a
-      // label or omitted supervisor_id still probe the right supervisor.
-      const runId = tracked?.runId ?? params.run_id
-      const supervisorId = tracked?.supervisorId ?? params.supervisor_id
+      const runId = params.run_id
+      const supervisorId = params.supervisor_id ?? tracked?.supervisorId
       let current: StatusResult | undefined
       try {
         const raw = await deps.statusTool({ runId, supervisorId, view: 'full' })
@@ -946,14 +948,18 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     /**
      * Emit the single terminal event for a tracked run. Every terminal path
      * (poll, blocking spawn, avenor_result) goes through here so the event-once
-     * guard and payload shape stay identical. A path with no tracked run emits
-     * nothing.
+     * guard and payload shape stay identical. A tracked run emits at most once;
+     * an untracked run emits with the caller-supplied identity, unguarded.
      *
      * @returns whether the event was emitted, so callers can gate one-time
      *   side effects.
      */
     function emitRunTerminal(input: {
       run: TrackedRun | undefined
+      /** Caller-supplied identity, used only when the run is untracked so a
+       * result delivered for another session's run still emits telemetry. */
+      runId?: string
+      supervisorId?: string
       runtimeId?: string
       label: string
       agent: string
@@ -962,7 +968,28 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       backend?: string
     }): boolean {
       const { run } = input
-      if (!run || run.terminalEventEmitted) return false
+      if (!run) {
+        // An untracked run has no once-guard to honor: the run was never
+        // tracked here (or was already consumed), so every successful result
+        // delivery emits its own terminal event with the caller's identity.
+        if (!input.runId) return false
+        emitAvenorEvent(
+          pi.events,
+          CHANNEL_RUN_TERMINAL,
+          createRunTerminalPayload({
+            runId: input.runId,
+            supervisorId: input.supervisorId,
+            runtimeId: input.runtimeId,
+            label: input.label,
+            agent: input.agent,
+            status: input.status,
+            nestedCount: input.nestedCount,
+            backend: input.backend,
+          }),
+        )
+        return true
+      }
+      if (run.terminalEventEmitted) return false
       run.terminalEventEmitted = true
       emitAvenorEvent(
         pi.events,
@@ -1234,7 +1261,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               label: entry.label,
               agent: entry.agent,
               status: entry.status,
-              nestedCount: entry.nestedCount,
+              nestedCount: entry.nestedCount ?? run.nestedCount,
               backend: entry.backend,
             })) {
               if (!wasTerminalBefore && !run.blocking) {
@@ -2207,21 +2234,35 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // Reconcile against that id even when the caller only passed a label.
           resultRun = reconcileResultRun(tracked, result, params.supervisor_id)
           if (completed) {
+            // Every successful delivery emits the terminal event: a tracked run
+            // is guarded by its once-flag, an untracked run (another session's,
+            // or already consumed) emits with the caller's identity so the
+            // channel never loses a completion. An ambiguous reference — a
+            // label or id that matches several supervisors — binds to nothing
+            // and invents no singleton terminal. Ambiguity mirrors getTrackedRun:
+            // several canonical id matches, or no id match with several labels.
+            const idMatches = trackedRunsById(params.run_id, params.supervisor_id).length
+            const labelMatches = [...trackedRuns.values()].filter(run =>
+              (params.supervisor_id === undefined || run.supervisorId === params.supervisor_id)
+              && run.label === params.run_id).length
+            const ambiguous = idMatches > 1 || (idMatches === 0 && labelMatches > 1)
+            emitRunTerminal({
+              run: resultRun,
+              runId: ambiguous ? undefined : (result.run_id ?? params.run_id),
+              supervisorId: params.supervisor_id,
+              runtimeId: resultRun?.runtimeId ?? result.runtime_id,
+              label: resultRun?.label ?? result.label ?? params.run_id,
+              agent: resultRun?.agent ?? 'unknown',
+              status: result.status ?? 'done',
+              nestedCount: resultRun?.nestedCount,
+              backend: resultRun?.lastStatus?.backend,
+            })
             // Only drop the run (and suppress the automatic completion) when
             // the result was actually delivered. If this call was interrupted
             // — aborted by signal, timed out, or still waiting — the caller
             // did not receive the output, so keep the run tracked and let the
             // polling tick deliver the completion later.
             if (resultRun) {
-              emitRunTerminal({
-                run: resultRun,
-                runtimeId: resultRun.runtimeId ?? result.runtime_id,
-                label: resultRun.label ?? result.label ?? params.run_id,
-                agent: resultRun.agent ?? 'unknown',
-                status: result.status ?? 'done',
-                nestedCount: resultRun.nestedCount,
-                backend: resultRun.lastStatus?.backend,
-              })
               trackedRuns.delete(trackedRunKey(resultRun.supervisorId, resultRun.runId))
               updateWidget(lastStatusEntries)
               // A label may resolve to one tracked run while the canonical result
@@ -2247,9 +2288,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
         } finally {
           blockingWait?.dispose()
-          const toReset = resultRun ?? tracked
-          if (!completed && toReset && trackedRuns.get(trackedRunKey(toReset.supervisorId, toReset.runId)) === toReset) {
-            toReset.blocking = previousBlocking ?? false
+          // An incomplete call releases only the run it claimed at entry: the
+          // reconciled run may be owned by another in-flight result call, and
+          // its claim must survive this call's exit.
+          if (!completed && tracked && trackedRuns.get(trackedRunKey(tracked.supervisorId, tracked.runId)) === tracked) {
+            tracked.blocking = previousBlocking ?? false
           }
         }
       },

@@ -3209,6 +3209,12 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
+    const sendMock = h.sendUserMessage as any
+    const inner = sendMock.mock.impl
+    sendMock.mock.impl = (text: string, opts?: any) => {
+      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
+      return inner(text, opts)
+    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3251,6 +3257,176 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('carries the last-known nestedCount into a poll-tick terminal event', async () => {
+    const SOCK = '/tmp/poll-terminal-nested.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'rc', label: 'solo', status: 'done', runtime_id: 'rt-c', backend: 'pi', final_output: 'solo answer' }
+          : { run_id: 'rc', label: 'solo', status: 'running', runtime_id: 'rt-c', backend: 'pi', pid: 424242 }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+    const dial = mock(async () => ({ list: async () => [{ status: 'running' }], close: () => {} }))
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      dial,
+      spawnTool: mock(async () => ({ run_id: 'rc', label: 'solo', supervisor_id: SOCK, runtime_id: 'rt-c' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'solo', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    // The running poll stores the nested count on the tracked run; the terminal
+    // poll cannot recompute it (the run has no live pid), so the carried value
+    // must reach the terminal payload.
+    await h.waitPollMatching(payload => payload.entries.some((e: { nestedCount?: number }) => e.nestedCount === 1))
+    done = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'solo' && e.status === 'done'))
+    await waitFor(() => h.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_RUN_TERMINAL && (payload as { runId?: string }).runId === 'rc'))
+    const payload = h.emitted
+      .filter(([channel]) => channel === CHANNEL_RUN_TERMINAL)
+      .map(([, value]) => value as Record<string, unknown>)
+      .find(value => value.runId === 'rc')
+    expect(payload).toMatchObject({ runId: 'rc', nestedCount: 1, backend: 'pi' })
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('emits a terminal event when a result is delivered for an untracked run', async () => {
+    const resultTool = mock(async () => ({ run_id: 'ghost', label: 'ghost', status: 'done', ready: true, output: 'ghost answer' }))
+    const h = await createMultiSupervisorHarness({
+      statusTool: mock(async () => ({ runs: [], count: 0 })),
+      resultTool,
+    })
+
+    await h.registeredTools.avenor_result.execute('t1', { run_id: 'ghost', wait: false }, undefined, undefined, h.ctx)
+    expect(h.emitted).toContainEqual([
+      CHANNEL_RUN_TERMINAL,
+      expect.objectContaining({ runId: 'ghost', label: 'ghost', status: 'done' }),
+    ])
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('re-probes the caller-supplied reference when a wait is interrupted', async () => {
+    const SOCK = '/tmp/interrupt-canonical.sock'
+    let alphaDone = false
+    let betaDone = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      // The caller's label 'alpha' now resolves canonically to the newer run rb.
+      if (args.runId === 'alpha') return { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
+      if (args.runId === 'ra') return { run_id: 'ra', label: 'alpha', status: alphaDone ? 'done' : 'running', runtime_id: 'rt-a' }
+      if (args.runId === 'rb') return { run_id: 'rb', label: 'beta', status: betaDone ? 'done' : 'running', runtime_id: 'rt-b' }
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+    const resultTool = mock(async (args: { runId?: string; signal?: AbortSignal }) => {
+      if (args.runId === 'alpha') {
+        // The original wait blocks until the interrupt aborts it.
+        return new Promise((_resolve, reject) => {
+          args.signal?.addEventListener('abort', () => reject(new Error('result wait interrupted')))
+        })
+      }
+      // The old redelivery target: the label-resolved run's own id.
+      if (args.runId === 'ra') return { run_id: 'ra', label: 'alpha', status: 'done', ready: true, output: 'alpha answer' }
+      throw new Error(`unexpected resultTool call for ${String(args.runId)}`)
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: makeTwoRunSpawnTool(SOCK),
+    })
+    const sendMock = h.sendUserMessage as any
+    const inner = sendMock.mock.impl
+    sendMock.mock.impl = (text: string, opts?: any) => {
+      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
+      return inner(text, opts)
+    }
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t3', { run_id: 'alpha', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    betaDone = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'beta' && e.status === 'done'))
+    const interrupted = await resultPromise
+
+    // The interruption reports the canonical resolution, not the label-resolved
+    // run's own terminal state — the caller re-issues for rb. The old code
+    // re-probed ra, redelivered alpha's result as ready, and consumed it.
+    expect(interrupted.details).toMatchObject({ run_id: 'rb', status: 'running', ready: false })
+    expect(resultTool.mock.calls.filter(call => call[0]?.runId === 'ra')).toHaveLength(0)
+
+    // The label-resolved run was released, not consumed: its completion still
+    // flows through the poll tick.
+    alphaDone = true
+    await waitFor(() => h.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_RUN_TERMINAL && (payload as { runId?: string }).runId === 'ra'))
+    await waitFor(() => h.sendUserMessage.mock.calls.some(([t]) => String(t).includes('Sub-agent "alpha" finished')))
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('does not release another call\'s blocking claim when the interrupt reconciles to it', async () => {
+    const SOCK = '/tmp/release-ownership.sock'
+    let betaDone = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      // The caller's label 'alpha' canonically resolves to rb, whose canonical
+      // view still shows it running.
+      if (args.runId === 'alpha') return { run_id: 'rb', label: 'beta', status: 'running', runtime_id: 'rt-b' }
+      if (args.runId === 'ra') return { run_id: 'ra', label: 'alpha', status: 'running', runtime_id: 'rt-a' }
+      if (args.runId === 'rb') return { run_id: 'rb', label: 'beta', status: betaDone ? 'done' : 'running', runtime_id: 'rt-b' }
+      return { run_id: args.runId, label: args.runId, status: 'running' }
+    })
+    const resultTool = mock(async (args: { runId?: string; signal?: AbortSignal }) => {
+      if (args.runId === 'rb') {
+        // The first call owns beta and holds until its caller aborts.
+        return new Promise(resolve => {
+          args.signal?.addEventListener('abort', () => resolve({ run_id: 'rb', label: 'beta', status: 'running', ready: false }))
+        })
+      }
+      if (args.runId === 'alpha') {
+        return new Promise((_resolve, reject) => {
+          args.signal?.addEventListener('abort', () => reject(new Error('result wait interrupted')))
+        })
+      }
+      throw new Error(`unexpected resultTool call for ${String(args.runId)}`)
+    })
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      spawnTool: makeTwoRunSpawnTool(SOCK),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const controller = new AbortController()
+    const call1 = h.registeredTools.avenor_result.execute('t3', { run_id: 'rb', supervisor_id: SOCK }, controller.signal, undefined, h.ctx)
+    const call2 = h.registeredTools.avenor_result.execute('t4', { run_id: 'alpha', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    betaDone = true
+    await h.waitPollMatching(payload => payload.entries.some((e: { label: string; status: string }) => e.label === 'beta' && e.status === 'done'))
+    const interrupted = await call2
+
+    // The interruption reconciles to rb and reports the canonical resolution.
+    expect(interrupted.details).toMatchObject({ run_id: 'rb', status: 'running', ready: false })
+
+    // Beta is still owned by the first call: its completion must not be
+    // delivered while that wait holds, across further poll ticks.
+    const pollsAtClaim = h.emitted.filter(([channel]) => channel === CHANNEL_POLL_COMPLETED).length
+    await waitFor(() => h.emitted.filter(([channel]) => channel === CHANNEL_POLL_COMPLETED).length >= pollsAtClaim + 3)
+    expect(h.sendUserMessage.mock.calls.filter(([t]) => String(t).includes('Sub-agent "beta" finished'))).toHaveLength(0)
+
+    // Releasing the first call hands beta's delivery back to the poll.
+    controller.abort()
+    await waitFor(() => h.sendUserMessage.mock.calls.some(([t]) => String(t).includes('Sub-agent "beta" finished')))
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('interrupts a blocking avenor_result when a sibling run completes', async () => {
     const SOCK = '/tmp/sibling-terminal.sock'
     let betaDone = false
@@ -3262,6 +3438,12 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
+    const sendMock = h.sendUserMessage as any
+    const inner = sendMock.mock.impl
+    sendMock.mock.impl = (text: string, opts?: any) => {
+      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
+      return inner(text, opts)
+    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3410,6 +3592,12 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
+    const sendMock = h.sendUserMessage as any
+    const inner = sendMock.mock.impl
+    sendMock.mock.impl = (text: string, opts?: any) => {
+      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
+      return inner(text, opts)
+    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3454,6 +3642,12 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
+    const sendMock = h.sendUserMessage as any
+    const inner = sendMock.mock.impl
+    sendMock.mock.impl = (text: string, opts?: any) => {
+      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
+      return inner(text, opts)
+    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
@@ -3502,6 +3696,12 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
+    const sendMock = h.sendUserMessage as any
+    const inner = sendMock.mock.impl
+    sendMock.mock.impl = (text: string, opts?: any) => {
+      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
+      return inner(text, opts)
+    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3574,6 +3774,12 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
+    const sendMock = h.sendUserMessage as any
+    const inner = sendMock.mock.impl
+    sendMock.mock.impl = (text: string, opts?: any) => {
+      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
+      return inner(text, opts)
+    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3613,6 +3819,12 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
+    const sendMock = h.sendUserMessage as any
+    const inner = sendMock.mock.impl
+    sendMock.mock.impl = (text: string, opts?: any) => {
+      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
+      return inner(text, opts)
+    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
@@ -3685,6 +3897,12 @@ describe('Avenor Pi extension', () => {
       resultTool,
       spawnTool: makeTwoRunSpawnTool(SOCK),
     })
+    const sendMock = h.sendUserMessage as any
+    const inner = sendMock.mock.impl
+    sendMock.mock.impl = (text: string, opts?: any) => {
+      console.error('DBG send:', String(text).slice(0, 70), '::', new Error().stack?.split('\n').filter(l => l.includes('index.ts:')).slice(0, 2).join(' | '))
+      return inner(text, opts)
+    }
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
     const controller = new AbortController()

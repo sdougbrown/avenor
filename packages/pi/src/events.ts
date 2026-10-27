@@ -106,7 +106,7 @@ export interface RunTerminalPayload {
   readonly label: string
   readonly agent: string
   readonly status: string
-  /** Number of active descendants when the run was removed, if available. */
+  /** Number of active descendants last seen for the run, if available. */
   readonly nestedCount?: number
   readonly backend?: string
 }
