@@ -98,7 +98,10 @@ the child's `claude` shows `AVENOR_BROKER_URL`, `AVENOR_RUN_ID=rt_1`,
    log line is `peer layer on (provisioned run rt_1, broker http://…)`, and
    `GET /sessions` (authenticated with the token from that environment) lists
    one record per label — `rt_1`/`child-a` — with no `claude-<hex>`
-   self-registration beside it.
+   self-registration beside it. The child writes nothing about its own
+   identity: no `/register`, and no `/session_name` either, so `child-a` stays
+   the record's own label and a later authorized rename through `/rename` is
+   what moves the name peers see.
 2. **Parent → child.** In the parent: `SendMessage({to: "avenor:child-a"})` →
    `{"success":true,… "Delivered by a plugin hook; nothing else was sent."}`,
    and the child's transcript gains the broker-framed peer row (sender = the
@@ -146,11 +149,21 @@ slow pass. The PR 1 run's captured evidence (transcripts, validation report,
 review grounding drives for turn axes and reload behavior) lives in the
 branch's `.cache/runs/evidence/` (uncommitted by repo policy).
 
+The identity drive covers the three identities a session can be handed: a
+provisioned run joins the record its launcher holds and issues no `/register`
+and no `/session_name` write (asserted by request path, with the launch label
+set as a supervisor spawn sets it), its label survives, and an authorized
+rename still moves it; a run id without a token self-registers and posts its
+name; a bare session mints its own run and names it.
+
 PR 2's live proof (2026-10-27, 2.1.311): `.cache/runs/pr2/evidence/proof.md`
 — the provisioned-child drive end to end, with `child-run-transcript.md`,
 `parent-session-transcript.md`, the `/sessions` listings, and the offline
 identity-selection preflight (`preflight.log`, `PREFLIGHT OK`). The same
-directory's `scripts/drive.sh` reruns it.
+directory's `scripts/drive.sh` reruns it; the identity preflight's committed
+successor is `test/preflight-identity.mjs`, and `evidence/review-fix.md`
+records its run on this head (`preflight-identity-review.log`), including the
+reverted-fix run that fails it.
 
 ## Known limits
 
