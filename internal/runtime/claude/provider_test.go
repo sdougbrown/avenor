@@ -927,10 +927,13 @@ func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *cla
 	t.Helper()
 	p := &Provider{sessions: make(map[string]*claudecore.Session)}
 	term.SetKind("pty")
-	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-unready", EventsBuf: 16})
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID:        "ses-unready",
+		EventsBuf:        16,
+		PaneReadyTimeout: 50 * time.Millisecond,
+	})
 	t.Cleanup(s.CancelFn)
 	s.Term = term
-	s.PaneReadyTimeout = 50 * time.Millisecond
 	p.sessions[s.SessionID] = s
 	return p, s
 }

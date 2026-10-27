@@ -496,7 +496,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	// Prompt() doesn't block; the channel push serves as a backup if Claude is
 	// already listening.
 	go func() {
-		if err := claudecore.WaitForPaneReady(s.Ctx, s.Term, s.PaneReadyTimeout); err != nil {
+		if err := s.WaitForPaneReady(s.Ctx); err != nil {
 			if errors.Is(err, claudecore.ErrPaneNotReady) {
 				s.FailUnreadyLaunch(s.Ctx)
 			}

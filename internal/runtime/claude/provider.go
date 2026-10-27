@@ -292,7 +292,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	}
 
 	go func() {
-		if err := claudecore.WaitForPaneReady(s.Ctx, s.Term, s.PaneReadyTimeout); err != nil {
+		if err := s.WaitForPaneReady(s.Ctx); err != nil {
 			s.Emit(events.Event{
 				Event:     "agent.prompt_failed",
 				SessionID: s.SessionID,

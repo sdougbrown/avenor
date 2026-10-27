@@ -30,9 +30,8 @@ type Session struct {
 	CancelFn  context.CancelFunc
 	StartedAt time.Time
 
-	// PaneReadyTimeout bounds how long a prompt waits for Claude's input box;
-	// zero means PromptInjectTimeout.
-	PaneReadyTimeout time.Duration
+	// paneReadyTimeout is SessionOptions.PaneReadyTimeout.
+	paneReadyTimeout time.Duration
 
 	Mu                  sync.Mutex
 	Prompted            bool
@@ -65,6 +64,10 @@ type SessionOptions struct {
 	Transcript *TranscriptReader
 	StderrLog  string
 	EventsBuf  int
+
+	// PaneReadyTimeout bounds how long a prompt waits for Claude's input box;
+	// zero means PromptInjectTimeout.
+	PaneReadyTimeout time.Duration
 }
 
 func NewSession(ctx context.Context, opts SessionOptions) *Session {
@@ -82,6 +85,8 @@ func NewSession(ctx context.Context, opts SessionOptions) *Session {
 		Ctx:        sessCtx,
 		CancelFn:   cancel,
 		StartedAt:  time.Now(),
+
+		paneReadyTimeout: opts.PaneReadyTimeout,
 	}
 }
 

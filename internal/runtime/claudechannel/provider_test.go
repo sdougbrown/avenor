@@ -547,13 +547,13 @@ func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *ses
 	}
 	p := &Provider{broker: b, sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
 	core := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
-		SessionID: "ses-unready",
-		RunID:     "run-unready",
-		EventsBuf: 16,
+		SessionID:        "ses-unready",
+		RunID:            "run-unready",
+		EventsBuf:        16,
+		PaneReadyTimeout: 50 * time.Millisecond,
 	})
 	t.Cleanup(core.CancelFn)
 	core.Term = term
-	core.PaneReadyTimeout = 50 * time.Millisecond
 	s := &session{Session: core}
 	p.sessions[s.SessionID] = s
 	return p, s

@@ -78,6 +78,12 @@ var (
 	ErrTerminalGone = errors.New("the terminal ended before claude's input box appeared")
 )
 
+// WaitForPaneReady waits for Claude's input box on the session's terminal,
+// bounded by SessionOptions.PaneReadyTimeout.
+func (s *Session) WaitForPaneReady(ctx context.Context) error {
+	return WaitForPaneReady(ctx, s.Term, s.paneReadyTimeout)
+}
+
 // WaitForPaneReady blocks until Claude's input box is taking input, and
 // returns nil then. It auto-dismisses the trust-safety dialog if present.
 // timeout bounds the wait; zero or less means PromptInjectTimeout. Any error
