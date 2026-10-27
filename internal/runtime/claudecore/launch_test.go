@@ -309,7 +309,9 @@ func TestFailUnreadyLaunchEndsTheSessionWithThePane(t *testing.T) {
 	eventsAtKill := -1
 	s.Term = hookTerm{FakeSession: fake, onKill: func() { eventsAtKill = len(s.Events) }}
 
-	s.FailUnreadyLaunch(s.Ctx)
+	if took := s.FailUnreadyLaunch(s.Ctx); !took {
+		t.Errorf("FailUnreadyLaunch = %v, want true", took)
+	}
 
 	// A one-shot caller exits on session.end, which can beat runSession's
 	// teardown, so the terminal must be gone before the verdict goes out.
@@ -373,7 +375,9 @@ func TestFailUnreadyLaunchLeavesAPromptedSessionRunning(t *testing.T) {
 	s.Prompted = true
 	s.Mu.Unlock()
 
-	s.FailUnreadyLaunch(s.Ctx)
+	if took := s.FailUnreadyLaunch(s.Ctx); took {
+		t.Errorf("FailUnreadyLaunch = %v, want false", took)
+	}
 
 	select {
 	case ev := <-s.Events:
@@ -395,7 +399,9 @@ func TestFailUnreadyLaunchYieldsToAPromptThatLandsMeanwhile(t *testing.T) {
 		s.Mu.Unlock()
 	}}
 
-	s.FailUnreadyLaunch(s.Ctx)
+	if took := s.FailUnreadyLaunch(s.Ctx); took {
+		t.Errorf("FailUnreadyLaunch = %v, want false", took)
+	}
 
 	select {
 	case ev := <-s.Events:
@@ -414,7 +420,9 @@ func TestFailUnreadyLaunchLeavesAClaimedVerdictAlone(t *testing.T) {
 	s := newTestSession(t, approvalDialogPane)
 	s.MarkFinished()
 
-	s.FailUnreadyLaunch(s.Ctx)
+	if took := s.FailUnreadyLaunch(s.Ctx); took {
+		t.Errorf("FailUnreadyLaunch = %v, want false", took)
+	}
 
 	select {
 	case ev := <-s.Events:
@@ -437,7 +445,9 @@ func TestFailUnreadyLaunchLeavesAPasteInFlightAlone(t *testing.T) {
 		t.Fatal("BeginPaste = false on a live session")
 	}
 
-	s.FailUnreadyLaunch(s.Ctx)
+	if took := s.FailUnreadyLaunch(s.Ctx); took {
+		t.Errorf("FailUnreadyLaunch = %v, want false", took)
+	}
 
 	select {
 	case ev := <-s.Events:
@@ -458,11 +468,14 @@ func TestFailUnreadyLaunchLeavesAPasteInFlightAlone(t *testing.T) {
 func TestFailUnreadyLaunchYieldsToAVerdictClaimedDuringTheKill(t *testing.T) {
 	// The kill can let runSession's exit watcher claim first. That claimant
 	// emits and tears down; a second session.end or a cancel from here could
-	// beat its emit to the Events reader.
+	// beat its emit to the Events reader. The launch was still taken, and the
+	// watcher reports it, so the caller must not report the prompt again.
 	s := newTestSession(t, approvalDialogPane)
 	s.Term = hookTerm{FakeSession: s.Term.(*terminal.FakeSession), onKill: func() { s.MarkFinished() }}
 
-	s.FailUnreadyLaunch(s.Ctx)
+	if took := s.FailUnreadyLaunch(s.Ctx); !took {
+		t.Errorf("FailUnreadyLaunch = %v, want true", took)
+	}
 
 	select {
 	case ev := <-s.Events:
