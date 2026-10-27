@@ -191,6 +191,17 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		return fmt.Errorf("send prompt: %w", err)
 	}
 
+	// The prompt is delivered over RPC, so submission is the accepted
+	// command, not a keypress. Report the length, never the text: event
+	// logs are 0600 and prompts are sensitive.
+	c.fanout(&events.Event{
+		Event:     "agent.prompt_submitted",
+		SessionID: sessionID,
+		Fields: map[string]any{
+			"prompt_length": len(prompt),
+		},
+	})
+
 	select {
 	case ev := <-turnCh:
 		settle()

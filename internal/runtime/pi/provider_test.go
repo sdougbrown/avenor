@@ -972,3 +972,64 @@ func TestPromptRecoversWhenPiAutoRetrySucceeds(t *testing.T) {
 		t.Fatalf("Prompt: %v; want recovery after the successful retry", err)
 	}
 }
+
+// The pi backend reports prompt submission through the event stream like the
+// claude backend: the event carries the prompt length, never the text.
+func TestPromptEmitsPromptSubmittedEvent(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-pi-prompt")
+	p.client = c
+	p.sessions = map[string]struct{}{"ses-pi-prompt": {}}
+
+	eventsCh := subscribeForSession(c, "ses-pi-prompt")
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(context.Background(), "ses-pi-prompt", "hello pi") }()
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
+		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "stop"})
+	}()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for prompt result")
+	}
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// session.end and agent.prompt_submitted both fan out to the subscriber;
+	// drain until the submission event arrives.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-eventsCh:
+			if ev.Event != "agent.prompt_submitted" {
+				continue
+			}
+			if ev.SessionID != "ses-pi-prompt" {
+				t.Errorf("session_id = %q, want ses-pi-prompt", ev.SessionID)
+			}
+			if got, _ := ev.Fields["prompt_length"].(int); got != len("hello pi") {
+				t.Errorf("prompt_length = %v, want %d", ev.Fields["prompt_length"], len("hello pi"))
+			}
+			for key, value := range ev.Fields {
+				if text, ok := value.(string); ok && text == "hello pi" {
+					t.Errorf("event carries the prompt text in field %q", key)
+				}
+			}
+			return
+		case <-deadline:
+			t.Fatal("no agent.prompt_submitted event")
+		}
+	}
+}
