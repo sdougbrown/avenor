@@ -31,6 +31,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -1057,6 +1058,107 @@ func TestSupervisorPublicAPIParkAndResume(t *testing.T) {
 // while a turn is still running is not lost when that turn ends: the runtime
 // runs the queued prompt as its next turn with no further RuntimePrompt to
 // wake it.
+func TestResumeExpiredPiSessionIsNotResumable(t *testing.T) {
+	provider := newItestProvider(itestAttempt("ses_ephemeral", itestSessionEnd("ses_ephemeral", "end_turn", "first")))
+	h := newItestHarness(t, Config{ParkedRuntimeTimeout: 20 * time.Millisecond}, itestSingleProvider(provider))
+	rt := h.spawn(map[string]any{"backend": "pi"})
+	h.awaitCondition("runtime reaped", func() bool {
+		child := h.sup.runtimeByID(rt)
+		child.mu.Lock()
+		defer child.mu.Unlock()
+		return child.lc.isCompleted()
+	})
+	_, err := h.sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{Target: rt, Message: "again"})
+	if err == nil || !strings.Contains(err.Error(), "not resumable") {
+		t.Fatalf("Resume expired Pi session = %v, want not resumable", err)
+	}
+}
+
+func TestResumeContinuesParkedRuntime(t *testing.T) {
+	provider := newItestProvider(
+		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "first")),
+		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "second")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+	rt := h.spawn(nil)
+	h.awaitStatus(rt, "done")
+	h.awaitCondition("runtime parked", func() bool {
+		child := h.sup.runtimeByID(rt)
+		child.mu.Lock()
+		defer child.mu.Unlock()
+		return child.lc.isParked()
+	})
+	result, err := h.sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{
+		Target: rt, Message: "again", RunID: "follow-up",
+	})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if result.RuntimeID != rt {
+		t.Fatalf("Resume runtime = %q, want parked runtime %q", result.RuntimeID, rt)
+	}
+	h.log.waitFor(t, "second turn", func(ev events.Event) bool {
+		out, _ := ev.Fields["final_output"].(string)
+		return itestEventIs("session.end", rt)(ev) && out == "second"
+	})
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/1", starts, resumes)
+	}
+}
+
+func TestWarmResumeKeyedReplayQueuesOnce(t *testing.T) {
+	gate := newItestGate()
+	defer gate.open()
+	provider := newItestProvider(
+		itestAttempt("ses_warm_key", itestSessionEnd("ses_warm_key", "end_turn", "first")),
+		itestAttempt("ses_warm_key", gate.step(), itestSessionEnd("ses_warm_key", "end_turn", "second")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+	rt := h.spawn(nil)
+	h.awaitCondition("runtime parked", func() bool {
+		child := h.sup.runtimeByID(rt)
+		child.mu.Lock()
+		defer child.mu.Unlock()
+		return child.lc.isParked()
+	})
+	caller := messaging.Caller{Kind: messaging.CallerOwner}
+	req := messaging.ResumeRequest{Target: rt, Message: "again", RunID: "first", IdempotencyKey: "warm-key"}
+	const n = 8
+	results := make([]messaging.ResumeResult, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			attempt := req
+			attempt.RunID = fmt.Sprintf("run-%d", i)
+			results[i], errs[i] = h.sup.Resume(caller, attempt)
+		}(i)
+	}
+	wg.Wait()
+	for i := range results {
+		if errs[i] != nil {
+			t.Fatalf("resume %d: %v", i, errs[i])
+		}
+		if results[i] != results[0] {
+			t.Fatalf("replay = %+v, want %+v", results[i], results[0])
+		}
+	}
+	req.Message = "different"
+	if _, err := h.sup.Resume(caller, req); err == nil {
+		t.Fatal("reusing a warm resume key with a different message succeeded")
+	}
+	gate.open()
+	h.log.waitFor(t, "second turn", func(ev events.Event) bool {
+		out, _ := ev.Fields["final_output"].(string)
+		return itestEventIs("session.end", rt)(ev) && out == "second"
+	})
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/1", starts, resumes)
+	}
+}
+
 func TestSupervisorPublicAPIPromptQueuedDuringActiveTurn(t *testing.T) {
 	t.Parallel()
 	gate := newItestGate()

@@ -247,6 +247,6 @@ label, `run_id`, `status` and the child's sentinel are the evidence.
 - A notice exists only for a run this session tracks — one it spawned or
   resumed. A run another Pi session owns appears in the status widget but never
   produces a notice here.
-- Resumed runs (`avenor_message` action `resume`) are tracked as new runs, and a
-  resumed `pi` run is refused outright, per
-  [messaging.md](messaging.md#known-limits-today).
+- Resumed runs (`avenor_message` action `resume`) are tracked as new public
+  runs. A parked Pi runtime can resume warm; after it is reaped its in-memory
+  session cannot be resumed, per [messaging.md](messaging.md#known-limits-today).

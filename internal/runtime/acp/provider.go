@@ -73,12 +73,13 @@ type Provider struct {
 	clientEnvCleanup    func() error
 
 	// Broker fields for channel-wrapped prompt injection.
-	broker          *broker.Broker
-	runIDs          map[string]string // sessionID → runID
-	pollContexts    map[string]context.Context
-	pollCancels     map[string]context.CancelFunc
-	pendingMu       sync.Mutex
-	pendingMessages map[string][]string // sessionID → queued wrapped prompts
+	broker            *broker.Broker
+	runIDs            map[string]string // sessionID → runID
+	pollContexts      map[string]context.Context
+	pollCancels       map[string]context.CancelFunc
+	pendingMu         sync.Mutex
+	pendingMessages   map[string][]string // sessionID → queued wrapped prompts
+	injectingMessages map[string]int
 }
 
 func NewProvider(cfg ProviderConfig) runtime.Provider {
@@ -150,7 +151,9 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if runID != "" {
 		go brokerRef.PollAgentMessages(pollCtx, runID, func(wrapped string) {
 			p.pendingMu.Lock()
-			p.pendingMessages[session.SessionID] = append(p.pendingMessages[session.SessionID], wrapped)
+			if p.pendingMessages != nil {
+				p.pendingMessages[session.SessionID] = append(p.pendingMessages[session.SessionID], wrapped)
+			}
 			p.pendingMu.Unlock()
 		})
 	}
@@ -433,7 +436,7 @@ func (p *Provider) Close() error {
 		}
 	}
 	p.pendingMu.Lock()
-	p.pendingMessages = map[string][]string{}
+	p.pendingMessages = nil
 	p.pendingMu.Unlock()
 	if cleanup != nil {
 		_ = cleanup()
@@ -711,6 +714,17 @@ func permissionResponseResult(response runtime.PermissionResponse, optionID stri
 	return map[string]any{"outcome": result}
 }
 
+// LockWarmMessageAdmission prevents an admitted turn from overtaking a
+// queued or currently injecting broker message.
+func (p *Provider) LockWarmMessageAdmission(sessionID string) (func(), bool) {
+	p.pendingMu.Lock()
+	if len(p.pendingMessages[sessionID]) != 0 || p.injectingMessages[sessionID] != 0 {
+		p.pendingMu.Unlock()
+		return nil, false
+	}
+	return p.pendingMu.Unlock, true
+}
+
 // injectPendingMessages injects queued channel-wrapped messages for a session
 // at a turn boundary (after session.end).
 func (p *Provider) injectPendingMessages(sessionID string) {
@@ -721,11 +735,22 @@ func (p *Provider) injectPendingMessages(sessionID string) {
 	}
 	msgs := p.pendingMessages[sessionID]
 	p.pendingMessages[sessionID] = nil
+	if len(msgs) != 0 {
+		if p.injectingMessages == nil {
+			p.injectingMessages = make(map[string]int)
+		}
+		p.injectingMessages[sessionID]++
+	}
 	p.pendingMu.Unlock()
 
 	if len(msgs) == 0 {
 		return
 	}
+	defer func() {
+		p.pendingMu.Lock()
+		p.injectingMessages[sessionID]--
+		p.pendingMu.Unlock()
+	}()
 
 	p.mu.Lock()
 	session := p.sessions[sessionID]

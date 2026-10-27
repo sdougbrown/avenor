@@ -102,8 +102,8 @@ proves the host legs:
 1. `Call avenor_spawn with dir "$SCRATCH/work", prompt "Reply with the single word OK and nothing else.", label "host-child-c", backend "pi", wait false.` then `Call avenor_result with run_id "host-child-c" wait true.` — the spawn result carries `run_id`, `label`, `effective_backend`; the result carries `runtime_id`, `session_id`, `stop_reason`, `output`.
 2. Spawn a second child that stays busy: `prompt "Use the bash tool to run: sleep 900. Then reply with the single word OK.", label "sleeper-pi", backend "pi", wait false.` — take its `runtime_id` from `avenor_status run_id "sleeper-pi" view "full"`.
 3. **A child's ask to the host.** Spawn a child with `prompt` = `Perform these steps in order. 1) Call avenor_message with action "ask", target "supervisor", message "ping", timeout_ms 120000. 2) Write the tool result to "$SCRATCH/child-ask.json". 3) Reply with the single word OK.`, then prompt the host: `A child will send you an inbound ask. When it appears, reply to it with the single word pong using the tool and arguments the ask instructs.` The host's inbound steer carries the ask's `reply_to`; once it answers, the child's ask returns `replied` with `reply: "pong"` (read it from the child's `events.log` `result.details` — the child's own JSON copy is whatever text its model chose to write). `not-sent` here means the child posted a versioned message id without the broker's generation.
-4. `Call avenor_message with action "resume", target "host-child-c", message "Reply with the single word AGAIN and nothing else."` — this is a **pi** child, and pi runs `--no-session`, so the answer is the documented refusal (`session not found ... cross-process resume is not supported`). Resuming an `opencode-acp` child with the same prompt returns `outcome: resumed`, a new `run_id`, the `-followup` label, and the new run's `sentinel_file`/`on_event`; the resumed sentinel keeps the same `SESSION=` as the original.
-5. `Call avenor_message with action "tell", target "host-child-c", message "ping"` after that run ends — a tool error whose repair sentence says `run "rt_1" is done; use action "resume" to continue it`. (A tool error carries no `details` on this surface; the sentence is the observable.)
+4. Promptly after step 1, while the Pi runtime is still parked (the default parked timeout is 30 minutes), call `avenor_message` with action `resume`, target `host-child-c`, message `Reply with the single word AGAIN and nothing else.` Record the returned `outcome: resumed`, new public `run_id`, `-followup` label, and new `sentinel_file`/`on_event`. Call `avenor_result` for that new run and confirm its output is `AGAIN`. Compare its `runtime_id` and `session_id` with step 1: both stay the same, although the public run id and per-turn artifact paths differ. Read both sentinels and event files to prove the original turn remains intact and the new turn completed separately. Do not shut down the supervisor between turns.
+5. After the resumed turn ends, call `avenor_message` with action `tell`, targeting the resumed public run id, message `ping` — a tool error says the run is done and advises using action `resume` to continue it. (A tool error carries no `details` on this surface; the sentence is the observable.)
 6. `Call avenor_peers with action "rename", name "host-renamed-supervisor"` then `Call avenor_peers` — the rename returns `renamed {run_id: "supervisor", label, previous_label: "supervisor"}` and the next list shows the new label with `kind: "supervisor"`.
 7. `Call avenor_workflow_cancel with workflow_id "wf-does-not-exist", actor "verify", reason "verify"` — the tool is registered on the host surface and fails with `rpc error [-32000]: workflow not found: wf-does-not-exist`.
 
@@ -149,9 +149,11 @@ prose:
   `tool.call_update`; the `opencode-acp` child records `rawOutput.output` (the
   render text) plus `rawInput`. The public run id is the spawn result's
   `run_id`, never the label.
-- Sentinels at the paths the resume result returned: `DONE`, `SESSION=`,
-  `STOP_REASON=`; the original and the resumed run share `SESSION=` and differ
-  in `RUN=`.
+- Original and resumed sentinels: `DONE`, matching `SESSION=`, and
+  `STOP_REASON=`; their distinct paths and event files preserve each turn.
+  Compare public run ids from the tool results, not sentinel `RUN=`, which names
+  the supervisor run rather than the public child run. Compare `runtime_id` in
+  the results to prove the parked runtime was reused.
 - `control-tail.ndjson`: `session.renamed` with `runtime_id`, `label`,
   `previous_label` (`supervisor` for a supervisor rename, the child's `rt_N` for
   a self rename).
@@ -243,9 +245,12 @@ unaffected.
 
 Read these against the binary before promising the drive above works end to end.
 
-- **`resume` of a `pi` run is refused.** pi sessions run `--no-session`, so a
-  finished pi child cannot be continued from another process; the tool says so
-  explicitly. Resume of an `opencode-acp` child works and keeps the session id.
+- **Pi resume requires the parked process.** A finished Pi turn can resume
+  warm while its runtime remains parked in the same supervisor. Once reaped
+  (default parked timeout: 30 minutes) or after supervisor shutdown, its
+  `--no-session` session cannot be resumed across processes; an expired run is
+  reported as not resumable. Do not treat that cold-resume refusal as proof
+  that warm resume failed. Timeout and killed runs are not resumable.
 - **A `tell` to the host arrives as an ask-shaped steer.** The host's ask poll
   drains the supervisor's control queue, which also carries fire-and-forget
   messages; such a message has no `message_id`, so the delivered steer instructs

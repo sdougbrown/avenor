@@ -131,6 +131,7 @@ type RunState struct {
 	// read it through Broker.runToken or Broker.runStateFor.
 	Token               string
 	ControlQueue        []*ControlMessage
+	pollDeliveries      int
 	RegisteredAt        time.Time
 	LastSeen            time.Time
 	Reports             []Report
@@ -1970,7 +1971,13 @@ func (b *Broker) pollAgentMessagesOnce(runID string, onMessage func(wrappedConte
 		msgs = append(msgs, *msg)
 	}
 	st.ControlQueue = other
+	st.pollDeliveries += len(msgs)
 	st.Mu.Unlock()
+	defer func() {
+		st.Mu.Lock()
+		st.pollDeliveries -= len(msgs)
+		st.Mu.Unlock()
+	}()
 	for _, msg := range msgs {
 		var payload struct {
 			Message string `json:"message"`
@@ -2372,6 +2379,49 @@ func (b *Broker) harnessNameChanged(runID, name string) {
 	if fn != nil {
 		fn(runID, name)
 	}
+}
+
+// LockWarmAdmission holds the run queue stable until the returned function is called.
+// A successful release publishes the requested label after admission has completed.
+func (b *Broker) LockWarmAdmission(runID, name string) (func(bool), error) {
+	st := b.GetRun(runID)
+	if st == nil {
+		if name != "" {
+			return nil, fmt.Errorf("run not found: %s", runID)
+		}
+		return func(bool) {}, nil
+	}
+	b.mu.RLock()
+	descendant := st.descendant
+	b.mu.RUnlock()
+	st.Mu.Lock()
+	if len(st.ControlQueue) != 0 || st.pollDeliveries != 0 {
+		st.Mu.Unlock()
+		return nil, fmt.Errorf("runtime %q has pending broker messages", runID)
+	}
+	if name != "" && st.HarnessName != "" && st.HarnessName != name {
+		st.Mu.Unlock()
+		return nil, fmt.Errorf("cannot rename runtime %s: harness name %q takes precedence", runID, st.HarnessName)
+	}
+	if name != "" && descendant {
+		st.Mu.Unlock()
+		return nil, fmt.Errorf("run %s is owned by a child broker", runID)
+	}
+	return func(commit bool) {
+		if commit {
+			st.LastMessage = nil
+		}
+		if commit && name != "" {
+			if st.Info == nil {
+				st.Info = &SessionInfo{RunID: runID}
+			}
+			st.Info.Label = name
+		}
+		st.Mu.Unlock()
+		if commit && name != "" {
+			b.runSetChanged()
+		}
+	}, nil
 }
 
 // RenameRun changes the model-set display name for runID. An empty name resets

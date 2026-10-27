@@ -1,0 +1,216 @@
+package stable
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/sdougbrown/avenor/internal/cli"
+	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
+)
+
+func TestWarmResumeRotatesArtifactsAndRejectsConcurrentAdmission(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old-events")
+	oldSentinel := filepath.Join(root, "old-sentinel")
+	if err := os.WriteFile(oldSentinel, []byte("DONE\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := cli.NewEventWriter(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := &childRuntime{id: "rt", eventWriter: sink, onEvent: oldPath, sentinelFile: oldSentinel, promptCh: make(chan struct{}, 1), session: runtime.Session{SessionID: "session"}, fullFinalOutput: "old", lastStopReason: "end_turn"}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	sup := &Supervisor{}
+	writer := &runtimeFanoutWriter{base: sink, child: child, supervisor: sup}
+	child.fanoutWriter = writer
+	if err := writer.Write(events.Event{Event: "test.old"}); err != nil {
+		t.Fatal(err)
+	}
+	nextPath, nextSentinel := filepath.Join(root, "new-events"), filepath.Join(root, "new-sentinel")
+	got, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: nextPath, SentinelFile: nextSentinel, resume: resumeSpawn{runID: "new-run"}})
+	if err != nil || !warm {
+		t.Fatalf("admit: warm=%v err=%v", warm, err)
+	}
+	defer child.eventWriter.Close()
+	if got.OnEvent != nextPath || got.SentinelFile != nextSentinel || got.RunID != "new-run" || got.SessionID != "session" {
+		t.Fatalf("result: %+v", got)
+	}
+	if child.fullFinalOutput != "" || child.lastStopReason != "" || len(child.promptQueue) != 1 {
+		t.Fatalf("stale state: %+v", child)
+	}
+	if err := writer.Write(events.Event{Event: "test.new"}); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := os.ReadFile(nextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(old) == string(next) || !containsEvent(old, "test.old") || containsEvent(old, "test.new") || !containsEvent(next, "test.new") {
+		t.Fatalf("old=%s new=%s", old, next)
+	}
+	if _, _, err := sup.admitWarmResume(child, SpawnParams{Prompt: "again", OnEvent: filepath.Join(root, "third"), SentinelFile: filepath.Join(root, "third-sentinel")}); err == nil {
+		t.Fatal("concurrent resume accepted")
+	}
+	if _, err := os.Stat(nextSentinel); !os.IsNotExist(err) {
+		t.Fatalf("new sentinel exists before completion: %v", err)
+	}
+}
+
+func TestWarmResumeRejectsPendingBrokerMessage(t *testing.T) {
+	root := t.TempDir()
+	b := broker.New("")
+	b.CreateRun("rt", "")
+	if err := b.Send("rt", "agent_message", nil, "msg"); err != nil {
+		t.Fatal(err)
+	}
+	child := &childRuntime{id: "rt", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	sup := &Supervisor{broker: b}
+	_, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: filepath.Join(root, "new"), SentinelFile: filepath.Join(root, "new-sentinel")})
+	if !warm || err == nil {
+		t.Fatalf("pending message admission: warm=%v err=%v", warm, err)
+	}
+	if child.sentinelFile != filepath.Join(root, "old-sentinel") || len(child.promptQueue) != 0 {
+		t.Fatal("rejected admission changed turn")
+	}
+}
+
+func TestWarmResumeRejectsMessageArrivingDuringAdmission(t *testing.T) {
+	root := t.TempDir()
+	b := broker.New("")
+	b.CreateRun("rt", "")
+	if err := b.RenameRun("rt", "old-label"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "user-events")
+	if err := os.WriteFile(path, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	child := &childRuntime{id: "rt", displayName: "old-label", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1), fullFinalOutput: "previous"}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	sup := &Supervisor{broker: b}
+	sup.testHooks.warmAdmissionAfterCheck = func() {
+		if err := b.Send("rt", "agent_message", nil, "msg"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, warm, err := sup.admitWarmResume(child, SpawnParams{Label: "new-label", Prompt: "next", OnEvent: path, SentinelFile: filepath.Join(root, "new-sentinel")})
+	if !warm || err == nil {
+		t.Fatalf("admission: warm=%v err=%v", warm, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "keep" {
+		t.Fatalf("user event file changed: %q, %v", data, err)
+	}
+	if b.DisplayName("rt") != "old-label" || child.displayName != "old-label" || child.fullFinalOutput != "previous" || child.onEvent != filepath.Join(root, "old") || len(child.promptQueue) != 0 {
+		t.Fatal("rejected admission changed label or turn state")
+	}
+	if _, err := os.Stat(filepath.Join(root, "new-sentinel")); !os.IsNotExist(err) {
+		t.Fatalf("sentinel created: %v", err)
+	}
+}
+
+func TestWarmResumeWaitsForTurnBoundSend(t *testing.T) {
+	root := t.TempDir()
+	b := broker.New("")
+	b.CreateRun("rt", "")
+	child := &childRuntime{id: "rt", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	sup := &Supervisor{broker: b, runtimes: map[string]*childRuntime{"rt": child}}
+	entered, release := make(chan struct{}), make(chan struct{})
+	sent := make(chan error, 1)
+	go func() {
+		sent <- sup.WithTurn("rt", child.sentinelFile, func() error { close(entered); <-release; return b.Send("rt", "agent_message", nil, "msg") })
+	}()
+	<-entered
+	admitted := make(chan error, 1)
+	go func() {
+		_, _, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: filepath.Join(root, "new"), SentinelFile: filepath.Join(root, "new-sentinel")})
+		admitted <- err
+	}()
+	close(release)
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("send deadlocked")
+	}
+	select {
+	case err := <-admitted:
+		if err == nil {
+			t.Fatal("admitted with pending message")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("admission deadlocked")
+	}
+}
+
+func TestWarmResumeRejectsClaimedDirectPrompt(t *testing.T) {
+	root := t.TempDir()
+	child := &childRuntime{id: "rt", promptQueue: []string{"direct"}, promptCh: make(chan struct{}, 1), onEvent: filepath.Join(root, "old")}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	if prompt, ok := child.dequeuePrompt(); !ok || prompt != "direct" {
+		t.Fatalf("dequeue = %q, %v", prompt, ok)
+	}
+	_, warm, err := (&Supervisor{}).admitWarmResume(child, SpawnParams{Prompt: "resume", OnEvent: filepath.Join(root, "new"), SentinelFile: filepath.Join(root, "sentinel")})
+	if !warm || err == nil {
+		t.Fatalf("claimed prompt admission: warm=%v err=%v", warm, err)
+	}
+	if child.onEvent != filepath.Join(root, "old") {
+		t.Fatal("claimed prompt artifacts changed")
+	}
+}
+
+func containsEvent(data []byte, name string) bool { return bytes.Contains(data, []byte(name)) }
+
+func TestUnstartedWarmResumeWritesFailureSentinel(t *testing.T) {
+	sup := newTestSupervisor(t, Config{})
+	path := filepath.Join(t.TempDir(), "sentinel")
+	child := &childRuntime{id: "rt", sentinelFile: path, warmResumePending: true, session: runtime.Session{SessionID: "session"}}
+	sup.finishUnstartedWarmResume(child)
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(data, []byte("FAILED\n")) || !bytes.Contains(data, []byte("SESSION=session\n")) {
+		t.Fatalf("failure sentinel %q: %v", data, err)
+	}
+	if child.lastStopReason != "error" || child.exitCode != 1 {
+		t.Fatalf("failure state: reason=%q exit=%d", child.lastStopReason, child.exitCode)
+	}
+}
+
+func TestWarmResumeRejectsOldArtifactsWithoutTruncation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "events")
+	sink, err := cli.NewEventWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	if err := sink.Write(events.Event{Event: "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	child := &childRuntime{id: "rt", eventWriter: sink, onEvent: path, sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	_, _, err = (&Supervisor{}).admitWarmResume(child, SpawnParams{OnEvent: path, SentinelFile: filepath.Join(root, "new-sentinel")})
+	if err == nil {
+		t.Fatal("accepted old event path")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !containsEvent(data, "keep") {
+		t.Fatalf("old events %s: %v", data, err)
+	}
+	if len(child.promptQueue) != 0 {
+		t.Fatal("failed admission queued prompt")
+	}
+}
