@@ -44,7 +44,7 @@ const skipIfNoBinary = !hasAvenorBinary()
 
 describe('Supervisor roster metadata', () => {
   it('forwards roster selectors and records effective identity without rereading the roster', async () => {
-    const spawnMock = mock(async () => ({
+    const spawnMock = mock(async (_params: Record<string, unknown>) => ({
       runtime_id: 'rt-roster',
       session_id: 'ses-roster',
       roster_file: '/repo/roster.json',

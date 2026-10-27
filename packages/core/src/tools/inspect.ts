@@ -1,4 +1,4 @@
-import { RunReducer, type RunSnapshot } from '../run-reducer.js'
+import { RunReducer, type RunSnapshot, type RunSnapshotView } from '../run-reducer.js'
 import { eventsTool } from './events.js'
 import { statusTool, type StatusResult } from './status.js'
 
@@ -14,7 +14,7 @@ interface InspectToolArgs {
   after_seq?: number
 }
 
-function publicSnapshot(snapshot: RunSnapshot): Omit<RunSnapshot, '_seen_seq_by_scope' | '_recent_legacy_keys' | '_last_semantic_fingerprint' | '_last_source_event'> {
+function publicSnapshot(snapshot: RunSnapshot): RunSnapshotView {
   const {
     _seen_seq_by_scope: _seen,
     _recent_legacy_keys: _recent,
@@ -29,7 +29,7 @@ export interface InspectResult {
   run_id: string
   label: string
   status: StatusResult
-  snapshot: Omit<RunSnapshot, '_seen_seq_by_scope' | '_recent_legacy_keys' | '_last_semantic_fingerprint' | '_last_source_event'>
+  snapshot: RunSnapshotView
   transcript: RunSnapshot['transcript']
   tools: RunSnapshot['tools']
   live_tools: RunSnapshot['live_tools']

@@ -3,12 +3,11 @@
     "strict": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "outDir": "./dist",
     "target": "ESNext",
-    "declaration": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    "types": ["node", "bun", "bun-types"],
+    "types": ["node", "bun"],
+    "noEmit": true,
     "skipLibCheck": true
   },
   "include": ["src"]

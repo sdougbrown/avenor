@@ -23,6 +23,7 @@
   },
   "scripts": {
     "build": "tsdown",
+    "typecheck": "tsc --noEmit",
     "test": "bun test",
     "dev": "tsdown --watch"
   },

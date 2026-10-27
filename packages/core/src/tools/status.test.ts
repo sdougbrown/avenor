@@ -4,13 +4,14 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { StatusResult } from './status.js'
+import type { Client } from '../client.js'
 import { Supervisor } from '../supervisor.js'
 
-const statusMock = mock(async () => {
+const statusMock = mock<Client['status']>(async () => {
   throw new Error('status call failed')
 })
 
-const closeMock = mock(() => {})
+const closeMock = mock<Client['close']>(() => {})
 
 const runInfo = {
   runId: 'singleton-regression-run',
@@ -23,11 +24,11 @@ const runInfo = {
 const localRuns = new Map([[runInfo.runId, runInfo]])
 const localAliases = new Map([[runInfo.label, runInfo]])
 
-const getSupervisorClientMock = mock(async () => ({
+const getSupervisorClientMock = mock(async (_supervisorId?: string) => ({
   client: {
     status: statusMock,
     close: closeMock,
-  },
+  } as any,
   isSingleton: true,
   sup: {
     runs: localRuns,
@@ -39,7 +40,7 @@ const getSupervisorClientMock = mock(async () => ({
       }
       return undefined
     },
-  },
+  } as any,
   supervisorId: '/tmp/avenor-mcp-test.sock',
 }))
 
@@ -233,8 +234,8 @@ describe('statusTool singleton registry', () => {
     })
 
     expect(result).toMatchObject({ agent: 'final-agent', backend: 'agy' })
-    expect(result.model).toBeUndefined()
-    expect(result.effective_model).toBeUndefined()
+    expect((result as StatusResult).model).toBeUndefined()
+    expect((result as StatusResult).effective_model).toBeUndefined()
 
     statusMock.mockRejectedValueOnce(new Error('completed runtime removed'))
     const fallback = await statusTool({
@@ -242,7 +243,7 @@ describe('statusTool singleton registry', () => {
       supervisorId: '/tmp/avenor-mcp-test.sock',
     })
     expect(fallback).toMatchObject({ agent: 'final-agent', backend: 'agy' })
-    expect(fallback.model).toBeUndefined()
+    expect((fallback as StatusResult).model).toBeUndefined()
   })
 
   it('maps richer metadata additively from live status', async () => {

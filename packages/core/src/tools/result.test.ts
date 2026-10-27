@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { createResultTool, type ResultResult } from './result.js'
-import type { StatusResult } from './status.js'
+import { inspectTool } from './inspect.js'
+import { statusTool, type StatusResult } from './status.js'
 
 function status(overrides: Partial<StatusResult> = {}): StatusResult {
   return {
@@ -14,18 +15,29 @@ function status(overrides: Partial<StatusResult> = {}): StatusResult {
 
 function deps(statuses: StatusResult[], pollIntervalMs = 1_000) {
   const queue = [...statuses]
-  const statusMock = mock(async () => queue.shift() ?? statuses[statuses.length - 1]!)
-  const inspectMock = mock(async () => ({
+  const statusMock = mock(async (_args: Parameters<typeof statusTool>[0]) =>
+    queue.shift() ?? statuses[statuses.length - 1]!)
+  const inspectMock = mock(async (_args: Parameters<typeof inspectTool>[0]) => ({
     final_output: 'inspected fallback',
     snapshot: { final_output: 'inspected fallback', assistant_text: 'inspected fallback' },
   }))
+  const fullOutputMock = mock(
+    async (_runtimeId: string | undefined, _supervisorId?: string): Promise<string | undefined> => undefined,
+  )
   let fakeTime = 0
   const sleepMock = mock(async (ms: number) => {
     fakeTime += ms
   })
   const nowMock = mock(() => fakeTime)
   return {
-    value: { status: statusMock, inspect: inspectMock, sleep: sleepMock, now: nowMock, pollIntervalMs },
+    value: {
+      status: statusMock,
+      inspect: inspectMock,
+      fullOutput: fullOutputMock,
+      sleep: sleepMock,
+      now: nowMock,
+      pollIntervalMs,
+    },
     statusMock,
     inspectMock,
     sleepMock,
@@ -118,7 +130,7 @@ describe('resultTool', () => {
 
     expect(result.output).toBe('finished')
     expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
-    expect(testDeps.sleepMock).toHaveBeenCalledOnce()
+    expect(testDeps.sleepMock).toHaveBeenCalledTimes(1)
   })
 
   it('returns immediately when non-blocking (wait=false)', async () => {
@@ -138,7 +150,7 @@ describe('resultTool', () => {
       status: 'waiting',
       ready: false,
       pending_permission: { request_id: 'req-1' },
-    } satisfies Partial<ResultResult>)
+    })
     expect(waitingDeps.sleepMock).not.toHaveBeenCalled()
   })
 
@@ -153,7 +165,7 @@ describe('resultTool', () => {
     expect(result.output).toBe('before-deadline')
     expect(result.timed_out).toBeUndefined()
     expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
-    expect(testDeps.sleepMock).toHaveBeenCalledOnce()
+    expect(testDeps.sleepMock).toHaveBeenCalledTimes(1)
   })
 
   it('returns the latest lifecycle state when its wait timeout expires', async () => {
@@ -163,7 +175,7 @@ describe('resultTool', () => {
 
     expect(result).toMatchObject({ status: 'running', ready: false, timed_out: true })
     expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
-    expect(testDeps.sleepMock).toHaveBeenCalledOnce()
+    expect(testDeps.sleepMock).toHaveBeenCalledTimes(1)
   })
 
   it('honors cancellation before polling', async () => {

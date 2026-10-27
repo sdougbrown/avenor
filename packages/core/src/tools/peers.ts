@@ -5,14 +5,18 @@ export interface PeersToolArgs extends PeersInput {}
 
 export type PeersResult = PeersRouterResult
 
-/** The one avenor_peers handler; it resolves and reads through the bound provider. */
-export async function peersTool(args: PeersToolArgs, provider: MessageProvider): Promise<PeersResult> {
+/** The one avenor_peers handler; it resolves and reads through the bound provider.
+ *
+ * Admission belongs to the shared router for every surface, so the argument is
+ * the untyped JSON a tool call carries and `executePeers` validates it first —
+ * the same shape `messageTool` takes. */
+export async function peersTool(args: unknown, provider: MessageProvider): Promise<PeersResult> {
   return executePeers(provider, args)
 }
 
 /** Bind the peers handler to one provider. */
 export function createPeersTool(
   provider: MessageProvider,
-): (args: PeersToolArgs) => Promise<PeersResult> {
+): (args: unknown) => Promise<PeersResult> {
   return args => peersTool(args, provider)
 }

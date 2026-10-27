@@ -623,7 +623,7 @@ export class Supervisor {
 
   async spawn(
     params: SpawnParams,
-    runId = crypto.randomUUID(),
+    runId: string = crypto.randomUUID(),
     metadata?: SpawnMetadata,
   ): Promise<RunInfo> {
     const workflowMode = typeof params.loop_file === 'string' || typeof params.team_file === 'string'

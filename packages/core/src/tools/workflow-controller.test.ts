@@ -1,8 +1,9 @@
 import { describe, it, expect, mock } from 'bun:test'
 import { type WorkflowControllerStatusToolArgs } from './workflow-controller-status.js'
+import { type WorkflowReadyToolArgs } from './workflow-ready.js'
 
 // Mock getSupervisorClient that returns distinct fake clients per supervisor ID
-const getSupervisorClientMock = mock(async (supervisorId: string) => {
+const getSupervisorClientMock = mock(async (supervisorId?: string) => {
   const client = {
     workflowControllerStatus: mock(async (controllerId: string) => ({
       controller_id: controllerId,
@@ -22,7 +23,8 @@ const getSupervisorClientMock = mock(async (supervisorId: string) => {
     client,
     isSingleton: false,
     sup: null,
-    supervisorId,
+    // The real helper resolves a default supervisor when the caller omits one.
+    supervisorId: supervisorId ?? '',
   }
 })
 
@@ -57,7 +59,7 @@ describe('workflow controller status tool basic forwarding', () => {
 describe('workflow ready tool', () => {
   it('throws when controllerId missing', async () => {
     const tool = createWorkflowReadyTool(getSupervisorClientMock)
-    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' })).rejects.toThrow('controllerId is required')
+    await expect(tool({ supervisorId: '/tmp/avenor-mcp-sup-a-123.sock' } as WorkflowReadyToolArgs)).rejects.toThrow('controllerId is required')
   })
 
   it('forwards to client.workflowReady with limit when supplied', async () => {

@@ -164,5 +164,8 @@ jobs:
       - name: Build JS packages
         run: mise run js-build
 
+      - name: Typecheck JS packages
+        run: mise run js-typecheck
+
       - name: Test JS packages
         run: mise run js-test

@@ -2,20 +2,21 @@ import { afterEach, describe, expect, it, mock } from 'bun:test'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import type { Client } from '../client.js'
 
-const historyMock = mock(async () => ({ events: [] }))
-const statusMock = mock(async () => {
+const historyMock = mock<Client['history']>(async () => ({ events: [] }))
+const statusMock = mock<Client['status']>(async () => {
   throw new Error('status unavailable')
 })
-const listMock = mock(async () => [])
-const closeMock = mock(() => {})
-const getSupervisorClientMock = mock(async () => ({
+const listMock = mock<Client['list']>(async () => [])
+const closeMock = mock<Client['close']>(() => {})
+const getSupervisorClientMock = mock(async (_supervisorId?: string) => ({
   client: {
     history: historyMock,
     status: statusMock,
     list: listMock,
     close: closeMock,
-  },
+  } as any,
   isSingleton: false,
   sup: null,
   supervisorId: '/tmp/avenor-events-test.sock',

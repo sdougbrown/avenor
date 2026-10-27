@@ -14,13 +14,13 @@ process.env.AVENOR_HOME = home
 const cancelMock = mock(async () => {})
 const closeMock = mock(() => {})
 const listMock = mock(async () => [] as Array<Record<string, unknown>>)
-const client = { cancel: cancelMock, close: closeMock, list: listMock }
+const client = { cancel: cancelMock, close: closeMock, list: listMock } as any
 
 // The tool routes both supervisor modes through getSupervisorClient, so one
 // injectable mock covers the external path (isSingleton: false) and the
 // singleton path (isSingleton: true, sup set) without module mocking.
 function setMode(mode: 'external' | 'singleton', runs: Map<string, { runtimeId: string }>) {
-  getSupervisorClientMock.mockImplementation(async () => ({
+  getSupervisorClientMock.mockImplementation(async (_supervisorId?: string) => ({
     client,
     isSingleton: mode === 'singleton',
     sup: mode === 'singleton'
@@ -28,13 +28,13 @@ function setMode(mode: 'external' | 'singleton', runs: Map<string, { runtimeId: 
           supervisorId: '/tmp/avenor-singleton.sock',
           getClient: () => client,
           getRunByReference: (reference: string) => runs.get(reference),
-        }
+        } as any
       : null,
     supervisorId: '/tmp/avenor-kill-test.sock',
   }))
 }
 
-const getSupervisorClientMock = mock(async () => ({
+const getSupervisorClientMock = mock(async (_supervisorId?: string) => ({
   client,
   isSingleton: false,
   sup: null,

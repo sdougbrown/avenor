@@ -23,6 +23,7 @@
   },
   "scripts": {
     "build": "tsdown",
+    "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:e2e": "AVENOR_REAL_INTEGRATION=1 bun test",
     "dev": "tsdown --watch",

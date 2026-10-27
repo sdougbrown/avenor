@@ -20,6 +20,7 @@ import type {
   InspectResult,
   RunObserver,
   RunSnapshot,
+  RunSnapshotView,
   RunToolState,
   RunTranscriptEntry,
   StatusResult,
@@ -69,7 +70,7 @@ export interface WatchOpenOptions {
 export interface WatchViewState {
   run: WatchRunRef
   status?: StatusResult
-  snapshot: RunSnapshot
+  snapshot: RunSnapshotView
   loading: boolean
   error?: string
   actionMessage?: string
@@ -166,11 +167,11 @@ function usageSummary(usage: Record<string, unknown> | undefined): string | unde
   return parts.join(' · ')
 }
 
-export function finalOutputPreview(status: Pick<StatusResult, 'final_output'> | undefined, snapshot?: Pick<RunSnapshot, 'final_output' | 'assistant_text'>): string | undefined {
+export function finalOutputPreview(status: Pick<StatusResult, 'final_output'> | undefined, snapshot?: Pick<RunSnapshotView, 'final_output' | 'assistant_text'>): string | undefined {
   return clipText(status?.final_output ?? snapshot?.final_output ?? snapshot?.assistant_text, FINAL_OUTPUT_CHARS)
 }
 
-function currentStatusWord(status: StatusResult | undefined, snapshot: RunSnapshot): string {
+function currentStatusWord(status: StatusResult | undefined, snapshot: RunSnapshotView): string {
   const raw = status?.status?.toLowerCase()
   if (raw && TERMINAL_STATUSES.has(raw)) return raw
   if (snapshot.pending_permission) return 'waiting'
@@ -182,12 +183,12 @@ function currentStatusWord(status: StatusResult | undefined, snapshot: RunSnapsh
   return raw ?? 'running'
 }
 
-function isPromptable(status: StatusResult | undefined, snapshot: RunSnapshot): boolean {
+function isPromptable(status: StatusResult | undefined, snapshot: RunSnapshotView): boolean {
   const current = currentStatusWord(status, snapshot)
   return !TERMINAL_STATUSES.has(current) && current !== 'unavailable'
 }
 
-function isFollowUpable(status: StatusResult | undefined, snapshot: RunSnapshot): boolean {
+function isFollowUpable(status: StatusResult | undefined, snapshot: RunSnapshotView): boolean {
   return TERMINAL_STATUSES.has(currentStatusWord(status, snapshot)) || snapshot.ended
 }
 
@@ -220,7 +221,7 @@ function transcriptText(entry: RunTranscriptEntry): string | undefined {
   return compactWhitespace(entry.text, PREVIEW_CHARS)
 }
 
-export function renderTranscriptLines(snapshot: RunSnapshot, width: number, theme: Theme): string[] {
+export function renderTranscriptLines(snapshot: RunSnapshotView, width: number, theme: Theme): string[] {
   const out: string[] = []
   for (const entry of snapshot.transcript) {
     const text = transcriptText(entry)
@@ -391,7 +392,7 @@ export class RunInspectorOverlay implements Component, Focusable {
         return
       }
 
-      const applySnapshot = (snapshot: RunSnapshot) => {
+      const applySnapshot = (snapshot: RunSnapshotView) => {
         this.state = {
           ...this.state,
           snapshot: {

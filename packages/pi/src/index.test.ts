@@ -3,8 +3,9 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { Supervisor, messageTool as realMessageTool } from '@dougbots/avenor-core'
+import { Supervisor, messageTool as realMessageTool, type StatusResult } from '@dougbots/avenor-core'
 import extensionFactory, {
+  type ExtensionDeps,
   buildCompletionText,
   buildInspectPayload,
   CHANNEL_DELIVERY_ERROR,
@@ -151,12 +152,12 @@ describe('Avenor Pi extension', () => {
   })
 
   it('routes avenor_message ask and withdraw through the bound provider', async () => {
-    const calls: Array<Record<string, unknown>> = []
+    const calls: unknown[] = []
     const harness = await startExtensionHarness({
       deps: {
-        messageTool: mock(async (args: Record<string, unknown>) => {
+        messageTool: mock(async (args: unknown) => {
           calls.push(args)
-          return { action: args.action, outcome: 'replied', messageId: 'msg-1', reply: 'ok', text: 'ok' }
+          return { action: (args as { action?: string }).action, outcome: 'replied', messageId: 'msg-1', reply: 'ok', text: 'ok' }
         }),
       },
     })
@@ -974,7 +975,7 @@ describe('Avenor Pi extension', () => {
     const eventHandlers: Map<string, any[]> = new Map()
 
     const mockBus = {
-      emit: mock(() => {}),
+      emit: mock((_channel: string, _payload: unknown) => {}),
       on: mock(() => () => {}),
     }
     const mockPi = {
@@ -1000,7 +1001,7 @@ describe('Avenor Pi extension', () => {
       }
       return { run_id: 'run-1', label: 'demo', status: 'running', runtime_id: 'rt-1' }
     })
-    const resultToolMock = mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' }))
+    const resultToolMock = mock(async (_args: { runId?: string }) => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' }))
     const singletonInterruptAndPrompt = mock(async () => {})
     const singletonCancel = mock(async () => {})
     const ownerInterruptAndPrompt = mock(async () => {})
@@ -1035,10 +1036,21 @@ describe('Avenor Pi extension', () => {
         return result
       }),
       resultTool: resultToolMock,
-      shutdownTool: mock(async () => ({ ok: true })),
+      brokerReceiveTool: mock(async () => ({ asks: [] })),
+      killTool: mock(async () => ({ killed: true, run_id: 'run-1' })),
+      workflowStatusTool: mock(async () => ({})),
+      workflowWaitTool: mock(async () => ({})),
+      workflowInspectTool: mock(async () => ({})),
+      workflowEventsTool: mock(async () => ({})),
+      workflowCompleteTool: mock(async () => ({})),
+      workflowGateTool: mock(async () => ({})),
+      workflowControllerStatusTool: mock(async () => ({})),
+      workflowReadyTool: mock(async () => ({})),
+      workflowCancelTool: mock(async () => ({})),
+      shutdownTool: mock(async () => ({ ok: true, cleaned_up: [] })),
       observeRun: mock(() => null),
-      dial: mock(async () => dialClient),
-      attachOwner: attachOwnerMock,
+      dial: mock(async () => dialClient) as unknown as ExtensionDeps['dial'],
+      attachOwner: attachOwnerMock as unknown as ExtensionDeps['attachOwner'],
       Supervisor: class {
         static isCurrentInstance(supervisorId: string) {
           return supervisorId === '/tmp/sock'
@@ -1323,7 +1335,7 @@ describe('Avenor Pi extension', () => {
       registerCommand: () => {},
       registerMessageRenderer: () => {},
       sendUserMessage: () => {},
-      events: { emit: mock(() => {}), on: mock(() => () => {}) },
+      events: { emit: mock((_channel: string, _payload: unknown) => {}), on: mock(() => () => {}) },
     }
 
     await createExtension({
@@ -1336,13 +1348,23 @@ describe('Avenor Pi extension', () => {
       hostProviderFor: mock(async () => makeMessageProvider()),
       eventsTool: mock(async () => eventsPayload),
       shutdownTool: mock(async () => shutdownPayload),
-      killTool: mock(async (args: Record<string, unknown>) => {
+      killTool: mock(async (args: { runId: string; supervisorId?: string }) => {
         killCalls.push(args)
         return killPayload
       }),
+      brokerReceiveTool: mock(async () => ({ asks: [] })),
+      workflowStatusTool: mock(async () => ({})),
+      workflowWaitTool: mock(async () => ({})),
+      workflowInspectTool: mock(async () => ({})),
+      workflowEventsTool: mock(async () => ({})),
+      workflowCompleteTool: mock(async () => ({})),
+      workflowGateTool: mock(async () => ({})),
+      workflowControllerStatusTool: mock(async () => ({})),
+      workflowReadyTool: mock(async () => ({})),
+      workflowCancelTool: mock(async () => ({})),
       observeRun: mock(() => null),
-      dial: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })),
-      attachOwner: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })),
+      dial: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })) as unknown as ExtensionDeps['dial'],
+      attachOwner: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })) as unknown as ExtensionDeps['attachOwner'],
       Supervisor: class {} as any,
     }, { subAgentEnv: null })(mockPi as any)
 
@@ -1394,38 +1416,11 @@ describe('Avenor Pi extension', () => {
   })
 
   it('registers avenor_inspect with bounded JSON output', async () => {
-    let inspectToolDef: any
-    const mockPi = {
-      on: () => {},
-      registerTool: (def: any) => {
-        if (def.name === 'avenor_inspect') inspectToolDef = def
-      },
-      registerCommand: () => {},
-      registerMessageRenderer: () => {},
-      sendUserMessage: () => {},
-      events: { emit: mock(() => {}), on: mock(() => () => {}) },
-    }
-
-    await createExtension({
-      ...({
-        spawnTool: mock(async () => ({ run_id: 'run-1', label: 'demo', supervisor_id: '/tmp/sock', runtime_id: 'rt-1' })),
-        statusTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', runtime_id: 'rt-1', final_output: 'answer' })),
-        eventsTool: mock(async () => ({ events: [] })),
-        answerPermissionTool: mock(async () => ({ ok: true })),
-        messageTool: mock(async () => ({ outcome: 'sent', messageId: 'm-1', text: 'sent' })),
-          inspectTool: mock(async () => makeInspectResult()),
-        resultTool: mock(async () => ({ run_id: 'run-1', label: 'demo', status: 'done', ready: true, output: 'hello world' })),
-        shutdownTool: mock(async () => ({ ok: true })),
-        observeRun: mock(() => null),
-        dial: mock(async () => ({ close() {}, cancel: async () => {}, prompt: async () => {}, events() { throw new Error('unused') } })),
-        attachOwner: mock(async () => ({ close() {}, cancel: async () => {}, prompt: async () => {}, events() { throw new Error('unused') } })),
-        Supervisor: class {
-          static async get() {
-            return { supervisorId: '/tmp/sock' }
-          }
-        } as any,
-      })
-    }, { subAgentEnv: null })(mockPi as any)
+    const harness = await startExtensionHarness({
+      deps: { inspectTool: mock(async () => makeInspectResult()) },
+      extOptions: { subAgentEnv: null },
+    })
+    const inspectToolDef = harness.registeredTools.avenor_inspect
 
     const result = await inspectToolDef.execute('tool-1', { run_id: 'run-1' })
     expect(result.content[0].text).toContain('"final_output": "hello world"')
@@ -2711,7 +2706,7 @@ describe('Avenor Pi extension', () => {
     const busyAt = Date.now()
     await waitFor(() => h.emitted.some(([channel, payload]) =>
       channel === CHANNEL_POLL_COMPLETED
-      && (payload as { timestamp?: number }).timestamp >= busyAt + 60))
+      && ((payload as { timestamp?: number }).timestamp ?? 0) >= busyAt + 60))
     expect(deliveries()).toHaveLength(1)
     expect(String(h.setStatus.mock.calls.at(-1)?.[1])).toContain('unread:1')
 
@@ -3461,7 +3456,7 @@ describe('Avenor Pi extension', () => {
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
-    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'rt_1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const resultPromise: Promise<{ content: Array<{ text: string }>; details?: unknown }> = h.registeredTools.avenor_result.execute('t2', { run_id: 'rt_1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
     await waitFor(() => resultTool.mock.calls.length === 1)
 
     deliver()
@@ -3496,7 +3491,7 @@ describe('Avenor Pi extension', () => {
     })
 
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
-    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'rt_1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const resultPromise: Promise<{ content: Array<{ text: string }>; details?: unknown }> = h.registeredTools.avenor_result.execute('t2', { run_id: 'rt_1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
     await waitFor(() => resultTool.mock.calls.length === 1)
 
     let outcome: 'returned' | 'rejected' | undefined
@@ -3946,7 +3941,7 @@ describe('Avenor Pi extension', () => {
       spawnTool: mock(async () => ({ run_id: 'rt_1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt-1' })),
     })
 
-    const spawnPromise = h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx)
+    const spawnPromise: Promise<{ content: Array<{ text: string }>; details?: unknown }> = h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx)
 
     deliver()
     await waitFor(() => h.sendUserMessage.mock.calls.length > 0)
@@ -4083,7 +4078,7 @@ describe('Avenor Pi extension', () => {
 
 describe('avenor_spawn parent run id', () => {
   it('names the supervisor as the child parent so the child can ask it back', async () => {
-    const spawnToolMock = mock(async () => ({
+    const spawnToolMock = mock(async (_args: { agent?: string; prompt?: string; wait?: boolean; supervisor_id?: string }) => ({
       run_id: 'run-1',
       label: 'child',
       supervisor_id: '/tmp/sock',
@@ -4113,7 +4108,7 @@ describe('avenor_spawn parent run id', () => {
     const root = fs.realpathSync(socketsDir)
     const OTHER = path.join(root, 'avenor-mcp-other.sock')
     const singleton = path.join(root, 'avenor-mcp-singleton.sock')
-    const spawnToolMock = mock(async () => ({
+    const spawnToolMock = mock(async (_args: { agent?: string; prompt?: string; wait?: boolean; supervisor_id?: string }) => ({
       run_id: 'run-1',
       label: 'child',
       supervisor_id: OTHER,
@@ -4153,7 +4148,7 @@ describe('avenor_spawn parent run id', () => {
     const socketsDir = path.join(home, 'sockets')
     fs.mkdirSync(socketsDir, { recursive: true, mode: 0o700 })
     const SINGLETON = path.join(fs.realpathSync(socketsDir), 'avenor-mcp-singleton.sock')
-    const spawnToolMock = mock(async () => ({
+    const spawnToolMock = mock(async (_args: { agent?: string; prompt?: string; wait?: boolean; supervisor_id?: string }) => ({
       run_id: 'run-1',
       label: 'child',
       supervisor_id: SINGLETON,

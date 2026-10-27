@@ -34,7 +34,7 @@ export function parseChecksums(content: string, assetName: string): string | nul
 export { getInstallDir, getVersion, installerBinaryPath }
 
 export async function postinstall(
-  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  fetchFn: (url: string) => Promise<Response> = globalThis.fetch,
   platform?: string,
   arch?: string,
 ): Promise<void> {

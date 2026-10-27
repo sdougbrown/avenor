@@ -1,5 +1,6 @@
 import { describe, it, expect, mock, beforeEach } from 'bun:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { validateSpawnSelection } from '@dougbots/avenor-core'
 import { z } from 'zod'
@@ -129,7 +130,7 @@ mock.module('@dougbots/avenor-core', () => ({
   validateSpawnSelection,
 }))
 
-const { server, getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } = await import('./mcp.js')
+const { server, startHttpServer, getMcpAuthToken, isAllowedHost, isAllowedOrigin, parseBearerToken } = await import('./mcp.js')
 
 describe('avenor MCP server', () => {
   it('registers kill and maps snake_case to camelCase', async () => {
@@ -141,7 +142,9 @@ describe('avenor MCP server', () => {
       name: 'kill',
       arguments: { run_id: 'run-1', supervisor_id: 'sup-1' },
     })
-    expect(kill).toMatchObject({ killed: true })
+    // Pass-through tools answer with the core result fields and the empty
+    // content list the MCP result schema defaults to.
+    expect(kill).toMatchObject({ killed: true, content: [] })
     expect(killCalls.at(-1)).toEqual({ runId: 'run-1', supervisorId: 'sup-1' })
     await client.close()
     await server.close()
@@ -249,6 +252,34 @@ describe('avenor MCP server', () => {
       } else {
         process.env.MCP_AUTH_TOKEN = original
       }
+    }
+  })
+
+  it('serves the MCP endpoint over HTTP with the web-standard transport', async () => {
+    const authToken = 'http-regression-token'
+    const started = await startHttpServer({ authToken, port: 0 })
+    try {
+      const unauthorized = await fetch(`http://127.0.0.1:${started.port}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      })
+      expect(unauthorized.status).toBe(401)
+
+      const transport = new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${started.port}/mcp`),
+        { requestInit: { headers: { authorization: `Bearer ${authToken}` } } },
+      )
+      const client = new Client({ name: 'http-test-client', version: '0.1.0' })
+      await client.connect(transport)
+      try {
+        const { tools } = await client.listTools()
+        expect(tools.map(tool => tool.name)).toContain('kill')
+      } finally {
+        await client.close()
+      }
+    } finally {
+      await started.stop()
     }
   })
 })

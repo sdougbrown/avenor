@@ -135,7 +135,7 @@ function selectedOptional(record: RecordValue | undefined, key: string): string 
   return optionalScalar(record?.[key])
 }
 
-function hasStatusIdentity(record: RecordValue | undefined): boolean {
+function hasStatusIdentity(record: RecordValue | undefined): record is RecordValue {
   return !!record && !!(stringValue(record.run_id) || stringValue(record.label) || stringValue(record.status))
 }
 

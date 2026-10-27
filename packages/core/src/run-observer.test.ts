@@ -1,12 +1,13 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { observeRun } from './run-observer.js'
+import type { Event, SubscribeOptions } from './client.js'
 
-function delayedIterable(events: unknown[]) {
+function delayedIterable(events: Event[]) {
   let index = 0
   const returnMock = mock(async () => ({ value: undefined, done: true as const }))
   return {
     iterator: {
-      async next() {
+      async next(): Promise<IteratorResult<Event>> {
         if (index >= events.length) {
           await new Promise((resolve) => setTimeout(resolve, 5))
           return { value: undefined, done: true as const }
@@ -24,6 +25,7 @@ function delayedIterable(events: unknown[]) {
   }
 }
 
+
 describe('observeRun', () => {
   it('observes replay+live events in order and filters by runtime', async () => {
     const { iterator } = delayedIterable([
@@ -33,7 +35,7 @@ describe('observeRun', () => {
       { event: 'session.end', runtime_id: 'rt-1', seq: 4, stop_reason: 'end_turn' },
     ])
 
-    const eventsMock = mock(() => iterator)
+    const eventsMock = mock((_options?: SubscribeOptions) => iterator)
     const observer = observeRun({ events: eventsMock }, { runtime_id: 'rt-1', after_seq: 1, limit: 8 })
     const final = await observer.next((snapshot) => snapshot.ended)
 
@@ -49,7 +51,7 @@ describe('observeRun', () => {
       { event: 'session.end', runtime_id: 'rt-1', seq: 7, stop_reason: 'end_turn' },
     ])
     const observer = observeRun(
-      { events: mock(() => iterator) },
+      { events: mock((_options?: SubscribeOptions) => iterator) },
       {
         runtime_id: 'rt-1',
         after_seq: 5,
@@ -77,7 +79,7 @@ describe('observeRun', () => {
 
   it('preserves explicit replay behavior without a runtime filter', async () => {
     const { iterator } = delayedIterable([])
-    const eventsMock = mock(() => iterator)
+    const eventsMock = mock((_options?: SubscribeOptions) => iterator)
 
     const observer = observeRun({ events: eventsMock }, { replay: true })
     await observer.close()
@@ -87,7 +89,7 @@ describe('observeRun', () => {
 
   it('defaults replay to live when no runtime filter is supplied', async () => {
     const { iterator } = delayedIterable([])
-    const eventsMock = mock(() => iterator)
+    const eventsMock = mock((_options?: SubscribeOptions) => iterator)
 
     const observer = observeRun({ events: eventsMock })
     await observer.close()
@@ -102,7 +104,7 @@ describe('observeRun', () => {
     ])
 
     const snapshots: string[] = []
-    const observer = observeRun({ events: mock(() => iterator) })
+    const observer = observeRun({ events: mock((_options?: SubscribeOptions) => iterator) })
     const unsubscribe = observer.subscribe((snapshot) => {
       snapshots.push(snapshot.last_event ?? '')
     })
@@ -136,7 +138,7 @@ describe('observeRun', () => {
 
   it('cleans up the underlying iterator on close', async () => {
     const { iterator, returnMock } = delayedIterable([])
-    const observer = observeRun({ events: mock(() => iterator) })
+    const observer = observeRun({ events: mock((_options?: SubscribeOptions) => iterator) })
     await observer.close()
     expect(returnMock).toHaveBeenCalledTimes(1)
   })

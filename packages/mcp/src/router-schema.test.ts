@@ -20,7 +20,10 @@ describe('routerAdmittedSchema', () => {
   for (const [name, published] of contracts) {
     it(`publishes the ${name} flat contract through zod's public toJSONSchema`, () => {
       const schema = routerAdmittedSchema(published)
-      expect(z.toJSONSchema(schema, { target: 'draft-7', io: 'input' })).toEqual(published)
+      // The contract is plain JSON; the published schema is compared as JSON
+      // rather than as zod's own payload type.
+      const generated: unknown = z.toJSONSchema(schema, { target: 'draft-7', io: 'input' })
+      expect(generated).toEqual(published)
     })
 
     it(`admits omitted and null arguments and leaves ${name} admission to the router`, () => {

@@ -5,11 +5,12 @@ function fakeClient() {
   const workflowCancel = mock(async (_workflowId: string, _actor: string, _reason: string) => ({ cancelled: true }))
   return {
     workflowCancel,
-    getSupervisorClient: mock(async (supervisorId: string) => ({
+    getSupervisorClient: mock(async (supervisorId?: string) => ({
       client: { workflowCancel, close: mock(() => {}) } as any,
       isSingleton: false,
       sup: null,
-      supervisorId,
+      // The real helper resolves a default supervisor when the caller omits one.
+      supervisorId: supervisorId ?? '',
     })),
   }
 }

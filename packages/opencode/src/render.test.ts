@@ -42,8 +42,9 @@ describe('OpenCode Avenor result renderers', () => {
       status: 'waiting',
       final_output: 'hello',
       pending_permission: {
+        request_id: 'perm-1',
         description: 'Read file',
-        options: [{ option_id: 'allow_once', label: 'Allow once' }],
+        options: [{ option_id: 'allow_once', label: 'Allow once', kind: 'allow' }],
       },
       phase: 'tool',
     }

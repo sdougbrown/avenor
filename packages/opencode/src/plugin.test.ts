@@ -15,13 +15,21 @@ import conformance from '../../../schemas/message_route.conformance.json'
 import resultFixture from '../../../schemas/message_route.result.json'
 import { peersDetails, resultOutput } from '../../core/src/message.js'
 
-const spawnToolMock = mock(async () => ({
+type ToolArgs = Record<string, unknown>
+type ToolOutput = Record<string, unknown>
+
+type PromptArgs = {
+  path: { id: string }
+  body: { parts: Array<{ type: string; text: string }> }
+}
+
+const spawnToolMock = mock(async (_args: ToolArgs): Promise<ToolOutput> => ({
   run_id: 'run-1',
   runtime_id: 'rt-1',
   label: 'test run',
   supervisor_id: '/tmp/avenor.sock',
 }))
-const statusToolMock = mock(async () => ({
+const statusToolMock = mock(async (_args: ToolArgs): Promise<ToolOutput> => ({
   run_id: 'run-1',
   runtime_id: 'rt-1',
   session_id: 'child-session',
@@ -98,7 +106,7 @@ const inspectToolMock = mock(async () => {
     final_output: 'final answer',
   }
 })
-const workflowControllerStatusToolMock = mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' }))
+const workflowControllerStatusToolMock = mock(async (_args: ToolArgs): Promise<ToolOutput> => ({ controller_id: 'ctl', desired_state: 'enabled' }))
 const workflowReadyToolMock = mock(async () => ({}))
 
 function makeEventClient(events: unknown[], options: { hangAfterExhausted?: boolean; errorAfterExhausted?: Error } = {}) {
@@ -218,7 +226,7 @@ mock.module('@dougbots/avenor-core', () => ({
 const { AvenorPlugin, buildWaitingText, hostIdentityMetadata, terminalStatus } = await import('./plugin.js')
 const originalFetch = globalThis.fetch
 
-function makeClient(promptAsync = mock(async () => {})) {
+function makeClient(promptAsync = mock(async (_args: PromptArgs) => {})) {
   return {
     session: {
       promptAsync,
@@ -685,7 +693,7 @@ describe('AvenorPlugin', () => {
     ])
     dialQueue.push(waitingStream, completionStream)
 
-    const promptAsync = mock(async () => {})
+    const promptAsync = mock(async (_args: PromptArgs) => {})
     const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
     const spawn = hooks.tool?.avenor_spawn as any
 
@@ -787,7 +795,7 @@ describe('AvenorPlugin', () => {
       final_output: 'routed final',
     }))
 
-    const promptAsync = mock(async () => {})
+    const promptAsync = mock(async (_args: PromptArgs) => {})
     const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
     const spawn = hooks.tool?.avenor_spawn as any
 
@@ -852,7 +860,7 @@ describe('AvenorPlugin', () => {
       { event: 'session.end', runtime_id: 'rt-1', session_id: 'child-session', seq: 1, stop_reason: 'end_turn' },
     ])
     dialQueue.push(firstStream)
-    const promptAsync = mock(async () => {})
+    const promptAsync = mock(async (_args: PromptArgs) => {})
     const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
     const spawn = hooks.tool?.avenor_spawn as any
 
@@ -934,7 +942,7 @@ describe('AvenorPlugin', () => {
     } as any)
     const stream = makeEventClient([], { hangAfterExhausted: true })
     dialQueue.push(stream)
-    const promptAsync = mock(async () => { throw new Error('stop polling after delivery') })
+    const promptAsync = mock(async (_args: PromptArgs) => { throw new Error('stop polling after delivery') })
     const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
 
     await (hooks.tool?.avenor_spawn as any).execute(
@@ -1312,7 +1320,7 @@ describe('OpenCode message tool parity', () => {
     dialQueue.push(makeEventClient([
       { event: 'session.end', runtime_id: 'rt-2', seq: 1, stop_reason: 'end_turn' },
     ]))
-    const promptAsync = mock(async () => {})
+    const promptAsync = mock(async (_args: PromptArgs) => {})
     const originalError = console.error
     console.error = () => {}
     try {
