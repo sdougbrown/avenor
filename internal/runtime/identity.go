@@ -54,9 +54,9 @@ var identityEnvKeys = func() map[string]struct{} {
 }()
 
 // ScrubbedEnvNames returns every environment name a child must not inherit:
-// launch identity, the test-only switches, and the parent-link credential.
-// A shell launcher that assembles its child's environment by hand unsets
-// these instead of calling ScrubIdentityEnv.
+// launch identity, the test-only switches, and the parent-link URL and
+// credential. A shell launcher that assembles its child's environment by hand
+// unsets these instead of calling ScrubIdentityEnv.
 func ScrubbedEnvNames() []string {
 	return append([]string(nil), scrubbedEnvNames...)
 }

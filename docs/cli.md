@@ -306,7 +306,17 @@ TOKEN=$(avenor parent-token)
 # Hub: fixed broker address, link credential in the environment.
 AVENOR_PARENT_BROKER_TOKEN=$TOKEN \
   avenor stable --control-socket /tmp/hub.sock --broker-addr 127.0.0.1:8787 &
-# The hub publishes the URL it actually bound (here, the fixed address):
+# The record appears once the hub owns its control socket; wait for it, then read
+# the URL it actually bound (here, the fixed address).
+waited=0
+while [ ! -e /tmp/hub.sock.broker.url ]; do
+  waited=$((waited + 1))
+  if [ "$waited" -gt 100 ]; then
+    echo "hub broker URL record never appeared: /tmp/hub.sock.broker.url" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
 cat /tmp/hub.sock.broker.url             # http://127.0.0.1:8787
 
 # Branch: no --broker-parent-url needed; the environment names the hub.

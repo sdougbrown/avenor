@@ -317,12 +317,22 @@ pid kill is guarded, so a spawn that never happened cannot turn into a `kill 0`
 of this shell's process group:
 
 ```sh
+await_gone() {  # await_gone <path> <seconds> <what>
+  _n=0
+  while [ -e "$1" ]; do
+    _n=$((_n + 1))
+    [ "$_n" -le $(($2 * 10)) ] || { echo "FAIL: $3 still exists after ${2}s: $1" >&2; return 1; }
+    sleep 0.1
+  done
+}
 for s in "$SCRATCH/branch-home"/sockets/*.sock "$SCRATCH/branch-b.sock" \
          "$SCRATCH/branch-a.sock" "$HUB_SOCK"; do
   [ -S "$s" ] && "$BIN" control --socket "$s" shutdown graceful
 done
-if [ -n "$BRANCH_HOME_SOCK" ] && [ -e "$BRANCH_HOME_SOCK.broker.url" ]; then
-  echo "FAIL: autostarted branch broker URL record survived shutdown" >&2
+# The shutdown RPC returns before the supervisor has finished removing its
+# record, so wait for the removal instead of checking once.
+if [ -n "$BRANCH_HOME_SOCK" ]; then
+  await_gone "$BRANCH_HOME_SOCK.broker.url" 10 "autostarted branch broker URL record" || exit 1
 fi
 for pid in "$HOST_PID" "$BRANCH_B_PID" "$BRANCH_A_PID" "$HUB_PID"; do
   case "$pid" in ''|*[!0-9]*) continue ;; esac   # unset or not a pid: never kill

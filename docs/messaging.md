@@ -290,10 +290,11 @@ token (neither the env var nor the flag) exits with an error.
 
 A branch's broker must also be reachable *from* the hub, because the hub relays
 an ask into the branch's own endpoint. On one host the default ephemeral
-loopback bind is enough; across hosts, give each branch `--broker-addr` bound to
-an address the hub can reach, and give the hub one the branches can reach. The
-parent link is not a tunnel: both directions of the deployment must be
-addressable.
+loopback bind is enough. Across hosts, manually launch the hub and each branch
+with `--broker-addr` on a concrete interface. Branches must reach the hub, and
+the hub must reach each branch. Autostart cannot configure this address and
+keeps the ephemeral loopback bind. The parent link is not a tunnel: both
+directions of the deployment must be addressable.
 
 The hub can discover and address registered branches' runs. Descendant callers
 cannot list sibling branches' runs; joining a hub does not grant sibling

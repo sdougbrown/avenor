@@ -105,9 +105,7 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 		{
 			name: "parent-token",
 			setup: func(t *testing.T) {
-				// A lone credential only stays stripped while no parent URL is
-				// inherited: an ambient URL makes the child a branch, whose
-				// credential is forwarded on purpose.
+				// A parent URL would intentionally forward this credential.
 				t.Setenv(token.EnvBrokerParentURL, "")
 				t.Setenv(token.EnvBrokerParentToken, "leaked-credential")
 			},
