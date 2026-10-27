@@ -14,6 +14,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
 )
 
 func TestWarmResumeRotatesArtifactsAndRejectsConcurrentAdmission(t *testing.T) {
@@ -67,6 +68,125 @@ func TestWarmResumeRotatesArtifactsAndRejectsConcurrentAdmission(t *testing.T) {
 	if _, err := os.Stat(nextSentinel); !os.IsNotExist(err) {
 		t.Fatalf("new sentinel exists before completion: %v", err)
 	}
+}
+
+// TestWarmResumeRefusesUnverifiedArtifactRoot pins parity with the cold-spawn
+// artifact hardening: a warm resume that needs the default artifact tree is
+// refused on the same roots ensureArtifactRoot refuses, and it creates
+// nothing under them.
+func TestWarmResumeRefusesUnverifiedArtifactRoot(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, root string) string
+	}{
+		{
+			name: "symlinked root",
+			prepare: func(t *testing.T, root string) string {
+				target := t.TempDir()
+				if err := os.Symlink(target, root); err != nil {
+					t.Fatal(err)
+				}
+				return target
+			},
+		},
+		{
+			name: "group writable root",
+			prepare: func(t *testing.T, root string) string {
+				if err := os.Mkdir(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(root, 0o770); err != nil {
+					t.Fatal(err)
+				}
+				return root
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := artifactRoot()
+			if err := os.RemoveAll(root); err != nil {
+				t.Fatal(err)
+			}
+			target := tc.prepare(t, root)
+			t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+			child := &childRuntime{id: "rt", promptCh: make(chan struct{}, 1)}
+			initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+			sup := &Supervisor{runID: "warmtest"}
+			_, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next"})
+			if !warm || err == nil || !strings.Contains(err.Error(), root) {
+				t.Fatalf("admission: warm=%v err=%v, want a refusal naming %s", warm, err, root)
+			}
+			entries, err := os.ReadDir(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("refused admission created %v under the root", entries)
+			}
+			if len(child.promptQueue) != 0 || child.onEvent != "" || child.sentinelFile != "" {
+				t.Fatal("refused admission changed the child's turn")
+			}
+		})
+	}
+}
+
+// warmGuardProvider is a provider whose sessions carry the warm-message
+// admission guard, the way channel-backed providers do.
+type warmGuardProvider struct {
+	*warmqueue.Queue
+	*stableScriptedProvider
+}
+
+// TestWarmResumeRefusesPendingProviderMessage pins the provider-side warm
+// guard: a prompt polled into a parked runtime's provider queue leaves the
+// broker's ControlQueue empty, so the guard is what refuses admission. The
+// refusal must release the broker admission lock, and a drained queue must
+// admit with a callable unlock.
+func TestWarmResumeRefusesPendingProviderMessage(t *testing.T) {
+	root := t.TempDir()
+	b := broker.New("")
+	b.CreateRun("rt", "")
+	queue := warmqueue.NewQueue()
+	queue.Enqueue("session", "queued prompt")
+	provider := &warmGuardProvider{
+		Queue: queue,
+		stableScriptedProvider: &stableScriptedProvider{attempt: -1, scripts: []stableScriptedAttempt{
+			itestAttempt("session", itestSessionEnd("session", "end_turn", "next")),
+		}},
+	}
+	child := &childRuntime{id: "rt", provider: provider, session: runtime.Session{SessionID: "session"}, onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	sup := &Supervisor{broker: b}
+
+	_, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: filepath.Join(root, "new"), SentinelFile: filepath.Join(root, "new-sentinel")})
+	if !warm || err == nil || !strings.Contains(err.Error(), "pending provider messages") {
+		t.Fatalf("admission: warm=%v err=%v, want a provider-message refusal", warm, err)
+	}
+	// The refusal released the broker admission lock instead of leaking it.
+	release, err := sup.broker.LockWarmAdmission("rt", "")
+	if err != nil {
+		t.Fatalf("broker admission lock leaked: %v", err)
+	}
+	release(false)
+	// A drained queue lets the same admission through.
+	queue.Reset()
+	result, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: filepath.Join(root, "new"), SentinelFile: filepath.Join(root, "new-sentinel")})
+	if err != nil || !warm {
+		t.Fatalf("admission after reset: warm=%v err=%v", warm, err)
+	}
+	defer child.eventWriter.Close()
+	if result.RuntimeID != "rt" || len(child.promptQueue) != 1 {
+		t.Fatalf("admission result = %+v, promptQueue=%d", result, len(child.promptQueue))
+	}
+	// An empty queue admits and hands back a callable unlock.
+	brokerRelease, unlock, err := sup.lockWarmResumeAdmission(child, "")
+	if err != nil || brokerRelease == nil || unlock == nil {
+		t.Fatal("empty-queue admission failed or returned a nil release or unlock")
+	}
+	unlock()
+	brokerRelease(false)
 }
 
 func TestWarmResumeRejectsPendingBrokerMessage(t *testing.T) {

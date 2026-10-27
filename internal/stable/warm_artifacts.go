@@ -162,7 +162,9 @@ func (s *Supervisor) lockWarmResumeAdmission(child *childRuntime, label string) 
 
 // reserveWarmResumeArtifacts picks the next turn's event and sentinel paths,
 // rejects path collisions, exclusively creates the event file, and parses the
-// derived permission handler. Every fallible step happens here, so a failure
+// derived permission handler. Default paths live under the shared artifact
+// root, so their directory is created through the same verified-root path a
+// cold spawn uses. Every fallible step happens here, so a failure
 // releases the whole reservation — the new writer is closed and reserved
 // directories removed — and the caller's child state is untouched. Requires
 // child.mu (the collision checks compare against the child's current paths).
@@ -170,11 +172,10 @@ func (s *Supervisor) reserveWarmResumeArtifacts(child *childRuntime, p SpawnPara
 	onEvent, sentinel := p.OnEvent, p.SentinelFile
 	var dir string
 	if onEvent == "" || sentinel == "" {
-		root := s.runtimeArtifactDir(child.id)
-		if err := os.MkdirAll(root, 0700); err != nil {
+		root, err := createArtifactRunDir(s.runID, child.id)
+		if err != nil {
 			return warmResumeArtifacts{}, err
 		}
-		var err error
 		dir, err = os.MkdirTemp(root, "turn-")
 		if err != nil {
 			return warmResumeArtifacts{}, err

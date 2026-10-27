@@ -364,6 +364,29 @@ func TestResumeRefusesActiveRuntimeEvenWithDoneSentinel(t *testing.T) {
 	}
 }
 
+// TestResumeKeyedBusyRefusalIsToolError pins the keyed path's error mapping:
+// a plain refusal from the resume work — a busy target, the way a teardown-in-
+// progress one refuses — must surface as a refused ToolError carrying the
+// original message, not as the raw error.
+func TestResumeKeyedBusyRefusalIsToolError(t *testing.T) {
+	sup, provider := newStage2Supervisor(t, 4)
+	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: t.TempDir(), Label: "prior"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSentinel(t, prior.SentinelFile, "DONE", "ses_resumed")
+	_, err = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue", IdempotencyKey: "k",
+	})
+	assertToolCode(t, err, "refused")
+	if !strings.Contains(err.Error(), "busy") {
+		t.Fatalf("error = %v, want the busy message preserved", err)
+	}
+	if got := provider.resumesRecorded(); len(got) != 0 {
+		t.Fatalf("unexpected concurrent resume: %v", got)
+	}
+}
+
 func TestResumeReportsSpawnedPaths(t *testing.T) {
 	sup, _ := newStage2Supervisor(t, 4)
 	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: t.TempDir(), Label: "prior"})
