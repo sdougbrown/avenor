@@ -131,24 +131,27 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 	}
 	const readyEnv = "AVENOR_CONTROL_READY_FD="
 	const identityEnv = token.EnvControlIdentityToken + "="
-	// Forward the parent credential only when a URL selects a hub to join.
-	// A lone credential would instead enable this nested supervisor's parent
-	// routes under the operator's shared secret.
 	parentURL := ""
 	for _, entry := range env {
 		if value, ok := strings.CutPrefix(entry, token.EnvBrokerParentURL+"="); ok {
 			parentURL = value
 		}
 	}
-	strippedEnvs := []string{
-		readyEnv,
-		identityEnv,
-		runtime.EnvTestHooks + "=",
-		runtime.EnvTestOwnerPublishDelay + "=",
-		// The advertised address belongs to the broker the operator configured
-		// it for. A nested supervisor runs its own broker, so inheriting the
-		// value would make it claim its ancestor's published address.
-		token.EnvBrokerAdvertiseURL + "=",
+	// The strip list is sourced from runtime's single broker/test name list so
+	// a name added there is stripped here without a second hand-maintained
+	// copy. The parent URL is deliberately forwarded so the nested supervisor
+	// joins the same hub, and the parent credential rides along only with it:
+	// a lone credential would instead enable this child's parent routes under
+	// the operator's shared secret.
+	strippedEnvs := []string{readyEnv, identityEnv}
+	for _, name := range runtime.BrokerEnvNames() {
+		if name == token.EnvBrokerParentURL {
+			continue
+		}
+		if name == token.EnvBrokerParentToken && strings.TrimSpace(parentURL) != "" {
+			continue
+		}
+		strippedEnvs = append(strippedEnvs, name+"=")
 	}
 	// A provisioned session's peer credential names the run its own plugin
 	// joined, not this supervisor's. Stripping it here keeps the autostarted
@@ -156,9 +159,6 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 	// hand; the harness children it launches are scrubbed by LaunchEnv.
 	for _, name := range runtime.PeerEnvNames() {
 		strippedEnvs = append(strippedEnvs, name+"=")
-	}
-	if strings.TrimSpace(parentURL) == "" {
-		strippedEnvs = append(strippedEnvs, token.EnvBrokerParentToken+"=")
 	}
 	cmd.Env = make([]string, 0, len(env)+2)
 	for _, entry := range env {

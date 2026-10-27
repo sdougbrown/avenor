@@ -40,19 +40,36 @@ var identityEnvNames = []string{
 	envParentRunID,
 }
 
-// scrubbedEnvNames excludes launch identity, test switches, the broker's
-// parent-link and advertised-address configuration, the retired label spelling,
-// and the avenor peer credential vocabulary from children. The parent-link
-// credential grants broker authority and a lone parent URL makes nested
-// supervisor startup fail; an inherited advertised URL would make a nested
+// brokerEnvNames lists the test-only switches and the broker's parent-link and
+// advertised-address configuration. None of them is ever emitted to a child:
+// the credential grants broker authority, a lone parent URL makes nested
+// supervisor startup fail, and an inherited advertised URL would make a nested
 // supervisor's broker claim its ancestor's public address, which routes relays
-// into the wrong branch; an inherited peer credential makes the child join the
-// broker as a run another live session already holds. All of them are stripped
-// here rather than by each backend, so a launcher that forgets an extra call
-// still cannot hand any one down.
+// into the wrong branch.
+var brokerEnvNames = []string{
+	EnvTestHooks,
+	EnvTestOwnerPublishDelay,
+	token.EnvBrokerParentToken,
+	token.EnvBrokerParentURL,
+	token.EnvBrokerAdvertiseURL,
+}
+
+// BrokerEnvNames returns the test-only switches and the broker's parent-link
+// and advertised-address configuration names. A strip point that assembles a
+// child environment by hand builds its strip list from this instead of
+// re-enumerating the names.
+func BrokerEnvNames() []string {
+	return append([]string(nil), brokerEnvNames...)
+}
+
+// scrubbedEnvNames excludes launch identity, the broker and test names, the
+// retired label spelling, and the avenor peer credential vocabulary from
+// children. An inherited peer credential makes the child join the broker as a
+// run another live session already holds, so it is stripped here rather than by
+// each backend: a launcher that forgets an extra call still cannot hand it down.
 var scrubbedEnvNames = append(
-	append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken, token.EnvBrokerParentURL, token.EnvBrokerAdvertiseURL, envRetiredPeerName),
-	peerEnvNames...,
+	append(append([]string(nil), identityEnvNames...), brokerEnvNames...),
+	append([]string{envRetiredPeerName}, peerEnvNames...)...,
 )
 
 var identityEnvKeys = func() map[string]struct{} {

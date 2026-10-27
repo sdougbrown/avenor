@@ -167,6 +167,54 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 	}
 }
 
+// TestSupervisorChildStripsEveryBrokerEnvName pins that the nested strip list
+// is sourced from runtime.BrokerEnvNames: a name added there is stripped from
+// the autostarted supervisor's environment without editing this launcher. The
+// parent URL is deliberately forwarded, and the parent credential's
+// conditional forwarding is pinned by
+// TestSupervisorForwardsParentLinkWhenURLInEnv, so both are skipped here.
+func TestSupervisorChildStripsEveryBrokerEnvName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AVENOR_TEST_UNRELATED_MARKER", "inherited-value")
+	forwarded := map[string]bool{token.EnvBrokerParentURL: true}
+	var stripped []string
+	for _, name := range runtime.BrokerEnvNames() {
+		if forwarded[name] {
+			continue
+		}
+		t.Setenv(name, "must-not-reach-the-child")
+		stripped = append(stripped, name)
+	}
+	var child *exec.Cmd
+	origExec := execCommand
+	execCommand = func(string, ...string) *exec.Cmd {
+		child = exec.Command("/nonexistent/avenor-test-stub")
+		return child
+	}
+	t.Cleanup(func() { execCommand = origExec })
+
+	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+	if child == nil {
+		t.Fatal("startSupervisor never built a child command")
+	}
+	for _, entry := range child.Env {
+		for _, name := range stripped {
+			if strings.HasPrefix(entry, name+"=") {
+				t.Fatalf("%q reached the supervisor child environment", entry)
+			}
+		}
+	}
+	foundMarker := false
+	for _, entry := range child.Env {
+		if entry == "AVENOR_TEST_UNRELATED_MARKER=inherited-value" {
+			foundMarker = true
+		}
+	}
+	if !foundMarker {
+		t.Fatal("the unrelated inherited marker was not preserved in the child environment")
+	}
+}
+
 func TestSupervisorForwardsParentLinkWhenURLInEnv(t *testing.T) {
 	tests := []struct {
 		name      string
