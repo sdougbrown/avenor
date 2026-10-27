@@ -286,6 +286,8 @@ func (s *Session) FailUnreadyLaunch(ctx context.Context) {
 		_ = s.Term.Kill(killCtx)
 		cancel()
 	}
+	// For the same reason, drop the log now; the verdict does not use it.
+	s.RemoveStderrLog()
 	// The dead terminal can end runSession first. EmitTerminalGone then claims
 	// and reports this same verdict, and its teardown cancels the session.
 	if !s.MarkFinished() {

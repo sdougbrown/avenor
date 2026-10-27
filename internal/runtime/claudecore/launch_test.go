@@ -455,6 +455,70 @@ func TestFailUnreadyLaunchLeavesAPasteInFlightAlone(t *testing.T) {
 	}
 }
 
+func TestFailUnreadyLaunchYieldsToAVerdictClaimedDuringTheKill(t *testing.T) {
+	// The kill can let runSession's exit watcher claim first. That claimant
+	// emits and tears down; a second session.end or a cancel from here could
+	// beat its emit to the Events reader.
+	s := newTestSession(t, approvalDialogPane)
+	s.Term = hookTerm{FakeSession: s.Term.(*terminal.FakeSession), onKill: func() { s.MarkFinished() }}
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("emitted %q after another claimant took the verdict", ev.Event)
+	default:
+	}
+	if s.Ctx.Err() != nil {
+		t.Error("session context cancelled under another claimant's verdict")
+	}
+}
+
+func TestFailUnreadyLaunchRemovesTheStderrLog(t *testing.T) {
+	// A one-shot caller exits on session.end, before runSession's teardown
+	// would remove the log.
+	s := newTestSession(t, approvalDialogPane)
+	writeStderrLog(t, s, "")
+	path := s.StderrLog
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("stderr log still present after FailUnreadyLaunch: %v", err)
+	}
+}
+
+func TestAFailedPasteReleasesTheSession(t *testing.T) {
+	// A paste that never reached Claude is not a first turn, so an unready
+	// verdict can still end the session.
+	s := newTestSession(t, approvalDialogPane)
+	if !s.BeginPaste() {
+		t.Fatal("BeginPaste = false on a live session")
+	}
+	s.EndPaste(false)
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	drainEvent(t, s)
+	if end := drainEvent(t, s); end.Fields["stop_reason"] != StopReasonTerminalNotReady {
+		t.Errorf("stop_reason = %v, want %s", end.Fields["stop_reason"], StopReasonTerminalNotReady)
+	}
+}
+
+func TestEndPasteReportsASessionThatEndedMeanwhile(t *testing.T) {
+	// The caller reports the paste only while the session runs; nothing may
+	// follow its session.end.
+	s := newTestSession(t, approvalDialogPane)
+	if !s.BeginPaste() {
+		t.Fatal("BeginPaste = false on a live session")
+	}
+	s.MarkFinished()
+
+	if s.EndPaste(true) {
+		t.Error("EndPaste = true for a session that finished during the paste")
+	}
+}
+
 func TestBeginPasteRefusesAnUnreadyLaunch(t *testing.T) {
 	// Once FailUnreadyLaunch has taken the session it kills the terminal, so a
 	// paste starting after that would land nowhere.

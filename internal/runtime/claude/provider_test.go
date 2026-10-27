@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1036,6 +1037,45 @@ func TestAPasteInFlightHoldsOffAnUnreadyLaunchVerdict(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatal("no agent.prompt_submitted for the paste in flight")
+		}
+	}
+}
+
+func TestAFailedPasteLeavesTheLaunchToFail(t *testing.T) {
+	// A paste that errored never reached Claude, so it must not hold off an
+	// unready verdict.
+	term := terminal.NewFakeSession("test-term", 1, claudecoretest.InputBoxReady)
+	term.SetPasteErr(errors.New("paste failed"))
+	p, s := newPromptSession(t, term, 2*time.Second)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	deadline := time.After(3 * time.Second)
+waitFailed:
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "agent.prompt_failed" {
+				break waitFailed
+			}
+		case <-deadline:
+			t.Fatal("no agent.prompt_failed for the failed paste")
+		}
+	}
+	s.FailUnreadyLaunch(s.Ctx)
+
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "session.end" {
+				if got := ev.Fields["stop_reason"]; got != claudecore.StopReasonTerminalNotReady {
+					t.Errorf("stop_reason = %v, want %s", got, claudecore.StopReasonTerminalNotReady)
+				}
+				return
+			}
+		default:
+			t.Fatal("no session.end after a failed paste")
 		}
 	}
 }
