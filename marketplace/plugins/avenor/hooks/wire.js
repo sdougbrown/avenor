@@ -22,6 +22,10 @@ function safeParse(text) {
   }
 }
 
+/**
+ * Random bytes as lowercase hex: the suffix of a self-minted run id, and the
+ * randomness mintMessageID appends to its encoded deadline.
+ */
 export function randomHex(nBytes) {
   const bytes = new Uint8Array(nBytes)
   globalThis.crypto.getRandomValues(bytes)
@@ -30,11 +34,6 @@ export function randomHex(nBytes) {
     out += byte.toString(16).padStart(2, "0")
   }
   return out
-}
-
-/** A run-id suffix for a self-minted identity, and a disambiguator for names. */
-export function shortHex(nBytes) {
-  return randomHex(nBytes)
 }
 
 /**

@@ -37,7 +37,7 @@
 import { parseAvenorAddress, matchSession } from "./addresses.js"
 import {
   mintMessageID,
-  shortHex,
+  randomHex,
   buildAgentMessage,
   parseControlMessage,
   extractReplyMessage,
@@ -233,7 +233,7 @@ async function registerRun(d, url, envRunID, envToken) {
   let runID = envRunID
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (!runID) {
-      runID = "claude-" + shortHex(3)
+      runID = "claude-" + randomHex(3)
     }
     const registration = envToken !== "" ? { run_id: runID, token: envToken } : { run_id: runID }
     try {
