@@ -15,7 +15,7 @@ import type {
 import { RpcError } from '../client.js'
 import { ensureRunPaths } from '../paths.js'
 import { Supervisor, retainLiveIdentity, type RunInfo } from '../supervisor.js'
-import { newMsgID, type MessageOutcome } from '../messaging-text.js'
+import { newMsgID, quote, type MessageOutcome } from '../messaging-text.js'
 import { ToolError } from '../message.js'
 import { findExternalRunById, listExternalRuns, registerExternalRun } from './run-registry.js'
 import { RESUMABLE_SENTINEL_STATUSES } from './sentinel-status.js'
@@ -141,11 +141,14 @@ export function isGenerationMismatchError(error: unknown): boolean {
  * `statusReportsNoRuntime`. The control plane carries that answer as a server
  * failure (-32000) whose message names the runtime it could not find, with no
  * structured data to key on, so the report is matched exactly: same code, same
- * runtime id, same sentence. Anything else is a failure the caller keeps.
+ * runtime id, same sentence. The supervisor builds the sentence with Go's
+ * `%q`, which escapes a `"` and a `\` the way `quote` does, so the id is
+ * rendered rather than interpolated. Anything else is a failure the caller
+ * keeps.
  */
 function isRuntimeNotFoundError(error: unknown, runId: string): boolean {
   if (!(error instanceof RpcError) || error.code !== -32000) return false
-  return rpcText(error) === `runtime "${runId}" not found`
+  return rpcText(error) === `runtime ${quote(runId)} not found`
 }
 
 /** Reject an abort exactly the way fetch does, so the ask cleanup path runs. */
@@ -354,12 +357,16 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
   // listedState reads one target's state from the broker's peer listing, which
   // is the only authority for a run this supervisor does not run. It answers
   // nothing for a listing that could not be read completely or that does not
-  // hold the run, so the caller keeps the failure it already had.
+  // hold the run, so the caller keeps the failure it already had. A stale
+  // generation is not the listing's answer: the surface retries the whole call
+  // once after a re-preflight, and a mismatch swallowed here would report the
+  // status failure instead of letting that retry run.
   async function listedState(runId: string): Promise<RunFacts | undefined> {
     let listed: { peers: PeerRecord[]; detail?: string }
     try {
       listed = await listedPeers()
-    } catch {
+    } catch (error) {
+      if (isGenerationMismatchError(error)) throw error
       return undefined
     }
     if (listed.detail) return undefined

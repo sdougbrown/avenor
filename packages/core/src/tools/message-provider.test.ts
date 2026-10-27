@@ -274,6 +274,38 @@ describe('host message provider', () => {
     await expect(provider(other).state(peerRunId)).rejects.toThrow('rt_someone_else')
   })
 
+  it('recognizes the absence answer Go renders with %q for an id carrying quotes and a backslash', async () => {
+    const peerRunId = 'rt_a"b\\c'
+    const client = fakeClient({
+      // The supervisor builds this sentence with fmt.Errorf("runtime %q not found"),
+      // so the id arrives Go-quoted rather than interpolated.
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_a\\"b\\\\c" not found')
+      }),
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: peerRunId, session: { run_id: peerRunId, label: 'branch-target', status: 'running' } }],
+      })),
+    })
+    expect(await provider(client).state(peerRunId)).toMatchObject({ live: true, resumable: false, status: 'running' })
+  })
+
+  it('lets a stale generation from the listing read out, so the surface can retry with a fresh one', async () => {
+    const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
+    const client = fakeClient({
+      status: mock(async (runtimeId?: string) => {
+        throw new RpcError(-32000, `runtime "${runtimeId ?? ''}" not found`)
+      }),
+      messagePeers: mock(async () => {
+        throw new RpcError(-32000, 'messaging: generation mismatch', {
+          code: 'generation-mismatch',
+          wire_code: 'generation-mismatch',
+        })
+      }),
+    })
+    const error = await provider(client).state(peerRunId).catch(err => err)
+    expect(isGenerationMismatchError(error)).toBe(true)
+  })
+
   it('refuses resolution on an incomplete listing and preserves the transport detail', async () => {
     const client = fakeClient({
       messagePeers: mock(async () => ({
