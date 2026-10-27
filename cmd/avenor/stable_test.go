@@ -420,7 +420,7 @@ func TestRunStableWildcardBrokerAddrRejected(t *testing.T) {
 		_ = r.Close()
 	}()
 
-	code := runStable([]string{"--control-socket", socketPath, "--broker-addr", "0.0.0.0:8787"})
+	code := runStable([]string{"--control-socket", socketPath, "--broker-addr", "0.0.0.0:0"})
 	_ = w.Close()
 	os.Stderr = oldStderr
 	var stderr bytes.Buffer

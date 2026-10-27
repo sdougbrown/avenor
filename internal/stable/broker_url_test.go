@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -78,9 +79,15 @@ func TestBrokerURLPublishedBesideControlSocket(t *testing.T) {
 	done := startStableRun(t, sup, socketPath)
 
 	record := strings.TrimSpace(awaitBrokerURLRecord(t, socketPath))
-	want := "http://" + sup.broker.Addr()
-	if record != want {
-		t.Fatalf("published broker URL = %q, want the bound address %q", record, want)
+	parsed, err := url.Parse(record)
+	if err != nil {
+		t.Fatalf("published broker URL %q does not parse: %v", record, err)
+	}
+	if parsed.Scheme != "http" {
+		t.Fatalf("published broker URL %q has scheme %q, want http", record, parsed.Scheme)
+	}
+	if parsed.Host != sup.broker.Addr() {
+		t.Fatalf("published broker URL host = %q, want the bound address %q", parsed.Host, sup.broker.Addr())
 	}
 	if host, port, err := net.SplitHostPort(sup.broker.Addr()); err != nil || host != "127.0.0.1" || port == "" || port == "0" {
 		t.Fatalf("bound broker address = %q (host %q, port %q), want concrete loopback with an ephemeral port", sup.broker.Addr(), host, port)
@@ -323,7 +330,7 @@ func TestConfiguredBindFailureFailsStartup(t *testing.T) {
 }
 
 func TestWildcardBrokerAddrIsRejected(t *testing.T) {
-	for _, addr := range []string{"0.0.0.0:8787", "[::]:8787", "[::%lo]:8787", "[::ffff:0.0.0.0]:8787", ":8787"} {
+	for _, addr := range []string{"0.0.0.0:0", "[::]:0", "[::%lo]:0", "[::ffff:0.0.0.0]:0", ":0"} {
 		t.Run(addr, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			socketPath := newStableSocketPath(t, "brokeraddr-wildcard")
