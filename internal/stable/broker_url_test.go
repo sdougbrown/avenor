@@ -13,6 +13,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/token"
 )
 
 // reserveStableLoopbackAddr reserves a loopback port and releases it so a test
@@ -497,5 +498,47 @@ func TestWildcardBrokerAddrIsRejected(t *testing.T) {
 				t.Fatalf("control socket bound despite the wildcard broker address: %v", err)
 			}
 		})
+	}
+}
+
+// TestAdvertisedURLWithoutConcreteBindIsRejected pins that an advertised URL is
+// only honored over a listener the operator named: an ephemeral bind chooses a
+// port the advertised URL hides, so a TLS terminator could not be pointed at it
+// and a parent relay could not back it. The refusal is fatal, before any
+// socket or record, naming the two flags involved.
+func TestAdvertisedURLWithoutConcreteBindIsRejected(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	socketPath := newStableSocketPath(t, "brokerurl-advertise-ephemeral")
+
+	stderr := captureStderr(t, func(w io.Writer) {
+		sup := newTestSupervisor(t, Config{
+			ControlSocket:      socketPath,
+			BrokerAdvertiseURL: "https://hub.example.com:8443",
+			MaxRuntimes:        1,
+			Stderr:             w,
+		})
+		done := make(chan int, 1)
+		go func() { done <- sup.Run() }()
+		select {
+		case code := <-done:
+			if code != 1 {
+				t.Fatalf("Run() = %d, want 1 for an advertised URL over an ephemeral bind", code)
+			}
+		case <-time.After(5 * time.Second):
+			_ = sup.Shutdown("kill")
+			<-done
+			t.Fatal("Run() kept serving an advertised URL over an ephemeral bind")
+		}
+	})
+	for _, want := range []string{"--broker-advertise-url", "--broker-addr", token.EnvBrokerAdvertiseURL} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr = %q, want it to name %q", stderr, want)
+		}
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("control socket bound despite the advertise/ephemeral conflict: %v", err)
+	}
+	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
+		t.Fatalf("broker URL record published despite the advertise/ephemeral conflict: %v", err)
 	}
 }

@@ -36,6 +36,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
+	"github.com/sdougbrown/avenor/internal/token"
 	"github.com/sdougbrown/avenor/internal/workflow"
 	"github.com/sdougbrown/avenor/internal/workflowcontroller"
 )
@@ -833,7 +834,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		})
 		// A value Run rejects must not seed a link that would retry its
 		// registration against a parent that refuses it.
-		if sup.brokerAdvertiseErr == nil {
+		if sup.brokerAdvertiseErr == nil && sup.ephemeralAdvertiseRefusal() == "" {
 			sup.installParentLink()
 		}
 	}
@@ -922,6 +923,16 @@ func (s *Supervisor) Run() (exitCode int) {
 
 	if s.brokerAdvertiseErr != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: %v\n", s.brokerAdvertiseErr)
+		reason = "start_failed"
+		return 1
+	}
+
+	// An advertised URL only makes sense over a listener the operator named:
+	// an ephemeral bind chooses a port the advertised URL hides, so a TLS
+	// terminator could not be pointed at it and a parent relay could not back
+	// it. Refuse the combination the way a wildcard bind is refused.
+	if refusal := s.ephemeralAdvertiseRefusal(); refusal != "" {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: %s; set a concrete --broker-addr (e.g. 127.0.0.1:8787) together with --broker-advertise-url or %s\n", refusal, token.EnvBrokerAdvertiseURL)
 		reason = "start_failed"
 		return 1
 	}
@@ -2120,6 +2131,17 @@ func (s *Supervisor) advertisedBrokerURL() string {
 		return s.brokerAdvertisedURL
 	}
 	return bound
+}
+
+// ephemeralAdvertiseRefusal reports why a configured advertised URL cannot ride
+// on the default ephemeral bind, or empty when the pair is workable: an
+// advertised URL points off-host at a listener whose port the operator chose,
+// while an ephemeral bind chooses a port the advertised URL hides.
+func (s *Supervisor) ephemeralAdvertiseRefusal() string {
+	if s.brokerAdvertisedURL == "" || s.config.BrokerAddr != "" {
+		return ""
+	}
+	return fmt.Sprintf("--broker-advertise-url %s requires a concrete --broker-addr bind; the ephemeral bind publishes a URL that hides the actually bound port", s.brokerAdvertisedURL)
 }
 
 // installParentLink wires this broker to its parent broker when the supervisor
