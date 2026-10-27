@@ -288,7 +288,9 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 		p.broker.DeleteRun(s.RunID)
 	}()
 	defer func() {
-		_ = s.Term.Kill(ctx)
+		// Not ctx: it is usually cancelled by now, and tmux kill-session under
+		// a cancelled context never runs, leaving claude in a detached session.
+		_ = s.Term.Kill(context.Background())
 		_ = removeProjectMCPServer(s.mcpProject, s.mcpServer)
 		_ = os.RemoveAll(s.mcpDir)
 		// Deferred, so the log is still there for EmitTerminalGone to classify
@@ -323,7 +325,6 @@ func (p *Provider) runSession(ctx context.Context, s *session) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = s.Term.Kill(ctx)
 			return
 		case <-sessionGone:
 			// Claude exited without calling avenor_finish. EmitTerminalGone

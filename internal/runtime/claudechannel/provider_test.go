@@ -622,6 +622,32 @@ func TestPromptLeavesAnExitedLaunchToTheExitWatcher(t *testing.T) {
 	}
 }
 
+func TestRunSessionKillsTheTerminalAfterCancel(t *testing.T) {
+	// The session's context is already cancelled when runSession tears down,
+	// and tmux kill-session under a cancelled context never runs.
+	p := &Provider{sessions: make(map[string]*session), broker: broker.New(""), launcher: terminal.PTYLauncher{}}
+	core := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID: "ses-kill",
+		RunID:     "run-kill",
+		EventsBuf: 8,
+	})
+	term := terminal.NewFakeSession("test-term", 1, "ready")
+	s := &session{Session: core}
+	s.Term = term
+	p.sessions[s.SessionID] = s
+
+	go p.runSession(s.Ctx, s)
+	s.CancelFn()
+	select {
+	case <-s.Done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runSession did not return after cancel")
+	}
+	if term.Alive(context.Background()) {
+		t.Fatal("terminal still alive after teardown; claude is left in a detached tmux session")
+	}
+}
+
 func TestClassifyPane(t *testing.T) {
 	cases := []struct {
 		name string

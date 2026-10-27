@@ -251,9 +251,15 @@ func (f *FakeSession) SetInterruptErr(err error) {
 }
 
 // Kill returns the configured error and completes the fake process lifecycle.
-func (f *FakeSession) Kill(_ context.Context) error {
+// Under a cancelled ctx it kills nothing and returns ctx's error, as the tmux
+// session's exec.CommandContext does.
+func (f *FakeSession) Kill(ctx context.Context) error {
 	f.mu.Lock()
 	f.killCalls++
+	if err := ctx.Err(); err != nil {
+		f.mu.Unlock()
+		return err
+	}
 	f.alive = false
 	err := f.killErr
 	f.mu.Unlock()
