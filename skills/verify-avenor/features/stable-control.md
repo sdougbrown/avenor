@@ -56,8 +56,8 @@ While the supervisor runs, four artifacts sit beside the socket: the socket
 (`0600`), the owner record `<socket>.owner.json` (`0600`, euid-owned; fields
 `version`, `socket`, `socket_identity`, `capability_id`, `secret`, `owner_pid`),
 the persistent lock `<socket>.control.lock` (`0600`), and the broker discovery
-record `<socket>.broker.url` (`0600`, one line: the `http://` URL of the broker
-the supervisor actually bound, ephemeral port included). Confirm them without
+record `<socket>.broker.url` (`0600`, one line: the advertised URL when configured,
+otherwise the bound broker's `http://` URL). Confirm them without
 printing the secret:
 
 ```sh

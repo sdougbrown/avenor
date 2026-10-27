@@ -2,7 +2,9 @@ package messaging
 
 import (
 	"fmt"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -35,8 +37,18 @@ func ParseBrokerURL(raw string) (string, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return "", fmt.Errorf("%q must be an http:// or https:// URL", trimmed)
 	}
-	if parsed.Host == "" {
+	if parsed.Hostname() == "" {
 		return "", fmt.Errorf("%q names no host", trimmed)
+	}
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && ip.IsUnspecified() {
+		return "", fmt.Errorf("%q names an unspecified host", trimmed)
+	}
+	port := parsed.Port()
+	if strings.HasSuffix(parsed.Host, ":") || port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", fmt.Errorf("%q has an invalid port", trimmed)
+		}
 	}
 	if parsed.User != nil {
 		return "", fmt.Errorf("%q carries credentials; broker routes authenticate per run", trimmed)

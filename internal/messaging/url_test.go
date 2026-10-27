@@ -45,6 +45,7 @@ func TestParseBrokerURLAcceptsAReachableBaseURL(t *testing.T) {
 		{raw: "https://hub.example.com/", want: "https://hub.example.com"},
 		{raw: " http://192.0.2.10:8787 ", want: "http://192.0.2.10:8787"},
 		{raw: "http://[2001:db8::1]:8787", want: "http://[2001:db8::1]:8787"},
+		{raw: "http://[::1]", want: "http://[::1]"},
 		{raw: "HTTPS://hub.example.com", want: "https://hub.example.com"},
 	} {
 		got, err := ParseBrokerURL(tc.raw)
@@ -69,6 +70,12 @@ func TestParseBrokerURLRefusesAnUnreachableBaseURL(t *testing.T) {
 		{name: "a scheme a peer cannot dial", raw: "unix:///run/avenor/hub.sock"},
 		{name: "a bind address without a scheme", raw: "127.0.0.1:8787"},
 		{name: "no host", raw: "http://"},
+		{name: "empty hostname", raw: "http://:8080"},
+		{name: "empty port", raw: "http://hub.example.com:"},
+		{name: "zero port", raw: "http://hub.example.com:0"},
+		{name: "port out of range", raw: "https://hub.example.com:65536"},
+		{name: "IPv4 wildcard", raw: "http://0.0.0.0:8787"},
+		{name: "IPv6 wildcard", raw: "http://[::]"},
 		{name: "a path a route would never reach", raw: "https://hub.example.com/avenor"},
 		{name: "credentials", raw: "https://user:secret@hub.example.com"},
 		{name: "a query", raw: "https://hub.example.com?generation=x"},
