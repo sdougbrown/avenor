@@ -299,6 +299,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 					"error": "terminal not ready",
 				},
 			})
+			s.FailUnreadyLaunch(s.Ctx)
 			return
 		}
 		readySignal := s.WaitForProgStatusReady(s.Ctx)

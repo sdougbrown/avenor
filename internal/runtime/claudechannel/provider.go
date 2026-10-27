@@ -495,6 +495,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	// already listening.
 	go func() {
 		if !claudecore.WaitForPaneReady(s.Ctx, s.Term) {
+			s.FailUnreadyLaunch(s.Ctx)
 			return
 		}
 		startupWait, waitConfigured, ok := s.WaitForStartupMCP(s.Ctx)

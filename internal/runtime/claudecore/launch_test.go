@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 )
 
@@ -263,6 +264,107 @@ func TestEmitTerminalGoneFailsWhenNoPromptWasEverSubmitted(t *testing.T) {
 	}
 	if strings.ContainsRune(msg, '\x1b') {
 		t.Errorf("error carries terminal escapes: %q", msg)
+	}
+}
+
+// wrappedCrashPane is Claude Code crashing at startup inside a VM launch
+// wrapper. The crash goes to the guest's terminal, so avenor's stderr log stays
+// empty and the pane is the only place the reason survives. Bun prints the
+// failing source line above the error, and that source can name a rate limit.
+const wrappedCrashPane = `11 | var Ayt=["CLAUDE_BG_DISPATCHER_RATE_LIMIT_TIER"];function x2s(e){return{...e.sub | ... truncated` + "\n\n" +
+	"error: bubblewrap is required for subprocess env scrubbing and isolation. " +
+	"Install with: sudo apt-get install -y bubblewrap\n" +
+	"      at tFo (/$bunfs/root/chunk-hbk8fyrr.js:11:7202)\n" +
+	"Bun v1.4.4 (Linux arm64)\n"
+
+func TestEmitTerminalGoneReportsThePaneWhenStderrIsEmpty(t *testing.T) {
+	s := newTestSession(t, wrappedCrashPane)
+
+	s.EmitTerminalGone(s.Ctx)
+
+	if ev := drainEvent(t, s); ev.Event != "agent.launch_failed" {
+		t.Fatalf("first event = %q, want agent.launch_failed", ev.Event)
+	}
+	end := drainEvent(t, s)
+	if pane, _ := end.Fields["pane"].(string); !strings.Contains(pane, "bubblewrap is required") {
+		t.Errorf("pane = %q, want the crash in it", pane)
+	}
+	assertNotAProviderLimit(t, end)
+}
+
+// approvalDialogPane is a blocking startup dialog avenor does not answer,
+// framed by full-width rules as Claude Code draws it in a 220-column pane.
+var approvalDialogPane = strings.Repeat("─", 220) + "\n" +
+	" Managed settings require approval\n\n" +
+	" Your organization has configured managed settings that could allow execution of arbitrary code.\n\n" +
+	" ❯ 1. Yes, I trust these settings\n" +
+	"   2. No, exit Claude Code\n\n" +
+	" Enter to confirm · Esc to exit\n" +
+	strings.Repeat("─", 220) + "\n"
+
+func TestFailUnreadyLaunchEndsTheSessionWithThePane(t *testing.T) {
+	// A first prompt that never found the input box leaves claude parked on
+	// whatever it is showing. Without a terminal status, a caller waiting on
+	// session.end waits forever.
+	s := newTestSession(t, approvalDialogPane)
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	if ev := drainEvent(t, s); ev.Event != "agent.launch_failed" {
+		t.Fatalf("first event = %q, want agent.launch_failed", ev.Event)
+	}
+	end := drainEvent(t, s)
+	if end.Event != "session.end" {
+		t.Fatalf("second event = %q, want session.end", end.Event)
+	}
+	if got := end.Fields["status"]; got != "failed" {
+		t.Errorf("status = %v, want failed", got)
+	}
+	if got := end.Fields["stop_reason"]; got != StopReasonTerminalNotReady {
+		t.Errorf("stop_reason = %v, want %s", got, StopReasonTerminalNotReady)
+	}
+	pane, _ := end.Fields["pane"].(string)
+	if !strings.Contains(pane, "Managed settings require approval") {
+		t.Errorf("pane = %q, want the dialog title in it", pane)
+	}
+	if len(pane) > maxDiagnosticText {
+		t.Errorf("pane is %d bytes, want it bounded by %d", len(pane), maxDiagnosticText)
+	}
+	assertNotAProviderLimit(t, end)
+	if s.Ctx.Err() == nil {
+		t.Error("session context still live; runSession would keep the terminal running")
+	}
+}
+
+func TestFailUnreadyLaunchLeavesAPromptedSessionRunning(t *testing.T) {
+	// A later turn that finds the pane busy is not a failed launch: the session
+	// already ran a turn and stays usable.
+	s := newTestSession(t, approvalDialogPane)
+	s.Mu.Lock()
+	s.Prompted = true
+	s.Mu.Unlock()
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	select {
+	case ev := <-s.Events:
+		t.Fatalf("emitted %q for a session that already ran a turn", ev.Event)
+	default:
+	}
+	if s.Ctx.Err() != nil {
+		t.Error("session context cancelled for a session that already ran a turn")
+	}
+}
+
+// assertNotAProviderLimit checks that a launch failure stays a launch failure
+// once the CLI reads its failure text for provider limits, which turns a
+// retryable rate limit into retries of a launch that cannot succeed.
+func assertNotAProviderLimit(t *testing.T, end events.Event) {
+	t.Helper()
+	reason, _ := end.Fields["stop_reason"].(string)
+	msg, _ := end.Fields["error"].(string)
+	if limit, _ := runtime.ClassifyProviderLimit(reason, msg); limit != "" {
+		t.Errorf("failure classified as %s from error %q", limit, msg)
 	}
 }
 

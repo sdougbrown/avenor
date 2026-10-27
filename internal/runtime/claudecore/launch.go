@@ -13,8 +13,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/shellquote"
 )
 
-// Stop reasons for a Claude process that exited without ever running a turn.
-// Both report status=failed: the old behaviour reported status=done with an
+// Stop reasons for a Claude session that ended without ever running a turn.
+// All report status=failed: the old behaviour reported status=done with an
 // empty output, which is byte-for-byte what a real end_turn that said nothing
 // looks like, so callers could not tell a typo from a completed run.
 const (
@@ -23,6 +23,9 @@ const (
 	// StopReasonLaunchFailed means claude exited before avenor submitted a
 	// prompt, for a reason avenor could not name.
 	StopReasonLaunchFailed = "launch_failed"
+	// StopReasonTerminalNotReady means claude never showed its input box, so
+	// avenor never submitted the first prompt.
+	StopReasonTerminalNotReady = "terminal_not_ready"
 )
 
 // agentNotFoundBanner is the invariant middle of the one-line error Claude Code
@@ -232,8 +235,11 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 		if stderrTail != "" {
 			msg += "; stderr: " + stderrTail
 		}
+		// Under a launch wrapper claude's stderr is the wrapper's terminal, so
+		// a crash leaves the log empty and only the pane shows it.
 		s.emitLaunchFailure(StopReasonLaunchFailed, msg, map[string]any{
 			"stderr": stderrTail,
+			"pane":   s.paneText(ctx),
 		})
 	default:
 		s.Emit(events.Event{
@@ -245,6 +251,66 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 			},
 		})
 	}
+}
+
+// FailUnreadyLaunch ends a session whose first prompt never found Claude's
+// input box, and reports what the pane showed instead. Claude is still running
+// there, parked on a screen avenor does not answer, such as a settings-approval
+// or MCP-server dialog, so without a terminal status a caller waiting on
+// session.end waits forever. Cancelling the session makes runSession kill the
+// terminal.
+//
+// It leaves a session that already ran a turn alone: a later prompt that finds
+// the pane busy is not a failed launch. A cancelled ctx means the session is
+// already ending, so it reports nothing.
+func (s *Session) FailUnreadyLaunch(ctx context.Context) {
+	if s.everPrompted() {
+		return
+	}
+	if ctx.Err() == nil && s.MarkFinished() {
+		s.emitLaunchFailure(StopReasonTerminalNotReady,
+			"claude never showed its input box, so avenor never submitted a prompt; the run never started",
+			map[string]any{"pane": s.paneText(ctx)})
+	}
+	if s.CancelFn != nil {
+		s.CancelFn()
+	}
+}
+
+// paneText is the bottom of the pane as one line of text for a diagnostic,
+// where a dialog's options or a crash's last lines are. Rules and blank lines
+// are dropped, since a full-width rule alone would fill the budget. It goes in
+// its own field, never in the error: failure text is read for provider limits,
+// and a screen can say anything.
+func (s *Session) paneText(ctx context.Context) string {
+	if s.Term == nil {
+		return ""
+	}
+	out, err := s.Term.Capture(ctx)
+	if err != nil {
+		return ""
+	}
+	var lines []string
+	for _, line := range strings.Split(normalizePane(out), "\n") {
+		var words []string
+		for _, w := range strings.Fields(line) {
+			if strings.Trim(w, "─") != "" {
+				words = append(words, w)
+			}
+		}
+		if len(words) > 0 {
+			lines = append(lines, strings.Join(words, " "))
+		}
+	}
+	text := strings.Join(lines, " | ")
+	if len(text) <= maxDiagnosticText {
+		return text
+	}
+	cut := len(text) - maxDiagnosticText
+	for cut < len(text) && !utf8.RuneStart(text[cut]) {
+		cut++
+	}
+	return text[cut:]
 }
 
 // detectAgentNotFound looks for the banner in the stderr log first — the only
