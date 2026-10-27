@@ -61,7 +61,7 @@ func New(addr string, creds messaging.LocalCredentials) (*Transport, error) {
 		if addr == "" {
 			return nil, fmt.Errorf("%w: local broker address is required", messaging.ErrInvalidRequest)
 		}
-		base = "http://" + addr
+		base = messaging.BrokerURL(addr)
 	}
 	parsed, err := url.Parse(base)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {

@@ -309,6 +309,16 @@ func TestLocalAdapterCloseLeavesBrokerRunning(t *testing.T) {
 	}
 }
 
+func TestNewAcceptsZonedIPv6BrokerAddr(t *testing.T) {
+	tr, err := localhttp.New("[fe80::1%eth0]:8787", messaging.LocalCredentials{RunID: "run_1", Token: "tok_1"})
+	if err != nil {
+		t.Fatalf("localhttp.New with a zoned IPv6 address: %v", err)
+	}
+	if err := tr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 func newStubAdapter(t *testing.T, url string) messaging.Transport {
 	t.Helper()
 	tr, err := localhttp.New("", messaging.LocalCredentials{RunID: alice.RunID, Token: "stub-token", BaseURL: url})

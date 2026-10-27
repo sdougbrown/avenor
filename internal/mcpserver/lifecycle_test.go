@@ -105,6 +105,8 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 		{
 			name: "parent-token",
 			setup: func(t *testing.T) {
+				// A parent URL would intentionally forward this credential.
+				t.Setenv(token.EnvBrokerParentURL, "")
 				t.Setenv(token.EnvBrokerParentToken, "leaked-credential")
 			},
 			scrubbed: []string{token.EnvBrokerParentToken},
@@ -140,6 +142,55 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 			}
 			if !foundMarker {
 				t.Fatal("the unrelated inherited marker was not preserved in the child environment")
+			}
+		})
+	}
+}
+
+func TestSupervisorForwardsParentLinkWhenURLInEnv(t *testing.T) {
+	tests := []struct {
+		name      string
+		parentURL string
+		forwarded bool
+	}{
+		{name: "url-in-env", parentURL: "http://127.0.0.1:9", forwarded: true},
+		{name: "no-url", parentURL: "", forwarded: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv(token.EnvBrokerParentURL, tt.parentURL)
+			t.Setenv(token.EnvBrokerParentToken, "shared-link-credential")
+			var child *exec.Cmd
+			origExec := execCommand
+			execCommand = func(string, ...string) *exec.Cmd {
+				child = exec.Command("/nonexistent/avenor-test-stub")
+				return child
+			}
+			t.Cleanup(func() { execCommand = origExec })
+
+			_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+			if child == nil {
+				t.Fatal("startSupervisor never built a child command")
+			}
+			var forwardedToken, forwardedURL string
+			for _, entry := range child.Env {
+				if value, ok := strings.CutPrefix(entry, token.EnvBrokerParentToken+"="); ok {
+					forwardedToken = value
+				}
+				if value, ok := strings.CutPrefix(entry, token.EnvBrokerParentURL+"="); ok {
+					forwardedURL = value
+				}
+			}
+			if forwardedURL != tt.parentURL {
+				t.Fatalf("forwarded parent URL = %q, want %q", forwardedURL, tt.parentURL)
+			}
+			wantToken := ""
+			if tt.forwarded {
+				wantToken = "shared-link-credential"
+			}
+			if forwardedToken != wantToken {
+				t.Fatalf("forwarded parent credential = %q, want %q", forwardedToken, wantToken)
 			}
 		})
 	}

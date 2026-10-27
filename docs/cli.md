@@ -284,7 +284,8 @@ avenor stable --control-socket /tmp/avenor.sock
 | `--lease-sweep-interval` | `10s` | Expire workflow leases whose heartbeat stopped at this cadence (0 = disable; leases expire only on restart recovery) |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout before killing children |
 | `--permission-claim-timeout` | `0` (disabled) | Optional permission claim deadline; with 0, fallback occurs only after all control clients disconnect |
-| `--broker-parent-url` | (none) | `http://` address of the parent broker to join. The credential comes from the `AVENOR_PARENT_BROKER_TOKEN` environment variable (required when this flag is set); a credential without a URL runs this broker as the tree's parent broker |
+| `--broker-addr` | (none) | Address the broker binds, published beside the control socket as `<socket>.broker.url`. Empty binds an ephemeral loopback port. A durable hub names a concrete interface address and fixed port, such as `127.0.0.1:8787` or `192.0.2.10:8787`; a wildcard bind (`0.0.0.0`, `::`) is refused because children and parent branches are told to reach the bound address |
+| `--broker-parent-url` | `$AVENOR_PARENT_BROKER_URL` | `http://` address of the parent broker to join; a non-empty flag overrides the environment. The credential comes from the `AVENOR_PARENT_BROKER_TOKEN` environment variable (required whenever the effective URL is non-empty); a credential without a URL runs this broker as the tree's parent broker |
 | `--broker-parent-token` | (none) | Explicit parent-link credential overriding `AVENOR_PARENT_BROKER_TOKEN`; prefer the env var, since argv is world-readable via `/proc/<pid>/cmdline` |
 
 ### Example
@@ -296,7 +297,40 @@ avenor stable --control-socket /tmp/avenor.sock --max-runtimes 4 \
   --idle-timeout 2h &
 ```
 
-Then spawn runtimes via `avenor control spawn`. See [stable.md](stable.md) and [control-protocol.md](control-protocol.md) for full details.
+Run a hub with a durable broker address, then point branches at it through the
+environment:
+
+```sh
+TOKEN=$(avenor parent-token)
+
+# Hub: fixed broker address, link credential in the environment.
+AVENOR_PARENT_BROKER_TOKEN=$TOKEN \
+  avenor stable --control-socket /tmp/hub.sock --broker-addr 127.0.0.1:8787 &
+HUB_PID=$!
+# The record appears once the hub owns its control socket; wait for it, then read
+# the URL it actually bound (here, the fixed address).
+waited=0
+while [ ! -e /tmp/hub.sock.broker.url ]; do
+  waited=$((waited + 1))
+  if [ "$waited" -gt 100 ]; then
+    echo "hub broker URL record never appeared: /tmp/hub.sock.broker.url" >&2
+    kill "$HUB_PID" 2>/dev/null || true
+    wait "$HUB_PID" 2>/dev/null || true
+    exit 1
+  fi
+  sleep 0.1
+done
+cat /tmp/hub.sock.broker.url             # http://127.0.0.1:8787
+
+# Branch: no --broker-parent-url needed; the environment names the hub.
+AVENOR_PARENT_BROKER_TOKEN=$TOKEN \
+  AVENOR_PARENT_BROKER_URL=http://127.0.0.1:8787 \
+  avenor stable --control-socket /tmp/branch.sock &
+```
+
+Then spawn runtimes via `avenor control spawn`. See [stable.md](stable.md),
+[messaging.md](messaging.md#running-a-hub) and
+[control-protocol.md](control-protocol.md) for full details.
 
 ## avenor control
 
@@ -878,7 +912,8 @@ See [loop.md](loop.md) for how exit codes interact with multi-phase loops.
 ## Environment Variables
 
 - `AVENOR_OPENCODE_URL` — Default server URL if `--server-url` not set (only consulted for subprocess discovery)
-- `AVENOR_PARENT_BROKER_TOKEN` — Parent-link credential consumed by `avenor stable` on both sides of a parent link; required with `--broker-parent-url`, and a credential without a URL runs the broker as the tree's parent broker. Prefer this over `--broker-parent-token`
+- `AVENOR_PARENT_BROKER_URL` — Parent broker URL `avenor stable` joins when `--broker-parent-url` is empty or absent; a non-empty flag overrides it. An interactive supervisor autostart (the `pi` extension or `avenor mcp`) joins the hub this names without command-line changes
+- `AVENOR_PARENT_BROKER_TOKEN` — Parent-link credential consumed by `avenor stable` on both sides of a parent link; required when the effective parent URL is non-empty, and a credential without a URL runs the broker as the tree's parent broker. Prefer this over `--broker-parent-token`
 - `MCP_AUTH_TOKEN` — Bearer token for HTTP MCP server if `--auth-token` not set
 - `OPENCODE_CONFIG_DIR` — Directory to search for opencode config; defaults to `~/.config/opencode/`
 

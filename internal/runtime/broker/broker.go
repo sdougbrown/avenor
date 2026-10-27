@@ -491,11 +491,29 @@ func MakeToken() string {
 	return credential
 }
 
+const defaultListenAddr = "127.0.0.1:0"
+
 // Start binds the broker to an ephemeral loopback port.
 func (b *Broker) Start() error {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	return b.StartOn(defaultListenAddr)
+}
+
+// StartOn binds the broker to addr. An empty addr keeps Start's default: an
+// ephemeral loopback port. The listener's actual address, including the port
+// the kernel assigned, is what Addr reports.
+func (b *Broker) StartOn(addr string) error {
+	if addr == "" {
+		addr = defaultListenAddr
+	}
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	// The resolver accepts aliases for the wildcard that a lexical check on
+	// addr never sees, so the refusal follows the bound address.
+	if tcpAddr, ok := l.Addr().(*net.TCPAddr); ok && tcpAddr.IP.IsUnspecified() {
+		_ = l.Close()
+		return fmt.Errorf("broker address %q is a wildcard bind (%s); bind a concrete interface address (e.g. 127.0.0.1:8787 or 192.0.2.10:8787) because children and parent branches are told to reach the bound address", addr, tcpAddr)
 	}
 	b.mu.Lock()
 	b.listener = l

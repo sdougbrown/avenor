@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
@@ -398,9 +399,10 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 			// half-configured identity.
 			var brokerURL, brokerRunID, brokerToken string
 			if opts.Broker != nil && opts.RuntimeID != "" && opts.BrokerToken != "" {
-				brokerURL = "http://" + opts.Broker.Addr()
-				brokerRunID = opts.RuntimeID
-				brokerToken = opts.BrokerToken
+				if brokerURL = messaging.BrokerURL(opts.Broker.Addr()); brokerURL != "" {
+					brokerRunID = opts.RuntimeID
+					brokerToken = opts.BrokerToken
+				}
 			}
 			return StartClientWithAgentProfileThinkingAndDir(
 				ctx, "", opts.Model, "", opts.Agent, opts.AgentProfile, opts.Thinking, opts.Dir,

@@ -3,13 +3,13 @@ package opencodeacp
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/acp"
 )
@@ -54,7 +54,7 @@ func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerAddr st
 				"avenor-channel-tools": map[string]any{
 					"type":    "local",
 					"enabled": true,
-					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", fmt.Sprintf("http://%s", brokerAddr)},
+					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", messaging.BrokerURL(brokerAddr)},
 				},
 			},
 			"tools": map[string]any{

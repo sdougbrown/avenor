@@ -512,6 +512,30 @@ func TestProviderStartOmitsBrokerURLWithoutToken(t *testing.T) {
 	}
 }
 
+func TestProviderStartOmitsBrokerConfigWithoutListener(t *testing.T) {
+	// A broker that never started has no address, so the child gets no broker
+	// configuration at all.
+	b := broker.New("url-test-token")
+	captured := withFakePiCommand(t)
+	p := NewWithOptions(runtime.StartOptions{Broker: b, RuntimeID: "rt_1", BrokerToken: "tok"})
+	defer p.Close()
+
+	if _, err := p.Start(context.Background(), runtime.StartOptions{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cmd := captured()
+	if cmd == nil {
+		t.Fatal("Pi command was not created")
+	}
+	for _, entry := range cmd.Env {
+		for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN"} {
+			if strings.HasPrefix(entry, key+"=") {
+				t.Errorf("%s set for a broker with no listener: %q", key, entry)
+			}
+		}
+	}
+}
+
 func TestProviderStartUsesRequestedWorkingDirectory(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

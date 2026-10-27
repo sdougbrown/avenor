@@ -1507,6 +1507,46 @@ func (l fakeLauncher) Start(context.Context, terminal.StartOptions) (terminal.Se
 	return l.term, nil
 }
 
+func TestStartRejectsBrokerWithoutListener(t *testing.T) {
+	binDir := t.TempDir()
+	script := "#!/bin/sh\necho 'Claude Code 2.0.0'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	b := broker.New("")
+	t.Cleanup(func() { _ = b.Stop() })
+	p := &Provider{
+		sessions: make(map[string]*session),
+		broker:   b,
+		launcher: fakeLauncher{term: terminal.NewFakeSession("test-term", 1, "")},
+	}
+
+	_, err := p.Start(context.Background(), runtime.StartOptions{Dir: dir})
+	if err == nil {
+		t.Fatal("Start launched on a broker with no listener")
+	}
+	for _, want := range []string{"no listener", "start the broker"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Start error = %q, want it to contain %q", err, want)
+		}
+	}
+	if got := b.RunCount(); got != 0 {
+		t.Fatalf("broker run count = %d after a rejected Start, want 0", got)
+	}
+	p.mu.Lock()
+	sessions := len(p.sessions)
+	p.mu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("provider sessions = %d after a rejected Start, want 0", sessions)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("bootstrap wrote a project mcp config on a rejected Start: %v", err)
+	}
+}
+
 func TestStartValidatesClaudeMCPWait(t *testing.T) {
 	p := New()
 	for _, tc := range []struct {
@@ -1535,9 +1575,14 @@ func TestStartupWaitHoldsOnlyTheFirstPrompt(t *testing.T) {
 
 	term := terminal.NewFakeSession("test-term", 1, "Tips for getting started\n")
 	term.SetKind("tmux")
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
 	p := &Provider{
 		sessions: make(map[string]*session),
-		broker:   broker.New(""),
+		broker:   b,
 		launcher: fakeLauncher{term: term},
 	}
 	started, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir(), ClaudeMCPWait: 30 * time.Second})

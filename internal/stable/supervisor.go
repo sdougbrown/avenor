@@ -122,6 +122,11 @@ type Config struct {
 	// registration from any caller on this machine could replace a live branch's
 	// claim wholesale.
 	BrokerParentToken string
+
+	// BrokerAddr is the broker's bind address; empty uses ephemeral loopback.
+	// Children and parent branches connect to this address, so wildcards are
+	// refused. BrokerURLPath locates its published URL.
+	BrokerAddr string
 }
 
 // DefaultLeaseSweepInterval is the default live lease-expiry cadence: a
@@ -673,6 +678,17 @@ type Supervisor struct {
 	fileSnapshots       map[string][]string // runtimeID → pre-run file list for output detection
 	fileSnapMu          sync.Mutex
 	broker              *broker.Broker
+	// brokerStartErr is the error the broker bind produced at construction. An
+	// explicitly configured BrokerAddr makes it fatal in Run; the default bind
+	// stays optional.
+	brokerStartErr error
+	// brokerStopOnce makes broker, messaging and parent-link teardown run once,
+	// whether Run exits through shutdown or through a startup failure.
+	brokerStopOnce sync.Once
+	// brokerURLPath and brokerURLValue are the discovery record Run published
+	// and the URL it holds, so shutdown removes only this supervisor's record.
+	brokerURLPath  string
+	brokerURLValue string
 	// messaging is the supervisor's own transport over the broker's ask store.
 	// It is the only transport the supervisor closes, and it never outlives
 	// the broker.
@@ -761,9 +777,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		errWriter:               cfg.Stderr,
 	}
 	sup.broker = broker.New("")
-	if err := sup.broker.Start(); err != nil {
-		// Non-fatal — broker is optional. Runs will still work without it.
-	} else {
+	if sup.startBroker(cfg.BrokerAddr) {
 		// Register the supervisor run eagerly so sub-agents can target it for
 		// asks before the host performs any outbound broker call. Without this,
 		// a child asking its parent first would fail "to run not found".
@@ -808,6 +822,36 @@ func NewSupervisor(cfg Config) *Supervisor {
 	return sup
 }
 
+// startBroker reports whether the broker is serving. Run treats an explicit
+// bind failure as fatal, but permits local runs without the default broker.
+func (s *Supervisor) startBroker(addr string) bool {
+	if err := s.broker.StartOn(addr); err != nil {
+		s.brokerStartErr = err
+		return false
+	}
+	return true
+}
+
+// stopBroker tears down the broker and the transports built on it, exactly once
+// however Run exits. The parent link stops first so a branch retracts its claim
+// before its broker stops serving.
+func (s *Supervisor) stopBroker() {
+	s.brokerStopOnce.Do(func() {
+		if s.parentLinkStop != nil {
+			s.parentLinkStop()
+		}
+		if s.parentLink != nil {
+			_ = s.parentLink.Close()
+		}
+		if s.broker != nil {
+			_ = s.broker.Stop()
+		}
+		if s.messaging != nil {
+			_ = s.messaging.Close()
+		}
+	})
+}
+
 // stderrWriter returns the writer supervisor diagnostics are reported to:
 // Config.Stderr when set, else the process stderr.
 func (s *Supervisor) stderrWriter() io.Writer {
@@ -820,6 +864,9 @@ func (s *Supervisor) Run() (exitCode int) {
 	// NewSupervisor initializes root admission before the control socket is
 	// bound. Close it on every exit, including a control-server start failure.
 	defer s.closeTreeBudget()
+	// A startup failure after NewSupervisor must not leave the broker listener,
+	// its prune loop, or the parent link running.
+	defer s.stopBroker()
 
 	// Operators must be able to tell the effective child question timeout
 	// and whether it was explicitly configured or defaulted.
@@ -843,6 +890,17 @@ func (s *Supervisor) Run() (exitCode int) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	if s.brokerStartErr != nil {
+		if s.config.BrokerAddr != "" {
+			// The operator asked for this listener: a silent fallback to no
+			// broker would leave the published hub URL missing or stale.
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: %v\n", s.brokerStartErr)
+			reason = "start_failed"
+			return 1
+		}
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: broker unavailable; broker messaging disabled: %v\n", s.brokerStartErr)
+	}
+
 	if err := s.control.Start(s.config.ControlSocket); err != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: start control server: %v\n", err)
 		reason = "start_failed"
@@ -856,6 +914,15 @@ func (s *Supervisor) Run() (exitCode int) {
 			}
 		}
 	}()
+
+	// Only the owner of the control socket may publish its broker's address, so
+	// a competing supervisor cannot advertise over a live one.
+	if err := s.publishBrokerURL(); err != nil {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: %v\n", err)
+		reason = "start_failed"
+		return 1
+	}
+	defer s.removeBrokerURL()
 
 	if s.config.HTTPDebug != "" {
 		var err error
@@ -1972,11 +2039,19 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}, nil
 }
 
+// brokerURL returns the URL children and parent branches reach this broker on,
+// or "" when no listener is bound. Broker messaging is optional, so a failed
+// default bind leaves the supervisor running without a URL rather than handing
+// out an unreachable "http://".
 func (s *Supervisor) brokerURL() string {
 	if s.broker == nil {
 		return ""
 	}
-	return fmt.Sprintf("http://%s", s.broker.Addr())
+	addr := s.broker.Addr()
+	if addr == "" {
+		return ""
+	}
+	return messaging.BrokerURL(addr)
 }
 
 // installParentLink wires this broker to its parent broker when the supervisor
@@ -3897,18 +3972,7 @@ func (s *Supervisor) shutdown(mode string) int {
 	defer func() {
 		// The branch retracts its claim before the broker stops serving, so a
 		// parent never routes into a broker that is already gone.
-		if s.parentLinkStop != nil {
-			s.parentLinkStop()
-		}
-		if s.parentLink != nil {
-			_ = s.parentLink.Close()
-		}
-		if s.broker != nil {
-			_ = s.broker.Stop()
-		}
-		if s.messaging != nil {
-			_ = s.messaging.Close()
-		}
+		s.stopBroker()
 		s.closeTreeBudget()
 	}()
 
