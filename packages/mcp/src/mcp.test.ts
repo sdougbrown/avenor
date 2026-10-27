@@ -142,9 +142,7 @@ describe('avenor MCP server', () => {
       name: 'kill',
       arguments: { run_id: 'run-1', supervisor_id: 'sup-1' },
     })
-    // Pass-through tools answer with the core result fields and the empty
-    // content list the MCP result schema defaults to.
-    expect(kill).toMatchObject({ killed: true, content: [] })
+    expect(kill).toMatchObject({ killed: true })
     expect(killCalls.at(-1)).toEqual({ runId: 'run-1', supervisorId: 'sup-1' })
     await client.close()
     await server.close()
@@ -278,6 +276,57 @@ describe('avenor MCP server', () => {
       } finally {
         await client.close()
       }
+    } finally {
+      await started.stop()
+    }
+  })
+
+  it('answers a pass-through tool call with its result fields over HTTP', async () => {
+    const authToken = 'http-wire-token'
+    const started = await startHttpServer({ authToken, port: 0 })
+    const url = `http://127.0.0.1:${started.port}/mcp`
+    const post = async (message: Record<string, unknown>, sessionId?: string | null) => {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          authorization: `Bearer ${authToken}`,
+          ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+        },
+        body: JSON.stringify(message),
+      })
+      const body = await response.text()
+      const messages = body
+        .split('\n')
+        .filter(line => line.startsWith('data:'))
+        .map(line => JSON.parse(line.slice('data:'.length)) as Record<string, any>)
+      return { response, messages }
+    }
+
+    try {
+      const init = await post({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'wire-test-client', version: '0.1.0' },
+        },
+      })
+      const sessionId = init.response.headers.get('mcp-session-id')
+      expect(sessionId).toBeTruthy()
+      const initialized = await post({ jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId)
+      expect(initialized.response.status).toBe(202)
+
+      const call = await post(
+        { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'kill', arguments: { run_id: 'run-1' } } },
+        sessionId,
+      )
+      // The whole reply an MCP client parses, read off the stream: the core tool
+      // fields ride beside the content list the transport's result schema supplies.
+      expect(call.messages.at(-1)?.result).toEqual({ killed: true, content: [] })
     } finally {
       await started.stop()
     }
