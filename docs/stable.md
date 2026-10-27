@@ -27,6 +27,7 @@ Flags:
 |---|---|---|
 | `--control-socket` `<path>` | (required) | Unix socket path for the control plane. Avenor writes a tombstone file at `<path>.dead` to signal abnormal shutdown, an owner record at `<path>.owner.json`, and a persistent lock at `<path>.control.lock` |
 | `--broker-addr` | (empty) | Concrete broker bind address; empty uses ephemeral loopback. The supervisor publishes its URL in `<control-socket>.broker.url`. See [hub setup](messaging.md#running-a-hub) for network trust requirements |
+| `--broker-advertise-url` | `$AVENOR_BROKER_ADVERTISE_URL` | URL other hosts reach this broker on, used for `<control-socket>.broker.url` and for registration with the parent broker; empty advertises the bound address. Set it when a TLS terminator or NAT publishes the broker under another address. Same-host children keep the bound address. An unreachable value stops startup |
 | `--broker-parent-url` | `$AVENOR_PARENT_BROKER_URL` | Parent hub URL; a non-empty flag overrides the environment. Requires `AVENOR_PARENT_BROKER_TOKEN` or `--broker-parent-token` |
 | `--broker-parent-token` | `$AVENOR_PARENT_BROKER_TOKEN` | Parent-link credential; prefer the environment to keep it out of process arguments |
 | `--max-runtimes` | 16 | Maximum concurrent child runtimes for this supervisor. Spawn requests are rejected once this limit is hit. Runtimes parked after a successful turn do not count against this limit |

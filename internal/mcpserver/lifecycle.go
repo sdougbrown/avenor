@@ -145,6 +145,10 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 		identityEnv,
 		runtime.EnvTestHooks + "=",
 		runtime.EnvTestOwnerPublishDelay + "=",
+		// The advertised address belongs to the broker the operator configured
+		// it for. A nested supervisor runs its own broker, so inheriting the
+		// value would make it claim its ancestor's published address.
+		token.EnvBrokerAdvertiseURL + "=",
 	}
 	// A provisioned session's peer credential names the run its own plugin
 	// joined, not this supervisor's. Stripping it here keeps the autostarted

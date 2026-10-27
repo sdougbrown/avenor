@@ -127,6 +127,14 @@ type Config struct {
 	// Children and parent branches connect to this address, so wildcards are
 	// refused. BrokerURLPath locates its published URL.
 	BrokerAddr string
+
+	// BrokerAdvertiseURL is the URL off-host peers reach this broker on when it
+	// is not the bound address: a TLS terminator or NAT publishes the broker
+	// under another host, port or scheme. It is what the broker registers with
+	// its parent and what BrokerURLPath records; same-host children keep using
+	// the bound address. Empty advertises the bound address. A value that is not
+	// a reachable http or https base URL fails startup.
+	BrokerAdvertiseURL string
 }
 
 // DefaultLeaseSweepInterval is the default live lease-expiry cadence: a
@@ -694,6 +702,13 @@ type Supervisor struct {
 	// and the URL it holds, so shutdown removes only this supervisor's record.
 	brokerURLPath  string
 	brokerURLValue string
+	// brokerAdvertisedURL is Config.BrokerAdvertiseURL in canonical form, or
+	// empty when the bound address is what gets advertised. brokerAdvertiseErr
+	// is the error an operator-supplied value produced; Run treats it as fatal,
+	// because falling back to the bound address would register and publish an
+	// address the operator replaced on purpose.
+	brokerAdvertisedURL string
+	brokerAdvertiseErr  error
 	// messaging is the supervisor's own transport over the broker's ask store.
 	// It is the only transport the supervisor closes, and it never outlives
 	// the broker.
@@ -784,6 +799,10 @@ func NewSupervisor(cfg Config) *Supervisor {
 	sup.broker = broker.New("")
 	sup.brokerIdentity = supervisorIdentity(cfg.ControlSocket)
 	sup.broker.SetIdentity(sup.brokerIdentity)
+	sup.brokerAdvertisedURL, sup.brokerAdvertiseErr = messaging.ParseBrokerURL(cfg.BrokerAdvertiseURL)
+	if sup.brokerAdvertiseErr != nil {
+		sup.brokerAdvertiseErr = fmt.Errorf("broker advertise URL: %w", sup.brokerAdvertiseErr)
+	}
 	if sup.startBroker(cfg.BrokerAddr) {
 		// Register the supervisor run eagerly so sub-agents can target it for
 		// asks before the host performs any outbound broker call. Without this,
@@ -812,7 +831,11 @@ func NewSupervisor(cfg Config) *Supervisor {
 				child.mu.Unlock()
 			}
 		})
-		sup.installParentLink()
+		// A value Run rejects must not seed a link that would retry its
+		// registration against a parent that refuses it.
+		if sup.brokerAdvertiseErr == nil {
+			sup.installParentLink()
+		}
 	}
 	sup.httpServerCond = sync.NewCond(&sup.httpServerMu)
 	sup.capacityCh = make(chan struct{})
@@ -896,6 +919,12 @@ func (s *Supervisor) Run() (exitCode int) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	if s.brokerAdvertiseErr != nil {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: %v\n", s.brokerAdvertiseErr)
+		reason = "start_failed"
+		return 1
+	}
 
 	if s.brokerStartErr != nil {
 		if s.config.BrokerAddr != "" {
@@ -2065,15 +2094,32 @@ func supervisorIdentity(controlSocket string) string {
 	return parentlink.BranchID(controlSocket, host)
 }
 
-// brokerURL returns the URL children and parent branches reach this broker on,
-// or "" when no listener is bound. Broker messaging is optional, so a failed
-// default bind leaves the supervisor running without a URL rather than handing
-// out an unreachable "http://".
+// brokerURL returns the URL children on this host reach this broker on, or ""
+// when no listener is bound. Broker messaging is optional, so a failed default
+// bind leaves the supervisor running without a URL rather than handing out an
+// unreachable "http://". It is the bound address even when the broker
+// advertises another one: a spawn result and the provider environments built
+// from it are consumed on this host.
 func (s *Supervisor) brokerURL() string {
 	if s.broker == nil {
 		return ""
 	}
 	return s.broker.URL()
+}
+
+// advertisedBrokerURL returns the URL peers on another host reach this broker
+// on: the operator's advertised URL, else the bound address. Parent registration
+// and the published record use it. An advertised URL never invents a listener,
+// so a broker that bound nothing advertises nothing.
+func (s *Supervisor) advertisedBrokerURL() string {
+	bound := s.brokerURL()
+	if bound == "" {
+		return ""
+	}
+	if s.brokerAdvertisedURL != "" {
+		return s.brokerAdvertisedURL
+	}
+	return bound
 }
 
 // installParentLink wires this broker to its parent broker when the supervisor
@@ -2094,7 +2140,7 @@ func (s *Supervisor) installParentLink() {
 	options := parentlink.Options{
 		ParentURL:  s.config.BrokerParentURL,
 		Token:      s.config.BrokerParentToken,
-		Endpoint:   s.brokerURL(),
+		Endpoint:   s.advertisedBrokerURL(),
 		Generation: s.broker.Store().Generation,
 		Runs:       s.parentRunClaims,
 		// The relay carries the asker's display name, so the branch that receives

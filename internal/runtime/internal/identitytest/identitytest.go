@@ -22,8 +22,8 @@ import (
 const unsetValue = "__UNSET__"
 
 // keys includes scrubbed names and operational variables that must survive.
-// Parent-link names are also listed independently, so production list changes
-// cannot hide a leaked credential or URL.
+// Parent-link and advertised-address names are also listed independently, so
+// production list changes cannot hide a leaked credential, URL or address.
 func keys() []string {
 	return append(runtime.ScrubbedEnvNames(),
 		runtime.EnvRuntimeID+"_SUFFIX", // near miss of an identity name
@@ -34,6 +34,7 @@ func keys() []string {
 		token.EnvBrokerParentURL,
 		token.EnvBrokerParentToken,
 		"AVENOR_SESSION_NAME",
+		token.EnvBrokerAdvertiseURL,
 	)
 }
 
@@ -125,6 +126,7 @@ func PoisonParent(t *testing.T) {
 		"AVENOR_SESSION_NAME":            "stale-session-name",
 		token.EnvBrokerParentToken:       "parent-secret",
 		token.EnvBrokerParentURL:         "http://parent-broker.invalid:9",
+		token.EnvBrokerAdvertiseURL:      "https://public-broker.invalid",
 	} {
 		t.Setenv(key, value)
 	}
@@ -182,6 +184,9 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 	}
 	if observed[token.EnvBrokerParentToken] != unsetValue {
 		t.Errorf("%s = %q, want it unset", token.EnvBrokerParentToken, observed[token.EnvBrokerParentToken])
+	}
+	if observed[token.EnvBrokerAdvertiseURL] != unsetValue {
+		t.Errorf("%s = %q, want it unset", token.EnvBrokerAdvertiseURL, observed[token.EnvBrokerAdvertiseURL])
 	}
 }
 

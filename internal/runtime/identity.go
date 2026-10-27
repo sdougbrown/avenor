@@ -40,15 +40,18 @@ var identityEnvNames = []string{
 	envParentRunID,
 }
 
-// scrubbedEnvNames excludes launch identity, test switches, parent-link
-// configuration, the retired label spelling, and the avenor peer credential
-// vocabulary from children. The parent-link credential grants broker authority
-// and a lone parent URL makes nested supervisor startup fail; an inherited peer
-// credential makes the child join the broker as a run another live session
-// already holds. Both are stripped here rather than by each backend, so a
-// launcher that forgets an extra call still cannot hand either one down.
+// scrubbedEnvNames excludes launch identity, test switches, the broker's
+// parent-link and advertised-address configuration, the retired label spelling,
+// and the avenor peer credential vocabulary from children. The parent-link
+// credential grants broker authority and a lone parent URL makes nested
+// supervisor startup fail; an inherited advertised URL would make a nested
+// supervisor's broker claim its ancestor's public address, which routes relays
+// into the wrong branch; an inherited peer credential makes the child join the
+// broker as a run another live session already holds. All of them are stripped
+// here rather than by each backend, so a launcher that forgets an extra call
+// still cannot hand any one down.
 var scrubbedEnvNames = append(
-	append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken, token.EnvBrokerParentURL, envRetiredPeerName),
+	append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken, token.EnvBrokerParentURL, token.EnvBrokerAdvertiseURL, envRetiredPeerName),
 	peerEnvNames...,
 )
 
@@ -62,10 +65,10 @@ var identityEnvKeys = func() map[string]struct{} {
 
 // ScrubbedEnvNames returns every environment name a child must not inherit:
 // launch identity, the test-only switches, the parent-link URL and credential,
-// the retired label spelling, and the avenor peer credentials. A shell launcher
-// that assembles its child's environment by hand unsets these instead of
-// calling ScrubIdentityEnv. A launch that provisions peer credentials appends
-// them after this scrub, never through it.
+// the broker's advertised address, the retired label spelling, and the avenor
+// peer credentials. A shell launcher that assembles its child's environment by
+// hand unsets these instead of calling ScrubIdentityEnv. A launch that
+// provisions peer credentials appends them after this scrub, never through it.
 func ScrubbedEnvNames() []string {
 	return append([]string(nil), scrubbedEnvNames...)
 }
@@ -166,9 +169,10 @@ func LaunchEnv(environ []string, p *LaunchProvenance) []string {
 
 // ScrubIdentityEnv returns environ without the names a child must not inherit
 // (ScrubbedEnvNames): launch identity, the test-only switches, the parent-link
-// URL and credential, and the avenor peer credentials. Matching is on the exact
-// key, so duplicates and bare-key entries are removed too, while near-miss names
-// and every other variable keep their order.
+// URL and credential, the broker's advertised address, and the avenor peer
+// credentials. Matching is on the exact key, so duplicates and bare-key entries
+// are removed too, while near-miss names and every other variable keep their
+// order.
 func ScrubIdentityEnv(environ []string) []string {
 	return scrubEnv(environ, func(key string) bool {
 		_, drop := identityEnvKeys[key]

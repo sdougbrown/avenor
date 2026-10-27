@@ -114,6 +114,15 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 			scrubbed: runtime.PeerEnvNames(),
 		},
 		{
+			name: "broker-advertise-url",
+			setup: func(t *testing.T) {
+				// A nested supervisor runs its own broker, so its ancestor's
+				// published address would be a lie about where relays arrive.
+				t.Setenv(token.EnvBrokerAdvertiseURL, "https://public.example.com")
+			},
+			scrubbed: []string{token.EnvBrokerAdvertiseURL},
+		},
+		{
 			name: "parent-token",
 			setup: func(t *testing.T) {
 				// A parent URL would intentionally forward this credential.

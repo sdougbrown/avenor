@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
@@ -64,6 +66,143 @@ func TestMissingBrokerListenerPublishesNoURL(t *testing.T) {
 	}
 	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
 		t.Fatalf("broker URL record published with no listener bound: %v", err)
+	}
+}
+
+// TestAdvertiseURLWithoutListenerPublishesNoURL pins that an advertised URL
+// replaces the bound address rather than standing in for a listener: the
+// terminator in front of this broker has no upstream when the broker bound
+// nothing, so the record must stay absent.
+func TestAdvertiseURLWithoutListenerPublishesNoURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	socketPath := newStableSocketPath(t, "brokerurl-advertise-nolistener")
+	sup := &Supervisor{
+		config:              Config{ControlSocket: socketPath},
+		broker:              broker.New(""),
+		brokerAdvertisedURL: "https://hub.example.com",
+	}
+	t.Cleanup(func() { _ = sup.broker.Stop() })
+
+	if got := sup.advertisedBrokerURL(); got != "" {
+		t.Fatalf("advertisedBrokerURL() = %q with no listener bound, want empty", got)
+	}
+	if err := sup.publishBrokerURL(); err != nil {
+		t.Fatalf("publishBrokerURL: %v", err)
+	}
+	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
+		t.Fatalf("broker URL record published with no listener bound: %v", err)
+	}
+}
+
+// TestAdvertisedBrokerURLIsPublishedBesideControlSocket pins the discovery side
+// of an advertised address: the record names the URL a TLS terminator or NAT
+// publishes the broker under, not the address it bound, and the bound address
+// still serves this host's children.
+func TestAdvertisedBrokerURLIsPublishedBesideControlSocket(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	addr := reserveStableLoopbackAddr(t)
+	socketPath := newStableSocketPath(t, "brokerurl-advertise")
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:      socketPath,
+		BrokerAddr:         addr,
+		BrokerAdvertiseURL: "https://hub.example.com:8443/",
+		MaxRuntimes:        1,
+		Stderr:             io.Discard,
+		ShutdownTimeout:    time.Second,
+	})
+	done := startStableRun(t, sup, socketPath)
+
+	if got := strings.TrimSpace(awaitBrokerURLRecord(t, socketPath)); got != "https://hub.example.com:8443" {
+		t.Fatalf("published broker URL = %q, want the advertised URL in canonical form", got)
+	}
+	resp, err := http.Get("http://" + addr + "/health")
+	if err != nil {
+		t.Fatalf("health on the bound broker address: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health on the bound address = %d, want 200", resp.StatusCode)
+	}
+
+	if err := sup.Shutdown("graceful"); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("Run() = %d, want 0", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run() did not return after a graceful shutdown")
+	}
+	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
+		t.Fatalf("advertised broker URL record survived shutdown: %v", err)
+	}
+}
+
+// TestSpawnResultKeepsTheBoundBrokerURL pins the local side: an advertised
+// address is for other hosts, so the URL a spawn hands to a child on this host
+// stays the bound address it can actually dial.
+func TestSpawnResultKeepsTheBoundBrokerURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	addr := reserveStableLoopbackAddr(t)
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:      newStableSocketPath(t, "brokerurl-advertise-spawn"),
+		BrokerAddr:         addr,
+		BrokerAdvertiseURL: "https://hub.example.com",
+		MaxRuntimes:        1,
+		Stderr:             io.Discard,
+	})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return &stableFakeProvider{events: make(chan events.Event, 1)}, nil
+	}
+
+	result, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if want := "http://" + addr; result.BrokerURL != want {
+		t.Fatalf("spawn broker_url = %q, want the bound %q", result.BrokerURL, want)
+	}
+}
+
+// TestInvalidAdvertiseURLFailsStartup pins that a value a peer could not post
+// to stops startup before any surface is bound or published: the operator asked
+// for this address, so silently falling back to the bound one would hide it.
+func TestInvalidAdvertiseURLFailsStartup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	socketPath := newStableSocketPath(t, "brokerurl-advertise-invalid")
+
+	stderr := captureStderr(t, func(w io.Writer) {
+		sup := newTestSupervisor(t, Config{
+			ControlSocket:      socketPath,
+			BrokerAdvertiseURL: "hub.example.com:8787",
+			MaxRuntimes:        1,
+			Stderr:             w,
+		})
+		done := make(chan int, 1)
+		go func() { done <- sup.Run() }()
+		select {
+		case code := <-done:
+			if code != 1 {
+				t.Fatalf("Run() = %d, want 1 for an unreachable advertised URL", code)
+			}
+		case <-time.After(5 * time.Second):
+			_ = sup.Shutdown("kill")
+			<-done
+			t.Fatal("Run() kept serving with an unreachable advertised URL")
+		}
+	})
+	for _, want := range []string{"broker advertise URL", "hub.example.com:8787"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr = %q, want it to name %q", stderr, want)
+		}
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("control socket bound despite the invalid advertised URL: %v", err)
+	}
+	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
+		t.Fatalf("broker URL record published despite the invalid advertised URL: %v", err)
 	}
 }
 

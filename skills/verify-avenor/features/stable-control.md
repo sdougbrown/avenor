@@ -9,7 +9,8 @@
 - Graceful shutdown of the supervisor (`shutdown graceful`)
 - Owner reconnect: every mutating verb loads the published owner record and authenticates on its own connection
 - Durable broker address: `--broker-addr` binds a fixed hub listener, and the
-  bound URL is published beside the socket for discovery
+  bound URL is what the `.broker.url` record publishes unless
+  `--broker-advertise-url` names the address a TLS terminator or NAT publishes
 
 ## How to get to it (user POV)
 
@@ -154,6 +155,40 @@ the address and leaves no socket or broker URL record, the wildcard run exits 1
 with `is a wildcard bind`, `concrete interface address` and the requested
 address in the message, and each graceful shutdown removes
 `<socket>.broker.url` while leaving the tombstone.
+
+### Advertised broker URL (TLS terminator / NAT)
+
+`--broker-advertise-url` (or `AVENOR_BROKER_ADVERTISE_URL`) replaces the bound
+address in the `.broker.url` record and in the endpoint the broker registers
+with its parent, while the bound address keeps serving this host's children.
+Drive the record and the validation without any terminator:
+
+```sh
+ADV_SOCK="$SCRATCH/advertised.sock"
+# A trailing slash is cosmetic; the record carries the canonical URL.
+./avenor stable --control-socket "$ADV_SOCK" --broker-addr "127.0.0.1:$PORT" \
+  --broker-advertise-url "https://hub.example.com:8443/" &> "$SCRATCH/advertised.log" &
+ADV_PID=$!   # record this
+await_path "$ADV_SOCK.broker.url" 15 "advertised broker URL record" || exit 1
+test "$(cat "$ADV_SOCK.broker.url")" = "https://hub.example.com:8443" \
+  && echo "advertised URL published"
+curl -fsS "http://127.0.0.1:$PORT/health" > /dev/null && echo "bound address still serves"
+./avenor control --socket "$ADV_SOCK" shutdown graceful
+await_gone "$ADV_SOCK.broker.url" 10 "advertised broker URL record" || exit 1
+
+# A value a peer could not post to is refused before anything binds.
+./avenor stable --control-socket "$SCRATCH/bad-advertise.sock" \
+  --broker-advertise-url "hub.example.com:8787"; echo "exit=$?"   # exit=1, names the value
+test -e "$SCRATCH/bad-advertise.sock" && echo "unexpected socket"
+```
+
+**Observable end state (the proof):** the record reads the advertised URL, not
+`http://127.0.0.1:$PORT`; the bound address still answers `/health`; the
+invalid value exits 1 with `broker advertise URL` and the rejected value in the
+message, leaving no socket and no record. The parent-side half — the branch
+registers the advertised endpoint and a relay posted there reaches the run —
+is driven in `internal/stable` (`TestAdvertisedBrokerURLIsTheParentRelayEndpoint`)
+with an in-process terminator, because a drive would need a real reverse proxy.
 
 
 ## Gotchas
