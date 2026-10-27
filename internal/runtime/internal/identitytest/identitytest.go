@@ -21,10 +21,9 @@ import (
 // inherit, so a test can tell "unset" from "empty".
 const unsetValue = "__UNSET__"
 
-// keys returns every environment name the observer serializes: the full set a
-// child must not inherit, plus the operational variables that prove the scrub
-// is exact. The parent-link pair is repeated here so the observer keeps
-// reporting it even if the production scrub list loses it.
+// keys includes scrubbed names and operational variables that must survive.
+// Parent-link names are also listed independently, so production list changes
+// cannot hide a leaked credential or URL.
 func keys() []string {
 	return append(runtime.ScrubbedEnvNames(),
 		runtime.EnvRuntimeID+"_SUFFIX", // near miss of an identity name
