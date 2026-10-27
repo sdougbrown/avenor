@@ -289,6 +289,46 @@ describe('host message provider', () => {
     expect(await provider(client).state(peerRunId)).toMatchObject({ live: true, resumable: false, status: 'running' })
   })
 
+  // Ids a broker permits that Go's %q escapes differently from messaging.Quote.
+  // The wire spelling is what the supervisor's fmt.Errorf("runtime %q not found")
+  // produces, character for character.
+  const goQuotedIds: Array<[name: string, runId: string, wireMessage: string]> = [
+    ['a C0 control', 'rt_\u0001ctl', 'runtime "rt_\\x01ctl" not found'],
+    ['a bell and a vertical tab', 'rt_\u0007bel\u000bvt', 'runtime "rt_\\abel\\vvt" not found'],
+    ['an escape and a delete', 'rt_\u001b\u007f', 'runtime "rt_\\x1b\\x7f" not found'],
+    ['a no-break space', 'rt_\u00a0nbsp', 'runtime "rt_\\u00a0nbsp" not found'],
+    ['an astral format character', 'rt_\u{e0021}tag', 'runtime "rt_\\U000e0021tag" not found'],
+  ]
+  for (const [name, runId, wireMessage] of goQuotedIds) {
+    it(`recognizes the absence answer Go renders for ${name}`, async () => {
+      const client = fakeClient({
+        status: mock(async () => {
+          throw new RpcError(-32000, wireMessage)
+        }),
+        messagePeers: mock(async () => ({
+          peers: [{ run_id: runId, session: { run_id: runId, label: 'branch-target', status: 'running' } }],
+        })),
+      })
+      expect(await provider(client).state(runId)).toMatchObject({ live: true, resumable: false, status: 'running' })
+    })
+  }
+
+  it('keeps a status failure whose id is escaped some other way than Go renders it', async () => {
+    // The messaging Quote spelling of a C0 control is `\u0001`; Go's %q writes
+    // `\x01`. Only the sentence the supervisor actually produces is the
+    // absence answer, so the escaped-any-other-way text stays this call's error.
+    const runId = 'rt_\u0001ctl'
+    const client = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_\\u0001ctl" not found')
+      }),
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: runId, session: { run_id: runId, label: 'branch-target', status: 'running' } }],
+      })),
+    })
+    await expect(provider(client).state(runId)).rejects.toThrow('rt_\\u0001ctl')
+  })
+
   it('lets a stale generation from the listing read out, so the surface can retry with a fresh one', async () => {
     const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
     const client = fakeClient({

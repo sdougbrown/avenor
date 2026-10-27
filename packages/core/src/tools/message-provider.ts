@@ -15,7 +15,7 @@ import type {
 import { RpcError } from '../client.js'
 import { ensureRunPaths } from '../paths.js'
 import { Supervisor, retainLiveIdentity, type RunInfo } from '../supervisor.js'
-import { newMsgID, quote, type MessageOutcome } from '../messaging-text.js'
+import { newMsgID, type MessageOutcome } from '../messaging-text.js'
 import { ToolError } from '../message.js'
 import { findExternalRunById, listExternalRuns, registerExternalRun } from './run-registry.js'
 import { RESUMABLE_SENTINEL_STATUSES } from './sentinel-status.js'
@@ -142,13 +142,67 @@ export function isGenerationMismatchError(error: unknown): boolean {
  * failure (-32000) whose message names the runtime it could not find, with no
  * structured data to key on, so the report is matched exactly: same code, same
  * runtime id, same sentence. The supervisor builds the sentence with Go's
- * `%q`, which escapes a `"` and a `\` the way `quote` does, so the id is
- * rendered rather than interpolated. Anything else is a failure the caller
- * keeps.
+ * `%q`, which is `strconv.Quote` — a different quoting from `messaging.Quote`
+ * (the shared tool-text contract) for control and format characters — so the
+ * id is rendered with `goQuote` rather than interpolated or quoted. Anything
+ * else is a failure the caller keeps.
  */
 function isRuntimeNotFoundError(error: unknown, runId: string): boolean {
   if (!(error instanceof RpcError) || error.code !== -32000) return false
-  return rpcText(error) === `runtime ${quote(runId)} not found`
+  return rpcText(error) === `runtime ${goQuote(runId)} not found`
+}
+
+/**
+ * Render a value as one Go double-quoted string literal, the `%q` verb's form
+ * (`strconv.Quote`): short escapes for a quote, a backslash, a bell, and the
+ * whitespace controls; `\xNN` for the remaining ASCII escapes; `\uNNNN` for a
+ * non-printable BMP rune; `\UNNNNNNNN` for a non-printable rune above it; and
+ * a printable rune verbatim. `messaging.Quote` (see `quote`) writes the C0
+ * controls as `\uNNNN` and an astral rune as a surrogate pair instead, so it
+ * cannot recognize a sentence the supervisor produced.
+ *
+ * Printable is Go's `strconv.IsPrint`: ASCII space through `~`, and elsewhere
+ * the general categories L, M, N, P and S. V8's Unicode tables can be newer
+ * than Go's, so a rune assigned since Go's tables were generated renders
+ * escaped here where Go writes it verbatim. That direction only fails to
+ * recognize the sentence; it never recognizes one the supervisor did not
+ * write.
+ */
+function goQuote(value: string): string {
+  let out = '"'
+  for (const character of value) out += goEscapedRune(character)
+  return `${out}"`
+}
+
+const GO_PRINTABLE = /[\p{L}\p{M}\p{N}\p{P}\p{S}]/u
+
+function goEscapedRune(character: string): string {
+  const code = character.codePointAt(0) ?? 0
+  switch (character) {
+    case '"':
+      return '\\"'
+    case '\\':
+      return '\\\\'
+    case '\x07':
+      return '\\a'
+    case '\b':
+      return '\\b'
+    case '\f':
+      return '\\f'
+    case '\n':
+      return '\\n'
+    case '\r':
+      return '\\r'
+    case '\t':
+      return '\\t'
+    case '\v':
+      return '\\v'
+  }
+  const printable = code < 0x80 ? code >= 0x20 && code !== 0x7f : GO_PRINTABLE.test(character)
+  if (printable) return character
+  if (code < 0x80) return `\\x${code.toString(16).padStart(2, '0')}`
+  if (code < 0x10000) return `\\u${code.toString(16).padStart(4, '0')}`
+  return `\\U${code.toString(16).padStart(8, '0')}`
 }
 
 /** Reject an abort exactly the way fetch does, so the ask cleanup path runs. */

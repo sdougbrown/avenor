@@ -635,6 +635,50 @@ func TestMCPMessageProviderRunStateReadsTheListingOnTheAbsenceAnswer(t *testing.
 	}
 }
 
+// TestMCPMessageProviderRunStateAnswersTheAbsenceAnswerFromTheSentinelFirst
+// pins the order of the two fallbacks on a genuine absence answer: a run this
+// host spawned keeps the terminal status its sentinel published even when the
+// broker's listing also holds the run and would report it live. Reading the
+// listing first would report a finished run as running.
+func TestMCPMessageProviderRunStateAnswersTheAbsenceAnswerFromTheSentinelFirst(t *testing.T) {
+	const publicID = "8d1f4a72-6c39-4f5b-b0e8-2a7f9c3d5e16"
+	sentinelPath := filepath.Join(t.TempDir(), "avenor-run-"+publicID+".done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_prior\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeMessageControlClient{
+		fakeClient: &fakeClient{statusErr: &client.RPCError{
+			Code:    -32000,
+			Message: fmt.Sprintf("runtime %q not found", publicID),
+		}},
+		peersFunc: branchPeerListing(publicID),
+	}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{
+		SupervisorID: testSupervisorPath,
+		RunID:        publicID,
+		RuntimeID:    "rt_1",
+		Label:        "finished",
+		SentinelPath: sentinelPath,
+	}); err != nil {
+		t.Fatalf("registry.Store: %v", err)
+	}
+
+	got, err := p.RunState(context.Background(), publicID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	want := messaging.RunFacts{
+		RunID:     publicID,
+		Status:    runstate.StatusDone,
+		Live:      false,
+		Resumable: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RunState = %#v, want %#v", got, want)
+	}
+}
+
 // TestMCPMessageProviderRunStateKeepsStatusFailuresThatAreNotAbsences proves a
 // refusal, a transport failure, and an absence answer naming a different
 // runtime all keep their own error even when the listing holds the run. A
