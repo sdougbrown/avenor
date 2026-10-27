@@ -16,6 +16,7 @@ state named in each file is the acceptance bar for that feature.
 | Config validation | [verify-command.md](verify-command.md) | `avenor verify` |
 | Launch identity | [provenance.md](provenance.md) | `avenor run --team-file` → MCP env + phase/team events |
 | Workflow launch wrappers | [workflow-launch-wrappers.md](workflow-launch-wrappers.md) | `avenor stable` + `avenor workflow` → wrapper argv + marker completion |
+| Claude peer layer | [claude-peers.md](claude-peers.md) | plugin `hooks/` mods layer → `SendMessage({to:"avenor:*"})`, inbound prompt turn, blocking `ask` |
 
 Known secondary surfaces not yet mapped: embedded board web UI (built with
 `-tags board`, see `mise.toml:go-build-full`), MCP server (`avenor mcp`,
