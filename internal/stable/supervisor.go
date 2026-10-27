@@ -2118,11 +2118,11 @@ func (s *Supervisor) brokerURL() string {
 	return s.broker.URL()
 }
 
-// advertisedBrokerURL returns the URL peers on another host reach this broker
+// externalBrokerURL returns the URL peers on another host reach this broker
 // on: the operator's advertised URL, else the bound address. Parent registration
 // and the published record use it. An advertised URL never invents a listener,
 // so a broker that bound nothing advertises nothing.
-func (s *Supervisor) advertisedBrokerURL() string {
+func (s *Supervisor) externalBrokerURL() string {
 	bound := s.brokerURL()
 	if bound == "" {
 		return ""
@@ -2162,7 +2162,7 @@ func (s *Supervisor) installParentLink() {
 	options := parentlink.Options{
 		ParentURL:  s.config.BrokerParentURL,
 		Token:      s.config.BrokerParentToken,
-		Endpoint:   s.advertisedBrokerURL(),
+		Endpoint:   s.externalBrokerURL(),
 		Generation: s.broker.Store().Generation,
 		Runs:       s.parentRunClaims,
 		// The relay carries the asker's display name, so the branch that receives

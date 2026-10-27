@@ -84,8 +84,8 @@ func TestAdvertiseURLWithoutListenerPublishesNoURL(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.broker.Stop() })
 
-	if got := sup.advertisedBrokerURL(); got != "" {
-		t.Fatalf("advertisedBrokerURL() = %q with no listener bound, want empty", got)
+	if got := sup.externalBrokerURL(); got != "" {
+		t.Fatalf("externalBrokerURL() = %q with no listener bound, want empty", got)
 	}
 	if err := sup.publishBrokerURL(); err != nil {
 		t.Fatalf("publishBrokerURL: %v", err)

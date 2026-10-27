@@ -15,7 +15,7 @@ func BrokerURLPath(socketPath string) string { return socketPath + ".broker.url"
 // socket. Run calls it only after the control server owns the socket, so a
 // competing supervisor that loses the socket never overwrites the live record.
 func (s *Supervisor) publishBrokerURL() error {
-	url := s.advertisedBrokerURL()
+	url := s.externalBrokerURL()
 	if url == "" || s.config.ControlSocket == "" {
 		return nil
 	}
