@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/stable"
@@ -453,7 +454,20 @@ func TestRunStableInvalidBrokerAdvertiseURLExits(t *testing.T) {
 		_ = r.Close()
 	}()
 
-	code := runStable([]string{"--control-socket", socketPath, "--broker-advertise-url", "hub.example.com:8787"})
+	// runStable parks in the supervisor's run loop when it does not exit, so a
+	// regression that stops the rejected URL from short-circuiting startup
+	// would hang this test until the package timeout. Bound the wait so the
+	// regression is reported while the suite is still usable.
+	exited := make(chan int, 1)
+	go func() {
+		exited <- runStable([]string{"--control-socket", socketPath, "--broker-advertise-url", "hub.example.com:8787"})
+	}()
+	var code int
+	select {
+	case code = <-exited:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("runStable did not exit on the rejected advertise URL within 30s; startup no longer stops on invalid --broker-advertise-url")
+	}
 	_ = w.Close()
 	os.Stderr = oldStderr
 	var stderr bytes.Buffer
