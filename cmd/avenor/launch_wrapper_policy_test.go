@@ -87,7 +87,7 @@ func TestCommandsResolveLaunchWrapperPolicyThroughSameChain(t *testing.T) {
 	home := t.TempDir()
 	envPath := writePolicyIn(t, t.TempDir(), "env.json", "/env/exec")
 	flagPath := writePolicyIn(t, t.TempDir(), "flag.json", "/flag/exec")
-	wellKnownPath := writePolicyIn(t, home, ".avenor/launch-wrapper-policy.json", "/well-known/exec")
+	wellKnownPath := writePolicyIn(t, home, "launch-wrapper-policy.json", "/well-known/exec")
 
 	tests := []struct {
 		name     string
@@ -131,7 +131,7 @@ func TestCommandsDisableLaunchWrapperPolicyWithoutAnySource(t *testing.T) {
 
 func TestCommandsFailOnInvalidWellKnownPolicy(t *testing.T) {
 	home := t.TempDir()
-	path := filepath.Join(home, ".avenor", "launch-wrapper-policy.json")
+	path := filepath.Join(home, "launch-wrapper-policy.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
