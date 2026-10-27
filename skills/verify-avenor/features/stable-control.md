@@ -125,10 +125,9 @@ cat "$HUB_SOCK.broker.url"          # http://127.0.0.1:$PORT
   --broker-addr "127.0.0.1:$PORT"; echo "exit=$?"   # exit=1, "address already in use"
 test -e "$SCRATCH/competitor.sock" && echo "unexpected socket"
 
-# A wildcard bind is refused up front, because that address is what children
-# and parent branches are told to reach. The refusal names the address the
-# kernel resolved, so an alias such as 0:0 is refused too.
-./avenor stable --control-socket "$SCRATCH/wild.sock" --broker-addr "0.0.0.0:$PORT"; echo "exit=$?"
+# Use an ephemeral port so the hub cannot mask wildcard validation with a
+# port collision. The resolved wildcard is refused before serving.
+./avenor stable --control-socket "$SCRATCH/wild.sock" --broker-addr "0.0.0.0:0"; echo "exit=$?"
 
 ./avenor control --socket "$HUB_SOCK" shutdown graceful
 await_gone "$HUB_SOCK.broker.url" 10 "hub broker URL record" || exit 1
