@@ -910,8 +910,12 @@ func (s *Server) queryRunStatus(cl ControlClient, supervisorPath, runID string) 
 			}
 			return nil, fmt.Errorf("status: %w", err)
 		}
+		// A run with no sentinel of its own is historical only when another
+		// registered turn owns the runtime's current sentinel; an unknown
+		// sentinel belongs to no turn this server knows, so the live status
+		// still answers for it.
 		if path := stringField(result, "sentinel_file"); path != "" &&
-			(path != ri.SentinelPath ||
+			((ri.SentinelPath != "" && path != ri.SentinelPath) ||
 				(ri.SentinelPath == "" && s.registry.OtherTurnOwnsSentinel(supervisorPath, ri.RuntimeID, ri.RunID, path))) {
 			if ts, ok := terminalStatusFromRunInfo(ri); ok {
 				ts["_historical_turn"] = true

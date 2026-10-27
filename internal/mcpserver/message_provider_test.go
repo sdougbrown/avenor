@@ -1115,3 +1115,34 @@ func TestMCPMessageProviderStatusAndRunStateAgreeOnTerminalFallback(t *testing.T
 		t.Fatalf("status path facts = %#v, want the RunState facts %#v", got, want)
 	}
 }
+
+// TestMCPMessageProviderSentinellessTurnWithoutOtherOwnerStaysLive proves a
+// registered run with no sentinel of its own keeps the runtime's live status
+// when no other turn owns the runtime's current sentinel. Only another owner
+// makes it historical.
+func TestMCPMessageProviderSentinellessTurnWithoutOtherOwnerStaysLive(t *testing.T) {
+	dir := t.TempDir()
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status":        "running",
+		"session_id":    "sess-live",
+		"sentinel_file": filepath.Join(dir, "unknown.done"),
+	}}}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{SupervisorID: testSupervisorPath, RunID: "solo", RuntimeID: "rt"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := p.Resolve(context.Background(), "solo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := p.RunState(context.Background(), resolved.RunID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	if !facts.Live {
+		t.Fatalf("sentinelless turn with no other owner facts = %#v, want live", facts)
+	}
+	if facts.Status == "unknown" {
+		t.Fatalf("status = %q, want the runtime's live status", facts.Status)
+	}
+}
