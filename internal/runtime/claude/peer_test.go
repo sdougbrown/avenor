@@ -2,6 +2,9 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,9 +79,11 @@ func startTestProvider(t *testing.T, opts runtime.StartOptions) (*Provider, *rec
 }
 
 // A spawned claude child joins the broker as the run its supervisor already
-// provisioned for it: the launch carries that run id and token, and the label
-// peers address it by. Minting a second run here would give one child two
-// records under one label — the ambiguity that makes `avenor:<label>` fail.
+// provisioned for it, and the credential it is handed is one-shot: the launch
+// carries an attach credential the mods layer trades for the run's own, so a
+// nested session that inherits this environment cannot join the same run.
+// Minting a second run here would give one child two records under one label —
+// the ambiguity that makes `avenor:<label>` fail.
 func TestStartProvisionsTheSupervisorsBrokerRun(t *testing.T) {
 	b := broker.New("")
 	if err := b.Start(); err != nil {
@@ -101,8 +106,9 @@ func TestStartProvisionsTheSupervisorsBrokerRun(t *testing.T) {
 	if env["AVENOR_RUN_ID"] != "rt_7" {
 		t.Errorf("AVENOR_RUN_ID = %q, want rt_7", env["AVENOR_RUN_ID"])
 	}
-	if env["AVENOR_BROKER_TOKEN"] != token {
-		t.Errorf("AVENOR_BROKER_TOKEN = %q, want %q", env["AVENOR_BROKER_TOKEN"], token)
+	attach := env["AVENOR_BROKER_TOKEN"]
+	if attach == "" || attach == token {
+		t.Fatalf("AVENOR_BROKER_TOKEN = %q, want a one-shot attach credential, not the run token", attach)
 	}
 	if env["AVENOR_SESSION_NAME"] != "" {
 		// The label reaches the child once, as the launch identity's AVENOR_LABEL.
@@ -115,11 +121,21 @@ func TestStartProvisionsTheSupervisorsBrokerRun(t *testing.T) {
 	if n := b.RunCount(); n != 1 {
 		t.Errorf("broker holds %d runs, want the one provisioned run", n)
 	}
+
+	// The credential the launch handed over is the one the broker will spend, and
+	// only once: that is the single inbound consumer.
+	first, status, body := attachTo(t, b.Addr(), "rt_7", attach)
+	if status != 200 || first != token {
+		t.Fatalf("attach = (%q, %d, %v), want the run token", first, status, body)
+	}
+	if _, status, body := attachTo(t, b.Addr(), "rt_7", attach); status != 409 {
+		t.Fatalf("second attach = (%d, %v), want 409", status, body)
+	}
 }
 
-// A broker without a run for this child must not half-configure it: URL, run id
-// and token travel together or not at all.
-func TestStartOmitsPeerCredentialsWithoutAProvisionedRun(t *testing.T) {
+// A provisioned run with no run record behind it must not half-configure the
+// child: URL, run id and a spendable credential travel together or not at all.
+func TestStartOmitsPeerCredentialsWithNoBearerForTheRunToken(t *testing.T) {
 	b := broker.New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("broker.Start: %v", err)
@@ -129,8 +145,10 @@ func TestStartOmitsPeerCredentialsWithoutAProvisionedRun(t *testing.T) {
 	_, launcher := startTestProvider(t, runtime.StartOptions{
 		Label:  "child-a",
 		Broker: b,
-		// RuntimeID without a token: nothing to join as.
-		RuntimeID: "rt_7",
+		// RuntimeID and a token with no run behind them: nothing to join as, and
+		// no attach credential the broker would honour.
+		RuntimeID:   "rt_7",
+		BrokerToken: "loose-token",
 	})
 
 	if env := launcher.captured().Env; len(env) != 0 {
@@ -139,4 +157,24 @@ func TestStartOmitsPeerCredentialsWithoutAProvisionedRun(t *testing.T) {
 	if n := b.RunCount(); n != 0 {
 		t.Errorf("broker holds %d runs, want none minted", n)
 	}
+}
+
+// attachTo posts one attach handshake at the broker's open route.
+func attachTo(t *testing.T, addr, runID, credential string) (string, int, string) {
+	t.Helper()
+	body := `{"run_id":"` + runID + `","token":"` + credential + `"}`
+	resp, err := http.Post("http://"+addr+"/attach", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /attach: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read attach body: %v", err)
+	}
+	var answer struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(raw, &answer)
+	return answer.Token, resp.StatusCode, string(raw)
 }

@@ -85,8 +85,10 @@ type StartOptions struct {
 	Provenance *runtime.LaunchProvenance
 	// Env holds KEY=VALUE entries exported to the hosted process after the
 	// launch identity: the caller's own vocabulary rather than the harness's.
-	// Inherited entries of the same names are stripped first. A tmux pane can
-	// only be given values this way, so the field is not a PTY-only seam.
+	// Inherited entries of the same names are stripped first. Neither launcher
+	// renders these values into a command line: the PTY launcher sets them as
+	// the child's environment, and the tmux launcher writes them to a mode-0600
+	// file the pane sources, because a new-session command is argv.
 	Env []string
 }
 

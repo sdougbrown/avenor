@@ -113,7 +113,7 @@ func TestTmuxNewSessionArgsUnsetParentClaudeSession(t *testing.T) {
 		Cols:    220,
 		Rows:    50,
 		Command: "exec claude --session-id abc",
-	})
+	}, "")
 
 	shellCmd := args[len(args)-1]
 	if !strings.HasPrefix(shellCmd, UnsetParentClaudeEnvPrefix()) {
@@ -242,7 +242,7 @@ func TestTmuxPrefixUnsetsTheParentCredential(t *testing.T) {
 		Cols:    220,
 		Rows:    50,
 		Command: "exec claude",
-	})
+	}, "")
 	shellCmd := args[len(args)-1]
 	// The prefix may span several "unset ..." segments (Claude session vars,
 	// then the shared scrub set); the credential must be unset by one of them.
@@ -255,5 +255,105 @@ func TestTmuxPrefixUnsetsTheParentCredential(t *testing.T) {
 	}
 	if !unset {
 		t.Fatalf("tmux command = %q, want some unset segment to include %s", shellCmd, token.EnvBrokerParentToken)
+	}
+}
+
+// A provisioned value is a credential this user's other processes could read
+// from ps or /proc/<pid>/cmdline, so the tmux launch must keep it out of argv
+// and out of the tmux server's command log: the pane sources a mode-0600 file
+// the launch owns, and that file dies with the session.
+func TestTmuxLaunchKeepsProvisionedValuesOutOfArgvAndRemovesTheFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "tmux.log")
+	fakeDir := filepath.Join(tmpDir, "fakebin")
+	if err := os.Mkdir(fakeDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	script := `#!/bin/sh
+printf '%s\n' "$@" >> "$FAKE_TMUX_LOG"
+case "$1" in
+  new-session) exit 0 ;;
+  list-panes) printf '4242\n'; exit 0 ;;
+  kill-session) exit 0 ;;
+esac
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(fakeDir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake tmux: %v", err)
+	}
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_TMUX_LOG", logPath)
+
+	const credential = "tok-argv-must-not-carry-me"
+	session, err := (TmuxLauncher{}).Start(context.Background(), StartOptions{
+		Name:    "avenor-test",
+		Dir:     "/tmp/x",
+		Cols:    220,
+		Rows:    50,
+		Command: "exec claude",
+		Env: []string{
+			"AVENOR_BROKER_URL=http://127.0.0.1:9",
+			"AVENOR_RUN_ID=rt_7",
+			"AVENOR_BROKER_TOKEN=" + credential,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read tmux log: %v", err)
+	}
+	var envFile string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.Contains(line, credential) {
+			t.Fatalf("tmux argv element = %q, want no provisioned value in it:\n%s", line, raw)
+		}
+		// The sourced path is the one argument shaped `. '<path>'; ...
+		if idx := strings.Index(line, ". '"); idx >= 0 {
+			rest := line[idx+3:]
+			if end := strings.Index(rest, "'"); end > 0 {
+				envFile = rest[:end]
+			}
+		}
+	}
+	if envFile == "" {
+		t.Fatalf("no sourced env file in the tmux command:\n%s", raw)
+	}
+
+	info, err := os.Stat(envFile)
+	if err != nil {
+		t.Fatalf("stat env file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("env file mode = %o, want 600", got)
+	}
+	source, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if !strings.Contains(string(source), "AVENOR_BROKER_TOKEN='"+credential+"'") {
+		t.Errorf("env file = %q, want the provisioned token in it", source)
+	}
+
+	// The pane does run with them: that is what the file is for.
+	shellCmd := UnsetParentClaudeEnvPrefix() + identityEnvPrefix(nil, envFile) + `printf '%s' "$AVENOR_BROKER_TOKEN"`
+	out, err := exec.Command("sh", "-c", shellCmd).Output()
+	if err != nil {
+		t.Fatalf("sourcing the launch env failed: %v", err)
+	}
+	if got := string(out); got != credential {
+		t.Errorf("child saw AVENOR_BROKER_TOKEN = %q, want %q", got, credential)
+	}
+
+	if err := session.Kill(context.Background()); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if _, err := os.Stat(envFile); !os.IsNotExist(err) {
+		t.Errorf("env file still exists after Kill: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(envFile)); !os.IsNotExist(err) {
+		t.Errorf("env dir still exists after Kill: %v", err)
 	}
 }

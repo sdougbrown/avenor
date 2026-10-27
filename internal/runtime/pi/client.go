@@ -139,15 +139,15 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 		filtered = append(filtered, "PI_AGENT_PROFILE="+agentProfile)
 	}
 	// Broker credentials let the pi sub-process poll its own inbound asks and
-	// reply via avenor_message as its own run.
-	if brokerURL != "" {
-		filtered = append(filtered, runtime.EnvBrokerURL+"="+brokerURL)
-	}
-	if brokerRunID != "" {
-		filtered = append(filtered, runtime.EnvBrokerRunID+"="+brokerRunID)
-	}
-	if brokerToken != "" {
-		filtered = append(filtered, runtime.EnvBrokerToken+"="+brokerToken)
+	// reply via avenor_message as its own run. They are one identity, so they go
+	// in together or not at all: a half-configured child would poll with
+	// credentials the broker cannot authenticate. runtime.ProvisionPeer is the
+	// rule that decides whether a launch has them.
+	if brokerURL != "" && brokerRunID != "" && brokerToken != "" {
+		filtered = append(filtered,
+			runtime.EnvBrokerURL+"="+brokerURL,
+			runtime.EnvBrokerRunID+"="+brokerRunID,
+			runtime.EnvBrokerToken+"="+brokerToken)
 	}
 	proc.Env = runtime.LaunchEnv(filtered, provenance)
 	stdin, err := proc.StdinPipe()

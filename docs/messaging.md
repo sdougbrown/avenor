@@ -200,6 +200,7 @@ The local adapter drives the broker's own router:
 | `/wait_reply` | Wait for the ask's terminal state. |
 | `/cancel_message` | Withdraw an ask. |
 | `/poll-control` | Drain queued control and agent messages. |
+| `/attach` | Spend one launch's attach credential: `run_id` and `token`, answered once with the run's own `{run_id, token}`. The broker mints these per launch (`MintAttach`) and the provider puts one in a provisioned child's environment, so the first session that presents it is the run's inbound consumer; a second presentation of the same credential is refused `409` with code `attach-consumed`, which is what keeps one run to one poller. The route is unauthenticated in the `/register` sense — the credential is the authentication and it is worthless once spent — and it never accepts the run's own token in place of a launch grant. |
 | `/rename` | Change a display name. The body's `run_id` must be the authenticated caller, and `session_id` is forwarded to the supervisor's one rename authority, so the supervisor decides whether the caller may rename that target. Answers `{run_id, label, previous_label}`. |
 | `/session_name` | Record the harness's own user-defined session name for the authenticated caller's run, or clear it with an empty `name`. The name must satisfy the same 1–64 rune rule as `/rename`; an empty `name` clears. Answers `{run_id, label}` with the resolved label. |
 | `/parent/register` | Adopt one child broker's claim on the runs it owns: `child_id`, `endpoint`, `generation` and `runs`, under the broker's link credential rather than a caller's run token. A claim replaces the child's previous run set and retires the runs it stopped naming. Answers `{generation, messaging_protocol}`, plus `run_keys` mapping a run's canonical ID to the run ID this broker addresses it by. |
@@ -261,7 +262,9 @@ network therefore means every client that can reach the broker port is
 trusted: the credentials are not an admission gate for arbitrary network
 clients. `POST /register` mints a token for any run id it has not seen without
 asking for a parent token, so a client that reaches the port can register
-itself and then use its own credential. There is no TLS listener, so a hub
+itself and then use its own credential. Its answer also carries a one-shot
+attach grant for that run, because the registering caller is the run's
+provisioning side. There is no TLS listener, so a hub
 exposed beyond that network needs a channel that supplies both confidentiality
 and admission control.
 

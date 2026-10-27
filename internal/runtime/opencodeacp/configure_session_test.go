@@ -172,7 +172,7 @@ func (e *errorConfigurer) SetSessionMode(_ context.Context, _, _ string) error {
 }
 
 func TestBuildClientEnv(t *testing.T) {
-	env, cleanup := buildClientEnv(runtime.StartOptions{Label: "worker"}, "run_123", "tok_456", "127.0.0.1:9999")
+	env, cleanup := buildClientEnv(runtime.StartOptions{Label: "worker"}, "run_123", "tok_456", "http://127.0.0.1:9999")
 	if cleanup != nil {
 		defer func() { _ = cleanup() }()
 	}
@@ -242,7 +242,7 @@ func TestBuildClientEnv(t *testing.T) {
 
 func TestMergeConfigPreservesExistingCustomConfig(t *testing.T) {
 	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"tools":{"existing*":true},"mcp":{"existing":{"type":"local","command":["echo","ok"]}}}`)
-	env, cleanup := buildClientEnv(runtime.StartOptions{}, "run_123", "tok_456", "127.0.0.1:9999")
+	env, cleanup := buildClientEnv(runtime.StartOptions{}, "run_123", "tok_456", "http://127.0.0.1:9999")
 	if cleanup != nil {
 		defer func() { _ = cleanup() }()
 	}
@@ -268,7 +268,7 @@ func TestMergeConfigPreservesExistingCustomConfig(t *testing.T) {
 }
 
 func TestBuildClientEnvCleanupRemovesConfigFile(t *testing.T) {
-	env, cleanup := buildClientEnv(runtime.StartOptions{}, "run_cleanup", "tok_456", "127.0.0.1:9999")
+	env, cleanup := buildClientEnv(runtime.StartOptions{}, "run_cleanup", "tok_456", "http://127.0.0.1:9999")
 	if cleanup == nil {
 		t.Fatal("cleanup func is nil")
 	}
@@ -714,8 +714,8 @@ func TestConcurrentProvidersKeepDistinctConfigFiles(t *testing.T) {
 			BackendID: "opencode-acp",
 			Bin:       bin,
 			Opts:      runtime.StartOptions{Agent: agent},
-			BuildClientEnv: func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
-				env, cleanup := buildClientEnv(opts, runID, brokerToken, brokerAddr)
+			BuildClientEnv: func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error) {
+				env, cleanup := buildClientEnv(opts, runID, brokerToken, brokerURL)
 				if env != nil {
 					mu.Lock()
 					paths[agent] = append(paths[agent], env["OPENCODE_CONFIG"])

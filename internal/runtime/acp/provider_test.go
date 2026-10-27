@@ -536,7 +536,7 @@ func TestStartRunsClientEnvCleanupOnEnsureClientFailure(t *testing.T) {
 		pollCancels:     map[string]context.CancelFunc{},
 		pendingMessages: map[string][]string{},
 		broker:          broker.New(""),
-		buildClientEnv: func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
+		buildClientEnv: func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error) {
 			return map[string]string{"OPENCODE_CONFIG": "/tmp/unused.json"}, func() error {
 				cleaned = true
 				return nil

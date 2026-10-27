@@ -134,12 +134,20 @@ func callerEnv(entries []string) []string {
 
 // identityEnvPrefix returns a shell prefix that unsets every name a child must
 // not inherit (runtime.ScrubbedEnvNames and the avenor peer credentials) and
-// exports this launch's identity followed by the caller's own env. The unset
-// must happen here, not just in LaunchEnv: a pane inherits the tmux server's
-// environment, which carries the credential the documented setup way. Values
-// are single-quoted so labels containing quotes, newlines or command
-// substitution text stay literal data.
-func identityEnvPrefix(p *runtime.LaunchProvenance, env []string) string {
+// exports this launch's identity, then sources envFile: the caller's own
+// environment, which this launch provisions values into. The unset must happen
+// here, not just in LaunchEnv: a pane inherits the tmux server's environment,
+// which carries the credential the documented setup way. Values are
+// single-quoted so labels containing quotes, newlines or command substitution
+// text stay literal data.
+//
+// The caller's entries travel through a file rather than the command because a
+// tmux new-session command is argv: any local process can read it from ps or
+// /proc/<pid>/cmdline, and a broker credential readable that way needs no
+// privilege to steal. The file's path may appear there; its values never do.
+// An empty envFile is a launch that provisions nothing, and the prefix is then
+// self-contained.
+func identityEnvPrefix(p *runtime.LaunchProvenance, envFile string) string {
 	var b strings.Builder
 	b.WriteString("unset")
 	for _, name := range runtime.ScrubbedEnvNames() {
@@ -152,10 +160,27 @@ func identityEnvPrefix(p *runtime.LaunchProvenance, env []string) string {
 	}
 	b.WriteString("; ")
 	writeExports(&b, p.IdentityEnv())
-	// The exports land after the unset, so a caller-supplied entry would win
-	// over both the unset and this launch's identity. callerEnv is what keeps
-	// the prefix's invariant true for every caller.
-	writeExports(&b, callerEnv(env))
+	if envFile != "" {
+		// Sourced after the unset, so a provisioned entry wins over both the
+		// unset and this launch's identity. callerEnv is what keeps that
+		// invariant true: it is the filter the file is written through.
+		b.WriteString(". ")
+		b.WriteString(shellquote.Quote(envFile))
+		b.WriteString("; ")
+	}
+	return b.String()
+}
+
+// launchEnvSource renders the caller's own environment as shell source an
+// interactive shell can `.` into itself: the same exports identityEnvPrefix
+// used to inline, written where no process listing can read them.
+func launchEnvSource(env []string) string {
+	entries := callerEnv(env)
+	if len(entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	writeExports(&b, entries)
 	return b.String()
 }
 

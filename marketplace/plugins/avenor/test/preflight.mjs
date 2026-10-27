@@ -806,7 +806,7 @@ const onCopy = await layerCopy({ version: '2.1.311-prod', base: '2.1.311' }, {
   AVENOR_BROKER_URL: BROKER,
   AVENOR_RUN_ID: 'claude-gate-' + Math.random().toString(16).slice(2, 8),
 })
-const onLine = events.find((e) => e.kind === 'ui.log' && e.line.includes('peer layer on (run claude-gate-'))
+const onLine = events.find((e) => e.kind === 'ui.log' && e.line.includes('peer layer on (self-registered run claude-gate-'))
 console.log(JSON.stringify({ check: 'a valid shape turns the layer on', logged: Boolean(onLine) }))
 if (!onLine) {
   console.log('FAIL: a valid version shape did not arm the layer')

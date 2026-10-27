@@ -3,18 +3,23 @@
 // noun speaks to a REAL broker, and drives session.start once per identity the
 // layer can be handed:
 //
-//   A. provisioned — broker URL, run id and token name a run the launcher
-//      already holds, and AVENOR_LABEL carries the launch label (every avenor
-//      launch exports its identity that way). The layer joins that run and
-//      writes nothing about it: no /register, no /session_name. The name write
-//      is asserted absent by path — a harness name outranks the record's label
-//      in the broker, so posting the launch label would shadow the name peers
-//      address the run by, including through a later authorized rename.
-//   B. half-provisioned — a run id without a token. The layer self-registers
-//      through the broker's open /register route and posts the name it was
-//      handed, here as AVENOR_LABEL alone.
+//   A. provisioned — broker URL, run id and this launch's one-shot attach
+//      credential name a run the launcher already holds, and AVENOR_LABEL
+//      carries the launch label (every avenor launch exports its identity that
+//      way). The layer trades the credential at /attach for the run's own and
+//      writes nothing else about the run: no /register, no /session_name. The
+//      name write is asserted absent by path — a harness name outranks the
+//      record's label in the broker, so posting the launch label would shadow
+//      the name peers address the run by, including through a later authorized
+//      rename.
+//   B. half-provisioned — a run id without a credential. The layer
+//      self-registers through the broker's open /register route and posts the
+//      name it was handed, here as AVENOR_LABEL alone.
 //   C. bare — no run id at all. The layer mints its own run and posts its name,
 //      handed as the older AVENOR_SESSION_NAME spelling a shell may still set.
+//   D. a second session holding A's environment. The attach credential was
+//      spent by A, so the layer disables itself with the broker's reason and
+//      polls nothing: one run keeps one inbound consumer.
 //
 // Run against a real `avenor stable` broker:
 //   node marketplace/plugins/avenor/test/preflight-identity.mjs http://127.0.0.1:<port>
@@ -70,12 +75,18 @@ async function labelOf(creds, runId) {
 
 // The broker's open register route writes the record a supervisor's
 // EnsureRun leaves behind when it is handed the token; the label follows
-// through /rename, which is the route an authorized name change takes.
+// through /rename, which is the route an authorized name change takes. The
+// answer's `attach` is the one-shot credential a launch hands its child, and
+// it is what the provisioned layer case presents.
 const STAMP = Date.now().toString(36)
 async function provisionRun(runId, token) {
   const res = await post('/register', { run_id: runId, token })
   if (!res.ok) throw new Error('provision ' + runId + ': ' + res.status + ' ' + res.text)
-  return { runId, token }
+  const answer = JSON.parse(res.text)
+  if (typeof answer.attach !== 'string' || answer.attach === '') {
+    throw new Error('provision ' + runId + ': the broker minted no attach credential')
+  }
+  return { runId, token, attach: answer.attach }
 }
 async function labelRun(creds, name) {
   const res = await post('/rename', { name }, creds)
@@ -84,6 +95,24 @@ async function labelRun(creds, name) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * Deadline-bounded wait for a condition a broker round trip has to reach. Every
+ * wait in this drive is bounded: a hang is a failure, never a slow pass.
+ */
+async function until(match, budgetMs = 15000) {
+  const deadline = Date.now() + budgetMs
+  for (;;) {
+    if (match()) return true
+    if (Date.now() > deadline) return false
+    await sleep(100)
+  }
+}
+
+/** The prompts the layer under test submitted, in arrival order. */
+function submitted(caseName) {
+  return events.filter((e) => e.kind === caseName + ' prompt.submit').map((e) => e.line)
+}
 
 // ---------- the stub engine-call object ----------
 async function loadLayer(caseName, env) {
@@ -133,18 +162,22 @@ const provisionedA = await provisionRun(RUN_A, 'preflight-provisioned-token')
 await labelRun(provisionedA, NAME_A)
 const beforeA = await sessions(provisionedA)
 
-const layerA = await loadLayer('a', {
+// The launch hands its child the run id and the one-shot credential minted for
+// this launch, never the run's own.
+const envA = {
   AVENOR_BROKER_URL: BROKER,
   AVENOR_RUN_ID: RUN_A,
-  AVENOR_BROKER_TOKEN: 'preflight-provisioned-token',
+  AVENOR_BROKER_TOKEN: provisionedA.attach,
   // The launch label, exactly as a supervisor spawn passes it.
   AVENOR_LABEL: NAME_A,
-})
+}
+const layerA = await loadLayer('a', envA)
 await layerA.hooks['session.start'](layerA.d, { cwd: '/tmp', isInteractive: true })
 
 const afterA = await sessions(provisionedA)
 const rowA = afterA.sessions.find((s) => s.run_id === RUN_A)
 check('A joined the provisioned run as its launch label', Boolean(rowA) && rowA.label === NAME_A, rowA)
+check('A issued exactly one /attach', issued(layerA, '/attach').length === 1, layerA.requests.map((r) => r.method + ' ' + r.path))
 check('A issued no /register', issued(layerA, '/register').length === 0, layerA.requests.map((r) => r.method + ' ' + r.path))
 check('A issued no /session_name write', issued(layerA, '/session_name').length === 0,
   layerA.requests.map((r) => r.method + ' ' + r.path))
@@ -171,9 +204,8 @@ const tell = await post('/send', {
   },
 }, probeA)
 check('A probe tell admitted', tell.ok, tell.status)
-await sleep(3000)
-const submittedA = events.filter((e) => e.kind === 'a prompt.submit').map((e) => e.line)
-check('A provisioned poll delivered the tell', submittedA.some((t) => t.includes('preflight-tell-arrives')), submittedA)
+const tellA = await until(() => submitted('a').some((t) => t.includes('preflight-tell-arrives')))
+check('A provisioned poll delivered the tell', tellA, submitted('a'))
 
 const sendA = await layerA.hooks['session.send'](layerA.d, {
   to: 'avenor:' + probeA.runId,
@@ -234,6 +266,42 @@ check('C minted id is a claude-<hex>', Boolean(freshC) && /^claude-[0-9a-f]{6}$/
 check('C posted the name it was handed', issued(layerC, '/session_name').length === 1,
   layerC.requests.map((r) => r.method + ' ' + r.path))
 check('C is listed under that name', Boolean(freshC) && freshC.label === NAME_C, freshC)
+
+// ---------- D. one run, one inbound consumer ----------
+console.log('=== D. a second session cannot join a run that already attached ===')
+events.length = 0
+// The same environment A was launched with: exactly what a nested session
+// spawned from A's own shell inherits.
+const layerD = await loadLayer('d', envA)
+await layerD.hooks['session.start'](layerD.d, { cwd: '/tmp', isInteractive: true })
+const logsD = events.filter((e) => e.kind === 'd ui.log').map((e) => e.line).join('\n')
+check('D presented the spent credential once', issued(layerD, '/attach').length === 1,
+  layerD.requests.map((r) => r.method + ' ' + r.path))
+check('D disabled itself with the broker\'s reason',
+  logsD.includes('refused this launch\'s attach') && logsD.includes('already used'), logsD)
+check('D polled nothing', issued(layerD, '/poll-control').length === 0,
+  layerD.requests.map((r) => r.method + ' ' + r.path))
+
+// The refusal is about the second consumer, not the run: A still serves its
+// queue, which is the observable difference between one consumer and two.
+const tellDId = 'av1.preflight.d.' + STAMP
+const tellD = await post('/send', {
+  from_run_id: probeA.runId,
+  to_run_id: RUN_A,
+  type: 'agent_message',
+  message_id: tellDId,
+  payload: {
+    id: tellDId,
+    from: probeA.runId,
+    from_run_id: probeA.runId,
+    to_run_id: RUN_A,
+    message: 'preflight-single-consumer',
+    role: 'agent',
+  },
+}, probeA)
+check('D probe tell admitted', tellD.ok, tellD.status)
+const tellAfterD = await until(() => submitted('a').some((t) => t.includes('preflight-single-consumer')))
+check('the tell still reaches A, the only consumer', tellAfterD, submitted('a'))
 
 console.log(failures === 0 ? 'PREFLIGHT OK' : 'PREFLIGHT FAILED (' + failures + ')')
 process.exit(failures === 0 ? 0 : 1)

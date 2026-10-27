@@ -27,18 +27,15 @@ type PTYLauncher struct {
 	AnswerProgStatus bool
 }
 
-func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
-	if opts.Cols == 0 {
-		opts.Cols = 220
-	}
-	if opts.Rows == 0 {
-		opts.Rows = 50
-	}
-
+// ptyCommand builds the hosted command. Every provisioned value travels in
+// cmd.Env, which is the process environment and readable by its own user only;
+// none of it is rendered into argv, which any local process can read. baseEnv
+// defaults to the terminal defaults when the launcher carries none.
+func ptyCommand(ctx context.Context, opts StartOptions, baseEnv []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "sh", "-c", opts.Command)
 	cmd.Dir = opts.Dir
 
-	env := l.Env
+	env := baseEnv
 	if len(env) == 0 {
 		env = []string{
 			"TERM=tmux-256color",
@@ -56,6 +53,18 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 	// also refuses a StartOptions.Env entry named in the scrub lists, since those
 	// are appended after every scrub layer above.
 	cmd.Env = PeerEnv(runtime.LaunchEnv(combined, opts.Provenance), opts.Env)
+	return cmd
+}
+
+func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
+	if opts.Cols == 0 {
+		opts.Cols = 220
+	}
+	if opts.Rows == 0 {
+		opts.Rows = 50
+	}
+
+	cmd := ptyCommand(ctx, opts, l.Env)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: uint16(opts.Cols),

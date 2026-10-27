@@ -89,17 +89,19 @@ A backend that starts a harness process exports Avenor's launch identity in that
 
 - `opencode-http` attaches to an external `opencode serve` instance. Avenor starts no backend process, so it cannot inject a per-session environment. MCP servers loaded by that server do not see the identity. A successful attach also leaves the Avenor process environment unchanged.
 - `pony` runs in-process. It has no harness child.
-- With the tmux launcher, Avenor removes inherited identity and exports the launch values inside the pane command. The tmux server environment keeps its values.
+- With the tmux launcher, Avenor removes inherited identity and exports the launch values inside the pane command, except the values a launch provisions for a broker peer: those go into a mode-0600 file in a mode-0700 directory the launch owns, which the pane command sources (`unset …; . <file>; exec claude`) and which the launcher removes when the session is torn down. A `tmux new-session` command string is argv, readable by any local process through `ps` or `/proc/<pid>/cmdline`, so no provisioned value may appear in it; the file's path may. The tmux server environment keeps its values.
 
 Each spawning backend removes inherited identity before it adds the current launch values. Other variables keep their values, including `AVENOR_TREE_BUDGET` and backend selectors such as `AVENOR_CLAUDE_TERMINAL` and `AVENOR_AGY_TRANSPORT`.
 
 `pi` also removes inherited `PI_AGENT`, `PI_AGENT_PROFILE`, `AVENOR_BROKER_URL`, `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN`. It then adds the agent, the agent profile and the broker credentials of the current launch only. The `pi` agent process receives a broker value only when its own launch supplies that value, so an inherited credential never reaches it. The short `pi --help` capability probe runs with the inherited environment. The other backends keep inherited broker values.
 
+A `claude` child gets a one-shot attach credential in `AVENOR_BROKER_TOKEN` instead of the run's own: its plugin mods layer trades it at the broker's `POST /attach` for the run credential at session start, and the broker spends it there, so the run has one inbound consumer. A `pi` child gets the run's credential, because its extension authenticates each request itself. `runtime.ProvisionPeer` is the one place that decides whether a launch provisions a peer at all, and `terminal.PeerEnv` is the one place that strips inherited ones.
+
 A prompt to an already-running process cannot change that process's environment. A fresh start or resume that starts a process receives the identity of that request. A backend that reuses a live process keeps the identity of the original launch. The `agy` print continuation inside one attempt keeps that attempt's identity.
 
 A launch wrapper receives the environment and passes it to the backend process. A wrapper that drops, filters or rewrites variables hides the identity from the backend's children. Avenor does not verify wrapper behavior.
 
-Avenor's identity variables are informational and forgeable. They are never credentials and never authorization inputs. The `pi` broker pair `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN` is separate: `AVENOR_RUN_ID` is broker run identity, not the containing execution.
+Avenor's identity variables are informational and forgeable. They are never credentials and never authorization inputs. The broker variables are separate: `AVENOR_RUN_ID` is broker run identity, not the containing execution, and the credential a launch provisions (`AVENOR_BROKER_TOKEN`) is a capability — the run's token for `pi`, a one-shot attach credential for `claude` — which is never rendered into an argv.
 
 A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` names the inner runner. Repeated nested phase names with the same iteration produce identical tuples, so the join is ambiguous. Avenor does not generate a scope ID.
 

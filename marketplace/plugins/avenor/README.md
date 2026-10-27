@@ -73,7 +73,9 @@ already uses for its peers:
 - `AVENOR_BROKER_URL` — http:// base of the `avenor stable` supervisor's
   broker (its own process; the port is ephemeral).
 - `AVENOR_RUN_ID` — the run this session joins as.
-- `AVENOR_BROKER_TOKEN` — the credential for that run.
+- `AVENOR_BROKER_TOKEN` — the credential this session was handed for that
+  run. A provisioned launch's is a one-shot attach credential (below); a
+  hand-exported shell has none, so it self-registers instead.
 - `AVENOR_SESSION_NAME` — optional display name, posted to the broker's
   `/session_name` by a session that self-registers; the posted name is what
   `avenor:<label>` resolution and peer lists see. It falls back to
@@ -84,19 +86,28 @@ already uses for its peers:
   joined it.
 
 The layer picks one of two identities at `session.start`, and which one it is
-turns on the token:
+turns on the credential:
 
 - **Child run (provisioned).** `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN`
   together are an identity someone else already holds. This is what a spawned
   Claude child gets: the avenor supervisor provisions a broker run for every
-  child it starts and hands the run id, its token, its label and the broker
-  URL to the child through the launch environment. The layer then registers as
-  that run — no `/register` call, and no `/session_name` write, so the label
-  the supervisor gave the run survives. The child appears in peer lists as the
-  same run `avenor control list` shows, under the label it was spawned with,
-  and its broker record belongs to the supervisor, which retires it when the
-  run ends.
-- **Top-level session (self-registered).** Without a token (an
+  child it starts and hands the run id, its one-shot attach credential, its
+  label and the broker URL to the child through the launch environment. The
+  layer trades that credential at `POST /attach` for the run's own, and then
+  behaves as the run — no `/register` call, and no `/session_name` write, so
+  the label the supervisor gave the run survives. The child appears in peer
+  lists as the same run `avenor control list` shows, under the label it was
+  spawned with, and its broker record belongs to the supervisor, which retires
+  it when the run ends.
+
+  The credential is single-use, and that is what keeps one run to one inbound
+  consumer. A session spawned from a provisioned session's own shell inherits
+  its environment, so it presents the credential its parent already spent: the
+  broker answers `409 attach-consumed` and the layer disables itself with that
+  reason (the log line names it) instead of putting a second poller on the same
+  queue. A resume or a retry is a fresh launch and gets a fresh credential, so
+  the new session attaches normally while the old grant is dead.
+- **Top-level session (self-registered).** Without a credential (an
   `AVENOR_RUN_ID` alone only pins the id) the session registers itself through
   the broker's open `/register` route and the minted token travels only to
   this process. That is the session you started by hand: export the variables
@@ -112,9 +123,17 @@ identity it was duplicating, and the label arrives once, as `AVENOR_LABEL`. So
 a child is a peer exactly when avenor made it one; a session started by hand
 in a shell that exported them is a peer on its own terms.
 
+What a launch provisions reaches a tmux pane through a file, not through the
+`new-session` command: that command string is argv, readable by any local
+process through `ps` or `/proc/<pid>/cmdline`, so the pane sources a mode-0600
+file in a mode-0700 directory this launch owns (`unset …; . <file>; exec
+claude`) and the launcher removes it when the session's terminal is torn down.
+The PTY launcher passes the same entries as the child's environment, where
+they already belong.
+
 Without `AVENOR_BROKER_URL` the layer stays off with one explanatory log line,
-and so does a registration the broker refuses — the reason reaches the
-session's log either way.
+and so does a registration or attach the broker refuses — the reason reaches
+the session's log either way.
 Same-UID local tool, per the repo's threat model: the broker's local routes
 trust the loopback user, and the mod keeps its token in memory only. Nothing
 about the layer is hardened beyond that model.

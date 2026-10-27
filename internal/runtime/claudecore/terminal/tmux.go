@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,15 +21,41 @@ type TmuxLauncher struct{}
 // the child's environment. A pane inherits the tmux server's environment, not
 // avenor's, so the command itself is the only place a leaked variable can be
 // removed and a new value can be added.
-func tmuxNewSessionArgs(opts StartOptions) []string {
+//
+// What the launch provisions for the child (envFile's contents) is sourced from
+// a mode-0600 file instead of exported here: this argv is world-readable through
+// ps and /proc/<pid>/cmdline, so a credential in it is a credential handed to
+// every local process.
+func tmuxNewSessionArgs(opts StartOptions, envFile string) []string {
 	return []string{
 		"new-session", "-d",
 		"-s", opts.Name,
 		"-c", opts.Dir,
 		"-x", strconv.Itoa(opts.Cols),
 		"-y", strconv.Itoa(opts.Rows),
-		UnsetParentClaudeEnvPrefix() + identityEnvPrefix(opts.Provenance, opts.Env) + opts.Command,
+		UnsetParentClaudeEnvPrefix() + identityEnvPrefix(opts.Provenance, envFile) + opts.Command,
 	}
+}
+
+// writeLaunchEnvFile writes this launch's environment to a file only this user
+// can read: a fresh mode-0700 directory under TMPDIR, holding one mode-0600
+// file. It reports "" when there is nothing to provision, so a launch with no
+// caller environment writes no file at all.
+func writeLaunchEnvFile(env []string) (string, error) {
+	source := launchEnvSource(env)
+	if source == "" {
+		return "", nil
+	}
+	dir, err := os.MkdirTemp("", "avenor-launch-env-")
+	if err != nil {
+		return "", fmt.Errorf("launch env dir: %w", err)
+	}
+	path := filepath.Join(dir, "env")
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("launch env file: %w", err)
+	}
+	return path, nil
 }
 
 func (TmuxLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
@@ -41,7 +70,15 @@ func (TmuxLauncher) Start(ctx context.Context, opts StartOptions) (Session, erro
 		return nil, fmt.Errorf("tmux launcher: Command is required")
 	}
 
-	if _, err := exec.CommandContext(ctx, "tmux", tmuxNewSessionArgs(opts)...).CombinedOutput(); err != nil {
+	envFile, err := writeLaunchEnvFile(opts.Env)
+	if err != nil {
+		return nil, err
+	}
+	// The file lives exactly as long as the pane: every path out of Start either
+	// hands it to the session that will remove it on teardown, or removes it here.
+	session := &TmuxSession{name: opts.Name, envFile: envFile}
+	if _, err := exec.CommandContext(ctx, "tmux", tmuxNewSessionArgs(opts, envFile)...).CombinedOutput(); err != nil {
+		session.removeEnvFile()
 		return nil, fmt.Errorf("tmux new-session: %w", err)
 	}
 
@@ -58,18 +95,34 @@ func (TmuxLauncher) Start(ctx context.Context, opts StartOptions) (Session, erro
 		}
 		select {
 		case <-deadline:
-			return &TmuxSession{name: opts.Name, pid: pid}, nil
+			session.pid = pid
+			return session, nil
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
 
-	return &TmuxSession{name: opts.Name, pid: pid}, nil
+	session.pid = pid
+	return session, nil
 }
 
 // TmuxSession is a terminal.Session backed by a tmux session.
 type TmuxSession struct {
 	name string
 	pid  int
+	// envFile is the sourced environment this launch created, removed with the
+	// session so a launch's credentials do not outlive it.
+	envFile string
+	// envOnce keeps the removal single whichever teardown path runs first.
+	envOnce sync.Once
+}
+
+func (s *TmuxSession) removeEnvFile() {
+	s.envOnce.Do(func() {
+		if s.envFile == "" {
+			return
+		}
+		_ = os.RemoveAll(filepath.Dir(s.envFile))
+	})
 }
 
 func (s *TmuxSession) Kind() string { return "tmux" }
@@ -126,12 +179,16 @@ func (s *TmuxSession) Alive(ctx context.Context) bool {
 }
 
 func (s *TmuxSession) Kill(ctx context.Context) error {
-	return exec.CommandContext(ctx, "tmux", "kill-session", "-t", s.name).Run()
+	err := exec.CommandContext(ctx, "tmux", "kill-session", "-t", s.name).Run()
+	s.removeEnvFile()
+	return err
 }
 
 // Wait polls tmux session ownership rather than terminal contents. tmux owns
-// its pane child, so there is no child process for this package to reap.
+// its pane child, so there is no child process for this package to reap. The
+// pane is gone when it returns, so the launch's environment file goes with it.
 func (s *TmuxSession) Wait(ctx context.Context) error {
+	defer s.removeEnvFile()
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {

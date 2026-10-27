@@ -395,18 +395,12 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 		starter = func(ctx context.Context, opts runtime.StartOptions) (*client, error) {
 			// The child is broker-configured only as a whole: URL, run id, and
 			// token travel together or not at all, so it can never poll with a
-			// half-configured identity.
-			var brokerURL, brokerRunID, brokerToken string
-			peerURL := ""
-			if opts.Broker != nil {
-				peerURL = opts.Broker.URL()
-			}
-			if peerURL != "" && opts.RuntimeID != "" && opts.BrokerToken != "" {
-				brokerURL, brokerRunID, brokerToken = peerURL, opts.RuntimeID, opts.BrokerToken
-			}
+			// half-configured identity. pi's extension authenticates each request
+			// itself, so what it needs is the run's own credential.
+			url, runID, token := runtime.ProvisionPeer(opts).Run()
 			return StartClientWithAgentProfileThinkingAndDir(
 				ctx, "", opts.Model, "", opts.Agent, opts.AgentProfile, opts.Thinking, opts.Dir,
-				brokerURL, brokerRunID, brokerToken, opts.LaunchWrapper, opts.Provenance,
+				url, runID, token, opts.LaunchWrapper, opts.Provenance,
 			)
 		}
 	}

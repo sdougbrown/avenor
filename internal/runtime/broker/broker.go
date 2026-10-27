@@ -111,6 +111,16 @@ type LastAgentMessage struct {
 	At         int64  `json:"at,omitempty"`
 }
 
+// attachCredential is one launch's grant to become its run's inbound consumer.
+// A launch is handed one in its environment, and the first session presenting
+// it is the one that joins: the credential is consumed there, so a second
+// session holding the same environment (a nested harness spawned from the
+// provisioned session) is refused instead of polling the same queue.
+type attachCredential struct {
+	runID    string
+	consumed bool
+}
+
 // RunState holds all per-run broker state.
 type RunState struct {
 	RunID string
@@ -354,6 +364,12 @@ type Broker struct {
 
 	pruneMu   sync.Mutex
 	pruneStop context.CancelFunc
+
+	// attachCreds holds the per-launch attach grants, and attachByRun the grant
+	// each run still has pending. Both are read and written under mu, the lock
+	// guarding the run records they name.
+	attachCreds map[string]*attachCredential // credential -> grant
+	attachByRun map[string]string            // runID -> the grant still pending
 }
 
 // New creates a broker on an ephemeral loopback port.
@@ -365,6 +381,8 @@ func New(globalToken string) *Broker {
 		pollTimeout:  2 * time.Second,
 		writeTimeout: 30 * time.Second,
 		store:        askstore.New(askstore.Options{}),
+		attachCreds:  make(map[string]*attachCredential),
+		attachByRun:  make(map[string]string),
 	}
 	b.store.SetBackend(brokerBackend{broker: b})
 	b.messenger = localMessenger{broker: b}
@@ -522,6 +540,7 @@ func (b *Broker) StartOn(addr string) error {
 	router := http.NewServeMux()
 	router.HandleFunc("/health", b.handleHealth)
 	router.HandleFunc("/register", b.withMethod("POST", b.handleRegister))
+	router.HandleFunc("/attach", b.withMethod("POST", b.handleAttach))
 	router.HandleFunc("/heartbeat", b.withMethod("POST", b.withAuth(b.handleHeartbeat)))
 	router.HandleFunc("/push-control", b.withMethod("POST", b.withAuth(b.handlePushControl)))
 	router.HandleFunc("/poll-control", b.withMethod("POST", b.withAuth(b.handlePollControl)))
@@ -689,6 +708,11 @@ func (b *Broker) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+// handleRegister mints a run or re-registers one the caller already holds. The
+// answer also carries a one-shot attach grant (see handleAttach): a caller that
+// just minted the record, or proved it holds the run's own credential, is the
+// provisioning side for that run, so it may hand one child the right to be the
+// run's inbound consumer.
 func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RunID string `json:"run_id"`
@@ -716,9 +740,13 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		st.Mu.Unlock()
 		respToken := st.Token
 		b.mu.Unlock()
+		// The caller proved it holds this run's credential, so it is the
+		// provisioning side and may hand its child a launch grant.
+		attach, _ := b.MintAttach(st.RunID)
 		resp := map[string]string{
 			"token":  respToken,
 			"run_id": st.RunID,
+			"attach": attach,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
@@ -741,10 +769,72 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	b.mu.Unlock()
 	b.runSetChanged()
 
+	// The caller minted this record, so it is the provisioning side for the run
+	// and may hand its child a launch grant.
+	attach, _ := b.MintAttach(st.RunID)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"token":  token,
 		"run_id": st.RunID,
+		"attach": attach,
+	})
+}
+
+// handleAttach trades one launch's attach credential for its run's own
+// credential, exactly once. It is the gate that keeps a run to one inbound
+// consumer: a launch was handed the credential, and a second session holding
+// the same environment — a nested harness spawned from the provisioned
+// session's own shell — presents a consumed one and is refused. /register is no
+// way around it either: it will not re-mint a run that already exists without
+// that run's token, which the child never holds.
+//
+// The route is open like /register: the credential is the authentication, and
+// it is worthless once spent. Nothing here trusts the body's run id beyond
+// checking that it names the run the credential was minted for.
+func (b *Broker) handleAttach(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RunID string `json:"run_id"`
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if body.RunID == "" || body.Token == "" {
+		http.Error(w, "missing run_id or token", http.StatusBadRequest)
+		return
+	}
+
+	b.mu.Lock()
+	grant, ok := b.attachCreds[body.Token]
+	if !ok || grant.runID != body.RunID {
+		b.mu.Unlock()
+		http.Error(w, "unauthorized: unknown attach credential", http.StatusUnauthorized)
+		return
+	}
+	if grant.consumed {
+		b.mu.Unlock()
+		writeJSONBody(w, http.StatusConflict, map[string]any{
+			"code":  "attach-consumed",
+			"error": "this launch's attach credential was already used: a run takes one inbound consumer, so another session cannot join it",
+		})
+		return
+	}
+	st, ok := b.runs[body.RunID]
+	if !ok {
+		b.mu.Unlock()
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+	grant.consumed = true
+	delete(b.attachByRun, body.RunID)
+	runToken := st.Token
+	b.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"run_id": body.RunID,
+		"token":  runToken,
 	})
 }
 
@@ -2018,6 +2108,42 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool) {
 	return token, true
 }
 
+// MintAttach mints the one-shot attach credential a launch hands its child.
+// The grant replaces any still-pending one for the run: a run has one live
+// launch, and a resume or a retry is a fresh launch with a fresh credential, so
+// a credential left behind by an earlier launch can no longer join. It reports
+// false for a run this broker does not hold — nothing would authenticate the
+// attach that followed.
+func (b *Broker) MintAttach(runID string) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.runs[runID]; !ok {
+		return "", false
+	}
+	if b.attachCreds == nil {
+		b.attachCreds = make(map[string]*attachCredential)
+		b.attachByRun = make(map[string]string)
+	}
+	credential := MakeToken()
+	if prior, ok := b.attachByRun[runID]; ok {
+		delete(b.attachCreds, prior)
+	}
+	b.attachCreds[credential] = &attachCredential{runID: runID}
+	b.attachByRun[runID] = credential
+	return credential, true
+}
+
+// attachForget drops every grant a removed run leaves behind. The caller holds
+// the broker lock.
+func (b *Broker) attachForget(runID string) {
+	delete(b.attachByRun, runID)
+	for credential, grant := range b.attachCreds {
+		if grant.runID == runID {
+			delete(b.attachCreds, credential)
+		}
+	}
+}
+
 // ownRun adopts a run a registered child broker owns, under the run ID this
 // broker addresses it by. The record keeps the credential that branch
 // authenticates the run with, so a forwarded ask and a relay into that branch
@@ -2222,8 +2348,7 @@ func (b *Broker) DeleteRun(runID string) {
 	if ok {
 		descendant = st.descendant
 		delete(b.runs, runID)
-	}
-	if ok {
+		b.attachForget(runID)
 	}
 	b.mu.Unlock()
 	if !ok {

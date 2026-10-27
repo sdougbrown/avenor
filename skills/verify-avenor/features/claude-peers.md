@@ -28,12 +28,16 @@ There are two ways to arrive, and the environment picks between them:
   id) and self-registers through the broker's open `/register` route. That is
   the two-session drive below.
 - **A run avenor spawned** with `--backend claude` is provisioned: the
-  `claude` provider hands the child the run id, its token, its label, and the
-  broker URL through the launch environment, and the layer joins as that run —
-  the same `rt_N` record `avenor control list` shows, under the label it was
-  spawned with, with no `/register` call. The plugin has to be installed
-  (user or project scope) for the child to load it at all; `--plugin-dir` is
-  not passed to a spawned child.
+  `claude` provider hands the child the run id, a one-shot attach credential
+  (`AVENOR_BROKER_TOKEN`), its label, and the broker URL through the launch
+  environment, and the layer trades the credential at `POST /attach` for the
+  run's own — joining as that run, the same `rt_N` record `avenor control
+  list` shows, under the label it was spawned with, with no `/register` call.
+  The credential is spent by the first session that presents it, so a session
+  spawned from the child's own shell is refused and the layer logs the
+  broker's reason. The plugin has to be installed (user or project scope) for
+  the child to load it at all; `--plugin-dir` is not passed to a spawned
+  child.
 
 ## Driving it
 
@@ -96,15 +100,20 @@ nohup env -i PATH="$PWD:$HOME/.local/bin:/usr/bin:/bin" HOME="$HOME" TMPDIR=/tmp
 
 1. **The child carries the provisioned identity.** `ps eww -p <pane pid>` of
 the child's `claude` shows `AVENOR_BROKER_URL`, `AVENOR_RUN_ID=rt_1`,
-   `AVENOR_BROKER_TOKEN`, and the launch label once, as `AVENOR_LABEL=child-a`;
-   its transcript's first log line is `peer layer on (provisioned run rt_1,
-   broker http://…)`, and `GET /sessions` (authenticated with the token from
-   that environment) lists
+   `AVENOR_BROKER_TOKEN` (this launch's one-shot attach credential, not the
+   run's own), and the launch label once, as `AVENOR_LABEL=child-a`; the
+   `tmux new-session` command string carries none of those values, only the
+   path of the mode-0600 launch env file it sources; its transcript's first log
+   line is `peer layer on (provisioned run rt_1, broker http://…)` right after
+   one `POST /attach`, and `GET /sessions` (authenticated with the run token
+   the attach answered) lists
    one record per label — `rt_1`/`child-a` — with no `claude-<hex>`
    self-registration beside it. The child writes nothing about its own
    identity: no `/register`, and no `/session_name` either, so `child-a` stays
    the record's own label and a later authorized rename through `/rename` is
-   what moves the name peers see.
+   what moves the name peers see. Starting a second `claude` from the child's
+   own shell (its inherited environment) is refused: one more `POST /attach`,
+   a `409 attach-consumed` log line, and no second poller.
 2. **Parent → child.** In the parent: `SendMessage({to: "avenor:child-a"})` →
    `{"success":true,… "Delivered by a plugin hook; nothing else was sent."}`,
    and the child's transcript gains the broker-framed peer row (sender = the
@@ -152,12 +161,15 @@ slow pass. The PR 1 run's captured evidence (transcripts, validation report,
 review grounding drives for turn axes and reload behavior) lives in the
 branch's `.cache/runs/evidence/` (uncommitted by repo policy).
 
-The identity drive covers the three identities a session can be handed: a
-provisioned run joins the record its launcher holds and issues no `/register`
-and no `/session_name` write (asserted by request path, with the launch label
-set as a supervisor spawn sets it), its label survives, and an authorized
-rename still moves it; a run id without a token self-registers and posts its
-name; a bare session mints its own run and names it.
+The identity drive covers the four identities a session can be handed: a
+provisioned run trades its launch credential for the run's and issues no
+`/register` and no `/session_name` write (asserted by request path, with the
+launch label set as a supervisor spawn sets it), its label survives, and an
+authorized rename still moves it; a run id without a credential self-registers
+and posts its name; a bare session mints its own run and names it; and a second
+session holding the provisioned environment is refused (`409 attach-consumed`,
+the broker's reason in its log, no `/poll-control` at all) while the tell it
+would have raced still reaches the first session.
 
 PR 2's live proof (2026-10-27, 2.1.311): `.cache/runs/pr2/evidence/proof.md`
 — the provisioned-child drive end to end, with `child-run-transcript.md`,
@@ -178,9 +190,14 @@ reverted-fix run that fails it.
   authenticates.
 - A hosted child never inherits a launching session's peer credentials:
   avenor's terminal launcher unsets the three peer names (and the retired
-  `AVENOR_SESSION_NAME` a launcher may still hold) and exports only what it
-  provisions, so the plugin in one session cannot make its children join as
-  itself.
+  `AVENOR_SESSION_NAME` a launcher may still hold) and provisions only its own,
+  so the plugin in one session cannot make its children join as itself — and a
+  session that inherits a provisioned environment anyway (a `claude` started
+  from inside the child) is refused at `/attach`, its credential already spent.
+  A backend that authenticates each request itself rather than trading a
+  credential (pi's extension) still receives the run's own token, so a nested
+  pi process could poll with it; the claude layer's single-consumer guarantee
+  is the attach handshake, not the environment.
 - The plugin must be installed for a spawned child to load it (`--plugin-dir`
   is the parent's way in, and a launch wrapper is the e2e's stand-in).
 - The reply correlation is a heuristic: a plain `SendMessage` to a peer with
