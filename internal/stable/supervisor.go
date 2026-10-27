@@ -123,11 +123,9 @@ type Config struct {
 	// claim wholesale.
 	BrokerParentToken string
 
-	// BrokerAddr is the address this supervisor's broker binds. Empty keeps the
-	// loopback ephemeral default. A durable hub binds a concrete interface
-	// address and a fixed port; that address is published beside the control
-	// socket (BrokerURLPath) and handed to children, so a wildcard bind is
-	// refused rather than advertised.
+	// BrokerAddr is the broker's bind address; empty uses ephemeral loopback.
+	// Children and parent branches connect to this address, so wildcards are
+	// refused. BrokerURLPath locates its published URL.
 	BrokerAddr string
 }
 
@@ -824,11 +822,8 @@ func NewSupervisor(cfg Config) *Supervisor {
 	return sup
 }
 
-// startBroker binds the broker. A bind failure is recorded for Run: an
-// explicitly configured address that cannot be bound is fatal there, while the
-// default bind stays optional because broker messaging is optional for a
-// supervisor that only drives local runs. Returns whether the broker is
-// serving.
+// startBroker reports whether the broker is serving. Run treats an explicit
+// bind failure as fatal, but permits local runs without the default broker.
 func (s *Supervisor) startBroker(addr string) bool {
 	if err := validateBrokerAddr(addr); err != nil {
 		s.brokerStartErr = err

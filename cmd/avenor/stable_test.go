@@ -14,11 +14,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/token"
 )
 
-// stableTestEnv isolates HOME (runtime state and sockets), TMPDIR (the
-// supervisor's artifact root), and the parent-link environment for a test that
-// runs a real supervisor in process, and returns the scratch directory. An
-// inherited parent-link URL or credential would otherwise change what runStable
-// resolves.
+// stableTestEnv isolates runtime state and parent-link configuration so tests
+// cannot join the operator's broker.
 func stableTestEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -286,9 +283,6 @@ func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
 	}
 }
 
-// TestRunStableBrokerParentURLFromEnv: with no --broker-parent-url flag, the
-// parent broker URL is resolved from $AVENOR_PARENT_BROKER_URL, which is how an
-// interactive supervisor autostart joins a hub without command-line changes.
 func TestRunStableBrokerParentURLFromEnv(t *testing.T) {
 	tmpDir := stableTestEnv(t)
 	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
@@ -343,9 +337,6 @@ func TestRunStableBrokerParentURLFlagOverridesEnv(t *testing.T) {
 	}
 }
 
-// TestRunStableBrokerParentEnvURLRequiresToken: a parent URL supplied only by
-// the environment is validated exactly like the flag: without a credential the
-// command exits before a supervisor is constructed.
 func TestRunStableBrokerParentEnvURLRequiresToken(t *testing.T) {
 	tmpDir := stableTestEnv(t)
 	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
@@ -363,7 +354,11 @@ func TestRunStableBrokerParentEnvURLRequiresToken(t *testing.T) {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stderr = w
-	defer func() { _ = r.Close() }()
+	defer func() {
+		os.Stderr = oldStderr
+		_ = w.Close()
+		_ = r.Close()
+	}()
 
 	t.Setenv(token.EnvBrokerParentURL, "http://127.0.0.1:9")
 	code := runStable([]string{"--control-socket", socketPath})
@@ -419,7 +414,11 @@ func TestRunStableWildcardBrokerAddrRejected(t *testing.T) {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stderr = w
-	defer func() { _ = r.Close() }()
+	defer func() {
+		os.Stderr = oldStderr
+		_ = w.Close()
+		_ = r.Close()
+	}()
 
 	code := runStable([]string{"--control-socket", socketPath, "--broker-addr", "0.0.0.0:8787"})
 	_ = w.Close()
@@ -458,7 +457,11 @@ func TestRunStableOccupiedBrokerAddrFailsStartup(t *testing.T) {
 		t.Fatalf("os.Pipe: %v", err)
 	}
 	os.Stderr = w
-	defer func() { _ = r.Close() }()
+	defer func() {
+		os.Stderr = oldStderr
+		_ = w.Close()
+		_ = r.Close()
+	}()
 
 	code := runStable([]string{"--control-socket", socketPath, "--broker-addr", addr})
 	_ = w.Close()

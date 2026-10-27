@@ -145,11 +145,6 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 	}
 }
 
-// TestSupervisorForwardsParentLinkWhenURLInEnv proves an autostarted
-// supervisor joins the hub the environment names: the parent-link credential is
-// forwarded beside a parent URL, while a credential with no URL is still
-// stripped so a nested broker cannot serve parent routes on the operator's
-// shared secret.
 func TestSupervisorForwardsParentLinkWhenURLInEnv(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -176,11 +171,10 @@ func TestSupervisorForwardsParentLinkWhenURLInEnv(t *testing.T) {
 			if child == nil {
 				t.Fatal("startSupervisor never built a child command")
 			}
-			foundToken := false
-			var forwardedURL string
+			var forwardedToken, forwardedURL string
 			for _, entry := range child.Env {
-				if strings.HasPrefix(entry, token.EnvBrokerParentToken+"=") {
-					foundToken = true
+				if value, ok := strings.CutPrefix(entry, token.EnvBrokerParentToken+"="); ok {
+					forwardedToken = value
 				}
 				if value, ok := strings.CutPrefix(entry, token.EnvBrokerParentURL+"="); ok {
 					forwardedURL = value
@@ -189,8 +183,12 @@ func TestSupervisorForwardsParentLinkWhenURLInEnv(t *testing.T) {
 			if forwardedURL != tt.parentURL {
 				t.Fatalf("forwarded parent URL = %q, want %q", forwardedURL, tt.parentURL)
 			}
-			if foundToken != tt.forwarded {
-				t.Fatalf("parent credential forwarded = %v, want %v", foundToken, tt.forwarded)
+			wantToken := ""
+			if tt.forwarded {
+				wantToken = "shared-link-credential"
+			}
+			if forwardedToken != wantToken {
+				t.Fatalf("forwarded parent credential = %q, want %q", forwardedToken, wantToken)
 			}
 		})
 	}

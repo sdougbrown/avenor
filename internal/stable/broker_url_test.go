@@ -66,10 +66,6 @@ func TestMissingBrokerListenerPublishesNoURL(t *testing.T) {
 	}
 }
 
-// TestBrokerURLPublishedBesideControlSocket pins discovery: a running
-// supervisor publishes the address its broker actually bound (an ephemeral
-// port included) beside its control socket, and removes the record when it
-// shuts down.
 func TestBrokerURLPublishedBesideControlSocket(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	socketPath := newStableSocketPath(t, "brokerurl-publish")
@@ -201,9 +197,6 @@ func TestStartupFailureLeavesRecordItNeverPublished(t *testing.T) {
 	}
 }
 
-// TestBrokerURLRecordRemovedWhenStartupFailsAfterPublication pins the failure
-// path: once this supervisor published its own record, a later startup failure
-// removes it, releases the control socket, and leaves no live broker listener.
 func TestBrokerURLRecordRemovedWhenStartupFailsAfterPublication(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	socketPath := newStableSocketPath(t, "brokerurl-late-failure")
@@ -261,9 +254,6 @@ func TestSupervisorBindsConfiguredBrokerAddr(t *testing.T) {
 	}
 }
 
-// TestConfiguredBindFailureFailsStartup pins that an explicitly configured
-// broker address that cannot be bound stops the supervisor with a message that
-// names the address, instead of silently running without a broker.
 func TestConfiguredBindFailureFailsStartup(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
@@ -293,11 +283,8 @@ func TestConfiguredBindFailureFailsStartup(t *testing.T) {
 	}
 }
 
-// TestWildcardBrokerAddrIsRejected pins the advertised-address policy: a
-// wildcard bind would publish an unroutable URL to children and parent
-// branches, so it is refused with an actionable message instead.
 func TestWildcardBrokerAddrIsRejected(t *testing.T) {
-	for _, addr := range []string{"0.0.0.0:8787", "[::]:8787", ":8787"} {
+	for _, addr := range []string{"0.0.0.0:8787", "[::]:8787", "[::%lo]:8787", "[::ffff:0.0.0.0]:8787", ":8787"} {
 		t.Run(addr, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			socketPath := newStableSocketPath(t, "brokeraddr-wildcard")

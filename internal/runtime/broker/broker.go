@@ -491,9 +491,6 @@ func MakeToken() string {
 	return credential
 }
 
-// defaultListenAddr is the loopback address an unconfigured broker binds: an
-// ephemeral port on the loopback interface, so a broker started with no
-// explicit address is reachable only from this machine.
 const defaultListenAddr = "127.0.0.1:0"
 
 // Start binds the broker to an ephemeral loopback port.

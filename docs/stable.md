@@ -26,6 +26,9 @@ Flags:
 | Flag | Default | Description |
 |---|---|---|
 | `--control-socket` `<path>` | (required) | Unix socket path for the control plane. Avenor writes a tombstone file at `<path>.dead` to signal abnormal shutdown, an owner record at `<path>.owner.json`, and a persistent lock at `<path>.control.lock` |
+| `--broker-addr` | (empty) | Concrete broker bind address; empty uses ephemeral loopback. The supervisor publishes its URL in `<control-socket>.broker.url`. See [hub setup](messaging.md#running-a-hub) for network trust requirements |
+| `--broker-parent-url` | `$AVENOR_PARENT_BROKER_URL` | Parent hub URL; a non-empty flag overrides the environment. Requires `AVENOR_PARENT_BROKER_TOKEN` or `--broker-parent-token` |
+| `--broker-parent-token` | `$AVENOR_PARENT_BROKER_TOKEN` | Parent-link credential; prefer the environment to keep it out of process arguments |
 | `--max-runtimes` | 16 | Maximum concurrent child runtimes for this supervisor. Spawn requests are rejected once this limit is hit. Runtimes parked after a successful turn do not count against this limit |
 | `--max-tree-budget` | 64 | Maximum concurrent executing runtimes across the whole supervisor tree including nested supervisors. Bounds recursive fan-out |
 | `--idle-timeout` | 0 | Exit cleanly after this duration with no live child runtimes (parked runtimes count as live). 0 disables (supervisor runs until signaled) |

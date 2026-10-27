@@ -3,21 +3,18 @@ package stable
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
-// BrokerURLPath is the discovery record a supervisor publishes beside its
-// control socket once it owns that socket: one line holding the http:// URL of
-// the broker it bound, actual port included.
+// BrokerURLPath locates the one-line HTTP URL record beside the control socket.
 func BrokerURLPath(socketPath string) string { return socketPath + ".broker.url" }
 
-// validateBrokerAddr refuses a broker bind whose own address cannot be handed
-// to anyone. The bound address is what children and parent branches are told to
-// reach, so a wildcard bind would publish an unroutable destination; an
-// operator must name a concrete interface address instead.
+// Children and parent branches connect to the bound address, so it must not
+// advertise a wildcard destination.
 func validateBrokerAddr(addr string) error {
 	if addr == "" {
 		return nil
@@ -29,7 +26,7 @@ func validateBrokerAddr(addr string) error {
 	if host == "" {
 		return wildcardBrokerAddrError(addr)
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+	if ip, err := netip.ParseAddr(host); err == nil && ip.WithZone("").Unmap().IsUnspecified() {
 		return wildcardBrokerAddrError(addr)
 	}
 	return nil
@@ -56,9 +53,8 @@ func (s *Supervisor) publishBrokerURL() error {
 	return nil
 }
 
-// removeBrokerURL removes the record this supervisor published. It leaves a
-// record whose contents do not match this supervisor's own URL alone: that
-// record belongs to a replacement that owns the socket now.
+// removeBrokerURL runs before control.Stop releases the live socket, excluding
+// replacement publishers. A changed record is left untouched.
 func (s *Supervisor) removeBrokerURL() {
 	path, url := s.brokerURLPath, s.brokerURLValue
 	s.brokerURLPath, s.brokerURLValue = "", ""

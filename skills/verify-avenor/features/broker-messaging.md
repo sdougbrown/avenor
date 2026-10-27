@@ -225,15 +225,16 @@ HUB_ASKER_RT=$(spawn_run "$HUB_SOCK" hub-asker \
   --on-event "$EV/hub-asker.events.jsonl" \
   --prompt 'Call the avenor_peers tool once. Find the peer whose label is "branch-target" (its run id contains "@"). Then call the avenor_message tool once with action "ask", target set to that exact run id, message "PING-FROM-HUB", timeout_ms 120000. Report the tool result and finish.') || exit 1
 
-# Bounded: a supervised child parks after a successful turn and writes no
-# sentinel while parked, so the turn is proven from the status snapshot and the
-# event log, both captured while the supervisors still run.
+# Capture turn completion before shutdown can overwrite the sentinel.
+# Bound every wait and retain the status snapshot and event log.
 await_status "$HUB_SOCK" "$HUB_ASKER_RT" 180 "hub asker turn" > "$EV/hub-asker.status.json" || exit 1
 await_status "$SCRATCH/branch-b.sock" "$BRANCH_TARGET_RT" 180 "branch target turn" > "$EV/branch-target.status.json" || exit 1
 await_status "$SCRATCH/branch-a.sock" "$BRANCH_OTHER_RT" 180 "branch other turn" > "$EV/branch-other.status.json" || exit 1
 grep -q '"exit_code": 0' "$EV/hub-asker.status.json" || { echo "FAIL: hub asker exit_code is not 0" >&2; exit 1; }
 grep -q '"exit_code": 0' "$EV/branch-target.status.json" || { echo "FAIL: branch target exit_code is not 0" >&2; exit 1; }
 grep -q 'PONG-FROM-BRANCH' "$EV/hub-asker.status.json" || { echo "FAIL: hub asker final_output lacks the reply" >&2; exit 1; }
+cp "$EV/hub-asker.sentinel" "$EV/hub-asker.turn.sentinel"
+cp "$EV/branch-target.sentinel" "$EV/branch-target.turn.sentinel"
 ```
 
 **Observable end state (the proof):** `hub-asker.status.json` shows `"status":
@@ -247,9 +248,10 @@ env-only branches — run ids ending in `@branch-a-<digest>` and
 path and host) — one `avenor_message` `tool.call` whose result has
 `"outcome": "replied"` and `"reply": "PONG-FROM-BRANCH"`, and a terminal
 `session.end` with stop reason `end_turn` and exit code `0`; the branch
-target's log carries the matching `reply` call. No sentinel exists yet: a run
-writes its sentinel only when it ends, so these parked runs' sentinels appear
-at teardown as `KILLED` with `STOP_REASON=cancelled` and `EXIT_CODE=130`.
+target's log carries the matching `reply` call. The saved turn sentinels carry
+`DONE` and `STOP_REASON=end_turn`. Capture them before teardown: shutting down
+parked runs overwrites their original sentinels with `KILLED`,
+`STOP_REASON=cancelled` and `EXIT_CODE=130`.
 `branch-a.log` and `branch-b.log` carry no `parent broker registration failed`
 line, so both joined the hub from the environment alone.
 
@@ -295,6 +297,7 @@ HUB_ASKER_RT=$(spawn_run "$HUB_SOCK" hub-asker-autostart \
 await_status "$HUB_SOCK" "$HUB_ASKER_RT" 180 "hub asker autostart turn" > "$EV/hub-asker-autostart.status.json" || exit 1
 grep -q '"exit_code": 0' "$EV/hub-asker-autostart.status.json" || { echo "FAIL: autostart asker exit_code is not 0" >&2; exit 1; }
 grep -q 'PONG-VIA-AUTOSTART' "$EV/hub-asker-autostart.status.json" || { echo "FAIL: autostart asker final_output lacks the reply" >&2; exit 1; }
+cp "$EV/hub-asker-autostart.sentinel" "$EV/hub-asker-autostart.turn.sentinel"
 ```
 
 **Observable end state (the proof):** `hub-asker-autostart.status.json` shows
@@ -304,10 +307,10 @@ grep -q 'PONG-VIA-AUTOSTART' "$EV/hub-asker-autostart.status.json" || { echo "FA
 `supervisor@avenor-mcp-<pid>-<digest>` and `rt_1@avenor-mcp-<pid>-<digest>`:
 the autostarted branch registered its supervisor and its child at the hub even
 though no supervisor command line carried a broker flag. The ask to that child
-returns `"outcome": "replied"` with `"reply": "PONG-VIA-AUTOSTART"`. Neither
-spawned child has a sentinel while parked; the branch's `<socket>.broker.url`
-record is removed when the autostarted supervisor is shut down through its
-socket, which the teardown checks.
+returns `"outcome": "replied"` with `"reply": "PONG-VIA-AUTOSTART"`. The saved
+turn sentinel carries `DONE` and `STOP_REASON=end_turn`. The branch's
+`<socket>.broker.url` record is removed when the autostarted supervisor shuts
+down through its socket, which the teardown checks.
 
 Tear down with the sockets and the recorded pids, never by process name. Every
 pid kill is guarded, so a spawn that never happened cannot turn into a `kill 0`

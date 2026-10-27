@@ -252,7 +252,9 @@ cat /run/avenor/hub.sock.broker.url
 The record is one line, mode `0600`. A supervisor that loses the control socket
 to a live competitor publishes nothing, so it cannot overwrite or remove that
 supervisor's record, and a supervisor removes its own record on shutdown or
-when a later startup step fails.
+when a later startup step fails. An abrupt kill can leave a stale record;
+its presence is not proof of a live broker. Check the control socket or the
+broker's `/health` endpoint before using it.
 
 The broker is cleartext HTTP with per-run bearer credentials. A trusted
 network therefore means every client that can reach the broker port is
@@ -292,6 +294,10 @@ loopback bind is enough; across hosts, give each branch `--broker-addr` bound to
 an address the hub can reach, and give the hub one the branches can reach. The
 parent link is not a tunnel: both directions of the deployment must be
 addressable.
+
+The hub can discover and address registered branches' runs. Descendant callers
+cannot list sibling branches' runs; joining a hub does not grant sibling
+visibility.
 
 The child registers the runs it owns at startup and retracts the claim on
 shutdown. The parent issues each descendant run its own credential at
