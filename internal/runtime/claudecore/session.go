@@ -212,7 +212,7 @@ func (s *Session) ScanTerminalTick() {
 		s.MarkActive()
 	case PaneStateIdle:
 		// Idle means Claude is at the prompt, waiting for next input.
-		// Don't end the session — the channel supports multi-turn.
+		// Don't end the session — Claude supports multi-turn.
 		// Clear any stale permission, unless Claude still reports itself
 		// blocked: the screen can show the input box while the dialog is
 		// being repainted.

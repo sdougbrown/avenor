@@ -36,10 +36,11 @@ const (
 //	--agent 'general' not found. Available agents: advisor, centaur, horse, ...
 //
 // Both ends of that line carry per-run values — the rejected name on the left,
-// the installed roster on the right — so the match is anchored between them, the
-// same way channelPolicyBlocked in the claudechannel provider anchors on its
-// banner's invariant middle rather than its per-run "(server:...)" tail.
-// Keeping "Available agents:" in the needle is what prevents a false positive:
+// the installed roster on the right — so the match is anchored between them,
+// the same way the channel-blocked banner match in the retired claude-channel
+// provider anchored on its banner's invariant middle rather than its per-run
+// "(server:...)" tail. Keeping "Available agents:" in the needle is what
+// prevents a false positive:
 // "not found" alone is ordinary agent output (a missing file, an empty grep) and
 // shows up in healthy panes.
 const agentNotFoundBanner = "not found. Available agents:"
@@ -240,8 +241,7 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 	case !prompted:
 		// claude died before avenor pasted a prompt, so no turn ever ran and
 		// "done" would be a lie. BuildArgs never passes a prompt on the command
-		// line, and the channel push only reaches Claude after the first
-		// terminal-delivered turn, so Prompted is the whole story here.
+		// line, so Prompted is the whole story here.
 		msg := "claude exited before avenor submitted a prompt; the run never started"
 		if stderrTail != "" {
 			msg += "; stderr: " + stderrTail
@@ -390,11 +390,10 @@ func (s *Session) everPrompted() bool {
 // emitLaunchFailure emits the diagnostic event plus the terminal session.end for
 // a run that never started. Callers must have won the MarkFinished race.
 //
-// The session.end is not optional. Cancelling the context instead leaves both
-// providers' runSession ctx.Done branch killing the terminal and emitting
+// The session.end is not optional. Cancelling the context instead leaves the
+// provider's runSession ctx.Done branch killing the terminal and emitting
 // nothing, so anything gating on a terminal status — avenor_status,
-// avenor_result — waits forever. This mirrors the channel-blocked path in the
-// claudechannel provider.
+// avenor_result — waits forever.
 func (s *Session) emitLaunchFailure(stopReason, message string, extra map[string]any) {
 	source := ""
 	if s.Term != nil {

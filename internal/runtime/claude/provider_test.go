@@ -21,12 +21,12 @@ import (
 
 func TestThinkingEffortArguments(t *testing.T) {
 	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
-		args := claudeutil.BuildArgs("session", "", runtime.StartOptions{Thinking: level})
+		args := claudeutil.BuildArgs("session", runtime.StartOptions{Thinking: level})
 		if got := strings.Join(args, " "); !strings.Contains(got, "--effort "+level) {
 			t.Fatalf("args for %s = %q", level, got)
 		}
 	}
-	if got := strings.Join(claudeutil.BuildArgs("session", "", runtime.StartOptions{}), " "); strings.Contains(got, "--effort") {
+	if got := strings.Join(claudeutil.BuildArgs("session", runtime.StartOptions{}), " "); strings.Contains(got, "--effort") {
 		t.Fatalf("empty thinking args = %q", got)
 	}
 }

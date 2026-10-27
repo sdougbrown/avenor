@@ -49,9 +49,9 @@ removes nothing. An ask addressed to that child after it has ended is therefore
 still admitted and queued against its run, where nothing reads it, so the asker
 waits out its own timeout instead of being told the target is gone. Other
 children do remove their runs. A loop or team teardown deletes its children's
-runs, and the claudechannel provider deletes its own run when its session ends.
-For those runs `target-unavailable` can mean the run ended; for a run nothing
-removed, it means the run was never registered on that broker.
+runs, and a provider that owns a session-scoped run deletes it when its session
+ends. For those runs `target-unavailable` can mean the run ended; for a run
+nothing removed, it means the run was never registered on that broker.
 
 The OpenCode plugin is the surface that supplies `parent_run_id` on
 `avenor_spawn`, a fresh UUID per plugin instance. The control `spawn` method

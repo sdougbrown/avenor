@@ -123,7 +123,7 @@ once (not repeated every 500ms); the terminal `session.end` has
 **Fallback (the proof):** `exit=0`; `"ready_signal":"pane"`; zero
 `"signal":"osc7501"` events; the run still ends with `stop_reason: end_turn`.
 `AVENOR_CLAUDE_TERMINAL=tmux` also gives `ready_signal=pane`: the tmux launcher
-and `claude-channel` never answer the query.
+never answers the query.
 
 **MCP startup wait:** rerun the report-path drive with `--claude-mcp-wait 4s`.
 Proof: `agent.prompt_submitted` carries `startup_wait_ms` (about 4000 minus the

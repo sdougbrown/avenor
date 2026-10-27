@@ -61,7 +61,9 @@ type AskClaimer interface {
 	RestoreAsk(messageID, askerRunID string)
 }
 
-// ControlReplier is implemented only by the claude-channel sidecar provider.
+// ControlReplier is implemented only by a surface that delivers control
+// replies. No shipped surface implements it, so `control_reply` is answered
+// with unsupported_action everywhere.
 type ControlReplier interface {
 	ControlReply(ctx context.Context, target string, payload json.RawMessage) error
 }

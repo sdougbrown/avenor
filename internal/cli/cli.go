@@ -39,7 +39,6 @@ const (
 	backendCursorACP      = "cursor-acp"
 	backendPony           = "pony"
 	backendClaude         = "claude"
-	backendClaudeChannel  = "claude-channel"
 	backendPi             = "pi"
 )
 
@@ -105,7 +104,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	progressTimeout := fs.Duration("progress-timeout", 0, "session progress timeout (fires if no event for duration)")
 	model := fs.String("model", "", "backend-specific model id")
 	thinking := fs.String("thinking", "", "thinking level (off, minimal, low, medium, high, xhigh, max)")
-	claudeMCPWait := fs.Duration("claude-mcp-wait", 0, "hold the first prompt until this long after launch so MCP servers connect first (claude and claude-channel backends, direct runs only; 0 = off, max 60s)")
+	claudeMCPWait := fs.Duration("claude-mcp-wait", 0, "hold the first prompt until this long after launch so MCP servers connect first (claude backend, direct runs only; 0 = off, max 60s)")
 	backend := fs.String("backend", DefaultBackend, "runtime backend")
 	runIDFlag := fs.String("run-id", "", "correlation id for this run (generated if not set)")
 	maxRetries := fs.Int("max-retries", 0, "maximum retry attempts on transient failure (0 = no retry)")
@@ -225,7 +224,6 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			}
 		case backendCodexAppServer:
 		case backendClaude:
-		case backendClaudeChannel:
 		case backendPi:
 		default:
 			fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)
@@ -1047,7 +1045,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 func validateCLISelection(backend string, discovery ServerDiscovery, thinking string) error {
 	switch backend {
 	case backendPony, backendOpenCodeACP, backendGeminiACP, backendAgy, backendCursorACP,
-		backendCodexAppServer, backendClaude, backendClaudeChannel, backendPi:
+		backendCodexAppServer, backendClaude, backendPi:
 	case backendOpenCodeHTTP:
 		if discovery.URL == "" {
 			return fmt.Errorf("--server-url is required for backend opencode-http")
@@ -1765,8 +1763,8 @@ func cancelProvider(turn *ProviderTurn, writer EventSink, sessionID, runID, runL
 }
 
 // failureText returns the terminal failure text a backend owns on session.end.
-// Only provider-owned fields count: model-authored prose such as a
-// claude-channel finish summary never classifies a run.
+// Only provider-owned fields count: model-authored prose in a finish summary
+// never classifies a run.
 func failureText(fields map[string]any) string {
 	for _, key := range []string{"error_message", "error", "message"} {
 		if text, _ := fields[key].(string); text != "" {

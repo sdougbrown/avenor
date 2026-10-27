@@ -23,8 +23,8 @@ every surface returns the same snake_case result object
 - `resume` — continue a finished run as a new run: a new public run id, the
   prior label plus `-followup` unless `label` overrides it, and the
   `sentinel_file`/`on_event` paths the new run minted.
-- `control_reply` — claude-channel only; every other surface reports
-  `unsupported_action`.
+- `control_reply` — retained in the contract for the retired claude-channel
+  sidecar; every surface reports `unsupported_action`.
 
 `avenor_peers` (MCP: `peers`):
 

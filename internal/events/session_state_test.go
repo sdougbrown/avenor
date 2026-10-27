@@ -2,10 +2,10 @@ package events
 
 import "testing"
 
-func TestSessionTrackerClaudeChannelLifecycle(t *testing.T) {
+func TestSessionTrackerChannelLifecycle(t *testing.T) {
 	tracker := NewSessionTracker("ses-1")
 	events := []Event{
-		{Event: "session.start", SessionID: "ses-1", Fields: map[string]any{"backend": "claude-channel"}},
+		{Event: "session.start", SessionID: "ses-1", Fields: map[string]any{"backend": "claude"}},
 		{Event: "agent.channel_ready", SessionID: "ses-1", Fields: map[string]any{"run_id": "run-1", "server_name": "avenor-channel-abcd1234"}},
 		{Event: "agent.prompt_queued", SessionID: "ses-1", Fields: map[string]any{"control_id": "c1", "message_type": "continue"}},
 		{Event: "agent.prompt_submitted", SessionID: "ses-1", Fields: map[string]any{"delivery": "tmux"}},
@@ -20,8 +20,8 @@ func TestSessionTrackerClaudeChannelLifecycle(t *testing.T) {
 		}
 	}
 	state := tracker.Snapshot()
-	if state.Backend != "claude-channel" {
-		t.Fatalf("Backend = %q, want claude-channel", state.Backend)
+	if state.Backend != "claude" {
+		t.Fatalf("Backend = %q, want claude", state.Backend)
 	}
 	if state.RunID != "run-1" {
 		t.Fatalf("RunID = %q, want run-1", state.RunID)
@@ -67,7 +67,7 @@ func TestSessionTrackerPermissionFlow(t *testing.T) {
 
 func TestSessionTrackerIgnoresDifferentSession(t *testing.T) {
 	tracker := NewSessionTracker("ses-3")
-	if tracker.Observe(Event{Event: "session.start", SessionID: "other", Fields: map[string]any{"backend": "claude-channel"}}) {
+	if tracker.Observe(Event{Event: "session.start", SessionID: "other", Fields: map[string]any{"backend": "claude"}}) {
 		t.Fatal("expected different session to be ignored")
 	}
 	state := tracker.Snapshot()

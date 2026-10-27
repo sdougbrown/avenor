@@ -36,12 +36,6 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		os.Exit(runMCP(os.Args[2:]))
 	}
-	if len(os.Args) > 1 && os.Args[1] == "claude-channel" {
-		os.Exit(runClaudeChannel(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "claude-channel-cleanup" {
-		os.Exit(runClaudeChannelCleanup(os.Args[2:]))
-	}
 	if len(os.Args) > 1 && os.Args[1] == "channel-tools" {
 		os.Exit(runChannelTools(os.Args[2:]))
 	}

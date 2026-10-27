@@ -59,7 +59,6 @@ var supportedBackends = func() map[string]bool {
 			"codex-app-server": true,
 			"pi":               true,
 			"claude":           true,
-			"claude-channel":   true,
 		}
 	}
 	return extractBackendsFromRules(data)

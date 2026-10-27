@@ -31,10 +31,10 @@ type StartOptions struct {
 	Model        string
 	AgentProfile string
 	Thinking     string
-	// ClaudeMCPWait holds the first prompt of a claude or claude-channel
-	// session until this long after launch, so MCP servers Claude Code
-	// connects in the background are available to the first turn. Zero
-	// sends the prompt as soon as the terminal is ready.
+	// ClaudeMCPWait holds the first prompt of a claude session until this long
+	// after launch, so MCP servers Claude Code connects in the background are
+	// available to the first turn. Zero sends the prompt as soon as the
+	// terminal is ready.
 	ClaudeMCPWait time.Duration
 	// LaunchWrapper is an opaque argv prefix placed in front of the backend
 	// process command at launch. Avenor does not interpret it; empty means

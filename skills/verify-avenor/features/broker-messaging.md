@@ -385,9 +385,9 @@ either. With a broker-aware install, the wait still has to return
 - A child's `rt_N` is not the supervisor and does not reach its queue. A direct
   child's run stays registered after the child ends, so an ask addressed to that
   `rt_N` is queued with no reader and the asker waits out `timeout_ms` instead
-  of failing fast. A loop or team teardown deletes its children's runs, and
-  claudechannel deletes its own, so for those children `target-unavailable` can
-  mean the run ended (`docs/messaging.md`).
+  of failing fast. A loop or team teardown deletes its children's runs, so for
+  those children `target-unavailable` can mean the run ended
+  (`docs/messaging.md`).
 - Keep `$AVENOR_HOME` short. The host's supervisor binds
   `$AVENOR_HOME/sockets/avenor-mcp-<pid>.sock`, and a unix socket path over
   roughly 107 bytes fails to bind (`start control server: ... bind: invalid

@@ -74,12 +74,11 @@ describe('thinking policy helpers', () => {
     )
   })
 
-  it('all 10 backends are exercised by the conformance fixture', () => {
+  it('all 9 backends are exercised by the conformance fixture', () => {
     const allBackends = [
       'codex-app-server',
       'pi',
       'claude',
-      'claude-channel',
       'opencode-acp',
       'opencode-http',
       'gemini-acp',
