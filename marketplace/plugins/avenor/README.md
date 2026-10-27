@@ -75,7 +75,11 @@ already uses for its peers:
 - `AVENOR_RUN_ID` — the run this session joins as.
 - `AVENOR_BROKER_TOKEN` — the credential for that run.
 - `AVENOR_SESSION_NAME` — optional display name, posted to the broker's
-  `/session_name`, which is what `avenor:<label>` resolution and peer lists see.
+  `/session_name` by a session that self-registers; the posted name is what
+  `avenor:<label>` resolution and peer lists see. A provisioned run posts
+  nothing: the supervisor already registered it under the label peers address,
+  and the launch copy of this variable only records the identity as the child
+  joined it.
 
 The layer picks one of two identities at `session.start`, and which one it is
 turns on the token:

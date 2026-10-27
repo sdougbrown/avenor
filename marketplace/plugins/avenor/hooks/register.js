@@ -30,8 +30,10 @@
 //
 // - Identity: a run id and token in the environment are a provisioned
 //   identity — a spawned child joins the broker as the run its launcher
-//   already holds. Without them the session self-registers through the
-//   broker's open `/register` route as a top-level peer of its own.
+//   already holds, with neither a `/register` call nor a `/session_name`
+//   write. Without them the session self-registers through the broker's open
+//   `/register` route as a top-level peer of its own, and names itself from
+//   `AVENOR_SESSION_NAME`.
 //
 // The hook grammar is what Claude Code 2.1.311's module scan enforces; the
 // mechanics come from the #391 spike (391-spike-findings.md). Branches over
@@ -224,16 +226,20 @@ async function selfRegister(d) {
     disableLayer("registering with the avenor broker " + brokerURL + " failed: " + errorText(err))
     return false
   }
-  // Only a name handed in is posted. A provisioned run already carries the
-  // label its launcher registered it under, and posting the run id in its
-  // place would replace that label; a self-registered run is displayed by its
-  // run id either way, so posting nothing changes nothing.
-  const name = await envSessionName(d)
-  if (name !== "") {
-    try {
-      await brokerPost(d, "/session_name", { name: name })
-    } catch (err) {
-      await logLayer(d, "session_name failed: " + errorText(err))
+  // A provisioned run posts no name. The supervisor registered it under the
+  // label its peers already address, and /session_name writes a harness name,
+  // which the broker resolves ahead of that label — the write would shadow the
+  // record's own name for good, including a later authorized rename. A
+  // self-registered run is displayed by its run id, so a name handed in is the
+  // only way it gets a good one.
+  if (!provisioned) {
+    const name = await envSessionName(d)
+    if (name !== "") {
+      try {
+        await brokerPost(d, "/session_name", { name: name })
+      } catch (err) {
+        await logLayer(d, "session_name failed: " + errorText(err))
+      }
     }
   }
   const path = provisioned ? "provisioned run " : "self-registered run "
