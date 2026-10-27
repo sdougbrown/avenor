@@ -207,6 +207,48 @@ func TestInvalidAdvertiseURLFailsStartup(t *testing.T) {
 	}
 }
 
+// TestInvalidParentURLFailsStartup pins that a parent URL a peer could not
+// post to stops startup like an invalid advertised URL: a malformed value
+// must surface as one start_failed naming the typo, not as a branch that
+// silently never registers with its parent.
+func TestInvalidParentURLFailsStartup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	socketPath := newStableSocketPath(t, "brokerurl-parent-invalid")
+
+	stderr := captureStderr(t, func(w io.Writer) {
+		sup := newTestSupervisor(t, Config{
+			ControlSocket:     socketPath,
+			BrokerParentURL:   "hub.example.com:8787",
+			BrokerParentToken: "link-token",
+			MaxRuntimes:       1,
+			Stderr:            w,
+		})
+		done := make(chan int, 1)
+		go func() { done <- sup.Run() }()
+		select {
+		case code := <-done:
+			if code != 1 {
+				t.Fatalf("Run() = %d, want 1 for an unreachable parent URL", code)
+			}
+		case <-time.After(5 * time.Second):
+			_ = sup.Shutdown("kill")
+			<-done
+			t.Fatal("Run() kept serving with an unreachable parent URL")
+		}
+	})
+	for _, want := range []string{"broker parent URL", "hub.example.com:8787"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr = %q, want it to name %q", stderr, want)
+		}
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("control socket bound despite the invalid parent URL: %v", err)
+	}
+	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
+		t.Fatalf("broker URL record published despite the invalid parent URL: %v", err)
+	}
+}
+
 func TestBrokerURLPublishedBesideControlSocket(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	socketPath := newStableSocketPath(t, "brokerurl-publish")

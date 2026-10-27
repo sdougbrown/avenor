@@ -704,12 +704,13 @@ type Supervisor struct {
 	brokerURLPath  string
 	brokerURLValue string
 	// brokerAdvertisedURL is Config.BrokerAdvertiseURL in canonical form, or
-	// empty when the bound address is what gets advertised. brokerAdvertiseErr
-	// is the error an operator-supplied value produced; Run treats it as fatal,
-	// because falling back to the bound address would register and publish an
-	// address the operator replaced on purpose.
+	// empty when the bound address is what gets advertised. brokerURLErr is the
+	// first operator-supplied URL a peer could not post to (the advertise URL,
+	// then the parent URL); Run treats it as fatal, because falling back to a
+	// substituted address would register and publish one the operator replaced
+	// on purpose.
 	brokerAdvertisedURL string
-	brokerAdvertiseErr  error
+	brokerURLErr        error
 	// messaging is the supervisor's own transport over the broker's ask store.
 	// It is the only transport the supervisor closes, and it never outlives
 	// the broker.
@@ -800,9 +801,16 @@ func NewSupervisor(cfg Config) *Supervisor {
 	sup.broker = broker.New("")
 	sup.brokerIdentity = supervisorIdentity(cfg.ControlSocket)
 	sup.broker.SetIdentity(sup.brokerIdentity)
-	sup.brokerAdvertisedURL, sup.brokerAdvertiseErr = messaging.ParseBrokerURL(cfg.BrokerAdvertiseURL)
-	if sup.brokerAdvertiseErr != nil {
-		sup.brokerAdvertiseErr = fmt.Errorf("broker advertise URL: %w", sup.brokerAdvertiseErr)
+	sup.brokerAdvertisedURL, sup.brokerURLErr = messaging.ParseBrokerURL(cfg.BrokerAdvertiseURL)
+	if sup.brokerURLErr != nil {
+		sup.brokerURLErr = fmt.Errorf("broker advertise URL: %w", sup.brokerURLErr)
+	}
+	// The parent URL is parsed here, not at relay time, so a typo surfaces as a
+	// start_failed with the offending value instead of a branch that silently
+	// never registers with its parent. Empty stays allowed: no parent URL means
+	// a standalone broker.
+	if _, err := messaging.ParseBrokerURL(cfg.BrokerParentURL); err != nil && sup.brokerURLErr == nil {
+		sup.brokerURLErr = fmt.Errorf("broker parent URL: %w", err)
 	}
 	if sup.startBroker(cfg.BrokerAddr) {
 		// Register the supervisor run eagerly so sub-agents can target it for
@@ -834,7 +842,7 @@ func NewSupervisor(cfg Config) *Supervisor {
 		})
 		// A value Run rejects must not seed a link that would retry its
 		// registration against a parent that refuses it.
-		if sup.brokerAdvertiseErr == nil && sup.ephemeralAdvertiseRefusal() == "" {
+		if sup.brokerURLErr == nil && sup.ephemeralAdvertiseRefusal() == "" {
 			sup.installParentLink()
 		}
 	}
@@ -921,8 +929,8 @@ func (s *Supervisor) Run() (exitCode int) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if s.brokerAdvertiseErr != nil {
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: %v\n", s.brokerAdvertiseErr)
+	if s.brokerURLErr != nil {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: %v\n", s.brokerURLErr)
 		reason = "start_failed"
 		return 1
 	}
