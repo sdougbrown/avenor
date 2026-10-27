@@ -30,6 +30,10 @@ type Session struct {
 	CancelFn  context.CancelFunc
 	StartedAt time.Time
 
+	// PaneReadyTimeout bounds how long a prompt waits for Claude's input box;
+	// zero means PromptInjectTimeout.
+	PaneReadyTimeout time.Duration
+
 	Mu                  sync.Mutex
 	Prompted            bool
 	Active              bool
@@ -97,7 +101,16 @@ func (s *Session) MarkActive() {
 	s.Mu.Unlock()
 }
 
+// Emit sends ev without blocking past the session's end. A send that fits in
+// the buffer always lands, even once the session has ended: the Events
+// readers drain the buffer on shutdown, so a terminal session.end emitted as
+// the session ends still reaches the consumer.
 func (s *Session) Emit(ev events.Event) {
+	select {
+	case s.Events <- ev:
+		return
+	default:
+	}
 	select {
 	case s.Events <- ev:
 	case <-s.Ctx.Done():

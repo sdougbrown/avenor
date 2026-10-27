@@ -254,11 +254,11 @@ func (s *Session) EmitTerminalGone(ctx context.Context) {
 }
 
 // FailUnreadyLaunch ends a session whose first prompt never found Claude's
-// input box, and reports what the pane showed instead. Claude is still running
-// there, parked on a screen avenor does not answer, such as a settings-approval
-// or MCP-server dialog, so without a terminal status a caller waiting on
-// session.end waits forever. Cancelling the session makes runSession kill the
-// terminal.
+// input box (WaitForPaneReady returned ErrPaneNotReady), and reports what the
+// pane showed instead. Claude is still running there, parked on a screen
+// avenor does not answer, such as a settings-approval or MCP-server dialog, so
+// without a terminal status a caller waiting on session.end waits forever.
+// Cancelling the session makes runSession kill the terminal.
 //
 // It leaves a session that already ran a turn alone: a later prompt that finds
 // the pane busy is not a failed launch. A cancelled ctx means the session is
@@ -267,10 +267,13 @@ func (s *Session) FailUnreadyLaunch(ctx context.Context) {
 	if s.everPrompted() {
 		return
 	}
+	// Capture first: once this run owns the verdict, nothing may block
+	// between claiming it and emitting it.
+	pane := s.paneText(ctx)
 	if ctx.Err() == nil && s.MarkFinished() {
 		s.emitLaunchFailure(StopReasonTerminalNotReady,
 			"claude never showed its input box, so avenor never submitted a prompt; the run never started",
-			map[string]any{"pane": s.paneText(ctx)})
+			map[string]any{"pane": pane})
 	}
 	if s.CancelFn != nil {
 		s.CancelFn()

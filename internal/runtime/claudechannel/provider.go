@@ -4,6 +4,7 @@ package claudechannel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -494,8 +495,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	// Prompt() doesn't block; the channel push serves as a backup if Claude is
 	// already listening.
 	go func() {
-		if !claudecore.WaitForPaneReady(s.Ctx, s.Term) {
-			s.FailUnreadyLaunch(s.Ctx)
+		if err := claudecore.WaitForPaneReady(s.Ctx, s.Term, s.PaneReadyTimeout); err != nil {
+			if errors.Is(err, claudecore.ErrPaneNotReady) {
+				s.FailUnreadyLaunch(s.Ctx)
+			}
 			return
 		}
 		startupWait, waitConfigured, ok := s.WaitForStartupMCP(s.Ctx)

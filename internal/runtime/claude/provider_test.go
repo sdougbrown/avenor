@@ -884,6 +884,85 @@ func TestPromptSkipsPasteWhenSessionFinishedDuringStartupWait(t *testing.T) {
 	}
 }
 
+// unansweredDialogPane is a startup dialog avenor does not answer.
+const unansweredDialogPane = " Managed settings require approval\n" +
+	" ❯ 1. Yes, I trust these settings\n" +
+	"   2. No, exit Claude Code\n"
+
+func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *claudecore.Session) {
+	t.Helper()
+	p := &Provider{sessions: make(map[string]*claudecore.Session)}
+	term.SetKind("pty")
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-unready", EventsBuf: 16})
+	t.Cleanup(s.CancelFn)
+	s.Term = term
+	s.PaneReadyTimeout = 50 * time.Millisecond
+	p.sessions[s.SessionID] = s
+	return p, s
+}
+
+func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
+	// Claude is alive but parked on a dialog. Without a terminal status the
+	// caller waiting on session.end waits forever.
+	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, unansweredDialogPane))
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event != "session.end" {
+				continue
+			}
+			if got := ev.Fields["stop_reason"]; got != claudecore.StopReasonTerminalNotReady {
+				t.Errorf("stop_reason = %v, want %s", got, claudecore.StopReasonTerminalNotReady)
+			}
+			if got := ev.Fields["status"]; got != "failed" {
+				t.Errorf("status = %v, want failed", got)
+			}
+			select {
+			case <-s.Ctx.Done():
+			case <-time.After(time.Second):
+				t.Error("session context still live; runSession would keep claude running")
+			}
+			return
+		case <-deadline:
+			t.Fatal("no session.end for a launch whose input box never appeared")
+		}
+	}
+}
+
+func TestPromptLeavesAnExitedLaunchToTheExitWatcher(t *testing.T) {
+	// Claude exited before its input box appeared. runSession's exit watcher
+	// classifies that from the stderr log and the pane; reporting it as
+	// terminal_not_ready would hide an agent_not_found or a crash.
+	term := terminal.NewFakeSession("test-term", 1, "error: bubblewrap is required\n")
+	term.SetAlive(false)
+	p, s := newPromptSession(t, term)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	quiet := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "session.end" || ev.Event == "agent.launch_failed" {
+				t.Fatalf("Prompt reported %s (%v) for a terminal that exited", ev.Event, ev.Fields["stop_reason"])
+			}
+		case <-quiet:
+			if s.Ctx.Err() != nil {
+				t.Error("Prompt cancelled the session; the exit watcher owns this verdict")
+			}
+			return
+		}
+	}
+}
+
 func TestCancelTakesProgStatusIdleAfterWorkingAsCancelled(t *testing.T) {
 	p := &Provider{
 		sessions:    make(map[string]*claudecore.Session),

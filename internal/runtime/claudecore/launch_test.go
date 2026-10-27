@@ -336,6 +336,26 @@ func TestFailUnreadyLaunchEndsTheSessionWithThePane(t *testing.T) {
 	}
 }
 
+func TestFailUnreadyLaunchKeepsTheBottomOfALongPane(t *testing.T) {
+	// 200 three-byte runes, a separator and a 12-byte last line put the
+	// 512-byte cut one byte into a rune.
+	s := newTestSession(t, strings.Repeat("€", 200)+"\ntail-marker!\n")
+
+	s.FailUnreadyLaunch(s.Ctx)
+
+	drainEvent(t, s)
+	pane, _ := drainEvent(t, s).Fields["pane"].(string)
+	if !utf8.ValidString(pane) {
+		t.Errorf("pane is not valid UTF-8: %q", pane)
+	}
+	if !strings.HasSuffix(pane, "tail-marker!") {
+		t.Errorf("pane = %q, want the last line kept", pane)
+	}
+	if len(pane) > maxDiagnosticText {
+		t.Errorf("pane is %d bytes, want at most %d", len(pane), maxDiagnosticText)
+	}
+}
+
 func TestFailUnreadyLaunchLeavesAPromptedSessionRunning(t *testing.T) {
 	// A later turn that finds the pane busy is not a failed launch: the session
 	// already ran a turn and stays usable.

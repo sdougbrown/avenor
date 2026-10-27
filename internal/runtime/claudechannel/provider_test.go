@@ -3,6 +3,7 @@ package claudechannel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -491,7 +492,7 @@ func TestWaitForPaneReadyStopsOnContextCancel(t *testing.T) {
 	cancel()
 
 	term := terminal.NewFakeSession("missing", 0, "")
-	if claudecore.WaitForPaneReady(ctx, term) {
+	if claudecore.WaitForPaneReady(ctx, term, 0) == nil {
 		t.Fatal("waitForPaneReady should stop when context is canceled")
 	}
 }
@@ -509,7 +510,7 @@ func TestWaitForPaneReadyDismissesTrustDialog(t *testing.T) {
 		trustPane,
 		"Tips for getting started\n",
 	})
-	if !claudecore.WaitForPaneReady(context.Background(), term) {
+	if err := claudecore.WaitForPaneReady(context.Background(), term, 0); err != nil {
 		t.Fatal("waitForPaneReady should return true after trust dialog dismissed")
 	}
 	sends := term.SendCalls()
@@ -522,20 +523,102 @@ func TestWaitForPaneReadyDismissesTrustDialog(t *testing.T) {
 }
 
 // TestWaitForPaneReadyDeadlineReturnsFalse pins the contract that a stalled
-// pane (no welcome marker before PromptInjectTimeout) must return false so the
-// caller drops the prompt instead of pasting into an unknown state. Without
-// this guard, the old behavior of "give up and assume ready" re-introduces
-// the trust-dialog paste-corruption bug.
+// pane (no welcome marker before the deadline) must fail so the caller drops
+// the prompt instead of pasting into an unknown state. Without this guard, the
+// old behavior of "give up and assume ready" re-introduces the trust-dialog
+// paste-corruption bug.
 func TestWaitForPaneReadyDeadlineReturnsFalse(t *testing.T) {
-	// Capture only ever returns text without any ready marker; the function
-	// must time out and return false rather than treating absence as readiness.
-	// A tight context bounds the test runtime — the function's own deadline
-	// (PromptInjectTimeout=30s) is too long to wait synchronously.
 	term := terminal.NewFakeSession("stalled", 1, "still booting…\n")
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	if claudecore.WaitForPaneReady(ctx, term) {
-		t.Fatal("waitForPaneReady should return false when no ready marker appears before deadline")
+	if err := claudecore.WaitForPaneReady(context.Background(), term, 100*time.Millisecond); !errors.Is(err, claudecore.ErrPaneNotReady) {
+		t.Fatalf("WaitForPaneReady = %v, want ErrPaneNotReady when no ready marker appears before the deadline", err)
+	}
+}
+
+// unansweredDialogPane is a startup dialog avenor does not answer.
+const unansweredDialogPane = " Managed settings require approval\n" +
+	" ❯ 1. Yes, I trust these settings\n" +
+	"   2. No, exit Claude Code\n"
+
+func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *session) {
+	t.Helper()
+	b := broker.New("")
+	if _, err := b.CreateRun("run-unready", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	p := &Provider{broker: b, sessions: make(map[string]*session), launcher: terminal.TmuxLauncher{}}
+	core := claudecore.NewSession(context.Background(), claudecore.SessionOptions{
+		SessionID: "ses-unready",
+		RunID:     "run-unready",
+		EventsBuf: 16,
+	})
+	t.Cleanup(core.CancelFn)
+	core.Term = term
+	core.PaneReadyTimeout = 50 * time.Millisecond
+	s := &session{Session: core}
+	p.sessions[s.SessionID] = s
+	return p, s
+}
+
+func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
+	// Claude is alive but parked on a dialog. Without a terminal status the
+	// caller waiting on session.end waits forever.
+	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, unansweredDialogPane))
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event != "session.end" {
+				continue
+			}
+			if got := ev.Fields["stop_reason"]; got != claudecore.StopReasonTerminalNotReady {
+				t.Errorf("stop_reason = %v, want %s", got, claudecore.StopReasonTerminalNotReady)
+			}
+			if got := ev.Fields["status"]; got != "failed" {
+				t.Errorf("status = %v, want failed", got)
+			}
+			select {
+			case <-s.Ctx.Done():
+			case <-time.After(time.Second):
+				t.Error("session context still live; runSession would keep claude running")
+			}
+			return
+		case <-deadline:
+			t.Fatal("no session.end for a launch whose input box never appeared")
+		}
+	}
+}
+
+func TestPromptLeavesAnExitedLaunchToTheExitWatcher(t *testing.T) {
+	// A dead tmux session fails capture at once. That is claude exiting, which
+	// runSession's exit watcher classifies from the stderr log; reporting it
+	// as terminal_not_ready would hide an agent_not_found or a crash.
+	term := terminal.NewFakeSession("test-term", 1, "")
+	term.SetCapErr(errors.New("can't find session"))
+	term.SetAlive(false)
+	p, s := newPromptSession(t, term)
+
+	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	quiet := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case ev := <-s.Events:
+			if ev.Event == "session.end" || ev.Event == "agent.launch_failed" {
+				t.Fatalf("Prompt reported %s (%v) for a terminal that exited", ev.Event, ev.Fields["stop_reason"])
+			}
+		case <-quiet:
+			if s.Ctx.Err() != nil {
+				t.Error("Prompt cancelled the session; the exit watcher owns this verdict")
+			}
+			return
+		}
 	}
 }
 
@@ -1207,7 +1290,7 @@ func TestCleanupProjectMCPRemovesOnlyAvenorChannelEntries(t *testing.T) {
 func TestPromptWaitsForStartupClearBeforePaste(t *testing.T) {
 	// Welcome screen marker present: WaitForPaneReady returns true.
 	term := terminal.NewFakeSession("test-term", 1, "Tips for getting started\n")
-	if !claudecore.WaitForPaneReady(context.Background(), term) {
+	if err := claudecore.WaitForPaneReady(context.Background(), term, 0); err != nil {
 		t.Fatal("waitForPaneReady should return true when welcome marker is visible")
 	}
 
@@ -1216,7 +1299,7 @@ func TestPromptWaitsForStartupClearBeforePaste(t *testing.T) {
 		"Loading development channels\n",
 		"Tips for getting started\n",
 	})
-	if !claudecore.WaitForPaneReady(context.Background(), term2) {
+	if err := claudecore.WaitForPaneReady(context.Background(), term2, 0); err != nil {
 		t.Fatal("waitForPaneReady should return true after welcome marker appears")
 	}
 }

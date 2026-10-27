@@ -126,8 +126,8 @@ func TestWaitForPaneReadySelectsTrustOptionBeforeConfirming(t *testing.T) {
 		dialog("Yes, I trust this folder"),
 		readyPane,
 	})
-	if !WaitForPaneReady(context.Background(), term) {
-		t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+	if err := WaitForPaneReady(context.Background(), term, 0); err != nil {
+		t.Fatalf("WaitForPaneReady = %v, want nil once the trust dialog is cleared", err)
 	}
 	want := [][]string{{string(terminal.KeyDown)}, {string(terminal.KeyEnter)}}
 	if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
@@ -155,8 +155,8 @@ func TestWaitForPaneReadyConfirmsTrustWhenStaleMarkerRemains(t *testing.T) {
 	for name, captures := range cases {
 		t.Run(name, func(t *testing.T) {
 			term := terminal.NewFakeSessionQueue("trust", 1, captures)
-			if !WaitForPaneReady(context.Background(), term) {
-				t.Fatal("WaitForPaneReady = false, want true once the trust dialog is cleared")
+			if err := WaitForPaneReady(context.Background(), term, 0); err != nil {
+				t.Fatalf("WaitForPaneReady = %v, want nil once the trust dialog is cleared", err)
 			}
 			want := [][]string{{string(terminal.KeyDown)}, {string(terminal.KeyEnter)}}
 			if got := term.SendCalls(); !reflect.DeepEqual(got, want) {
