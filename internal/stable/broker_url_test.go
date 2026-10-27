@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 // reserveStableLoopbackAddr reserves a loopback port and releases it so a test
@@ -40,6 +42,27 @@ func awaitBrokerURLRecord(t *testing.T, socketPath string) string {
 			t.Fatalf("broker URL record %s never appeared: %v", path, err)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestMissingBrokerListenerPublishesNoURL pins that a broker that never bound a
+// listener reports no URL and publishes no record. Broker messaging is optional,
+// so a supervisor whose default bind failed keeps running without one, but it
+// must not advertise a listener-less "http://".
+func TestMissingBrokerListenerPublishesNoURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	socketPath := newStableSocketPath(t, "brokerurl-nolistener")
+	sup := &Supervisor{config: Config{ControlSocket: socketPath}, broker: broker.New("")}
+	t.Cleanup(func() { _ = sup.broker.Stop() })
+
+	if got := sup.brokerURL(); got != "" {
+		t.Fatalf("brokerURL() = %q with no listener bound, want empty", got)
+	}
+	if err := sup.publishBrokerURL(); err != nil {
+		t.Fatalf("publishBrokerURL: %v", err)
+	}
+	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
+		t.Fatalf("broker URL record published with no listener bound: %v", err)
 	}
 }
 

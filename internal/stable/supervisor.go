@@ -2048,11 +2048,19 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}, nil
 }
 
+// brokerURL returns the URL children and parent branches reach this broker on,
+// or "" when no listener is bound. Broker messaging is optional, so a failed
+// default bind leaves the supervisor running without a URL rather than handing
+// out an unreachable "http://".
 func (s *Supervisor) brokerURL() string {
 	if s.broker == nil {
 		return ""
 	}
-	return fmt.Sprintf("http://%s", s.broker.Addr())
+	addr := s.broker.Addr()
+	if addr == "" {
+		return ""
+	}
+	return fmt.Sprintf("http://%s", addr)
 }
 
 // installParentLink wires this broker to its parent broker when the supervisor

@@ -254,9 +254,14 @@ to a live competitor publishes nothing, so it cannot overwrite or remove that
 supervisor's record, and a supervisor removes its own record on shutdown or
 when a later startup step fails.
 
-The broker is cleartext HTTP with per-run bearer credentials. Run a hub and its
-branches on a trusted network; there is no TLS listener, so a hub exposed beyond
-that network needs a channel that supplies confidentiality.
+The broker is cleartext HTTP with per-run bearer credentials. A trusted
+network therefore means every client that can reach the broker port is
+trusted: the credentials are not an admission gate for arbitrary network
+clients. `POST /register` mints a token for any run id it has not seen without
+asking for a parent token, so a client that reaches the port can register
+itself and then use its own credential. There is no TLS listener, so a hub
+exposed beyond that network needs a channel that supplies both confidentiality
+and admission control.
 
 ## Linking a branch
 

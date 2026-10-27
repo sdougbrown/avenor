@@ -97,10 +97,26 @@ any model call:
 ```sh
 PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
 HUB_SOCK="$SCRATCH/hub.sock"
+await_path() {  # await_path <path> <seconds> <what>
+  _n=0
+  until [ -e "$1" ]; do
+    _n=$((_n + 1))
+    [ "$_n" -le $(($2 * 10)) ] || { echo "FAIL: $3 did not appear within ${2}s: $1" >&2; return 1; }
+    sleep 0.1
+  done
+}
+await_gone() {  # await_gone <path> <seconds> <what>
+  _n=0
+  while [ -e "$1" ]; do
+    _n=$((_n + 1))
+    [ "$_n" -le $(($2 * 10)) ] || { echo "FAIL: $3 still exists after ${2}s: $1" >&2; return 1; }
+    sleep 0.1
+  done
+}
 ./avenor stable --control-socket "$HUB_SOCK" --broker-addr "127.0.0.1:$PORT" \
   &> "$SCRATCH/hub.log" &
 HUB_PID=$!   # record this
-until [ -f "$HUB_SOCK.broker.url" ]; do sleep 0.1; done
+await_path "$HUB_SOCK.broker.url" 15 "hub broker URL record" || exit 1
 cat "$HUB_SOCK.broker.url"          # http://127.0.0.1:$PORT
 
 # A second supervisor on the same port fails with exit 1, names the address,
@@ -114,15 +130,21 @@ test -e "$SCRATCH/competitor.sock" && echo "unexpected socket"
 ./avenor stable --control-socket "$SCRATCH/wild.sock" --broker-addr "0.0.0.0:$PORT"; echo "exit=$?"
 
 ./avenor control --socket "$HUB_SOCK" shutdown graceful
-until [ ! -e "$HUB_SOCK.broker.url" ]; do sleep 0.1; done
+await_gone "$HUB_SOCK.broker.url" 10 "hub broker URL record" || exit 1
 echo "broker URL record removed"
 
 # A restart on the same port publishes the same durable URL.
 ./avenor stable --control-socket "$HUB_SOCK" --broker-addr "127.0.0.1:$PORT" \
   &> "$SCRATCH/hub-restart.log" &
-until [ -f "$HUB_SOCK.broker.url" ]; do sleep 0.1; done
+RESTART_PID=$!   # record this
+await_path "$HUB_SOCK.broker.url" 15 "restarted hub broker URL record" || exit 1
 test "$(cat "$HUB_SOCK.broker.url")" = "http://127.0.0.1:$PORT" && echo "same durable URL"
 ./avenor control --socket "$HUB_SOCK" shutdown graceful
+await_gone "$HUB_SOCK.broker.url" 10 "restarted hub broker URL record" || exit 1
+for pid in "$HUB_PID" "$RESTART_PID"; do
+  case "$pid" in ''|*[!0-9]*) continue ;; esac   # unset or not a pid: never kill
+  [ "$pid" -gt 0 ] && kill "$pid" 2>/dev/null
+done
 ```
 
 **Observable end state (the proof):** the first and the restarted hub both
