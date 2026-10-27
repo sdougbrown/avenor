@@ -284,28 +284,40 @@ func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
 }
 
 func TestRunStableBrokerParentURLFromEnv(t *testing.T) {
-	tmpDir := stableTestEnv(t)
-	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+	for _, tc := range []struct {
+		name string
+		env  string
+		want string
+	}{
+		{"clean", "http://127.0.0.1:9", "http://127.0.0.1:9"},
+		{"padded", "\t http://127.0.0.1:9 \n", "http://127.0.0.1:9"},
+		{"blank", " \t\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := stableTestEnv(t)
+			socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
 
-	var captured *stable.Config
-	orig := newSupervisorFn
-	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
-		captured = &cfg
-		return orig(cfg)
-	}
-	t.Cleanup(func() { newSupervisorFn = orig })
+			var captured *stable.Config
+			orig := newSupervisorFn
+			newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+				captured = &cfg
+				return orig(cfg)
+			}
+			t.Cleanup(func() { newSupervisorFn = orig })
 
-	t.Setenv(token.EnvBrokerParentURL, "http://127.0.0.1:9")
-	t.Setenv(token.EnvBrokerParentToken, "env-token")
-	_ = runStable([]string{"--control-socket", socketPath})
-	if captured == nil {
-		t.Fatal("config was not captured; the constructor seam was not hit")
-	}
-	if captured.BrokerParentURL != "http://127.0.0.1:9" {
-		t.Fatalf("Config.BrokerParentURL = %q, want the environment URL", captured.BrokerParentURL)
-	}
-	if captured.BrokerParentToken != "env-token" {
-		t.Fatalf("Config.BrokerParentToken = %q, want the environment credential", captured.BrokerParentToken)
+			t.Setenv(token.EnvBrokerParentURL, tc.env)
+			t.Setenv(token.EnvBrokerParentToken, "env-token")
+			_ = runStable([]string{"--control-socket", socketPath})
+			if captured == nil {
+				t.Fatal("config was not captured; the constructor seam was not hit")
+			}
+			if captured.BrokerParentURL != tc.want {
+				t.Fatalf("Config.BrokerParentURL = %q, want %q", captured.BrokerParentURL, tc.want)
+			}
+			if captured.BrokerParentToken != "env-token" {
+				t.Fatalf("Config.BrokerParentToken = %q, want the environment credential", captured.BrokerParentToken)
+			}
+		})
 	}
 }
 
