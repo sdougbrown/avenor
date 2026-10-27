@@ -411,7 +411,9 @@ func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
 						"stop_reason": "cancelled",
 					},
 				})
-				// runSession's defer will call Term.Kill
+				// A finished session takes no more prompts. Cancelling it ends
+				// runSession, whose defer kills the terminal.
+				s.CancelFn()
 				return nil
 			}
 		}
@@ -430,7 +432,9 @@ func (p *Provider) forceCancel(s *claudecore.Session) error {
 			"stop_reason": "cancelled_forced",
 		},
 	})
-	// runSession's defer will call Term.Kill
+	// A finished session takes no more prompts. Cancelling it ends runSession,
+	// whose defer kills the terminal.
+	s.CancelFn()
 	return nil
 }
 

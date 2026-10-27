@@ -388,6 +388,40 @@ func TestCancelSendsEscThenWaitsForIdle(t *testing.T) {
 	}
 }
 
+func TestCancelKillsTheTerminal(t *testing.T) {
+	// Cancel finishes the session, and a finished session takes no more
+	// prompts, so leaving claude running only leaks it.
+	for name, pane := range map[string]string{
+		"idle after Esc":  "❯ ready",
+		"forced at grace": "✻ Churning… (2m 17s · ↓ 7.2k tokens)",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := &Provider{
+				sessions:    make(map[string]*claudecore.Session),
+				cancelGrace: 200 * time.Millisecond,
+			}
+			term := terminal.NewFakeSession("test-term", 1, pane)
+			s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-cancel-kill", EventsBuf: 8})
+			defer s.CancelFn()
+			s.Term = term
+			p.sessions[s.SessionID] = s
+			go p.runSession(s.Ctx, s)
+
+			if err := p.Cancel(context.Background(), s.SessionID); err != nil {
+				t.Fatalf("Cancel: %v", err)
+			}
+			select {
+			case <-s.Done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("runSession still running after Cancel")
+			}
+			if term.Alive(context.Background()) {
+				t.Fatal("terminal still alive after Cancel")
+			}
+		})
+	}
+}
+
 func TestCancelForcesKillOnTimeout(t *testing.T) {
 	t.Parallel()
 	p := &Provider{
