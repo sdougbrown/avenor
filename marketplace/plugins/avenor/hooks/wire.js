@@ -1,12 +1,18 @@
 // Pure wire helpers for the avenor broker's messaging contract
 // (docs/messaging.md): the message-id minter, the /send envelope, the queued
-// agent_message payload and the reply extraction. The shapes mirror
-// packages/core/src/messaging-text.ts (newMsgID, extractReplyMessage) and
+// agent_message payload, the reply extraction and the ask failure sentences.
+// The shapes mirror packages/core/src/messaging-text.ts (newMsgID,
+// extractReplyMessage, renderAskFailure, quote) and
 // packages/pi/src/subagent-broker.ts (buildAgentMessage, parseControlMessage),
 // so a mod, a pi child and a Go child all put the same bytes on the wire.
+// A hooks module imports its own files and "claude-code", nothing else, so the
+// ask templates and their escaping are copied from the schemas rather than
+// imported; change schemas/message.outcome.json and messaging-text.ts first.
 // Nothing here touches the engine call object.
 
 const MAX_WAIT_MS = 600000
+
+const NON_PRINTABLE = /[\p{Cf}\p{Zl}\p{Zp}]/u
 
 function safeParse(text) {
   try {
@@ -134,4 +140,107 @@ export function extractReplyMessage(result) {
   const body = payload === null || typeof payload !== "object" ? {} : payload
   const message = typeof body.message === "string" ? body.message : ""
   return message !== "" ? message : JSON.stringify(entry)
+}
+
+/**
+ * Escape a value the way messaging-text.ts `escapeNonPrintable` does, so a
+ * label or run id a peer controls cannot carry a bidi override or a zero-width
+ * character into tool text. Byte-identical to internal/messaging.Quote.
+ */
+function escapeNonPrintable(value) {
+  let out = ""
+  for (const character of value) {
+    const code = character.codePointAt(0)
+    if (character === '"') {
+      out += '\\"'
+      continue
+    }
+    if (character === "\\") {
+      out += "\\\\"
+      continue
+    }
+    if (character === "\b") {
+      out += "\\b"
+      continue
+    }
+    if (character === "\f") {
+      out += "\\f"
+      continue
+    }
+    if (character === "\n") {
+      out += "\\n"
+      continue
+    }
+    if (character === "\r") {
+      out += "\\r"
+      continue
+    }
+    if (character === "\t") {
+      out += "\\t"
+      continue
+    }
+    const unprintable = code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f) ||
+      NON_PRINTABLE.test(character)
+    if (unprintable) {
+      out += code > 0xffff
+        ? "\\u" + (0xd800 + ((code - 0x10000) >> 10)).toString(16).padStart(4, "0") +
+          "\\u" + (0xdc00 + ((code - 0x10000) & 0x3ff)).toString(16).padStart(4, "0")
+        : "\\u" + code.toString(16).padStart(4, "0")
+      continue
+    }
+    out += character
+  }
+  return out
+}
+
+/** A value as one quoted template fact, as messaging-text.ts `quote`. */
+export function quote(value) {
+  return '"' + escapeNonPrintable(typeof value === "string" ? value : String(value)) + '"'
+}
+
+/**
+ * The ask column of schemas/message.outcome.json, verbatim. Templates carry no
+ * literal quotes: the facts arrive pre-quoted, exactly as
+ * internal/messaging.Repair takes them.
+ */
+const ASK_TEMPLATES = {
+  "timed-out": 'no reply to {message_id} from {target} before the timeout; withdraw it with avenor_message action="withdraw" message_id={message_id}',
+  "not-sent": "ask {message_id} was not sent to {target}; nothing is pending",
+  "possibly-pending": 'ask {message_id} to {target} may still be pending; if no reply arrives, withdraw it with avenor_message action="withdraw" message_id={message_id}',
+  "lost": "ask {message_id} to {target} is lost and cannot be withdrawn; nothing is pending",
+  "edge-absent": "no ask {message_id} is pending on {target}; nothing is pending",
+}
+
+function substitute(template, facts) {
+  return template.replace(/\{([a-z_]+)\}/g, (whole, key) =>
+    Object.prototype.hasOwnProperty.call(facts, key) ? facts[key] : whole)
+}
+
+/**
+ * The shared ask failure sentence, as messaging-text.ts `renderAskFailure`
+ * renders it, so a Claude peer reads the same sentence and the same withdraw
+ * guidance every other surface gives instead of raw wire text. An outcome with
+ * no ask template renders the possibly-pending sentence, the contract's own
+ * fallback for an unclassified failure.
+ */
+export function renderAskFailure(messageId, target, outcome) {
+  const known = Object.prototype.hasOwnProperty.call(ASK_TEMPLATES, outcome)
+  const template = known ? ASK_TEMPLATES[outcome] : ASK_TEMPLATES["possibly-pending"]
+  return substitute(template, { message_id: quote(messageId), target: quote(target) })
+}
+
+/**
+ * Classify a failed /wait_reply from what the broker said, never from the
+ * error's prose: the row's `outcome` field is authoritative, the 504 body's
+ * `timeout: true` flag marks the bounded wait expiring, and the status is the
+ * fallback when the body cannot be read at all. Only those two signals make an
+ * ask timed-out, so an unrelated failure is never reported as one.
+ */
+export function askFailureOutcome(status, body) {
+  const entry = body === null || typeof body !== "object" ? {} : body
+  const declared = typeof entry.outcome === "string" ? entry.outcome : ""
+  const terminal = declared === "timed-out" || declared === "lost" || declared === "edge-absent"
+  if (terminal) return declared
+  if (entry.timeout === true || status === 504) return "timed-out"
+  return "possibly-pending"
 }

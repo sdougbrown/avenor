@@ -24,8 +24,13 @@ export function parseAvenorAddress(to) {
  * Resolution over the /sessions listing rows. `excludeRunId` drops the
  * caller's own record, so a session can never route a message back to
  * itself through its own layer.
+ *
+ * An empty ref resolves to nothing before the rows are read: the sibling
+ * resolvers refuse it the same way (packages/core/src/tools/message-provider.ts
+ * short-circuits `ref === ''`), and no row can legitimately be named "".
  */
 export function matchSession(sessions, ref, excludeRunId) {
+  if (ref === "") return { match: "none", runId: "", candidates: [] }
   const rows = Array.isArray(sessions) ? sessions : []
   let runIDMatch = null
   const labelMatches = []

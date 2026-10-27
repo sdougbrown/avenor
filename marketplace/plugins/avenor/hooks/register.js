@@ -21,7 +21,9 @@
 //   the avenor surfaces' ask action takes) and passes every other action
 //   through to the MCP server. The hook, not `$.tool.register`: the plugin
 //   also ships an MCP server named "avenor", and a registered tool under
-//   `mcp__avenor__*` would be refused as a replacement for it.
+//   `mcp__avenor__*` would be refused as a replacement for it. A failed ask
+//   renders the shared ask sentences (wire.js mirrors
+//   schemas/message.outcome.json), never raw wire text.
 //
 // The hook grammar is what Claude Code 2.1.311's module scan enforces; the
 // mechanics come from the #391 spike (391-spike-findings.md). Branches over
@@ -38,6 +40,9 @@ import {
   extractReplyMessage,
   frameInboundAsk,
   normalizeAskTimeoutMs,
+  renderAskFailure,
+  askFailureOutcome,
+  quote,
 } from "./wire.js"
 
 // The tested Claude Code release. Below it the layer disables itself instead
@@ -52,7 +57,6 @@ const FLOOR_PATCH = 311
 const OFF = { enabled: false, reason: "the avenor peer layer has not started" }
 const layer = { ...OFF }
 let broker = null
-let generation = ""
 let busyTurns = 0
 const pendingReplies = new Map()
 
@@ -97,6 +101,10 @@ async function deliverOutbound(d, ref, text) {
   const ambiguous = target.match === "ambiguous"
   if (ambiguous) {
     return undelivered('"' + ref + '" names several avenor runs (' + target.candidates.join(", ") + ")")
+  }
+  const incomplete = target.match === "incomplete"
+  if (incomplete) {
+    return undelivered(listingIncomplete(target.incomplete, ref))
   }
   // A peer this session owes an ask to takes the send as the ask's reply, so
   // the asker's own wait unblocks; every other send is a plain tell. The
@@ -147,6 +155,9 @@ async function startPeerLayer(d, e) {
   }
   const started = await selfRegister(d)
   if (!started) {
+    // Every refusal to register sets the reason; the layer explains itself
+    // once, the way the version gate does.
+    await logLayer(d, layer.reason)
     return { cwd: e.cwd }
   }
   runInboundLoop(d)
@@ -275,9 +286,7 @@ async function pollOnce(d) {
     })
     if (response.ok !== true) {
       // An unreadable answer (a replaced broker, a stale run) pauses rather
-      // than re-polling hot; the next success resumes, with the generation
-      // re-pinned because a replaced broker rotates it.
-      generation = ""
+      // than re-polling hot; the next success resumes.
       return true
     }
     const rows = parseJSON(response.text)
@@ -290,7 +299,6 @@ async function pollOnce(d) {
     }
     return false
   } catch (err) {
-    generation = ""
     return true
   }
 }
@@ -366,47 +374,60 @@ async function serveAskHook(d, e) {
 }
 
 async function serveAsk(d, ref, message, rawTimeout) {
-  const target = await resolveTarget(d, ref)
+  let target
+  try {
+    target = await resolveTarget(d, ref)
+  } catch (err) {
+    await logLayer(d, "ask target resolution failed: " + errorText(err))
+    return askOutcome("not-sent", null,
+      "ask to " + quote(ref) + " was not sent: the avenor broker did not answer the run listing")
+  }
   if (target.match === "none") {
     return askOutcome("not-sent", null, 'no avenor run matches "' + ref + '"')
   }
   if (target.match === "ambiguous") {
     return askOutcome("not-sent", null, '"' + ref + '" names several avenor runs (' + target.candidates.join(", ") + ")")
   }
-  return runAsk(d, target.runId, message, rawTimeout)
+  if (target.match === "incomplete") {
+    return askOutcome("not-sent", null, listingIncomplete(target.incomplete, ref))
+  }
+  return runAsk(d, target, ref, message, rawTimeout)
 }
 
-async function runAsk(d, runId, message, rawTimeout) {
-  const ref = runId === "" ? '""' : '"' + runId + '"'
-  const pinned = await pinnedGeneration(d)
-  if (pinned === "") {
-    return askOutcome("not-sent", null, "the avenor broker is unreachable")
-  }
+/**
+ * One ask against the resolved target, rendered with the contract's own
+ * sentences. The generation the send and the wait both pin comes from the
+ * listing the resolution already read, so an ask costs one listing.
+ */
+async function runAsk(d, target, ref, message, rawTimeout) {
   const messageId = mintMessageID(await d.clock.now())
   try {
     await brokerPost(d, "/send", buildAgentMessage({
       fromRunId: broker.runID,
-      toRunId: runId,
+      toRunId: target.runId,
       messageId: messageId,
       message: message,
       role: "agent",
       expectsReply: true,
-      generation: pinned,
+      generation: target.generation,
     }))
   } catch (err) {
-    return askOutcome("not-sent", messageId, "ask " + messageId + " was not sent to " + ref + ": " + errorText(err))
+    await logLayer(d, "ask " + messageId + " was not queued: " + errorText(err))
+    return askOutcome("not-sent", messageId, renderAskFailure(messageId, ref, "not-sent"))
   }
   let result
   try {
-    result = await brokerPost(d, "/wait_reply", { waiting_for: messageId, generation: pinned, timeout_ms: normalizeAskTimeoutMs(rawTimeout) })
+    result = await brokerPost(d, "/wait_reply", {
+      waiting_for: messageId,
+      generation: target.generation,
+      timeout_ms: normalizeAskTimeoutMs(rawTimeout),
+    })
   } catch (err) {
-    const text = errorText(err)
-    const timedOut = text.indexOf("timed-out") !== -1 || text.indexOf("504") !== -1
-    const outcome = timedOut ? "timed-out" : "possibly-pending"
-    return askOutcome(outcome, messageId, "ask " + messageId + " " + outcome + ": " + text)
+    const outcome = askFailureOutcome(httpStatus(err), httpBody(err))
+    await logLayer(d, "ask " + messageId + " wait reported " + outcome + ": " + errorText(err))
+    return askOutcome(outcome, messageId, renderAskFailure(messageId, ref, outcome))
   }
-  const reply = extractReplyMessage(result)
-  return askOutcome("replied", messageId, reply)
+  return askOutcome("replied", messageId, extractReplyMessage(result))
 }
 
 /**
@@ -429,33 +450,36 @@ function askOutcome(outcome, messageId, replyText) {
 
 /**
  * Resolution calls for one fresh /sessions listing — no cache — so a spawn
- * that just landed is immediately addressable.
+ * that just landed is immediately addressable. That listing also carries the
+ * generation an ask pins, so resolving and pinning are one round-trip.
+ *
+ * A listing the broker flagged partial (`peers_error`) refuses every ref
+ * outright: a subset cannot prove a run absent, nor that a label match is the
+ * only one, so matching against it would resolve to the wrong peer. The Go and
+ * TS resolvers apply the same rule to the same field.
  */
 async function resolveTarget(d, ref) {
   const body = await brokerGet(d, "/sessions")
   const answer = body === null || typeof body !== "object" ? {} : body
+  const incomplete = typeof answer.peers_error === "string" ? answer.peers_error : ""
+  if (incomplete !== "") {
+    return { match: "incomplete", runId: "", candidates: [], generation: "", incomplete: incomplete }
+  }
   const sessions = Array.isArray(answer.sessions) ? answer.sessions : []
-  return matchSession(sessions, ref, broker === null ? "" : broker.runID)
+  const hit = matchSession(sessions, ref, broker === null ? "" : broker.runID)
+  return {
+    match: hit.match,
+    runId: hit.runId,
+    candidates: hit.candidates,
+    generation: typeof answer.generation === "string" ? answer.generation : "",
+    incomplete: "",
+  }
 }
 
-/**
- * One preflight of the broker's generation, memoized for the session's asks.
- * Only asks carry versioned ids; tells and replies need nothing here, and a
- * failed poll clears the pin so a replaced broker is re-read.
- */
-async function pinnedGeneration(d) {
-  if (generation !== "") {
-    return generation
-  }
-  try {
-    const body = await brokerGet(d, "/sessions")
-    const answer = body === null || typeof body !== "object" ? {} : body
-    const fresh = typeof answer.generation === "string" ? answer.generation : ""
-    generation = fresh
-  } catch (err) {
-    return ""
-  }
-  return generation
+/** The refusal sentence for a ref resolved against a partial peer listing. */
+function listingIncomplete(detail, ref) {
+  return "the peer listing is incomplete: " + detail + "; " + quote(ref) +
+    " was not resolved against it, because a row it missed can shadow the run or label that ref names"
 }
 
 async function brokerGet(d, path) {
@@ -463,7 +487,7 @@ async function brokerGet(d, path) {
     headers: { "X-Avenor-Run-Id": broker.runID, "X-Avenor-Run-Token": broker.token },
   })
   if (response.ok !== true) {
-    throw new Error("GET " + path + ": " + response.status + ": " + response.text)
+    throw httpFailure("GET " + path, response)
   }
   return parseJSON(response.text)
 }
@@ -483,9 +507,32 @@ async function postJSON(d, url, path, bodyObj) {
     body: JSON.stringify(bodyObj),
   })
   if (response.ok !== true) {
-    throw new Error("POST " + path + ": " + response.status + ": " + response.text)
+    throw httpFailure("POST " + path, response)
   }
   return parseJSON(response.text)
+}
+
+/**
+ * A refused broker response as an error carrying the facts a caller has to
+ * classify from — the HTTP status and the parsed body — so an outcome is never
+ * inferred from the error's prose. The message keeps the raw text for the log
+ * line; no model-facing text renders it.
+ */
+function httpFailure(label, response) {
+  const failure = new Error(label + ": " + response.status + ": " + response.text)
+  failure.status = typeof response.status === "number" ? response.status : 0
+  const parsed = parseJSON(response.text)
+  failure.body = parsed === null || typeof parsed !== "object" ? {} : parsed
+  return failure
+}
+
+function httpStatus(err) {
+  return typeof err === "object" && err !== null && typeof err.status === "number" ? err.status : 0
+}
+
+function httpBody(err) {
+  const body = typeof err === "object" && err !== null ? err.body : null
+  return body === null || typeof body !== "object" ? {} : body
 }
 
 /**
