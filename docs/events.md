@@ -174,7 +174,7 @@ For the `claude` backend, `session.end` is the authoritative lifecycle signal. T
 
 The `pi` backend drives a pi child over an RPC command stream, so it has no terminal to scrape. It emits the backend events listed in [Protocol events](#protocol-events-passed-from-backend) plus one synthesized lifecycle event:
 
-**`agent.prompt_submitted`** — A prompt was handed to the pi child over the RPC command stream and accepted. Fields: `prompt_length` (the prompt's length in bytes). The prompt text itself is never emitted: event logs are written `0600` and prompts are sensitive, so only the length is recorded. The event is emitted once the prompt command is accepted, before the turn settles; `session.end` remains the authoritative completion signal.
+**`agent.prompt_submitted`** — A prompt was handed to the pi child over the RPC command stream and the child accepted it. Fields: `prompt_length` (the prompt's length in bytes). The prompt text itself is never emitted: event logs are written `0600` and prompts are sensitive, so only the length is recorded. The event is emitted only when the child's response reports `success: true`, before the turn settles; if the child rejects the prompt (`success: false`) the event is not emitted and the refusal is returned to the caller. `session.end` remains the authoritative completion signal.
 
 ### Retry and error events
 

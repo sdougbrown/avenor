@@ -185,10 +185,27 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		"message": prompt,
 		"id":      newRequestID(),
 	}
-	_, err = c.sendCommand(ctx, cmd)
+	result, err := c.sendCommand(ctx, cmd)
 	if err != nil {
 		settle()
 		return fmt.Errorf("send prompt: %w", err)
+	}
+	var response struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		settle()
+		return fmt.Errorf("decode pi prompt response: %w", err)
+	}
+	if !response.Success {
+		// The child refused the prompt, so no turn started: do not report
+		// submission, and surface the refusal to the caller.
+		settle()
+		if response.Error == "" {
+			response.Error = "unsuccessful response"
+		}
+		return fmt.Errorf("pi prompt rejected: %s", response.Error)
 	}
 
 	// The prompt is delivered over RPC, so submission is the accepted

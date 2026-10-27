@@ -1023,13 +1023,66 @@ func TestPromptEmitsPromptSubmittedEvent(t *testing.T) {
 				t.Errorf("prompt_length = %v, want %d", ev.Fields["prompt_length"], len("hello pi"))
 			}
 			for key, value := range ev.Fields {
-				if text, ok := value.(string); ok && text == "hello pi" {
+				if text, ok := value.(string); ok && strings.Contains(text, "hello pi") {
 					t.Errorf("event carries the prompt text in field %q", key)
 				}
 			}
 			return
 		case <-deadline:
 			t.Fatal("no agent.prompt_submitted event")
+		}
+	}
+}
+
+// A pi child that refuses the prompt (success:false) never starts a turn, so
+// the backend must not report submission: no agent.prompt_submitted event
+// fires and Prompt returns the child's refusal.
+func TestPromptRejectedEmitsNoPromptSubmittedEvent(t *testing.T) {
+	p := NewWithOptions(runtime.StartOptions{})
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-pi-reject")
+	p.client = c
+	p.sessions = map[string]struct{}{"ses-pi-reject": {}}
+
+	eventsCh := subscribeForSession(c, "ses-pi-reject")
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(context.Background(), "ses-pi-reject", "hello pi") }()
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": false, "error": "prompt rejected by child"})
+	}()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for prompt result")
+	}
+	if err == nil {
+		t.Fatal("expected an error when the child rejects the prompt")
+	}
+	if !strings.Contains(err.Error(), "prompt rejected by child") {
+		t.Fatalf("error = %v; want the child's refusal in the message", err)
+	}
+
+	// The turn never started, so no submission event may have fired. The
+	// refusal path fans nothing out, so a bounded drain is safe: if the
+	// (buggy) submission event were buffered it would already be here.
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case ev := <-eventsCh:
+			if ev.Event == "agent.prompt_submitted" {
+				t.Fatal("agent.prompt_submitted emitted for a rejected prompt")
+			}
+		case <-deadline:
+			return
 		}
 	}
 }
