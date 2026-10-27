@@ -29,7 +29,6 @@ func TestBackendPolicyGenerated(t *testing.T) {
 		{"claude", str("off"), false, false, true}, // off not supported
 		{"claude", str("low"), true, false, true},  // start-only
 		{"claude", str("medium"), false, true, true},
-		{"claude", str("low"), true, false, true}, // start-only
 
 		// Backends with no thinking support
 		{"agy", str("low"), false, false, true},
