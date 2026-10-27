@@ -52,11 +52,20 @@ The policy file is strict JSON:
 {"allowed_argv": [["/usr/bin/nice", "-n", "5"]]}
 ```
 
-Unknown fields, trailing data, an empty allowlist, empty entries, empty elements, NUL bytes, and non-absolute executables are rejected at supervisor startup (`mcp launch wrapper policy: <reason>`). An MCP spawn carrying a wrapper must **exactly match** one `allowed_argv` entry — same executable (absolute path), same flags, same order, no extra or missing arguments. A wrapper that is not allowed is rejected with `launch_wrapper: argv is not allowed by this supervisor` before any process is created; a supervisor without the flag rejects every wrapped MCP spawn with `launch_wrapper: disabled for MCP on this supervisor`. MCP servers also fail closed against older supervisors that predate the gated `spawn_mcp` verb.
+Unknown fields, trailing data, an empty allowlist, empty entries, empty elements, NUL bytes, and non-absolute executables are rejected at supervisor startup (`mcp launch wrapper policy: <reason>`). An MCP spawn carrying a wrapper must **exactly match** one `allowed_argv` entry — same executable (absolute path), same flags, same order, no extra or missing arguments. A wrapper that is not allowed is rejected with `launch_wrapper: argv is not allowed by this supervisor` before any process is created; a supervisor with no policy rejects every wrapped MCP spawn with `launch_wrapper: disabled for MCP on this supervisor`. MCP servers also fail closed against older supervisors that predate the gated `spawn_mcp` verb.
+
+The policy path is picked up in this order, for both `avenor stable` and `avenor mcp`:
+
+1. `--mcp-launch-wrapper-policy <path>` (wins),
+2. `$AVENOR_MCP_LAUNCH_WRAPPER_POLICY`,
+3. `$HOME/.avenor/launch-wrapper-policy.json`,
+4. none of the above: the policy is disabled.
+
+A path named by the flag or the environment must exist and load; a missing or malformed file is an error. The well-known file is optional — absent means disabled — but a malformed one is an error too, never a silent fallback to disabled. Creating that file is the durable, machine-local way to enable the allowlist, so a plugin's versioned `.mcp.json` never has to carry a machine-specific argv.
 
 Approved wrappers are **trusted code with supervisor privileges**: a wrapper process receives the backend environment, including provider API keys and per-run broker credentials. The allowlist is an exposure control on which wrappers MCP clients may invoke — it is **not** sandboxing, and approving a wrapper accepts that residual risk.
 
-The `avenor mcp` command accepts `--mcp-launch-wrapper-policy` only to forward the policy to a supervisor it autostarts. Attaching to an already-running supervisor never changes that supervisor's policy.
+The `avenor mcp` command accepts `--mcp-launch-wrapper-policy` only to forward the policy to a supervisor it autostarts; it resolves the same flag → environment → `$HOME/.avenor/launch-wrapper-policy.json` chain and forwards the path it picked. Attaching to an already-running supervisor never changes that supervisor's policy — that supervisor's own pickup chain decided it.
 
 The CLI (`avenor control spawn`) and ordinary control-socket `spawn` calls are operator-trusted surfaces: they are **not** allowlist-gated and keep the pre-existing behavior above.
 

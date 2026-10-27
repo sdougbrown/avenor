@@ -14,6 +14,10 @@ import (
 
 type allowedHostList []string
 
+// newMCPServerFn is the MCP server constructor used by runMCP. Tests patch it
+// to capture Options without starting a server.
+var newMCPServerFn = mcpserver.NewServer
+
 func (a *allowedHostList) String() string { return strings.Join(*a, ",") }
 
 func (a *allowedHostList) Set(value string) error {
@@ -77,7 +81,7 @@ func runMCP(args []string) int {
 	maxWait := fs.Duration("max-wait", 0, "approximate polling budget for blocking tools (default 25s over HTTP; 0 disables)")
 	var allowedHosts allowedHostList
 	fs.Var(&allowedHosts, "allowed-host", "exact tailnet hostname accepted on the HTTP transport (repeatable)")
-	mcpLaunchWrapperPolicy := fs.String("mcp-launch-wrapper-policy", "", "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts; ignored when attaching to an existing supervisor")
+	mcpLaunchWrapperPolicy := fs.String("mcp-launch-wrapper-policy", "", "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts (default: $AVENOR_MCP_LAUNCH_WRAPPER_POLICY, else $HOME/.avenor/launch-wrapper-policy.json); ignored when attaching to an existing supervisor, though a named file that is missing or malformed still fails")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -123,7 +127,13 @@ func runMCP(args []string) int {
 		*authToken = token
 	}
 
-	s, err := mcpserver.NewServer(mcpserver.Options{
+	_, mcpPolicyPath, err := resolveMCPLaunchWrapperPolicy(*mcpLaunchWrapperPolicy)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "avenor mcp: mcp launch wrapper policy: %v\n", err)
+		return 1
+	}
+
+	s, err := newMCPServerFn(mcpserver.Options{
 		Transport:                  *transport,
 		ControlSocket:              *controlSocket,
 		SupervisorSocket:           *supervisorSocket,
@@ -134,7 +144,7 @@ func runMCP(args []string) int {
 		MaxWait:                    effectiveMaxWait(*transport, maxWaitExplicit, *maxWait),
 		AllowedHosts:               allowedHosts,
 		ControlClient:              nil,
-		MCPLaunchWrapperPolicyPath: *mcpLaunchWrapperPolicy,
+		MCPLaunchWrapperPolicyPath: mcpPolicyPath,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)

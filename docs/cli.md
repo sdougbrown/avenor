@@ -284,6 +284,7 @@ avenor stable --control-socket /tmp/avenor.sock
 | `--lease-sweep-interval` | `10s` | Expire workflow leases whose heartbeat stopped at this cadence (0 = disable; leases expire only on restart recovery) |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout before killing children |
 | `--permission-claim-timeout` | `0` (disabled) | Optional permission claim deadline; with 0, fallback occurs only after all control clients disconnect |
+| `--mcp-launch-wrapper-policy` | `$AVENOR_MCP_LAUNCH_WRAPPER_POLICY`, then `$HOME/.avenor/launch-wrapper-policy.json` | JSON allowlist of `launch_wrapper` argv entries permitted for MCP-driven spawns. The flag wins; a path named by the flag or the environment must exist. The well-known file is optional, and with no source the policy is disabled. A malformed file is an error (see [backends.md](backends.md#mcp-surfaces-operator-allowlist)) |
 | `--broker-addr` | (none) | Address the broker binds, published beside the control socket as `<socket>.broker.url`. Empty binds an ephemeral loopback port. A durable hub names a concrete interface address and fixed port, such as `127.0.0.1:8787` or `192.0.2.10:8787`; a wildcard bind (`0.0.0.0`, `::`) is refused because children and parent branches are told to reach the bound address |
 | `--broker-parent-url` | `$AVENOR_PARENT_BROKER_URL` | `http://` address of the parent broker to join; a non-empty flag overrides the environment. The credential comes from the `AVENOR_PARENT_BROKER_TOKEN` environment variable (required whenever the effective URL is non-empty); a credential without a URL runs this broker as the tree's parent broker |
 | `--broker-parent-token` | (none) | Explicit parent-link credential overriding `AVENOR_PARENT_BROKER_TOKEN`; prefer the env var, since argv is world-readable via `/proc/<pid>/cmdline` |
@@ -585,6 +586,7 @@ avenor mcp [flags]
 | `--idle-timeout` | `30m` | Idle timeout before server exits |
 | `--addr` | `127.0.0.1:3748` | Address to listen on for HTTP transport |
 | `--auth-token` | (none) | Bearer token for HTTP transport; defaults to `MCP_AUTH_TOKEN` env var |
+| `--mcp-launch-wrapper-policy` | `$AVENOR_MCP_LAUNCH_WRAPPER_POLICY`, then `$HOME/.avenor/launch-wrapper-policy.json` | Policy file forwarded to a supervisor this command autostarts; ignored when attaching to an existing supervisor (see [backends.md](backends.md#mcp-surfaces-operator-allowlist)) |
 
 ### Examples
 
