@@ -43,11 +43,12 @@ func ParseBrokerURL(raw string) (string, error) {
 	if ip := net.ParseIP(parsed.Hostname()); ip != nil && ip.IsUnspecified() {
 		return "", fmt.Errorf("%q names an unspecified host", trimmed)
 	}
-	// url.Parse accepts a non-bracketed host whose last colon segment is
-	// numeric, so "1.2.3.4:8080:9090" survives it. Only one colon is a
-	// host:port; net.SplitHostPort is what rules the rest out. A bracketed host
-	// is already validated as an IPv6 literal (with optional zone) by
-	// url.Parse itself.
+	// Depending on the Go version, url.Parse accepts a non-bracketed host whose
+	// last colon segment is numeric, so "1.2.3.4:8080:9090" survives it here.
+	// Only one colon is a host:port; net.SplitHostPort is what rules the rest
+	// out, and the refusal table in url_test.go pins both that input and an
+	// unbracketed "::1". A bracketed host is already validated as an IPv6
+	// literal (with optional zone) by url.Parse itself.
 	if !strings.HasPrefix(parsed.Host, "[") && strings.Contains(parsed.Host, ":") {
 		if _, _, err := net.SplitHostPort(parsed.Host); err != nil {
 			return "", fmt.Errorf("%q is not a host with a single port", trimmed)
