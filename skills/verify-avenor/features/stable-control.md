@@ -126,7 +126,8 @@ cat "$HUB_SOCK.broker.url"          # http://127.0.0.1:$PORT
 test -e "$SCRATCH/competitor.sock" && echo "unexpected socket"
 
 # A wildcard bind is refused up front, because that address is what children
-# and parent branches are told to reach.
+# and parent branches are told to reach. The refusal names the address the
+# kernel resolved, so an alias such as 0:0 is refused too.
 ./avenor stable --control-socket "$SCRATCH/wild.sock" --broker-addr "0.0.0.0:$PORT"; echo "exit=$?"
 
 ./avenor control --socket "$HUB_SOCK" shutdown graceful
@@ -151,8 +152,9 @@ done
 publish `http://127.0.0.1:$PORT` (the same fixed port, not a fresh ephemeral
 one), the occupied bind exits 1 with an `address already in use` message naming
 the address and leaves no socket or broker URL record, the wildcard run exits 1
-with `is a wildcard bind; bind a concrete interface address`, and each graceful
-shutdown removes `<socket>.broker.url` while leaving the tombstone.
+with `is a wildcard bind`, `concrete interface address` and the requested
+address in the message, and each graceful shutdown removes
+`<socket>.broker.url` while leaving the tombstone.
 
 
 ## Gotchas

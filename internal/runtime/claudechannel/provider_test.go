@@ -1535,9 +1535,14 @@ func TestStartupWaitHoldsOnlyTheFirstPrompt(t *testing.T) {
 
 	term := terminal.NewFakeSession("test-term", 1, "Tips for getting started\n")
 	term.SetKind("tmux")
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
 	p := &Provider{
 		sessions: make(map[string]*session),
-		broker:   broker.New(""),
+		broker:   b,
 		launcher: fakeLauncher{term: term},
 	}
 	started, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir(), ClaudeMCPWait: 30 * time.Second})

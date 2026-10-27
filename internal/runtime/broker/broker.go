@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -498,6 +499,15 @@ func (b *Broker) Start() error {
 	return b.StartOn(defaultListenAddr)
 }
 
+// URL is the HTTP base URL a client reaches addr on, or "" when addr is empty.
+// A scoped IPv6 zone is escaped, so the result parses back to the bound host.
+func URL(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	return (&url.URL{Scheme: "http", Host: addr}).String()
+}
+
 // StartOn binds the broker to addr. An empty addr keeps Start's default: an
 // ephemeral loopback port. The listener's actual address, including the port
 // the kernel assigned, is what Addr reports.
@@ -508,6 +518,12 @@ func (b *Broker) StartOn(addr string) error {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	// The resolver accepts aliases for the wildcard that a lexical check on
+	// addr never sees, so the refusal follows the bound address.
+	if tcpAddr, ok := l.Addr().(*net.TCPAddr); ok && tcpAddr.IP.IsUnspecified() {
+		_ = l.Close()
+		return fmt.Errorf("broker address %q is a wildcard bind (%s); bind a concrete interface address (e.g. 127.0.0.1:8787 or 192.0.2.10:8787) because children and parent branches are told to reach the bound address", addr, tcpAddr)
 	}
 	b.mu.Lock()
 	b.listener = l

@@ -123,6 +123,11 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 
+	brokerURL := broker.URL(p.broker.Addr())
+	if brokerURL == "" {
+		return runtime.Session{}, fmt.Errorf("claude channel: the broker has no listener address; start the broker before launching a run")
+	}
+
 	// Generate IDs.
 	sessionID := uuid.New().String()
 	runID := uuid.New().String()
@@ -130,7 +135,6 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if err != nil {
 		return runtime.Session{}, fmt.Errorf("broker create run: %w", err)
 	}
-	brokerURL := fmt.Sprintf("http://%s", p.broker.Addr())
 	runSlug := shortRunID(runID)
 	serverName := "avenor-channel-" + runSlug
 

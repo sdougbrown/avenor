@@ -825,10 +825,6 @@ func NewSupervisor(cfg Config) *Supervisor {
 // startBroker reports whether the broker is serving. Run treats an explicit
 // bind failure as fatal, but permits local runs without the default broker.
 func (s *Supervisor) startBroker(addr string) bool {
-	if err := validateBrokerAddr(addr); err != nil {
-		s.brokerStartErr = err
-		return false
-	}
 	if err := s.broker.StartOn(addr); err != nil {
 		s.brokerStartErr = err
 		return false
@@ -2055,7 +2051,7 @@ func (s *Supervisor) brokerURL() string {
 	if addr == "" {
 		return ""
 	}
-	return fmt.Sprintf("http://%s", addr)
+	return broker.URL(addr)
 }
 
 // installParentLink wires this broker to its parent broker when the supervisor

@@ -47,23 +47,67 @@ func TestBrokerStartOnBindsConfiguredAddr(t *testing.T) {
 }
 
 // TestBrokerStartKeepsLoopbackEphemeralDefault pins the unchanged default: no
-// configured address still means an ephemeral loopback port.
+// configured address still means an ephemeral loopback port, so two default
+// brokers never share a listener.
 func TestBrokerStartKeepsLoopbackEphemeralDefault(t *testing.T) {
-	b := New("")
-	if err := b.StartOn(""); err != nil {
-		t.Fatalf("StartOn(\"\"): %v", err)
+	first, second := New(""), New("")
+	for _, b := range []*Broker{first, second} {
+		if err := b.StartOn(""); err != nil {
+			t.Fatalf("StartOn(\"\"): %v", err)
+		}
+		defer b.Stop()
 	}
-	defer b.Stop()
+	if first.Addr() == second.Addr() {
+		t.Fatalf("two default binds share address %q, want distinct ephemeral ports", first.Addr())
+	}
 
-	host, port, err := net.SplitHostPort(b.Addr())
+	host, port, err := net.SplitHostPort(first.Addr())
 	if err != nil {
-		t.Fatalf("split broker addr %q: %v", b.Addr(), err)
+		t.Fatalf("split broker addr %q: %v", first.Addr(), err)
 	}
 	if host != "127.0.0.1" {
 		t.Fatalf("default bind host = %q, want loopback", host)
 	}
 	if port == "" || port == "0" {
 		t.Fatalf("default bind port = %q, want an ephemeral port", port)
+	}
+}
+
+// TestBrokerStartOnRejectsWildcardAliases pins that the refusal follows the
+// address the kernel resolves, not its spelling: these aliases all bind the
+// wildcard.
+func TestBrokerStartOnRejectsWildcardAliases(t *testing.T) {
+	for _, addr := range []string{"0:0", "0.0.0:0"} {
+		t.Run(addr, func(t *testing.T) {
+			probe, err := net.Listen("tcp", addr)
+			if err != nil {
+				t.Skipf("this platform cannot resolve %q: %v", addr, err)
+			}
+			resolved := probe.Addr().String()
+			tcpAddr, ok := probe.Addr().(*net.TCPAddr)
+			unspecified := ok && tcpAddr.IP.IsUnspecified()
+			if err := probe.Close(); err != nil {
+				t.Fatalf("release probe listener: %v", err)
+			}
+			if !unspecified {
+				t.Skipf("this platform resolves %q to %s, not the wildcard", addr, resolved)
+			}
+
+			b := New("")
+			defer b.Stop()
+			err = b.StartOn(addr)
+			if err == nil {
+				t.Fatalf("StartOn(%q) bound the wildcard", addr)
+			}
+			for _, want := range []string{addr, "wildcard", "concrete interface address"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("StartOn error = %q, want it to contain %q", err, want)
+				}
+			}
+			if got := b.Addr(); got != "" {
+				t.Fatalf("Addr() = %q after a wildcard bind, want empty", got)
+			}
+		})
 	}
 }
 

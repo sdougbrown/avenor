@@ -23,7 +23,8 @@ const unsetValue = "__UNSET__"
 
 // keys returns every environment name the observer serializes: the full set a
 // child must not inherit, plus the operational variables that prove the scrub
-// is exact.
+// is exact. The parent-link pair is repeated here so the observer keeps
+// reporting it even if the production scrub list loses it.
 func keys() []string {
 	return append(runtime.ScrubbedEnvNames(),
 		runtime.EnvRuntimeID+"_SUFFIX", // near miss of an identity name
@@ -31,6 +32,8 @@ func keys() []string {
 		"AVENOR_RUN_ID",
 		"AVENOR_BROKER_TOKEN",
 		"AVENOR_BROKER_URL",
+		token.EnvBrokerParentURL,
+		token.EnvBrokerParentToken,
 	)
 }
 
@@ -164,6 +167,14 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 	}
 	if observed["AVENOR_TREE_BUDGET"] != "7" {
 		t.Errorf("AVENOR_TREE_BUDGET = %q, want 7", observed["AVENOR_TREE_BUDGET"])
+	}
+	// Observed and required independently of ScrubbedEnvNames, so dropping the
+	// names from the production scrub list fails here instead of going unseen.
+	if observed[token.EnvBrokerParentURL] != unsetValue {
+		t.Errorf("%s = %q, want it unset", token.EnvBrokerParentURL, observed[token.EnvBrokerParentURL])
+	}
+	if observed[token.EnvBrokerParentToken] != unsetValue {
+		t.Errorf("%s = %q, want it unset", token.EnvBrokerParentToken, observed[token.EnvBrokerParentToken])
 	}
 }
 
