@@ -15,6 +15,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/claudecoretest"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 	"github.com/sdougbrown/avenor/internal/runtime/claudeutil"
 )
@@ -522,22 +523,17 @@ func TestWaitForPaneReadyDismissesTrustDialog(t *testing.T) {
 	}
 }
 
-// TestWaitForPaneReadyDeadlineReturnsFalse pins the contract that a stalled
-// pane (no welcome marker before the deadline) must fail so the caller drops
-// the prompt instead of pasting into an unknown state. Without this guard, the
-// old behavior of "give up and assume ready" re-introduces the trust-dialog
-// paste-corruption bug.
-func TestWaitForPaneReadyDeadlineReturnsFalse(t *testing.T) {
+// TestWaitForPaneReadyDeadlineReturnsErrPaneNotReady pins the contract that a
+// stalled pane (no welcome marker before the deadline) must fail so the caller
+// drops the prompt instead of pasting into an unknown state. Without this
+// guard, the old behavior of "give up and assume ready" re-introduces the
+// trust-dialog paste-corruption bug.
+func TestWaitForPaneReadyDeadlineReturnsErrPaneNotReady(t *testing.T) {
 	term := terminal.NewFakeSession("stalled", 1, "still booting…\n")
 	if err := claudecore.WaitForPaneReady(context.Background(), term, 100*time.Millisecond); !errors.Is(err, claudecore.ErrPaneNotReady) {
 		t.Fatalf("WaitForPaneReady = %v, want ErrPaneNotReady when no ready marker appears before the deadline", err)
 	}
 }
-
-// unansweredDialogPane is a startup dialog avenor does not answer.
-const unansweredDialogPane = " Managed settings require approval\n" +
-	" ❯ 1. Yes, I trust these settings\n" +
-	"   2. No, exit Claude Code\n"
 
 func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *session) {
 	t.Helper()
@@ -562,7 +558,7 @@ func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *ses
 func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
 	// Claude is alive but parked on a dialog. Without a terminal status the
 	// caller waiting on session.end waits forever.
-	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, unansweredDialogPane))
+	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, claudecoretest.ManagedSettingsDialog))
 
 	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -593,10 +589,12 @@ func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
 	}
 }
 
-func TestPromptLeavesAnExitedLaunchToTheExitWatcher(t *testing.T) {
-	// A dead tmux session fails capture at once. That is claude exiting, which
-	// runSession's exit watcher classifies from the stderr log; reporting it
-	// as terminal_not_ready would hide an agent_not_found or a crash.
+func TestPromptAbstainsWhenTheLaunchExited(t *testing.T) {
+	// A dead tmux session fails capture at once. That is claude exiting, so
+	// Prompt reports no verdict and leaves the session running for
+	// runSession's exit watcher to classify; terminal_not_ready would hide an
+	// agent_not_found or a crash. The EmitTerminalGone tests in claudecore pin
+	// the watcher's side.
 	term := terminal.NewFakeSession("test-term", 1, "")
 	term.SetCapErr(errors.New("can't find session"))
 	term.SetAlive(false)

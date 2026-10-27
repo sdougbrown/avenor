@@ -13,6 +13,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/claudecoretest"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 	"github.com/sdougbrown/avenor/internal/runtime/claudeutil"
 )
@@ -918,11 +919,6 @@ func TestPromptSkipsPasteWhenSessionFinishedDuringStartupWait(t *testing.T) {
 	}
 }
 
-// unansweredDialogPane is a startup dialog avenor does not answer.
-const unansweredDialogPane = " Managed settings require approval\n" +
-	" ❯ 1. Yes, I trust these settings\n" +
-	"   2. No, exit Claude Code\n"
-
 func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *claudecore.Session) {
 	t.Helper()
 	p := &Provider{sessions: make(map[string]*claudecore.Session)}
@@ -941,7 +937,7 @@ func newPromptSession(t *testing.T, term *terminal.FakeSession) (*Provider, *cla
 func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
 	// Claude is alive but parked on a dialog. Without a terminal status the
 	// caller waiting on session.end waits forever.
-	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, unansweredDialogPane))
+	p, s := newPromptSession(t, terminal.NewFakeSession("test-term", 1, claudecoretest.ManagedSettingsDialog))
 
 	if err := p.Prompt(context.Background(), s.SessionID, "hello"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -972,10 +968,11 @@ func TestPromptEndsALaunchWhoseInputBoxNeverAppears(t *testing.T) {
 	}
 }
 
-func TestPromptLeavesAnExitedLaunchToTheExitWatcher(t *testing.T) {
-	// Claude exited before its input box appeared. runSession's exit watcher
-	// classifies that from the stderr log and the pane; reporting it as
-	// terminal_not_ready would hide an agent_not_found or a crash.
+func TestPromptAbstainsWhenTheLaunchExited(t *testing.T) {
+	// Claude exited before its input box appeared. Prompt reports no verdict
+	// and leaves the session running, so runSession's exit watcher can
+	// classify the exit; terminal_not_ready would hide an agent_not_found or
+	// a crash. The EmitTerminalGone tests in claudecore pin the watcher's side.
 	term := terminal.NewFakeSession("test-term", 1, "error: bubblewrap is required\n")
 	term.SetAlive(false)
 	p, s := newPromptSession(t, term)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/claudecore/claudecoretest"
 	"github.com/sdougbrown/avenor/internal/runtime/claudecore/terminal"
 )
 
@@ -296,11 +297,7 @@ func TestEmitTerminalGoneReportsThePaneWhenStderrIsEmpty(t *testing.T) {
 // approvalDialogPane is a blocking startup dialog avenor does not answer,
 // framed by full-width rules as Claude Code draws it in a 220-column pane.
 var approvalDialogPane = strings.Repeat("─", 220) + "\n" +
-	" Managed settings require approval\n\n" +
-	" Your organization has configured managed settings that could allow execution of arbitrary code.\n\n" +
-	" ❯ 1. Yes, I trust these settings\n" +
-	"   2. No, exit Claude Code\n\n" +
-	" Enter to confirm · Esc to exit\n" +
+	claudecoretest.ManagedSettingsDialog +
 	strings.Repeat("─", 220) + "\n"
 
 func TestFailUnreadyLaunchEndsTheSessionWithThePane(t *testing.T) {
