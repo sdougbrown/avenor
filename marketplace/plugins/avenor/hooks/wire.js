@@ -80,8 +80,10 @@ export function buildAgentMessage(fields) {
 /**
  * A queued control row parsed to the peer-message facts. `message_id` is
  * empty for a tell (SendBody carries none), which still frames a reply
- * instruction but cannot complete an edge. Null when the row is not a
- * readable peer message: control rows (continue, cancel, …) are not.
+ * instruction but cannot complete an edge; `expectsReply` mirrors the
+ * payload's expects_reply, the caller's signal that the edge is real and
+ * worth correlating a reply against. Null when the row is not a readable
+ * peer message: control rows (continue, cancel, …) are not.
  */
 export function parseControlMessage(msg) {
   const entry = msg === null || typeof msg !== "object" ? {} : msg
@@ -101,7 +103,8 @@ export function parseControlMessage(msg) {
     ? entry.sender
     : typeof body.from === "string" ? body.from : fromRunId
   const role = typeof body.role === "string" ? body.role : ""
-  return { fromRunId, sender, messageId, message, role }
+  const expectsReply = body.expects_reply === true
+  return { fromRunId, sender, messageId, message, role, expectsReply }
 }
 
 /**

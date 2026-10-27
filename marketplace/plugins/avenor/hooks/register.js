@@ -76,8 +76,10 @@ async function deliverIfAvenor(d, e) {
     // Not our address space: pass through, so the normal pipeline delivers.
     return undefined
   }
-  if (!layer.enabled) {
-    return undelivered(layer.reason)
+  if (!layer.enabled || broker === null) {
+    // Disabled means disabled: even an avenor:* address goes to the normal
+    // pipeline, whose own refusal is the honest answer.
+    return undefined
   }
   try {
     return await deliverOutbound(d, ref, e.text)
@@ -98,8 +100,10 @@ async function deliverOutbound(d, ref, text) {
   }
   // A peer this session owes an ask to takes the send as the ask's reply, so
   // the asker's own wait unblocks; every other send is a plain tell. The
-  // correlation is the most recent inbound ask from that peer.
-  const askId = popReply(target.runId)
+  // correlation is the most recent inbound ask from that peer, and it is
+  // consumed only once the broker queue confirms: a failed send keeps the
+  // edge pending, so the model's retry still rides it.
+  const askId = peekReply(target.runId)
   const hasReply = askId !== null
   const body = hasReply
     ? buildAgentMessage({
@@ -117,11 +121,21 @@ async function deliverOutbound(d, ref, text) {
         message: text,
         role: "agent",
       })
-  const response = await brokerPost(d, "/send", body)
+  let response
+  try {
+    response = await brokerPost(d, "/send", body)
+  } catch (err) {
+    await logLayer(d, "send to " + target.runId + " failed: " + errorText(err))
+    return undelivered("the avenor broker refused the send: " + errorText(err))
+  }
   const queued = response.queued === true
-  return queued
-    ? { isDelivered: true }
-    : undelivered("the broker answered " + JSON.stringify(response))
+  if (!queued) {
+    return undelivered("the broker answered " + JSON.stringify(response))
+  }
+  if (hasReply) {
+    dropReply(target.runId, askId)
+  }
+  return { isDelivered: true }
 }
 
 // --- session.start: version gate, self-registration, inbound loop ---
@@ -557,20 +571,24 @@ function undelivered(reason) {
 }
 
 /** A pending inbound ask correlation, keyed by the peer's run id: the most
- * recent ask wins, so a reply sent to that peer rides its edge. */
+ * recent ask wins, so a reply sent to that peer rides its edge. Only real
+ * asks (expects_reply) correlate — a peer's courtesy reply is a message, not
+ * an edge, and remembering it would point the next send at a dead edge. */
 function rememberReply(ask) {
-  if (ask.messageId !== "") {
+  if (ask.expectsReply === true && ask.messageId !== "") {
     pendingReplies.set(ask.fromRunId, ask.messageId)
   }
 }
 
-function popReply(runId) {
+function peekReply(runId) {
   const askId = pendingReplies.get(runId)
-  if (typeof askId === "string") {
+  return typeof askId === "string" ? askId : null
+}
+
+function dropReply(runId, askId) {
+  if (pendingReplies.get(runId) === askId) {
     pendingReplies.delete(runId)
-    return askId
   }
-  return null
 }
 
 function disableLayer(reason) {

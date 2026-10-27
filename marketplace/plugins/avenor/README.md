@@ -13,9 +13,12 @@ broker peer, so avenor runs become addressable like teammates:
   address against the broker's `GET /sessions` and delivers through
   `POST /send`. The hook answers `{isDelivered: true}` only after the broker
   queues the message; otherwise it answers `{isDelivered: false, reason}`
-  (nothing is claimed on a failure), and anything not starting with `avenor:`
-  passes through untouched. A send that answers a peer's pending inbound ask
-  rides that ask's reply edge, unblocking the asker's own wait.
+  (nothing is claimed on a failure, and a refused reply keeps its ask
+  correlation, so a retry still rides the edge). Everything the layer does
+  not own passes through untouched: non-`avenor:` addresses always, and even
+  an `avenor:` address while the layer is disabled or unconfigured. A send
+  that answers a peer's pending inbound ask (`expects_reply`) rides that
+  ask's reply edge, unblocking the asker's own wait.
 - **Ask:** the avenor MCP surface's `message` tool already carries an `ask`
   action; with the peer layer on, a `tool.call` hook serves that action
   through this session's own broker credentials (an `expects_reply` send
@@ -36,7 +39,8 @@ broker peer, so avenor runs become addressable like teammates:
 Tested Claude Code version: **2.1.311**. There is no `engines` pin in the
 manifest, so the mod gates itself at runtime with `$.session.version()`: on an
 older release the layer logs one line (peer layer off) and disables itself
-instead of erroring — hooks pass every send through and no subscription runs.
+instead of erroring — every send (an `avenor:` address included) passes
+through to the normal pipeline and no subscription runs.
 
 ## Bootstrap
 
@@ -83,8 +87,11 @@ as `GET /sessions` lists it.
 - The pass-through `turn.start`/`turn.complete` counters log one benign
   "hook skipped: returned the wrong shape (no result)" notice per turn; the
   turn events themselves proceed untouched.
-- A hot `/reload-plugins` re-registers and re-subscribes the session; the
-  previous run record stays in the broker until the supervisor restarts.
+- A hot `/reload-plugins` does not re-run `session.start` (verified live:
+  nothing re-registers, no fresh log line), and the armed layer keeps serving
+  the session unchanged across the reload — an inbound ask and an outbound
+  send both worked immediately after a live reload. Restart the session to
+  run new module code.
 - A self-registered run's broker record outlives the session (there is no
   run-deregistration route for non-provisioned runs); it stops being a live
   peer when the session ends.
