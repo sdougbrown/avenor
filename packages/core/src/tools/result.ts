@@ -1,6 +1,5 @@
-import * as fs from 'node:fs'
-import * as readline from 'node:readline'
 import { normalizeRunEvent } from '../run-events.js'
+import { readNdjsonRecords } from './events.js'
 import { inspectTool } from './inspect.js'
 import { statusTool, type StatusResult } from './status.js'
 import { validateTimeout } from './validate.js'
@@ -56,24 +55,18 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 async function outputFromEvents(filePath: string): Promise<string | undefined> {
-  const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
-  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity })
+  // A missing or unreadable log rejects and the caller's catch leaves the
+  // fallback output marked possibly truncated.
   let output: string | undefined
-  try {
-    for await (const line of lines) {
-      if (!line.trim()) continue
-      try {
-        const event = normalizeRunEvent(JSON.parse(line))
-        if (event?.event === 'session.end' && event.final_output !== undefined) {
-          output = event.final_output
-        }
-      } catch {
-        // Ignore incomplete or malformed events.
+  for await (const record of readNdjsonRecords(filePath)) {
+    try {
+      const event = normalizeRunEvent(record)
+      if (event?.event === 'session.end' && event.final_output !== undefined) {
+        output = event.final_output
       }
+    } catch {
+      // Ignore incomplete or malformed events.
     }
-  } finally {
-    lines.close()
-    stream.close()
   }
   return output
 }

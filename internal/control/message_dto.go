@@ -18,11 +18,11 @@ import (
 // MessageSendParams is the message_send request. The control owner always
 // sends as the supervisor session, so the request carries no from_run_id.
 type MessageSendParams struct {
-	ToRunID    string `json:"to_run_id"`
-	MessageID  string `json:"message_id"`
-	Generation string `json:"generation"`
-	Body       string `json:"body"`
-	NoReply    bool   `json:"no_reply,omitempty"`
+	ToRunID              string `json:"to_run_id"`
+	MessageID            string `json:"message_id"`
+	Generation           string `json:"generation"`
+	Body                 string `json:"body"`
+	NoReply              bool   `json:"no_reply,omitempty"`
 	ExpectedSentinelFile string `json:"expected_sentinel_file,omitempty"`
 }
 

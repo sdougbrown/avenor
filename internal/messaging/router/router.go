@@ -189,6 +189,11 @@ func (r *Router) Execute(ctx context.Context, input json.RawMessage) (Result, er
 	if denial := permissionDenial(action, conditions); denial != nil {
 		return Result{}, denial
 	}
+	// The authority checks idempotency before mutable run state. A replay must
+	// reach it even if the first resume has since changed that state.
+	if action == actionResume && typed.IdempotencyKey != "" {
+		return r.resume(ctx, typed, res)
+	}
 	facts, err := r.provider.RunState(ctx, res.RunID)
 	if err != nil {
 		return Result{}, refused(err)

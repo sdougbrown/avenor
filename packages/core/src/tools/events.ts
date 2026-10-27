@@ -91,32 +91,47 @@ function matchesFilters(
   return true
 }
 
-async function readNdjsonEvents(
+/**
+ * Stream the parsed records of one NDJSON event log. Malformed lines are
+ * dropped; an unreadable log rejects, so a caller that cannot read the log
+ * never sees a silent empty tail.
+ */
+export async function* readNdjsonRecords(
   filePath: string,
-  args: { types?: string[]; limit: number; after_seq?: number },
-): Promise<Array<Record<string, unknown>>> {
+): AsyncGenerator<Record<string, unknown>> {
   const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
-  const events: Array<Record<string, unknown>> = []
 
   try {
     for await (const line of rl) {
       if (!line.trim()) continue
+      let parsed: unknown
       try {
-        const parsed = JSON.parse(line)
-        const record = asRecord(parsed)
-        if (!record || !matchesFilters(record, args)) continue
-        events.push(clipEvent(record))
-        if (events.length > args.limit) {
-          events.splice(0, events.length - args.limit)
-        }
+        parsed = JSON.parse(line)
       } catch {
-        // skip malformed lines
+        continue
       }
+      const record = asRecord(parsed)
+      if (record) yield record
     }
   } finally {
     rl.close()
     stream.close()
+  }
+}
+
+async function readNdjsonEvents(
+  filePath: string,
+  args: { types?: string[]; limit: number; after_seq?: number },
+): Promise<Array<Record<string, unknown>>> {
+  const events: Array<Record<string, unknown>> = []
+
+  for await (const record of readNdjsonRecords(filePath)) {
+    if (!matchesFilters(record, args)) continue
+    events.push(clipEvent(record))
+    if (events.length > args.limit) {
+      events.splice(0, events.length - args.limit)
+    }
   }
 
   return events

@@ -49,12 +49,11 @@ func newMCPMessageProvider(ctx context.Context, server *Server, client ControlCl
 }
 
 func (p *mcpMessageProvider) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
-	if info := p.resolvedRun; info != nil && info.RuntimeID == req.To.RunID {
-		if info.SentinelPath == "" {
-			return messaging.SendResult{}, fmt.Errorf("turn identity unavailable for %q", info.RunID)
-		}
-		req.ExpectedSentinelFile = info.SentinelPath
+	sentinel, err := p.turnIdentity(req.To.RunID)
+	if err != nil {
+		return messaging.SendResult{}, err
 	}
+	req.ExpectedSentinelFile = sentinel
 	res, err := versionedRetry(ctx, p, &req.Generation, func(ctx context.Context) (messaging.SendResult, error) {
 		return p.transport.Send(ctx, req)
 	})
@@ -416,23 +415,52 @@ func (p *mcpMessageProvider) Rename(ctx context.Context, req messaging.RenameReq
 }
 
 func (p *mcpMessageProvider) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
+	sentinel, err := p.turnIdentity(runID)
+	if err != nil {
+		return messaging.PeerLast{}, err
+	}
 	var last messaging.PeerLast
-	var err error
-	if info := p.resolvedRun; info != nil && info.RuntimeID == runID {
+	if sentinel == "" {
+		last, err = p.client.SessionLastContext(ctx, runID)
+	} else {
 		guarded, ok := p.client.(interface {
 			SessionLastTurnContext(context.Context, string, string) (messaging.PeerLast, error)
 		})
-		if !ok || info.SentinelPath == "" {
-			return messaging.PeerLast{}, fmt.Errorf("turn identity unavailable for %q", info.RunID)
+		if !ok {
+			return messaging.PeerLast{}, fmt.Errorf("turn identity unavailable for %q", runID)
 		}
-		last, err = guarded.SessionLastTurnContext(ctx, runID, info.SentinelPath)
-	} else {
-		last, err = p.client.SessionLastContext(ctx, runID)
+		last, err = guarded.SessionLastTurnContext(ctx, runID, sentinel)
 	}
 	if err != nil {
 		return messaging.PeerLast{}, authorityToolError(err)
 	}
 	return last, nil
+}
+
+// turnIdentity returns the sentinel the target's turn must still own. A target
+// the broker lists but this server holds no registry entry for has no turn
+// identity to confuse: with no registered turn there is no prior-vs-current
+// turn to mix up, and refusing would break tell, ask and last for runs this
+// server never registered — the same open path the TS provider keeps through
+// expectedSentinel(undefined). A registry-known target, though, is only safe to
+// use through the entry that owns its current turn, so a call reached without
+// that resolution — or with one whose turn has no sentinel of its own — fails
+// closed instead of running unguarded.
+func (p *mcpMessageProvider) turnIdentity(target string) (string, error) {
+	if target == messaging.SupervisorRunID {
+		return "", nil
+	}
+	if p.server.registry.LookupRuntime(p.supervisorPath, target) == nil {
+		return "", nil
+	}
+	info := p.resolvedRun
+	if info == nil || info.RuntimeID != target {
+		return "", fmt.Errorf("turn identity unavailable for %q", target)
+	}
+	if info.SentinelPath == "" {
+		return "", fmt.Errorf("turn identity unavailable for %q", info.RunID)
+	}
+	return info.SentinelPath, nil
 }
 
 // authorityToolError turns a control failure that carries a typed router code

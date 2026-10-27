@@ -284,6 +284,9 @@ async function buildRunStatus(
     sentinel = await parseSentinel(runInfo.sentinelPath)
   }
 
+  // When the live turn is not this run's, its session belongs to a newer
+  // turn on the shared runtime; only the run's own registered session may
+  // answer for this one.
   const source = belongsToRun ? liveStatus : null
   const translated = belongsToRun && liveStatus
     ? translateStatus(rawStatusPhase(source), sentinel)
@@ -297,7 +300,7 @@ async function buildRunStatus(
       runtime_id: runInfo.runtimeId,
       session_id:
         (sentinel?.SESSION as string) ??
-        (liveStatus?.session_id as string | undefined) ??
+        (source?.session_id as string | undefined) ??
         runInfo.sessionId,
       stop_reason: sentinel?.STOP_REASON,
       identity: {

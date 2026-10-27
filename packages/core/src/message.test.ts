@@ -594,6 +594,57 @@ describe('router invariants', () => {
     }
   })
 
+  it('skips the run-state read for a keyed resume and returns the resume result', async () => {
+    let stateCalls = 0
+    let resumeCalls: Array<{
+      target: string
+      message: string
+      label?: string
+      idempotencyKey?: string
+    }> = []
+    const provider: MessageProvider = {
+      caller: () => ({ kind: 'owner', runId: 'supervisor' }),
+      surface: () => 'mcp',
+      role: () => 'agent',
+      resolve: async (ref: string) => ({ runId: ref, match: 'unique' }),
+      state: async () => {
+        stateCalls++
+        throw new Error('state must not be read for an idempotent resume')
+      },
+      tell: async () => { throw new Error('unexpected tell') },
+      ask: async () => { throw new Error('unexpected ask') },
+      reply: async () => { throw new Error('unexpected reply') },
+      withdraw: async () => { throw new Error('unexpected withdraw') },
+      resume: async (req) => {
+        resumeCalls.push(req)
+        return {
+          outcome: 'resumed',
+          runId: 'run-resumed',
+          runtimeId: 'rt-resumed',
+          label: 'resumed-label',
+          sentinelFile: '/tmp/resumed.done',
+          onEvent: '/tmp/resumed-events.ndjson',
+        }
+      },
+      rename: async () => { throw new Error('unexpected rename') },
+      last: async () => { throw new Error('unexpected last') },
+      peers: async () => ({ peers: [] }),
+    }
+    const result = await executeMessage(provider, {
+      action: 'resume',
+      target: 'run-target',
+      message: 'continue',
+      idempotency_key: 'singleton-retry',
+    })
+    expect(stateCalls).toBe(0)
+    expect(resumeCalls).toEqual([
+      { target: 'run-target', message: 'continue', label: undefined, idempotencyKey: 'singleton-retry' },
+    ])
+    expect(result.outcome).toBe('resumed')
+    expect(result.runId).toBe('run-resumed')
+    expect(result.text).toBe('resumed "resumed-label" as run "run-resumed"')
+  })
+
   it('restores the ask claim when the provider reply throws', async () => {
     const buildProvider = (thrown: unknown) => {
       const claimed = new Map<string, string>([['av1.reply.1', 'run-asker']])

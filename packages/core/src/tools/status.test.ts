@@ -127,6 +127,7 @@ describe('statusTool singleton registry', () => {
     delete (runInfo as any).agentProfile
     delete (runInfo as any).model
     delete (runInfo as any).effectiveModel
+    delete (runInfo as any).sessionId
 
     if (sentinelPath) {
       try {
@@ -157,6 +158,28 @@ describe('statusTool singleton registry', () => {
     expect(result).toMatchObject({ run_id: runInfo.runId, label: runInfo.label, status: 'done', session_id: 'old-session', runtime_output_available: false })
     expect(result.final_output).toBeUndefined()
     expect(result.pending_permission).toBeUndefined()
+  })
+
+  it('keeps the registered session when the live runtime has moved to a newer turn', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-registered-${runInfo.runId}.done`)
+    fs.writeFileSync(sentinelPath, 'DONE\nSTOP_REASON=end_turn\n')
+    runInfo.sentinelPath = sentinelPath
+    ;(runInfo as any).sessionId = 'registered-session'
+    statusMock.mockResolvedValueOnce({
+      runtime_id: runInfo.runtimeId,
+      sentinel_file: '/tmp/newer-turn.done',
+      session_id: 'newer-turn-session',
+      phase: 'waiting',
+      final_output: 'newer output',
+    })
+    const result = await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' })
+    expect(result).toMatchObject({
+      run_id: runInfo.runId,
+      status: 'done',
+      session_id: 'registered-session',
+      runtime_output_available: false,
+    })
+    expect(result.final_output).toBeUndefined()
   })
 
   it('does not report the previous terminal result for a queued turn', async () => {

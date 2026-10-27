@@ -775,6 +775,78 @@ func TestResumePermissionPrecedesStateRead(t *testing.T) {
 	}
 }
 
+// TestKeyedResumeReachesTheAuthorityWithoutTheStateGate pins the resume
+// short-circuit: a keyed resume skips the RunState + stateDenial gate and
+// reaches the resume authority even when the state read fails, because the
+// authority checks idempotency before mutable run state and a replay must get
+// the stored result instead of a not_resumable refusal for a turn the first
+// resume already ended. An unkeyed resume still takes the state gate.
+func TestKeyedResumeReachesTheAuthorityWithoutTheStateGate(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		input         string
+		runStateErr   error
+		wantResume    bool
+		wantRunStates int
+		wantCode      string
+	}{
+		{
+			name:          "a keyed resume skips the state gate and reaches resume",
+			input:         `{"action": "resume", "target": "rt_9", "message": "again", "idempotency_key": "key-1"}`,
+			runStateErr:   errors.New("state unavailable"),
+			wantResume:    true,
+			wantRunStates: 0,
+		},
+		{
+			name:        "an unkeyed resume still takes the state gate",
+			input:       `{"action": "resume", "target": "rt_9", "message": "again"}`,
+			runStateErr: errors.New("state unavailable"),
+			wantCode:    "refused",
+		},
+		{
+			name:     "an unkeyed resume on a live target is refused by the state gate",
+			input:    `{"action": "resume", "target": "rt_9", "message": "again"}`,
+			wantCode: "target_not_terminal",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &fakeProvider{
+				caller:      messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"},
+				resolution:  messaging.Resolution{RunID: "rt_9", Label: "mesh-b", Match: messaging.MatchUnique},
+				runStateErr: tc.runStateErr,
+				runFacts:    messaging.RunFacts{Live: true},
+				resumed:     messaging.ResumeResult{RunID: "run-2", Label: "follow"},
+			}
+			result, err := newTestRouter(t, provider).Execute(t.Context(), json.RawMessage(tc.input))
+			if tc.wantCode != "" {
+				var toolErr *ToolError
+				if !errors.As(err, &toolErr) || toolErr.Code != tc.wantCode {
+					t.Fatalf("error = %v, want the %s tool error", err, tc.wantCode)
+				}
+				if provider.resumeReq != (messaging.ResumeRequest{}) {
+					t.Fatal("a gated resume reached the authority")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if provider.resumeReq != (messaging.ResumeRequest{}) != tc.wantResume {
+				t.Fatalf("resume reached authority = %v, want %v", provider.resumeReq != messaging.ResumeRequest{}, tc.wantResume)
+			}
+			if got := provider.resumeReq.IdempotencyKey; got != "key-1" {
+				t.Fatalf("resume idempotency_key = %q, want key-1", got)
+			}
+			if provider.runStateCalls != tc.wantRunStates {
+				t.Fatalf("RunState calls = %d, want %d", provider.runStateCalls, tc.wantRunStates)
+			}
+			if result.Outcome != outcomeResumed {
+				t.Fatalf("outcome = %q, want resumed", result.Outcome)
+			}
+		})
+	}
+}
+
 // TestWithdrawFenceCapacityReportsPossiblyPending keeps the router from claiming
 // "nothing is pending" when the absence fence could not be installed and a
 // delayed send can still be admitted.

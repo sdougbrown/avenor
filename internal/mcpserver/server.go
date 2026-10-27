@@ -902,8 +902,10 @@ func (s *Server) queryRunStatus(cl ControlClient, supervisorPath, runID string) 
 	if ri != nil {
 		result, err := cl.Status(ri.RuntimeID)
 		if err != nil {
+			// A failed read is not a historical turn: the flag means the runtime's
+			// current turn was read for a prior one, which a failed read cannot
+			// claim. The terminal sentinel still answers for the finished run.
 			if ts, ok := terminalStatusFromRunInfo(ri); ok {
-				ts["_historical_turn"] = true
 				return ts, nil
 			}
 			return nil, fmt.Errorf("status: %w", err)
