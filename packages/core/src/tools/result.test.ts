@@ -1,4 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { createResultTool, type ResultResult } from './result.js'
 import { inspectTool } from './inspect.js'
 import { statusTool, type StatusResult } from './status.js'
@@ -45,6 +48,19 @@ function deps(statuses: StatusResult[], pollIntervalMs = 1_000) {
 }
 
 describe('resultTool', () => {
+  it('reads the original turn output instead of the shared runtime result', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-result-'))
+    try {
+      const eventPath = path.join(dir, 'events.log')
+      const original = 'original '.repeat(1000)
+      fs.writeFileSync(eventPath, JSON.stringify({ event: 'session.end', final_output: original }) + '\n')
+      const testDeps = deps([status({ status: 'done', event_path: eventPath, runtime_output_available: false })])
+      const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+      expect(result.output).toBe(original)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
   it('returns only terminal result fields and the final output', async () => {
     const testDeps = deps([status({
       status: 'done',
@@ -55,7 +71,6 @@ describe('resultTool', () => {
       event_path: '/tmp/events.log',
     })])
 
-    testDeps.value.fullOutput = mock(async () => 'final answer')
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
 
     expect(result).toEqual({
@@ -67,6 +82,8 @@ describe('resultTool', () => {
       session_id: 'ses-1',
       stop_reason: 'end_turn',
       output: 'final answer',
+      output_truncated: true,
+      output_event_path: '/tmp/events.log',
     })
     expect(testDeps.statusMock).toHaveBeenCalledWith({
       runId: 'run-1',
@@ -76,16 +93,11 @@ describe('resultTool', () => {
     expect(testDeps.inspectMock).not.toHaveBeenCalled()
   })
 
-  it('retrieves the complete terminal output instead of the status preview', async () => {
+  it('marks a preview uncertain when the turn event log is unavailable', async () => {
     const testDeps = deps([status({ status: 'done', final_output: 'x'.repeat(4_000) })])
-    const fullOutput = 'x'.repeat(4_000) + ' complete explore report'
-    testDeps.value.fullOutput = mock(async () => fullOutput)
-
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
-
-    expect(result.output).toBe(fullOutput)
-    expect(testDeps.value.fullOutput).toHaveBeenCalledWith('rt-1', undefined)
-    expect(testDeps.inspectMock).not.toHaveBeenCalled()
+    expect(result.output).toBe('x'.repeat(4_000))
+    expect(result.output_truncated).toBe(true)
   })
 
   it('marks an older supervisor preview as possibly truncated when result retrieval fails', async () => {
@@ -94,7 +106,6 @@ describe('resultTool', () => {
       final_output: 'bounded preview',
       event_path: '/tmp/events.ndjson',
     })])
-    testDeps.value.fullOutput = mock(async () => { throw new Error('method not found') })
 
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
 
@@ -107,7 +118,6 @@ describe('resultTool', () => {
 
   it('marks an inspection fallback as possibly truncated', async () => {
     const testDeps = deps([status({ status: 'done', event_path: '/tmp/events.ndjson' })])
-    testDeps.value.fullOutput = mock(async () => undefined)
 
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
 

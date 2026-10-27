@@ -1148,8 +1148,8 @@ func (s *ControlServer) acceptLoop() {
 		seq++
 		cs := &connState{
 			id: seq, server: s, conn: conn,
-			waitSlots:        make(chan struct{}, maxInflightPerConn),
-			messageSlots:     make(chan struct{}, maxInflightPerConn),
+			waitSlots:    make(chan struct{}, maxInflightPerConn),
+			messageSlots: make(chan struct{}, maxInflightPerConn),
 		}
 		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
@@ -1651,7 +1651,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		}
 		return success(req.ID, s.stableHandler.List())
 
-	case "message_send":
+	case "message_send", "message_send_turn":
 		var p MessageSendParams
 		transport, resp, ok := s.messagePrelude(c, req, &p, true)
 		if !ok {
@@ -1661,7 +1661,26 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if !ok {
 			return resp
 		}
-		res, err := tr.Send(c.ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
+		if req.Method == "message_send_turn" && p.ExpectedSentinelFile == "" {
+			return failure(req.ID, -32602, "turn identity required", nil)
+		}
+		var res messaging.SendResult
+		var err error
+		send := func() error {
+			res, err = tr.Send(c.ctx, p.request(messaging.Identity{RunID: messaging.SupervisorRunID}))
+			return err
+		}
+		if p.ExpectedSentinelFile != "" {
+			guard, ok := s.stableHandler.(interface {
+				WithTurn(string, string, func() error) error
+			})
+			if !ok {
+				return failure(req.ID, -32000, "turn guard unavailable", nil)
+			}
+			err = guard.WithTurn(p.ToRunID, p.ExpectedSentinelFile, send)
+		} else {
+			err = send()
+		}
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), messageErrorData(err, res.Outcome, res.MessageID))
 		}
@@ -1796,7 +1815,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
 		}
 		return success(req.ID, newSessionRenameResult(res))
-	case "session_last":
+	case "session_last", "session_last_turn":
 		if s.stableHandler == nil {
 			return failure(req.ID, -32601, "method not found", nil)
 		}
@@ -1804,7 +1823,27 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
-		record, ok, err := s.stableHandler.SessionLast(p.RuntimeID)
+		if req.Method == "session_last_turn" && p.ExpectedSentinelFile == "" {
+			return failure(req.ID, -32602, "turn identity required", nil)
+		}
+		var record broker.LastAgentMessage
+		var ok bool
+		var err error
+		read := func() error {
+			record, ok, err = s.stableHandler.SessionLast(p.RuntimeID)
+			return err
+		}
+		if p.ExpectedSentinelFile != "" {
+			guard, supported := s.stableHandler.(interface {
+				WithTurn(string, string, func() error) error
+			})
+			if !supported {
+				return failure(req.ID, -32000, "turn guard unavailable", nil)
+			}
+			err = guard.WithTurn(p.RuntimeID, p.ExpectedSentinelFile, read)
+		} else {
+			err = read()
+		}
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
 		}

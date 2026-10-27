@@ -570,6 +570,107 @@ func TestMCPMessageProviderRunStateTranslatesStatus(t *testing.T) {
 	}
 }
 
+func TestMCPMessageProviderResolvedPublicTurnUsesItsState(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.done")
+	if err := os.WriteFile(oldPath, []byte("DONE\nSESSION=old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status": "running", "sentinel_file": filepath.Join(dir, "new.done"),
+	}}}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{SupervisorID: testSupervisorPath, RunID: "old", RuntimeID: "rt", SentinelPath: oldPath}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := p.Resolve(context.Background(), "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := p.RunState(context.Background(), resolved.RunID)
+	if err != nil || facts.Live || facts.Status != runstate.StatusDone {
+		t.Fatalf("historical turn state = %#v, %v", facts, err)
+	}
+}
+
+// TestMCPMessageProviderHistoricalTurnRefusesResume proves a turn whose
+// sentinel is no longer its runtime's current one is neither live nor
+// resumable: the shared status's session belongs to the runtime's current
+// turn, and resuming through the shared runtime would continue that turn.
+// The router refuses the resume with the not_resumable tool error.
+func TestMCPMessageProviderHistoricalTurnRefusesResume(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := writeSentinel(t, dir, "old.done", "DONE\nSESSION=old-session\n")
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status":        "running",
+		"session_id":    "sess-new",
+		"sentinel_file": filepath.Join(dir, "new.done"),
+	}}}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{SupervisorID: testSupervisorPath, RunID: "old", RuntimeID: "rt", SentinelPath: oldPath}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := p.Resolve(context.Background(), "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := p.RunState(context.Background(), resolved.RunID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	if facts.Live || facts.Resumable {
+		t.Fatalf("historical turn facts = %#v, want not live and not resumable", facts)
+	}
+
+	// The refusal is the typed not_resumable error, not a generic refusal.
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		t.Fatal("resume reached the control verb for a historical turn")
+		return messaging.ResumeResult{}, nil
+	}
+	rt, err := router.NewRouter(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = rt.Execute(context.Background(), json.RawMessage(`{"action":"resume","target":"old","message":"next"}`))
+	var toolErr *router.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "not_resumable" {
+		t.Fatalf("resume error = %v, want the not_resumable tool error", err)
+	}
+}
+
+// TestMCPMessageProviderSentinellessTurnRefusesResume covers the historical
+// detection for a turn registered without a sentinel of its own: another
+// registered turn of the same runtime owning the runtime's current sentinel
+// is what makes the sentinelless turn historical.
+func TestMCPMessageProviderSentinellessTurnRefusesResume(t *testing.T) {
+	dir := t.TempDir()
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status":        "running",
+		"session_id":    "sess-new",
+		"sentinel_file": filepath.Join(dir, "new.done"),
+	}}}
+	p := newTestMessageProvider(t, cl)
+	for _, info := range []*RunInfo{
+		{SupervisorID: testSupervisorPath, RunID: "old", RuntimeID: "rt"},
+		{SupervisorID: testSupervisorPath, RunID: "new", RuntimeID: "rt", SentinelPath: filepath.Join(dir, "new.done")},
+	} {
+		if err := p.server.registry.Store(info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolved, err := p.Resolve(context.Background(), "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := p.RunState(context.Background(), resolved.RunID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	if facts.Live || facts.Resumable {
+		t.Fatalf("historical sentinelless turn facts = %#v, want not live and not resumable", facts)
+	}
+}
+
 // TestMCPMessageProviderRunStateFallsBackToTerminalSentinel proves a run that
 // finished before a supervisor restart is still reported as done. Status fails
 // because the runtime is gone, and the registry's terminal sentinel answers;

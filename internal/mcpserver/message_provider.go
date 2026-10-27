@@ -24,6 +24,11 @@ type mcpMessageProvider struct {
 	generationMu   sync.RWMutex
 	generation     string
 	transport      *controlTransport
+	// resolvedRun is the turn a Resolve call bound on this provider. The
+	// provider is minted per tool call by messageSurfaceProvider, consumed by
+	// one router Execute on the call's goroutine, and discarded with the
+	// call, so the field cannot be observed by a concurrent call.
+	resolvedRun *RunInfo
 }
 
 // newMCPMessageProvider preflights the control store under ctx, so a caller can
@@ -44,6 +49,12 @@ func newMCPMessageProvider(ctx context.Context, server *Server, client ControlCl
 }
 
 func (p *mcpMessageProvider) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
+	if info := p.resolvedRun; info != nil && info.RuntimeID == req.To.RunID {
+		if info.SentinelPath == "" {
+			return messaging.SendResult{}, fmt.Errorf("turn identity unavailable for %q", info.RunID)
+		}
+		req.ExpectedSentinelFile = info.SentinelPath
+	}
 	res, err := versionedRetry(ctx, p, &req.Generation, func(ctx context.Context) (messaging.SendResult, error) {
 		return p.transport.Send(ctx, req)
 	})
@@ -177,6 +188,7 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 		return messaging.Resolution{RunID: messaging.SupervisorRunID, Label: messaging.SupervisorRunID, Match: messaging.MatchUnique}, nil
 	}
 	if info := p.server.registry.Lookup(p.supervisorPath, ref); info != nil && info.RuntimeID != "" {
+		p.resolvedRun = info
 		return messaging.Resolution{
 			RunID:       info.RuntimeID,
 			PublicRunID: info.RunID,
@@ -190,6 +202,7 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 	if info, err := p.server.lookupRunByPublicID(p.client, p.supervisorPath, ref); err != nil {
 		return messaging.Resolution{}, err
 	} else if info != nil && info.RuntimeID != "" {
+		p.resolvedRun = info
 		return messaging.Resolution{
 			RunID:       info.RuntimeID,
 			PublicRunID: info.RunID,
@@ -230,6 +243,20 @@ func (p *mcpMessageProvider) peerResolution(runID, label string) messaging.Resol
 	}
 	if info := p.server.registry.LookupRuntime(p.supervisorPath, runID); info != nil {
 		res.PublicRunID = info.RunID
+		p.resolvedRun = info
+	} else if status, err := p.client.Status(runID); err == nil {
+		// Several registered turns can share a runtime id (a warm resume,
+		// or a restart that re-minted one while the pre-restart entry stays
+		// registered). The current turn is the one whose sentinel the runtime
+		// currently holds; a sentinel no registered turn owns, or a status
+		// that cannot be read, keeps the ambiguity rather than answering
+		// with an entry the map iteration reached.
+		if path := stringField(status, "sentinel_file"); path != "" {
+			if info := p.server.registry.LookupRuntimeTurn(p.supervisorPath, runID, path); info != nil {
+				res.PublicRunID = info.RunID
+				p.resolvedRun = info
+			}
+		}
 	}
 	return res
 }
@@ -248,6 +275,20 @@ func (p *mcpMessageProvider) peerResolution(runID, label string) messaging.Resol
 func (p *mcpMessageProvider) RunState(ctx context.Context, runID string) (messaging.RunFacts, error) {
 	if runID == messaging.SupervisorRunID {
 		return p.peerRunState(ctx, runID)
+	}
+	if info := p.resolvedRun; info != nil && info.RuntimeID == runID {
+		status, err := p.server.queryRunStatus(p.client, p.supervisorPath, info.RunID)
+		if err != nil {
+			// A historical turn whose terminal sentinel cannot be read: the
+			// turn is over, its final status is unknown, and it is not
+			// resumable through the shared runtime. The router answers
+			// not_resumable from these facts.
+			if errors.Is(err, ErrRunMovedTurn) {
+				return messaging.RunFacts{RunID: runID, Status: runstate.StatusUnknown}, nil
+			}
+			return messaging.RunFacts{}, err
+		}
+		return runFactsFromStatus(runID, status), nil
 	}
 	status, err := p.client.Status(runID)
 	if err == nil {
@@ -292,26 +333,33 @@ func statusReportsNoRuntime(err error, runID string) bool {
 // runFactsFromStatus classifies one supervisor status map into the turn and
 // resume facts the router reads. Resumable is a resumable sentinel or a live
 // session id; a missing sentinel is simply not resumable from the sentinel.
-// The live status and the registry's terminal-status fallback share this
-// classification, so the two paths cannot drift.
+// A status flagged _historical_turn is the runtime's current turn read for a
+// prior one: its session belongs to the current turn, not the target's, and
+// the target's turn is over, so neither the session nor the sentinel counts
+// and the turn is not live. The live status and the registry's
+// terminal-status fallback share this classification, so the two paths cannot
+// drift.
 func runFactsFromStatus(runID string, status map[string]any) messaging.RunFacts {
 	rawStatus, _ := status["status"].(string)
 	rawPhase, _ := status["phase"].(string)
 	translation := runstate.Translate(runstate.RuntimeStatus(rawStatus), runstate.Phase(rawPhase))
+	historical, _ := status["_historical_turn"].(bool)
 	resumable := false
-	if sessionID, _ := status["session_id"].(string); sessionID != "" {
-		resumable = true
-	}
-	if path, _ := status["sentinel_file"].(string); path != "" {
-		if sentinel, err := runstate.ReadSentinel(path); err == nil && runstate.IsResumableStatus(sentinel.Status) {
+	if !historical {
+		if sessionID, _ := status["session_id"].(string); sessionID != "" {
 			resumable = true
+		}
+		if path, _ := status["sentinel_file"].(string); path != "" {
+			if sentinel, err := runstate.ReadSentinel(path); err == nil && runstate.IsResumableStatus(sentinel.Status) {
+				resumable = true
+			}
 		}
 	}
 	return messaging.RunFacts{
 		RunID:     runID,
 		Status:    translation.Status,
 		Phase:     translation.Phase,
-		Live:      !translation.TurnComplete,
+		Live:      !translation.TurnComplete && !historical,
 		Resumable: resumable,
 	}
 }
@@ -368,7 +416,19 @@ func (p *mcpMessageProvider) Rename(ctx context.Context, req messaging.RenameReq
 }
 
 func (p *mcpMessageProvider) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
-	last, err := p.client.SessionLastContext(ctx, runID)
+	var last messaging.PeerLast
+	var err error
+	if info := p.resolvedRun; info != nil && info.RuntimeID == runID {
+		guarded, ok := p.client.(interface {
+			SessionLastTurnContext(context.Context, string, string) (messaging.PeerLast, error)
+		})
+		if !ok || info.SentinelPath == "" {
+			return messaging.PeerLast{}, fmt.Errorf("turn identity unavailable for %q", info.RunID)
+		}
+		last, err = guarded.SessionLastTurnContext(ctx, runID, info.SentinelPath)
+	} else {
+		last, err = p.client.SessionLastContext(ctx, runID)
+	}
 	if err != nil {
 		return messaging.PeerLast{}, authorityToolError(err)
 	}

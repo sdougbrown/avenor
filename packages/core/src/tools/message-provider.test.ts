@@ -92,6 +92,63 @@ describe('host message provider', () => {
     })
   }
 
+  it('resolves a shared runtime label to the latest registered turn', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    for (const id of ['alias-old', 'alias-new']) fs.mkdirSync(path.join(home, 'runs', id), { recursive: true })
+    registerExternalRun({ supervisorId, runId: 'alias-old', label: 'shared', runtimeId: 'rt_shared', sentinelPath: '/old', eventLogPath: '' })
+    registerExternalRun({ supervisorId, runId: 'alias-new', label: 'shared', runtimeId: 'rt_shared', sentinelPath: path.join(home, 'runs', 'alias-new', 'sentinel.done'), eventLogPath: '' })
+    const client = fakeClient({ status: mock(async () => ({ status: 'running', sentinel_file: path.join(home, 'runs', 'alias-new', 'sentinel.done') })), messagePeers: mock(async () => ({ peers: [{ run_id: 'rt_shared', session: { run_id: 'rt_shared', label: 'shared', status: 'running' } }] })) })
+    try {
+      expect(await provider(client).resolve('shared')).toMatchObject({ publicRunId: 'alias-new', runId: 'rt_shared' })
+    } finally {
+      forgetExternalRuns(supervisorId)
+    }
+  })
+
+  it('does not route an old public turn to a newer live turn sharing its runtime', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const sentinel = path.join(home, 'old-turn.done')
+    fs.writeFileSync(sentinel, 'DONE\nSESSION=old-session\n')
+    fs.mkdirSync(path.join(home, 'runs', 'old-turn'), { recursive: true })
+    registerExternalRun({ supervisorId, runId: 'old-turn', label: 'old', runtimeId: 'rt_shared', sentinelPath: sentinel, eventLogPath: '' })
+    const client = fakeClient({ status: mock(async () => ({ status: 'running', sentinel_file: '/tmp/new-turn.done', session_id: 'new-session' })) })
+    try {
+      await expect(executeMessage(provider(client), { action: 'tell', target: 'old-turn', message: 'hello' })).rejects.toThrow()
+      expect(client.send).not.toHaveBeenCalled()
+      const result = await executePeers(provider(client), { action: 'last', target: 'old-turn' })
+      expect(result.last?.final_output).toBe('')
+      expect(client.sessionLast).not.toHaveBeenCalled()
+    } finally {
+      forgetExternalRuns(supervisorId)
+      fs.rmSync(sentinel, { force: true })
+    }
+  })
+
+  it('pins send and last to the resolved turn even if the runtime changes after status', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const sentinel = path.join(home, 'guarded-turn.done')
+    fs.mkdirSync(path.join(home, 'runs', 'guarded-turn'), { recursive: true })
+    registerExternalRun({ supervisorId, runId: 'guarded-turn', label: 'guarded', runtimeId: 'rt_shared', sentinelPath: sentinel, eventLogPath: '' })
+    const send = mock(async (params: any) => {
+      expect(params.expected_sentinel_file).toBe(sentinel)
+      throw new Error('turn changed')
+    })
+    const last = mock(async (_runtime: string, expected?: string) => {
+      expect(expected).toBe(sentinel)
+      throw new Error('turn changed')
+    })
+    const client = fakeClient({ status: mock(async () => ({ status: 'running', sentinel_file: sentinel })), messageSend: send, sessionLast: last })
+    try {
+      await expect(executeMessage(provider(client), { action: 'tell', target: 'guarded-turn', message: 'hello' })).rejects.toThrow()
+      await expect(executeMessage(provider(client), { action: 'ask', target: 'guarded-turn', message: 'hello' })).rejects.toThrow()
+      await expect(executePeers(provider(client), { action: 'last', target: 'guarded-turn' })).rejects.toThrow()
+      expect(send).toHaveBeenCalledTimes(2)
+      expect(last).toHaveBeenCalledTimes(1)
+    } finally {
+      forgetExternalRuns(supervisorId)
+    }
+  })
+
   it('sends a tell as the supervisor with no reply expectation', async () => {
     const client = fakeClient()
     const result = await executeMessage(provider(client), { action: 'tell', target: 'supervisor', message: 'hi' })

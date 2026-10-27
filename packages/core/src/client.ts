@@ -149,6 +149,7 @@ export interface WorkflowControllerCreateParams {
 export const MESSAGE_MAX_WAIT_MS = 600_000
 
 export interface MessageSendParams {
+  expected_sentinel_file?: string
   to_run_id: string
   message_id: string
   generation: string
@@ -858,7 +859,7 @@ export class Client {
   // The merged messaging control verbs. Each decodes the snake_case control DTO
   // internal/control/message_dto.go declares.
   async messageSend(params: MessageSendParams): Promise<MessageSendResult> {
-    return this.call('message_send', params) as Promise<MessageSendResult>
+    return this.call(params.expected_sentinel_file ? 'message_send_turn' : 'message_send', params) as Promise<MessageSendResult>
   }
 
   // A blocking message verb answers after at most MESSAGE_MAX_WAIT_MS; the
@@ -906,8 +907,8 @@ export class Client {
     return this.call('session_rename', { session_id: sessionId, name }) as Promise<SessionRenameResult>
   }
 
-  async sessionLast(runtimeId: string): Promise<SessionLastResult> {
-    return this.call('session_last', { runtime_id: runtimeId }) as Promise<SessionLastResult>
+  async sessionLast(runtimeId: string, expectedSentinelFile?: string): Promise<SessionLastResult> {
+    return this.call(expectedSentinelFile ? 'session_last_turn' : 'session_last', { runtime_id: runtimeId, ...(expectedSentinelFile ? { expected_sentinel_file: expectedSentinelFile } : {}) }) as Promise<SessionLastResult>
   }
 
   async sessionLastSet(

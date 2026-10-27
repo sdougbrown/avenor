@@ -93,13 +93,14 @@ export interface MessageProvider {
   surface(): MessageSurface
   role(): string
   resolve(ref: string): Promise<Resolution>
-  state(runId: string): Promise<RunFacts>
-  tell(targetRunId: string, message: string): Promise<ProviderResult>
+  state(runId: string, publicRunId?: string): Promise<RunFacts>
+  tell(targetRunId: string, message: string, publicRunId?: string): Promise<ProviderResult>
   ask(
     targetRunId: string,
     message: string,
     timeoutMs?: number,
     signal?: AbortSignal,
+    publicRunId?: string,
   ): Promise<ProviderResult>
   reply(inboundAskId: string, message: string, askerRunId: string): Promise<ProviderResult>
   withdraw(messageId: string): Promise<ProviderResult>
@@ -112,7 +113,7 @@ export interface MessageProvider {
     idempotencyKey?: string
   }): Promise<ProviderResult>
   rename(req: { sessionId?: string; name: string }): Promise<ProviderResult>
-  last(runId: string): Promise<ProviderResult>
+  last(runId: string, publicRunId?: string): Promise<ProviderResult>
   peers(): Promise<PeersProviderResult>
   /** Host surfaces that own a turn loop publish their own finished turn. */
   recordLastTurn?(text: string, stopReason: string, truncated: boolean): Promise<void>
@@ -633,7 +634,7 @@ async function tell(
   const label = resolutionLabel(resolution, input.target ?? '')
   let result: ProviderResult
   try {
-    result = await provider.tell(resolution.runId, input.message ?? '')
+    result = await provider.tell(resolution.runId, input.message ?? '', resolution.publicRunId)
   } catch (err) {
     throw asToolError(err)
   }
@@ -657,7 +658,7 @@ async function ask(
   const label = resolutionLabel(resolution, input.target ?? '')
   let result: ProviderResult
   try {
-    result = await provider.ask(resolution.runId, input.message ?? '', input.timeout_ms, signal)
+    result = await provider.ask(resolution.runId, input.message ?? '', input.timeout_ms, signal, resolution.publicRunId)
   } catch (err) {
     throw asToolError(err)
   }
@@ -795,9 +796,12 @@ export async function executeMessage(
   conditions.targetMatch = resolution.match
   const denial = permissionDenial(action, conditions)
   if (denial) throw denial
+  // The authority checks idempotency before mutable run state. A replay must
+  // reach it even if the first resume has since changed that state.
+  if (action === 'resume' && typed.idempotency_key) return resume(provider, typed, resolution)
   let facts
   try {
-    facts = await provider.state(resolution.runId)
+    facts = await provider.state(resolution.runId, resolution.publicRunId)
   } catch (err) {
     throw refused(err)
   }
@@ -876,7 +880,7 @@ export async function executePeers(
   const resolution = await resolveTarget(provider, typed.target ?? '')
   let last
   try {
-    last = await provider.last(resolution.runId)
+    last = await provider.last(resolution.runId, resolution.publicRunId)
   } catch (err) {
     throw asToolError(err)
   }

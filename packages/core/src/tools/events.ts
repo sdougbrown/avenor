@@ -245,7 +245,9 @@ async function executeEventsTool(
       }
     }
 
-    if (resolved.runtimeId) {
+    // A registered run identifies a turn, while runtime history can advance
+    // to a later turn between resolution and this read.
+    if (resolved.runtimeId && !resolved.runInfo) {
       try {
         const history = await resolved.client.history({
           runtime_id: resolved.runtimeId,

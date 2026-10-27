@@ -203,7 +203,7 @@ func TestAvenorResultRehydratesFromSupervisorList(t *testing.T) {
 			fake := &fakeClient{
 				listResult:   []map[string]any{rehydrateEntry()},
 				statusResult: map[string]any{"status": "done", "session_id": "ses_live"},
-				resultResult: map[string]any{"final_output": "full answer"},
+				resultResult: map[string]any{"final_output": "full answer", "sentinel_file": rehydrateEntry()["sentinel_file"]},
 			}
 			s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
 			if err != nil {

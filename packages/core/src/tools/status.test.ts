@@ -135,6 +135,39 @@ describe('statusTool singleton registry', () => {
     }
   })
 
+  it('preserves live waiting and permission with a sentinel for the same turn', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-wait-${runInfo.runId}.done`)
+    fs.writeFileSync(sentinelPath, 'DONE\n')
+    runInfo.sentinelPath = sentinelPath
+    statusMock.mockResolvedValueOnce({ runtime_id: runInfo.runtimeId, sentinel_file: sentinelPath, phase: 'waiting', pending_permission: { request_id: 'req', description: 'approve', options: [] } })
+    const result = await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' })
+    expect(result.status).toBe('waiting')
+    expect(result.pending_permission?.request_id).toBe('req')
+  })
+
+  it('isolates an earlier turn from the shared runtime and its newer output', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-run-${runInfo.runId}.done`)
+    fs.writeFileSync(sentinelPath, 'DONE\nSESSION=old-session\nSTOP_REASON=end_turn\n')
+    runInfo.sentinelPath = sentinelPath
+    statusMock.mockResolvedValueOnce({
+      runtime_id: runInfo.runtimeId, sentinel_file: '/tmp/new-turn.done',
+      label: 'new turn', phase: 'waiting', final_output: 'new output',
+    })
+    const result = await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' })
+    expect(result).toMatchObject({ run_id: runInfo.runId, label: runInfo.label, status: 'done', session_id: 'old-session', runtime_output_available: false })
+    expect(result.final_output).toBeUndefined()
+    expect(result.pending_permission).toBeUndefined()
+  })
+
+  it('does not report the previous terminal result for a queued turn', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-new-${runInfo.runId}.done`)
+    runInfo.sentinelPath = sentinelPath
+    statusMock.mockResolvedValueOnce({ runtime_id: runInfo.runtimeId, sentinel_file: '/tmp/old-turn.done', status: 'done', final_output: 'old output' })
+    const result = await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' })
+    expect(result).toMatchObject({ status: 'running', run_id: runInfo.runId })
+    expect(result.final_output).toBeUndefined()
+  })
+
   it('reads terminal sentinel when singleton registry status lookup throws', async () => {
     sentinelPath = path.join(os.tmpdir(), `avenor-run-${runInfo.runId}.done`)
     fs.writeFileSync(sentinelPath, 'DONE\nSESSION=ses-1234\nSTOP_REASON=end_turn\n')

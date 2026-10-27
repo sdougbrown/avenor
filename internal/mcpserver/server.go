@@ -522,16 +522,25 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		// per-entry merge is a single map lookup instead of a full registry
 		// scan per entry.
 		registryByRuntimeID := make(map[string]*RunInfo)
-		for _, ri := range s.registry.All() {
+		registryByTurn := make(map[[2]string]*RunInfo)
+		registryEntries := s.registry.All()
+		for _, ri := range registryEntries {
 			if ri.SupervisorID == supervisorPath {
 				if _, ok := registryByRuntimeID[ri.RuntimeID]; !ok {
 					registryByRuntimeID[ri.RuntimeID] = ri
+				}
+				key := [2]string{ri.RuntimeID, ri.SentinelPath}
+				if _, ok := registryByTurn[key]; !ok {
+					registryByTurn[key] = ri
 				}
 			}
 		}
 		for _, entry := range results {
 			runtimeID, _ := entry["runtime_id"].(string)
 			ri := registryByRuntimeID[runtimeID]
+			if path := stringField(entry, "sentinel_file"); path != "" {
+				ri = registryByTurn[[2]string{runtimeID, path}]
+			}
 			var sentinelPath string
 			if ri != nil {
 				sentinelPath = ri.SentinelPath
@@ -547,7 +556,7 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 				translated = append(translated, shapeStatusForView(ts, args.View))
 			}
 		}
-		for _, ri := range s.registry.All() {
+		for _, ri := range registryEntries {
 			if seenRegistryRuns[ri.RunID] || ri.SupervisorID != supervisorPath {
 				continue
 			}
@@ -589,6 +598,12 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 	}
 	return nil, statusToolOutput{statusRun: statusRunFromMap(shapeStatusForView(ts, args.View))}, nil
 }
+
+// ErrRunMovedTurn reports a run whose turn no longer owns its runtime and
+// whose own terminal sentinel cannot be read: the live status belongs to the
+// runtime's current turn, so the run's status is unavailable, but the run is
+// a historical turn rather than a missing one.
+var ErrRunMovedTurn = errors.New("runtime has moved to another turn")
 
 func terminalStatusFromRunInfo(info *RunInfo) (map[string]any, bool) {
 	if info == nil || info.SentinelPath == "" {
@@ -888,9 +903,19 @@ func (s *Server) queryRunStatus(cl ControlClient, supervisorPath, runID string) 
 		result, err := cl.Status(ri.RuntimeID)
 		if err != nil {
 			if ts, ok := terminalStatusFromRunInfo(ri); ok {
+				ts["_historical_turn"] = true
 				return ts, nil
 			}
 			return nil, fmt.Errorf("status: %w", err)
+		}
+		if path := stringField(result, "sentinel_file"); path != "" &&
+			(path != ri.SentinelPath ||
+				(ri.SentinelPath == "" && s.registry.OtherTurnOwnsSentinel(supervisorPath, ri.RuntimeID, ri.RunID, path))) {
+			if ts, ok := terminalStatusFromRunInfo(ri); ok {
+				ts["_historical_turn"] = true
+				return ts, nil
+			}
+			return nil, fmt.Errorf("status for run %q unavailable: %w", ri.RunID, ErrRunMovedTurn)
 		}
 		ts := translateStatus(s.diag, ri.RuntimeID, result, ri.SentinelPath)
 		applyRunInfoIdentity(ts, ri)
@@ -990,12 +1015,26 @@ func (s *Server) retrieveFinalOutput(cl ControlClient, supervisorPath, runID str
 	// Status provides a bounded preview only. Call Result for full output when
 	// the control plane supports it.
 	fullResultRetrieved := false
+	if output, found := s.recoverFinalOutput(supervisorPath, runID); found {
+		status["final_output"] = output
+		status["final_output_truncated"] = false
+		fullResultRetrieved = true
+	}
+	historical, _ := status["_historical_turn"].(bool)
 	if results, ok := cl.(interface {
 		Result(string) (map[string]any, error)
-	}); ok {
+	}); ok && !historical && !fullResultRetrieved {
 		runtimeID, _ := status["runtime_id"].(string)
 		if result, err := results.Result(runtimeID); err == nil {
-			if output, ok := result["final_output"].(string); ok {
+			// A runtime can be resumed between Status and Result. Only accept
+			// its output for a registered turn when Result identifies that turn.
+			info := s.registry.Lookup(supervisorPath, stringField(status, "run_id"))
+			path := stringField(status, "sentinel_file")
+			if info != nil {
+				path = info.SentinelPath
+			}
+			matchesTurn := (info == nil && path == "") || (path != "" && stringField(result, "sentinel_file") == path)
+			if output, ok := result["final_output"].(string); ok && matchesTurn {
 				status["final_output"] = output
 				status["final_output_truncated"] = false
 				fullResultRetrieved = true
@@ -1598,6 +1637,19 @@ func (s *Server) registerResumed(cl ControlClient, supervisorPath string, res me
 		info.Thinking, _ = status["thinking"].(string)
 		info.Dir, _ = status["dir"].(string)
 		info.AutoApprove, _ = status["auto_approve"].(bool)
+	}
+	// A warm resume re-admits the label the original turn was admitted with,
+	// and the label index must transfer to the new turn before the store: the
+	// registry rejects a label already mapped to the historical run, and a
+	// failed registration would leave the admitted turn unresolvable by label.
+	// The transfer is scoped to the same supervisor and runtime, so a label
+	// held by a different run is never stolen.
+	if res.Label != "" && res.RuntimeID != "" {
+		if holder := s.registry.LabelHolder(res.Label); holder != nil &&
+			holder.SupervisorID == supervisorPath && holder.RuntimeID == res.RuntimeID &&
+			holder.RunID != res.RunID {
+			s.registry.UnlinkLabel(supervisorPath, res.Label)
+		}
 	}
 	return s.registry.Store(info)
 }

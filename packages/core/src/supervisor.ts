@@ -564,10 +564,11 @@ export class Supervisor {
   /** Match a stored run by its broker runtime ID. */
   getRunByRuntimeId(runtimeId: string): RunInfo | undefined {
     if (!runtimeId) return undefined
+    let match: RunInfo | undefined
     for (const runInfo of this.runs.values()) {
-      if (runInfo.runtimeId === runtimeId) return runInfo
+      if (runInfo.runtimeId === runtimeId) match = runInfo
     }
-    return undefined
+    return match
   }
 
   /**

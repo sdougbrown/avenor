@@ -42,6 +42,7 @@ export interface MessageClient {
     generation: string
     body: string
     no_reply?: boolean
+    expected_sentinel_file?: string
   }): Promise<MessageSendResult>
   messageWait(params: {
     message_id: string
@@ -66,7 +67,7 @@ export interface MessageClient {
     on_event?: string
   }): Promise<ResumeResult>
   sessionRename(sessionId: string, name: string): Promise<SessionRenameResult>
-  sessionLast(runtimeId: string): Promise<SessionLastResult>
+  sessionLast(runtimeId: string, expectedSentinelFile?: string): Promise<SessionLastResult>
   sessionLastSet(
     runtimeId: string,
     finalOutput: string,
@@ -355,10 +356,28 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     }
   }
 
-  function publicRunIdFor(runId: string): string | undefined {
+  async function publicRunIdFor(runId: string): Promise<string | undefined> {
     const local = Supervisor.getInstance(supervisorId)?.getRunByRuntimeId(runId)
     if (local?.runId) return local.runId
-    return listExternalRuns(supervisorId).find(info => info.runtimeId === runId)?.runId
+    const matches = listExternalRuns(supervisorId).filter(info => info.runtimeId === runId)
+    if (matches.length <= 1) return matches[0]?.runId
+    const status = await client.status(runId)
+    const match = matches.find(info => info.sentinelPath === status.sentinel_file)
+    if (!match) throw new Error(`turn identity unavailable for ${runId}`)
+    return match.runId
+  }
+
+  function publicRunInfo(publicRunId?: string): RunInfo | undefined {
+    if (!publicRunId) return undefined
+    const instance = Supervisor.getInstance(supervisorId)
+    return instance ? instance.getRunById(publicRunId) : findExternalRunById(supervisorId, publicRunId)
+  }
+
+  function expectedSentinel(publicRunId?: string): string | undefined {
+    if (!publicRunId) return undefined
+    const info = publicRunInfo(publicRunId)
+    if (!info?.sentinelPath) throw new Error(`turn identity unavailable for ${publicRunId}`)
+    return info.sentinelPath
   }
 
   function unique(info: RunInfo): Resolution {
@@ -419,7 +438,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       if (exact) {
         return {
           runId: exact.run_id,
-          publicRunId: publicRunIdFor(exact.run_id),
+          publicRunId: await publicRunIdFor(exact.run_id),
           label: firstNonEmpty(exact.label, exact.run_id),
           match: 'unique',
         }
@@ -428,7 +447,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       if (candidates.length === 1) {
         return {
           runId: candidates[0],
-          publicRunId: publicRunIdFor(candidates[0]),
+          publicRunId: await publicRunIdFor(candidates[0]),
           label: ref,
           match: 'unique',
         }
@@ -437,7 +456,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       return { runId: '', match: 'none' }
     },
 
-    async state(runId: string): Promise<RunFacts> {
+    async state(runId: string, publicRunId?: string): Promise<RunFacts> {
       if (runId === SUPERVISOR_RUN_ID) {
         const { peers, detail } = await listedPeers()
         if (detail) {
@@ -478,6 +497,11 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         if (listed) return listed
         throw error
       }
+      const info = publicRunInfo(publicRunId)
+      if (info && typeof status.sentinel_file === 'string' && status.sentinel_file !== info.sentinelPath) {
+        const completed = await sentinelResumable(info.sentinelPath)
+        return { live: false, resumable: false, status: completed ? 'done' : 'unknown' }
+      }
       const translation = translateRunFacts(
         typeof status.status === 'string' ? status.status : '',
         typeof status.phase === 'string' ? status.phase : '',
@@ -489,7 +513,8 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       return { live: translation.live, resumable, status: translation.status }
     },
 
-    async tell(targetRunId: string, message: string): Promise<ProviderResult> {
+    async tell(targetRunId: string, message: string, publicRunId?: string): Promise<ProviderResult> {
+      const expected = expectedSentinel(publicRunId)
       const messageId = newMsgID()
       const body = JSON.stringify({
         from: SUPERVISOR_RUN_ID,
@@ -506,6 +531,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           generation,
           body,
           no_reply: true,
+          ...(expected ? { expected_sentinel_file: expected } : {}),
         })
       } catch (error) {
         const outcome = controlOutcome(error)
@@ -523,7 +549,9 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       message: string,
       timeoutMs?: number,
       signal?: AbortSignal,
+      publicRunId?: string,
     ): Promise<ProviderResult> {
+      const expected = expectedSentinel(publicRunId)
       const messageId = newMsgID()
       const body = JSON.stringify({
         id: messageId,
@@ -541,6 +569,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           message_id: messageId,
           generation,
           body,
+          ...(expected ? { expected_sentinel_file: expected } : {}),
         })
       } catch (error) {
         const outcome = controlOutcome(error)
@@ -669,10 +698,17 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       }
     },
 
-    async last(runId: string): Promise<ProviderResult> {
+    async last(runId: string, publicRunId?: string): Promise<ProviderResult> {
+      const expected = expectedSentinel(publicRunId)
+      if (expected) {
+        const status = await client.status(runId)
+        if (typeof status.sentinel_file === 'string' && status.sentinel_file !== expected) {
+          return { outcome: 'sent', hasRecord: false }
+        }
+      }
       let last: SessionLastResult
       try {
-        last = await client.sessionLast(runId)
+        last = await client.sessionLast(runId, expected)
       } catch (error) {
         throw authorityError(error)
       }

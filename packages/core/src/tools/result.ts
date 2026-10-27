@@ -1,6 +1,7 @@
-import { Supervisor } from '../supervisor.js'
+import * as fs from 'node:fs'
+import * as readline from 'node:readline'
+import { normalizeRunEvent } from '../run-events.js'
 import { inspectTool } from './inspect.js'
-import { getSupervisorClient } from './get-supervisor-client.js'
 import { statusTool, type StatusResult } from './status.js'
 import { validateTimeout } from './validate.js'
 
@@ -26,11 +27,7 @@ export interface ResultResult {
 
 interface ResultToolDeps {
   status: typeof statusTool
-  // Only the final-output fallbacks the inspector can supply are read here.
-  inspect: (
-    args: Parameters<typeof inspectTool>[0],
-  ) => Promise<{ final_output?: string; snapshot: { final_output?: string; assistant_text?: string } }>
-  fullOutput?(runtimeId: string | undefined, supervisorId?: string): Promise<string | undefined>
+  inspect: typeof inspectTool
   sleep(ms: number, signal?: AbortSignal): Promise<void>
   now(): number
   pollIntervalMs: number
@@ -58,26 +55,32 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-async function fullOutput(runtimeId: string | undefined, supervisorId?: string): Promise<string | undefined> {
-  if (supervisorId) {
-    const { client, isSingleton } = await getSupervisorClient(supervisorId)
-    try {
-      const result = await client.result(runtimeId)
-      return typeof result.final_output === 'string' ? result.final_output : undefined
-    } finally {
-      if (!isSingleton) client.close()
+async function outputFromEvents(filePath: string): Promise<string | undefined> {
+  const stream = fs.createReadStream(filePath, { encoding: 'utf-8' })
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity })
+  let output: string | undefined
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue
+      try {
+        const event = normalizeRunEvent(JSON.parse(line))
+        if (event?.event === 'session.end' && event.final_output !== undefined) {
+          output = event.final_output
+        }
+      } catch {
+        // Ignore incomplete or malformed events.
+      }
     }
+  } finally {
+    lines.close()
+    stream.close()
   }
-
-  const client = (await Supervisor.get()).getClient()
-  const result = await client.result(runtimeId)
-  return typeof result.final_output === 'string' ? result.final_output : undefined
+  return output
 }
 
 const defaultDeps: ResultToolDeps = {
   status: statusTool,
   inspect: inspectTool,
-  fullOutput,
   sleep,
   now: Date.now,
   pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
@@ -127,12 +130,11 @@ async function executeResultTool(args: ResultToolArgs, deps: ResultToolDeps): Pr
     if (!status) throw new Error(`run not found: ${args.runId}`)
 
     if (TERMINAL_STATUSES.has(status.status)) {
-      // Status only carries a bounded preview. The explicit result path asks
-      // control for the durable, complete terminal answer instead of replaying
-      // message chunks or widening inspector payloads.
+      // The runtime can already belong to another turn. Only the per-run
+      // event log identifies this turn's complete terminal answer.
       let exactOutputRetrieved = false
       try {
-        const output = await deps.fullOutput?.(status.runtime_id, args.supervisorId)
+        let output = status.event_path ? await outputFromEvents(status.event_path).catch(() => undefined) : undefined
         if (output !== undefined) {
           status.final_output = output
           status.final_output_truncated = false
@@ -142,7 +144,7 @@ async function executeResultTool(args: ResultToolArgs, deps: ResultToolDeps): Pr
         // Older supervisors may not implement result yet. Any presentation
         // fallback below is explicitly marked as possibly truncated.
       }
-      if (status.final_output === undefined) {
+      if (status.final_output === undefined && status.runtime_output_available !== false) {
         try {
           const inspected = await deps.inspect({
             runId: args.runId,
