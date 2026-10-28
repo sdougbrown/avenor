@@ -65,8 +65,9 @@ export function parseControlMessage(msg: Record<string, unknown>): InboundAsk | 
   }
   const p = payload as Record<string, unknown> | undefined
   if (!p || typeof p.message !== 'string' || !p.message) return null
+  // A message id is what an answer correlates against, so only an ask needs one:
+  // the broker refuses an expects_reply send without it. A tell opens no edge.
   const messageId = String(p.id ?? '')
-  if (!messageId) return null
   // The sender is the broker's stamp on the queued row, which the sender cannot
   // write. The payload's copy is only a fallback for a row queued without one:
   // reading it first would let any peer announce itself as another run, which

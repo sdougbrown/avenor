@@ -54,6 +54,17 @@ describe('parseControlMessage', () => {
     expect(ask).toEqual({ from_run_id: 'peer-real', message_id: 'ask-3', message: 'hello' })
   })
 
+  it('keeps a tell that carries no message id', () => {
+    // A tell opens no edge, so there is nothing for an id to correlate; the
+    // broker only refuses an ask that lacks one.
+    const tell = parseControlMessage({
+      type: 'agent_message', from_run_id: 'peer-1',
+      payload: { from_run_id: 'peer-1', message: 'fyi' },
+    })
+    expect(tell).toEqual({ from_run_id: 'peer-1', message_id: '', message: 'fyi' })
+    expect(formatInboundAskBody(tell!, { heading: 'Message from peer', reply: false })).not.toContain('reply')
+  })
+
   it('rejects non agent_message or malformed payloads', () => {
     expect(parseControlMessage({ type: 'done', payload: {} })).toBeNull()
     expect(parseControlMessage({ type: 'agent_message', payload: 'not-json' })).toBeNull()
