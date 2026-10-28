@@ -2173,6 +2173,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             ? SUPERVISOR_RUN_ID
             : undefined
 
+        const spawningSessionGeneration = sessionGeneration
         const result = await deps.spawnTool({
           ...(params.agent !== undefined ? { agent: params.agent } : {}),
           ...(params.prompt !== undefined ? { prompt: params.prompt } : {}),
@@ -2191,6 +2192,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           ...(parentRunId !== undefined ? { parent_run_id: parentRunId } : {}),
         })
 
+        if (spawningSessionGeneration !== sessionGeneration) {
+          return {
+            content: [{ type: 'text', text: `Monitoring of "${label}" (run_id: ${result.run_id}) was interrupted. Use avenor_status or avenor_inspect to check.` }],
+            details: { run_id: result.run_id, ...spawnIdentityMetadata(hostParams) },
+          }
+        }
         const supervisorId = statusSupervisorId(params.supervisor_id, result.supervisor_id)
         const runRef: WatchRunRef = {
           runId: result.run_id,

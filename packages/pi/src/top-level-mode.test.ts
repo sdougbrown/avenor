@@ -132,7 +132,7 @@ test('configured central polling waits for an existing local supervisor before r
     h = await startExtensionHarness({
       deps: {
         messageTool,
-        Supervisor: class { static currentInstance() { return exists ? { supervisorId: 'local' } : undefined } } as never,
+        Supervisor: class { static currentInstance() { return exists ? { supervisorId: 'local', getClient: () => ({}) } : undefined } } as never,
         brokerReceiveTool: async () => { receives++; return { asks: [] } },
       },
       extOptions: { topLevelBrokerUrl: 'https://broker.test' },
@@ -192,7 +192,7 @@ test('completed top-level turns are readable through central self and preserve t
     h = await startExtensionHarness({
       deps: {
         messageTool,
-        Supervisor: class { static currentInstance() { return exists ? { supervisorId: 'local' } : undefined } } as never,
+        Supervisor: class { static currentInstance() { return exists ? { supervisorId: 'local', getClient: () => ({}) } : undefined } } as never,
         hostProviderFor: async () => makeMessageProvider({ recordLastTurn: async (...args) => { localRecords.push(args) } }),
       },
       extOptions: { topLevelBrokerUrl: 'https://broker.test' },
