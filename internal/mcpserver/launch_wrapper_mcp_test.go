@@ -40,13 +40,20 @@ func (f *stringMethodNotFoundClient) Spawn(params map[string]any) (map[string]an
 	return nil, errors.New("ordinary spawn must not be reached")
 }
 
+// TestAvenorSpawnFailClosedOnUnsupportedVerb pins that a supervisor without
+// the gated spawn_mcp verb gets no fallback to the ungated one, wrapper or not:
+// the plain verb cannot gate either the launch fields or the wrapper.
 func TestAvenorSpawnFailClosedOnUnsupportedVerb(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		cl   ControlClient
+		name          string
+		cl            ControlClient
+		launchWrapper []string
+		want          string
 	}{
-		{"rpc error code", &failingSpawnMCPClient{}},
-		{"string error", &stringMethodNotFoundClient{}},
+		{"rpc error code, wrapped", &failingSpawnMCPClient{}, []string{"nice", "-n", "5"}, "launch_wrapper: disabled for MCP on this supervisor"},
+		{"string error, wrapped", &stringMethodNotFoundClient{}, []string{"nice", "-n", "5"}, "launch_wrapper: disabled for MCP on this supervisor"},
+		{"rpc error code, unwrapped", &failingSpawnMCPClient{}, nil, "spawn: this supervisor predates the MCP-gated spawn_mcp verb"},
+		{"string error, unwrapped", &stringMethodNotFoundClient{}, nil, "spawn: this supervisor predates the MCP-gated spawn_mcp verb"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: tc.cl})
@@ -55,13 +62,13 @@ func TestAvenorSpawnFailClosedOnUnsupportedVerb(t *testing.T) {
 			}
 			_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
 				RepoDir:       "/tmp/test-repo",
-				LaunchWrapper: []string{"nice", "-n", "5"},
+				LaunchWrapper: tc.launchWrapper,
 			})
 			if err == nil {
-				t.Fatal("spawn error = nil, want disabled error")
+				t.Fatal("spawn error = nil, want a disabled error")
 			}
-			if err.Error() != "launch_wrapper: disabled for MCP on this supervisor" {
-				t.Fatalf("spawn error = %q, want exact disabled error", err)
+			if err.Error() != tc.want {
+				t.Fatalf("spawn error = %q, want %q", err, tc.want)
 			}
 			switch cl := tc.cl.(type) {
 			case *failingSpawnMCPClient:
@@ -78,11 +85,12 @@ func TestAvenorSpawnFailClosedOnUnsupportedVerb(t *testing.T) {
 }
 
 // routingSpyClient records which spawn verb the server routes a request
-// through, succeeding on both paths.
+// through and the params it forwarded, succeeding on both paths.
 type routingSpyClient struct {
 	fakeClient
 	spawnCalls    int
 	spawnMCPCalls int
+	spawnMCPArgs  []map[string]any
 }
 
 func (f *routingSpyClient) Spawn(params map[string]any) (map[string]any, error) {
@@ -92,22 +100,23 @@ func (f *routingSpyClient) Spawn(params map[string]any) (map[string]any, error) 
 
 func (f *routingSpyClient) SpawnMCP(params map[string]any) (map[string]any, error) {
 	f.spawnMCPCalls++
+	f.spawnMCPArgs = append(f.spawnMCPArgs, params)
 	return map[string]any{"runtime_id": "rt_route", "session_id": "ses_route"}, nil
 }
 
-// TestAvenorSpawnRoutesByLaunchWrapper pins the spawn verb routing: an
-// unwrapped request goes through the plain spawn verb (which pre-spawn_mcp
-// supervisors have), while a wrapped request goes through the gated spawn_mcp
-// verb.
-func TestAvenorSpawnRoutesByLaunchWrapper(t *testing.T) {
+// TestAvenorSpawnAlwaysUsesGatedVerb pins the spawn verb routing: every MCP
+// spawn goes through the gated spawn_mcp verb, wrapper or not. A request that
+// took the plain spawn verb would skip the launch-field gate as well as the
+// wrapper allowlist, so an unwrapped request carrying a caller-written roster
+// must arrive at the gated verb with its selectors intact.
+func TestAvenorSpawnAlwaysUsesGatedVerb(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		launchWrapper []string
-		wantSpawn     int
-		wantSpawnMCP  int
+		name string
+		args spawnArgs
 	}{
-		{"unwrapped routes to spawn", nil, 1, 0},
-		{"wrapped routes to spawn_mcp", []string{"nice", "-n", "5"}, 0, 1},
+		{"unwrapped", spawnArgs{RepoDir: "/tmp/test-repo"}},
+		{"roster selectors", spawnArgs{RepoDir: "/tmp/test-repo", RosterFile: "/tmp/caller-written-roster.json", RosterEntry: "tool"}},
+		{"wrapped", spawnArgs{RepoDir: "/tmp/test-repo", LaunchWrapper: []string{"nice", "-n", "5"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cl := &routingSpyClient{}
@@ -115,16 +124,19 @@ func TestAvenorSpawnRoutesByLaunchWrapper(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-				RepoDir:       "/tmp/test-repo",
-				LaunchWrapper: tc.launchWrapper,
-			})
+			_, _, err = s.handleAvenorSpawn(context.Background(), nil, tc.args)
 			if err != nil {
 				t.Fatalf("spawn error = %v, want nil", err)
 			}
-			if cl.spawnCalls != tc.wantSpawn || cl.spawnMCPCalls != tc.wantSpawnMCP {
-				t.Fatalf("routing: Spawn calls = %d (want %d), SpawnMCP calls = %d (want %d)",
-					cl.spawnCalls, tc.wantSpawn, cl.spawnMCPCalls, tc.wantSpawnMCP)
+			if cl.spawnCalls != 0 || cl.spawnMCPCalls != 1 {
+				t.Fatalf("routing: Spawn calls = %d (want 0), SpawnMCP calls = %d (want 1)",
+					cl.spawnCalls, cl.spawnMCPCalls)
+			}
+			if tc.args.RosterFile != "" {
+				params := cl.spawnMCPArgs[0]
+				if params["roster_file"] != tc.args.RosterFile || params["roster_entry"] != tc.args.RosterEntry {
+					t.Fatalf("forwarded params = %v, want the caller's roster_file and roster_entry carried verbatim", params)
+				}
 			}
 		})
 	}
