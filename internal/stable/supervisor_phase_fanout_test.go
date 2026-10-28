@@ -17,7 +17,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
-	"github.com/sdougbrown/avenor/internal/runtime/claudechannel"
 )
 
 // syncBuffer is a mutex-guarded bytes.Buffer: concurrent fanout writes report
@@ -177,21 +176,24 @@ func TestUnknownPhaseDiagnosticCacheSaturatesAtCap(t *testing.T) {
 	assertNoLifecycleErrorLine(t, stderr.String())
 }
 
-// The fanout stores a claudechannel broker phase verbatim because the mapping
-// emits only known phases: a recognized phase never logs and never normalizes
-// to unknown.
-func TestClaudechannelReportPhaseReachesStoredPhase(t *testing.T) {
+// A recognized phase report reaches the stored phase verbatim: it never logs
+// and never normalizes to unknown.
+func TestReportPhaseReachesStoredPhase(t *testing.T) {
 	var stderr bytes.Buffer
 	sup := newTestSupervisor(t, Config{
-		ControlSocket:   newStableSocketPath(t, "claudechannel-phase"),
+		ControlSocket:   newStableSocketPath(t, "report-phase"),
 		MaxRuntimes:     1,
 		ShutdownTimeout: 0,
 		Stderr:          &stderr,
 	})
 	child, writer := newUnknownPhaseTestChild(t, sup)
 
-	ev := claudechannel.BrokerEvent("ses_unknown_phase", "blocked", nil)
-	if err := writer.Write(ev); err != nil {
+	report := events.Event{
+		Event:     "agent.status",
+		SessionID: "ses_unknown_phase",
+		Fields:    map[string]any{"phase": string(runstate.PhaseWaiting), "state": "blocked"},
+	}
+	if err := writer.Write(report); err != nil {
 		t.Fatalf("Write blocked report event: %v", err)
 	}
 	if got := storedChildPhase(t, child); got != runstate.PhaseWaiting {
@@ -201,22 +203,9 @@ func TestClaudechannelReportPhaseReachesStoredPhase(t *testing.T) {
 		t.Fatalf("recognized phase logged as unrecognized: %d unrecognized-phase log lines, want 0", got)
 	}
 
-	// An arbitrary report state normalizes to working before the fanout, so it
-	// never lands in the unknown-phase diagnostic cache.
-	ev = claudechannel.BrokerEvent("ses_unknown_phase", "custom_state", nil)
-	if err := writer.Write(ev); err != nil {
-		t.Fatalf("Write custom report event: %v", err)
-	}
-	if got := storedChildPhase(t, child); got != runstate.PhaseWorking {
-		t.Fatalf("stored phase after custom report = %q, want working", got)
-	}
-	if got := strings.Count(stderr.String(), "reported unrecognized phase"); got != 0 {
-		t.Fatalf("normalized phase logged as unrecognized: %d unrecognized-phase log lines, want 0", got)
-	}
-
 	finishSyntheticChildLifecycle(sup, child)
 	if !child.lc.isCompleted() {
-		t.Fatal("runtime did not complete after claudechannel phases")
+		t.Fatal("runtime did not complete after a report phase")
 	}
 	assertNoLifecycleErrorLine(t, stderr.String())
 }

@@ -143,7 +143,7 @@ Example:
 
 ### claude backend events
 
-The `claude` backend emits a subset of the `claude-channel` event surface. It has no broker or sidecar, so it produces no channel-side events.
+The `claude` backend has no broker or sidecar, so it produces no channel-side events.
 
 Events emitted:
 - `session.start` — carries `backend="claude"`, `dir`, and `dangerously_load=false` (the flag is never set).
@@ -160,31 +160,15 @@ On the PTY launcher Claude Code reports its own state with OSC 7501 (Program Sta
 
 A report that Claude is blocked on a permission emits no `agent.status`; Avenor brokers the dialog as a `permission.request` as soon as it is on screen. Reports from subagents never affect the turn. `session.end` stays transcript-driven: an `end_turn` record ends the turn, except that while Claude still reports the turn working (a background subagent ends an inner turn first) Avenor holds it until Claude reports `done`, `idle`, `clear` or `error`, the terminal resets, or reports are lost, and once reports are flowing it ends the turn only after about 0.75s passes without a later `end_turn`, so the final reply is emitted first. Claude reporting `done` without a transcript `end_turn` never ends the session.
 
-The tmux launcher and the `claude-channel` backend do not answer the query and keep the pane-scrape behaviour above. `AVENOR_CLAUDE_OSC7501=off` (or `0`, `false`) turns the reply off for the `claude` backend.
+The tmux launcher does not answer the query and keeps the pane-scrape behaviour above. `AVENOR_CLAUDE_OSC7501=off` (or `0`, `false`) turns the reply off for the `claude` backend.
 
-Events **not** emitted by `claude` (channel-only): `agent.channel_ready`, `agent.prompt_queued`, `agent.report`, `agent.reply`, `agent.finish`.
+The broker-channel events Avenor used to synthesize — `agent.channel_ready`, `agent.prompt_queued`, `agent.report`, `agent.reply`, `agent.finish` — are retired with the `claude-channel` backend and no shipped backend emits them. The session tracker still decodes them, so an external publisher that sends one is not ignored.
 
 The `source` field on `agent.status` is limited to `"transcript"`, `"pty"`, and `"tmux"` — never `"channel"` or `"sidecar"`. `signal` and `reason` appear only on report-derived events.
 
 For the `claude` backend, `session.end` is the authoritative lifecycle signal. There is no `agent.finish` event; use `session.end` to detect completion.
 
 ---
-
-### Claude channel events
-
-The `claude-channel` backend emits a few extra synthesized events so non-Claude controllers can follow the broker-side lifecycle without scraping tmux output. These events are emitted by Avenor, not Claude Code itself.
-
-**`agent.channel_ready`** — The Claude sidecar has registered with the in-process broker and the channel is available. Fields: `run_id`, `server_name`, `source` (`"channel"`).
-
-**`agent.prompt_queued`** — A prompt was queued onto the broker control channel for Claude to consume. Fields: `control_id`, `message_type` (currently `"continue"`), `delivery` (`"channel"`), `prompt_length`.
-
-**`agent.prompt_submitted`** — A prompt was injected directly into Claude's terminal session and submitted with Enter. Fields: `delivery` (`"tmux"` or `"pty"` depending on which backend the session is running on), `prompt_length`, and on the first prompt of a `--claude-mcp-wait` run `startup_wait_ms`.
-
-**`agent.report`** — The Claude sidecar called `avenor_report`. Fields: `state`, `payload`, `source` (`"channel"`). Avenor may also emit a second derived event such as `agent.message_chunk` or `agent.status` from the same report payload for compatibility with existing consumers.
-
-**`agent.reply`** — The Claude sidecar delivered a control reply through `avenor_message` with `action="control_reply"`. Fields: `to`, `payload`, `source` (`"channel"`).
-
-**`agent.finish`** — The Claude sidecar called `avenor_finish`. Fields: `status`, `summary`, `files_changed`, optional `payload`, `source` (`"channel"`). Avenor then emits the terminal `session.end` event derived from that finish record.
 
 ### Retry and error events
 
@@ -228,7 +212,7 @@ Every event in this section is written to the durable `--on-event` NDJSON except
 
 **`agent.status`** — Synthesized by Avenor to signal agent phase transitions. Emitted before the protocol event that triggered it.
 
-Fields: `phase` (one of `thinking`, `working`, `waiting`, `done`), `source` (`"avenor"` for synthesized transitions, `"agent"` for explicit markers in output text; for `claude-channel`, also `"transcript"` when derived from JSONL records, or the terminal kind `"tmux"`/`"pty"` for pane-scrape-derived `waiting`/permission states), optional `label` (human-readable activity description), optional `signal` (`"osc7501"` when the program's own status report produced the event; `claude` backend only), optional `reason` (why a `waiting` phase is waiting: `question`, `auth`, or `idle`), `ts` (Unix milliseconds).
+Fields: `phase` (one of `thinking`, `working`, `waiting`, `done`), `source` (`"avenor"` for synthesized transitions, `"agent"` for explicit markers in output text, `"transcript"` when the `claude` backend derives it from JSONL records, or the terminal kind `"tmux"`/`"pty"` for pane-scrape-derived `waiting`/permission states), optional `label` (human-readable activity description), optional `signal` (`"osc7501"` when the program's own status report produced the event; `claude` backend only), optional `reason` (why a `waiting` phase is waiting: `question`, `auth`, or `idle`), `ts` (Unix milliseconds).
 
 Also includes `run_id` and `run_label` when present.
 
@@ -317,7 +301,7 @@ reclassified. The classifier covers the shapes each backend forwards:
 | `codex-app-server` | The `turn/completed` failure message |
 | ACP backends | The prompt error text |
 | `opencode-http` | The provider error name, reported as the stop reason |
-| `claude-channel` | None: the finish record's `summary` is model-authored prose, so it never classifies a run |
+| `claude` | None: the finish record's `summary` is model-authored prose, so it never classifies a run |
 
 The provider's retry-after hint is parsed from the same text (`try again in
 20s`, `retry-after: 30`, `resets in 2 hours`) and reported as `retry_after`
@@ -348,8 +332,7 @@ which arrived first. Where the provider's message lands depends on the path:
   The cause is on the `avenor.error` event whose `source` is `"prompt"`.
 
 Only provider-owned fields classify a run. A model-authored value — notably a
-claude-channel finish `summary` — cannot choose the stop reason or the
-retry-after hint.
+finish `summary` — cannot choose the stop reason or the retry-after hint.
 
 ## Launch identity
 
@@ -457,8 +440,6 @@ for _, ev := range stream {
     }
 }
 ```
-
-For `claude-channel`, prefer broker-derived events over tmux-derived status when both exist. In practice that means `agent.channel_ready`, `agent.prompt_queued`, `agent.prompt_submitted`, `agent.report`, `agent.reply`, `agent.finish`, and `session.end` are the authoritative lifecycle events for orchestrators. `agent.status` remains useful as secondary telemetry, but it should not be the only signal driving control flow.
 
 For `claude`, `session.end` is the only terminal lifecycle event. There is no `agent.finish`. Use `session.end` to detect completion and `agent.status phase=working source=transcript` to track progress.
 

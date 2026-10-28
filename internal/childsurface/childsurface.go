@@ -12,8 +12,8 @@ import (
 
 // Provider is a surface's router provider plus the generation binding every
 // child provider performs before the router is built. It is an interface so a
-// surface that adds capabilities to the shared child provider — the
-// claude-channel sidecar adds ControlReply — keeps them for the router.
+// surface that adds capabilities to the shared child provider keeps them for
+// the router.
 type Provider interface {
 	router.Provider
 	Prepare(ctx context.Context) error

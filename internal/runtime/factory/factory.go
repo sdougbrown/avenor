@@ -8,8 +8,7 @@
 //   - cursor-acp: spawns agent acp subprocess, owns lifecycle.
 //   - pi: spawns pi --mode rpc subprocess, owns lifecycle.
 //   - pony: test/stub backend.
-//   - claude: channel-less Claude Code backend; PTY by default, AVENOR_CLAUDE_TERMINAL=tmux for tmux.
-//   - claude-channel: broker-channel Claude Code backend; requires tmux; uses --dangerously-load-development-channels.
+//   - claude: Claude Code backend; PTY by default, AVENOR_CLAUDE_TERMINAL=tmux for tmux.
 package factory
 
 import (
@@ -18,7 +17,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/agy"
 	"github.com/sdougbrown/avenor/internal/runtime/claude"
-	"github.com/sdougbrown/avenor/internal/runtime/claudechannel"
 	"github.com/sdougbrown/avenor/internal/runtime/codexappserver"
 	"github.com/sdougbrown/avenor/internal/runtime/cursoracp"
 	"github.com/sdougbrown/avenor/internal/runtime/geminiacp"
@@ -58,8 +56,6 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 		return pony.NewWithOptions(startOpts), nil
 	case "claude":
 		return claude.NewWithOptions(startOpts), nil
-	case "claude-channel":
-		return claudechannel.NewWithOptions(startOpts), nil
 	default:
 		return nil, fmt.Errorf("unknown backend %q", backend)
 	}

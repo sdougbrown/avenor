@@ -64,12 +64,12 @@
             "when": {
               "op": "and",
               "exprs": [
-                { "op": "condIn", "condition": "backend", "values": ["claude", "claude-channel"] },
+                { "op": "condIn", "condition": "backend", "values": ["claude"] },
                 { "op": "condEq", "condition": "resume", "value": false },
                 { "op": "in", "field": "thinking", "values": ["low", "medium", "high", "xhigh", "max"] }
               ]
             },
-            "reason": "claude and claude-channel support low through max only on a new session"
+            "reason": "claude supports low through max only on a new session"
           }
         ]
       }

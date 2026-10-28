@@ -66,18 +66,16 @@ func TestEvaluate(t *testing.T) {
 		}
 	}
 
-	// Claude family: low..max at start; unsupported capability / values
+	// Claude: low..max at start; unsupported capability / values
 	// distinguished, and resume is start-only.
-	for _, backend := range []string{"claude", "claude-channel"} {
-		if got := Evaluate(backend, "off", false); got != UnsupportedValue {
-			t.Errorf("%s off = %v, want UnsupportedValue", backend, got)
-		}
-		if got := Evaluate(backend, "low", false); got != OK {
-			t.Errorf("%s low = %v, want OK", backend, got)
-		}
-		if got := Evaluate(backend, "low", true); got != StartOnly {
-			t.Errorf("%s resume low = %v, want StartOnly", backend, got)
-		}
+	if got := Evaluate("claude", "off", false); got != UnsupportedValue {
+		t.Errorf("claude off = %v, want UnsupportedValue", got)
+	}
+	if got := Evaluate("claude", "low", false); got != OK {
+		t.Errorf("claude low = %v, want OK", got)
+	}
+	if got := Evaluate("claude", "low", true); got != StartOnly {
+		t.Errorf("claude resume low = %v, want StartOnly", got)
 	}
 }
 

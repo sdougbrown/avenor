@@ -30,14 +30,9 @@ func checkEffortCapability(ctx context.Context, backend, effort string, helpOutp
 	return nil
 }
 
-// BuildArgs returns the Claude CLI arguments for a normal or channel-backed
-// session. A non-empty serverName enables the Claude Channel startup flag.
-func BuildArgs(sessionID, serverName string, opts runtime.StartOptions) []string {
-	var args []string
-	if serverName != "" {
-		args = append(args, "--dangerously-load-development-channels", "server:"+serverName)
-	}
-	args = append(args, "--session-id", sessionID)
+// BuildArgs returns the Claude CLI arguments for a Claude Code session.
+func BuildArgs(sessionID string, opts runtime.StartOptions) []string {
+	args := []string{"--session-id", sessionID}
 	if opts.Agent != "" {
 		args = append(args, "--agent", opts.Agent)
 	}

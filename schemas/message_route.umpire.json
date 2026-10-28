@@ -23,7 +23,7 @@
     },
     "controlReplySupported": {
       "type": "boolean",
-      "description": "The surface can deliver a claude-channel control reply (the sidecar only)."
+      "description": "Retained in the contract; no surface can deliver a control reply now that the claude-channel sidecar is retired."
     }
   },
   "fields": {
@@ -76,7 +76,7 @@
           }
         ]
       },
-      "reason": "action \"control_reply\" is only available on the claude-channel backend"
+      "reason": "action \"control_reply\" is retained in the contract but no surface can deliver one"
     },
     {
       "type": "fairWhen",

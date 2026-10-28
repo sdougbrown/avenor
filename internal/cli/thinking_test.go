@@ -102,16 +102,14 @@ func TestStartSessionThinkingResumeDispatch(t *testing.T) {
 }
 
 func TestStartSessionRejectsExplicitResumeWithoutNativePath(t *testing.T) {
-	for _, backend := range []string{"claude", "claude-channel"} {
-		for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
-			p := &plainThinkingProvider{}
-			_, err := StartSession(context.Background(), p, backend, runtime.StartOptions{Thinking: level}, "session")
-			if err == nil || !strings.Contains(err.Error(), backend) || !strings.Contains(err.Error(), "only when starting a session") || !strings.Contains(err.Error(), `value "`+level+`"`) {
-				t.Fatalf("%s/%s error = %v", backend, level, err)
-			}
-			if p.resumeCalls != 0 || p.startCalls != 0 {
-				t.Fatalf("%s/%s started a replacement process", backend, level)
-			}
+	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
+		p := &plainThinkingProvider{}
+		_, err := StartSession(context.Background(), p, "claude", runtime.StartOptions{Thinking: level}, "session")
+		if err == nil || !strings.Contains(err.Error(), "claude") || !strings.Contains(err.Error(), "only when starting a session") || !strings.Contains(err.Error(), `value "`+level+`"`) {
+			t.Fatalf("%s error = %v", level, err)
+		}
+		if p.resumeCalls != 0 || p.startCalls != 0 {
+			t.Fatalf("%s started a replacement process", level)
 		}
 	}
 }

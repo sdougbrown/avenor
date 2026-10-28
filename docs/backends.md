@@ -15,10 +15,9 @@ avenor --backend gemini-acp --prompt "say hi"
 avenor --backend cursor-acp --prompt "say hi"
 avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
 avenor --backend claude --prompt "say hi"
-avenor --backend claude-channel --prompt "say hi"
 ```
 
-Both `claude` and `claude-channel` require `claude` to be on `PATH`. `claude-channel` additionally requires `tmux` on `PATH` and uses `--dangerously-load-development-channels` to open a broker channel; `claude` requires neither.
+`claude` requires `claude` on `PATH`, and `tmux` on `PATH` only when `AVENOR_CLAUDE_TERMINAL=tmux`.
 
 ## Launch wrapper
 
@@ -92,7 +91,6 @@ A backend that starts a harness process exports Avenor's launch identity in that
 | `codex-app-server` | ✓ app-server subprocess |
 | `agy` | ✓ headless print process, and RPC host when the RPC transport is active |
 | `claude` | ✓ PTY or tmux pane |
-| `claude-channel` | ✓ tmux pane |
 | `opencode-http` | ✗ no child process |
 | `pony` | ✗ in-process |
 
@@ -116,30 +114,30 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | claude-channel | pony |
-|---|---|---|---|---|---|---|---|---|---|---|
-| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ⚠ | ✗ |
-| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ⚠ |
-| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
-| Thinking control | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ⚠ | ✗ |
-| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ |
+| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | pony |
+|---|---|---|---|---|---|---|---|---|---|
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ✗ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠ |
+| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ |
+| Thinking control | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental. `agy` permission relay requires the explicit RPC transport.
 
-Thinking control is native for Codex and Pi. Claude and Claude Channel support five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
+Thinking control is native for Codex and Pi. Claude supports five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
 
-Session resume for `claude` and `claude-channel` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by either backend.
+Session resume for `claude` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by this backend.
 
 ---
 
 ## claude
 
-Channel-less provider for Claude Code. Starts Claude in a terminal session (PTY by default), injects prompts via PTY paste, and reads progress from the JSONL transcript file that Claude writes to `~/.claude/projects/`. No broker, no sidecar, no `.mcp.json` injection, no `--dangerously-load-development-channels`.
+Channel-less provider for Claude Code. Starts Claude in a terminal session (PTY by default), injects prompts via PTY paste, and reads progress from the JSONL transcript file that Claude writes to `~/.claude/projects/`. No broker, no sidecar, no `.mcp.json` injection.
 
 ### Launcher
 
@@ -153,7 +151,7 @@ avenor --backend claude --prompt "say hi"
 AVENOR_CLAUDE_TERMINAL=tmux avenor --backend claude --prompt "say hi"
 ```
 
-`AVENOR_CLAUDE_TERMINAL` is shared with `claude-channel`, but the defaults differ: `claude` defaults to PTY, `claude-channel` defaults to tmux.
+`AVENOR_CLAUDE_TERMINAL` selects the launcher; `claude` defaults to PTY.
 
 ### Status reports (OSC 7501)
 
@@ -166,7 +164,7 @@ On the PTY launcher Avenor answers Claude Code's OSC 7501 (Program Status Protoc
 - **Completion.** The transcript `end_turn` still ends the turn. While Claude reports the turn working, an `end_turn` (from a background subagent) is held until Claude reports `done`, `idle`, `clear` or `error`, the terminal resets, or reports are lost. A later `working` report before any `done` holds it again. A hold lasts at most 10 minutes.
 - **Cancel.** Claude reporting `idle` after the turn started working counts as a completed cancel, alongside the pane going idle.
 
-Reports are untrusted: they never approve anything, and report text is display-only. Set `AVENOR_CLAUDE_OSC7501=off` (or `0`, `false`) to leave the query unanswered; the session then behaves exactly as with scraping alone (`ready_signal=pane`, no `signal=osc7501` events). The tmux launcher and `claude-channel` never answer the query and keep scraping. The MCP startup wait applies to both launchers and to `claude-channel`.
+Reports are untrusted: they never approve anything, and report text is display-only. Set `AVENOR_CLAUDE_OSC7501=off` (or `0`, `false`) to leave the query unanswered; the session then behaves exactly as with scraping alone (`ready_signal=pane`, no `signal=osc7501` events). The tmux launcher never answers the query and keeps scraping. The MCP startup wait applies to both launchers.
 
 ### Requirements
 
@@ -192,67 +190,6 @@ Reports are untrusted: they never approve anything, and report text is display-o
 `Cancel()` sends Esc-Esc and polls the pane for an idle prompt (up to ~3s). If the pane goes idle, or Claude reports `idle` after the turn started working, `session.end stop_reason=cancelled` is emitted and the terminal is killed. If the poll times out, the terminal is killed immediately and `session.end stop_reason=cancelled_forced` is emitted.
 
 ---
-
-## Choosing between `claude` and `claude-channel`
-
-Use `claude` if:
-- Your org policy blocks research-preview channel flags (`--dangerously-load-development-channels`).
-- You don't need broker-mediated permission/control flow.
-- You want PTY as the default launcher (no tmux required).
-
-Use `claude-channel` if:
-- You need structured, broker-mediated permission and control flow via `claude/channel` MCP push events.
-- You want the richer event surface (`agent.channel_ready`, `agent.prompt_queued`, `agent.report`, `agent.finish`) for orchestration.
-
-Both backends share the same terminal session model, pane-scrape idle detection, and JSONL transcript reader. The difference is whether a broker channel is opened between Avenor and the running Claude process. Only `claude` on its PTY launcher also uses Claude's OSC 7501 status reports.
-
----
-
-## claude-channel (experimental)
-
-Starts a full interactive Claude Code session in the background, controlled via
-`claude/channel` MCP push events with tmux PTY lifecycle fallback. This backend requires `tmux`; it will fail at startup if `tmux` is not installed or not on `PATH`.
-
-### How it works
-
-1. Avenor generates a unique run ID (e.g., `47212ef3`) and writes an MCP server entry to the project's `.mcp.json` with a name like `avenor-channel-47212ef3`.
-2. The MCP entry uses the avenor binary itself as the command: `avenor claude-channel --run-id <id> --token <token> --broker-url <url>`.
-3. Avenor spawns Claude Code in a detached tmux session with `--dangerously-load-development-channels server:avenor-channel-47212ef3`.
-4. Claude discovers the MCP server from `.mcp.json`, loads it, and the bidirectional channel opens.
-5. Avenor pushes control messages (continue, cancel, permission decisions) to Claude via `claude/channel` events.
-6. Claude calls the `avenor_report`, `avenor_finish`, `avenor_message` (with `action="control_reply"` for a control reply) and `avenor_peers` tools to communicate back.
-7. If the channel is ignored or not yet active, Avenor falls back to tmux PTY prompt injection.
-8. On session exit, Avenor removes the `avenor-channel-*` entry from `.mcp.json`.
-
-The `.mcp.json` is written to the project directory so Claude Code can discover it. Manual cleanup is available via `avenor claude-channel-cleanup --dir <project-dir>` if a session crashes without removing its entry.
-
-### Requirements
-
-- Claude Code v2.1.80 or later installed and on `PATH`.
-- `tmux` installed and on `PATH`.
-- No separate sidecar runtime needed — the avenor binary implements both the orchestrator and the MCP server.
-- Research-preview channels may be blocked by org policy.
-- This backend does **not** use `claude -p`; it launches a real interactive session in tmux.
-
-### Security
-
-- Only load trusted local channel servers.
-- The broker binds to `127.0.0.1` and requires a per-run random bearer token.
-- Do not use `--dangerously-skip-permissions` in environments you do not fully trust.
-
-### Capabilities
-
-| Capability | Supported |
-|---|---|
-| New sessions | ✓ |
-| Session resume | ⚠ (in-memory, while avenor is alive) |
-| Prompt execution | ✓ (via channel push) |
-| Cancel | ✓ (channel cancel → signal → kill) |
-| Event streaming | ✓ |
-| Permission relay | ⚠ (experimental, not yet verified) |
-| Model selection | ✓ (via `--model`) |
-| External server URL | ✗ |
-| Subprocess discovery | ✓ |
 
 ## opencode-acp
 

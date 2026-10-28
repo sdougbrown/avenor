@@ -122,7 +122,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	// all.
 	peer := runtime.ProvisionPeer(merged)
 
-	claudeArgs := claudeutil.BuildArgs(sessionID, "", merged)
+	claudeArgs := claudeutil.BuildArgs(sessionID, merged)
 
 	stderrLog, err := claudecore.CreateStderrLog()
 	if err != nil {

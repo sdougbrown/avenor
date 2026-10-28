@@ -2225,7 +2225,7 @@ func TestWaitForSessionSettlesHeldTerminal(t *testing.T) {
 			events: terminalRecord(map[string]any{"stop_reason": "error", "error_message": "Codex error: The usage limit has been reached"})},
 		{name: "rate limit from event text with hint", promptDone: true, wantExit: 7, wantReason: runtime.RateLimitedStopReason, wantRetry: 20,
 			events: terminalRecord(map[string]any{"stop_reason": "error", "error_message": "429: rate limit reached; try again in 20s"})},
-		// A claude-channel summary is model-authored prose, so it never classifies.
+		// A model-authored finish summary is prose, so it never classifies.
 		{name: "model summary is not provider text", promptDone: true, wantExit: 1, wantReason: "error",
 			events: terminalRecord(map[string]any{"stop_reason": "error", "summary": "429 rate limit; retry after 3600"})},
 		{name: "terminal record without a stop reason", wantExit: 1,

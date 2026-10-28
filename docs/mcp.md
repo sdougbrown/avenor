@@ -361,15 +361,15 @@ One tool for every message between runs, with an explicit `action`. The shared r
 | `reply` | `reply_to`, `message` | Answer an inbound ask this surface received. |
 | `resume` | `target`, `message`, optional `label`, `idempotency_key` | Continue a completed run's session in a new run. |
 | `withdraw` | `message_id` | Retract a pending ask. |
-| `control_reply` | `target`, optional `payload` | Deliver a control reply (claude-channel backend only). |
+| `control_reply` | `target`, optional `payload` | Deliver a control reply (no surface can deliver one; the action answers `unsupported_action`) |
 
 `target` is a run ID, a peer label, or `"self"`. `timeout_ms` is an integer no larger than the shared ask cap (ten minutes). The tool takes no `supervisor_id`: it is bound to the supervisor this server knows the addressed run on.
 
 `resume` is the follow-up: it spawns a new runtime that continues the prior session instead of prompting the old one. The default label is `<prior-label>-followup`, an `auto_approve` policy is inherited, and the result carries `run_id`, `label`, `sentinel_file` and `on_event` for the new run. A keyed `resume` whose key already produced a run replays that run rather than spawning a second one.
 
-`reply` answers an ask that was delivered to this surface. This server receives no inbound asks, so `reply` always answers `edge-absent` with the text "no ask … is pending on this surface; nothing was sent" and sends nothing. A surface that does receive asks — a Pi child — replies for real; the claude-channel sidecar receives control messages instead and answers them with `control_reply`.
+`reply` answers an ask that was delivered to this surface. This server receives no inbound asks, so `reply` always answers `edge-absent` with the text "no ask … is pending on this surface; nothing was sent" and sends nothing. A surface that does receive asks — a Pi child — replies for real.
 
-`control_reply` is the claude-channel backend's reply path and only its provider can deliver one. Every other surface rejects it with code `unsupported_action` and the static reason `action "control_reply" is only available on the claude-channel backend`.
+`control_reply` is retained in the contract for the retired claude-channel backend's reply path, and no surface can deliver one any more. Every surface rejects it with code `unsupported_action` and the static reason `action "control_reply" is retained in the contract but no surface can deliver one`.
 
 Every result is the same snake_case object on every surface: `action`, `outcome` and `text` always, plus `message_id`, `run_id`, `label`, `reply`, `sentinel_file` and `on_event` when the outcome carries them. The text comes from the shared outcome table, not from this server. A router failure is a failed tool call (`isError: true`) whose text is a fixed sentence and whose structured content carries the error `code`.
 
@@ -457,7 +457,7 @@ The `workflow_*` tools drive a [durable workflow](workflow.md) against a supervi
 
 All take an optional `supervisor_id` (supervisor socket path). `workflow_status`, `workflow_inspect`, and `workflow_events` take `workflow_id` (and `after_seq`/`limit` for events). `workflow_wait` takes `workflow_id` and an optional `timeout` (e.g. `30s`, `5m`). `workflow_complete` takes `workflow_id`, `node_id`, `activation_id`, `attempt_id`, `lease_id`, `owner_token`, `outcome`, and optional `outputs`/`artifacts`. `workflow_gate` takes `workflow_id`, `node_id`, `gate_id`, `activation_id`, `operation` (`satisfy`, `reject`, `waive`, or `external_result`), and the operation's fields. `workflow_cancel` takes `workflow_id`, the required `reason`, and `actor` — who is cancelling. The manager rejects a missing actor before it looks at the reason, so this server supplies the caller's value or defaults it to `mcp`; the Pi, OpenCode and `packages/mcp` tools require `actor` explicitly.
 
-`workflow_cancel` is a host-surface tool. The Pi extension (`avenor_workflow_cancel`), the OpenCode plugin, the TypeScript MCP server and this server register it; the Go child tool servers (`channeltools`, the claude-channel sidecar) register no workflow tools at all. A Pi child still sees `avenor_workflow_cancel` registered — the extension publishes the whole host tool set in both modes — but it holds no control connection, so a cancel from a child fails.
+`workflow_cancel` is a host-surface tool. The Pi extension (`avenor_workflow_cancel`), the OpenCode plugin, the TypeScript MCP server and this server register it; the Go child tool servers (`channeltools`) register no workflow tools at all. A Pi child still sees `avenor_workflow_cancel` registered — the extension publishes the whole host tool set in both modes — but it holds no control connection, so a cancel from a child fails.
 
 ### Workflow controllers
 

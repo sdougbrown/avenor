@@ -29,7 +29,6 @@ func TestThinkingBackendPolicy(t *testing.T) {
 		"codex-app-server": {"off": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true},
 		"pi":               {"off": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true},
 		"claude":           {"low": true, "medium": true, "high": true, "xhigh": true, "max": true},
-		"claude-channel":   {"low": true, "medium": true, "high": true, "xhigh": true, "max": true},
 		"opencode-acp":     {},
 		"opencode-http":    {},
 		"gemini-acp":       {},
@@ -56,11 +55,9 @@ func TestThinkingBackendPolicy(t *testing.T) {
 }
 
 func TestThinkingErrorsDistinguishUnsupportedValueAndCapability(t *testing.T) {
-	for _, backend := range []string{"claude", "claude-channel"} {
-		valueErr := ValidateThinkingForBackend(backend, "off")
-		if valueErr == nil || !strings.Contains(valueErr.Error(), "thinking value \"off\"") || !strings.Contains(valueErr.Error(), "allowed: low, medium, high, xhigh, max") {
-			t.Fatalf("%s value error = %v", backend, valueErr)
-		}
+	valueErr := ValidateThinkingForBackend("claude", "off")
+	if valueErr == nil || !strings.Contains(valueErr.Error(), "thinking value \"off\"") || !strings.Contains(valueErr.Error(), "allowed: low, medium, high, xhigh, max") {
+		t.Fatalf("value error = %v", valueErr)
 	}
 
 	capabilityErr := ValidateThinkingForBackend("agy", "low")
@@ -76,15 +73,13 @@ func TestValidateThinkingForBackendResume(t *testing.T) {
 			t.Errorf("%s resume off: %v", backend, err)
 		}
 	}
-	// Claude family is start-only on explicit resume.
-	for _, backend := range []string{"claude", "claude-channel"} {
-		err := ValidateThinkingForBackendResume(backend, "low")
-		if err == nil || !strings.Contains(err.Error(), "only when starting a session") {
-			t.Errorf("%s resume low error = %v", backend, err)
-		}
+	// Claude is start-only on explicit resume.
+	err := ValidateThinkingForBackendResume("claude", "low")
+	if err == nil || !strings.Contains(err.Error(), "only when starting a session") {
+		t.Errorf("resume low error = %v", err)
 	}
 	// Backends without support report an unsupported capability.
-	err := ValidateThinkingForBackendResume("agy", "low")
+	err = ValidateThinkingForBackendResume("agy", "low")
 	if err == nil || !strings.Contains(err.Error(), `does not support parameter "thinking"`) {
 		t.Errorf("agy resume low error = %v", err)
 	}

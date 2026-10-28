@@ -14,7 +14,6 @@ func TestValidateClaudeMCPWait(t *testing.T) {
 	}{
 		{"zero on any backend", "agy", 0, false},
 		{"claude", "claude", 5 * time.Second, false},
-		{"claude-channel", "claude-channel", 5 * time.Second, false},
 		{"at cap", "claude", MaxClaudeMCPWait, false},
 		{"over cap", "claude", MaxClaudeMCPWait + time.Nanosecond, true},
 		{"negative", "claude", -time.Second, true},
@@ -35,7 +34,6 @@ func TestIsClaudeFamily(t *testing.T) {
 		want    bool
 	}{
 		{"claude", true},
-		{"claude-channel", true},
 		{"pony", false},
 		{"opencode-http", false},
 		{"codex-app-server", false},

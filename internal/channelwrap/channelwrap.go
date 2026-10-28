@@ -1,7 +1,5 @@
 // Package channelwrap provides helpers for channel-wrapped prompt injection
-// used by non-Claude backends. The claude-channel sidecar delivers via MCP
-// notifications natively; this helper is for backends that must inject
-// channel messages as text prompts.
+// used by backends that must inject channel messages as text prompts.
 package channelwrap
 
 import (

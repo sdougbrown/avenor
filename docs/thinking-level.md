@@ -33,7 +33,6 @@ The native mechanisms below were verified with Codex CLI 0.144.6, Pi 0.83.0, and
 | `codex-app-server` | all seven values | all seven values | `turn/start.effort` |
 | `pi` | all seven values | all seven values | fresh client: `--thinking`; reused client: `set_thinking_level` |
 | `claude` | `low`, `medium`, `high`, `xhigh`, `max` | unsupported | `--effort` at startup |
-| `claude-channel` | `low`, `medium`, `high`, `xhigh`, `max` | unsupported | `--effort` at startup |
 | `opencode-acp` | unsupported | unsupported | none verified |
 | `opencode-http` | unsupported | unsupported | none verified |
 | `gemini-acp` | unsupported | unsupported | none verified |
@@ -67,11 +66,11 @@ For a reused client, Avenor sends `set_thinking_level` on that client and requir
 
 Pi owns model-specific mapping and clamping. The seven Avenor controls do not promise identical effective behavior for every Pi model.
 
-### Claude and Claude Channel
+### Claude
 
-Both Claude backends check that `claude --help` advertises `--effort <level>` before an explicit start. They pass `--effort` for `low`, `medium`, `high`, `xhigh`, and `max`. Claude has no native startup value for `off` or `minimal`, so Avenor rejects those values.
+Claude checks that `claude --help` advertises `--effort <level>` before an explicit start. It passes `--effort` for `low`, `medium`, `high`, `xhigh`, and `max`. Claude has no native startup value for `off` or `minimal`, so Avenor rejects those values.
 
-The effort flag is startup-only. Both backends reject every explicit resume value, even if the live in-process session appears to use the same value. Omitted thinking keeps the existing in-memory resume behavior.
+The effort flag is startup-only. Claude rejects every explicit resume value, even if the live in-process session appears to use the same value. Omitted thinking keeps the existing in-memory resume behavior.
 
 ## Unsupported backends
 

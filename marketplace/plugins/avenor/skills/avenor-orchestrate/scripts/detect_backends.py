@@ -20,7 +20,6 @@ DISPLAY_ORDER = [
     "claude",
     "gemini-acp",
     "cursor-acp",
-    "claude-channel",
     "opencode-http",
 ]
 
@@ -33,7 +32,6 @@ MODEL_SELECTION = {
     "gemini-acp": False,
     "cursor-acp": False,
     "claude": True,
-    "claude-channel": True,
 }
 
 
@@ -166,19 +164,12 @@ def detect(server_url: str | None, preferred: str | None) -> dict:
         ),
         "cursor-acp": backend("agent", existing([home / ".cursor"])),
         "claude": backend("claude", existing([home / ".claude.json", home / ".claude"])),
-        "claude-channel": backend("claude", existing([home / ".claude.json", home / ".claude"])),
         "opencode-http": http_backend(server_url),
     }
 
     backends["pi"]["pi_agents_extension"] = pi_agents
     backends["pi"]["named_agents_ready"] = pi_agents and bool(pi_profiles)
     backends["opencode-acp"]["named_agents_ready"] = bool(opencode_profiles)
-    tmux = shutil.which("tmux")
-    backends["claude-channel"]["tmux"] = tmux
-    if backends["claude-channel"]["available"] and not tmux:
-        backends["claude-channel"]["available"] = False
-        backends["claude-channel"]["configuration"] = "unavailable"
-        backends["claude-channel"]["note"] = "claude-channel also requires tmux."
 
     for name, item in backends.items():
         item.setdefault("named_agents_ready", False)

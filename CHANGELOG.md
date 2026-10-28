@@ -37,6 +37,7 @@
 
 ### Removed
 
+- The `claude-channel` backend is deleted: `internal/runtime/claudechannel`, the `internal/claudechannelsidecar` MCP sidecar, the `avenor claude-channel` and `avenor claude-channel-cleanup` subcommands, and its factory, CLI and thinking-policy wiring. The Claude Code plugin's mods layer replaces both roles — a spawned `claude` child joins the broker as its own run, and a user session is an addressable peer — so `--backend claude-channel` now exits `1` as an unknown backend. The `control_reply` action and the `agent.channel_ready`/`agent.prompt_queued`/`agent.report`/`agent.reply`/`agent.finish` events stay in the contract but no shipped surface emits or delivers them; the session tracker still decodes them for an external publisher.
 - The `followUpTool`, `askTool`, `cancelTool` and `brokerReplyTool` exports (packages/core) and the `Client.brokerSend`, `Client.brokerAsk`, `Client.brokerCancel` and `Client.brokerReply` wrappers are deleted with no alias window. `messageTool` and `Client.messageSend`/`messageWait`/`messageReply`/`messageWithdraw` replace them.
 
 ### Fixed

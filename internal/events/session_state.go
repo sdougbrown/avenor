@@ -3,8 +3,8 @@ package events
 import "fmt"
 
 // SessionState is a best-effort synthesized view of a live session derived from
-// the raw event stream. It is transport-agnostic, but it preserves
-// claude-channel-specific lifecycle signals when they are present.
+// the raw event stream. It is transport-agnostic, but it preserves the channel
+// lifecycle signals when they are present.
 type SessionState struct {
 	SessionID         string   `json:"session_id,omitempty"`
 	RunID             string   `json:"run_id,omitempty"`

@@ -69,15 +69,13 @@ func TestStartSessionValidatesClaudeMCPWait(t *testing.T) {
 }
 
 func TestStartSessionRejectsClaudeMCPWaitOnResume(t *testing.T) {
-	for _, backend := range []string{"claude", "claude-channel"} {
-		p := &plainThinkingProvider{}
-		_, err := StartSession(context.Background(), p, backend, runtime.StartOptions{ClaudeMCPWait: 7 * time.Second}, "session")
-		if err == nil || !strings.Contains(err.Error(), "claude-mcp-wait") || !strings.Contains(err.Error(), "only when starting a session") {
-			t.Fatalf("%s error = %v, want a start-only rejection", backend, err)
-		}
-		if p.resumeCalls != 0 || p.startCalls != 0 {
-			t.Fatalf("%s started a replacement process", backend)
-		}
+	p := &plainThinkingProvider{}
+	_, err := StartSession(context.Background(), p, "claude", runtime.StartOptions{ClaudeMCPWait: 7 * time.Second}, "session")
+	if err == nil || !strings.Contains(err.Error(), "claude-mcp-wait") || !strings.Contains(err.Error(), "only when starting a session") {
+		t.Fatalf("error = %v, want a start-only rejection", err)
+	}
+	if p.resumeCalls != 0 || p.startCalls != 0 {
+		t.Fatal("started a replacement process")
 	}
 }
 

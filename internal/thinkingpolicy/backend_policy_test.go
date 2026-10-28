@@ -28,8 +28,7 @@ func TestBackendPolicyGenerated(t *testing.T) {
 		{"claude", str("max"), false, true, true},
 		{"claude", str("off"), false, false, true}, // off not supported
 		{"claude", str("low"), true, false, true},  // start-only
-		{"claude-channel", str("medium"), false, true, true},
-		{"claude-channel", str("low"), true, false, true}, // start-only
+		{"claude", str("medium"), false, true, true},
 
 		// Backends with no thinking support
 		{"agy", str("low"), false, false, true},
