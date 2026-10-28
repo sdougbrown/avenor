@@ -74,6 +74,11 @@ func (b *Broker) runPeerLeaseLoop(ctx context.Context) {
 // lock is serving a request, so it is alive and a later tick retires it.
 // Blocking here would let one wedged request delay tombstoning for every peer,
 // keeping the rest routable long after their leases lapsed.
+//
+// The wait a skipped peer defers is its own release of pending asks, not its
+// reachability: peerUnavailableLocked already refuses its sends on the deadline,
+// so a request that never finishes leaves that peer's tombstone late, never its
+// inbox open.
 func (b *Broker) expirePeers(now time.Time) {
 	b.mu.RLock()
 	states := make([]*RunState, 0, len(b.runs))

@@ -44,6 +44,10 @@ test('a label match routes to the authority whose row carried that label', async
   )
   const r = await p.resolve('foo')
   expect(r.match).toBe('unique')
+  // `runId` stays the authority's own id, so a consumer that reports it reports
+  // something a reader can act on; only the route key is opaque.
+  expect(r.runId).toBe('X')
+  expect(r.routeKey).not.toBe(r.runId)
   await p.tell(r.routeKey ?? r.runId, 'hello')
   expect(sent).toEqual(['central:X'])
 })
@@ -54,6 +58,8 @@ test('resume routes to the resolved authority, not to the caller-visible id', as
   local.resume = async req => { resumedIn = `local:${req.target}`; return { outcome: 'sent', runId: 'rt_1' } }
   const p = combinePeerProviders(local, provider('central', [], []))
   const r = await p.resolve('child')
+  expect(r.runId).toBe('rt_1')
+  expect(r.routeKey).not.toBe(r.runId)
   await p.resume({ target: r.routeKey ?? r.runId, message: 'go' })
   expect(resumedIn).toBe('local:rt_1')
 })
