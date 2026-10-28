@@ -77,6 +77,10 @@ type ResumeRequest struct {
 	IdempotencyKey string
 	SentinelFile   string // path the provider minted for the new run
 	EventLog       string // path the provider minted for the new run
+	// MCP marks a resume an MCP surface originated. The supervisor gates the
+	// launch such a resume re-execs; the control socket's owner connection,
+	// which a trusted caller drives directly, is trusted instead.
+	MCP bool
 }
 
 // ResumeResult reports the new run a resume produced.

@@ -396,6 +396,7 @@ func (p *mcpMessageProvider) Resume(ctx context.Context, req messaging.ResumeReq
 		IdempotencyKey: req.IdempotencyKey,
 		SentinelFile:   sentinelFile,
 		EventLog:       eventLog,
+		MCP:            true,
 	})
 	if err != nil {
 		return messaging.ResumeResult{}, authorityToolError(err)
