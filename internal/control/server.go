@@ -1155,8 +1155,8 @@ func (s *ControlServer) acceptLoop() {
 		seq++
 		cs := &connState{
 			id: seq, server: s, conn: conn,
-			waitSlots:        make(chan struct{}, maxInflightPerConn),
-			messageSlots:     make(chan struct{}, maxInflightPerConn),
+			waitSlots:    make(chan struct{}, maxInflightPerConn),
+			messageSlots: make(chan struct{}, maxInflightPerConn),
 		}
 		cs.ctx, cs.cancel = context.WithCancel(context.Background())
 		s.mu.Lock()
