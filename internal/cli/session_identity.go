@@ -21,16 +21,12 @@ type cliSessionIdentity struct {
 	agentProfile  string
 	launchWrapper []string
 	launch        backendlaunch.Spec
-	// sessionDir reserves the session directory a backend reports from its
-	// create handshake. Stage 2 records it; an empty value means the backend
-	// has not reported one.
-	sessionDir string
 }
 
 // equal compares two identities field by field. The launch wrapper and args
 // are slices, so identities cannot be compared with ==.
 func (a cliSessionIdentity) equal(b cliSessionIdentity) bool {
-	return a.backend == b.backend && a.agent == b.agent && a.model == b.model && a.agentProfile == b.agentProfile && slices.Equal(a.launchWrapper, b.launchWrapper) && a.launch.Equal(b.launch) && a.sessionDir == b.sessionDir
+	return a.backend == b.backend && a.agent == b.agent && a.model == b.model && a.agentProfile == b.agentProfile && slices.Equal(a.launchWrapper, b.launchWrapper) && a.launch.Equal(b.launch)
 }
 
 // sessionBackendMap records the complete identity that owns each session ID

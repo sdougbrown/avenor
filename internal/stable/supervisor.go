@@ -325,7 +325,6 @@ type childRuntime struct {
 	backend            string
 	launchWrapper      []string
 	launch             backendlaunch.Spec
-	sessionDir         string
 	rosterFile         string
 	rosterEntry        string
 	effectiveBackend   string
@@ -503,10 +502,6 @@ type effectiveIdentity struct {
 	// entry. It is part of the ownership record so a resume that resolves to a
 	// different binary, args or settings path is rejected.
 	Launch backendlaunch.Spec
-	// SessionDir reserves the session directory a backend reports from its
-	// create handshake. Stage 2 records it; an empty value means the backend
-	// has not reported one.
-	SessionDir string
 }
 
 type sessionIdentityEntry struct {
@@ -3444,7 +3439,7 @@ func (c *childRuntime) sessionID() string {
 // differ per path.
 func authoritativeIdentityEqual(left, right effectiveIdentity) bool {
 	return left.Backend == right.Backend && left.Agent == right.Agent && left.Model == right.Model &&
-		left.AgentProfile == right.AgentProfile && left.Launch.Equal(right.Launch) && left.SessionDir == right.SessionDir
+		left.AgentProfile == right.AgentProfile && left.Launch.Equal(right.Launch)
 }
 
 // launchWrapperSupplied reports whether a resume request carries an explicit
@@ -3621,7 +3616,6 @@ func (s *Supervisor) adoptSessionAttempt(child *childRuntime, attempt *sessionAt
 		child.rosterFile = attempt.identity.RosterFile
 		child.rosterEntry = attempt.identity.RosterEntry
 		child.launch = attempt.identity.Launch
-		child.sessionDir = attempt.identity.SessionDir
 	}
 	child.mu.Unlock()
 	return true
@@ -3731,7 +3725,6 @@ func (s *Supervisor) beginWorkflowAttempt(child *childRuntime, provider runtime.
 	child.rosterFile = identity.RosterFile
 	child.rosterEntry = identity.RosterEntry
 	child.launch = identity.Launch
-	child.sessionDir = identity.SessionDir
 	child.mu.Unlock()
 	child.writeMu.Unlock()
 	if deferredStartErr != nil {
@@ -3781,7 +3774,6 @@ func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSe
 	child.rosterFile = final.Identity.RosterFile
 	child.rosterEntry = final.Identity.RosterEntry
 	child.launch = final.Identity.Launch
-	child.sessionDir = final.Identity.SessionDir
 	child.mu.Unlock()
 	if finErr != nil {
 		s.reportLifecycleError(child, finErr)
@@ -3801,7 +3793,6 @@ func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effec
 		RosterEntry:   child.rosterEntry,
 		LaunchWrapper: child.launchWrapper,
 		Launch:        child.launch,
-		SessionDir:    child.sessionDir,
 	}
 	if identity.Backend == "" {
 		identity.Backend = child.backend
@@ -3874,7 +3865,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	identity := effectiveIdentity{
 		Backend: child.effectiveBackend, Agent: child.effectiveAgent, Model: child.effectiveModel,
 		AgentProfile: child.agentProfile, RosterFile: child.rosterFile, RosterEntry: child.rosterEntry,
-		LaunchWrapper: child.launchWrapper, Launch: child.launch, SessionDir: child.sessionDir,
+		LaunchWrapper: child.launchWrapper, Launch: child.launch,
 	}
 	child.mu.Unlock()
 	if mapped, ok := s.sessionIdentity(session.SessionID); ok {
@@ -3973,11 +3964,8 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		Agent:         child.effectiveAgent,
 		Model:         child.effectiveModel,
 		AgentProfile:  child.agentProfile,
-		RosterFile:    child.rosterFile,
-		RosterEntry:   child.rosterEntry,
 		LaunchWrapper: child.launchWrapper,
 		Launch:        child.launch,
-		SessionDir:    child.sessionDir,
 	}
 	provider := child.provider
 	fallbackBackend := child.backend
