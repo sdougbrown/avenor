@@ -64,6 +64,67 @@ test('resume routes to the resolved authority, not to the caller-visible id', as
   expect(resumedIn).toBe('local:rt_1')
 })
 
+test('a central match resolves from the listing already fetched, without a second lookup', async () => {
+  let listings = 0
+  const broker = {
+    peers: async () => { listings++; return { peers: [{ run_id: 'remote', label: 'scout' }] } },
+    tell: async () => ({ outcome: 'sent' as const }),
+    ask: async () => ({ outcome: 'timed-out' }),
+    reply: async () => ({ outcome: 'replied' }),
+    withdraw: async () => ({ outcome: 'withdrawn' }),
+    rename: async () => ({ outcome: 'renamed' }),
+    last: async () => ({ outcome: 'sent' }),
+  } satisfies ChildBroker
+  const central = createChildMessageProvider({ surface: 'pi-child', runId: 'central', broker })
+  const p = combinePeerProviders(() => null, central)
+  const r = await p.resolve('scout')
+  expect(r.runId).toBe('remote')
+  // One fetch answers the whole resolution: only the host has a field the listing
+  // cannot carry, so asking the authority again would be a second read of the same
+  // snapshot and a race against a peer retiring between them.
+  expect(listings).toBe(1)
+})
+
+test('rename routes to the authority that owns the session', async () => {
+  const sent: string[] = []
+  const local = provider('local', [], sent)
+  const central = provider('central', [], sent)
+  central.rename = async req => { sent.push(`central:${req.sessionId}`); return { outcome: 'renamed', label: req.name } }
+  local.rename = async req => { sent.push(`local:${req.sessionId}`); return { outcome: 'renamed', label: req.name } }
+
+  const both = combinePeerProviders(local, central)
+  // A run id with no session binding is the caller's own identity, so central owns it.
+  await both.rename({ name: 'x' })
+  expect(sent).toEqual(['central:undefined'])
+
+  // A session this host runs is renamed through the host, which owns its record.
+  await both.rename({ sessionId: 'ses_local', name: 'x' })
+  expect(sent).toEqual(['central:undefined', 'local:ses_local'])
+
+  // With no host provider bound there is nobody who can own another session.
+  const centralOnly = combinePeerProviders(() => null, central)
+  const refusal = (() => { try { centralOnly.rename({ sessionId: 'ses_other', name: 'x' }) } catch (error) { return error } })() as { code?: string }
+  expect(refusal.code).toBe('not_permitted')
+})
+
+test('resume tracking follows the provider that executed the resume', async () => {
+  const local = provider('local', [{ run_id: 'rt_1', label: 'child' }], [])
+  const central = provider('central', [], [])
+  const tracked: string[] = []
+  local.onResumed = result => { tracked.push(`local:${result.runId}`) }
+  local.registerResumed = async () => { tracked.push('local:registered') }
+  central.onResumed = result => { tracked.push(`central:${result.runId}`) }
+  central.registerResumed = async () => { tracked.push('central:registered') }
+  local.resume = async req => ({ outcome: 'sent', runId: req.target })
+
+  const p = combinePeerProviders(local, central)
+  const r = await p.resolve('child')
+  const resumed = await p.resume({ target: r.routeKey ?? r.runId, message: 'go' })
+  p.onResumed?.(resumed)
+  await p.registerResumed?.(resumed)
+  expect(tracked).toEqual(['local:rt_1', 'local:registered'])
+})
+
 test('incomplete remote listings cannot fall back to a local match', async () => {
   const p = combinePeerProviders(provider('local', [{ run_id: 'child' }], []), provider('central', [], [], 'offline'))
   await expect(p.resolve('child')).rejects.toThrow('incomplete')

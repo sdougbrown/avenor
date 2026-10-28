@@ -61,8 +61,14 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
       }
       const { resolution: matched, row: hit } = matchPeerRows(rows, ref)
       if (matched.match !== 'unique' || !hit) return matched
-      const resolved = hit.provider === host && publicResolution && hit.run_id === ref
-        ? publicResolution : await hit.provider.resolve(hit.run_id)
+      // The rule already answered from the row, which came from this same fetch.
+      // Only the host can add a field the listing does not carry — the public run
+      // id a caller reports — so only a host row is worth a second lookup. A
+      // central row costs nothing more, and cannot fail as "changed during
+      // resolution" for a peer that retired between two reads of one snapshot.
+      const resolved = hit.provider === host
+        ? publicResolution && hit.run_id === ref ? publicResolution : await hit.provider.resolve(hit.run_id)
+        : matched
       if (resolved.match !== 'unique') throw new Error('the peer changed during resolution')
       const key = JSON.stringify([authority(hit.provider), resolved.runId, resolved.publicRunId])
       routes.set(key, { provider: hit.provider, id: resolved.runId, publicId: resolved.publicRunId })
