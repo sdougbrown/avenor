@@ -170,6 +170,14 @@ For the `claude` backend, `session.end` is the authoritative lifecycle signal. T
 
 ---
 
+### pi backend events
+
+The `pi` backend drives a pi child over an RPC command stream, so it has no terminal to scrape. It emits the backend events listed in [Protocol events](#protocol-events-passed-from-backend) plus one synthesized lifecycle event:
+
+**`agent.prompt_submitted`** — The pi child accepted a prompt over the RPC command stream. Fields: `prompt_length` (the prompt's length in bytes). The event omits prompt text for privacy.
+
+A matching `success: true` response emits this event before any later backend notifications, including `session.end`. A rejected prompt (`success: false`) emits no submission event and returns the refusal to the caller. Submission does not mean completion; `session.end` remains the authoritative completion signal.
+
 ### Retry and error events
 
 **`avenor.retry`** — A phase is being retried (exit code 1, non-fatal failure). Emitted before each retry attempt after the first. Fields: `attempt` (which retry this is: 1 for the first retry, 2 for the second, etc.), `max_retries`, `ts`.

@@ -364,7 +364,7 @@ func (failingWriteCloser) Close() error              { return nil }
 
 func TestThinkingSetterTransportAndDecodeErrorsAreNotCapabilityErrors(t *testing.T) {
 	t.Run("transport", func(t *testing.T) {
-		c := &client{stdin: failingWriteCloser{}, pending: map[string]chan json.RawMessage{}, done: make(chan struct{})}
+		c := &client{stdin: failingWriteCloser{}, pending: map[string]pendingCommand{}, done: make(chan struct{})}
 		err := NewWithOptions(runtime.StartOptions{}).setThinkingLevel(context.Background(), c, "high")
 		if err == nil || !strings.Contains(err.Error(), `pi set_thinking_level "high":`) || strings.Contains(err.Error(), "does not support parameter") {
 			t.Fatalf("error = %v", err)
@@ -970,5 +970,118 @@ func TestPromptRecoversWhenPiAutoRetrySucceeds(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatalf("Prompt: %v; want recovery after the successful retry", err)
+	}
+}
+
+type gatedWriteCloser struct {
+	io.WriteCloser
+	release <-chan struct{}
+}
+
+func (w gatedWriteCloser) Write(data []byte) (int, error) {
+	n, err := w.WriteCloser.Write(data)
+	<-w.release
+	return n, err
+}
+
+func TestPromptSubmissionPrecedesFastCompletion(t *testing.T) {
+	c, _, rIn := fakeClient()
+	defer c.Close()
+	releaseWrite := make(chan struct{})
+	defer close(releaseWrite)
+	c.stdin = gatedWriteCloser{WriteCloser: c.stdin, release: releaseWrite}
+	const sessionID = "ses-pi-prompt"
+	const prompt = "hello π"
+	c.setSessionID(sessionID)
+	p := promptOnClient(c, sessionID)
+	eventsCh := subscribeForSession(c, sessionID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(ctx, sessionID, prompt) }()
+
+	cmd, err := readCommand(rIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := json.Marshal(map[string]any{"type": "response", "id": cmd["id"], "success": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The child can accept and finish before the stdin write returns to Prompt.
+	c.dispatchLine(response)
+	c.dispatchLine(response)
+	c.dispatchLine([]byte(`{"type":"agent_end","stopReason":"stop"}`))
+	releaseWrite <- struct{}{}
+	if err := <-errCh; err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	for _, want := range []string{"agent.prompt_submitted", "session.end"} {
+		select {
+		case ev := <-eventsCh:
+			if ev.Event != want || ev.SessionID != sessionID {
+				t.Fatalf("event = %s (%s), want %s (%s)", ev.Event, ev.SessionID, want, sessionID)
+			}
+			if ev.Event == "agent.prompt_submitted" {
+				if got, ok := ev.Fields["prompt_length"].(int); !ok || got != len(prompt) {
+					t.Errorf("prompt_length = %v, want %d bytes", ev.Fields["prompt_length"], len(prompt))
+				}
+				encoded, err := json.Marshal(ev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(encoded), prompt) {
+					t.Errorf("event contains prompt text: %s", encoded)
+				}
+			}
+		default:
+			t.Fatalf("missing %s event", want)
+		}
+	}
+	select {
+	case ev := <-eventsCh:
+		t.Fatalf("unexpected extra event: %s", ev.Event)
+	default:
+	}
+}
+
+func TestPromptRejectedEmitsNoPromptSubmittedEvent(t *testing.T) {
+	c, wOut, rIn := fakeClient()
+	defer c.Close()
+	c.setSessionID("ses-pi-reject")
+	p := promptOnClient(c, "ses-pi-reject")
+
+	eventsCh := subscribeForSession(c, "ses-pi-reject")
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Prompt(context.Background(), "ses-pi-reject", "hello pi") }()
+
+	go func() {
+		cmd, err := readCommand(rIn)
+		if err != nil {
+			return
+		}
+		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": false, "error": "prompt rejected by child"})
+	}()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for prompt result")
+	}
+	if err == nil {
+		t.Fatal("expected an error when the child rejects the prompt")
+	}
+	if !strings.Contains(err.Error(), "prompt rejected by child") {
+		t.Fatalf("error = %v; want the child's refusal in the message", err)
+	}
+
+	select {
+	case ev := <-eventsCh:
+		t.Fatalf("event emitted for rejected prompt: %s", ev.Event)
+	default:
 	}
 }

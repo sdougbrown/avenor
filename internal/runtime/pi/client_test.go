@@ -58,6 +58,7 @@ func readCommand(r io.Reader) (map[string]any, error) {
 func TestClientCommandResponse(t *testing.T) {
 	c, wOut, rIn := fakeClient()
 	defer c.Close()
+	eventCh := subscribeForTest(c)
 
 	done := make(chan error, 1)
 	go func() {
@@ -95,6 +96,11 @@ func TestClientCommandResponse(t *testing.T) {
 	}
 	if resp["type"] != "response" {
 		t.Errorf("type = %v, want response", resp["type"])
+	}
+	select {
+	case ev := <-eventCh:
+		t.Fatalf("non-prompt command emitted event: %s", ev.Event)
+	default:
 	}
 }
 
