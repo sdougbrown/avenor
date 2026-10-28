@@ -34,32 +34,26 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 
 var _ runtime.Provider = (*Provider)(nil)
 
-// Start reports the Stage 1 boundary.
 func (p *Provider) Start(context.Context, runtime.StartOptions) (runtime.Session, error) {
 	return runtime.Session{}, ErrNotImplemented
 }
 
-// Resume reports the Stage 1 boundary.
 func (p *Provider) Resume(context.Context, string) (runtime.Session, error) {
 	return runtime.Session{}, ErrNotImplemented
 }
 
-// Prompt reports the Stage 1 boundary.
 func (p *Provider) Prompt(context.Context, string, string) error {
 	return ErrNotImplemented
 }
 
-// Cancel reports the Stage 1 boundary.
 func (p *Provider) Cancel(context.Context, string) error {
 	return ErrNotImplemented
 }
 
-// Events reports the Stage 1 boundary.
 func (p *Provider) Events(context.Context, string) (<-chan events.Event, error) {
 	return nil, ErrNotImplemented
 }
 
-// AnswerPermission reports the Stage 1 boundary.
 func (p *Provider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
 	return ErrNotImplemented
 }
