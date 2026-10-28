@@ -384,6 +384,111 @@ func TestTellToRetiredPeerIsRefused(t *testing.T) {
 	}
 }
 
+// A peer's credential is not published upward once its identity is gone: a parent
+// broker holding it could route to an inbox nobody drains.
+func TestPeerTombstoneLeavesParentRunClaims(t *testing.T) {
+	b := peerBroker(t)
+	ensureRun(t, b, "local-child", "local-child")
+	creds := map[string]any{"run_id": "pi-peer", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	claimed := func() map[string]bool {
+		got := map[string]bool{}
+		for _, claim := range b.ParentRunClaims() {
+			got[claim.RunID] = true
+		}
+		return got
+	}
+	if got := claimed(); !got["pi-peer"] || !got["local-child"] {
+		t.Fatalf("live claims = %v, want both runs", got)
+	}
+	if code, _ := peerPost(t, b, "/retire", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if got := claimed(); got["pi-peer"] {
+		t.Fatalf("retired peer still claimed upward: %v", got)
+	}
+}
+
+// A control message pushed at a retired peer is refused rather than queued where
+// no consumer will ever drain it.
+func TestPushControlToRetiredPeerIsRefused(t *testing.T) {
+	b := peerBroker(t)
+	creds := map[string]any{"run_id": "peer", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if code, _ := peerPost(t, b, "/retire", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	// withAuth refuses the retired credentials and handlePushControl re-checks the
+	// lease, so either may answer; the property is that the route answers gone and
+	// queues nothing.
+	body := map[string]any{"run_id": "peer", "token": "secret", "type": "agent_message", "payload": map[string]any{"message": "hi"}}
+	if code, result := peerPost(t, b, "/push-control", body); code != http.StatusGone || result["code"] != "peer-retired" {
+		t.Fatalf("push-control to retired peer = %d %v", code, result)
+	}
+	if queued := countAgentMessages(t, b, "peer"); queued != 0 {
+		t.Fatalf("retired peer queue holds %d messages", queued)
+	}
+}
+
+// A poll admitted before its lease lapsed wakes on the retire signal, so it has to
+// re-ask the lease: answering 200 would leave the client polling a dead inbox one
+// cycle longer than its identity allows.
+func TestPeerPollAdmittedBeforeExpiryAnswersGone(t *testing.T) {
+	b := New("")
+	b.pollTimeout = time.Minute
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	creds := map[string]any{"run_id": "peer", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	st, _, _ := b.runStateFor("peer")
+	answer := make(chan int, 1)
+	raw, _ := json.Marshal(creds)
+	req, err := http.NewRequest(http.MethodPost, b.URL()+"/poll-control", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+		if err != nil {
+			answer <- 0
+			return
+		}
+		defer resp.Body.Close()
+		answer <- resp.StatusCode
+	}()
+	for {
+		st.Mu.Lock()
+		polling := st.peerPolling
+		st.Mu.Unlock()
+		if polling {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("the poll was not admitted")
+		default:
+			runtime.Gosched()
+		}
+	}
+	st.Mu.Lock()
+	st.peerDeadline = time.Now().Add(-time.Second)
+	st.Mu.Unlock()
+	b.expirePeers(time.Now())
+	if code := <-answer; code != http.StatusGone {
+		t.Fatalf("poll admitted before expiry answered %d, want 410", code)
+	}
+}
+
 func TestPeerRetirementCannotBeBypassedWithCredentialAlias(t *testing.T) {
 	b := peerBroker(t)
 	peer := map[string]any{"run_id": "peer", "token": "shared-secret", "peer": true}

@@ -85,6 +85,41 @@ test('central-only peer listing does not create a supervisor and tell does not i
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
 
+test('an ask in flight is aborted by session shutdown instead of outliving its identity', async () => {
+  const b = broker()
+  const base = globalThis.fetch
+  // Hold /wait_reply open until the session closes, recording whether the abort
+  // signal its transport actually carried.
+  const aborted = { value: false }
+  const fetchWithPatientWait = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    if (new URL(String(url)).pathname !== '/wait_reply') return (base as typeof fetch)(url, init)
+    return new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal
+      if (!signal) { reject(new Error('missing transport deadline')); return }
+      const onAbort = () => { aborted.value = true; reject(signal.reason) }
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    })
+  }, { preconnect() {} }) as typeof fetch
+  // Installed before the session starts: the central provider captures its
+  // transport when it is built, so a later swap would not reach it.
+  globalThis.fetch = fetchWithPatientWait
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { messageTool, hostProviderFor: undefined, Supervisor: class { static currentInstance() { return undefined } } as never },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test' },
+    })
+    expect((await h.registeredTools.avenor_peers.execute('p', {})).details.peers).toHaveLength(2)
+    const pending = h.registeredTools.avenor_message.execute('ask', { action: 'ask', target: 'claude', message: 'question', timeout_ms: 60000 })
+    await waitFor(() => b.calls.some(c => c.path === '/send'))
+    await h.eventHandlers.session_shutdown({}, {})
+    const result = await pending.catch((error: unknown) => error)
+    expect(aborted.value).toBe(true)
+    expect((result as { details?: { outcome?: string } }).details?.outcome ?? 'failed').not.toBe('replied')
+  } finally { globalThis.fetch = base; await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
+
 test('registration failure never falls back to local messaging and retries the same identity', async () => {
   const b = broker()
   const delegate = globalThis.fetch
