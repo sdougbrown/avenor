@@ -98,9 +98,17 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 	}
 	newLabel := req.Label
 	if newLabel == "" {
-		// label falls back to the prior runtime id when the broker has no
-		// display name, so this is never just the suffix.
-		newLabel = label + runstate.FollowUpLabelSuffix
+		// The implicit label is resolved here, once, before SpawnParams is
+		// built: a harness name the broker run carries is what the runtime
+		// will be registered under on either resume arm, so it wins over the
+		// follow-up suffix and the result reports the registered label.
+		if harness := s.brokerHarnessName(runID); harness != "" {
+			newLabel = harness
+		} else {
+			// label falls back to the prior runtime id when the broker has no
+			// display name, so this is never just the suffix.
+			newLabel = label + runstate.FollowUpLabelSuffix
+		}
 	}
 
 	idempotencyKey := ""
@@ -129,7 +137,6 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 		resume: resumeSpawn{
 			runID:            req.RunID,
 			labelReservation: true,
-			implicitLabel:    req.Label == "",
 		},
 	}
 	spawned, err := s.resumeOnce(prior, runID, params)
@@ -249,6 +256,21 @@ func (s *Supervisor) resumeSessionID(prior *childRuntime, runID string) (string,
 		status = string(runstate.StatusUnknown)
 	}
 	return "", notResumableError(runID, status)
+}
+
+// brokerHarnessName reports the harness-supplied name the broker run carries,
+// or "" when there is no broker, the run is unknown, or it has none.
+func (s *Supervisor) brokerHarnessName(runID string) string {
+	if s.broker == nil {
+		return ""
+	}
+	st := s.broker.GetRun(runID)
+	if st == nil {
+		return ""
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	return st.HarnessName
 }
 
 // notResumableError renders the one denial the session ladder and the sentinel

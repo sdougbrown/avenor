@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
@@ -205,6 +207,86 @@ func TestWarmResumeRejectsPendingBrokerMessage(t *testing.T) {
 	}
 	if child.sentinelFile != filepath.Join(root, "old-sentinel") || len(child.promptQueue) != 0 {
 		t.Fatal("rejected admission changed turn")
+	}
+}
+
+// TestWarmResumePendingMessageCleansReservedArtifacts pins the reordered
+// admission fence: the artifacts are reserved before the broker admission
+// lock, the pending check runs under the lock, and a rejection removes
+// everything the reservation created — the exclusively created event file
+// even on a caller-supplied path, and the turn directory on default paths.
+func TestWarmResumePendingMessageCleansReservedArtifacts(t *testing.T) {
+	root := t.TempDir()
+	b := broker.New("")
+	if _, err := b.CreateRun("rt", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Send("rt", "agent_message", nil, "msg"); err != nil {
+		t.Fatal(err)
+	}
+	child := &childRuntime{id: "rt", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	sup := &Supervisor{broker: b}
+	newEvents := filepath.Join(root, "new-events")
+	_, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: newEvents, SentinelFile: filepath.Join(root, "new-sentinel")})
+	if !warm || err == nil || !strings.Contains(err.Error(), "pending broker messages") {
+		t.Fatalf("pending-message admission: warm=%v err=%v", warm, err)
+	}
+	if _, err := os.Stat(newEvents); !os.IsNotExist(err) {
+		t.Fatalf("reserved event file survived the rejection: %v", err)
+	}
+	if child.onEvent != filepath.Join(root, "old") || len(child.promptQueue) != 0 {
+		t.Fatal("rejected admission changed the child's turn")
+	}
+
+	// Default paths get the same cleanup: the rejected reservation's turn
+	// directory is removed and the run directory is left empty.
+	if _, err := b.CreateRun("rt2", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Send("rt2", "agent_message", nil, "msg"); err != nil {
+		t.Fatal(err)
+	}
+	child2 := &childRuntime{id: "rt2", onEvent: filepath.Join(root, "old2"), sentinelFile: filepath.Join(root, "old2-sentinel"), promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child2, testLifecycleOptions{exec: execParked})
+	sup2 := &Supervisor{broker: b, runID: "warm-resume-clean-test"}
+	_, warm, err = sup2.admitWarmResume(child2, SpawnParams{Prompt: "next"})
+	if !warm || err == nil {
+		t.Fatalf("default-path pending-message admission: warm=%v err=%v", warm, err)
+	}
+	runDir, err := createArtifactRunDir(sup2.runID, "rt2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("rejected reservation left %v under %s", entries, runDir)
+	}
+
+	// A message that arrives while admission is between the reservation and
+	// the lock is caught by the authoritative check under the lock, and the
+	// reserved event file is still removed.
+	if _, err := b.CreateRun("rt3", ""); err != nil {
+		t.Fatal(err)
+	}
+	child3 := &childRuntime{id: "rt3", onEvent: filepath.Join(root, "old3"), sentinelFile: filepath.Join(root, "old3-sentinel"), promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child3, testLifecycleOptions{exec: execParked})
+	sup3 := &Supervisor{broker: b}
+	sup3.testHooks.warmAdmissionAfterCheck = func() {
+		if err := b.Send("rt3", "agent_message", nil, "late"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lateEvents := filepath.Join(root, "late-events")
+	_, warm, err = sup3.admitWarmResume(child3, SpawnParams{Prompt: "next", OnEvent: lateEvents, SentinelFile: filepath.Join(root, "late-sentinel")})
+	if !warm || err == nil || !strings.Contains(err.Error(), "pending broker messages") {
+		t.Fatalf("late-message admission: warm=%v err=%v", warm, err)
+	}
+	if _, err := os.Stat(lateEvents); !os.IsNotExist(err) {
+		t.Fatalf("reserved event file survived the late-message rejection: %v", err)
 	}
 }
 
@@ -469,6 +551,78 @@ func TestUnstartedWarmResumeKeepsCompletionSentinel(t *testing.T) {
 	}
 	if child.exitCode != 0 || child.lastStopReason != "" {
 		t.Fatalf("failure state applied: exit=%d reason=%q", child.exitCode, child.lastStopReason)
+	}
+}
+
+// TestShutdownWritesAdmittedWarmResumeSentinel drives the real termination
+// call site (supervisor.go runChild's teardown defer) with an admitted warm
+// resume whose turn is held open: shutting the supervisor down must leave the
+// new turn's sentinel written at its reserved path — the terminal idle-end
+// effect writes it, and finishUnstartedWarmResume, which runs after it in the
+// same teardown, leaves an existing sentinel alone — so a host-side sentinel
+// wait cannot hang until timeout.
+func TestShutdownWritesAdmittedWarmResumeSentinel(t *testing.T) {
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:        newStableSocketPath(t, "warm-shutdown-sentinel"),
+		MaxRuntimes:          2,
+		ParkedRuntimeTimeout: 0,
+		ShutdownTimeout:      0,
+	})
+	t.Cleanup(func() {
+		_ = sup.Shutdown("kill")
+		_ = sup.broker.Stop()
+	})
+	release := make(chan struct{})
+	var closeOnce sync.Once
+	safeClose := func() { closeOnce.Do(func() { close(release) }) }
+	t.Cleanup(safeClose)
+	provider := &stableScriptedProvider{attempt: -1, emitted: make(chan int, 4), scripts: []stableScriptedAttempt{
+		itestAttempt("ses_warm_shutdown", itestSessionEnd("ses_warm_shutdown", "end_turn", "done")),
+		itestAttempt("ses_warm_shutdown", stableScriptedEvent{release: release}),
+	}}
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return provider, nil
+	}
+	dir := t.TempDir()
+
+	first, err := sup.spawn(SpawnParams{Prompt: "start", Dir: dir})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	waitForActiveRuntimeCount(t, sup, 0) // the first turn parks
+	for len(provider.emitted) > 0 {
+		<-provider.emitted
+	}
+
+	nextSentinel := filepath.Join(dir, "next-sentinel")
+	resumed, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: first.RuntimeID, Message: "continue",
+		SentinelFile: nextSentinel, EventLog: filepath.Join(dir, "next-events"),
+	})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	// The resumed turn is in flight: the provider opened its second attempt.
+	select {
+	case <-provider.emitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resumed turn never started")
+	}
+
+	// Shut down while the turn is held open; the termination path must write
+	// the new turn's sentinel at its reserved path.
+	if err := sup.Shutdown("kill"); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	child := sup.runtimeByID(resumed.RuntimeID)
+	select {
+	case <-child.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not finish after shutdown")
+	}
+	data, err := os.ReadFile(nextSentinel)
+	if err != nil || !bytes.Contains(data, []byte("SESSION=")) {
+		t.Fatalf("new turn sentinel = %q: %v", data, err)
 	}
 }
 

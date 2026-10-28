@@ -238,10 +238,6 @@ type resumeSpawn struct {
 	// labelReservation makes the spawn reserve Label even without an
 	// idempotency key, matching the reservation a keyed spawn gets.
 	labelReservation bool
-	// implicitLabel marks Label as the follow-up label the resume ladder
-	// derived rather than a caller-chosen one, so warm admission may replace
-	// it with the runtime's current display name.
-	implicitLabel bool
 }
 
 type SpawnResult struct {

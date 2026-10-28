@@ -174,6 +174,20 @@ func (st *RunState) displayName() string {
 	return st.labelLocked()
 }
 
+// setLabelLocked writes name as the run's display label, creating the session
+// record when it is missing. The caller holds st.Mu; name is written
+// verbatim, so a caller that resets an empty name to the run ID — as
+// RenameRun does — applies that rule before calling. Publishing the change
+// stays with the caller too: an admission commit publishes only when a label
+// actually moved, and an adoption claims a record the branch that owns it
+// already publishes.
+func (st *RunState) setLabelLocked(runID, name string) {
+	if st.Info == nil {
+		st.Info = &SessionInfo{RunID: runID}
+	}
+	st.Info.Label = name
+}
+
 // labelLocked resolves the one display name peers see. A harness's own session
 // name wins whenever the harness supplied one, because the human chose it; the
 // model-set (or launch) name is the fallback, and a run with neither carries its
@@ -2241,10 +2255,7 @@ func (b *Broker) ownRun(claim messaging.ClaimedRun, newlyAdopted bool) string {
 	}
 	if claim.Label != "" {
 		st.Mu.Lock()
-		if st.Info == nil {
-			st.Info = &SessionInfo{RunID: claim.Key}
-		}
-		st.Info.Label = claim.Label
+		st.setLabelLocked(claim.Key, claim.Label)
 		st.Mu.Unlock()
 	}
 	return st.Token
@@ -2412,10 +2423,7 @@ func (b *Broker) LockWarmAdmission(runID, name string) (func(bool), error) {
 			st.LastMessage = nil
 		}
 		if commit && name != "" {
-			if st.Info == nil {
-				st.Info = &SessionInfo{RunID: runID}
-			}
-			st.Info.Label = name
+			st.setLabelLocked(runID, name)
 		}
 		st.Mu.Unlock()
 		if commit && name != "" {
@@ -2443,10 +2451,7 @@ func (b *Broker) RenameRun(runID, name string) error {
 		name = runID
 	}
 	st.Mu.Lock()
-	if st.Info == nil {
-		st.Info = &SessionInfo{RunID: runID}
-	}
-	st.Info.Label = name
+	st.setLabelLocked(runID, name)
 	st.Mu.Unlock()
 	// The label is what a host publishes about this run, so a rename is a
 	// run-set change even though the set itself did not change.

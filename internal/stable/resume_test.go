@@ -275,6 +275,59 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	}
 }
 
+// TestResumeColdArmImplicitLabelUsesHarnessName pins the single resolution of
+// the implicit resume label: a completed runtime whose broker run carries a
+// harness name falls through to the cold arm, and the reported label is the
+// label the new runtime is registered under — the harness name — not the
+// prior display name with the follow-up suffix.
+func TestResumeColdArmImplicitLabelUsesHarnessName(t *testing.T) {
+	sup, provider := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "sentinel.env")
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		Agent: "claude", AutoApprove: true,
+		SentinelFile: sentinel,
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	finishResumeFixture(t, sup, prior, sentinel)
+	if err := sup.broker.SetHarnessName(prior.RuntimeID, "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+
+	newSentinel := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
+	newEventLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")
+	result, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+		SentinelFile: newSentinel, EventLog: newEventLog,
+	})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if result.Label != "harness-name" {
+		t.Fatalf("resume label = %q, want the harness name", result.Label)
+	}
+	resumed := sup.runtimeByID(result.RuntimeID)
+	if resumed == nil {
+		t.Fatalf("resumed runtime %q is not registered", result.RuntimeID)
+	}
+	resumed.mu.Lock()
+	registered := resumed.label
+	resumed.mu.Unlock()
+	if registered != result.Label {
+		t.Fatalf("runtime registered under %q but resume reported %q", registered, result.Label)
+	}
+	if got := sup.broker.DisplayName(result.RuntimeID); got != result.Label {
+		t.Fatalf("broker display name = %q, resume reported %q", got, result.Label)
+	}
+	// The cold arm ran: the provider resumed the prior session.
+	if resumes := provider.resumesRecorded(); len(resumes) != 1 || resumes[0] != "ses_resumed" {
+		t.Fatalf("provider resumes = %v, want [ses_resumed]", resumes)
+	}
+}
+
 func TestResumeKeyedReplayAdoptsFirstRun(t *testing.T) {
 	sup, provider := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
