@@ -626,6 +626,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let topLevelEnv: SubAgentEnv | null = null
     let centralSessionAbort: AbortController | null = null
     let centralTurnWrites: Promise<void> = Promise.resolve()
+    let centralPendingTurn: { generation: number; final_output: string; stop_reason: string; truncated: boolean } | null = null
     let topLevelRegistered = false
     let topLevelError: Error | null = null
     let topLevelTerminal = false
@@ -746,6 +747,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           consecutiveFailures = 0
           queuedMessages.push(...msgs)
           deliverQueuedMessages()
+          await publishCentralTurn()
         } catch (error) {
           // Broker unreachable while it is starting up is expected; persistent
           // failure (e.g. a rejected token) must not stay silent.
@@ -1746,6 +1748,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         topLevelRegistered = true
         topLevelError = null
         if (sessionCtx) await publishSessionName(sessionCtx)
+        await publishCentralTurn()
       } catch (error) {
         if (signal.aborted) return
         topLevelError = error instanceof Error ? error : new Error('central peer registration failed')
@@ -1803,6 +1806,30 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return hostMessageProvider(supervisorId)
     }
 
+    function publishCentralTurn(): Promise<void> {
+      const env = topLevelEnv
+      const generation = sessionGeneration
+      const signal = centralSessionAbort?.signal
+      if (!env || !topLevelRegistered || topLevelTerminal || !centralPendingTurn) return Promise.resolve()
+      centralTurnWrites = centralTurnWrites.then(async () => {
+        while (env === topLevelEnv && generation === sessionGeneration && topLevelRegistered && !topLevelTerminal && !signal?.aborted) {
+          const record = centralPendingTurn
+          if (!record || record.generation !== generation) return
+          try {
+            await postBroker(env, '/last_message', {
+              final_output: record.final_output, stop_reason: record.stop_reason, truncated: record.truncated,
+            }, fetch, signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000))
+            if (centralPendingTurn === record) centralPendingTurn = null
+          } catch (error) {
+            if (signal?.aborted) return
+            console.error('[avenor] central last-turn publication failed:', error instanceof BrokerHttpError ? `HTTP ${error.status}` : 'transport failure')
+            return
+          }
+        }
+      })
+      return centralTurnWrites
+    }
+
     // Report a failed last-turn record without disrupting the interactive
     // TUI. Every failure is emitted on the last-turn error channel, so a
     // suppressed repeat stays observable. The first failure in an episode
@@ -1834,20 +1861,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const bounded = boundFinalOutput(turn.text)
       const stopReason = normalizeTurnStopReason(turn.stopReason)
       const truncated = turn.text.length > bounded.length
-      const env = topLevelRegistered && !topLevelTerminal ? topLevelEnv : null
-      const generation = sessionGeneration
-      const signal = centralSessionAbort?.signal
-      const centralWrite = env ? centralTurnWrites = centralTurnWrites.then(async () => {
-        if (env !== topLevelEnv || generation !== sessionGeneration || signal?.aborted) return
-        try {
-          await postBroker(env, '/last_message', {
-            final_output: bounded, stop_reason: stopReason, truncated,
-          }, fetch, signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000))
-        } catch (error) {
-          if (signal?.aborted) return
-          console.error('[avenor] central last-turn publication failed:', error instanceof BrokerHttpError ? `HTTP ${error.status}` : 'transport failure')
-        }
-      }) : Promise.resolve()
+      if (topLevelBrokerUrl) {
+        centralPendingTurn = { generation: sessionGeneration, final_output: bounded, stop_reason: stopReason, truncated }
+      }
+      const centralWrite = publishCentralTurn()
       // Nobody can read a last-turn record while no supervisor exists, and
       // recording one must not start a supervisor (plus its broker) in a
       // session that never delegates. A supervisor whose connection is already
@@ -1890,6 +1907,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       sessionCtx = ctx
       sessionGeneration++
       const startingSessionGeneration = sessionGeneration
+      centralPendingTurn = null
       compacting = false
       clearPendingNotices()
       // The replaced session may have stopped polling with terminal runs still
@@ -1940,6 +1958,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       stopSubAgentPoll()
       centralSessionAbort?.abort()
       centralSessionAbort = null
+      centralPendingTurn = null
       const retiredEnv = topLevelEnv
       topLevelEnv = null
       topLevelRegistered = false

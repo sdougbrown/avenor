@@ -241,3 +241,85 @@ test('queued central turn records keep order and cannot publish into a restarted
     expect(records[0].run_id).not.toBe(records[1].run_id)
   } finally { firstWrite.resolve(Response.json({})); await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
+
+test('latest completed turn survives initial registration failures and publishes after registration recovers', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  let ready = false
+  const records: string[] = []
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(url)).pathname
+    if (path === '/register' && !ready) return Response.json({ error: 'unavailable' }, { status: 503 })
+    if (path === '/last_message' && init?.method === 'POST') records.push(JSON.parse(String(init.body)).final_output)
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { Supervisor: class { static currentInstance() { return undefined } } as never },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test' },
+    })
+    await h.eventHandlers.turn_end({ message: { content: 'old answer', stopReason: 'stop' } })
+    await h.eventHandlers.turn_end({ message: { content: 'latest answer', stopReason: 'stop' } })
+    ready = true
+    await waitFor(() => records.length > 0)
+    expect(records).toEqual(['latest answer'])
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
+
+test('failed last-turn publication retries latest content on polling recovery without another turn', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  let ready = false
+  const records: string[] = []
+  let attempts = 0
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    if (new URL(String(url)).pathname === '/last_message' && init?.method === 'POST') {
+      attempts++
+      if (!ready) throw new Error('connection reset')
+      records.push(JSON.parse(String(init.body)).final_output)
+    }
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { Supervisor: class { static currentInstance() { return undefined } } as never },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test' },
+    })
+    await h.eventHandlers.turn_end({ message: { content: 'old answer', stopReason: 'stop' } })
+    await h.eventHandlers.turn_end({ message: { content: 'latest answer', stopReason: 'error' } })
+    expect(attempts).toBeGreaterThanOrEqual(2)
+    ready = true
+    await waitFor(() => records.length > 0)
+    expect(records).toEqual(['latest answer'])
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
+
+test('a pending turn from failed registration is cleared before a new session registers', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  let ready = false
+  const records: string[] = []
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(url)).pathname
+    if (path === '/register' && !ready) return Response.json({}, { status: 503 })
+    if (path === '/last_message' && init?.method === 'POST') records.push(JSON.parse(String(init.body)).final_output)
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { Supervisor: class { static currentInstance() { return undefined } } as never },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test' },
+    })
+    await h.eventHandlers.turn_end({ message: { content: 'previous session', stopReason: 'stop' } })
+    await h.eventHandlers.session_shutdown({}, {})
+    ready = true
+    await h.eventHandlers.session_start({}, h.ctx)
+    await waitFor(() => b.calls.filter(c => c.path === '/poll-control').length >= 3)
+    expect(records).toEqual([])
+    await h.eventHandlers.turn_end({ message: { content: 'current session', stopReason: 'stop' } })
+    expect(records).toEqual(['current session'])
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
