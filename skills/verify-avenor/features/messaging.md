@@ -20,9 +20,10 @@ every surface returns the same snake_case result object
 - `withdraw` — retire a pending ask by `message_id`. Only a pending ask is
   retracted: a terminal one keeps its own outcome, so a timed-out ask answers
   `timed-out` with `ask "<id>" timed out; nothing was withdrawn`.
-- `resume` — continue a finished run as a new run: a new public run id, the
-  prior label plus `-followup` unless `label` overrides it, and the
-  `sentinel_file`/`on_event` paths the new run minted.
+- `resume` — continue a finished run with a new public run id and distinct
+  `sentinel_file`/`on_event` paths. Without an explicit label, warm continuation
+  keeps a harness name; otherwise the prior label gains `-followup`.
+  Cold continuation always uses the follow-up label unless `label` overrides it.
 - `control_reply` — retained in the contract for the retired claude-channel
   sidecar; every surface reports `unsupported_action`.
 

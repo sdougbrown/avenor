@@ -294,41 +294,6 @@ func TestWarmResumePendingMessageCleansReservedArtifacts(t *testing.T) {
 	}
 }
 
-func TestWarmResumeRejectsMessageArrivingDuringAdmission(t *testing.T) {
-	root := t.TempDir()
-	b := broker.New("")
-	b.CreateRun("rt", "")
-	if err := b.RenameRun("rt", "old-label"); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(root, "user-events")
-	if err := os.WriteFile(path, []byte("keep"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	child := &childRuntime{id: "rt", displayName: "old-label", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1), fullFinalOutput: "previous"}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
-	sup := &Supervisor{broker: b}
-	sup.testHooks.warmAdmissionAfterReservation = func() {
-		if err := b.Send("rt", "agent_message", nil, "msg"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_, warm, err := sup.admitWarmResume(child, SpawnParams{Label: "new-label", Prompt: "next", OnEvent: path, SentinelFile: filepath.Join(root, "new-sentinel")})
-	if !warm || err == nil {
-		t.Fatalf("admission: warm=%v err=%v", warm, err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil || string(data) != "keep" {
-		t.Fatalf("user event file changed: %q, %v", data, err)
-	}
-	if b.DisplayName("rt") != "old-label" || child.displayName != "old-label" || child.fullFinalOutput != "previous" || child.onEvent != filepath.Join(root, "old") || len(child.promptQueue) != 0 {
-		t.Fatal("rejected admission changed label or turn state")
-	}
-	if _, err := os.Stat(filepath.Join(root, "new-sentinel")); !os.IsNotExist(err) {
-		t.Fatalf("sentinel created: %v", err)
-	}
-}
-
 func TestWarmResumeWaitsForTurnBoundSend(t *testing.T) {
 	root := t.TempDir()
 	b := broker.New("")

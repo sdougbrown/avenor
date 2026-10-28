@@ -2228,9 +2228,13 @@ func openEventLogFile(path string, extra int) (*os.File, error) {
 		}
 		return nil, err
 	}
-	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		return nil, err
+	// Exclusive creation already bounds the mode to 0600; only a reused file
+	// needs tightening after open.
+	if extra&os.O_EXCL == 0 {
+		if err := file.Chmod(0o600); err != nil {
+			file.Close()
+			return nil, err
+		}
 	}
 	return file, nil
 }

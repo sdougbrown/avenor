@@ -275,12 +275,7 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	}
 }
 
-// TestResumeColdArmImplicitLabelUsesHarnessName pins the single resolution of
-// the implicit resume label: a completed runtime whose broker run carries a
-// harness name falls through to the cold arm, and the reported label is the
-// label the new runtime is registered under — the harness name — not the
-// prior display name with the follow-up suffix.
-func TestResumeColdArmImplicitLabelUsesHarnessName(t *testing.T) {
+func TestResumeColdArmKeepsHarnessLabelsUnambiguous(t *testing.T) {
 	sup, provider := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "sentinel.env")
@@ -306,8 +301,14 @@ func TestResumeColdArmImplicitLabelUsesHarnessName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if result.Label != "harness-name" {
-		t.Fatalf("resume label = %q, want the harness name", result.Label)
+	if result.Label != "harness-name-followup" {
+		t.Fatalf("resume label = %q, want the follow-up label", result.Label)
+	}
+	for label, want := range map[string]string{"harness-name": prior.RuntimeID, result.Label: result.RuntimeID} {
+		got, err := sup.resolveRunReference(label)
+		if err != nil || got != want {
+			t.Fatalf("resolve %q = %q, %v; want %q", label, got, err, want)
+		}
 	}
 	resumed := sup.runtimeByID(result.RuntimeID)
 	if resumed == nil {

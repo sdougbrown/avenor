@@ -69,6 +69,9 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 }
 
 func (s *Supervisor) performResume(prior *childRuntime, runID string, req messaging.ResumeRequest) (SpawnResult, error) {
+	if req.Message == "" {
+		return SpawnResult{}, &router.ToolError{Code: "refused", Message: "resume message is required"}
+	}
 	prior.mu.Lock()
 	label := prior.label
 	agent, model, backend := prior.effectiveAgent, prior.effectiveModel, prior.effectiveBackend
@@ -98,17 +101,7 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 	}
 	newLabel := req.Label
 	if newLabel == "" {
-		// The implicit label is resolved here, once, before SpawnParams is
-		// built: a harness name the broker run carries is what the runtime
-		// will be registered under on either resume arm, so it wins over the
-		// follow-up suffix and the result reports the registered label.
-		if harness := s.brokerHarnessName(runID); harness != "" {
-			newLabel = harness
-		} else {
-			// label falls back to the prior runtime id when the broker has no
-			// display name, so this is never just the suffix.
-			newLabel = label + runstate.FollowUpLabelSuffix
-		}
+		newLabel = label + runstate.FollowUpLabelSuffix
 	}
 
 	idempotencyKey := ""
@@ -137,6 +130,7 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 		resume: resumeSpawn{
 			runID:            req.RunID,
 			labelReservation: true,
+			implicitLabel:    req.Label == "",
 		},
 	}
 	spawned, err := s.resumeOnce(prior, runID, params)
@@ -171,7 +165,13 @@ func resumeResult(result SpawnResult) messaging.ResumeResult {
 // admission continues child.session, and pi has no cold arm, so no other
 // resume pays for the ladder's sentinel reads.
 func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams) (result SpawnResult, err error) {
-	result, warm, err := s.admitWarmResume(prior, p)
+	warmParams := p
+	if p.resume.implicitLabel {
+		if harness := s.brokerHarnessName(runID); harness != "" {
+			warmParams.Label = harness
+		}
+	}
+	result, warm, err := s.admitWarmResume(prior, warmParams)
 	if err != nil {
 		return result, err
 	}

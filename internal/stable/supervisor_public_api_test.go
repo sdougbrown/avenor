@@ -1078,31 +1078,36 @@ func TestResumeContinuesParkedRuntime(t *testing.T) {
 	provider := newItestProvider(
 		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "first")),
 		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "second")),
+		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "third")),
 	)
 	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
 	rt := h.spawn(nil)
 	h.awaitStatus(rt, "done")
-	h.awaitCondition("runtime parked", func() bool {
-		child := h.sup.runtimeByID(rt)
-		child.mu.Lock()
-		defer child.mu.Unlock()
-		return child.lc.isParked()
-	})
-	result, err := h.sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{
-		Target: rt, Message: "again", RunID: "follow-up",
-	})
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
+	previous := h.rawRuntimeStatus(rt)["sentinel_file"]
+	for _, output := range []string{"second", "third"} {
+		h.awaitCondition("runtime parked", func() bool {
+			child := h.sup.runtimeByID(rt)
+			child.mu.Lock()
+			defer child.mu.Unlock()
+			return child.lc.isParked()
+		})
+		result, err := h.sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{
+			Target: rt, Message: "again", RunID: output,
+		})
+		if err != nil {
+			t.Fatalf("Resume %s: %v", output, err)
+		}
+		if result.RuntimeID != rt || result.SessionID != "ses_warm" || result.SentinelFile == previous {
+			t.Fatalf("Resume %s = %+v; previous sentinel %v", output, result, previous)
+		}
+		previous = result.SentinelFile
+		h.log.waitFor(t, output+" turn", func(ev events.Event) bool {
+			out, _ := ev.Fields["final_output"].(string)
+			return itestEventIs("session.end", rt)(ev) && out == output
+		})
 	}
-	if result.RuntimeID != rt {
-		t.Fatalf("Resume runtime = %q, want parked runtime %q", result.RuntimeID, rt)
-	}
-	h.log.waitFor(t, "second turn", func(ev events.Event) bool {
-		out, _ := ev.Fields["final_output"].(string)
-		return itestEventIs("session.end", rt)(ev) && out == "second"
-	})
-	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
-		t.Fatalf("provider starts/resumes = %d/%d, want 1/1", starts, resumes)
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 2 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/2", starts, resumes)
 	}
 }
 

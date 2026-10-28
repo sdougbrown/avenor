@@ -165,14 +165,10 @@ func IdempotencyHash(p SpawnParams) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// ResumeIdempotencyHash derives the parameter hash for a keyed resume, the
-// resume-side sibling of IdempotencyHash so hashing for the idempotency store
-// has one home. The inputs are exactly the resolved run id plus the caller's
-// message and label, marshaled as a []string: that byte shape is what earlier
-// keyed resumes committed, so it must not change or committed replays would
-// miss the store and re-run. A future ResumeRequest field carrying caller
-// intent must be added here explicitly — unlike SpawnParams, the request is
-// not hashed wholesale, so a new field is silently excluded until it is.
+// ResumeIdempotencyHash hashes the resolved runtime id and caller-supplied
+// message and label for the supervisor's in-memory idempotency store. Add any
+// new ResumeRequest field carrying caller intent explicitly; artifact paths
+// and the public run id are per-attempt values, not intent.
 func ResumeIdempotencyHash(runID string, req messaging.ResumeRequest) (string, error) {
 	b, err := json.Marshal([]string{runID, req.Message, req.Label})
 	if err != nil {

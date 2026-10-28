@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/permission"
@@ -47,6 +48,54 @@ func TestPiWarmResumePreservesUnreadInbox(t *testing.T) {
 	messages, err := b.DrainAgentMessages("rt", 0)
 	if err != nil || len(messages) != 1 || messages[0].ID != "message-1" {
 		t.Fatalf("unread inbox changed: %+v, %v", messages, err)
+	}
+}
+
+func TestWarmResumeRejectsDerivedPermissionArtifactCollisions(t *testing.T) {
+	for _, suffix := range []string{".req", ".req.response"} {
+		t.Run(suffix, func(t *testing.T) {
+			root := t.TempDir()
+			sentinel := filepath.Join(root, "sentinel")
+			eventPath := cli.DerivePermBase(sentinel) + suffix
+			child := &childRuntime{id: "rt", derivedFileHandler: true, promptCh: make(chan struct{}, 1)}
+			initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+			_, _, err := (&Supervisor{}).admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: eventPath, SentinelFile: sentinel})
+			if err == nil {
+				_ = child.eventWriter.Close()
+				t.Fatal("admitted an event log at a permission protocol path")
+			}
+			if _, err := os.Stat(eventPath); !os.IsNotExist(err) {
+				t.Fatalf("rejected reservation left an event file: %v", err)
+			}
+			if child.onEvent != "" || len(child.promptQueue) != 0 {
+				t.Fatal("rejected reservation changed the turn")
+			}
+		})
+	}
+}
+
+func TestWarmResumeRejectsEmptyMessage(t *testing.T) {
+	root := t.TempDir()
+	b := broker.New("")
+	if _, err := b.CreateRun("rt", "worker"); err != nil {
+		t.Fatal(err)
+	}
+	child := &childRuntime{id: "rt", promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	sup := &Supervisor{broker: b, runtimes: map[string]*childRuntime{"rt": child}}
+	eventPath := filepath.Join(root, "events")
+	_, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{
+		Target: "rt", RunID: resumeUUID1, EventLog: eventPath, SentinelFile: filepath.Join(root, "sentinel"),
+	})
+	if err == nil {
+		_ = child.eventWriter.Close()
+		t.Fatal("admitted a resume with no message")
+	}
+	if len(child.promptQueue) != 0 {
+		t.Fatal("empty message changed the turn")
+	}
+	if _, err := os.Stat(eventPath); !os.IsNotExist(err) {
+		t.Fatalf("empty message reserved artifacts: %v", err)
 	}
 }
 

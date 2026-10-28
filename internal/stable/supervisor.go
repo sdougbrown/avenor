@@ -238,6 +238,10 @@ type resumeSpawn struct {
 	// labelReservation makes the spawn reserve Label even without an
 	// idempotency key, matching the reservation a keyed spawn gets.
 	labelReservation bool
+	// implicitLabel permits the warm arm to keep the existing harness name.
+	// A cold continuation uses its own follow-up label to avoid ambiguity
+	// with the completed runtime's broker record.
+	implicitLabel bool
 }
 
 type SpawnResult struct {

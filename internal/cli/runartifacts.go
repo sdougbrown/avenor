@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
+	"github.com/sdougbrown/avenor/internal/permission"
 )
 
 // atomicWriteHook, when non-nil, observes each successful atomic write by
@@ -42,10 +43,10 @@ func validateArtifactPaths(resultFile, pidFile, sentinelFile, onEvent, permissio
 		{"--on-event", onEvent, false},
 	}
 	if sentinelFile != "" && permissionHandler == "" && !autoApprove {
-		base := DerivePermBase(sentinelFile)
+		request, response := permission.FilePaths(DerivePermBase(sentinelFile))
 		artifacts = append(artifacts,
-			artifact{"the permission request file", base + ".req", false},
-			artifact{"the permission response file", base + ".req.response", false},
+			artifact{"the permission request file", request, false},
+			artifact{"the permission response file", response, false},
 		)
 	}
 	type seenPath struct {

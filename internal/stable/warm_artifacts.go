@@ -190,11 +190,24 @@ func (s *Supervisor) reserveWarmResumeArtifacts(child *childRuntime, p SpawnPara
 			_ = os.RemoveAll(dir)
 		}
 	}
-	for _, pair := range [][2]string{{onEvent, sentinel}, {onEvent, child.onEvent}, {onEvent, child.sentinelFile}, {sentinel, child.onEvent}, {sentinel, child.sentinelFile}} {
-		if sameArtifact(pair[0], pair[1]) {
-			cleanup()
-			return warmResumeArtifacts{}, fmt.Errorf("warm resume artifact paths must be distinct")
+	paths := []string{onEvent, sentinel}
+	previous := []string{child.onEvent, child.sentinelFile}
+	if child.derivedFileHandler {
+		request, response := permission.FilePaths(cli.DerivePermBase(sentinel))
+		paths = append(paths, request, response)
+		if child.sentinelFile != "" {
+			request, response = permission.FilePaths(cli.DerivePermBase(child.sentinelFile))
+			previous = append(previous, request, response)
 		}
+	}
+	for _, path := range paths {
+		for _, other := range previous {
+			if sameArtifact(path, other) {
+				cleanup()
+				return warmResumeArtifacts{}, fmt.Errorf("warm resume artifact paths must be distinct")
+			}
+		}
+		previous = append(previous, path)
 	}
 	if _, err := os.Lstat(sentinel); err == nil {
 		cleanup()
