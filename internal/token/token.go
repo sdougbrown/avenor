@@ -18,6 +18,12 @@ const EnvBrokerParentToken = "AVENOR_PARENT_BROKER_TOKEN"
 // supervisor autostart joins a hub without command-line changes.
 const EnvBrokerParentURL = "AVENOR_PARENT_BROKER_URL"
 
+// EnvBrokerAdvertiseURL carries the URL other hosts reach this broker on to
+// `avenor stable` when no --broker-advertise-url flag is given. An env-only
+// value is how a supervisor started by a launcher advertises the address a TLS
+// terminator or NAT publishes it under, without command-line changes.
+const EnvBrokerAdvertiseURL = "AVENOR_BROKER_ADVERTISE_URL"
+
 // EnvControlIdentityToken carries the supervisor ownership credential through
 // the nested supervisor's inherited readiness pipe. It is defined here so the
 // MCP spawn path and the control server that reads it back agree on the name.

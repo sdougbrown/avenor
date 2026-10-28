@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/stable"
@@ -24,6 +25,7 @@ func stableTestEnv(t *testing.T) string {
 	t.Setenv(token.EnvBrokerParentURL, "")
 	t.Setenv(token.EnvBrokerParentToken, "")
 	t.Setenv(stable.EnvMCPLaunchWrapperPolicy, "")
+	t.Setenv(token.EnvBrokerAdvertiseURL, "")
 	return dir
 }
 
@@ -388,6 +390,96 @@ func TestRunStableBrokerParentEnvURLRequiresToken(t *testing.T) {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want the guard error naming %s", stderr.String(), want)
 		}
+	}
+}
+
+// TestRunStableBrokerAdvertiseURLPropagation: the advertised broker URL reaches
+// the supervisor config from the flag or, when the flag is empty, from
+// $AVENOR_BROKER_ADVERTISE_URL.
+func TestRunStableBrokerAdvertiseURLPropagation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag string
+		env  string
+		want string
+	}{
+		{name: "flag", flag: "https://flag.example.com:8443", env: "https://env.example.com", want: "https://flag.example.com:8443"},
+		{name: "env", env: "https://env.example.com", want: "https://env.example.com"},
+		{name: "neither", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := stableTestEnv(t)
+			socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
+
+			var captured *stable.Config
+			orig := newSupervisorFn
+			newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
+				captured = &cfg
+				return orig(cfg)
+			}
+			t.Cleanup(func() { newSupervisorFn = orig })
+
+			t.Setenv(token.EnvBrokerAdvertiseURL, tc.env)
+			args := []string{"--control-socket", socketPath}
+			if tc.flag != "" {
+				args = append(args, "--broker-advertise-url", tc.flag)
+			}
+			_ = runStable(args)
+			if captured == nil {
+				t.Fatal("config was not captured; the constructor seam was not hit")
+			}
+			if captured.BrokerAdvertiseURL != tc.want {
+				t.Fatalf("Config.BrokerAdvertiseURL = %q, want %q", captured.BrokerAdvertiseURL, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunStableInvalidBrokerAdvertiseURLExits pins the CLI surface of the
+// refusal: the flag reaches startup and returns exit code 1. What the refusal
+// writes and withholds is pinned once, in
+// internal/stable.TestInvalidAdvertiseURLFailsStartup.
+func TestRunStableInvalidBrokerAdvertiseURLExits(t *testing.T) {
+	tmpDir := stableTestEnv(t)
+	socketPath := filepath.Join(tmpDir, "advertise-invalid.sock")
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = oldStderr
+		_ = w.Close()
+		_ = r.Close()
+	}()
+
+	// runStable parks in the supervisor's run loop when it does not exit, so a
+	// regression that stops the rejected URL from short-circuiting startup
+	// would hang this test until the package timeout. Bound the wait so the
+	// regression is reported while the suite is still usable.
+	exited := make(chan int, 1)
+	go func() {
+		exited <- runStable([]string{"--control-socket", socketPath, "--broker-advertise-url", "hub.example.com:8787"})
+	}()
+	var code int
+	select {
+	case code = <-exited:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("runStable did not exit on the rejected advertise URL within 30s; startup no longer stops on invalid --broker-advertise-url")
+	}
+	_ = w.Close()
+	os.Stderr = oldStderr
+	var stderr bytes.Buffer
+	if _, err := io.Copy(&stderr, r); err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	if code != 1 {
+		t.Fatalf("runStable(invalid advertise url) = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "broker advertise URL") {
+		t.Fatalf("stderr = %q, want it to name the rejected advertised URL", stderr.String())
 	}
 }
 

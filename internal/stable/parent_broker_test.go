@@ -5,7 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -418,4 +422,81 @@ func parentLinkedPost(t *testing.T, addr, path, runID, token string, body map[st
 	var decoded map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&decoded)
 	return resp.StatusCode, decoded
+}
+
+// TestAdvertisedBrokerURLIsTheParentRelayEndpoint pins the routing side of an
+// advertised address: the branch registers the URL a TLS terminator publishes
+// rather than the address it bound, and a relay the parent posts to that URL
+// still reaches the run. The terminator here is a reverse proxy in front of the
+// bound address, so a regression back to the bound address leaves the proxy
+// unused.
+func TestAdvertisedBrokerURLIsTheParentRelayEndpoint(t *testing.T) {
+	parentBroker, parentLink := startTestParentBroker(t)
+	bindAddr := reserveStableLoopbackAddr(t)
+
+	var relays atomic.Int64
+	terminator := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: bindAddr})
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/relay" {
+			relays.Add(1)
+		}
+		terminator.ServeHTTP(w, r)
+	}))
+	t.Cleanup(proxy.Close)
+
+	socketPath := newStableSocketPath(t, "advertised-relay")
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:      socketPath,
+		MaxRuntimes:        2,
+		BrokerAddr:         bindAddr,
+		BrokerAdvertiseURL: proxy.URL,
+		BrokerParentURL:    "http://" + parentBroker.Addr(),
+		BrokerParentToken:  testLinkToken,
+	})
+	t.Cleanup(func() { _ = sup.Shutdown("kill") })
+
+	branchID := parentlink.BranchID(socketPath, testHost())
+	supervisorKey := messaging.SupervisorRunID + "@" + branchID
+	awaitRegistryOwner(t, "the parent to adopt the advertised branch", parentLink.Registry(), supervisorKey)
+	hop, ok := parentLink.Registry().Hop(supervisorKey)
+	if !ok {
+		t.Fatalf("the parent holds no hop for %q", supervisorKey)
+	}
+	if hop.Endpoint != proxy.URL {
+		t.Fatalf("registered endpoint = %q, want the advertised %q", hop.Endpoint, proxy.URL)
+	}
+
+	if _, err := sup.broker.CreateRun("rt_advertised", "advertised"); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	runKey := "rt_advertised@" + branchID
+	awaitRegistryOwner(t, "the parent to adopt the advertised branch's run", parentLink.Registry(), runKey)
+
+	if _, err := parentBroker.CreateRun("rt_asker", "asker"); err != nil {
+		t.Fatalf("create the asker run: %v", err)
+	}
+	transport := parentBroker.MessengerTransport()
+	t.Cleanup(func() { _ = transport.Close() })
+	ctx := context.Background()
+	pre, err := transport.Preflight(ctx)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	msgID := newStableMsgID(t)
+	sent, err := transport.Send(ctx, messaging.SendRequest{
+		From:       messaging.Identity{RunID: "rt_asker", Sender: "asker"},
+		To:         messaging.Identity{RunID: runKey},
+		MessageID:  msgID,
+		Generation: pre.Generation,
+		Body:       `{"message":"through the terminator"}`,
+	})
+	if err != nil || sent.Outcome != messaging.OutcomeSent {
+		t.Fatalf("cross-branch ask = (%+v, %v), want sent", sent, err)
+	}
+	if asker := deliveredAsker(t, sup.broker, "rt_advertised", msgID); asker != "rt_asker" {
+		t.Fatalf("delivered asker = %q, want the asker the parent relayed to", asker)
+	}
+	if got := relays.Load(); got != 1 {
+		t.Fatalf("the terminator forwarded %d relay requests, want exactly 1", got)
+	}
 }

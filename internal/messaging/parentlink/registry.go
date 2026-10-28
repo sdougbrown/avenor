@@ -8,7 +8,6 @@ package parentlink
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 	"sync"
 
@@ -162,25 +161,17 @@ func (r *Registry) Register(reg messaging.DescendantRegistration) (messaging.Des
 // validEndpoint refuses an endpoint the relay could not post to. The relay
 // posts the target run's credential to the endpoint a child registered, so an
 // endpoint that is not an absolute http address is refused rather than
-// carried. An empty endpoint names no route at all and is left to the hop.
+// carried. The shape a peer can post broker routes to is messaging's own rule:
+// ParseBrokerURL refuses a path prefix, a query that the relay's concatenated
+// hop would swallow, userinfo, an invalid port and an unspecified host. What
+// stays relay-specific here is that an empty endpoint names no route at all and
+// is left to the hop.
 func validEndpoint(endpoint string) error {
 	if endpoint == "" {
 		return nil
 	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return fmt.Errorf("%w: the branch's endpoint is not a URL: %v", messaging.ErrInvalidRequest, err)
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("%w: the branch's endpoint must be an http address", messaging.ErrInvalidRequest)
-	}
-	if parsed.Host == "" {
-		return fmt.Errorf("%w: the branch's endpoint names no host", messaging.ErrInvalidRequest)
-	}
-	// The relay posts its hop to the endpoint's root, so a path under the host
-	// would be one the relay never sends to.
-	if parsed.EscapedPath() != "" {
-		return fmt.Errorf("%w: the branch's endpoint must be its broker's root address", messaging.ErrInvalidRequest)
+	if _, err := messaging.ParseBrokerURL(endpoint); err != nil {
+		return fmt.Errorf("%w: the branch's endpoint %v", messaging.ErrInvalidRequest, err)
 	}
 	return nil
 }

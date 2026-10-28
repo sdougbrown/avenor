@@ -257,6 +257,38 @@ when a later startup step fails. An abrupt kill can leave a stale record;
 its presence is not proof of a live broker. Check the control socket or the
 broker's `/health` endpoint before using it.
 
+### Publishing a different address
+
+When a TLS terminator or NAT publishes the broker under another host, port or
+scheme, name that address with `--broker-advertise-url` (or
+`AVENOR_BROKER_ADVERTISE_URL`; a non-empty flag wins):
+
+```sh
+avenor stable --control-socket /run/avenor/hub.sock \
+  --broker-addr 127.0.0.1:8787 \
+  --broker-advertise-url https://hub.example.com &
+cat /run/avenor/hub.sock.broker.url
+# https://hub.example.com
+```
+
+That URL replaces the bound address in two places, and only those two: the
+`<socket>.broker.url` record and the endpoint the broker registers with its
+parent, which is where a parent posts its relays. Children and in-process
+transports on this host keep the bound address, so a local child never has to
+round-trip through the terminator. A branch that a hub must reach through a
+terminator publishes its address the same way.
+
+The value must be an absolute `http://` or `https://` root URL naming a host,
+with no credentials, query or fragment; one trailing slash is accepted. A path
+prefix or query would break every broker route, so a value carrying one is
+refused. An `https` URL is dialed with the host's system trust store, so the
+terminator's certificate must be one the dialing peer trusts. A value that
+fails validation stops startup instead of falling back to the bound address,
+because the operator replaced that address on purpose. A value also requires
+the concrete `--broker-addr` bind from the example: over the default ephemeral
+bind the published URL would hide the actually bound port, so that pair stops
+startup too.
+
 The broker is cleartext HTTP with per-run bearer credentials. A trusted
 network therefore means every client that can reach the broker port is
 trusted: the credentials are not an admission gate for arbitrary network
@@ -283,7 +315,8 @@ supervisor's stderr. A resume or a relaunch of a run the supervisor itself
 minted is unaffected. There is no TLS listener, so
 a hub
 exposed beyond that network needs a channel that supplies both confidentiality
-and admission control.
+and admission control; `--broker-advertise-url` names that channel's public
+address and changes nothing about what the broker itself accepts.
 
 ## Linking a branch
 
@@ -311,9 +344,11 @@ token (neither the env var nor the flag) exits with an error.
 A branch's broker must also be reachable *from* the hub, because the hub relays
 an ask into the branch's own endpoint. On one host the default ephemeral
 loopback bind is enough. Across hosts, manually launch the hub and each branch
-with `--broker-addr` on a concrete interface. Branches must reach the hub, and
-the hub must reach each branch. Autostart cannot configure this address and
-keeps the ephemeral loopback bind. The parent link is not a tunnel: both
+with `--broker-addr` on a concrete interface, plus `--broker-advertise-url`
+where a terminator or NAT puts the branch behind another address. Branches must
+reach the hub, and the hub must reach each branch. Autostart cannot configure
+these addresses and keeps the ephemeral loopback bind; a nested supervisor does
+not inherit the advertised address. The parent link is not a tunnel: both
 directions of the deployment must be addressable.
 
 The hub can discover and address registered branches' runs. Descendant callers

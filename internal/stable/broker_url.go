@@ -11,11 +11,11 @@ import (
 // BrokerURLPath locates the one-line HTTP URL record beside the control socket.
 func BrokerURLPath(socketPath string) string { return socketPath + ".broker.url" }
 
-// publishBrokerURL records the broker's actual address beside the control
+// publishBrokerURL records the broker's advertised address beside the control
 // socket. Run calls it only after the control server owns the socket, so a
 // competing supervisor that loses the socket never overwrites the live record.
 func (s *Supervisor) publishBrokerURL() error {
-	url := s.brokerURL()
+	url := s.externalBrokerURL()
 	if url == "" || s.config.ControlSocket == "" {
 		return nil
 	}

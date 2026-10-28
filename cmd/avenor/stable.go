@@ -33,7 +33,8 @@ func runStable(args []string) int {
 	workflowAdapterDir := fs.String("workflow-adapter-dir", "", "host-owned trusted adapter manifest directory (default: $XDG_CONFIG_HOME/avenor/workflow-adapters, else $HOME/.config/avenor/workflow-adapters)")
 	brokerParentURL := fs.String("broker-parent-url", "", "http:// address of the parent broker to join. An empty flag uses $AVENOR_PARENT_BROKER_URL. The credential comes from $AVENOR_PARENT_BROKER_TOKEN (or --broker-parent-token as an explicit override); a credential without a URL runs this broker as the tree's parent broker")
 	brokerParentToken := fs.String("broker-parent-token", "", "parent-link credential overriding $AVENOR_PARENT_BROKER_TOKEN; prefer the env var, since argv is world-readable via /proc/<pid>/cmdline")
-	brokerAddr := fs.String("broker-addr", "", "address the broker binds, published beside the control socket as <socket>.broker.url. Empty binds an ephemeral loopback port; a durable hub names a concrete interface address and fixed port (e.g. 127.0.0.1:8787). A wildcard bind is refused because the advertised address must be reachable by children and parent branches")
+	brokerAddr := fs.String("broker-addr", "", "address the broker binds, published beside the control socket as <socket>.broker.url. Empty binds an ephemeral loopback port; a durable hub names a concrete interface address and fixed port (e.g. 127.0.0.1:8787). A wildcard bind is refused because children on this host are told to reach the bound address, which a wildcard does not name")
+	brokerAdvertiseURL := fs.String("broker-advertise-url", "", "http:// or https:// URL other hosts reach this broker on, used for the <socket>.broker.url record and registration with the parent broker. Empty advertises the bound address. Use it when a TLS terminator or NAT publishes the broker under another host, port or scheme; children on this host keep the bound address")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -52,6 +53,10 @@ func runStable(args []string) int {
 	parentURL := *brokerParentURL
 	if parentURL == "" {
 		parentURL = strings.TrimSpace(os.Getenv(token.EnvBrokerParentURL))
+	}
+	advertiseURL := *brokerAdvertiseURL
+	if advertiseURL == "" {
+		advertiseURL = os.Getenv(token.EnvBrokerAdvertiseURL)
 	}
 	if parentURL != "" && credential == "" {
 		fmt.Fprintf(os.Stderr, "avenor stable: %s or --broker-parent-token must be set when %s or --broker-parent-url supplies a parent broker URL\n", token.EnvBrokerParentToken, token.EnvBrokerParentURL)
@@ -94,6 +99,7 @@ func runStable(args []string) int {
 		BrokerParentURL:            parentURL,
 		BrokerParentToken:          credential,
 		BrokerAddr:                 *brokerAddr,
+		BrokerAdvertiseURL:         advertiseURL,
 	})
 	if treeBudgetFile == "" {
 		// Root: propagate the tree budget path to descendant processes.
