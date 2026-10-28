@@ -18,7 +18,7 @@ import { Supervisor, retainLiveIdentity, type RunInfo } from '../supervisor.js'
 import { newMsgID, type MessageOutcome } from '../messaging-text.js'
 import { ToolError } from '../message.js'
 import { findExternalRunById, listExternalRuns, registerExternalRun } from './run-registry.js'
-import { RESUMABLE_SENTINEL_STATUSES } from './sentinel-status.js'
+import { RESUMABLE_SENTINEL_STATUSES, TERMINAL_SENTINEL_STATUSES } from './sentinel-status.js'
 import type {
   MessageProvider,
   MessageSurface,
@@ -294,13 +294,6 @@ function peerFacts(peer: PeerRecord | undefined): RunFacts {
   const translation = translateRunFacts(peer?.status ?? '', '')
   return { live: translation.live, resumable: false, status: translation.status }
 }
-
-/**
- * The terminal sentinel statuses the registry's state fallback answers from,
- * matching the Go `terminalStatusFromRunInfo` set: a run that settled before a
- * supervisor restart keeps its outcome discoverable by run id.
- */
-const TERMINAL_SENTINEL_STATUSES = new Set(['DONE', 'FAILED', 'BLOCKED', 'TIMEOUT', 'KILLED'])
 
 /** Read one sentinel file's status word, or undefined when the file is unreadable. */
 async function readSentinelStatus(filePath: string): Promise<string | undefined> {
