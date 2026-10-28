@@ -11,7 +11,9 @@ import (
 
 // cliSessionIdentity is the complete provider identity attached to a session
 // during one non-stable CLI run. Empty fields are authoritative once recorded;
-// callers may omit them on resume, but may not replace them.
+// callers may omit them on resume, but may not replace them. launch is the
+// exception: every resume resolves the launch before restoring the identity,
+// so it is never omitted and is always compared against the recorded spec.
 type cliSessionIdentity struct {
 	backend       string
 	agent         string

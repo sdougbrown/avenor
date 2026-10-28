@@ -24,7 +24,9 @@ type Spec struct {
 	Settings string
 }
 
-// IsZero reports whether the spec carries no launch identity at all.
+// IsZero reports whether the spec carries no launch identity at all. An
+// explicit empty Args is present, not absent: the launch honors it as "no
+// arguments", which is a different identity from an entry that named none.
 func (s Spec) IsZero() bool {
 	return s.Command == "" && s.Args == nil && s.Settings == ""
 }
@@ -36,12 +38,14 @@ func (s Spec) Equal(other Spec) bool {
 
 // Diff returns the first ownership field ("command", "args" or "settings")
 // whose value differs between two specs, or "" when they are identical. The
-// name is the roster field, so a conflict message can name what changed.
+// name is the roster field, so a conflict message can name what changed. Args
+// compare by presence and value, like IsZero: an explicit empty list is a
+// different launch identity from an absent one.
 func Diff(a, b Spec) string {
 	switch {
 	case a.Command != b.Command:
 		return "command"
-	case !slices.Equal(a.Args, b.Args):
+	case (a.Args == nil) != (b.Args == nil) || !slices.Equal(a.Args, b.Args):
 		return "args"
 	case a.Settings != b.Settings:
 		return "settings"
@@ -118,6 +122,12 @@ func Fields(backend string) []string {
 
 // Validate reports the first field in input that backend does not declare.
 // Only a backend that registered the field may carry it in a roster entry.
+//
+// Owner note: this function hard-codes the launch field vocabulary below
+// against the fixed Input struct. A backend that registered a differently
+// named field would be advertised by Fields yet never validated or populated,
+// so a second launch backend with new field names must extend this table and
+// Input. Stage 1 has exactly one such backend.
 func Validate(backend string, input Input) error {
 	fields := Fields(backend)
 	for _, field := range []struct {

@@ -14,6 +14,7 @@ package factory
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/agy"
@@ -48,6 +49,17 @@ var knownBackends = map[string]bool{
 // question a caller otherwise re-lists by hand before a provider exists.
 func IsKnown(backend string) bool {
 	return knownBackends[backend]
+}
+
+// KnownBackends returns every backend name this build registers, sorted, so a
+// caller that must cover all of them iterates this instead of re-listing them.
+func KnownBackends() []string {
+	names := make([]string, 0, len(knownBackends))
+	for name := range knownBackends {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // noProcessBackends connect to an already-running or in-process runtime and

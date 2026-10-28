@@ -64,13 +64,10 @@ func (p *Provider) AnswerPermission(context.Context, string, string, runtime.Per
 	return ErrNotImplemented
 }
 
-// Capabilities describes the backend the protocol client will provide. The
-// executable's own capabilities are read from its handshake at Start.
+// Capabilities describes what this Stage 1 backend can do: nothing beyond
+// being poo. Resume, permissions and model selection are reported when the
+// protocol client that implements them lands, since Stage 1 has no handshake
+// to read them from.
 func (p *Provider) Capabilities(context.Context) (runtime.Capabilities, error) {
-	return runtime.Capabilities{
-		Backend:        backendID,
-		Permissions:    true,
-		Resume:         true,
-		ModelSelection: true,
-	}, nil
+	return runtime.Capabilities{Backend: backendID}, nil
 }
