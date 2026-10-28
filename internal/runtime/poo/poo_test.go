@@ -177,10 +177,27 @@ func TestRosterPooEntryWithThinkingIsRefused(t *testing.T) {
 	}
 }
 
-func TestProviderStartReportsTheStageOneBoundary(t *testing.T) {
+// A start with no resolved executable fails before any process is spawned, and
+// the error says what the launch was missing.
+func TestProviderStartWithoutAResolvedLaunchFails(t *testing.T) {
 	provider := NewWithOptions(runtime.StartOptions{})
 	_, err := provider.Start(context.Background(), runtime.StartOptions{})
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("Start() error = %v, want ErrNotImplemented", err)
+	if err == nil {
+		t.Fatal("Start() with no resolved launch returned no error")
+	}
+	if !strings.Contains(err.Error(), "no poo executable") {
+		t.Fatalf("Start() error = %q, want the missing executable named", err)
+	}
+}
+
+// AnswerPermission and Resume are Stage 3: they report the boundary instead of
+// pretending to work.
+func TestProviderStageThreeCallsReportTheBoundary(t *testing.T) {
+	provider := NewWithOptions(runtime.StartOptions{})
+	if _, err := provider.Resume(context.Background(), "session"); !errors.Is(err, ErrNotImplemented) {
+		t.Fatalf("Resume() error = %v, want ErrNotImplemented", err)
+	}
+	if err := provider.AnswerPermission(context.Background(), "session", "ask", runtime.PermissionResponse{}); !errors.Is(err, ErrNotImplemented) {
+		t.Fatalf("AnswerPermission() error = %v, want ErrNotImplemented", err)
 	}
 }

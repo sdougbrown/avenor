@@ -9,6 +9,8 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/pelletier/go-toml/v2 v2.4.3
+	github.com/sdougbrown/cli-registry v0.1.1
+	github.com/sdougbrown/poo v0.0.0-20261026182242-c2c83a6eb044
 	golang.org/x/sys v0.41.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
