@@ -1921,16 +1921,8 @@ func (b *Broker) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusBadRequest, "target is required", "invalid-request")
 		return
 	}
-	st := b.GetRun(target)
-	if st == nil {
+	if !b.reachable(target) {
 		writeCodedError(w, http.StatusNotFound, "run not found: "+target, "target-unavailable")
-		return
-	}
-	st.Mu.Lock()
-	gone := st.peerUnavailableLocked(time.Now())
-	st.Mu.Unlock()
-	if gone != "" {
-		writePeerGone(w, gone)
 		return
 	}
 	record, hasRecord := b.LastAgentMessage(target)
@@ -2218,6 +2210,19 @@ func (b *Broker) handleSessionName(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- accessors ---
+
+// reachable reports whether runID can still take a message: the record exists
+// and its peer identity is neither retired nor expired. It is the question a
+// routing boundary asks about a target it did not authenticate as.
+func (b *Broker) reachable(runID string) bool {
+	st := b.GetRun(runID)
+	if st == nil {
+		return false
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	return st.peerUnavailableLocked(time.Now()) == ""
+}
 
 // GetRun returns runID's record, including the tombstone a retired or expired
 // peer leaves behind. Whether that identity may still be reached is a separate
@@ -2775,7 +2780,7 @@ func (m localMessenger) Tell(ctx context.Context, req messaging.TellRequest) err
 }
 
 func (m localMessenger) Reachable(runID string) bool {
-	return m.broker.GetRun(runID) != nil
+	return m.broker.reachable(runID)
 }
 
 func (m localMessenger) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {

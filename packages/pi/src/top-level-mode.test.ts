@@ -69,6 +69,10 @@ test('central-only peer listing does not create a supervisor and tell does not i
     await waitFor(() => h!.sendUserMessage.mock.calls.length > 0)
     const frame = String(h.sendUserMessage.mock.calls[0][0])
     expect(frame).toContain('hello')
+    expect(frame).toContain('Message from peer')
+    // The framing is what makes a peer's words read as a peer's, so it is pinned
+    // here where the tell is actually delivered, not only on the formatter.
+    expect(frame).toContain('another session')
     expect(frame).not.toContain('reply_to')
     expect((await h.registeredTools.avenor_message.execute('r', { action: 'reply', reply_to: 'tell', message: 'bad' })).details.outcome).toBe('edge-absent')
     b.disconnect()

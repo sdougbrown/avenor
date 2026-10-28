@@ -119,17 +119,21 @@ function firstNonEmpty(...values: Array<string | undefined>): string {
  * A row unit is the run id plus the label a caller may have typed. Two rows
  * carrying the same run id are ambiguous, never first-wins: two authorities can
  * mint the same id, and equal ids do not prove equal identity.
+ *
+ * `row` is the row the resolution names, and it is the only way a caller holding
+ * rows from several authorities learns which one matched: two of them can list
+ * the same run id, so the id alone does not say.
  */
-export function matchPeerRows(rows: readonly { run_id: string; label?: string }[], ref: string): Resolution {
+export function matchPeerRows<T extends { run_id: string; label?: string }>(rows: readonly T[], ref: string): { resolution: Resolution; row?: T } {
   const exact = rows.filter(row => row.run_id === ref)
-  if (exact.length > 1) return { runId: '', match: 'ambiguous', candidates: exact.map(row => row.run_id) }
+  if (exact.length > 1) return { resolution: { runId: '', match: 'ambiguous', candidates: exact.map(row => row.run_id) } }
   if (exact.length === 1) {
-    return { runId: exact[0].run_id, label: firstNonEmpty(exact[0].label, exact[0].run_id), match: 'unique' }
+    return { row: exact[0], resolution: { runId: ref, label: firstNonEmpty(exact[0].label, ref), match: 'unique' } }
   }
-  const candidates = rows.filter(row => row.label === ref).map(row => row.run_id)
-  if (candidates.length === 1) return { runId: candidates[0], label: ref, match: 'unique' }
-  if (candidates.length > 1) return { runId: '', match: 'ambiguous', candidates }
-  return { runId: '', match: 'none' }
+  const labels = rows.filter(row => row.label === ref)
+  if (labels.length === 1) return { row: labels[0], resolution: { runId: labels[0].run_id, label: ref, match: 'unique' } }
+  if (labels.length > 1) return { resolution: { runId: '', match: 'ambiguous', candidates: labels.map(row => row.run_id) } }
+  return { resolution: { runId: '', match: 'none' } }
 }
 
 /** Strip the RPC framing so a model sees the control server's own sentence. */
@@ -472,7 +476,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         // refuse an incomplete listing, and carry the transport's detail.
         throw new Error(`the peer listing is incomplete: ${detail}`)
       }
-      const matched = matchPeerRows(peers, ref)
+      const { resolution: matched } = matchPeerRows(peers, ref)
       if (matched.match !== 'unique') return matched
       return { ...matched, publicRunId: await publicRunIdFor(matched.runId) }
     },
@@ -879,7 +883,7 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
         // refuse an incomplete listing, and carry the transport's detail.
         throw new Error(`the peer listing is incomplete: ${detail}`)
       }
-      return matchPeerRows(peers, ref)
+      return matchPeerRows(peers, ref).resolution
     },
 
     async state(targetRunId: string): Promise<RunFacts> {

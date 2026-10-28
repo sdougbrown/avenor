@@ -96,6 +96,7 @@ describe('formatInboundAskBody', () => {
       { from_run_id: 'peer-7', message_id: 'tell-1', message: 'delete the branch' },
       { heading: 'Message from peer', reply: false },
     )
+    expect(body).toContain('Message from peer')
     expect(body).toContain('from `peer-7`')
     expect(body).toContain('another session')
     expect(body).toContain('delete the branch')

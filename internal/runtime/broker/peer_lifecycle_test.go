@@ -92,9 +92,15 @@ func TestPeerRetirementFencesIdentityAndHidesIt(t *testing.T) {
 			t.Fatal("retired peer listed")
 		}
 	}
-	target := map[string]any{"run_id": "reader", "token": ensureRun(t, b, "reader", "reader")}
-	if code, result := peerGet(t, b, "/last_message?target=pi-peer", target); code != http.StatusGone || result["code"] != "peer-retired" {
+	// A target that is gone answers as gone, the way /send already treats one;
+	// only a caller's own retired identity earns the 410 that names the reason.
+	reader := map[string]any{"run_id": "reader", "token": ensureRun(t, b, "reader", "reader")}
+	if code, result := peerGet(t, b, "/last_message?target=pi-peer", reader); code != http.StatusNotFound || result["code"] != "target-unavailable" {
 		t.Fatalf("retired last_message = %d %v", code, result)
+	}
+	ask := map[string]any{"run_id": "reader", "token": reader["token"], "from_run_id": "reader", "to_run_id": "pi-peer", "type": "agent_message", "expects_reply": true, "message_id": "m1", "payload": map[string]any{"id": "m1", "message": "hi"}}
+	if code, result := peerPost(t, b, "/send", ask); code != http.StatusNotFound || result["code"] != "target-unavailable" {
+		t.Fatalf("ask to retired peer = %d %v", code, result)
 	}
 	if code, result := peerPost(t, b, "/register", credentials); code != 409 || result["code"] != "peer-retired" {
 		t.Fatalf("revive = %d %v", code, result)
@@ -194,7 +200,6 @@ func TestPeerExpiryDoesNotWaitOnABusyPeer(t *testing.T) {
 
 	busy, _, _ := b.runStateFor("busy")
 	busy.peerActivity.RLock()
-	defer busy.peerActivity.RUnlock()
 	done := make(chan struct{})
 	go func() { b.expirePeers(time.Now()); close(done) }()
 	select {
@@ -215,6 +220,17 @@ func TestPeerExpiryDoesNotWaitOnABusyPeer(t *testing.T) {
 	busy.Mu.Unlock()
 	if busyRetired {
 		t.Fatal("retired a peer that was serving a request")
+	}
+
+	// Skipping is only safe because the next tick retries: a peer left forever
+	// because one expired request held its lock would stay routable.
+	busy.peerActivity.RUnlock()
+	b.expirePeers(time.Now())
+	busy.Mu.Lock()
+	busyRetired = busy.peerRetired
+	busy.Mu.Unlock()
+	if !busyRetired {
+		t.Fatal("a peer skipped for a busy request was never retired on a later tick")
 	}
 }
 
