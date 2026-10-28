@@ -325,7 +325,7 @@ Requires ownership.
 
 #### `spawn_mcp`
 
-Identical request and response shape to `spawn`. This is the MCP-gated variant: the supervisor enforces its launch wrapper policy on this verb only — a `launch_wrapper` that does not exactly match an allowlist entry is rejected before any process is created (`launch_wrapper: argv is not allowed by this supervisor`), and a supervisor without a policy rejects every wrapped request (`launch_wrapper: disabled for MCP on this supervisor`). Ordinary `spawn` and the CLI are operator-trusted and not allowlist-gated. See [backends.md](backends.md#mcp-surfaces-operator-allowlist).
+Identical request and response shape to `spawn`. This is the MCP-gated variant: the supervisor enforces its launch wrapper policy on this verb only — a `launch_wrapper` that does not exactly match an allowlist entry is rejected before any process is created (`launch_wrapper: argv is not allowed by this supervisor`), and a supervisor without a policy rejects every wrapped request (`launch_wrapper: disabled for MCP on this supervisor`). The same verb also refuses a caller-chosen launch identity — a roster entry that declares `command`, `args` or `settings`, or a resume on such a session — with `roster entry "<name>": launch fields are disabled for MCP spawns (<field>)`. Ordinary `spawn` and the CLI are operator-trusted: they are neither allowlist-gated nor closed to launch fields. See [backends.md](backends.md#mcp-surfaces-operator-allowlist).
 
 Requires ownership.
 

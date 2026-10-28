@@ -223,6 +223,10 @@ type SpawnParams struct {
 	// derived, never caller-supplied, and must not enter the spawn wire shape or
 	// the idempotency parameter hash.
 	launch backendlaunch.Spec
+	// launchInput is the launch fields the selected roster entry declares, also
+	// derived rather than caller-supplied: it lets a caller-gated surface tell a
+	// configured launch from the one a backend resolves for itself.
+	launchInput backendlaunch.Input
 	// resume carries the parameters only the resume path sets (resume.go).
 	// The nested struct carries no JSON tag and json.Marshal skips unexported
 	// fields, so none of it affects the idempotency parameter hash; each field
@@ -5227,6 +5231,7 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 		if err != nil {
 			return params, backend, err
 		}
+		params.launchInput = entry.LaunchInput()
 	} else {
 		// No roster entry selects a launch: a backend that starts a configured
 		// binary still resolves its default here.
@@ -5258,10 +5263,41 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 // the supervisor has no launch wrapper policy configured.
 var errMCPLaunchWrapperDisabled = errors.New("launch_wrapper: disabled for MCP on this supervisor")
 
-// authorizeMCPLaunchWrapper enforces the supervisor's MCP launch wrapper
-// policy for a spawn_mcp request. It resolves the effective wrapper argv —
-// the final argv that will be exec'd, after roster and resume identity
-// resolution — and requires an exact allowlist match. It must be called
+// authorizeMCPLaunchFields refuses a spawn_mcp request whose effective launch
+// identity the caller chose. The roster file and entry name an MCP caller
+// passes are caller-authored, and command, args and settings select the
+// executable, its arguments and its settings file: a caller that can set them
+// runs arbitrary code with the supervisor's privileges. Only a launch the
+// backend resolves for itself is allowed here, so an entry that declares none
+// of the fields still spawns. The refusal names the entry and the field, or the
+// backend when no entry is selected.
+func (s *Supervisor) authorizeMCPLaunchFields(backend string, p SpawnParams) error {
+	field := backendlaunch.Declared(p.launchInput)
+	if field == "" {
+		// A resume carries no roster entry of its own and inherits the session's
+		// recorded launch, so compare the effective launch with the one this
+		// backend resolves without any entry: anything else was configured.
+		selfLaunch, err := backendlaunch.Resolve(backend, "", backendlaunch.Input{})
+		if err != nil {
+			return err
+		}
+		field = backendlaunch.Diff(p.launch, selfLaunch)
+	}
+	if field == "" {
+		return nil
+	}
+	subject := fmt.Sprintf("backend %q", backend)
+	if p.RosterEntry != "" {
+		subject = fmt.Sprintf("roster entry %q", p.RosterEntry)
+	}
+	return fmt.Errorf("%s: launch fields are disabled for MCP spawns (%s)", subject, field)
+}
+
+// authorizeMCPLaunchWrapper enforces the supervisor's MCP launch policy for a
+// spawn_mcp request: the launch fields a selected roster entry sets and the
+// launch wrapper argv. Both are taken from the effective identity — the argv and
+// executable that will actually be used, after roster and resume resolution —
+// so an inherited wrapper or an inherited launch is gated too. It must be called
 // before reservations, idempotency, or any process creation.
 func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) error {
 	if len(params.LaunchWrapper) > 0 {
@@ -5272,9 +5308,16 @@ func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) error {
 	// Resolve even when the request omits the wrapper: a resume inherits the
 	// session's authoritative wrapper, and the inherited argv is the argv that
 	// will be exec'd — it needs the same gate.
-	resolved, _, err := s.resolveDirectSpawnIdentity(params)
+	resolved, backend, err := s.resolveDirectSpawnIdentity(params)
 	if err != nil {
 		return err
+	}
+	// Workflow phases resolve their own launch from the template, which is
+	// operator-authored rather than caller-authored.
+	if !spawnIsWorkflow(params) {
+		if err := s.authorizeMCPLaunchFields(backend, resolved); err != nil {
+			return err
+		}
 	}
 	if len(resolved.LaunchWrapper) == 0 {
 		return nil
@@ -5289,8 +5332,8 @@ func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) error {
 }
 
 // SpawnMCP implements control.StableHandler for the spawn_mcp verb: an
-// MCP-driven spawn whose launch_wrapper is subject to the supervisor's
-// operator allowlist. Everything else about the spawn is identical to Spawn.
+// MCP-driven spawn whose launch fields and launch_wrapper are subject to the
+// supervisor's policy. Everything else about the spawn is identical to Spawn.
 func (s *Supervisor) SpawnMCP(raw json.RawMessage) (any, error) {
 	p, err := parseStableSpawn(raw)
 	if err != nil {
