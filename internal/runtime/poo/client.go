@@ -76,14 +76,13 @@ type client struct {
 }
 
 // startClient spawns the resolved binary and returns the connected client. The
-// argv is the recorded launch identity, so the process is exactly the one the
-// session owns.
+// command and its args are the recorded launch identity, so the process is
+// exactly the one the session owns.
 func startClient(ctx context.Context, opts runtime.StartOptions, observe func(sessionEvent)) (*client, error) {
-	argv := Argv(opts.Launch)
-	if len(argv) == 0 || argv[0] == "" {
+	if opts.Launch.Command == "" {
 		return nil, errors.New("no poo executable was resolved for this launch")
 	}
-	proc := launcher.Command(ctx, opts.LaunchWrapper, argv[0], argv[1:]...)
+	proc := launcher.Command(ctx, opts.LaunchWrapper, opts.Launch.Command, LaunchArgs(opts.Launch)...)
 	proc.Dir = opts.Dir
 	// The child receives this launch's identity and none of the parent's, the
 	// same scrub every backend process goes through. It is given no broker
