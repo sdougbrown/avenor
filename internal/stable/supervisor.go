@@ -5231,7 +5231,7 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 		if err != nil {
 			return params, backend, err
 		}
-		params.launchInput = entry.LaunchInput()
+		params.launchInput = entry.Input
 	} else {
 		// No roster entry selects a launch: a backend that starts a configured
 		// binary still resolves its default here.
