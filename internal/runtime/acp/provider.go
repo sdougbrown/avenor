@@ -32,7 +32,7 @@ type ProviderConfig struct {
 	Authenticate        string               // optional: if non-empty, call Client.Authenticate with this methodId after Initialize
 	Opts                runtime.StartOptions // authoritative launch options; retained so Resume launches with the same wrapper and settings
 	ConfigureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
-	BuildClientEnv      func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error)
+	BuildClientEnv      func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
 }
 
 type Provider struct {
@@ -69,7 +69,7 @@ type Provider struct {
 	appendCWDArg        bool
 	authenticateID      string
 	configureSession    func(ctx context.Context, session *Session, opts runtime.StartOptions) error
-	buildClientEnv      func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error)
+	buildClientEnv      func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
 	clientEnvCleanup    func() error
 
 	// Broker fields for channel-wrapped prompt injection.
@@ -266,7 +266,13 @@ func (p *Provider) launchRun(opts runtime.StartOptions) (runID, brokerToken stri
 	if runID == "" {
 		runID = uuid.New().String()
 	}
-	brokerToken, _ = brokerRef.EnsureRun(runID, opts.Label)
+	brokerToken, _, err := brokerRef.EnsureRun(runID, opts.Label)
+	if err != nil {
+		// A record already holds this run ID under a credential this supervisor did
+		// not mint, so the launch carries no broker identity at all (brokerRef nil,
+		// exactly as with no broker) rather than one someone else registered.
+		return runID, "", nil
+	}
 	return runID, brokerToken, brokerRef
 }
 
@@ -282,12 +288,14 @@ func (p *Provider) launchEnv(opts runtime.StartOptions, runID, brokerToken strin
 	// Always call buildClientEnv so backends can inject config overrides (e.g.
 	// mode overrides for subagent-mode agents) even without a broker. The
 	// backend is responsible for returning nil when there's nothing to override,
-	// so no temp file is created unnecessarily.
-	brokerAddr := ""
+	// so no temp file is created unnecessarily. It is handed the broker's http
+	// URL, not the bound address: the one spelling of that base is the broker's
+	// own (Broker.URL), so a backend never re-renders it.
+	brokerURL := ""
 	if brokerRef != nil {
-		brokerAddr = brokerRef.Addr()
+		brokerURL = brokerRef.URL()
 	}
-	return buildClientEnv(opts, runID, brokerToken, brokerAddr)
+	return buildClientEnv(opts, runID, brokerToken, brokerURL)
 }
 
 func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {

@@ -62,7 +62,7 @@ func startBroker(t *testing.T) *broker.Broker {
 
 func localTransport(t *testing.T, b *broker.Broker, id messaging.Identity) messaging.Transport {
 	t.Helper()
-	token, _ := b.EnsureRun(id.RunID, id.Sender)
+	token, _, _ := b.EnsureRun(id.RunID, id.Sender)
 	tr, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: id.RunID, Token: token})
 	if err != nil {
 		t.Fatalf("localhttp.New: %v", err)
@@ -81,6 +81,6 @@ func registerPeers(t *testing.T, b *broker.Broker, id messaging.Identity) {
 		return
 	}
 	for _, peer := range []string{"alice", "bob", "eve"} {
-		b.EnsureRun(prefix+"-"+peer, peer)
+		_, _, _ = b.EnsureRun(prefix+"-"+peer, peer)
 	}
 }

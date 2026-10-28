@@ -385,7 +385,7 @@ func TestHarnessNameObserverMirrorsIntoTheRuntimeLabel(t *testing.T) {
 		t.Fatal("the test supervisor has no broker")
 	}
 	const runID = "rt_harness"
-	if _, ok := sup.broker.EnsureRun(runID, "launch-label"); !ok {
+	if _, ok, err := sup.broker.EnsureRun(runID, "launch-label"); !ok || err != nil {
 		t.Fatal("ensure the run record: not created")
 	}
 	sup.controlMu.Lock()
@@ -438,7 +438,7 @@ func TestSessionRenameUnderAHarnessName(t *testing.T) {
 		t.Fatal("the test supervisor has no broker")
 	}
 	const runID = "rt_hrn"
-	if _, ok := sup.broker.EnsureRun(runID, "launch-label"); !ok {
+	if _, ok, err := sup.broker.EnsureRun(runID, "launch-label"); !ok || err != nil {
 		t.Fatal("ensure the run record: not created")
 	}
 	sup.controlMu.Lock()

@@ -121,19 +121,16 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 	proc.Dir = cwd
 	// Stale PI_AGENT and broker credentials from the parent must never leak into
 	// the child: they would activate sub-agent broker mode or authenticate as
-	// the wrong run. Inherited launch identity would misattribute the child
-	// too. Filtering and scrubbing run regardless of which values are injected,
-	// then this launch's identity is added.
-	env := proc.Environ()
-	filtered := env[:0]
+	// the wrong run. Inherited launch identity and an inherited peer credential
+	// go too. The shared scrub runs first and this launch appends its own values
+	// after it, so nothing here can be mistaken for something it inherited.
+	env := runtime.LaunchEnv(proc.Environ(), provenance)
+	filtered := make([]string, 0, len(env)+7)
 	for _, e := range env {
-		if !strings.HasPrefix(e, "PI_AGENT=") &&
-			!strings.HasPrefix(e, "PI_AGENT_PROFILE=") &&
-			!strings.HasPrefix(e, "AVENOR_BROKER_URL=") &&
-			!strings.HasPrefix(e, "AVENOR_RUN_ID=") &&
-			!strings.HasPrefix(e, "AVENOR_BROKER_TOKEN=") {
-			filtered = append(filtered, e)
+		if strings.HasPrefix(e, "PI_AGENT=") || strings.HasPrefix(e, "PI_AGENT_PROFILE=") {
+			continue
 		}
+		filtered = append(filtered, e)
 	}
 	if agent != "" {
 		filtered = append(filtered, "PI_AGENT="+agent)
@@ -142,17 +139,17 @@ func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider str
 		filtered = append(filtered, "PI_AGENT_PROFILE="+agentProfile)
 	}
 	// Broker credentials let the pi sub-process poll its own inbound asks and
-	// reply via avenor_message as its own run.
-	if brokerURL != "" {
-		filtered = append(filtered, "AVENOR_BROKER_URL="+brokerURL)
+	// reply via avenor_message as its own run. They are one identity, so they go
+	// in together or not at all: a half-configured child would poll with
+	// credentials the broker cannot authenticate. runtime.ProvisionPeer is the
+	// rule that decides whether a launch has them.
+	if brokerURL != "" && brokerRunID != "" && brokerToken != "" {
+		filtered = append(filtered,
+			runtime.EnvBrokerURL+"="+brokerURL,
+			runtime.EnvBrokerRunID+"="+brokerRunID,
+			runtime.EnvBrokerToken+"="+brokerToken)
 	}
-	if brokerRunID != "" {
-		filtered = append(filtered, "AVENOR_RUN_ID="+brokerRunID)
-	}
-	if brokerToken != "" {
-		filtered = append(filtered, "AVENOR_BROKER_TOKEN="+brokerToken)
-	}
-	proc.Env = runtime.LaunchEnv(filtered, provenance)
+	proc.Env = filtered
 	stdin, err := proc.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("pi stdin pipe: %w", err)

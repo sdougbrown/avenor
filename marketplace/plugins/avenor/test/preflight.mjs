@@ -806,7 +806,7 @@ const onCopy = await layerCopy({ version: '2.1.311-prod', base: '2.1.311' }, {
   AVENOR_BROKER_URL: BROKER,
   AVENOR_RUN_ID: 'claude-gate-' + Math.random().toString(16).slice(2, 8),
 })
-const onLine = events.find((e) => e.kind === 'ui.log' && e.line.includes('peer layer on (run claude-gate-'))
+const onLine = events.find((e) => e.kind === 'ui.log' && e.line.includes('peer layer on (self-registered run claude-gate-'))
 console.log(JSON.stringify({ check: 'a valid shape turns the layer on', logged: Boolean(onLine) }))
 if (!onLine) {
   console.log('FAIL: a valid version shape did not arm the layer')
@@ -902,7 +902,7 @@ if (remintAttempts[1] === remintAttempts[0] || !remintAttempts[1].startsWith('cl
   console.log('FAIL: the retry did not mint a fresh suffix', remintAttempts)
   process.exit(1)
 }
-const remintLine = events.find((e) => e.line === 'peer layer on (run ' + remintAttempts[1] + ', broker ' + BROKER + ')')
+const remintLine = events.find((e) => e.line === 'peer layer on (self-registered run ' + remintAttempts[1] + ', broker ' + BROKER + ')')
 if (!remintLine) {
   console.log('FAIL: the layer did not arm with the reminted run', remintAttempts)
   process.exit(1)

@@ -103,6 +103,17 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 			scrubbed: []string{runtime.EnvTestHooks, runtime.EnvTestOwnerPublishDelay},
 		},
 		{
+			name: "peer-credential",
+			setup: func(t *testing.T) {
+				// What a claude session started from a provisioned child exports
+				// into everything it spawns, including this autostarted supervisor.
+				t.Setenv(runtime.EnvBrokerURL, "http://127.0.0.1:9")
+				t.Setenv(runtime.EnvBrokerRunID, "rt_parent")
+				t.Setenv(runtime.EnvBrokerToken, "inherited-launch-grant")
+			},
+			scrubbed: runtime.PeerEnvNames(),
+		},
+		{
 			name: "parent-token",
 			setup: func(t *testing.T) {
 				// A parent URL would intentionally forward this credential.

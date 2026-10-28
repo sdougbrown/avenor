@@ -33,6 +33,7 @@ func keys() []string {
 		"AVENOR_BROKER_URL",
 		token.EnvBrokerParentURL,
 		token.EnvBrokerParentToken,
+		"AVENOR_SESSION_NAME",
 	)
 }
 
@@ -121,6 +122,7 @@ func PoisonParent(t *testing.T) {
 		"AVENOR_RUN_ID":                  "broker-run",
 		"AVENOR_BROKER_TOKEN":            "broker-token",
 		"AVENOR_BROKER_URL":              "http://stale.invalid",
+		"AVENOR_SESSION_NAME":            "stale-session-name",
 		token.EnvBrokerParentToken:       "parent-secret",
 		token.EnvBrokerParentURL:         "http://parent-broker.invalid:9",
 	} {
@@ -151,6 +153,12 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 		supplied[key] = value
 	}
 	for _, key := range runtime.ScrubbedEnvNames() {
+		if runtime.IsPeerEnvName(key) {
+			// The peer credential is not launch identity: a launch either strips
+			// an inherited one or provisions its own, and AssertPeerEnv says
+			// which. Requiring "unset" here would fail every provisioned launch.
+			continue
+		}
 		if value, ok := supplied[key]; ok {
 			if observed[key] != value {
 				t.Errorf("%s = %q, want %q", key, observed[key], value)
@@ -177,11 +185,28 @@ func Assert(t *testing.T, observed map[string]string, want *runtime.LaunchProven
 	}
 }
 
-// AssertBrokerPreserved requires the broker credential pair to survive an
-// identity scrub.
-func AssertBrokerPreserved(t *testing.T, observed map[string]string) {
+// peerKeys is the avenor peer credential vocabulary a launch either provisions
+// or strips, listed independently of runtime.PeerEnvNames so a production list
+// change cannot hide a leaked credential. AVENOR_SESSION_NAME is not here: it
+// is retired, never provisioned, and covered by the scrub list instead.
+var peerKeys = []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN"}
+
+// AssertPeerEnv requires the observed peer credentials to be exactly the ones
+// this launch provisioned. A name missing from want must be unset in the child:
+// an inherited credential (the parent's own peer identity, or a tmux server's)
+// never survives a launch that provisions nothing.
+func AssertPeerEnv(t *testing.T, observed map[string]string, want map[string]string) {
 	t.Helper()
-	if observed["AVENOR_RUN_ID"] != "broker-run" || observed["AVENOR_BROKER_TOKEN"] != "broker-token" {
-		t.Errorf("broker pair = %q/%q, want it preserved", observed["AVENOR_RUN_ID"], observed["AVENOR_BROKER_TOKEN"])
+	for _, key := range peerKeys {
+		wantValue, provisioned := want[key]
+		if !provisioned {
+			if observed[key] != unsetValue {
+				t.Errorf("%s = %q, want it unset", key, observed[key])
+			}
+			continue
+		}
+		if observed[key] != wantValue {
+			t.Errorf("%s = %q, want %q", key, observed[key], wantValue)
+		}
 	}
 }

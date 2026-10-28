@@ -4,10 +4,11 @@ Delegate work to independent avenor runs and supervise them without leaving the
 conversation. The plugin ships the Avenor MCP server (`avenor mcp`) plus the
 skill set that teaches a model how to drive it.
 
-## Native peer layer (issue #391, PR 1)
+## Native peer layer (issue #391)
 
 The `hooks/` directory is a mods layer that makes this Claude session itself a
-broker peer, so avenor runs become addressable like teammates:
+broker peer — a session you started by hand, and a run avenor spawned — so
+avenor runs become addressable like teammates:
 
 - **Send:** `SendMessage({to: "avenor:<run id or label>"})` resolves the
   address against the broker's `GET /sessions` and delivers through
@@ -71,40 +72,90 @@ already uses for its peers:
 
 - `AVENOR_BROKER_URL` — http:// base of the `avenor stable` supervisor's
   broker (its own process; the port is ephemeral).
-- `AVENOR_RUN_ID` — optional. Set it to pin this session's broker run id
-  (the recommended way to make a top-level session deterministically
-  addressable, e.g. `claude-parent`); unset, the mod self-mints `claude-<hex>`.
-- `AVENOR_BROKER_TOKEN` — optional; set only when provisioning an
-  already-registered run (PR 2's launcher path). A top-level session omits it:
-  the mod self-registers under its run id through the broker's `/register`
-  route and the broker mint token travels only to this process.
+- `AVENOR_RUN_ID` — the run this session joins as.
+- `AVENOR_BROKER_TOKEN` — the credential this session was handed for that
+  run. A provisioned launch's is a one-shot attach credential (below); a
+  hand-exported shell has none, so it self-registers instead.
 - `AVENOR_SESSION_NAME` — optional display name, posted to the broker's
-  `/session_name`, which is what `avenor:<label>` resolution and peer lists see.
+  `/session_name` by a session that self-registers; the posted name is what
+  `avenor:<label>` resolution and peer lists see. It falls back to
+  `AVENOR_LABEL`, the launch identity every avenor launch exports, so a
+  hand-exported shell can keep using either spelling. A provisioned run posts
+  nothing: the supervisor already registered it under the label peers address,
+  and the launch copy of this variable only records the identity as the child
+  joined it.
 
-For a top-level session, export the variables in the shell that launches
-`claude`, or set them under `env` in `~/.claude/settings.json` (the session's
-own process then carries them). The layer starts at `session.start`: it
-self-registers, names its run, and begins the subscription; without
-`AVENOR_BROKER_URL` it stays off with one explanatory log line, and so does
-a registration the broker refuses — the reason reaches the session's log
-either way.
+The layer picks one of two identities at `session.start`, and which one it is
+turns on the credential:
 
+- **Child run (provisioned).** `AVENOR_RUN_ID` and `AVENOR_BROKER_TOKEN`
+  together are an identity someone else already holds. This is what a spawned
+  Claude child gets: the avenor supervisor provisions a broker run for every
+  child it starts and hands the run id, its one-shot attach credential, its
+  label and the broker URL to the child through the launch environment. The
+  credential is minted in process by the broker that provisions the launch; no
+  route mints one, and `/register` answers only the run credential. The
+  layer trades that credential at `POST /attach` for the run's own, and then
+  behaves as the run — no `/register` call, and no `/session_name` write, so
+  the label the supervisor gave the run survives. The child appears in peer
+  lists as the same run `avenor control list` shows, under the label it was
+  spawned with, and its broker record belongs to the supervisor, which retires
+  it when the run ends.
+
+  The credential is single-use, and that is what keeps one run to one inbound
+  consumer. A session spawned from a provisioned session's own shell inherits
+  its environment, so it presents the credential its parent already spent: the
+  broker answers `409 attach-consumed` and the layer disables itself with that
+  reason (the log line names it) instead of putting a second poller on the same
+  queue. A resume or a retry is a fresh launch and gets a fresh credential, so
+  the new session attaches normally while the old grant is dead.
+- **Top-level session (self-registered).** Without a credential (an
+  `AVENOR_RUN_ID` alone only pins the id) the session registers itself through
+  the broker's open `/register` route and the minted token travels only to
+  this process. That is the session you started by hand: export the variables
+  in the shell that launches `claude`, or set them under `env` in
+  `~/.claude/settings.json`. A record that route created belongs to whoever
+  registered it, so the supervisor never adopts it for a launch it provisions:
+  a run id registered before the launch reaches the broker leaves that child
+  with no peer identity rather than with a credential its registrant holds.
+
+A hosted child never inherits a launching session's copy of those names:
+avenor's terminal launcher strips `AVENOR_BROKER_URL`, `AVENOR_RUN_ID` and
+`AVENOR_BROKER_TOKEN` (a tmux pane would otherwise pick up whatever the tmux
+server held) and exports only what it provisions. `AVENOR_SESSION_NAME` goes
+further: it is never provisioned at all, so it is stripped like the launch
+identity it was duplicating, and the label arrives once, as `AVENOR_LABEL`. So
+a child is a peer exactly when avenor made it one; a session started by hand
+in a shell that exported them is a peer on its own terms.
+
+What a launch provisions reaches a tmux pane through a file, not through the
+`new-session` command: that command string is argv, readable by any local
+process through `ps` or `/proc/<pid>/cmdline`, so the pane sources a mode-0600
+file in a mode-0700 directory this launch owns (`unset …; . <file>; exec
+claude`) and the launcher removes it when the session's terminal is torn down.
+The PTY launcher passes the same entries as the child's environment, where
+they already belong.
+
+Without `AVENOR_BROKER_URL` the layer stays off with one explanatory log line,
+and so does a registration or attach the broker refuses — the reason reaches
+the session's log either way.
 Same-UID local tool, per the repo's threat model: the broker's local routes
-trust the loopback user, and the mod keeps its minted token in memory only.
-Nothing about the layer is hardened beyond that model.
+trust the loopback user, and the mod keeps its token in memory only. Nothing
+about the layer is hardened beyond that model.
 
 ## Spawning runs (the MCP surface)
 
 The MCP tools (`avenor` server in `.mcp.json`) are the unchanged surface:
 `spawn`, `status`, `result`, `message`, `peers` and friends. A spawned run on
 this machine is addressable by its broker label via `avenor:<label>` as soon
-as `GET /sessions` lists it.
+as `GET /sessions` lists it — and a spawned Claude run lists itself, because
+the plugin it loads joins the run the supervisor provisioned for it.
 
-## Limitations (PR 1)
+## Limitations
 
-- Provisioning (broker URL, run id, token) is what PR 2 will mint at spawn
-  for Claude children; until then a spawned Claude run joins as a self-minted
-  peer or needs the supervisor's credentials another way.
+- Provisioning is the default `claude` backend's: a spawned child joins as
+  its run and takes inbound asks, but the supervisor still owns the run's
+  record and retires it when the run ends.
 - The reply correlation is a heuristic: a plain send to a peer with a
   pending inbound ask answers the most recent one. An explicit `reply`
   action names the ask instead, so concurrent asks from one peer can each be

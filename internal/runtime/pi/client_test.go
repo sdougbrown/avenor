@@ -1145,4 +1145,33 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 	if v, ok := agentEnv[token.EnvBrokerParentToken]; ok {
 		t.Fatalf("pi child env carries the parent-link credential: %q", v)
 	}
+
+	// Partial provisioning: a URL and run id with no token is not an identity, so
+	// none of the three may reach the child — the empty token must strip the
+	// stale one rather than leave the child half-configured.
+	client4, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "sonnet", "", "", "", "", "",
+		"http://127.0.0.1:9999", "rt_1", "", nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("fourth StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client4.Close()
+	if len(commands) < 4 || commands[3] == nil {
+		t.Fatal("fourth pi command was not created")
+	}
+	if commands[3].Env == nil {
+		t.Fatal("fourth pi command env was not assigned; child would inherit stale parent env")
+	}
+	partialEnv := make(map[string]string)
+	for _, entry := range commands[3].Env {
+		if k, v, ok := strings.Cut(entry, "="); ok {
+			partialEnv[k] = v
+		}
+	}
+	for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN"} {
+		if v, ok := partialEnv[key]; ok {
+			t.Errorf("%s = %q leaked into child env with two of three broker values", key, v)
+		}
+	}
 }

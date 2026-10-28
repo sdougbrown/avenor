@@ -27,18 +27,15 @@ type PTYLauncher struct {
 	AnswerProgStatus bool
 }
 
-func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
-	if opts.Cols == 0 {
-		opts.Cols = 220
-	}
-	if opts.Rows == 0 {
-		opts.Rows = 50
-	}
-
+// ptyCommand builds the hosted command. Every provisioned value travels in
+// cmd.Env, which is the process environment and readable by its own user only;
+// none of it is rendered into argv, which any local process can read. baseEnv
+// defaults to the terminal defaults when the launcher carries none.
+func ptyCommand(ctx context.Context, opts StartOptions, baseEnv []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "sh", "-c", opts.Command)
 	cmd.Dir = opts.Dir
 
-	env := l.Env
+	env := baseEnv
 	if len(env) == 0 {
 		env = []string{
 			"TERM=tmux-256color",
@@ -48,11 +45,28 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 	}
 	// Scrub the combined environment last, then add this launch's identity. The
 	// hosted process is an independent Claude Code session, and inheriting the
-	// launching session's marker turns a completed turn into a silent hang.
-	// Scrubbing after the append also means a caller-provided Env entry cannot
-	// reintroduce a scrubbed variable.
+	// launching session's marker turns a completed turn into a silent hang. The
+	// same scrub removes an inherited peer credential, which would make this
+	// child join the broker as a run another live session already holds.
 	combined := ScrubParentClaudeEnv(append(os.Environ(), env...))
-	cmd.Env = runtime.LaunchEnv(combined, opts.Provenance)
+	// PeerEnv appends this launch's provisioned peer credential, which is what
+	// makes a spawned claude a provisioned peer. It still refuses a
+	// StartOptions.Env entry named in the scrub lists, since those are appended
+	// after every scrub layer above; the peer names themselves are the entries
+	// it lets through.
+	cmd.Env = PeerEnv(runtime.LaunchEnv(combined, opts.Provenance), opts.Env)
+	return cmd
+}
+
+func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, error) {
+	if opts.Cols == 0 {
+		opts.Cols = 220
+	}
+	if opts.Rows == 0 {
+		opts.Rows = 50
+	}
+
+	cmd := ptyCommand(ctx, opts, l.Env)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: uint16(opts.Cols),

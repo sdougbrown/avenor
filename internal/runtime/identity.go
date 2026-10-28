@@ -40,10 +40,17 @@ var identityEnvNames = []string{
 	envParentRunID,
 }
 
-// scrubbedEnvNames excludes launch identity, test switches, and parent-link
-// configuration from children. The credential grants broker authority; a lone
-// parent URL makes nested supervisor startup fail.
-var scrubbedEnvNames = append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken, token.EnvBrokerParentURL)
+// scrubbedEnvNames excludes launch identity, test switches, parent-link
+// configuration, the retired label spelling, and the avenor peer credential
+// vocabulary from children. The parent-link credential grants broker authority
+// and a lone parent URL makes nested supervisor startup fail; an inherited peer
+// credential makes the child join the broker as a run another live session
+// already holds. Both are stripped here rather than by each backend, so a
+// launcher that forgets an extra call still cannot hand either one down.
+var scrubbedEnvNames = append(
+	append(append([]string(nil), identityEnvNames...), EnvTestHooks, EnvTestOwnerPublishDelay, token.EnvBrokerParentToken, token.EnvBrokerParentURL, envRetiredPeerName),
+	peerEnvNames...,
+)
 
 var identityEnvKeys = func() map[string]struct{} {
 	keys := make(map[string]struct{}, len(scrubbedEnvNames))
@@ -54,11 +61,20 @@ var identityEnvKeys = func() map[string]struct{} {
 }()
 
 // ScrubbedEnvNames returns every environment name a child must not inherit:
-// launch identity, the test-only switches, and the parent-link URL and
-// credential. A shell launcher that assembles its child's environment by hand
-// unsets these instead of calling ScrubIdentityEnv.
+// launch identity, the test-only switches, the parent-link URL and credential,
+// the retired label spelling, and the avenor peer credentials. A shell launcher
+// that assembles its child's environment by hand unsets these instead of
+// calling ScrubIdentityEnv. A launch that provisions peer credentials appends
+// them after this scrub, never through it.
 func ScrubbedEnvNames() []string {
 	return append([]string(nil), scrubbedEnvNames...)
+}
+
+// IsScrubbedEnvName reports whether name is one a child must not inherit.
+// Callers pass a name, not a NAME=VALUE entry.
+func IsScrubbedEnvName(name string) bool {
+	_, ok := identityEnvKeys[name]
+	return ok
 }
 
 // Launch kinds reported in LaunchProvenance.Kind.
@@ -140,25 +156,37 @@ func (p *LaunchProvenance) IdentityEnv() []string {
 }
 
 // LaunchEnv returns environ with the full ScrubbedEnvNames set removed,
-// followed by p's identity. Scrubbing first keeps the launch's own values; a
-// nil p yields the scrubbed environment alone.
+// followed by p's identity. Scrubbing first keeps the launch's own values and
+// strips both an inherited peer credential and an inherited parent-link pair; a
+// nil p yields the scrubbed environment alone. Peer credentials a launch
+// provisions are appended after this, the same way identity is.
 func LaunchEnv(environ []string, p *LaunchProvenance) []string {
 	return append(ScrubIdentityEnv(environ), p.IdentityEnv()...)
 }
 
 // ScrubIdentityEnv returns environ without the names a child must not inherit
-// (ScrubbedEnvNames): launch identity, the test-only switches, and the
-// parent-link URL and credential. Matching is on the exact key, so duplicates and
-// bare-key entries are removed too, while near-miss names and every other
-// variable keep their order.
+// (ScrubbedEnvNames): launch identity, the test-only switches, the parent-link
+// URL and credential, and the avenor peer credentials. Matching is on the exact
+// key, so duplicates and bare-key entries are removed too, while near-miss names
+// and every other variable keep their order.
 func ScrubIdentityEnv(environ []string) []string {
+	return scrubEnv(environ, func(key string) bool {
+		_, drop := identityEnvKeys[key]
+		return drop
+	})
+}
+
+// scrubEnv is the one exact-key filter every scrub in this package composes:
+// duplicates and bare-key entries are dropped too, while near-miss names and
+// every other variable keep their order.
+func scrubEnv(environ []string, drop func(key string) bool) []string {
 	if len(environ) == 0 {
 		return nil
 	}
 	kept := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		key, _, _ := strings.Cut(entry, "=")
-		if _, ok := identityEnvKeys[key]; ok {
+		if drop(key) {
 			continue
 		}
 		kept = append(kept, entry)

@@ -113,6 +113,15 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 
 	sessionID := uuid.New().String()
 
+	// The child Claude session joins the broker as the run the supervisor
+	// provisioned for it, through the plugin's mods layer. The environment
+	// carries a one-shot attach credential rather than the run's token: the mods
+	// layer trades it for the run credential at session start, so a nested
+	// session that inherits this environment cannot join the same run. Nil when
+	// nothing was provisioned; the launch then carries no peer credentials at
+	// all.
+	peer := runtime.ProvisionPeer(merged)
+
 	claudeArgs := claudeutil.BuildArgs(sessionID, "", merged)
 
 	stderrLog, err := claudecore.CreateStderrLog()
@@ -141,6 +150,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		Rows:       50,
 		Command:    shellCmd,
 		Provenance: merged.Provenance,
+		Env:        peer.AttachEnv(),
 	})
 	if err != nil {
 		s.CancelFn()

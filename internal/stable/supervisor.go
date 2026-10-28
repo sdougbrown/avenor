@@ -678,6 +678,11 @@ type Supervisor struct {
 	fileSnapshots       map[string][]string // runtimeID → pre-run file list for output detection
 	fileSnapMu          sync.Mutex
 	broker              *broker.Broker
+	// brokerIdentity is this supervisor's stable identity, which the broker mints
+	// run records under: the control socket path plus this host, so a restart
+	// comes back as the same supervisor and adopts the records its predecessor
+	// minted. It is the same value the parent link registers as its branch ID.
+	brokerIdentity string
 	// brokerStartErr is the error the broker bind produced at construction. An
 	// explicitly configured BrokerAddr makes it fatal in Run; the default bind
 	// stays optional.
@@ -777,6 +782,8 @@ func NewSupervisor(cfg Config) *Supervisor {
 		errWriter:               cfg.Stderr,
 	}
 	sup.broker = broker.New("")
+	sup.brokerIdentity = supervisorIdentity(cfg.ControlSocket)
+	sup.broker.SetIdentity(sup.brokerIdentity)
 	if sup.startBroker(cfg.BrokerAddr) {
 		// Register the supervisor run eagerly so sub-agents can target it for
 		// asks before the host performs any outbound broker call. Without this,
@@ -1813,7 +1820,14 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// the parent run ID to the child's prompt so it knows where to reply.
 	var parentToken string
 	if params.ParentRunID != "" && s.broker != nil {
-		parentToken, _ = s.broker.EnsureRun(params.ParentRunID, "")
+		var err error
+		parentToken, _, err = s.broker.EnsureRun(params.ParentRunID, "")
+		if err != nil {
+			// A parent that registered itself through the broker's open route is
+			// not this supervisor's record to adopt, so the note carries the run ID
+			// without a credential the supervisor could vouch for.
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: parent run %s left unadopted: %v; the child is told the parent's run ID only\n", params.ParentRunID, err)
+		}
 		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Report status updates, findings, and questions back to your parent run %q with your surface's own messaging tool: use the action your surface calls tell for a status update, and ask when you need a reply.\n\n", params.ParentRunID, params.ParentRunID)
 		promptText = parentNote + promptText
 	}
@@ -2039,6 +2053,18 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}, nil
 }
 
+// supervisorIdentity returns this supervisor's stable identity: the control
+// socket path it serves, plus this host, in the branch-ID form the parent link
+// already registers. The broker mints every run record it creates under it, so
+// a restart of the supervisor adopts what its predecessor minted, while a
+// record the broker's open /register route created — whose credential its
+// author chose — stays unadoptable. An unconfigured control socket yields no
+// identity, and the broker keeps the process-scoped one it minted itself.
+func supervisorIdentity(controlSocket string) string {
+	host, _ := os.Hostname()
+	return parentlink.BranchID(controlSocket, host)
+}
+
 // brokerURL returns the URL children and parent branches reach this broker on,
 // or "" when no listener is bound. Broker messaging is optional, so a failed
 // default bind leaves the supervisor running without a URL rather than handing
@@ -2047,11 +2073,7 @@ func (s *Supervisor) brokerURL() string {
 	if s.broker == nil {
 		return ""
 	}
-	addr := s.broker.Addr()
-	if addr == "" {
-		return ""
-	}
-	return messaging.BrokerURL(addr)
+	return s.broker.URL()
 }
 
 // installParentLink wires this broker to its parent broker when the supervisor
@@ -2062,7 +2084,6 @@ func (s *Supervisor) installParentLink() {
 	if s.config.BrokerParentURL == "" && s.config.BrokerParentToken == "" {
 		return
 	}
-	host, _ := os.Hostname()
 	if s.config.BrokerParentURL != "" && s.config.BrokerParentToken == "" {
 		// Fail fast: parent routes refuse every request without a credential,
 		// so a link would retry its registration against a 401 forever. The
@@ -2081,9 +2102,10 @@ func (s *Supervisor) installParentLink() {
 		DisplayName: s.broker.DisplayName,
 		RetireRun:   func(runID, token string) { s.broker.DeleteRunIfToken(runID, token) },
 		// The control socket path plus the host it lives on is this supervisor's
-		// stable identity: a restart comes back under the same child ID and
-		// reclaims its runs, and a same-path branch on another host stays distinct.
-		ChildID: parentlink.BranchID(s.config.ControlSocket, host),
+		// stable identity (supervisorIdentity): a restart comes back under the same
+		// child ID and reclaims its runs, and a same-path branch on another host
+		// stays distinct.
+		ChildID: s.brokerIdentity,
 	}
 	link, err := parentlink.New(options, s.broker.LocalMessenger())
 	if err != nil {
@@ -2130,8 +2152,15 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 	}
 	// EnsureRun is idempotent, so concurrent first-use calls settle on the
 	// same run and token instead of racing CreateRun and failing "already
-	// registered" on the second call.
-	token, _ := s.broker.EnsureRun(messaging.SupervisorRunID, "supervisor")
+	// registered" on the second call. A record the open /register route minted
+	// is not adoptable: its credential belongs to whoever posted it, so the
+	// supervisor runs without a broker identity of its own rather than under one
+	// that writer chose.
+	token, _, err := s.broker.EnsureRun(messaging.SupervisorRunID, "supervisor")
+	if err != nil {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: supervisor run %s not adopted: %v; the supervisor sends no broker asks\n", messaging.SupervisorRunID, err)
+		return "", ""
+	}
 	if token == "" {
 		return "", ""
 	}
@@ -2147,6 +2176,11 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 // captures the token so the child can poll for and reply to inbound asks. The
 // run may already exist (e.g. pre-registered for tasking), in which case EnsureRun
 // returns the existing token.
+//
+// An existing record this supervisor did not mint is refused rather than
+// adopted: the launch then carries no broker identity at all, which is the
+// closed choice — the child must not authenticate as a run whose credential a
+// registrant chose, because that registrant would hold the child's identity too.
 func (s *Supervisor) ensureChildBrokerRun(child *childRuntime) string {
 	if s.broker == nil {
 		return ""
@@ -2154,7 +2188,11 @@ func (s *Supervisor) ensureChildBrokerRun(child *childRuntime) string {
 	child.mu.Lock()
 	label := child.label
 	child.mu.Unlock()
-	token, _ := s.broker.EnsureRun(child.id, label)
+	token, _, err := s.broker.EnsureRun(child.id, label)
+	if err != nil {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child run %s not adopted: %v; the child launches without a broker identity\n", child.id, err)
+		token = ""
+	}
 	child.mu.Lock()
 	child.brokerToken = token
 	backend, model, dir := child.effectiveBackend, child.effectiveModel, child.dir

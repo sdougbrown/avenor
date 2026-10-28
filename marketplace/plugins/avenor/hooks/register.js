@@ -28,6 +28,18 @@
 //   ask renders the shared ask sentences (wire.js mirrors
 //   schemas/message.outcome.json), never raw wire text.
 //
+// - Identity: a run id and an attach credential in the environment are a
+//   provisioned identity — a spawned child joins the broker as the run its
+//   launcher already holds, with neither a `/register` call nor a
+//   `/session_name` write. The credential is a one-shot grant: the layer trades
+//   it at `POST /attach` for the run's own credential, so a run has one inbound
+//   consumer and a second session holding the same environment (a nested
+//   session spawned from a provisioned one's shell) is refused with the
+//   broker's reason. Without the pair the session self-registers through the
+//   broker's open `/register` route as a top-level peer of its own, and names
+//   itself from `AVENOR_SESSION_NAME` (falling back to the launch's
+//   `AVENOR_LABEL`).
+//
 // The hook grammar is what Claude Code 2.1.311's module scan enforces; the
 // mechanics come from the #391 spike (391-spike-findings.md). Branches over
 // event data are ternaries; helpers that take the engine call object `d` are
@@ -201,8 +213,17 @@ async function selfRegister(d) {
   }
   const envRunID = await envRunId(d)
   const envToken = await envBrokerToken(d)
+  // A run id and a credential together are a provisioned identity: whoever
+  // spawned this session already holds the run, and the record is the broker's.
+  // The credential is this launch's, good for one attach handshake, so joining
+  // is a round trip and the open /register route is not the way in — it would
+  // mint a record for a run the launcher no longer holds (a supervisor
+  // restart), leaving behind a peer nothing routes to.
+  const provisioned = envRunID !== "" && envToken !== ""
   try {
-    const registered = await registerRun(d, brokerURL, envRunID, envToken)
+    const registered = provisioned
+      ? await attachRun(d, brokerURL, envRunID, envToken)
+      : await registerRun(d, brokerURL, envRunID)
     if (registered === null) {
       return false
     }
@@ -211,33 +232,77 @@ async function selfRegister(d) {
     disableLayer("registering with the avenor broker " + brokerURL + " failed: " + errorText(err))
     return false
   }
-  const name = (await envSessionName(d)) || broker.runID
-  try {
-    await brokerPost(d, "/session_name", { name: name })
-  } catch (err) {
-    // The name is cosmetic: an unnamed run is still addressable by run id.
-    await logLayer(d, "session_name failed: " + errorText(err))
+  // A provisioned run posts no name. The supervisor registered it under the
+  // label its peers already address, and /session_name writes a harness name,
+  // which the broker resolves ahead of that label — the write would shadow the
+  // record's own name for good, including a later authorized rename. A
+  // self-registered run is displayed by its run id, so a name handed in is the
+  // only way it gets a good one.
+  if (!provisioned) {
+    const name = await envSessionName(d)
+    if (name !== "") {
+      try {
+        await brokerPost(d, "/session_name", { name: name })
+      } catch (err) {
+        await logLayer(d, "session_name failed: " + errorText(err))
+      }
+    }
   }
-  await logLayer(d, "peer layer on (run " + broker.runID + ", broker " + broker.url + ")")
+  const path = provisioned ? "provisioned run " : "self-registered run "
+  await logLayer(d, "peer layer on (" + path + broker.runID + ", broker " + broker.url + ")")
   return true
 }
 
 /**
- * One registration (or the retry of a self-minted identity): a run id from
- * the environment is used as given, so a token supplied alongside it is the
- * provisioned credential; a self-minted id retries once with another suffix
- * when the broker holds a stale record the session cannot authenticate
- * against. Null reports a disable-with-reason the caller logs.
+ * The provisioned fast path: a one-shot attach handshake. The broker spends
+ * this launch's credential on the first session that presents it and answers
+ * with the run's own, which is what the layer uses for the rest of the
+ * session. A refusal means the run already has its inbound consumer — a
+ * nested session spawned from a provisioned one inherits the same
+ * environment — so the layer disables itself with the broker's reason instead
+ * of polling a queue another session is serving. Null reports that
+ * disable-with-reason; a transport failure is thrown for the caller to report.
  */
-async function registerRun(d, url, envRunID, envToken) {
+async function attachRun(d, url, runID, credential) {
+  let answer
+  try {
+    answer = await postJSON(d, url, "/attach", { run_id: runID, token: credential })
+  } catch (err) {
+    const status = httpStatus(err)
+    const refused = status === 401 || status === 404 || status === 409
+    if (!refused) {
+      throw err
+    }
+    const body = httpBody(err)
+    const reason = typeof body.error === "string" && body.error !== "" ? body.error : errorText(err)
+    disableLayer("the avenor broker refused this launch's attach for " + runID + ": " + reason)
+    return null
+  }
+  const mintedToken = answer === null || typeof answer !== "object" ? "" : answer.token
+  const mintedRunID = answer !== null && typeof answer === "object" &&
+    typeof answer.run_id === "string" && answer.run_id !== "" ? answer.run_id : runID
+  if (typeof mintedToken !== "string" || mintedToken === "") {
+    disableLayer("the broker answered the attach for " + mintedRunID + " with no run credential")
+    return null
+  }
+  return { url: url, runID: mintedRunID, token: mintedToken }
+}
+
+/**
+ * One self-registration through the broker's open /register route, or the
+ * retry of a self-minted identity: a run id from the environment is used as
+ * given; a self-minted one retries once with another suffix when the broker
+ * holds a stale record the session cannot authenticate against. Null reports a
+ * disable-with-reason the caller logs.
+ */
+async function registerRun(d, url, envRunID) {
   let runID = envRunID
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (!runID) {
       runID = "claude-" + randomHex(3)
     }
-    const registration = envToken !== "" ? { run_id: runID, token: envToken } : { run_id: runID }
     try {
-      const answer = await postJSON(d, url, "/register", registration)
+      const answer = await postJSON(d, url, "/register", { run_id: runID })
       const mintedToken = answer === null || typeof answer !== "object" ? "" : answer.token
       const mintedRunID = answer !== null && typeof answer === "object" &&
         typeof answer.run_id === "string" && answer.run_id !== "" ? answer.run_id : runID
@@ -247,7 +312,7 @@ async function registerRun(d, url, envRunID, envToken) {
       }
       return { url: url, runID: mintedRunID, token: mintedToken }
     } catch (err) {
-      const retryable = envRunID === "" && envToken === "" && attempt === 0 &&
+      const retryable = envRunID === "" && attempt === 0 &&
         errorText(err).indexOf("already registered") !== -1
       if (!retryable) {
         throw err
@@ -658,6 +723,17 @@ async function envSessionName(d) {
   let value
   try {
     value = await d.env.get("AVENOR_SESSION_NAME")
+  } catch (err) {
+    value = ""
+  }
+  if (typeof value === "string" && value !== "") {
+    return value
+  }
+  // AVENOR_LABEL is the launch identity's own spelling: avenor exports it for
+  // every launch, while AVENOR_SESSION_NAME above is the retired
+  // peer-credential copy that only a hand-exported shell still sets.
+  try {
+    value = await d.env.get("AVENOR_LABEL")
   } catch (err) {
     return ""
   }

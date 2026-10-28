@@ -146,6 +146,13 @@ func startSupervisor(socketPath string, idleTimeout time.Duration, mcpLaunchWrap
 		runtime.EnvTestHooks + "=",
 		runtime.EnvTestOwnerPublishDelay + "=",
 	}
+	// A provisioned session's peer credential names the run its own plugin
+	// joined, not this supervisor's. Stripping it here keeps the autostarted
+	// supervisor from carrying it, and from handing it to a child it builds by
+	// hand; the harness children it launches are scrubbed by LaunchEnv.
+	for _, name := range runtime.PeerEnvNames() {
+		strippedEnvs = append(strippedEnvs, name+"=")
+	}
 	if strings.TrimSpace(parentURL) == "" {
 		strippedEnvs = append(strippedEnvs, token.EnvBrokerParentToken+"=")
 	}

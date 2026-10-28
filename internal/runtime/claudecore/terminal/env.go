@@ -96,13 +96,66 @@ func UnsetParentClaudeEnvPrefix() string {
 	return b.String()
 }
 
+// PeerEnv finishes a terminal launch's environment: a child never inherits a
+// launcher's copy of the peer credential, and what this launch provisions is
+// appended last.
+//
+// PeerEnv returns env followed by extra: this launch's provisioned entries.
+// extra also passes the same filter the scrub layers apply, so a caller cannot
+// smuggle a name back in through it — CLAUDE_CODE_MESSAGING_TOKEN or the
+// parent-link credential among them. Only the peer names themselves are let
+// through there, since provisioning them is the point. Entries that are not
+// KEY=VALUE are dropped, and extra wins over env for every name.
+//
+// The peer names are in runtime.ScrubbedEnvNames, so the LaunchEnv every caller
+// composes with has already removed an inherited copy and this pass finds
+// nothing. It stays so PeerEnv is still correct for a caller that hands it an
+// environment it did not scrub, and it composes runtime's one exact-key filter
+// rather than repeating it.
+func PeerEnv(env []string, extra []string) []string {
+	return append(runtime.ScrubPeerEnv(env), callerEnv(extra)...)
+}
+
+// callerEnv returns the entries of a caller-supplied Env that a child may
+// inherit. They are appended after every scrub layer, so without this filter a
+// single StartOptions.Env entry would reintroduce what the scrubs exist to keep
+// out: the parent's Claude Code session or messaging token, an inherited launch
+// identity, or the parent-link credential. The peer credential names are the
+// exception, because provisioning them is what a launch's Env is for.
+func callerEnv(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
+			continue
+		}
+		if isParentClaudeSessionVar(key) {
+			continue
+		}
+		if runtime.IsScrubbedEnvName(key) && !runtime.IsPeerEnvName(key) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // identityEnvPrefix returns a shell prefix that unsets every name a child must
-// not inherit (runtime.ScrubbedEnvNames) and exports this launch's identity.
-// The unset must happen here, not just in LaunchEnv: a pane inherits the tmux
-// server's environment, which carries the credential the documented setup way.
-// Values are single-quoted so labels containing quotes, newlines or command
-// substitution text stay literal data.
-func identityEnvPrefix(p *runtime.LaunchProvenance) string {
+// not inherit (runtime.ScrubbedEnvNames, which includes the avenor peer
+// credentials) and exports this launch's identity, then sources envFile: the
+// caller's own environment, which this launch provisions values into. The unset
+// must happen here, not just in LaunchEnv: a pane inherits the tmux server's
+// environment, which carries the credential the documented setup way. Values are
+// single-quoted so labels containing quotes, newlines or command substitution
+// text stay literal data.
+//
+// The caller's entries travel through a file rather than the command because a
+// tmux new-session command is argv: any local process can read it from ps or
+// /proc/<pid>/cmdline, and a broker credential readable that way needs no
+// privilege to steal. The file's path may appear there; its values never do.
+// An empty envFile is a launch that provisions nothing, and the prefix is then
+// self-contained.
+func identityEnvPrefix(p *runtime.LaunchProvenance, envFile string) string {
 	var b strings.Builder
 	b.WriteString("unset")
 	for _, name := range runtime.ScrubbedEnvNames() {
@@ -110,13 +163,41 @@ func identityEnvPrefix(p *runtime.LaunchProvenance) string {
 		b.WriteString(name)
 	}
 	b.WriteString("; ")
-	for _, entry := range p.IdentityEnv() {
-		key, value, _ := strings.Cut(entry, "=")
+	writeExports(&b, p.IdentityEnv())
+	if envFile != "" {
+		// Sourced after the unset, so a provisioned entry wins over both the
+		// unset and this launch's identity. callerEnv is what keeps that
+		// invariant true: it is the filter the file is written through.
+		b.WriteString(". ")
+		b.WriteString(shellquote.Quote(envFile))
+		b.WriteString("; ")
+	}
+	return b.String()
+}
+
+// launchEnvSource renders the caller's own environment as shell source an
+// interactive shell can `.` into itself: the same exports identityEnvPrefix
+// used to inline, written where no process listing can read them.
+func launchEnvSource(env []string) string {
+	entries := callerEnv(env)
+	if len(entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	writeExports(&b, entries)
+	return b.String()
+}
+
+func writeExports(b *strings.Builder, entries []string) {
+	for _, entry := range entries {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
+			continue
+		}
 		b.WriteString("export ")
 		b.WriteString(key)
 		b.WriteString("=")
 		b.WriteString(shellquote.Quote(value))
 		b.WriteString("; ")
 	}
-	return b.String()
 }

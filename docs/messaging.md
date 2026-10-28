@@ -200,6 +200,7 @@ The local adapter drives the broker's own router:
 | `/wait_reply` | Wait for the ask's terminal state. |
 | `/cancel_message` | Withdraw an ask. |
 | `/poll-control` | Drain queued control and agent messages. |
+| `/attach` | Spend one launch's attach credential: `run_id` and `token`, answered once with the run's own `{run_id, token}`. The broker mints these per launch (`MintAttach`) and the provider puts one in a provisioned child's environment, so the first session that presents it is the run's inbound consumer; a second presentation of the same credential is refused `409` with code `attach-consumed`, which is what keeps one run to one poller. The route is unauthenticated in the `/register` sense — the credential is the authentication and it is worthless once spent — and it never accepts the run's own token in place of a launch grant. A grant exists only for a record the broker's own supervisor minted, so a record another writer registered never has one to spend. |
 | `/rename` | Change a display name. The body's `run_id` must be the authenticated caller, and `session_id` is forwarded to the supervisor's one rename authority, so the supervisor decides whether the caller may rename that target. Answers `{run_id, label, previous_label}`. |
 | `/session_name` | Record the harness's own user-defined session name for the authenticated caller's run, or clear it with an empty `name`. The name must satisfy the same 1–64 rune rule as `/rename`; an empty `name` clears. Answers `{run_id, label}` with the resolved label. |
 | `/parent/register` | Adopt one child broker's claim on the runs it owns: `child_id`, `endpoint`, `generation` and `runs`, under the broker's link credential rather than a caller's run token. A claim replaces the child's previous run set and retires the runs it stopped naming. Answers `{generation, messaging_protocol}`, plus `run_keys` mapping a run's canonical ID to the run ID this broker addresses it by. |
@@ -261,7 +262,26 @@ network therefore means every client that can reach the broker port is
 trusted: the credentials are not an admission gate for arbitrary network
 clients. `POST /register` mints a token for any run id it has not seen without
 asking for a parent token, so a client that reaches the port can register
-itself and then use its own credential. There is no TLS listener, so a hub
+itself and then use its own credential. Its answer is that credential and the
+run id, never a launch attach grant: the broker mints one in process, for the
+launch it is about to start, because a register call would rotate the grant
+already sitting in a running child's environment.
+
+A registered record is also not adoptable. Each record the broker creates
+carries the identity of the supervisor that minted it — the control socket path
+plus the host, which is the same value a restart of that supervisor comes back
+under — and `EnsureRun`, the provisioning seam, adopts only a record carrying
+its own identity. A record `POST /register` created carries none, because its
+author chose the credential: adopting it would hand that author the identity of
+a run the supervisor is about to provision, since the token would travel to the
+child's launch and the plugin would then trade an attach grant for it. So a
+process that squats a run id before the supervisor provisions that child owns
+nothing it can use: `EnsureRun` refuses the record (`ErrRunNotOwned`),
+`MintAttach` mints no grant for it, and the launch proceeds with no broker
+identity at all rather than with someone else's, reporting the refusal on the
+supervisor's stderr. A resume or a relaunch of a run the supervisor itself
+minted is unaffected. There is no TLS listener, so
+a hub
 exposed beyond that network needs a channel that supplies both confidentiality
 and admission control.
 

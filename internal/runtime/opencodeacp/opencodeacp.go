@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
-	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/acp"
 )
@@ -37,14 +36,14 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 	})
 }
 
-func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
+func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error) {
 	hasOverrides := false
 
 	// Inject the avenor-channel-tools MCP server when broker info is available.
 	// Without a broker (e.g. CLI-only runs), skip the MCP injection — the mode
 	// override below is the only thing needed.
 	mcpOverride := map[string]any{}
-	if runID != "" && brokerToken != "" && brokerAddr != "" {
+	if runID != "" && brokerToken != "" && brokerURL != "" {
 		avenorBin, err := os.Executable()
 		if err != nil {
 			return nil, nil
@@ -54,7 +53,7 @@ func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerAddr st
 				"avenor-channel-tools": map[string]any{
 					"type":    "local",
 					"enabled": true,
-					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", messaging.BrokerURL(brokerAddr)},
+					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", brokerURL},
 				},
 			},
 			"tools": map[string]any{

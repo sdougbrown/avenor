@@ -44,9 +44,9 @@ func TestIdentityChildEnv(t *testing.T) {
 		t.Fatalf("broker.Start: %v", err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	token, ok := b.EnsureRun("rt_child", "")
-	if !ok {
-		t.Fatal("EnsureRun reported a failed registration")
+	token, ok, err := b.EnsureRun("rt_child", "")
+	if err != nil || !ok {
+		t.Fatalf("EnsureRun = (%q, %v, %v), want a minted run", token, ok, err)
 	}
 
 	provenance := identitytest.Provenance("rt_child")
