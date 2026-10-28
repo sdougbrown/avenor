@@ -233,15 +233,28 @@ func (b *Broker) PushControl(runID string, msg ControlMessage) error {
 		return fmt.Errorf("run not found: %s", runID)
 	}
 	st.Mu.Lock()
-	if st.peerUnavailableLocked(time.Now()) != "" {
-		st.Mu.Unlock()
+	defer st.Mu.Unlock()
+	if code := enqueueControlLocked(st, &msg, time.Now()); code != "" {
 		return fmt.Errorf("%w: %s", messaging.ErrTargetUnavailable, runID)
 	}
-	msg.CreatedAt = time.Now()
-	st.ControlQueue = append(st.ControlQueue, &msg)
-	st.signalLocked()
-	st.Mu.Unlock()
 	return nil
+}
+
+// enqueueControlLocked admits one control message into st's queue, refusing when
+// the peer identity behind it can no longer receive, and reports that refusal as
+// the code a caller turns into its own answer. The refusal and the enqueue have to
+// stay paired: three delivery paths reach a peer's queue, and one of them appending
+// to a tombstone would hand a message to a consumer that will never drain it.
+//
+// The caller holds st.Mu.
+func enqueueControlLocked(st *RunState, msg *ControlMessage, now time.Time) string {
+	if code := st.peerUnavailableLocked(now); code != "" {
+		return code
+	}
+	msg.CreatedAt = now
+	st.ControlQueue = append(st.ControlQueue, msg)
+	st.signalLocked()
+	return ""
 }
 
 // Send enqueues a control message for the given run using raw fields.
@@ -846,6 +859,11 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		st.RegisteredAt = time.Now()
 		st.LastSeen = time.Now()
+		// A retry is a live peer saying hello again, so it renews like the first
+		// hello did. Refresh only LastSeen and a lost response costs the session
+		// its place in the mesh 60 seconds later, with a successful re-register on
+		// the record.
+		st.renewPeerLeaseLocked(time.Now())
 		st.Mu.Unlock()
 		respToken := st.Token
 		b.mu.Unlock()
@@ -998,14 +1016,11 @@ func (b *Broker) handlePushControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	st.Mu.Lock()
-	if code := st.peerUnavailableLocked(time.Now()); code != "" {
+	if code := enqueueControlLocked(st, &msg, time.Now()); code != "" {
 		st.Mu.Unlock()
 		writePeerGone(w, code)
 		return
 	}
-	msg.CreatedAt = time.Now()
-	st.ControlQueue = append(st.ControlQueue, &msg)
-	st.signalLocked()
 	st.Mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2727,12 +2742,10 @@ func (x brokerBackend) Publish(target string, msg messaging.InboundMessage) (fun
 		CreatedAt: time.Now(),
 	}
 	st.Mu.Lock()
-	if st.peerUnavailableLocked(time.Now()) != "" {
+	if code := enqueueControlLocked(st, queued, time.Now()); code != "" {
 		st.Mu.Unlock()
 		return nil, messaging.ErrTargetUnavailable
 	}
-	st.ControlQueue = append(st.ControlQueue, queued)
-	st.signalLocked()
 	st.Mu.Unlock()
 	return func() {
 		st.Mu.Lock()

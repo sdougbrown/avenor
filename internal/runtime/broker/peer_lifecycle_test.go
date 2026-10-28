@@ -262,6 +262,34 @@ func TestPeerPollingRenewsLeaseAndRegistrationCannotDowngrade(t *testing.T) {
 	}
 }
 
+// A peer that retries a registration renews its lease, so a lost response does not
+// cost the session its place in the mesh.
+func TestPeerReRegistrationRenewsTheLease(t *testing.T) {
+	b := peerBroker(t)
+	creds := map[string]any{"run_id": "pi-peer", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	st, _, _ := b.runStateFor("pi-peer")
+	st.Mu.Lock()
+	st.peerDeadline = time.Now().Add(5 * time.Second)
+	before := st.peerDeadline
+	st.Mu.Unlock()
+
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	st.Mu.Lock()
+	renewed := st.peerDeadline
+	st.Mu.Unlock()
+	if !renewed.After(before) || time.Until(renewed) < peerLease/2 {
+		t.Fatalf("re-registration did not renew the lease: %v became %v", before, renewed)
+	}
+	if code, _ := peerPost(t, b, "/heartbeat", creds); code != http.StatusOK {
+		t.Fatalf("heartbeat after re-registration = %d", code)
+	}
+}
+
 func TestPeerDuplicatePollRefusedBeforeDrain(t *testing.T) {
 	b := New("")
 	b.pollTimeout = time.Minute
