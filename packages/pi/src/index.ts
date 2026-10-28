@@ -451,9 +451,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // idle completion sent during compaction can be rejected by the prompt
     // path, so delivery waits and leaves the notice unread.
     let compacting = false
-    // Suppress last-turn writes after a closed-socket failure until the default
-    // binding is evicted by disposeHostProvider/disposeHostProviders, or a new
-    // session starts. Evicting other supervisors must not reset this flag.
+    // A closed-socket last-turn failure is reported once per episode: the
+    // attempt itself keeps running on every turn so a healthy supervisor is
+    // picked up without a session restart. The flag clears when a record
+    // succeeds again, the host providers are rebound wholesale, or a new
+    // session starts. Evicting one binding must not reset it, or an unhealthy
+    // supervisor would be re-reported on every turn end.
     let lastTurnSocketClosed = false
 
     // Registry of in-flight blocking waits (avenor_result, spawn with
@@ -1615,7 +1618,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       hostProviders.delete(key)
       // A disposed provider's claims belong to a dead session.
       hostAskClaims.delete(key)
-      if (key === '') lastTurnSocketClosed = false
       if (!binding || binding.isSingleton || !binding.client) return
       try {
         binding.client.close()
@@ -1712,19 +1714,40 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return hostMessageProvider(supervisorId)
     }
 
+    // Report a failed last-turn record without disrupting the interactive TUI.
+    // ui.notify is Pi's TUI-safe channel in every mode; console.error is the
+    // fallback for a session that has no UI context yet. A latched report fires
+    // once per episode; an unlatched one fires on every occurrence.
+    function reportLastTurnFailure(message: string, latched: boolean): void {
+      if (latched) {
+        if (lastTurnSocketClosed) return
+        lastTurnSocketClosed = true
+      }
+      const text = `[avenor] session_last_set failed: ${message}`
+      if (sessionCtx) sessionCtx.ui.notify(text, 'warning')
+      else console.error(text)
+    }
+
     // The host's own last-turn producer. Every turn's end is recorded, including
     // cancelled and error turns; a run-level end is not a turn (DS-1). A child's
     // turn is recorded by the broker recorder, so child mode publishes nothing
     // from here.
     pi.on('turn_end', async event => {
       if (isSubAgentBrokerMode) return
-      // A closed control socket is terminal until the host providers are
-      // re-established: skip the attempt and stop the per-turn log spam.
-      if (lastTurnSocketClosed) return
       // Nobody can read a last-turn record while no supervisor exists, and
       // recording one must not start a supervisor (plus its broker) in a
-      // session that never delegates.
-      if (!deps.Supervisor.currentInstance?.()) return
+      // session that never delegates. A supervisor whose connection is already
+      // dead is reported once and its stale binding evicted; the next turn
+      // redials only once a healthy supervisor exists again.
+      const instance = deps.Supervisor.currentInstance?.()
+      if (!instance) return
+      try {
+        instance.getClient()
+      } catch (error) {
+        disposeHostProvider(undefined)
+        reportLastTurnFailure(error instanceof Error ? error.message : String(error), true)
+        return
+      }
       const turn = extractTurnText([event.message])
       try {
         const provider = await hostProviderFor(undefined)
@@ -1735,9 +1758,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           normalizeTurnStopReason(turn.stopReason),
           turn.text.length > bounded.length,
         )
+        lastTurnSocketClosed = false
       } catch (error) {
-        if (isClosedSocketError(error)) lastTurnSocketClosed = true
-        console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
+        if (isClosedSocketError(error)) {
+          // The cached binding's socket is dead: evict it so the next turn
+          // redials into whatever supervisor is healthy then.
+          disposeHostProvider(undefined)
+          reportLastTurnFailure(error instanceof Error ? error.message : String(error), true)
+        } else {
+          reportLastTurnFailure(error instanceof Error ? error.message : String(error), false)
+        }
       }
     })
 

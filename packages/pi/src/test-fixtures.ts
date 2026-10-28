@@ -77,7 +77,7 @@ export async function startExtensionHarness(options: {
     // A started session shares an in-process supervisor unless a test says otherwise.
     Supervisor: class {
       static currentInstance() {
-        return { supervisorId: 'sup' }
+        return { supervisorId: 'sup', getClient: () => ({}) }
       }
     } as any,
   }

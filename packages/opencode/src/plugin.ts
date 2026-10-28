@@ -24,6 +24,7 @@ import {
   extractTurnText,
   getSupervisorClient,
   inspectTool,
+  isClosedSocketError,
   messageTool,
   normalizeTurnStopReason,
   observeRun,
@@ -811,6 +812,13 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       // leaves it unclaimed and the next update for it is retried.
       publishedTurn = { created, id: messageId }
     } catch (error) {
+      if (isClosedSocketError(error)) {
+        // The cached binding's socket is dead: drop it so the next host tool
+        // redials instead of reusing the closed client. Publication stays
+        // quiet until that rebind; the log line is the one observable record.
+        hostProvider = undefined
+        hostBinding = undefined
+      }
       console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
     }
   }

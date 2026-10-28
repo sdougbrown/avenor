@@ -7,6 +7,7 @@ import { extractEventText } from '../../core/src/run-events.js'
 import { validateSpawnSelection } from '../../core/src/spawn-selection.js'
 import { THINKING_LEVELS } from '../../core/src/thinking-policy.js'
 import { ToolError, renderPeerList } from '../../core/src/message.js'
+import { ClosedSocketError, isClosedSocketError } from '../../core/src/client.js'
 import { boundFinalOutput, extractTurnText, normalizeTurnStopReason, renderLast } from '../../core/src/messaging-text.js'
 import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
 import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
@@ -199,6 +200,7 @@ mock.module('@dougbots/avenor-core', () => ({
   getSupervisorClient: getSupervisorClientMock,
   ToolError,
   renderPeerList,
+  isClosedSocketError,
   boundFinalOutput,
   extractTurnText,
   normalizeTurnStopReason,
@@ -1726,6 +1728,35 @@ describe('OpenCode host turn producer', () => {
 
     expect(attempts).toBe(2)
     expect(record.mock.calls[1]).toEqual(['one', 'end_turn', false])
+  })
+
+  it('drops a closed host binding so the next host tool redials', async () => {
+    const dialsBefore = getSupervisorClientMock.mock.calls.length
+    const record = mock(async () => {
+      throw new ClosedSocketError('control socket is closed')
+    })
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+      await bindSession(hooks, 'session-1')
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      expect(logged.join('\n')).toContain('session_last_set failed')
+      // The next host tool redials instead of reusing the closed client, and
+      // publication resumes on the new binding.
+      const healthy = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+      providerFactory = () => makeProvider({ recordLastTurn: healthy })
+      await bindSession(hooks, 'session-1')
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      expect(healthy).toHaveBeenCalledWith('one', 'end_turn', false)
+    } finally {
+      console.error = originalError
+    }
+    expect(getSupervisorClientMock).toHaveBeenCalledTimes(dialsBefore + 2)
+    expect(hostProviderOptions).toHaveLength(2)
   })
 
   it('publishes one turn when a repeat update arrives while the publish is in flight', async () => {
