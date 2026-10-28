@@ -141,6 +141,13 @@ type StableHandler interface {
 	WaitForCapacityMS(timeoutMS int) error
 }
 
+// TurnGuard is the optional capability that serializes a turn-bound operation
+// with same-runtime turn admission. Handlers that do not implement it refuse
+// turn-bound requests with "turn guard unavailable".
+type TurnGuard interface {
+	WithTurn(runtimeID, sentinel string, operation func() error) error
+}
+
 type connState struct {
 	id      uint64
 	server  *ControlServer
@@ -1671,9 +1678,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return err
 		}
 		if p.ExpectedSentinelFile != "" {
-			guard, ok := s.stableHandler.(interface {
-				WithTurn(string, string, func() error) error
-			})
+			guard, ok := s.stableHandler.(TurnGuard)
 			if !ok {
 				return failure(req.ID, -32000, "turn guard unavailable", nil)
 			}
@@ -1834,9 +1839,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return err
 		}
 		if p.ExpectedSentinelFile != "" {
-			guard, supported := s.stableHandler.(interface {
-				WithTurn(string, string, func() error) error
-			})
+			guard, supported := s.stableHandler.(TurnGuard)
 			if !supported {
 				return failure(req.ID, -32000, "turn guard unavailable", nil)
 			}
