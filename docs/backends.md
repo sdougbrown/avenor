@@ -133,6 +133,26 @@ Thinking control is native for Codex and Pi. Claude supports five startup values
 
 Session resume for `claude` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by this backend.
 
+## poo (Stage 1: resolution only)
+
+`poo` drives a poo binary over its public stdio protocol. Stage 1 registers the backend and resolves the binary a roster entry selects; the protocol client and provider land in Stage 2, so a run on this backend still stops at start with `the poo backend is not implemented yet`.
+
+A poo roster entry is the only place `command`, `args` and `settings` are accepted:
+
+```json
+{
+  "umpire-reviewer": {
+    "backend": "poo",
+    "command": "/opt/umpire-bot/bin/umpire-poo",
+    "args": ["serve"],
+    "settings": "/etc/umpire-bot/poo-settings.yaml",
+    "agent": "search"
+  }
+}
+```
+
+`command` is used as given and recorded as an absolute path; without it Avenor runs `poo` from `PATH`. `args` defaults to `["serve"]`. The launch argv is `<bin> <args...> --settings <path>`, with `--settings` only when the entry names a settings file. The resolved binary, args and settings path are part of the session's ownership record, so a resume that resolves differently is rejected before a provider exists. A backend that does not own these fields rejects them. A poo entry cannot carry `thinking`; the shared thinking policy refuses it like any backend without thinking support.
+
 ---
 
 ## claude
