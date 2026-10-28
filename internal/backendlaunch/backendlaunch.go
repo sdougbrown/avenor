@@ -96,9 +96,25 @@ var (
 	registrations = map[string]registration{}
 )
 
+type inputField struct {
+	name    string
+	present func(Input) bool
+}
+
+// inputFields is the launch field vocabulary Input carries, in the order
+// Validate reports it. It is the only place a field's presence is decided, so a
+// backend's registered names and the fields shared code can see cannot drift.
+var inputFields = []inputField{
+	{name: "command", present: func(in Input) bool { return in.Command != "" }},
+	{name: "args", present: func(in Input) bool { return in.Args != nil }},
+	{name: "settings", present: func(in Input) bool { return in.Settings != "" }},
+}
+
 // Register declares the extra roster fields backend owns and the resolver that
 // turns them into a Spec. A backend calls it from its package init, so a binary
-// that does not link the backend cannot accept its fields.
+// that does not link the backend cannot accept its fields. Every name must be a
+// field of Input; Register panics otherwise, because a field no resolver can be
+// handed would be advertised by Fields yet never validated.
 func Register(backend string, fields []string, resolver Resolver) {
 	if strings.TrimSpace(backend) == "" {
 		panic("backendlaunch: Register requires a backend name")
@@ -108,6 +124,11 @@ func Register(backend string, fields []string, resolver Resolver) {
 	}
 	if resolver == nil {
 		panic("backendlaunch: Register requires a resolver")
+	}
+	for _, field := range fields {
+		if !slices.ContainsFunc(inputFields, func(f inputField) bool { return f.name == field }) {
+			panic(fmt.Sprintf("backendlaunch: backend %q registered unknown launch field %q", backend, field))
+		}
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -127,23 +148,10 @@ func Fields(backend string) []string {
 
 // Validate reports the first field in input that backend does not declare.
 // Only a backend that registered the field may carry it in a roster entry.
-//
-// Owner note: this function hard-codes the launch field vocabulary below
-// against the fixed Input struct. A backend that registered a differently
-// named field would be advertised by Fields yet never validated or populated,
-// so a second launch backend with new field names must extend this table and
-// Input. Stage 1 has exactly one such backend.
 func Validate(backend string, input Input) error {
 	fields := Fields(backend)
-	for _, field := range []struct {
-		name    string
-		present bool
-	}{
-		{name: "command", present: input.Command != ""},
-		{name: "args", present: input.Args != nil},
-		{name: "settings", present: input.Settings != ""},
-	} {
-		if field.present && !slices.Contains(fields, field.name) {
+	for _, field := range inputFields {
+		if field.present(input) && !slices.Contains(fields, field.name) {
 			return fmt.Errorf("field %q is not supported by backend %q", field.name, backend)
 		}
 	}
