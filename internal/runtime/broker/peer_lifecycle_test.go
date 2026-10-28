@@ -138,6 +138,51 @@ func TestPeerExpiryReleasesPendingAsks(t *testing.T) {
 	}
 }
 
+// A peer holding its activity lock is serving a request, so it is alive. Expiry
+// must not wait for it: one wedged request would otherwise hold every other
+// peer's tombstone back and leave lapsed peers routable.
+func TestPeerExpiryDoesNotWaitOnABusyPeer(t *testing.T) {
+	b := peerBroker(t)
+	lapsed := time.Now().Add(-time.Second)
+	for _, runID := range []string{"busy", "idle"} {
+		if code, _ := peerPost(t, b, "/register", map[string]any{"run_id": runID, "token": "secret-" + runID, "peer": true}); code != http.StatusOK {
+			t.Fatal(code)
+		}
+		st, _, ok := b.runStateFor(runID)
+		if !ok {
+			t.Fatalf("%s is not registered", runID)
+		}
+		st.Mu.Lock()
+		st.peerDeadline = lapsed
+		st.Mu.Unlock()
+	}
+
+	busy, _, _ := b.runStateFor("busy")
+	busy.peerActivity.RLock()
+	defer busy.peerActivity.RUnlock()
+	done := make(chan struct{})
+	go func() { b.expirePeers(time.Now()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expiry waited on a peer serving a request")
+	}
+
+	idle, _, _ := b.runStateFor("idle")
+	idle.Mu.Lock()
+	idleRetired := idle.peerRetired
+	idle.Mu.Unlock()
+	if !idleRetired {
+		t.Fatal("a busy peer held back another peer's tombstone")
+	}
+	busy.Mu.Lock()
+	busyRetired := busy.peerRetired
+	busy.Mu.Unlock()
+	if busyRetired {
+		t.Fatal("retired a peer that was serving a request")
+	}
+}
+
 func TestPeerPollingRenewsLeaseAndRegistrationCannotDowngrade(t *testing.T) {
 	b := peerBroker(t)
 	creds := map[string]any{"run_id": "peer", "token": "secret", "peer": true}

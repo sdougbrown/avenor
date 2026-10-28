@@ -8,6 +8,15 @@ import (
 
 const peerLease = 60 * time.Second
 
+// renewPeerLeaseLocked extends a registered peer's lease from now. The caller
+// holds Mu. It is the one place the lease length is applied, so a heartbeat and
+// a poll cannot renew by different rules.
+func (st *RunState) renewPeerLeaseLocked(now time.Time) {
+	if st.peer {
+		st.peerDeadline = now.Add(peerLease)
+	}
+}
+
 // peerUnavailableLocked reads the lease under Mu. Peer tombstones retain the
 // registration credential so a delayed registration cannot revive a dead inbox.
 func (st *RunState) peerUnavailableLocked(now time.Time) string {
@@ -60,6 +69,11 @@ func (b *Broker) runPeerLeaseLoop(ctx context.Context) {
 	}
 }
 
+// expirePeers tombstones every peer whose lease lapsed. Each peer is handled
+// under its own activity lock, taken without blocking: a peer that holds the
+// lock is serving a request, so it is alive and a later tick retires it.
+// Blocking here would let one wedged request delay tombstoning for every peer,
+// keeping the rest routable long after their leases lapsed.
 func (b *Broker) expirePeers(now time.Time) {
 	b.mu.RLock()
 	states := make([]*RunState, 0, len(b.runs))
@@ -70,7 +84,9 @@ func (b *Broker) expirePeers(now time.Time) {
 	}
 	b.mu.RUnlock()
 	for _, st := range states {
-		st.peerActivity.Lock()
+		if !st.peerActivity.TryLock() {
+			continue
+		}
 		st.Mu.Lock()
 		expired := !st.peerRetired && !now.Before(st.peerDeadline)
 		if expired {
