@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -23,6 +24,24 @@ func writeSentinel(t *testing.T, path, status, sessionID string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write sentinel: %v", err)
+	}
+}
+
+func TestColdResumeRefusesUntilPriorTeardownFinishes(t *testing.T) {
+	sup, provider := newStage2Supervisor(t, 4)
+	for _, state := range []lifecycleState{
+		{completion: completionAdmissionClosed},
+		{shutdown: shutdownRequested},
+		{writer: writerClosing},
+	} {
+		child := &childRuntime{id: "prior", runDone: make(chan struct{}), lc: state}
+		_, err := sup.resumeOnce(child, child.id, SpawnParams{Backend: "opencode", Label: "next", SessionID: "same-session"})
+		if err == nil || !strings.Contains(err.Error(), "teardown") {
+			t.Fatalf("resume during teardown (%+v): %v", state, err)
+		}
+		if got := provider.resumesRecorded(); len(got) != 0 {
+			t.Fatalf("provider resumed before teardown: %v", got)
+		}
 	}
 }
 
@@ -52,6 +71,30 @@ func TestResumeResolution(t *testing.T) {
 	assertToolCode(t, err, "unknown_target")
 }
 
+func TestResumePiDenialStatuses(t *testing.T) {
+	sup, _ := newStage2Supervisor(t, 4)
+	cases := []struct {
+		name   string
+		lc     lifecycleState
+		status string
+	}{
+		// Park timeout: the session ended, so the denial names expiry.
+		{name: "expired", lc: lifecycleState{completion: completionPublished}, status: "expired"},
+		// Runtime shutdown requested: the denial names the shutdown, not expiry.
+		{name: "shutdown", lc: lifecycleState{shutdown: shutdownRequested}, status: "shutdown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			child := &childRuntime{id: "prior", lc: tc.lc}
+			_, err := sup.resumeOnce(child, child.id, SpawnParams{Backend: "pi", Label: "next"})
+			assertToolCode(t, err, "not_resumable")
+			if !strings.Contains(err.Error(), "(status: "+tc.status+")") {
+				t.Fatalf("not-resumable text = %q, want status %q", err, tc.status)
+			}
+		})
+	}
+}
+
 func TestResumeRefusesNonResumableSentinel(t *testing.T) {
 	sup, _ := newStage2Supervisor(t, 4)
 	dir := t.TempDir()
@@ -63,6 +106,18 @@ func TestResumeRefusesNonResumableSentinel(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
+	}
+	// The session ladder runs only on the cold arm, so drive the prior runtime
+	// to a terminal state first: a live runtime is refused as busy before the
+	// sentinel is ever read.
+	if err := sup.RuntimeCancel(prior.RuntimeID); err != nil {
+		t.Fatalf("cancel prior: %v", err)
+	}
+	child := sup.runtimeByID(prior.RuntimeID)
+	select {
+	case <-child.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prior runtime did not stop")
 	}
 	for _, status := range []string{"TIMEOUT", "KILLED"} {
 		t.Run(status, func(t *testing.T) {
@@ -110,6 +165,20 @@ func TestResumeRefusesWithoutResolvableSession(t *testing.T) {
 	child.mu.Lock()
 	child.session = runtime.Session{}
 	child.mu.Unlock()
+	// The ladder runs only on the cold arm, so drive the runtime terminal
+	// before resuming; cancel writes its own error sentinel, and this ladder
+	// rung needs the never-written sentinel to stay absent.
+	if err := sup.RuntimeCancel(prior.RuntimeID); err != nil {
+		t.Fatalf("cancel prior: %v", err)
+	}
+	select {
+	case <-child.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prior runtime did not stop")
+	}
+	if err := os.Remove(filepath.Join(dir, "never-written.env")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove sentinel: %v", err)
+	}
 
 	_, err = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
 		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "again",
@@ -126,6 +195,20 @@ func TestResumeRefusesWithoutResolvableSession(t *testing.T) {
 	}
 }
 
+func finishResumeFixture(t *testing.T, sup *Supervisor, prior SpawnResult, sentinel string) {
+	t.Helper()
+	if err := sup.RuntimeCancel(prior.RuntimeID); err != nil {
+		t.Fatalf("cancel prior: %v", err)
+	}
+	child := sup.runtimeByID(prior.RuntimeID)
+	select {
+	case <-child.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prior runtime did not stop")
+	}
+	writeSentinel(t, sentinel, "DONE", "ses_resumed")
+}
+
 func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	sup, provider := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
@@ -139,7 +222,7 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	writeSentinel(t, sentinel, "DONE", "ses_resumed")
+	finishResumeFixture(t, sup, prior, sentinel)
 	// The default follow-up label comes from the current display name, so a
 	// rename before the resume is honoured.
 	if _, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: prior.RuntimeID}, "", "renamed-prior"); err != nil {
@@ -192,6 +275,60 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	}
 }
 
+func TestResumeColdArmKeepsHarnessLabelsUnambiguous(t *testing.T) {
+	sup, provider := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "sentinel.env")
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		Agent: "claude", AutoApprove: true,
+		SentinelFile: sentinel,
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	finishResumeFixture(t, sup, prior, sentinel)
+	if err := sup.broker.SetHarnessName(prior.RuntimeID, "harness-name"); err != nil {
+		t.Fatalf("set harness name: %v", err)
+	}
+
+	newSentinel := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
+	newEventLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")
+	result, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+		SentinelFile: newSentinel, EventLog: newEventLog,
+	})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if result.Label != "harness-name-followup" {
+		t.Fatalf("resume label = %q, want the follow-up label", result.Label)
+	}
+	for label, want := range map[string]string{"harness-name": prior.RuntimeID, result.Label: result.RuntimeID} {
+		got, err := sup.resolveRunReference(label)
+		if err != nil || got != want {
+			t.Fatalf("resolve %q = %q, %v; want %q", label, got, err, want)
+		}
+	}
+	resumed := sup.runtimeByID(result.RuntimeID)
+	if resumed == nil {
+		t.Fatalf("resumed runtime %q is not registered", result.RuntimeID)
+	}
+	resumed.mu.Lock()
+	registered := resumed.label
+	resumed.mu.Unlock()
+	if registered != result.Label {
+		t.Fatalf("runtime registered under %q but resume reported %q", registered, result.Label)
+	}
+	if got := sup.broker.DisplayName(result.RuntimeID); got != result.Label {
+		t.Fatalf("broker display name = %q, resume reported %q", got, result.Label)
+	}
+	// The cold arm ran: the provider resumed the prior session.
+	if resumes := provider.resumesRecorded(); len(resumes) != 1 || resumes[0] != "ses_resumed" {
+		t.Fatalf("provider resumes = %v, want [ses_resumed]", resumes)
+	}
+}
+
 func TestResumeKeyedReplayAdoptsFirstRun(t *testing.T) {
 	sup, provider := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
@@ -204,7 +341,7 @@ func TestResumeKeyedReplayAdoptsFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	writeSentinel(t, sentinel, "DONE", "ses_resumed")
+	finishResumeFixture(t, sup, prior, sentinel)
 
 	// The TS host mints <home>/runs/<run_id>/sentinel.done, which no sentinel
 	// basename parser can recover the run id from: the run id must round-trip
@@ -264,13 +401,53 @@ func TestResumeRejectsLiveLabel(t *testing.T) {
 	}
 }
 
+func TestResumeRefusesActiveRuntimeEvenWithDoneSentinel(t *testing.T) {
+	sup, provider := newStage2Supervisor(t, 4)
+	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: t.TempDir(), Label: "prior"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSentinel(t, prior.SentinelFile, "DONE", "ses_resumed")
+	_, err = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{Target: prior.RuntimeID, Message: "continue"})
+	assertToolCode(t, err, "refused")
+	if !strings.Contains(err.Error(), "busy") {
+		t.Fatalf("error = %v, want busy", err)
+	}
+	if got := provider.resumesRecorded(); len(got) != 0 {
+		t.Fatalf("unexpected concurrent resume: %v", got)
+	}
+}
+
+// TestResumeKeyedBusyRefusalIsToolError pins the keyed path's error mapping:
+// a plain refusal from the resume work — a busy target, the way a teardown-in-
+// progress one refuses — must surface as a refused ToolError carrying the
+// original message, not as the raw error.
+func TestResumeKeyedBusyRefusalIsToolError(t *testing.T) {
+	sup, provider := newStage2Supervisor(t, 4)
+	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: t.TempDir(), Label: "prior"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSentinel(t, prior.SentinelFile, "DONE", "ses_resumed")
+	_, err = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue", IdempotencyKey: "k",
+	})
+	assertToolCode(t, err, "refused")
+	if !strings.Contains(err.Error(), "busy") {
+		t.Fatalf("error = %v, want the busy message preserved", err)
+	}
+	if got := provider.resumesRecorded(); len(got) != 0 {
+		t.Fatalf("unexpected concurrent resume: %v", got)
+	}
+}
+
 func TestResumeReportsSpawnedPaths(t *testing.T) {
 	sup, _ := newStage2Supervisor(t, 4)
 	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: t.TempDir(), Label: "prior"})
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	writeSentinel(t, prior.SentinelFile, "DONE", "ses_resumed")
+	finishResumeFixture(t, sup, prior, prior.SentinelFile)
 
 	result, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
 		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
@@ -329,7 +506,7 @@ func TestResumeConcurrentKeyedSpawnsOneRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	writeSentinel(t, prior.SentinelFile, "DONE", "ses_resumed")
+	finishResumeFixture(t, sup, prior, prior.SentinelFile)
 
 	const n = 8
 	results := make([]messaging.ResumeResult, n)
@@ -376,7 +553,7 @@ func TestResumeKeySpaceIsolatedFromSpawn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	writeSentinel(t, sentinel, "DONE", "ses_resumed")
+	finishResumeFixture(t, sup, prior, sentinel)
 
 	raw, err := json.Marshal(SpawnParams{Prompt: "keyed", Dir: dir, Agent: "claude", IdempotencyKey: "k"})
 	if err != nil {
@@ -415,7 +592,7 @@ func TestResumeDropsStartOnlyOptionsForClaudeResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	writeSentinel(t, sentinel, "DONE", "ses_resumed")
+	finishResumeFixture(t, sup, prior, sentinel)
 
 	newSentinel := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
 	newEventLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")

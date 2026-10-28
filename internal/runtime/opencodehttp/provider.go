@@ -13,6 +13,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
 )
 
 const backendID = "opencode-http"
@@ -30,11 +31,12 @@ type Provider struct {
 	endedSessions map[string]bool // guards double-emit of session.end
 
 	// Broker fields for channel-wrapped prompt injection.
-	broker          *broker.Broker
-	runIDs          map[string]string // sessionID → runID
-	pollCancels     map[string]context.CancelFunc
-	pendingMu       sync.Mutex
-	pendingMessages map[string][]string // sessionID → queued wrapped prompts
+	broker      *broker.Broker
+	runIDs      map[string]string // sessionID → runID
+	pollCancels map[string]context.CancelFunc
+	// Queue holds queued channel messages and the warm-admission guard;
+	// LockWarmMessageAdmission is promoted from it.
+	*warmqueue.Queue
 }
 
 type sessionState struct {
@@ -51,13 +53,13 @@ func New() (runtime.Provider, error) {
 // NewWithOptions creates a Provider with the given options.
 func NewWithOptions(opts runtime.StartOptions) (runtime.Provider, error) {
 	return &Provider{
-		opts:            opts,
-		sessions:        make(map[string]sessionState),
-		subscribers:     make(map[chan events.Event]string),
-		endedSessions:   make(map[string]bool),
-		runIDs:          make(map[string]string),
-		pollCancels:     make(map[string]context.CancelFunc),
-		pendingMessages: make(map[string][]string),
+		opts:          opts,
+		sessions:      make(map[string]sessionState),
+		subscribers:   make(map[chan events.Event]string),
+		endedSessions: make(map[string]bool),
+		runIDs:        make(map[string]string),
+		pollCancels:   make(map[string]context.CancelFunc),
+		Queue:         warmqueue.NewQueue(),
 	}, nil
 }
 
@@ -110,9 +112,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		p.pollCancels[sessionID] = cancel
 		p.mu.Unlock()
 		go p.broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
-			p.pendingMu.Lock()
-			p.pendingMessages[sessionID] = append(p.pendingMessages[sessionID], wrapped)
-			p.pendingMu.Unlock()
+			p.Queue.Enqueue(sessionID, wrapped)
 		})
 	}
 
@@ -260,9 +260,7 @@ func (p *Provider) Close() error {
 	p.mu.Lock()
 	p.runIDs = nil
 	p.mu.Unlock()
-	p.pendingMu.Lock()
-	p.pendingMessages = map[string][]string{}
-	p.pendingMu.Unlock()
+	p.Queue.Reset()
 	return nil
 }
 
@@ -528,14 +526,11 @@ func clientOptionsFromURL(rawURL string) (ClientOptions, string) {
 // injectPendingMessages injects queued channel-wrapped messages for a session
 // at a turn boundary.
 func (p *Provider) injectPendingMessages(ctx context.Context, sessionID string) {
-	p.pendingMu.Lock()
-	msgs := p.pendingMessages[sessionID]
-	p.pendingMessages[sessionID] = nil
-	p.pendingMu.Unlock()
-
+	msgs, done := p.Queue.Take(sessionID)
 	if len(msgs) == 0 {
 		return
 	}
+	defer done()
 	p.beginSessionTurn(sessionID)
 	for _, msg := range msgs {
 		p.Prompt(ctx, sessionID, msg)

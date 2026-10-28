@@ -31,6 +31,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -1057,6 +1058,182 @@ func TestSupervisorPublicAPIParkAndResume(t *testing.T) {
 // while a turn is still running is not lost when that turn ends: the runtime
 // runs the queued prompt as its next turn with no further RuntimePrompt to
 // wake it.
+func TestResumeExpiredPiSessionIsNotResumable(t *testing.T) {
+	provider := newItestProvider(itestAttempt("ses_ephemeral", itestSessionEnd("ses_ephemeral", "end_turn", "first")))
+	h := newItestHarness(t, Config{ParkedRuntimeTimeout: 20 * time.Millisecond}, itestSingleProvider(provider))
+	rt := h.spawn(map[string]any{"backend": "pi"})
+	h.awaitCondition("runtime reaped", func() bool {
+		child := h.sup.runtimeByID(rt)
+		child.mu.Lock()
+		defer child.mu.Unlock()
+		return child.lc.isCompleted()
+	})
+	_, err := h.sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{Target: rt, Message: "again"})
+	if err == nil || !strings.Contains(err.Error(), "not resumable") {
+		t.Fatalf("Resume expired Pi session = %v, want not resumable", err)
+	}
+}
+
+func TestResumeContinuesParkedRuntime(t *testing.T) {
+	provider := newItestProvider(
+		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "first")),
+		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "second")),
+		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "third")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+	rt := h.spawn(nil)
+	h.awaitStatus(rt, "done")
+	previous := h.rawRuntimeStatus(rt)["sentinel_file"]
+	for _, output := range []string{"second", "third"} {
+		h.awaitCondition("runtime parked", func() bool {
+			child := h.sup.runtimeByID(rt)
+			child.mu.Lock()
+			defer child.mu.Unlock()
+			return child.lc.isParked()
+		})
+		result, err := h.sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{
+			Target: rt, Message: "again", RunID: output,
+		})
+		if err != nil {
+			t.Fatalf("Resume %s: %v", output, err)
+		}
+		if result.RuntimeID != rt || result.SessionID != "ses_warm" || result.SentinelFile == previous {
+			t.Fatalf("Resume %s = %+v; previous sentinel %v", output, result, previous)
+		}
+		previous = result.SentinelFile
+		h.log.waitFor(t, output+" turn", func(ev events.Event) bool {
+			out, _ := ev.Fields["final_output"].(string)
+			return itestEventIs("session.end", rt)(ev) && out == output
+		})
+	}
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 2 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/2", starts, resumes)
+	}
+}
+
+// TestRuntimeResultReportsSentinelPath pins the sentinel_file half of
+// RuntimeResult: the terminal reply carries the runtime's sentinel path, and
+// after a warm resume rotates the child onto the next turn's sentinel the
+// reported path follows the rotation.
+func TestRuntimeResultReportsSentinelPath(t *testing.T) {
+	provider := newItestProvider(
+		itestAttempt("ses_result_sentinel", itestSessionEnd("ses_result_sentinel", "end_turn", "first")),
+		itestAttempt("ses_result_sentinel", itestSessionEnd("ses_result_sentinel", "end_turn", "second")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+	dir := h.t.TempDir()
+	raw, err := json.Marshal(map[string]any{
+		"prompt": "go", "dir": dir, "backend": "pony",
+		"sentinel_file": filepath.Join(dir, "first.env"),
+	})
+	if err != nil {
+		t.Fatalf("marshal spawn params: %v", err)
+	}
+	out, err := h.sup.Spawn(raw)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	spawned, ok := out.(SpawnResult)
+	if !ok || spawned.RuntimeID == "" {
+		t.Fatalf("Spawn result = %#v, want SpawnResult", out)
+	}
+	rt := spawned.RuntimeID
+	h.awaitStatus(rt, "done")
+	if _, err := os.Stat(spawned.SentinelFile); err != nil {
+		t.Fatalf("first sentinel on disk: %v", err)
+	}
+	got, err := h.sup.RuntimeResult(rt)
+	if err != nil {
+		t.Fatalf("RuntimeResult: %v", err)
+	}
+	result, _ := got.(map[string]any)
+	if path, _ := result["sentinel_file"].(string); path != spawned.SentinelFile {
+		t.Fatalf("RuntimeResult sentinel_file = %q, want the spawn's %q", path, spawned.SentinelFile)
+	}
+	h.awaitCondition("runtime parked", func() bool {
+		child := h.sup.runtimeByID(rt)
+		child.mu.Lock()
+		defer child.mu.Unlock()
+		return child.lc.isParked()
+	})
+	resumed, err := h.sup.Resume(messaging.Caller{Kind: messaging.CallerOwner}, messaging.ResumeRequest{
+		Target: rt, Message: "again", RunID: "follow-up",
+		SentinelFile: filepath.Join(dir, "second.env"),
+	})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	h.awaitStatus(rt, "done")
+	if _, err := os.Stat(resumed.SentinelFile); err != nil {
+		t.Fatalf("second sentinel on disk: %v", err)
+	}
+	got, err = h.sup.RuntimeResult(rt)
+	if err != nil {
+		t.Fatalf("RuntimeResult after resume: %v", err)
+	}
+	result, _ = got.(map[string]any)
+	path, _ := result["sentinel_file"].(string)
+	if path != resumed.SentinelFile || path == spawned.SentinelFile {
+		t.Fatalf("RuntimeResult sentinel_file after resume = %q, want the rotated %q", path, resumed.SentinelFile)
+	}
+	// Settle the harness before the TempDir cleanup removes the sentinel
+	// directory, so shutdown's best-effort sentinel writes still have a target.
+	h.shutdown("kill")
+}
+
+func TestWarmResumeKeyedReplayQueuesOnce(t *testing.T) {
+	gate := newItestGate()
+	defer gate.open()
+	provider := newItestProvider(
+		itestAttempt("ses_warm_key", itestSessionEnd("ses_warm_key", "end_turn", "first")),
+		itestAttempt("ses_warm_key", gate.step(), itestSessionEnd("ses_warm_key", "end_turn", "second")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+	rt := h.spawn(nil)
+	h.awaitCondition("runtime parked", func() bool {
+		child := h.sup.runtimeByID(rt)
+		child.mu.Lock()
+		defer child.mu.Unlock()
+		return child.lc.isParked()
+	})
+	caller := messaging.Caller{Kind: messaging.CallerOwner}
+	req := messaging.ResumeRequest{Target: rt, Message: "again", RunID: "first", IdempotencyKey: "warm-key"}
+	const n = 8
+	results := make([]messaging.ResumeResult, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			attempt := req
+			attempt.RunID = fmt.Sprintf("run-%d", i)
+			results[i], errs[i] = h.sup.Resume(caller, attempt)
+		}(i)
+	}
+	wg.Wait()
+	for i := range results {
+		if errs[i] != nil {
+			t.Fatalf("resume %d: %v", i, errs[i])
+		}
+		if results[i] != results[0] {
+			t.Fatalf("replay = %+v, want %+v", results[i], results[0])
+		}
+	}
+	req.Message = "different"
+	if _, err := h.sup.Resume(caller, req); err == nil {
+		t.Fatal("reusing a warm resume key with a different message succeeded")
+	}
+	gate.open()
+	h.log.waitFor(t, "second turn", func(ev events.Event) bool {
+		out, _ := ev.Fields["final_output"].(string)
+		return itestEventIs("session.end", rt)(ev) && out == "second"
+	})
+	if starts, resumes := provider.counts(); starts != 1 || resumes != 1 {
+		t.Fatalf("provider starts/resumes = %d/%d, want 1/1", starts, resumes)
+	}
+}
+
 func TestSupervisorPublicAPIPromptQueuedDuringActiveTurn(t *testing.T) {
 	t.Parallel()
 	gate := newItestGate()

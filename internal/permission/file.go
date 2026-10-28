@@ -64,6 +64,12 @@ func NewFileHandler(basePath string) *FileHandler {
 	}
 }
 
+// FilePaths returns the request and response paths for a file handler base.
+func FilePaths(base string) (request, response string) {
+	request = base + ".req"
+	return request, request + ".response"
+}
+
 // Handle manages the file protocol for an already-published permission.request.
 // The caller owns event publication so a request receives one effective resolver
 // hint rather than a duplicate normalized event.
@@ -83,8 +89,7 @@ func (h *FileHandler) Handle(ctx context.Context, provider runtime.Provider, eve
 		return Resolution{}, errors.New("permission.request missing request_id")
 	}
 
-	requestPath := h.BasePath + ".req"
-	responsePath := requestPath + ".response"
+	requestPath, responsePath := FilePaths(h.BasePath)
 	_ = os.Remove(responsePath)
 
 	data, err := json.MarshalIndent(request, "", "  ")

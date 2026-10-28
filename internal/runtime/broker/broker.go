@@ -131,6 +131,7 @@ type RunState struct {
 	// read it through Broker.runToken or Broker.runStateFor.
 	Token               string
 	ControlQueue        []*ControlMessage
+	pollDeliveries      int
 	RegisteredAt        time.Time
 	LastSeen            time.Time
 	Reports             []Report
@@ -171,6 +172,20 @@ func (st *RunState) displayName() string {
 	st.Mu.Lock()
 	defer st.Mu.Unlock()
 	return st.labelLocked()
+}
+
+// setLabelLocked writes name as the run's display label, creating the session
+// record when it is missing. The caller holds st.Mu; name is written
+// verbatim, so a caller that resets an empty name to the run ID — as
+// RenameRun does — applies that rule before calling. Publishing the change
+// stays with the caller too: an admission commit publishes only when a label
+// actually moved, and an adoption claims a record the branch that owns it
+// already publishes.
+func (st *RunState) setLabelLocked(runID, name string) {
+	if st.Info == nil {
+		st.Info = &SessionInfo{RunID: runID}
+	}
+	st.Info.Label = name
 }
 
 // labelLocked resolves the one display name peers see. A harness's own session
@@ -1970,7 +1985,13 @@ func (b *Broker) pollAgentMessagesOnce(runID string, onMessage func(wrappedConte
 		msgs = append(msgs, *msg)
 	}
 	st.ControlQueue = other
+	st.pollDeliveries += len(msgs)
 	st.Mu.Unlock()
+	defer func() {
+		st.Mu.Lock()
+		st.pollDeliveries -= len(msgs)
+		st.Mu.Unlock()
+	}()
 	for _, msg := range msgs {
 		var payload struct {
 			Message string `json:"message"`
@@ -2234,10 +2255,7 @@ func (b *Broker) ownRun(claim messaging.ClaimedRun, newlyAdopted bool) string {
 	}
 	if claim.Label != "" {
 		st.Mu.Lock()
-		if st.Info == nil {
-			st.Info = &SessionInfo{RunID: claim.Key}
-		}
-		st.Info.Label = claim.Label
+		st.setLabelLocked(claim.Key, claim.Label)
 		st.Mu.Unlock()
 	}
 	return st.Token
@@ -2374,6 +2392,48 @@ func (b *Broker) harnessNameChanged(runID, name string) {
 	}
 }
 
+// LockWarmAdmission holds the run queue stable until the returned function is
+// called. Pending messages block admission only for providers that inject
+// them automatically; explicit inbox consumers keep their unread messages.
+// A successful release publishes the requested label after admission has completed.
+func (b *Broker) LockWarmAdmission(runID, name string, injectsMessages bool) (func(bool), error) {
+	st := b.GetRun(runID)
+	if st == nil {
+		if name != "" {
+			return nil, fmt.Errorf("run not found: %s", runID)
+		}
+		return func(bool) {}, nil
+	}
+	b.mu.RLock()
+	descendant := st.descendant
+	b.mu.RUnlock()
+	st.Mu.Lock()
+	if injectsMessages && (len(st.ControlQueue) != 0 || st.pollDeliveries != 0) {
+		st.Mu.Unlock()
+		return nil, fmt.Errorf("runtime %q has pending broker messages", runID)
+	}
+	if name != "" && st.HarnessName != "" && st.HarnessName != name {
+		st.Mu.Unlock()
+		return nil, fmt.Errorf("cannot rename runtime %s: harness name %q takes precedence", runID, st.HarnessName)
+	}
+	if name != "" && descendant {
+		st.Mu.Unlock()
+		return nil, fmt.Errorf("run %s is owned by a child broker", runID)
+	}
+	return func(commit bool) {
+		if commit {
+			st.LastMessage = nil
+		}
+		if commit && name != "" {
+			st.setLabelLocked(runID, name)
+		}
+		st.Mu.Unlock()
+		if commit && name != "" {
+			b.runSetChanged()
+		}
+	}, nil
+}
+
 // RenameRun changes the model-set display name for runID. An empty name resets
 // the run to its run ID. A harness-supplied name, if any, still wins.
 func (b *Broker) RenameRun(runID, name string) error {
@@ -2393,10 +2453,7 @@ func (b *Broker) RenameRun(runID, name string) error {
 		name = runID
 	}
 	st.Mu.Lock()
-	if st.Info == nil {
-		st.Info = &SessionInfo{RunID: runID}
-	}
-	st.Info.Label = name
+	st.setLabelLocked(runID, name)
 	st.Mu.Unlock()
 	// The label is what a host publishes about this run, so a rename is a
 	// run-set change even though the set itself did not change.

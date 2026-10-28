@@ -217,10 +217,31 @@ type SpawnParams struct {
 	// so teardown releases the run's own slot even if another runtime wears
 	// the same label.
 	permissionDeciderSlotKey string
-	// resumeRunID is the public run id a resume's surface minted. It carries no
-	// JSON tag so it never affects the idempotency parameter hash; the spawn
-	// result echoes it, which is how a keyed replay reports the first run's id.
-	resumeRunID string
+	// resume carries the parameters only the resume path sets (resume.go).
+	// The nested struct carries no JSON tag and json.Marshal skips unexported
+	// fields, so none of it affects the idempotency parameter hash; each field
+	// is documented on resumeSpawn.
+	resume resumeSpawn
+}
+
+// resumeSpawn groups the spawn parameters only the resume path sets. Folding
+// them into one struct keeps SpawnParams reading as one idea: everything
+// outside resume is a spawn a caller can request directly.
+//
+// The struct is unexported and carries no JSON tag, so it never enters the
+// idempotency parameter hash or the spawn wire shape.
+type resumeSpawn struct {
+	// runID is the public run id a resume's surface minted. The spawn result
+	// echoes it, which is how a keyed replay reports the first run's id
+	// instead of the retry's.
+	runID string
+	// labelReservation makes the spawn reserve Label even without an
+	// idempotency key, matching the reservation a keyed spawn gets.
+	labelReservation bool
+	// implicitLabel permits the warm arm to keep the existing harness name.
+	// A cold continuation uses its own follow-up label to avoid ambiguity
+	// with the completed runtime's broker record.
+	implicitLabel bool
 }
 
 type SpawnResult struct {
@@ -228,6 +249,7 @@ type SpawnResult struct {
 	// RunID is the public run id the surface supplied, internal to the resume
 	// path; it is not part of the spawn wire shape.
 	RunID        string `json:"-"`
+	Label        string `json:"-"`
 	SessionID    string `json:"session_id"`
 	OnEvent      string `json:"on_event"`
 	SentinelFile string `json:"sentinel_file"`
@@ -289,28 +311,29 @@ type childRuntime struct {
 	// see. A spawn sets it, applySessionName rewrites it, and the broker's
 	// harness-name observer rewrites it — each under s.controlMu -> child.mu,
 	// the locks List, RuntimeStatus and labelHolderLocked read it under.
-	displayName      string
-	agent            string
-	agentProfile     string
-	model            string
-	thinking         string
-	backend          string
-	launchWrapper    []string
-	rosterFile       string
-	rosterEntry      string
-	effectiveBackend string
-	effectiveAgent   string
-	effectiveModel   string
-	roster           *rosterconfig.Config
-	parentID         string   // runtime ID of the parent agent, empty for top-level
-	children         []string // runtime IDs spawned by this runtime
-	startedAt        int64
-	provider         runtime.Provider
-	session          runtime.Session
-	eventWriter      cli.EventSink
-	fileHandler      *permission.FileHandler
-	autoApprove      bool
-	permClaimTimeout time.Duration
+	displayName        string
+	agent              string
+	agentProfile       string
+	model              string
+	thinking           string
+	backend            string
+	launchWrapper      []string
+	rosterFile         string
+	rosterEntry        string
+	effectiveBackend   string
+	effectiveAgent     string
+	effectiveModel     string
+	roster             *rosterconfig.Config
+	parentID           string   // runtime ID of the parent agent, empty for top-level
+	children           []string // runtime IDs spawned by this runtime
+	startedAt          int64
+	provider           runtime.Provider
+	session            runtime.Session
+	eventWriter        cli.EventSink
+	fileHandler        *permission.FileHandler
+	derivedFileHandler bool
+	autoApprove        bool
+	permClaimTimeout   time.Duration
 	// permissionDecider carries the resolved permission policy's decider;
 	// nil means the runtime uses the ordinary permission resolver behavior.
 	permissionDecider *workflow.PermissionDecider
@@ -353,15 +376,16 @@ type childRuntime struct {
 	done                       chan struct{}
 	doneOnce                   sync.Once
 	runDoneOnce                sync.Once
-	// runDone is a test-observable join point: it is closed when the child's
-	// run goroutine exits (after its post-completion work, such as the
-	// capacity release that follows complete) or by the rollback/finish path
-	// when no run goroutine ever started. Production never reads it; test
-	// teardown joins on it before asserting lifecycle counters.
-	runDone     chan struct{}
-	exitCode    int
-	promptCh    chan struct{}
-	promptQueue []string
+	// runDone closes after the run goroutine finishes provider teardown and
+	// post-completion work, including capacity release, or on rollback when
+	// no run goroutine started. Cold resume waits for it before opening the
+	// same session in another provider; tests join it before checking cleanup.
+	runDone           chan struct{}
+	exitCode          int
+	promptCh          chan struct{}
+	promptQueue       []string
+	warmResumePending bool
+	promptClaimed     bool
 	// turnWaiters are wait_turn callers blocked on the runtime's next
 	// running→idle transition. Each waiter registers a channel under child.mu;
 	// settleTurnLocked closes them when the active turn settles, so a settle
@@ -396,6 +420,17 @@ type childRuntime struct {
 	// end, so a run publishes at most one per session.
 	runEnds       map[string]struct{}
 	directAttempt *sessionAttempt
+	// turnMu serializes this runtime's turn-bound work: warm admission
+	// (admitWarmResume) and any turn-bound operation that holds the same
+	// lock. It is per-runtime so a slow turn-bound operation on one
+	// runtime cannot block another runtime's admission. It anchors the one
+	// lock order shared across the supervisor, outermost to innermost:
+	//
+	//	child.turnMu -> child.writeMu -> s.controlMu -> child.mu -> broker st.Mu
+	//
+	// Every path that takes more than one of these locks takes them in that
+	// order; admitWarmResume references this comment instead of restating it.
+	turnMu sync.Mutex
 	// lc is the closed lifecycle state owned by the pure machine
 	// (runtime_lifecycle.go) and committed field by field by the adapter
 	// (runtime_lifecycle_apply.go). Read it through the field-specific
@@ -583,6 +618,15 @@ type testHooks struct {
 	// cleanup's control lock is held and the router lock is not. nil in
 	// production.
 	directCleanupPost func()
+	// warmAdmissionAfterReservation runs after artifact reservation and
+	// before the admission locks, so a test can send a broker message that
+	// the pending check must catch. Set before admission; nil in production.
+	warmAdmissionAfterReservation func()
+	// warmResumePermissionHandler, when non-nil (set by tests before the
+	// admission call), replaces the derived permission handler parse during
+	// warm-resume artifact reservation so a test can force the pre-install
+	// validation failure. nil in production.
+	warmResumePermissionHandler func(sentinel string) (*permission.FileHandler, error)
 }
 
 type Supervisor struct {
@@ -1706,7 +1750,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	// Keyed spawns enforce label uniqueness atomically with registration:
 	// two concurrent keyed first-use spawns with the same label cannot both
 	// register (the MCP pre-check is a fast path, not the authority).
-	if params.IdempotencyKey != "" && params.Label != "" {
+	if (params.IdempotencyKey != "" || params.resume.labelReservation) && params.Label != "" {
 		if holder := s.labelHolderLocked(params.Label); holder != "" {
 			childCancel()
 			s.controlMu.Unlock()
@@ -1909,6 +1953,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		}
 		fileHandler = fh
 	}
+	child.derivedFileHandler = params.PermissionHandler == "" && fileHandler != nil
 
 	// Loop spawn path — uses looprunner instead of a single provider/session.
 	if params.LoopFile != "" {
@@ -1936,7 +1981,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		// SpawnResult.SessionID is empty — phase session IDs are in events.
 		result := SpawnResult{
 			RuntimeID:    rtID,
-			RunID:        params.resumeRunID,
+			RunID:        params.resume.runID,
 			OnEvent:      onEvent,
 			SentinelFile: sentinelFile,
 			BrokerURL:    s.brokerURL(),
@@ -1978,7 +2023,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 
 		result := SpawnResult{
 			RuntimeID:    rtID,
-			RunID:        params.resumeRunID,
+			RunID:        params.resume.runID,
 			OnEvent:      onEvent,
 			SentinelFile: sentinelFile,
 			BrokerURL:    s.brokerURL(),
@@ -2083,7 +2128,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	brokerURL := s.brokerURL()
 	return SpawnResult{
 		RuntimeID:        rtID,
-		RunID:            params.resumeRunID,
+		RunID:            params.resume.runID,
 		SessionID:        session.SessionID,
 		OnEvent:          onEvent,
 		SentinelFile:     sentinelFile,
@@ -2337,6 +2382,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 		}
 		s.recordWorkflowTermination(child, panicked, ctx)
 		providerLifecycle := s.beginChildShutdown(child)
+		s.finishUnstartedWarmResume(child)
 		s.closeChildEventWriter(child)
 		s.permissions.clearRuntimePermissionOptions(child.id)
 		s.closeChildProvider(child, providerLifecycle)
@@ -2481,6 +2527,10 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			_, parkEff, parkErr := s.applyLifecycle(child, lifecycleSignal{
 				kind: signalParkRequested, class: child.lc.class, runKind: runKindOrdinaryDirect,
 			})
+			if parkErr == nil {
+				child.warmResumePending = false
+				child.promptClaimed = false
+			}
 			child.mu.Unlock()
 			if parkErr != nil {
 				// The outcome sentinel already ran on the park path; the fail-
@@ -3283,6 +3333,9 @@ func (c *childRuntime) dequeuePrompt() (string, bool) {
 	}
 	prompt := c.promptQueue[0]
 	c.promptQueue = c.promptQueue[1:]
+	if c.lc.isParked() {
+		c.promptClaimed = true
+	}
 	return prompt, true
 }
 
@@ -3328,6 +3381,7 @@ func (c *childRuntime) waitForNextPrompt(s *Supervisor, ctx context.Context, par
 			if len(c.promptQueue) > 0 {
 				prompt := c.promptQueue[0]
 				c.promptQueue = c.promptQueue[1:]
+				c.promptClaimed = true
 				_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalPromptDequeued, class: c.lc.class})
 				c.mu.Unlock()
 				if err != nil {
@@ -5361,7 +5415,7 @@ func (s *Supervisor) RuntimeResult(rtID string) (any, error) {
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return map[string]any{"final_output": rt.fullFinalOutput}, nil
+	return map[string]any{"final_output": rt.fullFinalOutput, "sentinel_file": rt.sentinelFile}, nil
 }
 
 // RuntimeWaitTurn blocks until the runtime's next running→idle transition

@@ -22,6 +22,15 @@ type Provider interface {
 	Capabilities(ctx context.Context) (Capabilities, error)
 }
 
+// WarmMessageAdmission is the optional guard for providers that inject broker
+// messages at turn boundaries. A warm resume must not overtake queued or
+// in-flight messages for the session.
+type WarmMessageAdmission interface {
+	// LockWarmMessageAdmission returns an unlock on success. On refusal the
+	// guard is not held.
+	LockWarmMessageAdmission(sessionID string) (func(), bool)
+}
+
 // StartOptions holds options for starting a new session.
 type StartOptions struct {
 	Agent        string

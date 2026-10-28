@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
+	"github.com/sdougbrown/avenor/internal/permission"
 )
 
 // atomicWriteHook, when non-nil, observes each successful atomic write by
@@ -42,10 +43,10 @@ func validateArtifactPaths(resultFile, pidFile, sentinelFile, onEvent, permissio
 		{"--on-event", onEvent, false},
 	}
 	if sentinelFile != "" && permissionHandler == "" && !autoApprove {
-		base := DerivePermBase(sentinelFile)
+		request, response := permission.FilePaths(DerivePermBase(sentinelFile))
 		artifacts = append(artifacts,
-			artifact{"the permission request file", base + ".req", false},
-			artifact{"the permission response file", base + ".req.response", false},
+			artifact{"the permission request file", request, false},
+			artifact{"the permission response file", response, false},
 		)
 	}
 	type seenPath struct {
@@ -61,15 +62,9 @@ func validateArtifactPaths(resultFile, pidFile, sentinelFile, onEvent, permissio
 		if f.singleLine && strings.ContainsAny(f.path, "\r\n") {
 			return fmt.Errorf("%s must be a single-line path", f.name)
 		}
-		abs, err := filepath.Abs(f.path)
+		abs, err := ResolveArtifactPath(f.path)
 		if err != nil {
 			return fmt.Errorf("%s: %w", f.name, err)
-		}
-		// A symlinked directory can hide that two spellings reach one file, so
-		// compare through the resolved parent when it exists. The file itself is
-		// opened without following a final symlink; see NewEventWriter.
-		if parent, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
-			abs = filepath.Join(parent, filepath.Base(abs))
 		}
 		info, err := os.Stat(abs)
 		if err != nil {
@@ -156,4 +151,24 @@ func writeFileAtomic(path, pattern, text string) error {
 		atomicWriteHook(path)
 	}
 	return nil
+}
+
+// ResolveArtifactPath names an artifact the way this package compares them:
+// absolute, with any existing parent directory resolved through symlinks, so
+// two spellings that reach one file through a symlinked directory compare equal
+// even before the file exists. The final element is never resolved, matching
+// how an artifact file is opened without following a final symlink; see
+// NewEventWriter.
+//
+// Callers that compare artifact paths, including warm-turn admission in
+// internal/stable, use this so one symlink rule covers every writer.
+func ResolveArtifactPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		return filepath.Join(parent, filepath.Base(abs)), nil
+	}
+	return abs, nil
 }

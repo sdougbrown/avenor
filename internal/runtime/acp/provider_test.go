@@ -17,6 +17,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
 )
 
 func TestSelectPermissionOption(t *testing.T) {
@@ -405,21 +406,19 @@ func TestCachePermissionOptionsSessionEndInjectsPendingMessages(t *testing.T) {
 				"req": {map[string]any{"optionId": "allow", "kind": "allow"}},
 			},
 		},
-		pendingMessages: map[string][]string{"ses": {"<channel>hello</channel>"}},
-		events:          make(chan events.Event, 2),
+		Queue:  warmqueue.NewQueue(),
+		events: make(chan events.Event, 2),
 	}
 
+	p.Queue.Enqueue("ses", "<channel>hello</channel>")
 	p.cachePermissionOptions(events.Event{Event: "session.end", SessionID: "ses"})
 
 	if len(stdin.prompts) != 1 || stdin.prompts[0] != "<channel>hello</channel>" {
 		t.Fatalf("injected prompts = %#v, want pending channel message", stdin.prompts)
 	}
-	p.pendingMu.Lock()
-	if len(p.pendingMessages["ses"]) != 0 {
-		p.pendingMu.Unlock()
-		t.Fatalf("pending messages not cleared: %#v", p.pendingMessages["ses"])
+	if left, _ := p.Queue.Take("ses"); len(left) != 0 {
+		t.Fatalf("pending messages not cleared: %#v", left)
 	}
-	p.pendingMu.Unlock()
 	p.mu.Lock()
 	if _, ok := p.pendingOptions["ses"]; ok {
 		p.mu.Unlock()
@@ -528,15 +527,15 @@ func TestAnswerPermissionRemovesFallbackCacheAfterSuccess(t *testing.T) {
 func TestStartRunsClientEnvCleanupOnEnsureClientFailure(t *testing.T) {
 	cleaned := false
 	p := &Provider{
-		backendID:       "test-acp",
-		bin:             "definitely-not-a-real-binary",
-		sessions:        map[string]*Session{},
-		runIDs:          map[string]string{},
-		pollContexts:    map[string]context.Context{},
-		pollCancels:     map[string]context.CancelFunc{},
-		pendingMessages: map[string][]string{},
-		broker:          broker.New(""),
-		buildClientEnv: func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error) {
+		backendID:    "test-acp",
+		bin:          "definitely-not-a-real-binary",
+		sessions:     map[string]*Session{},
+		runIDs:       map[string]string{},
+		pollContexts: map[string]context.Context{},
+		pollCancels:  map[string]context.CancelFunc{},
+		Queue:        warmqueue.NewQueue(),
+		broker:       broker.New(""),
+		buildClientEnv: func(opts runtime.StartOptions, runID, brokerToken, brokerAddr string) (map[string]string, func() error) {
 			return map[string]string{"OPENCODE_CONFIG": "/tmp/unused.json"}, func() error {
 				cleaned = true
 				return nil
@@ -561,7 +560,7 @@ func TestCloseRunsClientEnvCleanup(t *testing.T) {
 	p := &Provider{
 		pollCancels:      map[string]context.CancelFunc{},
 		pollContexts:     map[string]context.Context{},
-		pendingMessages:  map[string][]string{},
+		Queue:            warmqueue.NewQueue(),
 		clientEnvCleanup: func() error { return os.Remove(path) },
 	}
 

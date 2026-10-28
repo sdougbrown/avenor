@@ -43,11 +43,35 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 			Message: fmt.Sprintf("runtime %q is not owned by this supervisor", runID),
 		}
 	}
-	sessionID, err := s.resumeSessionID(prior, runID)
+	if req.IdempotencyKey != "" {
+		key := runstate.FollowUpIdempotencyKeyPrefix + req.IdempotencyKey
+		hash, err := ResumeIdempotencyHash(runID, req)
+		if err != nil {
+			return messaging.ResumeResult{}, err
+		}
+		result, err := s.runIdempotentOperation(key, hash, func() (SpawnResult, error) {
+			return s.performResume(prior, runID, req)
+		})
+		if err != nil {
+			var toolErr *router.ToolError
+			if errors.As(err, &toolErr) {
+				return messaging.ResumeResult{}, err
+			}
+			return messaging.ResumeResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
+		}
+		return resumeResult(result), nil
+	}
+	result, err := s.performResume(prior, runID, req)
 	if err != nil {
 		return messaging.ResumeResult{}, err
 	}
+	return resumeResult(result), nil
+}
 
+func (s *Supervisor) performResume(prior *childRuntime, runID string, req messaging.ResumeRequest) (SpawnResult, error) {
+	if req.Message == "" {
+		return SpawnResult{}, &router.ToolError{Code: "refused", Message: "resume message is required"}
+	}
 	prior.mu.Lock()
 	label := prior.label
 	agent, model, backend := prior.effectiveAgent, prior.effectiveModel, prior.effectiveBackend
@@ -77,22 +101,12 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 	}
 	newLabel := req.Label
 	if newLabel == "" {
-		// label falls back to the prior runtime id when the broker has no
-		// display name, so this is never just the suffix.
 		newLabel = label + runstate.FollowUpLabelSuffix
 	}
 
 	idempotencyKey := ""
 	if req.IdempotencyKey != "" {
 		idempotencyKey = runstate.FollowUpIdempotencyKeyPrefix + req.IdempotencyKey
-	} else if holder := s.liveLabelHolder(newLabel); holder != "" {
-		// Only an unkeyed spawn reaches a taken label: a keyed resume is gated
-		// by idempotentSpawn, which rejects the label itself. This pre-check
-		// only fast-fails the plain case with the same text.
-		return messaging.ResumeResult{}, &router.ToolError{
-			Code:    "refused",
-			Message: fmt.Sprintf("label already in use: %s (runtime %s)", newLabel, holder),
-		}
 	}
 
 	params := SpawnParams{
@@ -109,50 +123,97 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 		AutoApprove:    autoApprove,
 		RosterFile:     rosterFile,
 		RosterEntry:    rosterEntry,
-		SessionID:      sessionID,
 		IdempotencyKey: idempotencyKey,
 		// The surface mints the public run id; carrying it through the spawn
 		// result is what lets a keyed replay report the first run's id instead
 		// of the retry's.
-		resumeRunID: req.RunID,
+		resume: resumeSpawn{
+			runID:            req.RunID,
+			labelReservation: true,
+			implicitLabel:    req.Label == "",
+		},
 	}
-	// finishSpawn is the control-socket spawn gate: it hashes and gates a keyed
-	// spawn and replays a stored result, so a keyed resume cannot diverge from a
-	// keyed spawn.
-	res, err := s.finishSpawn(params)
+	spawned, err := s.resumeOnce(prior, runID, params)
 	if err != nil {
-		return messaging.ResumeResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
+		var toolErr *router.ToolError
+		if errors.As(err, &toolErr) {
+			return SpawnResult{}, err
+		}
+		return SpawnResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
 	}
-	spawned, ok := res.(SpawnResult)
-	if !ok {
-		return messaging.ResumeResult{}, &router.ToolError{
-			Code:    "refused",
-			Message: fmt.Sprintf("spawn returned %T, not a spawn result", res),
+	if spawned.RunID == "" {
+		spawned.RunID = req.RunID
+	}
+	if spawned.Label == "" {
+		spawned.Label = newLabel
+	}
+	if spawned.SentinelFile == "" {
+		spawned.SentinelFile = req.SentinelFile
+	}
+	if spawned.OnEvent == "" {
+		spawned.OnEvent = req.EventLog
+	}
+	return spawned, nil
+}
+
+func resumeResult(result SpawnResult) messaging.ResumeResult {
+	return messaging.ResumeResult{RunID: result.RunID, Label: result.Label, RuntimeID: result.RuntimeID, SessionID: result.SessionID, SentinelFile: result.SentinelFile, OnEvent: result.OnEvent}
+}
+
+// resumeOnce admits a parked turn or starts a cold continuation. The session
+// ladder runs only on the cold arm, just before the spawn that uses it: a warm
+// admission continues child.session, and pi has no cold arm, so no other
+// resume pays for the ladder's sentinel reads.
+func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams) (result SpawnResult, err error) {
+	warmParams := p
+	if p.resume.implicitLabel {
+		if harness := s.brokerHarnessName(runID); harness != "" {
+			warmParams.Label = harness
 		}
 	}
-
-	// The spawn defaults the artifact paths when the request leaves them empty,
-	// so the result reports where the run actually writes on both paths.
-	result := messaging.ResumeResult{
-		RunID:        req.RunID,
-		Label:        newLabel,
-		RuntimeID:    spawned.RuntimeID,
-		SessionID:    spawned.SessionID,
-		SentinelFile: spawned.SentinelFile,
-		OnEvent:      spawned.OnEvent,
+	result, warm, err := s.admitWarmResume(prior, warmParams)
+	if err != nil {
+		return result, err
 	}
-	if result.SentinelFile == "" {
-		result.SentinelFile = req.SentinelFile
+	if warm {
+		return result, nil
 	}
-	if result.OnEvent == "" {
-		result.OnEvent = req.EventLog
+	if p.Backend == "pi" {
+		return result, notResumableError(runID, s.piResumeDeniedStatus(prior))
 	}
-	// A keyed call replays the first run, so the first run's id wins over the
-	// freshly minted one.
-	if spawned.RunID != "" {
-		result.RunID = spawned.RunID
+	// Completion admission closes before provider teardown. Do not open the
+	// same session in another provider until the old run has fully exited.
+	select {
+	case <-prior.runDone:
+	default:
+		return result, fmt.Errorf("runtime %q teardown is still in progress; retry resume", runID)
+	}
+	sessionID, err := s.resumeSessionID(prior, runID)
+	if err != nil {
+		return result, err
+	}
+	p.SessionID = sessionID
+	result, err = s.spawn(p)
+	if err != nil {
+		return result, err
 	}
 	return result, nil
+}
+
+// piResumeDeniedStatus names the not_resumable status for a pi runtime the
+// warm path cannot admit: expiry when the run's session has ended, shutdown
+// when the runtime (or its supervisor) is being torn down instead.
+func (s *Supervisor) piResumeDeniedStatus(prior *childRuntime) string {
+	s.controlMu.Lock()
+	shuttingDown := s.shuttingDown
+	s.controlMu.Unlock()
+	prior.mu.Lock()
+	tornDown := prior.lc.isShuttingDown() || prior.lc.isWriterClosing()
+	prior.mu.Unlock()
+	if shuttingDown || tornDown {
+		return "shutdown"
+	}
+	return "expired"
 }
 
 // resumeSessionID reads the session ladder: the sentinel's SESSION, then the
@@ -197,6 +258,21 @@ func (s *Supervisor) resumeSessionID(prior *childRuntime, runID string) (string,
 	return "", notResumableError(runID, status)
 }
 
+// brokerHarnessName reports the harness-supplied name the broker run carries,
+// or "" when there is no broker, the run is unknown, or it has none.
+func (s *Supervisor) brokerHarnessName(runID string) string {
+	if s.broker == nil {
+		return ""
+	}
+	st := s.broker.GetRun(runID)
+	if st == nil {
+		return ""
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	return st.HarnessName
+}
+
 // notResumableError renders the one denial the session ladder and the sentinel
 // status produce.
 func notResumableError(runID, status string) *router.ToolError {
@@ -217,11 +293,4 @@ func (s *Supervisor) runtimeByID(rtID string) *childRuntime {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
 	return s.runtimes[rtID]
-}
-
-// liveLabelHolder reports the runtime a live run holds newLabel under, or "".
-func (s *Supervisor) liveLabelHolder(label string) string {
-	s.controlMu.Lock()
-	defer s.controlMu.Unlock()
-	return s.labelHolderLocked(label)
 }
