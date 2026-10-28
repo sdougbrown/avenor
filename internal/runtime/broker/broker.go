@@ -616,7 +616,7 @@ func (b *Broker) StartOn(addr string) error {
 	router.HandleFunc("/report", b.withMethod("POST", b.withAuth(b.handleReport)))
 	router.HandleFunc("/finish", b.withMethod("POST", b.withAuth(b.handleFinish)))
 	router.HandleFunc("/reply", b.withMethod("POST", b.withAuth(b.handleReply)))
-	router.HandleFunc("/send", b.withMethod("POST", b.withAuth(b.handleSend)))
+	router.HandleFunc("/send", b.withMethod("POST", b.withAuth(b.withPeerAdmission(b.handleSend))))
 	router.HandleFunc("/wait_reply", b.withMethod("POST", b.withAuth(b.handleWaitReply)))
 	router.HandleFunc("/cancel_message", b.withMethod("POST", b.withAuth(b.handleCancelMessage)))
 	router.HandleFunc("/sessions", b.withMethod("GET", b.withAuth(b.handleSessions)))
@@ -764,10 +764,6 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if st.peer && (r.URL.Path == "/send" || (r.URL.Path == "/last_message" && r.Method == http.MethodPost)) {
-			st.peerActivity.RLock()
-			defer st.peerActivity.RUnlock()
-		}
 		st.Mu.Lock()
 		peerCode := st.peerUnavailableLocked(time.Now())
 		st.Mu.Unlock()
@@ -783,6 +779,26 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // --- handlers ---
+
+// withPeerAdmission holds a peer's activity lock for the length of a request that
+// admits work into its inbox, so expirePeers cannot tombstone (and clear the
+// queue of) a peer mid-request. It is composed into the route table rather than
+// inferred there, because expirePeers' TryLock treats a held lock as proof the
+// peer is serving: a route that needs this and does not have it silently loses
+// the protection.
+//
+// It is composed inside withAuth, which is what makes the authenticated run
+// known.
+func (b *Broker) withPeerAdmission(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		st, _, ok := b.runStateFor(authenticatedCaller(r))
+		if ok && st.peer {
+			st.peerActivity.RLock()
+			defer st.peerActivity.RUnlock()
+		}
+		next(w, r)
+	}
+}
 
 func (b *Broker) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)

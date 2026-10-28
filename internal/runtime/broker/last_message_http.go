@@ -10,7 +10,9 @@ func (b *Broker) routeLastMessage(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		b.withAuth(b.handleLastMessage)(w, r)
 	case http.MethodPost:
-		b.withAuth(b.handlePublishLastMessage)(w, r)
+		// A publish admits a turn into the peer's record, so the peer may not be
+		// tombstoned underneath it; the read side admits nothing and takes no lock.
+		b.withAuth(b.withPeerAdmission(b.handlePublishLastMessage))(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -37,16 +39,24 @@ func (b *Broker) handlePublishLastMessage(w http.ResponseWriter, r *http.Request
 		return
 	}
 	st.Mu.Lock()
-	if st.peer && (body.Sequence == nil || *body.Sequence == 0 || *body.Sequence > 9007199254740991) {
+	// This route publishes a peer's turn across a machine boundary, and only a
+	// peer has a sequence to order those publishes by. A provisioned run records
+	// its turns in process, through SetLastAgentMessage, where the writer is the
+	// recorder itself; letting it in here would give a delayed or retried publish
+	// a second, unordered way to overwrite a newer record.
+	if !st.peer {
+		st.Mu.Unlock()
+		writeCodedError(w, http.StatusForbidden, "only a peer publishes its own last turn over the wire", "not-permitted")
+		return
+	}
+	if body.Sequence == nil || *body.Sequence == 0 || *body.Sequence > 9007199254740991 {
 		st.Mu.Unlock()
 		writeCodedError(w, http.StatusBadRequest, "peer records require a positive safe-integer sequence", "invalid-request")
 		return
 	}
-	if !st.peer || *body.Sequence > st.peerLastTurnSequence {
+	if *body.Sequence > st.peerLastTurnSequence {
 		setLastAgentMessageLocked(st, *body.FinalOutput, body.StopReason, body.Truncated)
-		if st.peer {
-			st.peerLastTurnSequence = *body.Sequence
-		}
+		st.peerLastTurnSequence = *body.Sequence
 	}
 	st.Mu.Unlock()
 	writeJSONBody(w, http.StatusOK, map[string]any{"ok": true})
