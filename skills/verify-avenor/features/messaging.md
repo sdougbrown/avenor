@@ -251,6 +251,9 @@ Read these against the binary before promising the drive above works end to end.
   `--no-session` session cannot be resumed across processes; an expired run is
   reported as not resumable. Do not treat that cold-resume refusal as proof
   that warm resume failed. Timeout and killed runs are not resumable.
+  An unread Pi inbox does not block warm resume; its messages remain queued
+  for the consumer. Providers that automatically inject broker messages still
+  refuse warm admission while messages are queued or being delivered.
 - **A `tell` to the host arrives as an ask-shaped steer.** The host's ask poll
   drains the supervisor's control queue, which also carries fire-and-forget
   messages; such a message has no `message_id`, so the delivered steer instructs

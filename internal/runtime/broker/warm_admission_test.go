@@ -22,7 +22,7 @@ func TestWarmAdmissionRejectsMessageBeingDeliveredToProvider(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("delivery did not start")
 	}
-	if unlock, err := b.LockWarmAdmission("rt", ""); err == nil {
+	if unlock, err := b.LockWarmAdmission("rt", "", true); err == nil {
 		unlock(false)
 		t.Error("admitted while message delivery was in flight")
 	}
@@ -32,7 +32,7 @@ func TestWarmAdmissionRejectsMessageBeingDeliveredToProvider(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("delivery did not finish")
 	}
-	unlock, err := b.LockWarmAdmission("rt", "")
+	unlock, err := b.LockWarmAdmission("rt", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestWarmAdmissionRejectsMessageBeingDeliveredToProvider(t *testing.T) {
 // an empty-name lock would be.
 func TestWarmAdmissionRejectsRunNotFound(t *testing.T) {
 	b := New("")
-	_, err := b.LockWarmAdmission("missing", "resume-label")
+	_, err := b.LockWarmAdmission("missing", "resume-label", true)
 	if err == nil || !strings.Contains(err.Error(), "run not found: missing") {
 		t.Fatalf("LockWarmAdmission on a missing run = %v, want run not found", err)
 	}
@@ -62,14 +62,14 @@ func TestWarmAdmissionHarnessNameTakesPrecedence(t *testing.T) {
 	if err := b.SetHarnessName("rt", "harness-name"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := b.LockWarmAdmission("rt", "resume-label")
+	_, err := b.LockWarmAdmission("rt", "resume-label", true)
 	if err == nil || !strings.Contains(err.Error(), `harness name "harness-name" takes precedence`) {
 		t.Fatalf("conflicting label = %v, want harness name precedence", err)
 	}
 	if got := b.DisplayName("rt"); got != "harness-name" {
 		t.Fatalf("rejected attempt changed the label to %q", got)
 	}
-	unlock, err := b.LockWarmAdmission("rt", "harness-name")
+	unlock, err := b.LockWarmAdmission("rt", "harness-name", true)
 	if err != nil {
 		t.Fatalf("matching label refused: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestWarmAdmissionHarnessNameTakesPrecedence(t *testing.T) {
 func TestWarmAdmissionRejectsDescendantRun(t *testing.T) {
 	b := New("")
 	b.ownRun(messaging.ClaimedRun{Key: "desc", RunClaim: messaging.RunClaim{RunID: "desc", Label: "branch-label"}}, true)
-	_, err := b.LockWarmAdmission("desc", "resume-label")
+	_, err := b.LockWarmAdmission("desc", "resume-label", true)
 	if err == nil || !strings.Contains(err.Error(), "owned by a child broker") {
 		t.Fatalf("descendant admission = %v, want owned by a child broker", err)
 	}

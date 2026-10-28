@@ -167,7 +167,7 @@ func TestWarmResumeRefusesPendingProviderMessage(t *testing.T) {
 		t.Fatalf("admission: warm=%v err=%v, want a provider-message refusal", warm, err)
 	}
 	// The refusal released the broker admission lock instead of leaking it.
-	release, err := sup.broker.LockWarmAdmission("rt", "")
+	release, err := sup.broker.LockWarmAdmission("rt", "", true)
 	if err != nil {
 		t.Fatalf("broker admission lock leaked: %v", err)
 	}
@@ -200,6 +200,7 @@ func TestWarmResumeRejectsPendingBrokerMessage(t *testing.T) {
 	}
 	child := &childRuntime{id: "rt", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	child.provider = &warmGuardProvider{Queue: warmqueue.NewQueue()}
 	sup := &Supervisor{broker: b}
 	_, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: filepath.Join(root, "new"), SentinelFile: filepath.Join(root, "new-sentinel")})
 	if !warm || err == nil {
@@ -226,6 +227,7 @@ func TestWarmResumePendingMessageCleansReservedArtifacts(t *testing.T) {
 	}
 	child := &childRuntime{id: "rt", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	child.provider = &warmGuardProvider{Queue: warmqueue.NewQueue()}
 	sup := &Supervisor{broker: b}
 	newEvents := filepath.Join(root, "new-events")
 	_, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: newEvents, SentinelFile: filepath.Join(root, "new-sentinel")})
@@ -249,6 +251,7 @@ func TestWarmResumePendingMessageCleansReservedArtifacts(t *testing.T) {
 	}
 	child2 := &childRuntime{id: "rt2", onEvent: filepath.Join(root, "old2"), sentinelFile: filepath.Join(root, "old2-sentinel"), promptCh: make(chan struct{}, 1)}
 	initializeTestLifecycle(t, child2, testLifecycleOptions{exec: execParked})
+	child2.provider = &warmGuardProvider{Queue: warmqueue.NewQueue()}
 	sup2 := &Supervisor{broker: b, runID: "warm-resume-clean-test"}
 	_, warm, err = sup2.admitWarmResume(child2, SpawnParams{Prompt: "next"})
 	if !warm || err == nil {
@@ -274,8 +277,9 @@ func TestWarmResumePendingMessageCleansReservedArtifacts(t *testing.T) {
 	}
 	child3 := &childRuntime{id: "rt3", onEvent: filepath.Join(root, "old3"), sentinelFile: filepath.Join(root, "old3-sentinel"), promptCh: make(chan struct{}, 1)}
 	initializeTestLifecycle(t, child3, testLifecycleOptions{exec: execParked})
+	child3.provider = &warmGuardProvider{Queue: warmqueue.NewQueue()}
 	sup3 := &Supervisor{broker: b}
-	sup3.testHooks.warmAdmissionAfterCheck = func() {
+	sup3.testHooks.warmAdmissionAfterReservation = func() {
 		if err := b.Send("rt3", "agent_message", nil, "late"); err != nil {
 			t.Fatal(err)
 		}
@@ -304,7 +308,7 @@ func TestWarmResumeRejectsMessageArrivingDuringAdmission(t *testing.T) {
 	child := &childRuntime{id: "rt", displayName: "old-label", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1), fullFinalOutput: "previous"}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
 	sup := &Supervisor{broker: b}
-	sup.testHooks.warmAdmissionAfterCheck = func() {
+	sup.testHooks.warmAdmissionAfterReservation = func() {
 		if err := b.Send("rt", "agent_message", nil, "msg"); err != nil {
 			t.Fatal(err)
 		}
@@ -331,6 +335,7 @@ func TestWarmResumeWaitsForTurnBoundSend(t *testing.T) {
 	b.CreateRun("rt", "")
 	child := &childRuntime{id: "rt", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	child.provider = &warmGuardProvider{Queue: warmqueue.NewQueue()}
 	sup := &Supervisor{broker: b, runtimes: map[string]*childRuntime{"rt": child}}
 	entered, release := make(chan struct{}), make(chan struct{})
 	sent := make(chan error, 1)

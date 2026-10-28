@@ -2392,9 +2392,11 @@ func (b *Broker) harnessNameChanged(runID, name string) {
 	}
 }
 
-// LockWarmAdmission holds the run queue stable until the returned function is called.
+// LockWarmAdmission holds the run queue stable until the returned function is
+// called. Pending messages block admission only for providers that inject
+// them automatically; explicit inbox consumers keep their unread messages.
 // A successful release publishes the requested label after admission has completed.
-func (b *Broker) LockWarmAdmission(runID, name string) (func(bool), error) {
+func (b *Broker) LockWarmAdmission(runID, name string, injectsMessages bool) (func(bool), error) {
 	st := b.GetRun(runID)
 	if st == nil {
 		if name != "" {
@@ -2406,7 +2408,7 @@ func (b *Broker) LockWarmAdmission(runID, name string) (func(bool), error) {
 	descendant := st.descendant
 	b.mu.RUnlock()
 	st.Mu.Lock()
-	if len(st.ControlQueue) != 0 || st.pollDeliveries != 0 {
+	if injectsMessages && (len(st.ControlQueue) != 0 || st.pollDeliveries != 0) {
 		st.Mu.Unlock()
 		return nil, fmt.Errorf("runtime %q has pending broker messages", runID)
 	}

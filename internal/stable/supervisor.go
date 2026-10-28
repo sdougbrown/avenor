@@ -372,11 +372,10 @@ type childRuntime struct {
 	done                       chan struct{}
 	doneOnce                   sync.Once
 	runDoneOnce                sync.Once
-	// runDone is a test-observable join point: it is closed when the child's
-	// run goroutine exits (after its post-completion work, such as the
-	// capacity release that follows complete) or by the rollback/finish path
-	// when no run goroutine ever started. Production never reads it; test
-	// teardown joins on it before asserting lifecycle counters.
+	// runDone closes after the run goroutine finishes provider teardown and
+	// post-completion work, including capacity release, or on rollback when
+	// no run goroutine started. Cold resume waits for it before opening the
+	// same session in another provider; tests join it before checking cleanup.
 	runDone           chan struct{}
 	exitCode          int
 	promptCh          chan struct{}
@@ -615,12 +614,10 @@ type testHooks struct {
 	// cleanup's control lock is held and the router lock is not. nil in
 	// production.
 	directCleanupPost func()
-	// warmAdmissionAfterCheck, when non-nil (set by tests before the
-	// admission call), runs inside warm admission right after the
-	// pending-broker-message check and before the admission commits, so a
-	// test can land a broker send in that read–commit window
-	// deterministically. nil in production.
-	warmAdmissionAfterCheck func()
+	// warmAdmissionAfterReservation runs after artifact reservation and
+	// before the admission locks, so a test can send a broker message that
+	// the pending check must catch. Set before admission; nil in production.
+	warmAdmissionAfterReservation func()
 	// warmResumePermissionHandler, when non-nil (set by tests before the
 	// admission call), replaces the derived permission handler parse during
 	// warm-resume artifact reservation so a test can force the pre-install
