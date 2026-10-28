@@ -32,16 +32,9 @@ import (
 )
 
 const (
-	DefaultBackend        = "opencode-acp"
-	backendOpenCodeACP    = "opencode-acp"
-	backendOpenCodeHTTP   = "opencode-http"
-	backendCodexAppServer = "codex-app-server"
-	backendGeminiACP      = "gemini-acp"
-	backendAgy            = "agy"
-	backendCursorACP      = "cursor-acp"
-	backendPony           = "pony"
-	backendClaude         = "claude"
-	backendPi             = "pi"
+	DefaultBackend      = "opencode-acp"
+	backendOpenCodeHTTP = "opencode-http"
+	backendPony         = "pony"
 )
 
 // DefaultPermissionClaimTimeout is the zero value, meaning "no timeout":
