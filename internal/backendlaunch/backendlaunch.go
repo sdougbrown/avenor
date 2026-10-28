@@ -54,12 +54,17 @@ func Diff(a, b Spec) string {
 	}
 }
 
-// Value renders one ownership field for a conflict message.
+// Value renders one ownership field for a conflict message. An absent args
+// list renders as "(none)", so a presence-only difference between two specs
+// stays visible in the message that reports it.
 func (s Spec) Value(field string) string {
 	switch field {
 	case "command":
 		return s.Command
 	case "args":
+		if s.Args == nil {
+			return "(none)"
+		}
 		return strings.Join(s.Args, " ")
 	case "settings":
 		return s.Settings

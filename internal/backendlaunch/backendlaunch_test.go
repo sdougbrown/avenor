@@ -119,6 +119,14 @@ func TestSpecEqualDiffAndValue(t *testing.T) {
 	if got := Diff(explicitEmpty, absent); got != "args" {
 		t.Fatalf("Diff(explicit empty args, absent args) = %q, want args", got)
 	}
+	// A conflict message is read by an operator deciding what to change, so the
+	// two sides of a presence-only difference must not render identically.
+	if got := absent.Value("args"); got != "(none)" {
+		t.Fatalf("absent args Value() = %q, want (none)", got)
+	}
+	if got := explicitEmpty.Value("args"); got == absent.Value("args") {
+		t.Fatalf("explicit empty and absent args both render %q, want distinct messages", got)
+	}
 	if explicitEmpty.Equal(absent) {
 		t.Fatal("Equal(explicit empty args, absent args) = true, want distinct identities")
 	}
