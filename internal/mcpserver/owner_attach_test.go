@@ -79,7 +79,7 @@ func TestMCPControlToolsAttachAsOwner(t *testing.T) {
 		t.Fatalf("spawn: %v", err)
 	}
 	if _, _, err := s.handleAvenorSpawn(ctx, nil, spawnArgs{RepoDir: dir, Prompt: "work", LaunchWrapper: []string{"nice"}}); err != nil {
-		t.Fatalf("spawn_mcp: %v", err)
+		t.Fatalf("wrapped spawn: %v", err)
 	}
 	if _, _, err := s.handleAvenorKill(ctx, nil, killArgs{RunID: "run_1"}); err != nil {
 		t.Fatalf("cancel: %v", err)
@@ -91,7 +91,7 @@ func TestMCPControlToolsAttachAsOwner(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 
-	want := []string{"spawn", "spawn_mcp", "cancel:rt_1", "answer_permission:rt_1:req_1:allow", "shutdown"}
+	want := []string{"spawn_mcp", "spawn_mcp", "cancel:rt_1", "answer_permission:rt_1:req_1:allow", "shutdown"}
 	if len(stub.calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", stub.calls, want)
 	}
