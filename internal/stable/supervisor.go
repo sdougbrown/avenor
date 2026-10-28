@@ -227,6 +227,12 @@ type SpawnParams struct {
 	// derived rather than caller-supplied: it lets a caller-gated surface tell a
 	// configured launch from the one a backend resolves for itself.
 	launchInput backendlaunch.Input
+	// gated is the identity an MCP gate resolved and approved for this spawn. A
+	// spawn carrying it starts with that identity instead of loading the roster
+	// file a second time, so a rewrite between the gate and the exec cannot
+	// change the launch. Derived rather than caller-supplied, and without a JSON
+	// tag, so it never enters the spawn wire shape or the idempotency hash.
+	gated *mcpLaunchDecision
 	// resume carries the parameters only the resume path sets (resume.go).
 	// The nested struct carries no JSON tag and json.Marshal skips unexported
 	// fields, so none of it affects the idempotency parameter hash; each field
@@ -1744,9 +1750,18 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		}
 	}
 
-	params, backend, err := s.resolveDirectSpawnIdentity(params)
-	if err != nil {
-		return SpawnResult{}, err
+	backend := ""
+	if gated := params.gated; gated != nil {
+		// The gate already resolved and approved this identity, and reading the
+		// roster again here is the time-of-check/time-of-use window the gate's
+		// verdict must not have: use the identity it approved.
+		params, backend = gated.params, gated.backend
+	} else {
+		var err error
+		params, backend, err = s.resolveDirectSpawnIdentity(params)
+		if err != nil {
+			return SpawnResult{}, err
+		}
 	}
 	if params.Dir == "" {
 		params.Dir = "."
@@ -5297,20 +5312,36 @@ func (s *Supervisor) authorizeMCPLaunchFields(backend string, p SpawnParams) err
 	return fmt.Errorf("%s: launch fields are disabled for MCP spawns (%s)", subject, field)
 }
 
-// gateMCPLaunch resolves one MCP-originated spawn's effective identity and
+// mcpLaunchDecision is one MCP gate's verdict on a spawn: the effective
+// identity it resolved and the backend that resolution settled on. A spawn
+// carrying it starts with that identity instead of resolving the roster file a
+// second time.
+type mcpLaunchDecision struct {
+	params  SpawnParams
+	backend string
+}
+
+// decideMCPLaunch resolves one MCP-originated spawn's effective identity and
 // refuses a launch the caller chose. Every surface that can re-exec an
 // inherited launch shares it — the spawn_mcp verb and the message tool's
-// resume — so the check and the error it renders exist once. It must run
-// before reservations, idempotency, or any process creation.
-func (s *Supervisor) gateMCPLaunch(params SpawnParams) (SpawnParams, string, error) {
+// resume — so the check and the error it renders exist once. It must run before
+// reservations, idempotency, or any process creation.
+func (s *Supervisor) decideMCPLaunch(params SpawnParams) (mcpLaunchDecision, error) {
 	resolved, backend, err := s.resolveDirectSpawnIdentity(params)
 	if err != nil {
-		return params, backend, err
+		return mcpLaunchDecision{}, err
 	}
 	if err := s.authorizeMCPLaunchFields(backend, resolved); err != nil {
-		return params, backend, err
+		return mcpLaunchDecision{}, err
 	}
-	return resolved, backend, nil
+	return mcpLaunchDecision{params: resolved, backend: backend}, nil
+}
+
+// carried hands the decision to the spawn: the params it returns carry the
+// identity the gate approved instead of resolving the roster file again.
+func (d mcpLaunchDecision) carried(params SpawnParams) SpawnParams {
+	params.gated = &d
+	return params
 }
 
 // authorizeMCPLaunchWrapper enforces the supervisor's MCP launch policy for a
@@ -5318,30 +5349,31 @@ func (s *Supervisor) gateMCPLaunch(params SpawnParams) (SpawnParams, string, err
 // launch wrapper argv. Both are taken from the effective identity — the argv and
 // executable that will actually be used, after roster and resume resolution —
 // so an inherited wrapper or an inherited launch is gated too. It must be called
-// before reservations, idempotency, or any process creation.
-func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) error {
+// before reservations, idempotency, or any process creation, and the params it
+// returns carry the identity it approved.
+func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) (SpawnParams, error) {
 	if len(params.LaunchWrapper) > 0 {
 		if err := runtime.ValidateLaunchWrapper(params.LaunchWrapper); err != nil {
-			return fmt.Errorf("launch_wrapper: %w", err)
+			return params, fmt.Errorf("launch_wrapper: %w", err)
 		}
 	}
 	// Resolve even when the request omits the wrapper: a resume inherits the
 	// session's authoritative wrapper, and the inherited argv is the argv that
 	// will be exec'd — it needs the same gate.
-	resolved, _, err := s.gateMCPLaunch(params)
+	decision, err := s.decideMCPLaunch(params)
 	if err != nil {
-		return err
+		return params, err
 	}
-	if len(resolved.LaunchWrapper) == 0 {
-		return nil
+	if len(decision.params.LaunchWrapper) == 0 {
+		return decision.carried(params), nil
 	}
 	if s.config.MCPLaunchWrapperPolicy == nil {
-		return errMCPLaunchWrapperDisabled
+		return params, errMCPLaunchWrapperDisabled
 	}
-	if !mcpLaunchWrapperAllowed(s.config.MCPLaunchWrapperPolicy, resolved.LaunchWrapper) {
-		return errors.New("launch_wrapper: argv is not allowed by this supervisor")
+	if !mcpLaunchWrapperAllowed(s.config.MCPLaunchWrapperPolicy, decision.params.LaunchWrapper) {
+		return params, errors.New("launch_wrapper: argv is not allowed by this supervisor")
 	}
-	return nil
+	return decision.carried(params), nil
 }
 
 // SpawnMCP implements control.StableHandler for the spawn_mcp verb: an
@@ -5361,10 +5393,11 @@ func (s *Supervisor) SpawnMCP(raw json.RawMessage) (any, error) {
 		return nil, errors.New("spawn_mcp: loop_file and team_file are not accepted; workflow spawns use the spawn verb")
 	}
 	s.applySpawnCallerParent(raw, &p)
-	if err := s.authorizeMCPLaunchWrapper(p); err != nil {
+	gated, err := s.authorizeMCPLaunchWrapper(p)
+	if err != nil {
 		return nil, err
 	}
-	return s.finishSpawn(p)
+	return s.finishSpawn(gated)
 }
 
 // parseStableSpawn parses and sanitizes a control-socket spawn payload: it

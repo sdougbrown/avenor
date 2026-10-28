@@ -198,9 +198,11 @@ func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams
 		// An MCP-originated resume re-execs the prior run's inherited launch, and
 		// nothing else on this path reads it: gate it exactly as spawn_mcp gates a
 		// resume it is handed.
-		if _, _, err := s.gateMCPLaunch(p); err != nil {
+		decision, err := s.decideMCPLaunch(p)
+		if err != nil {
 			return result, err
 		}
+		p = decision.carried(p)
 	}
 	result, err = s.spawn(p)
 	if err != nil {
