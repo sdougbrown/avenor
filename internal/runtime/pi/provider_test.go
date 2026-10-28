@@ -985,7 +985,6 @@ func (w gatedWriteCloser) Write(data []byte) (int, error) {
 }
 
 func TestPromptSubmissionPrecedesFastCompletion(t *testing.T) {
-	p := NewWithOptions(runtime.StartOptions{})
 	c, _, rIn := fakeClient()
 	defer c.Close()
 	releaseWrite := make(chan struct{})
@@ -994,8 +993,7 @@ func TestPromptSubmissionPrecedesFastCompletion(t *testing.T) {
 	const sessionID = "ses-pi-prompt"
 	const prompt = "hello π"
 	c.setSessionID(sessionID)
-	p.client = c
-	p.sessions[sessionID] = struct{}{}
+	p := promptOnClient(c, sessionID)
 	eventsCh := subscribeForSession(c, sessionID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1050,12 +1048,10 @@ func TestPromptSubmissionPrecedesFastCompletion(t *testing.T) {
 }
 
 func TestPromptRejectedEmitsNoPromptSubmittedEvent(t *testing.T) {
-	p := NewWithOptions(runtime.StartOptions{})
 	c, wOut, rIn := fakeClient()
 	defer c.Close()
 	c.setSessionID("ses-pi-reject")
-	p.client = c
-	p.sessions = map[string]struct{}{"ses-pi-reject": {}}
+	p := promptOnClient(c, "ses-pi-reject")
 
 	eventsCh := subscribeForSession(c, "ses-pi-reject")
 

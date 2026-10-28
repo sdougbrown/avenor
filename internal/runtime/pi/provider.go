@@ -190,20 +190,9 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		settle()
 		return fmt.Errorf("send prompt: %w", err)
 	}
-	var response struct {
-		Success bool   `json:"success"`
-		Error   string `json:"error"`
-	}
-	if err := json.Unmarshal(result, &response); err != nil {
+	if err := checkSuccessResponse(result, "prompt"); err != nil {
 		settle()
-		return fmt.Errorf("decode pi prompt response: %w", err)
-	}
-	if !response.Success {
-		settle()
-		if response.Error == "" {
-			response.Error = "unsuccessful response"
-		}
-		return fmt.Errorf("pi prompt rejected: %s", response.Error)
+		return err
 	}
 
 	select {
@@ -437,18 +426,22 @@ func (p *Provider) setThinkingLevel(ctx context.Context, c *client, level string
 	if err != nil {
 		return fmt.Errorf("pi set_thinking_level %q: %w", level, err)
 	}
+	return checkSuccessResponse(result, fmt.Sprintf("set_thinking_level %q", level))
+}
+
+func checkSuccessResponse(result json.RawMessage, command string) error {
 	var response struct {
 		Success bool   `json:"success"`
 		Error   string `json:"error"`
 	}
 	if err := json.Unmarshal(result, &response); err != nil {
-		return fmt.Errorf("decode pi set_thinking_level %q response: %w", level, err)
+		return fmt.Errorf("decode pi %s response: %w", command, err)
 	}
 	if !response.Success {
 		if response.Error == "" {
 			response.Error = "unsuccessful response"
 		}
-		return fmt.Errorf("pi set_thinking_level %q rejected: %s", level, response.Error)
+		return fmt.Errorf("pi %s rejected: %s", command, response.Error)
 	}
 	return nil
 }
