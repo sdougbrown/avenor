@@ -451,8 +451,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // idle completion sent during compaction can be rejected by the prompt
     // path, so delivery waits and leaves the notice unread.
     let compacting = false
-    // A closed-socket last-turn failure is reported once per episode: the
-    // attempt itself keeps running on every turn so a healthy supervisor is
+    // A closed-socket last-turn failure is reported once per episode. The
+    // attempt itself keeps running on every turn, so a healthy supervisor is
     // picked up without a session restart. The flag clears when a record
     // succeeds again, the host providers are rebound wholesale, or a new
     // session starts. Evicting one binding must not reset it, or an unhealthy
@@ -1737,7 +1737,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // Nobody can read a last-turn record while no supervisor exists, and
       // recording one must not start a supervisor (plus its broker) in a
       // session that never delegates. A supervisor whose connection is already
-      // dead is reported once and its stale binding evicted; the next turn
+      // dead is reported once and its stale binding evicted. The next turn
       // redials only once a healthy supervisor exists again.
       const instance = deps.Supervisor.currentInstance?.()
       if (!instance) return
