@@ -34,7 +34,7 @@ export function readSubAgentEnv(env: NodeJS.ProcessEnv = process.env): SubAgentE
 export function createTopLevelPeerEnv(brokerUrl: string): SubAgentEnv {
   const url = new URL(brokerUrl)
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new Error('AVENOR_BROKER_URL must be an HTTP(S) URL without credentials, query, or fragment')
+    throw new Error(`the broker URL must be an HTTP(S) URL without credentials, query, or fragment: ${brokerUrl}`)
   }
   return { brokerUrl: url.href.replace(/\/$/, ''), runId: `pi-${randomUUID()}`, token: randomUUID() }
 }

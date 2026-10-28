@@ -92,10 +92,11 @@ func TestPeerRetirementFencesIdentityAndHidesIt(t *testing.T) {
 			t.Fatal("retired peer listed")
 		}
 	}
-	// A target that is gone answers as gone, the way /send already treats one;
-	// only a caller's own retired identity earns the 410 that names the reason.
+	// Its last turn stays readable while the record is, which is what SessionLast
+	// already does in process; a target that must take part is the fenced case.
+	b.SetLastAgentMessage("pi-peer", "final words", "end_turn", false)
 	reader := map[string]any{"run_id": "reader", "token": ensureRun(t, b, "reader", "reader")}
-	if code, result := peerGet(t, b, "/last_message?target=pi-peer", reader); code != http.StatusNotFound || result["code"] != "target-unavailable" {
+	if code, result := peerGet(t, b, "/last_message?target=pi-peer", reader); code != http.StatusOK || result["final_output"] != "final words" {
 		t.Fatalf("retired last_message = %d %v", code, result)
 	}
 	ask := map[string]any{"run_id": "reader", "token": reader["token"], "from_run_id": "reader", "to_run_id": "pi-peer", "type": "agent_message", "expects_reply": true, "message_id": "m1", "payload": map[string]any{"id": "m1", "message": "hi"}}

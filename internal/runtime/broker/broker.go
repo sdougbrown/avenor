@@ -1946,10 +1946,13 @@ func (b *Broker) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusBadRequest, "target is required", "invalid-request")
 		return
 	}
-	if !b.Reachable(target) {
+	if b.GetRun(target) == nil {
 		writeCodedError(w, http.StatusNotFound, "run not found: "+target, "target-unavailable")
 		return
 	}
+	// History, not participation: a tombstone still answers for the turn it holds,
+	// the way SessionLast reads it in process. Reachable is the question for a
+	// target that has to take part, and the reap is what ends this read.
 	record, hasRecord := b.LastAgentMessage(target)
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"run_id":                 record.RunID,

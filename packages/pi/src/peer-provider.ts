@@ -14,8 +14,21 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
     if (id === undefined) { id = nextAuthority++; authorities.set(provider, id) }
     return id
   }
+  // Both maps are keyed by something a caller can only act on soon after it was
+  // issued — a resolved route is used by the call that resolved it, and a message
+  // id is withdrawn within its ask window. Neither has a natural expiry, so each
+  // keeps the most recent bindings and forgets the rest: an entry old enough to be
+  // evicted names a route or an edge no live caller still holds.
+  const ROUTE_MEMORY = 1024
   const routes = new Map<string, { provider: MessageProvider; id: string; publicId?: string }>()
   const outgoing = new Map<string, MessageProvider | null>()
+  function remember<K, V>(memory: Map<K, V>, key: K, value: V) {
+    memory.set(key, value)
+    if (memory.size > ROUTE_MEMORY) {
+      const oldest = memory.keys().next()
+      if (!oldest.done) memory.delete(oldest.value)
+    }
+  }
   const claims = new Map<string, MessageProvider>()
   const resumed = new WeakMap<ProviderResult, MessageProvider>()
 
@@ -25,11 +38,11 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
     return found
   }
 
-  async function remember(provider: MessageProvider, result: Promise<ProviderResult>) {
+  async function rememberProvider(provider: MessageProvider, result: Promise<ProviderResult>) {
     const answer = await result
     if (answer.messageId) {
       const previous = outgoing.get(answer.messageId)
-      outgoing.set(answer.messageId, previous === undefined || previous === provider ? provider : null)
+      remember(outgoing, answer.messageId, previous === undefined || previous === provider ? provider : null)
     }
     return answer
   }
@@ -71,7 +84,7 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
         : matched
       if (resolved.match !== 'unique') throw new Error('the peer changed during resolution')
       const key = JSON.stringify([authority(hit.provider), resolved.runId, resolved.publicRunId])
-      routes.set(key, { provider: hit.provider, id: resolved.runId, publicId: resolved.publicRunId })
+      remember(routes, key, { provider: hit.provider, id: resolved.runId, publicId: resolved.publicRunId })
       return { ...resolved, routeKey: key, publicRunId: resolved.publicRunId ?? hit.run_id }
     },
     controlReply: (target, payload) => {
@@ -83,7 +96,7 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
     tell: (key, message) => { const r = route(key); return r.provider.tell(r.id, message, r.publicId) },
     ask: (key, message, timeout, signal) => {
       const r = route(key)
-      return remember(r.provider, r.provider.ask(r.id, message, timeout, signal, r.publicId))
+      return rememberProvider(r.provider, r.provider.ask(r.id, message, timeout, signal, r.publicId))
     },
     async last(key) {
       const r = route(key)

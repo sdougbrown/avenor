@@ -67,7 +67,13 @@ test('resume routes to the resolved authority, not to the caller-visible id', as
 test('a central match resolves from the listing already fetched, without a second lookup', async () => {
   let listings = 0
   const broker = {
-    peers: async () => { listings++; return { peers: [{ run_id: 'remote', label: 'scout' }] } },
+    // A second read of the same snapshot is the regression, so fail on one rather
+    // than count fetches: an outcome a caller can see, not a mirrored mechanism.
+    peers: async () => {
+      listings++
+      if (listings > 1) throw new Error('resolved the same target twice')
+      return { peers: [{ run_id: 'remote', label: 'scout' }] }
+    },
     tell: async () => ({ outcome: 'sent' as const }),
     ask: async () => ({ outcome: 'timed-out' }),
     reply: async () => ({ outcome: 'replied' }),
@@ -79,10 +85,6 @@ test('a central match resolves from the listing already fetched, without a secon
   const p = combinePeerProviders(() => null, central)
   const r = await p.resolve('scout')
   expect(r.runId).toBe('remote')
-  // One fetch answers the whole resolution: only the host has a field the listing
-  // cannot carry, so asking the authority again would be a second read of the same
-  // snapshot and a race against a peer retiring between them.
-  expect(listings).toBe(1)
 })
 
 test('rename routes to the authority that owns the session', async () => {
