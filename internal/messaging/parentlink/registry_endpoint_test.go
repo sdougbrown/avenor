@@ -21,6 +21,10 @@ func TestRegistryRefusesAnEndpointItCouldNotPostTo(t *testing.T) {
 		{name: "a scheme the relay cannot dial", endpoint: "file:///tmp/child"},
 		{name: "an address without a host", endpoint: "http://"},
 		{name: "an http address with a path", endpoint: "http://child-one/broker"},
+		{name: "a query the relay's hop would swallow", endpoint: "http://child-one:8080?x=1"},
+		{name: "userinfo the relay would carry as a credential", endpoint: "http://user@child-one:8080"},
+		{name: "a port the relay cannot dial", endpoint: "http://child-one:70000"},
+		{name: "a wildcard host", endpoint: "http://0.0.0.0:8080"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -60,5 +64,22 @@ func TestRegistryAcceptsAnHTTPRegistration(t *testing.T) {
 	hop, ok := registry.Hop(ParentRunKey("child-one", "run-a"))
 	if !ok || hop.Endpoint != "http://child-one:8080" {
 		t.Fatalf("hop = (%+v, %v), want the registered endpoint", hop, ok)
+	}
+}
+
+// TestRegistryAcceptsAnEmptyEndpoint pins the relay-specific side of the rule:
+// an endpoint that names no route at all is still registered, and the hop it
+// leaves behind reports no route for the relay to post to.
+func TestRegistryAcceptsAnEmptyEndpoint(t *testing.T) {
+	registry := NewRegistry()
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID:    "child-one",
+		Generation: "gen-a",
+		Runs:       []messaging.RunClaim{{RunID: "run-a"}},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, ok := registry.Hop(ParentRunKey("child-one", "run-a")); ok {
+		t.Fatal("an empty endpoint produced a hop for the relay to post to")
 	}
 }
