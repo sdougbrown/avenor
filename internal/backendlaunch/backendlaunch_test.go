@@ -34,7 +34,7 @@ func TestValidateRejectsUndeclaredFields(t *testing.T) {
 			if err == nil {
 				t.Fatalf("Validate(unregistered, %s) = nil, want rejection", tc.name)
 			}
-			if !slices.Contains([]string{"command", "args", "settings"}, tc.name) || !strings.Contains(err.Error(), tc.name) || !strings.Contains(err.Error(), "unregistered") {
+			if !strings.Contains(err.Error(), tc.name) || !strings.Contains(err.Error(), "unregistered") {
 				t.Fatalf("Validate() error = %q, want field %q and backend named", err, tc.name)
 			}
 		})

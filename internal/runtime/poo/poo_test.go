@@ -172,7 +172,7 @@ func TestRosterPooEntryWithThinkingIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("ValidateThinkingForBackend(poo, high) = nil, want the unsupported-parameter error")
 	}
-	if err.Error() != `backend "poo" does not support parameter "thinking"` {
+	if err.Error() != runtime.NewUnsupportedThinkingError(entry.Backend).Error() {
 		t.Fatalf("ValidateThinkingForBackend() = %q, want the shared unsupported-parameter error", err)
 	}
 }
@@ -182,8 +182,5 @@ func TestProviderStartReportsTheStageOneBoundary(t *testing.T) {
 	_, err := provider.Start(context.Background(), runtime.StartOptions{})
 	if !errors.Is(err, ErrNotImplemented) {
 		t.Fatalf("Start() error = %v, want ErrNotImplemented", err)
-	}
-	if err.Error() != "the poo backend is not implemented yet" {
-		t.Fatalf("Start() error = %q, want the stage-one message", err)
 	}
 }

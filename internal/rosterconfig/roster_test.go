@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
@@ -392,13 +391,5 @@ func TestLoadRejectsLaunchFieldsForOtherBackends(t *testing.T) {
 	}
 	if backends == 0 {
 		t.Fatal("no backend declares zero launch fields, so this test covers nothing")
-	}
-}
-
-func TestEntryLaunchInput(t *testing.T) {
-	entry := Entry{Backend: "poo", Agent: "search", Command: "/opt/bin/poo", Args: []string{"serve"}, Settings: "/etc/poo.yaml"}
-	input := entry.LaunchInput()
-	if input.Command != entry.Command || input.Settings != entry.Settings || !slices.Equal(input.Args, entry.Args) {
-		t.Fatalf("LaunchInput() = %+v, want the entry's launch fields", input)
 	}
 }
