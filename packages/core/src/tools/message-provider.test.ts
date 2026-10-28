@@ -331,10 +331,8 @@ describe('host message provider', () => {
     const supervisorId = '/tmp/avenor-provider.sock'
     const runDir = path.join(home, 'runs', 'run-465')
     fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
-    const sup = Object.create(Supervisor.prototype) as Supervisor
-    ;(sup as any).socketPath = supervisorId
-    ;(sup as any).runs = new Map()
-    ;(sup as any).aliases = new Map()
+    const adopted = Supervisor.adoptTestInstance('avenor', supervisorId)
+    const sup = adopted.supervisor
     sup.registerResumed({
       runId: 'run-465',
       label: 'mesh-r',
@@ -343,8 +341,6 @@ describe('host message provider', () => {
       runtimeId: 'rt_465',
       sessionId: 'ses_465',
     })
-    const previousInstance = (Supervisor as any).instance
-    ;(Supervisor as any).instance = sup
     try {
       const client = fakeClient({
         status: mock(async () => {
@@ -360,7 +356,7 @@ describe('host message provider', () => {
       fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'TIMEOUT\n')
       expect(await host.state('run-465')).toMatchObject({ live: false, resumable: true, status: 'timeout' })
     } finally {
-      ;(Supervisor as any).instance = previousInstance
+      adopted.restore()
       fs.rmSync(runDir, { recursive: true, force: true })
     }
   })

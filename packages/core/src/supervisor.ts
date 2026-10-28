@@ -575,6 +575,28 @@ export class Supervisor {
    * source of truth for the ownership check, so callers cannot observe
    * isCurrentInstance true while currentInstance is null.
    */
+  /**
+   * Build an instance that owns socketPath without spawning a supervisor
+   * process, and adopt it as the live singleton. `start` is the production
+   * writer of both; this exists so a test can drive the in-process plane
+   * without forging private state, and hands back the previous singleton so
+   * the caller can restore it.
+   */
+  static adoptTestInstance(binaryPath: string, socketPath: string): {
+    supervisor: Supervisor
+    restore: () => void
+  } {
+    const previous = Supervisor.instance
+    const supervisor = new Supervisor(binaryPath, socketPath)
+    Supervisor.instance = supervisor
+    return {
+      supervisor,
+      restore: () => {
+        Supervisor.instance = previous
+      },
+    }
+  }
+
   static getInstance(supervisorId: string): Supervisor | null {
     if (Supervisor.instance === null) return null
     if (Supervisor.instance.supervisorId === supervisorId) return Supervisor.instance
