@@ -22,17 +22,15 @@ import (
 // the pair that thinking validity actually depends on.
 //
 // Command, Args and Settings are launch fields owned by the backend that reads
-// them. A backend declares them through backendlaunch.Register; every other
-// backend rejects an entry that sets them, so a roster can never attach a
-// launch configuration the backend ignores.
+// them; they travel in the embedded Input. A backend declares them through
+// backendlaunch.Register; every other backend rejects an entry that sets them,
+// so a roster can never attach a launch configuration the backend ignores.
 type Entry struct {
-	Backend  string   `json:"backend"`
-	Agent    string   `json:"agent,omitempty"`
-	Model    string   `json:"model,omitempty"`
-	Thinking string   `json:"thinking,omitempty"`
-	Command  string   `json:"command,omitempty"`
-	Args     []string `json:"args,omitempty"`
-	Settings string   `json:"settings,omitempty"`
+	Backend  string `json:"backend"`
+	Agent    string `json:"agent,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
+	backendlaunch.Input
 }
 
 // Config is the top-level roster map, keyed by roster entry name.
@@ -98,7 +96,7 @@ func (e Entry) Validate() error {
 	if strings.TrimSpace(e.Agent) == "" && strings.TrimSpace(e.Model) == "" {
 		return fmt.Errorf("at least one of agent or model must be set")
 	}
-	if err := backendlaunch.Validate(e.Backend, e.LaunchInput()); err != nil {
+	if err := backendlaunch.Validate(e.Backend, e.Input); err != nil {
 		return err
 	}
 	// Canonical form only. The backend policy check stays downstream, where
@@ -135,12 +133,7 @@ func (c Config) ResolveLaunch(entryName string) (backendlaunch.Spec, error) {
 	if err != nil {
 		return backendlaunch.Spec{}, err
 	}
-	return backendlaunch.Resolve(entry.Backend, entryName, entry.LaunchInput())
-}
-
-// LaunchInput returns the backend-owned launch fields this entry carries.
-func (e Entry) LaunchInput() backendlaunch.Input {
-	return backendlaunch.Input{Command: e.Command, Args: e.Args, Settings: e.Settings}
+	return backendlaunch.Resolve(entry.Backend, entryName, entry.Input)
 }
 
 // ResolveInput contains the run-level identity context and any phase-local
@@ -201,7 +194,7 @@ func Resolve(input ResolveInput) (ResolvedSelection, error) {
 		if err := input.Roster.Validate(); err != nil {
 			return ResolvedSelection{}, fmt.Errorf("roster entry: %w", err)
 		}
-		launch, err := backendlaunch.Resolve(input.Roster.Backend, input.RosterEntry, input.Roster.LaunchInput())
+		launch, err := backendlaunch.Resolve(input.Roster.Backend, input.RosterEntry, input.Roster.Input)
 		if err != nil {
 			return ResolvedSelection{}, err
 		}

@@ -10,6 +10,7 @@ package backendlaunch
 
 import (
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -75,10 +76,14 @@ func (s Spec) Value(field string) string {
 
 // Input carries the roster entry values a backend declared as its own. A
 // backend that registered no fields always receives the zero Input.
+//
+// Its fields are the launch-field vocabulary: each JSON key is the roster key an
+// entry uses, and the table shared code validates against is derived from them,
+// so adding a launch field is one edit here.
 type Input struct {
-	Command  string
-	Args     []string
-	Settings string
+	Command  string   `json:"command,omitempty"`
+	Args     []string `json:"args,omitempty"`
+	Settings string   `json:"settings,omitempty"`
 }
 
 // Resolver turns one roster entry's declared fields into a Spec. entryName is
@@ -102,12 +107,42 @@ type inputField struct {
 }
 
 // inputFields is the launch field vocabulary Input carries, in the order
-// Validate reports it. It is the only place a field's presence is decided, so a
-// backend's registered names and the fields shared code can see cannot drift.
-var inputFields = []inputField{
-	{name: "command", present: func(in Input) bool { return in.Command != "" }},
-	{name: "args", present: func(in Input) bool { return in.Args != nil }},
-	{name: "settings", present: func(in Input) bool { return in.Settings != "" }},
+// Validate reports it. It is derived from Input's fields, so a field added there
+// is validated and advertised without a second edit. It is the only place a
+// field's presence is decided, so a backend's registered names and the fields
+// shared code can see cannot drift.
+var inputFields = inputFieldTable()
+
+func inputFieldTable() []inputField {
+	typ := reflect.TypeFor[Input]()
+	fields := make([]inputField, 0, typ.NumField())
+	keys := make(map[string]string, typ.NumField())
+	for i := range typ.NumField() {
+		structField := typ.Field(i)
+		key, _, _ := strings.Cut(structField.Tag.Get("json"), ",")
+		if key == "" || key == "-" {
+			panic(fmt.Sprintf("backendlaunch: Input field %q has no roster key", structField.Name))
+		}
+		if other, duplicate := keys[key]; duplicate {
+			panic(fmt.Sprintf("backendlaunch: Input fields %q and %q share roster key %q", other, structField.Name, key))
+		}
+		keys[key] = structField.Name
+		fields = append(fields, inputField{name: key, present: launchFieldPresent(i)})
+	}
+	return fields
+}
+
+// launchFieldPresent reports whether the Input field at index is set. A slice is
+// present when it is not nil, so an explicit empty args list stays a launch
+// decision; every other field is present when it carries a value.
+func launchFieldPresent(index int) func(Input) bool {
+	return func(in Input) bool {
+		value := reflect.ValueOf(in).Field(index)
+		if value.Kind() == reflect.Slice {
+			return !value.IsNil()
+		}
+		return !value.IsZero()
+	}
 }
 
 // Register declares the extra roster fields backend owns and the resolver that

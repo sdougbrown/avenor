@@ -229,10 +229,10 @@ func TestSpawnWithRosterLaunchFieldsIsAllowed(t *testing.T) {
 	}
 }
 
-// TestSpawnMCPLaunchFieldsRefusalIsGeneric proves the refusal names the entry
-// and the field, not a backend: a future backend that declares launch fields
-// inherits the same gate.
-func TestSpawnMCPLaunchFieldsRefusalIsGeneric(t *testing.T) {
+// TestSpawnMCPRefusesExplicitEmptyArgs proves an explicit empty args list is a
+// declared launch, not an absent one: the presence rule that refuses it here is
+// the one the ownership record uses to tell `"args": []` from no args at all.
+func TestSpawnMCPRefusesExplicitEmptyArgs(t *testing.T) {
 	stubPooOnPath(t)
 	sup, created := mcpLaunchFieldsSupervisor(t)
 	dir := t.TempDir()

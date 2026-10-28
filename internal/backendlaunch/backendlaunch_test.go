@@ -1,6 +1,7 @@
 package backendlaunch
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -83,6 +84,43 @@ func TestRegisterRejectsDuplicateAndIncompleteRegistrations(t *testing.T) {
 			}()
 			tc.call()
 		})
+	}
+}
+
+// TestLaunchFieldVocabularyCoversInput proves the validity table follows
+// Input's fields: every declared field, set on its own, is both advertised as a
+// roster key and seen as present. A field added to Input is therefore validated
+// and reachable by a backend without a second edit, instead of compiling and
+// being dropped before a resolver sees it.
+func TestLaunchFieldVocabularyCoversInput(t *testing.T) {
+	typ := reflect.TypeFor[Input]()
+	if len(inputFields) != typ.NumField() {
+		t.Fatalf("inputFields has %d entries, Input has %d fields", len(inputFields), typ.NumField())
+	}
+	for i := range typ.NumField() {
+		structField := typ.Field(i)
+		key, _, _ := strings.Cut(structField.Tag.Get("json"), ",")
+		set := Input{}
+		value := reflect.ValueOf(&set).Elem().Field(i)
+		switch value.Kind() {
+		case reflect.String:
+			value.SetString("set")
+		case reflect.Slice:
+			value.Set(reflect.MakeSlice(value.Type(), 0, 0))
+		default:
+			t.Fatalf("Input field %q is a %s; the presence rule covers strings and slices", structField.Name, value.Kind())
+		}
+
+		if got := Declared(set); got != key {
+			t.Fatalf("Declared(%s set) = %q, want %q", structField.Name, got, key)
+		}
+		err := Validate("unregistered", set)
+		if err == nil || !strings.Contains(err.Error(), `field "`+key+`"`) {
+			t.Fatalf("Validate(unregistered, %s set) = %v, want field %q rejected", structField.Name, err, key)
+		}
+		if err := Validate("testlaunch", set); err != nil {
+			t.Fatalf("Validate(testlaunch, %s set) = %v, want nil", structField.Name, err)
+		}
 	}
 }
 
