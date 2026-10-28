@@ -3,7 +3,7 @@ import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { StatusResult } from './status.js'
+import type { StatusListResult, StatusResult } from './status.js'
 import type { Client } from '../client.js'
 import { Supervisor } from '../supervisor.js'
 
@@ -48,6 +48,11 @@ const { shapeStatusResult, createStatusTool } = await import('./status.js')
 const { createSpawnTool } = await import('./spawn.js')
 const { forgetExternalRuns } = await import('./run-registry.js')
 const statusTool = createStatusTool(getSupervisorClientMock)
+
+function singleRun(result: StatusResult | StatusListResult): StatusResult {
+  if ('runs' in result) throw new Error('expected a single run status')
+  return result
+}
 
 function fullStatus(): StatusResult {
   return {
@@ -141,7 +146,7 @@ describe('statusTool singleton registry', () => {
     fs.writeFileSync(sentinelPath, 'DONE\n')
     runInfo.sentinelPath = sentinelPath
     statusMock.mockResolvedValueOnce({ runtime_id: runInfo.runtimeId, sentinel_file: sentinelPath, phase: 'waiting', pending_permission: { request_id: 'req', description: 'approve', options: [] } })
-    const result = await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' })
+    const result = singleRun(await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' }))
     expect(result.status).toBe('waiting')
     expect(result.pending_permission?.request_id).toBe('req')
   })
@@ -154,7 +159,7 @@ describe('statusTool singleton registry', () => {
       runtime_id: runInfo.runtimeId, sentinel_file: '/tmp/new-turn.done',
       label: 'new turn', phase: 'waiting', final_output: 'new output',
     })
-    const result = await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' })
+    const result = singleRun(await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' }))
     expect(result).toMatchObject({ run_id: runInfo.runId, label: runInfo.label, status: 'done', session_id: 'old-session', runtime_output_available: false })
     expect(result.final_output).toBeUndefined()
     expect(result.pending_permission).toBeUndefined()
@@ -172,7 +177,7 @@ describe('statusTool singleton registry', () => {
       phase: 'waiting',
       final_output: 'newer output',
     })
-    const result = await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' })
+    const result = singleRun(await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' }))
     expect(result).toMatchObject({
       run_id: runInfo.runId,
       status: 'done',
@@ -186,7 +191,7 @@ describe('statusTool singleton registry', () => {
     sentinelPath = path.join(os.tmpdir(), `avenor-new-${runInfo.runId}.done`)
     runInfo.sentinelPath = sentinelPath
     statusMock.mockResolvedValueOnce({ runtime_id: runInfo.runtimeId, sentinel_file: '/tmp/old-turn.done', status: 'done', final_output: 'old output' })
-    const result = await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' })
+    const result = singleRun(await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' }))
     expect(result).toMatchObject({ status: 'running', run_id: runInfo.runId })
     expect(result.final_output).toBeUndefined()
   })

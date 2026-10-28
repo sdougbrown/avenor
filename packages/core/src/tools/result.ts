@@ -28,7 +28,10 @@ export interface ResultResult {
 
 interface ResultToolDeps {
   status: typeof statusTool
-  inspect: typeof inspectTool
+  // Only the final-output fallbacks the inspector can supply are read here.
+  inspect: (
+    args: Parameters<typeof inspectTool>[0],
+  ) => Promise<{ final_output?: string; snapshot: { final_output?: string; assistant_text?: string } }>
   /** The control result verb for a runtime; older supervisors may not implement it. */
   result(supervisorId: string | undefined, runtimeId: string): Promise<Record<string, unknown>>
   /** The run's registered sentinel path, or undefined when the run is not registered. */

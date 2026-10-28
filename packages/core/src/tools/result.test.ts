@@ -189,7 +189,7 @@ describe('resultTool', () => {
 
     expect(result.output).toBe('finished')
     expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
-    expect(testDeps.sleepMock).toHaveBeenCalledOnce()
+    expect(testDeps.sleepMock).toHaveBeenCalledTimes(1)
   })
 
   it('returns immediately when non-blocking (wait=false)', async () => {
@@ -208,7 +208,7 @@ describe('resultTool', () => {
     expect(waiting).toMatchObject({
       status: 'waiting',
       ready: false,
-      pending_permission: { request_id: 'req-1' },
+      pending_permission: { request_id: 'req-1', description: 'Allow?', options: [] },
     } satisfies Partial<ResultResult>)
     expect(waitingDeps.sleepMock).not.toHaveBeenCalled()
   })
@@ -224,7 +224,7 @@ describe('resultTool', () => {
     expect(result.output).toBe('before-deadline')
     expect(result.timed_out).toBeUndefined()
     expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
-    expect(testDeps.sleepMock).toHaveBeenCalledOnce()
+    expect(testDeps.sleepMock).toHaveBeenCalledTimes(1)
   })
 
   it('returns the latest lifecycle state when its wait timeout expires', async () => {
@@ -234,7 +234,7 @@ describe('resultTool', () => {
 
     expect(result).toMatchObject({ status: 'running', ready: false, timed_out: true })
     expect(testDeps.statusMock).toHaveBeenCalledTimes(2)
-    expect(testDeps.sleepMock).toHaveBeenCalledOnce()
+    expect(testDeps.sleepMock).toHaveBeenCalledTimes(1)
   })
 
   it('honors cancellation before polling', async () => {

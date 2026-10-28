@@ -154,6 +154,27 @@ describe('host message provider', () => {
     }
   })
 
+  it('reports a historical turn by the terminal status its sentinel recorded', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    for (const [runId, firstLine, expected] of [
+      ['failed-turn', 'FAILED', 'failed'],
+      ['timeout-turn', 'TIMEOUT', 'timeout'],
+      ['killed-turn', 'KILLED', 'killed'],
+    ] as const) {
+      const sentinel = path.join(home, `${runId}.done`)
+      fs.writeFileSync(sentinel, `${firstLine}\nSESSION=old-session\n`)
+      fs.mkdirSync(path.join(home, 'runs', runId), { recursive: true })
+      registerExternalRun({ supervisorId, runId, label: runId, runtimeId: `rt_${runId}`, sentinelPath: sentinel, eventLogPath: '' })
+      const client = fakeClient({ status: mock(async () => ({ status: 'running', sentinel_file: '/tmp/newer-turn.done', session_id: 'newer-session' })) })
+      try {
+        expect(await provider(client).state(`rt_${runId}`, runId)).toMatchObject({ live: false, resumable: false, status: expected })
+      } finally {
+        forgetExternalRuns(supervisorId)
+        fs.rmSync(sentinel, { force: true })
+      }
+    }
+  })
+
   it('resolves a shared local runtime to the turn owning the runtime sentinel, not the last inserted', async () => {
     const supervisorId = '/tmp/avenor-provider.sock'
     const oldSentinel = path.join(home, 'local-old.done')
@@ -190,21 +211,23 @@ describe('host message provider', () => {
     const sentinel = path.join(home, 'guarded-turn.done')
     fs.mkdirSync(path.join(home, 'runs', 'guarded-turn'), { recursive: true })
     registerExternalRun({ supervisorId, runId: 'guarded-turn', label: 'guarded', runtimeId: 'rt_shared', sentinelPath: sentinel, eventLogPath: '' })
+    const sentSentinels: Array<string | undefined> = []
     const send = mock(async (params: any) => {
-      expect(params.expected_sentinel_file).toBe(sentinel)
-      throw new Error('turn changed')
+      sentSentinels.push(params.expected_sentinel_file)
+      throw new Error('send refused: turn changed')
     })
+    const lastSentinels: Array<string | undefined> = []
     const last = mock(async (_runtime: string, expected?: string) => {
-      expect(expected).toBe(sentinel)
-      throw new Error('turn changed')
+      lastSentinels.push(expected)
+      throw new Error('last refused: turn changed')
     })
     const client = fakeClient({ status: mock(async () => ({ status: 'running', sentinel_file: sentinel })), messageSend: send, sessionLast: last })
     try {
-      await expect(executeMessage(provider(client), { action: 'tell', target: 'guarded-turn', message: 'hello' })).rejects.toThrow()
-      await expect(executeMessage(provider(client), { action: 'ask', target: 'guarded-turn', message: 'hello' })).rejects.toThrow()
-      await expect(executePeers(provider(client), { action: 'last', target: 'guarded-turn' })).rejects.toThrow()
-      expect(send).toHaveBeenCalledTimes(2)
-      expect(last).toHaveBeenCalledTimes(1)
+      await expect(executeMessage(provider(client), { action: 'tell', target: 'guarded-turn', message: 'hello' })).rejects.toThrow('send refused: turn changed')
+      await expect(executeMessage(provider(client), { action: 'ask', target: 'guarded-turn', message: 'hello' })).rejects.toThrow('send refused: turn changed')
+      await expect(executePeers(provider(client), { action: 'last', target: 'guarded-turn' })).rejects.toThrow('last refused: turn changed')
+      expect(sentSentinels).toEqual([sentinel, sentinel])
+      expect(lastSentinels).toEqual([sentinel])
     } finally {
       forgetExternalRuns(supervisorId)
     }

@@ -514,8 +514,12 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       }
       const info = publicRunInfo(publicRunId)
       if (info && typeof status.sentinel_file === 'string' && status.sentinel_file !== info.sentinelPath) {
-        const completed = await sentinelResumable(info.sentinelPath)
-        return { live: false, resumable: false, status: completed ? 'done' : 'unknown' }
+        // The runtime's current turn owns the live sentinel; this turn is over
+        // and not resumable through the shared runtime. Its final status is
+        // the terminal status its own sentinel recorded, mapped the way the
+        // status surface maps it; an unreadable sentinel leaves it unknown.
+        const terminal = await terminalSentinelStatus(info.sentinelPath)
+        return { live: false, resumable: false, status: terminal ?? 'unknown' }
       }
       const translation = translateRunFacts(
         typeof status.status === 'string' ? status.status : '',
