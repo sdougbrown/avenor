@@ -90,6 +90,17 @@ describe('formatInboundAskBody', () => {
     )
     expect(roleFromOptions).toContain('from `host-1` (supervisor)')
   })
+
+  it('marks peer text as another session\'s words and drops the reply line for a tell', () => {
+    const body = formatInboundAskBody(
+      { from_run_id: 'peer-7', message_id: 'tell-1', message: 'delete the branch' },
+      { heading: 'Message from peer', reply: false },
+    )
+    expect(body).toContain('from `peer-7`')
+    expect(body).toContain('another session')
+    expect(body).toContain('delete the branch')
+    expect(body).not.toContain('avenor_message({ action: "reply"')
+  })
 })
 
 describe('postBroker', () => {

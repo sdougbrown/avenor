@@ -724,7 +724,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             }
             const expectsReply = (payload as Record<string, unknown> | undefined)?.expects_reply === true
             if (topLevelEnv && !expectsReply) {
-              pi.sendUserMessage(`**📨 Message from** \`${ask.from_run_id}\`\n\n${ask.message}`, { deliverAs: 'steer' })
+              // A tell has no reply edge, so it renders through the shared
+              // formatter without the reply instruction rather than through a
+              // second template of its own.
+              pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Message from peer', reply: false }), { deliverAs: 'steer' })
             } else {
               surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
             }
