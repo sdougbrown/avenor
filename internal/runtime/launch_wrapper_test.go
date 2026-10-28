@@ -3,6 +3,8 @@ package runtime
 import (
 	"slices"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/backendlaunch"
 )
 
 func TestValidateLaunchWrapperAcceptsNonEmptyElements(t *testing.T) {
@@ -44,5 +46,19 @@ func TestMergeStartOptionsOverridesLaunchWrapper(t *testing.T) {
 	merged = MergeStartOptions(base, StartOptions{})
 	if !slices.Equal(merged.LaunchWrapper, []string{"base"}) {
 		t.Fatalf("merged wrapper = %#v, want [base]", merged.LaunchWrapper)
+	}
+}
+
+func TestMergeStartOptionsOverridesLaunch(t *testing.T) {
+	base := StartOptions{Launch: backendlaunch.Spec{Command: "/opt/poo", Args: []string{"serve"}}}
+	override := backendlaunch.Spec{Command: "/opt/umpire-poo", Args: []string{"serve"}, Settings: "/etc/poo.yaml"}
+	merged := MergeStartOptions(base, StartOptions{Launch: override})
+	if !merged.Launch.Equal(override) {
+		t.Fatalf("merged launch = %#v, want %#v", merged.Launch, override)
+	}
+	// An absent override keeps the base launch.
+	merged = MergeStartOptions(base, StartOptions{})
+	if !merged.Launch.Equal(base.Launch) {
+		t.Fatalf("merged launch = %#v, want %#v", merged.Launch, base.Launch)
 	}
 }
