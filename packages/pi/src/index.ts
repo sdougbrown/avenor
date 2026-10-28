@@ -83,10 +83,12 @@ import {
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   createDeliveryErrorPayload,
+  createLastTurnErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
   emitAvenorEvent,
+  CHANNEL_LAST_TURN_ERROR,
 } from './events.js'
 import type { PollErrorPayload } from './events.js'
 import {
@@ -451,10 +453,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // idle completion sent during compaction can be rejected by the prompt
     // path, so delivery waits and leaves the notice unread.
     let compacting = false
-    // Suppress last-turn writes after a closed-socket failure until the default
-    // binding is evicted by disposeHostProvider/disposeHostProviders, or a new
-    // session starts. Evicting other supervisors must not reset this flag.
-    let lastTurnSocketClosed = false
+    // A last-turn record failure is reported once per episode, keyed on the
+    // supervisor instance object (supervisorId is the socket path, which is
+    // constant across replacements within one process); null means no latch.
+    // The latch clears when a record succeeds again, the host providers are
+    // rebound wholesale, or a new session starts; the guard also clears it
+    // when the supervisor instance changes, because a replacement supervisor
+    // starts its own episode. Evicting one binding must not clear the latch,
+    // or an unhealthy supervisor would be re-reported on every turn end.
+    let lastTurnFailureReportedFor: unknown = null
 
     // Registry of in-flight blocking waits (avenor_result, spawn with
     // wait=true). When any run reaches a stopping point — a terminal state, a
@@ -1615,7 +1622,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       hostProviders.delete(key)
       // A disposed provider's claims belong to a dead session.
       hostAskClaims.delete(key)
-      if (key === '') lastTurnSocketClosed = false
       if (!binding || binding.isSingleton || !binding.client) return
       try {
         binding.client.close()
@@ -1629,7 +1635,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function disposeHostProviders(): void {
       for (const key of [...hostProviders.keys()]) disposeHostProvider(key)
       hostAskClaims.clear()
-      lastTurnSocketClosed = false
+      lastTurnFailureReportedFor = null
     }
 
     async function defaultHostProviderFor(supervisorId: string | undefined): Promise<MessageProvider> {
@@ -1712,22 +1718,56 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return hostMessageProvider(supervisorId)
     }
 
+    // Report a failed last-turn record without disrupting the interactive
+    // TUI. Every failure is emitted on the last-turn error channel, so a
+    // suppressed repeat stays observable. The first failure in an episode
+    // additionally raises ui.notify — Pi's TUI-safe channel in every mode;
+    // console.error is the fallback for a session that has no UI context
+    // yet. The episode latches until a record succeeds again, the instance is
+    // replaced, the providers rebind wholesale, or a new session starts, so a
+    // persistently failing record cannot raise a toast on every turn end.
+    function reportLastTurnFailure(message: string, instance: unknown): void {
+      emitAvenorEvent(pi.events, CHANNEL_LAST_TURN_ERROR, createLastTurnErrorPayload({
+        message: 'session_last_set failed',
+        error: message,
+        timestamp: Date.now(),
+      }))
+      if (lastTurnFailureReportedFor !== null) return
+      lastTurnFailureReportedFor = instance
+      const text = `[avenor] session_last_set failed: ${message}`
+      if (sessionCtx) sessionCtx.ui.notify(text, 'warning')
+      else console.error(text)
+    }
+
     // The host's own last-turn producer. Every turn's end is recorded, including
     // cancelled and error turns; a run-level end is not a turn (DS-1). A child's
     // turn is recorded by the broker recorder, so child mode publishes nothing
     // from here.
     pi.on('turn_end', async event => {
       if (isSubAgentBrokerMode) return
-      // A closed control socket is terminal until the host providers are
-      // re-established: skip the attempt and stop the per-turn log spam.
-      if (lastTurnSocketClosed) return
       // Nobody can read a last-turn record while no supervisor exists, and
       // recording one must not start a supervisor (plus its broker) in a
-      // session that never delegates.
-      if (!deps.Supervisor.currentInstance?.()) return
-      const turn = extractTurnText([event.message])
+      // session that never delegates. A supervisor whose connection is already
+      // dead is reported once and its stale binding evicted. The next turn
+      // redials only once a healthy supervisor exists again.
+      const instance = deps.Supervisor.currentInstance?.()
+      if (!instance) return
+      // A replacement supervisor starts a new report episode: a latch left by
+      // a dead predecessor must not suppress this instance's first failure.
+      // The key is the instance object: supervisorId is the socket path, which
+      // is constant across replacements within one process.
+      if (instance !== lastTurnFailureReportedFor) lastTurnFailureReportedFor = null
       try {
-        const provider = await hostProviderFor(undefined)
+        instance.getClient()
+      } catch (error) {
+        disposeHostProvider(undefined)
+        reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance)
+        return
+      }
+      const turn = extractTurnText([event.message])
+      let provider: MessageProvider | undefined
+      try {
+        provider = await hostProviderFor(undefined)
         if (!provider.recordLastTurn) return
         const bounded = boundFinalOutput(turn.text)
         await provider.recordLastTurn(
@@ -1735,9 +1775,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           normalizeTurnStopReason(turn.stopReason),
           turn.text.length > bounded.length,
         )
+        lastTurnFailureReportedFor = null
       } catch (error) {
-        if (isClosedSocketError(error)) lastTurnSocketClosed = true
-        console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
+        if (isClosedSocketError(error)) {
+          // Evict only the binding whose record failed: a concurrent tool call
+          // may have re-dialled and cached a fresh binding, whose claims must
+          // survive. With nothing cached there is nothing to preserve.
+          const cached = hostProviders.get('')
+          if (!cached || cached.provider === provider) disposeHostProvider(undefined)
+        }
+        reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance)
       }
     })
 
@@ -1751,7 +1798,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // polling the same way resumeAfterCompaction does.
       if (trackedRuns.size > 0) startPolling()
       lastStatusEntries = []
-      lastTurnSocketClosed = false
+      lastTurnFailureReportedFor = null
       pollingErrorCount = 0
       pollingErrors.length = 0
       publishedSessionName = null
@@ -2907,10 +2954,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 // These adapters use Pi's shared bus and do not create a second bus.
 export {
   CHANNEL_DELIVERY_ERROR,
+  CHANNEL_LAST_TURN_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   createDeliveryErrorPayload,
+  createLastTurnErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -2925,6 +2974,8 @@ export type {
   DeliveryErrorPayload,
   DeliveryErrorPayloadInput,
   DeliveryErrorSource,
+  LastTurnErrorPayload,
+  LastTurnErrorPayloadInput,
   PollCompletedPayload,
   PollErrorPayload,
   PollErrorPayloadInput,

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, mock } from 'bun:test'
 import conformance from '../../../schemas/message_route.conformance.json'
 import resultFixture from '../../../schemas/message_route.result.json'
 import { ClosedSocketError, messageTool as realMessageTool, renderLast, RpcError, type MessageProvider } from '@dougbots/avenor-core'
+import { CHANNEL_LAST_TURN_ERROR } from './index.js'
 import { makeMessageProvider, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 const openHarnesses: Array<{
@@ -218,6 +219,7 @@ describe('Pi host turn producer', () => {
 
   it('records the turn through the bound provider when a supervisor exists', async () => {
     const sessionLastSet = mock(async () => ({}))
+    const supervisorInstance = { supervisorId: 'sup', getClient: () => ({}) }
     const client = {
       messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
       sessionLastSet,
@@ -229,7 +231,7 @@ describe('Pi host turn producer', () => {
         getSupervisorClient: getSupervisorClient as any,
         Supervisor: class {
           static currentInstance() {
-            return { supervisorId: 'sup' }
+            return supervisorInstance
           }
         } as any,
       },
@@ -237,6 +239,7 @@ describe('Pi host turn producer', () => {
     await harness.eventHandlers.turn_end(turnEnd({ content: 'the answer', stopReason: 'stop' }))
     expect(getSupervisorClient).toHaveBeenCalledTimes(1)
     expect(sessionLastSet).toHaveBeenCalledWith('supervisor', 'the answer', 'end_turn', false)
+    expect(harness.notify).not.toHaveBeenCalled()
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
@@ -249,7 +252,7 @@ describe('Pi host turn producer', () => {
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
-  it('logs a closed control socket once and stops retrying until session_start', async () => {
+  it('reports a closed control socket once through the session UI and keeps attempting', async () => {
     const record = mock(async () => {
       throw new ClosedSocketError('control socket is closed')
     })
@@ -260,39 +263,46 @@ describe('Pi host turn producer', () => {
     try {
       await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
       expect(record).toHaveBeenCalledTimes(1)
-      expect(errorLog).toHaveBeenCalledTimes(1)
-      // A closed socket is terminal: the next turn end is skipped without logging.
+      expect(harness.notify).toHaveBeenCalledTimes(1)
+      expect(String(harness.notify.mock.calls[0]?.[0])).toContain('session_last_set failed: control socket is closed')
+      expect(errorLog).not.toHaveBeenCalled()
+      // The next turn keeps attempting so a healthy supervisor is picked up,
+      // but the still-closed connection is not reported again.
       await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
-      expect(record).toHaveBeenCalledTimes(1)
-      expect(errorLog).toHaveBeenCalledTimes(1)
-      // A new session re-establishes the host providers: the next turn end retries.
+      expect(record).toHaveBeenCalledTimes(2)
+      expect(harness.notify).toHaveBeenCalledTimes(1)
+      // A new session re-arms the report latch.
       await harness.eventHandlers.session_start({}, harness.ctx)
       await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
-      expect(record).toHaveBeenCalledTimes(2)
-      expect(errorLog).toHaveBeenCalledTimes(2)
+      expect(record).toHaveBeenCalledTimes(3)
+      expect(harness.notify).toHaveBeenCalledTimes(2)
     } finally {
       console.error = originalError
       await harness.eventHandlers.session_shutdown({}, {})
     }
   })
 
-  it('keeps retrying a transient session_last_set failure on every turn end', async () => {
+  it('reports a transient session_last_set failure once per episode', async () => {
     const record = mock(async () => {
       throw new Error('broker down')
     })
-    const errorLog = mock((_message?: unknown, ..._rest: unknown[]) => {})
-    const originalError = console.error
-    console.error = errorLog
     const harness = await startHarness({ deps: { hostProviderFor: mock(async () => recordingProvider(record)) } })
-    try {
-      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
-      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
-      expect(record).toHaveBeenCalledTimes(2)
-      expect(errorLog).toHaveBeenCalledTimes(2)
-    } finally {
-      console.error = originalError
-      await harness.eventHandlers.session_shutdown({}, {})
-    }
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+    // The attempt retries on every turn; the report latches until a record
+    // succeeds, so a persistently failing broker raises one toast, not one per
+    // turn.
+    expect(record).toHaveBeenCalledTimes(2)
+    expect(harness.notify).toHaveBeenCalledTimes(1)
+    // Suppressed repeats stay observable: every failure is emitted on the
+    // last-turn error channel, even when the toast is latched, with the
+    // failure text as the payload's error.
+    const lastTurnErrors = harness.emitted.filter(([channel]) => channel === CHANNEL_LAST_TURN_ERROR)
+    expect(lastTurnErrors).toHaveLength(2)
+    const [, payload] = lastTurnErrors[1] as [{}, { message: string; error: string }]
+    expect(payload.message).toBe('session_last_set failed')
+    expect(payload.error).toBe('broker down')
+    await harness.eventHandlers.session_shutdown({}, {})
   })
 
   it('recovers last-turn recording after a generation mismatch without session_start', async () => {
@@ -322,55 +332,201 @@ describe('Pi host turn producer', () => {
     try {
       await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
       await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
-      expect(closedRecord).toHaveBeenCalledTimes(1)
-      expect(errorLog).toHaveBeenCalledTimes(1)
+      expect(closedRecord).toHaveBeenCalledTimes(2)
+      expect(harness.notify).toHaveBeenCalledTimes(1)
+      expect(errorLog).not.toHaveBeenCalled()
       await waitFor(() => receiveCount >= 3)
-      provider = makeMessageProvider({ recordLastTurn: record })
+      // The wholesale rebind cleared the latch: the same failure reports again
+      // on the rebound generation instead of staying suppressed.
       await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
-      expect(record).toHaveBeenCalledWith('turn three', 'end_turn', false)
+      expect(closedRecord).toHaveBeenCalledTimes(3)
+      expect(harness.notify).toHaveBeenCalledTimes(2)
+      // A healthy provider publishes again without a session restart.
+      provider = makeMessageProvider({ recordLastTurn: record })
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn four', stopReason: 'stop' }))
+      expect(record).toHaveBeenCalledWith('turn four', 'end_turn', false)
     } finally {
       console.error = originalError
       await harness.eventHandlers.session_shutdown({}, {})
     }
   })
 
-  it('recovers last-turn recording after default binding eviction without session_start', async () => {
+  it('redials a closed default binding and resumes publication without session_start', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
-    const client: {
-      messagePreflight: () => Promise<{ protocol: number; generation: string }>
-      sessionLastSet: (_text: string, _stop: string, _truncated: boolean) => Promise<void>
-    } = {
+    const closedSet = mock(async (_text: string, _stop: string, _truncated: boolean) => {
+      throw new ClosedSocketError('control socket is closed')
+    })
+    const client = {
       messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
-      sessionLastSet: mock(async (_text: string, _stop: string, _truncated: boolean) => { throw new ClosedSocketError('control socket is closed') }),
+      sessionLastSet: closedSet as unknown as (_text: string, _stop: string, _truncated: boolean) => Promise<void>,
     }
     const getSupervisorClient = mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: 'sup' }))
-    const errorLog = mock((_message?: unknown, ..._rest: unknown[]) => {})
-    const originalError = console.error
     const harness = await startHarness({
       deps: {
         hostProviderFor: undefined,
         getSupervisorClient: getSupervisorClient as any,
       },
     })
-    console.error = errorLog
-    try {
-      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
-      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
-      expect(client.sessionLastSet).toHaveBeenCalledTimes(1)
-      expect(errorLog).toHaveBeenCalledTimes(1)
-      await harness.registeredTools.avenor_shutdown.execute('s1', { supervisor_id: '/tmp/other.sock' })
-      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
-      expect(client.sessionLastSet).toHaveBeenCalledTimes(1)
-      expect(errorLog).toHaveBeenCalledTimes(1)
-      await harness.registeredTools.avenor_shutdown.execute('s2', {})
-      client.sessionLastSet = record
-      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn four', stopReason: 'stop' }))
-      expect(getSupervisorClient).toHaveBeenCalledTimes(2)
-      expect(record).toHaveBeenCalledWith('supervisor', 'turn four', 'end_turn', false)
-    } finally {
-      console.error = originalError
-      await harness.eventHandlers.session_shutdown({}, {})
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+    expect(harness.notify).toHaveBeenCalledTimes(1)
+    // The failed binding was evicted, so the next turn redials instead of
+    // reusing the closed client, and the still-closed connection is not
+    // reported again.
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+    expect(closedSet).toHaveBeenCalledTimes(2)
+    expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+    expect(harness.notify).toHaveBeenCalledTimes(1)
+    // A healthy connection publishes again and re-arms the report latch.
+    client.sessionLastSet = record
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
+    expect(getSupervisorClient).toHaveBeenCalledTimes(3)
+    expect(record).toHaveBeenCalledWith('supervisor', 'turn three', 'end_turn', false)
+    // A later failure on the new connection is a new episode and is reported.
+    client.sessionLastSet = closedSet
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn four', stopReason: 'stop' }))
+    expect(harness.notify).toHaveBeenCalledTimes(2)
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
+  it('keeps a concurrently re-dialled binding when the failed record evicts', async () => {
+    // Umpire round 2, finding 3: the failing record's eviction must not
+    // discard a binding that a concurrent tool call cached. The failing record
+    // first drops the stale binding and runs a host tool, which redials and
+    // caches a fresh binding; the catch must not evict that one.
+    const record2 = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    const client1 = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
+      sessionLastSet: mock(async () => {
+        await harness.registeredTools.avenor_shutdown.execute('t1', {})
+        await harness.registeredTools.avenor_peers.execute('t2', { action: 'list' })
+        throw new ClosedSocketError('control socket is closed')
+      }),
     }
+    const client2 = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-2' })),
+      messagePeers: mock(async () => ({ peers: [], generation: 'gen-2' })),
+      sessionLastSet: record2,
+    }
+    let dial = 0
+    const getSupervisorClient = mock(async () => {
+      dial++
+      return { client: dial === 1 ? client1 : client2, isSingleton: true, sup: null, supervisorId: 'sup' }
+    })
+    const harness = await startHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+      },
+    })
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+    expect(harness.notify).toHaveBeenCalledTimes(1)
+    // The fresh binding survives the eviction, so the next turn records
+    // without another dial.
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+    expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+    expect(record2).toHaveBeenCalledWith('supervisor', 'turn two', 'end_turn', false)
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
+  it('reports a replacement supervisor its own first failure without session_start', async () => {
+    // Umpire round 1, finding 1: supervisor A's socket dies (reported once),
+    // avenor_shutdown stops A and a replacement B is dialled, and B fails
+    // before any successful record. B's failure is its own episode: the stale
+    // latch from A must not suppress it.
+    const closedSet = mock(async (_text: string, _stop: string, _truncated: boolean) => {
+      throw new ClosedSocketError('control socket is closed')
+    })
+    const client = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
+      sessionLastSet: closedSet as unknown as (_text: string, _stop: string, _truncated: boolean) => Promise<void>,
+    }
+    const getSupervisorClient = mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: 'sup' }))
+    const instanceA = { supervisorId: '/tmp/a.sock', getClient: () => ({}) }
+    const instanceB = { supervisorId: '/tmp/b.sock', getClient: () => ({}) }
+    let current = instanceA
+    const harness = await startHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        Supervisor: class {
+          static currentInstance() {
+            return current
+          }
+        } as any,
+      },
+    })
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+    expect(harness.notify).toHaveBeenCalledTimes(1)
+    await harness.registeredTools.avenor_shutdown.execute('s1', {})
+    current = instanceB
+    // B fails before any successful record: the report must be B's own.
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+    expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+    expect(harness.notify).toHaveBeenCalledTimes(2)
+    // B is still dead: the latch suppresses repeats for the same instance.
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
+    expect(harness.notify).toHaveBeenCalledTimes(2)
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
+  it('reports an unhealthy supervisor once and recovers when it is healthy again', async () => {
+    // The guard branch's eviction must be exercised against a pre-existing
+    // binding: the binding is established and records, the instance's
+    // getClient() starts throwing (report once, no dial), and the recovery
+    // turn redials and records without an extra failed turn.
+    const client1SessionLastSet = mock(async () => {})
+    const client2SessionLastSet = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    const client1 = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
+      sessionLastSet: client1SessionLastSet as unknown as (_text: string, _stop: string, _truncated: boolean) => Promise<void>,
+    }
+    const client2 = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-2' })),
+      sessionLastSet: client2SessionLastSet as unknown as (_text: string, _stop: string, _truncated: boolean) => Promise<void>,
+    }
+    let dial = 0
+    const getSupervisorClient = mock(async () => {
+      dial++
+      return { client: dial === 1 ? client1 : client2, isSingleton: true, sup: null, supervisorId: 'sup' }
+    })
+    const healthyInstance = { supervisorId: 'sup', getClient: () => ({}) }
+    const deadInstance = {
+      supervisorId: 'sup',
+      getClient: () => {
+        throw new Error('avenor supervisor connection closed')
+      },
+    }
+    let current = healthyInstance
+    const harness = await startHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        Supervisor: class {
+          static currentInstance() {
+            return current
+          }
+        } as any,
+      },
+    })
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+    expect(client1SessionLastSet).toHaveBeenCalledTimes(1)
+    expect(getSupervisorClient).toHaveBeenCalledTimes(1)
+    expect(harness.notify).not.toHaveBeenCalled()
+    // The connection dies: the guard reports once and evicts without dialing.
+    current = deadInstance
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+    expect(harness.notify).toHaveBeenCalledTimes(1)
+    expect(String(harness.notify.mock.calls[0]?.[0])).toContain('session_last_set failed: avenor supervisor connection closed')
+    expect(getSupervisorClient).toHaveBeenCalledTimes(1)
+    expect(client1SessionLastSet).toHaveBeenCalledTimes(1)
+    // The supervisor recovers: the next turn redials and records, with no
+    // redundant failed record on the stale binding.
+    current = healthyInstance
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
+    expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+    expect(client2SessionLastSet).toHaveBeenCalledWith('supervisor', 'turn three', 'end_turn', false)
+    expect(harness.notify).toHaveBeenCalledTimes(1)
+    await harness.eventHandlers.session_shutdown({}, {})
   })
 })
 

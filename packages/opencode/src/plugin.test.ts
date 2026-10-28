@@ -7,6 +7,7 @@ import { extractEventText } from '../../core/src/run-events.js'
 import { validateSpawnSelection } from '../../core/src/spawn-selection.js'
 import { THINKING_LEVELS } from '../../core/src/thinking-policy.js'
 import { ToolError, renderPeerList } from '../../core/src/message.js'
+import { ClosedSocketError, isClosedSocketError } from '../../core/src/client.js'
 import { boundFinalOutput, extractTurnText, normalizeTurnStopReason, renderLast } from '../../core/src/messaging-text.js'
 import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
 import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
@@ -199,6 +200,7 @@ mock.module('@dougbots/avenor-core', () => ({
   getSupervisorClient: getSupervisorClientMock,
   ToolError,
   renderPeerList,
+  isClosedSocketError,
   boundFinalOutput,
   extractTurnText,
   normalizeTurnStopReason,
@@ -1726,6 +1728,116 @@ describe('OpenCode host turn producer', () => {
 
     expect(attempts).toBe(2)
     expect(record.mock.calls[1]).toEqual(['one', 'end_turn', false])
+  })
+
+  it('drops a closed host binding so the next host tool redials', async () => {
+    const dialsBefore = getSupervisorClientMock.mock.calls.length
+    // A stable client makes the identity reuse check meaningful: without the
+    // drop, the second bind would return the cached dead binding instead of
+    // redialing, and the healthy provider would never be called.
+    const stableClient = { messagePreflight: mock(async () => ({ generation: 'gen-1' })) }
+    getSupervisorClientMock.mockImplementation(async () => ({
+      client: stableClient,
+      supervisorId: '/tmp/avenor.sock',
+      isSingleton: true,
+      sup: null,
+    }))
+    const record = mock(async () => {
+      throw new ClosedSocketError('control socket is closed')
+    })
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+      await bindSession(hooks, 'session-1')
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      expect(logged.join('\n')).toContain('session_last_set failed')
+      // The stale window skips quietly: the same session's next event neither
+      // records nor logs again.
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      expect(logged).toHaveLength(1)
+      // The next host tool redials instead of reusing the closed client, and
+      // publication resumes on the new binding.
+      const healthy = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+      providerFactory = () => makeProvider({ recordLastTurn: healthy })
+      await bindSession(hooks, 'session-1')
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      expect(healthy).toHaveBeenCalledWith('one', 'end_turn', false)
+    } finally {
+      console.error = originalError
+    }
+    expect(getSupervisorClientMock).toHaveBeenCalledTimes(dialsBefore + 2)
+  })
+
+  it('keeps a concurrently re-cached binding when the failed publish drops', async () => {
+    const dialsBefore = getSupervisorClientMock.mock.calls.length
+    // The failing publish first rebinds through a host tool (a restarted
+    // supervisor hands back a fresh client), then throws. The drop must not
+    // discard the fresh binding: the next publish runs on it.
+    let hooksRef: { tool?: Record<string, { execute: (id: string, args: Record<string, unknown>) => Promise<unknown> }> } | undefined
+    let dial = 0
+    const client1 = { messagePreflight: mock(async () => ({ generation: 'gen-1' })) }
+    const client2 = { messagePreflight: mock(async () => ({ generation: 'gen-2' })) }
+    getSupervisorClientMock.mockImplementation(async () => {
+      dial++
+      return { client: dial === 1 ? client1 : client2, supervisorId: '/tmp/avenor.sock', isSingleton: true, sup: null }
+    })
+    const healthy = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    const record = mock(async () => {
+      providerFactory = () => makeProvider({ recordLastTurn: healthy })
+      await (hooksRef?.tool?.avenor_peers as any)?.execute({ action: 'list' }, toolContext('session-1'))
+      throw new ClosedSocketError('control socket is closed')
+    })
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    hooksRef = hooks as any
+    await bindSession(hooks, 'session-1')
+    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    // The fresh binding survived the drop, so the next publish runs on it.
+    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    expect(healthy).toHaveBeenCalledWith('one', 'end_turn', false)
+    expect(getSupervisorClientMock).toHaveBeenCalledTimes(dialsBefore + 2)
+  })
+
+  it('keeps the bound session when a crash rebind races another session', async () => {
+    // After the closed-socket drop, a host tool from another session refreshes
+    // the provider but keeps the session that first ran a host tool.
+    const stableClient = { messagePreflight: mock(async () => ({ generation: 'gen-1' })) }
+    getSupervisorClientMock.mockImplementation(async () => ({
+      client: stableClient,
+      supervisorId: '/tmp/avenor.sock',
+      isSingleton: true,
+      sup: null,
+    }))
+    const record = mock(async () => {
+      throw new ClosedSocketError('control socket is closed')
+    })
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+      await bindSession(hooks, 'session-1')
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      const healthy = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+      providerFactory = () => makeProvider({ recordLastTurn: healthy })
+      await bindSession(hooks, 'session-2')
+      expect(logged.join('\n')).toContain('host session already bound to session-1')
+      // The original session still owns publication; the other session's turn
+      // is gated off.
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      await turn(hooks, { id: 'msg-2', sessionID: 'session-2', role: 'assistant', time: { created: 2, completed: 3 }, finish: 'stop' })
+      expect(healthy).toHaveBeenCalledTimes(1)
+      expect(healthy).toHaveBeenCalledWith('one', 'end_turn', false)
+    } finally {
+      console.error = originalError
+    }
   })
 
   it('publishes one turn when a repeat update arrives while the publish is in flight', async () => {
