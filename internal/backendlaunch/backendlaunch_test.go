@@ -71,6 +71,9 @@ func TestRegisterRejectsDuplicateAndIncompleteRegistrations(t *testing.T) {
 		{name: "empty backend", call: func() { Register("", []string{"command"}, func(string, Input) (Spec, error) { return Spec{}, nil }) }},
 		{name: "no fields", call: func() { Register("nofields", nil, func(string, Input) (Spec, error) { return Spec{}, nil }) }},
 		{name: "no resolver", call: func() { Register("noresolver", []string{"command"}, nil) }},
+		{name: "field outside the input vocabulary", call: func() {
+			Register("unknownfield", []string{"command", "profile"}, func(string, Input) (Spec, error) { return Spec{}, nil })
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
