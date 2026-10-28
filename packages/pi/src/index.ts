@@ -1719,14 +1719,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     }
 
     // Report a failed last-turn record without disrupting the interactive TUI.
-    // ui.notify is Pi's TUI-safe channel in every mode; console.error is the
-    // fallback for a session that has no UI context yet. A report fires once
-    // per supervisor instance: the latch clears when a record succeeds again,
-    // the instance is replaced, the providers rebind wholesale, or a new
-    // session starts, so a persistently failing record cannot raise a toast on
-    // every turn end. Recurring background failures also surface through the
-    // status widget's error count.
+    // Every failure is recorded through the poll-error buffer and its event
+    // channel, so a suppressed repeat stays observable. The first failure in
+    // an episode additionally raises ui.notify — Pi's TUI-safe channel in
+    // every mode; console.error is the fallback for a session that has no UI
+    // context yet. A report latches until a record succeeds again, the
+    // instance is replaced, the providers rebind wholesale, or a new session
+    // starts, so a persistently failing record cannot raise a toast on every
+    // turn end.
     function reportLastTurnFailure(message: string, instance: unknown): void {
+      recordPollingError('last-turn', 'failed to record the host last turn', message)
       if (lastTurnSocketClosed) return
       lastTurnSocketClosed = true
       lastTurnSocketClosedFor = instance

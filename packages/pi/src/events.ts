@@ -26,7 +26,7 @@ export const CHANNEL_POLL_ERROR = 'avenor:poll:error' as const
 /** Emitted when a completion-notice delivery fails permanently. */
 export const CHANNEL_DELIVERY_ERROR = 'avenor:delivery:error' as const
 
-export type PollErrorSource = 'singleton-list' | 'run-status' | 'spawn-status'
+export type PollErrorSource = 'singleton-list' | 'run-status' | 'spawn-status' | 'last-turn'
 
 /** Delivery paths whose retries can be exhausted. */
 export type DeliveryErrorSource = 'idle-send'
