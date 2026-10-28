@@ -59,12 +59,8 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
       if (publicResolution && host && !rows.some(row => row.provider === host && row.run_id === ref)) {
         rows.push({ run_id: ref, label: publicResolution.label, provider: host })
       }
-      const matched = matchPeerRows(rows, ref)
-      if (matched.match !== 'unique') return matched
-      // The rule reports one row per unique id, so this lookup names exactly the
-      // authority that owns the match.
-      const hit = rows.find(row => row.run_id === matched.runId)
-      if (!hit) throw new Error('the peer changed during resolution')
+      const { resolution: matched, row: hit } = matchPeerRows(rows, ref)
+      if (matched.match !== 'unique' || !hit) return matched
       const resolved = hit.provider === host && publicResolution && hit.run_id === ref
         ? publicResolution : await hit.provider.resolve(hit.run_id)
       if (resolved.match !== 'unique') throw new Error('the peer changed during resolution')

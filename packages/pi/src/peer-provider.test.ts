@@ -34,6 +34,30 @@ test('duplicate names and IDs remain ambiguous without identity equivalence', as
   expect(sent).toEqual([])
 })
 
+test('a label match routes to the authority whose row carried that label', async () => {
+  const sent: string[] = []
+  // Both authorities list the same run id under different labels, so the id alone
+  // does not name which of them the label picked.
+  const p = combinePeerProviders(
+    provider('local', [{ run_id: 'X', label: 'bar' }], sent),
+    provider('central', [{ run_id: 'X', label: 'foo' }], sent),
+  )
+  const r = await p.resolve('foo')
+  expect(r.match).toBe('unique')
+  await p.tell(r.routeKey ?? r.runId, 'hello')
+  expect(sent).toEqual(['central:X'])
+})
+
+test('resume routes to the resolved authority, not to the caller-visible id', async () => {
+  const local = provider('local', [{ run_id: 'rt_1', label: 'child' }], [])
+  let resumedIn: string | undefined
+  local.resume = async req => { resumedIn = `local:${req.target}`; return { outcome: 'sent', runId: 'rt_1' } }
+  const p = combinePeerProviders(local, provider('central', [], []))
+  const r = await p.resolve('child')
+  await p.resume({ target: r.routeKey ?? r.runId, message: 'go' })
+  expect(resumedIn).toBe('local:rt_1')
+})
+
 test('incomplete remote listings cannot fall back to a local match', async () => {
   const p = combinePeerProviders(provider('local', [{ run_id: 'child' }], []), provider('central', [], [], 'offline'))
   await expect(p.resolve('child')).rejects.toThrow('incomplete')
