@@ -458,3 +458,43 @@ func TestMCPResumeAllowsDefaultLaunch(t *testing.T) {
 		t.Fatalf("provider creations = %d, want the seed and the resumed run", len(*created))
 	}
 }
+
+// TestMCPGateIdentityIsWhatTheSpawnUses proves the gate and the spawn share one
+// read of the roster file. The roster is rewritten between the two — the
+// window a concurrent writer would use — and the spawn still starts with the
+// launch the gate approved instead of the rewritten command.
+func TestMCPGateIdentityIsWhatTheSpawnUses(t *testing.T) {
+	stub := stubPooOnPath(t)
+	sup, created := mcpLaunchFieldsSupervisor(t)
+	dir := t.TempDir()
+	rosterPath := writeStage5Roster(t, dir, `{"tool":{"backend":"poo","agent":"search"}}`)
+
+	params, err := parseStableSpawn([]byte(`{"dir":"` + dir + `","prompt":"hi","roster_file":"` + rosterPath + `","roster_entry":"tool"}`))
+	if err != nil {
+		t.Fatalf("parse spawn params: %v", err)
+	}
+	gated, err := sup.authorizeMCPLaunchWrapper(params)
+	if err != nil {
+		t.Fatalf("gate refused an entry that declares no launch field: %v", err)
+	}
+
+	// Time of check is over; the caller's roster now names an executable.
+	writeStage5Roster(t, dir, `{"tool":{"backend":"poo","agent":"search","command":"/opt/bin/evil-poo"}}`)
+
+	out, err := sup.finishSpawn(gated)
+	if err != nil {
+		t.Fatalf("spawn after the rewrite: %v", err)
+	}
+	result, ok := out.(SpawnResult)
+	if !ok {
+		t.Fatalf("finishSpawn() = %T, want SpawnResult", out)
+	}
+	sup.cancelRuntime(result.RuntimeID)
+
+	if len(*created) != 1 {
+		t.Fatalf("provider creations = %d, want 1", len(*created))
+	}
+	if got := (*created)[0].Launch.Command; got != stub {
+		t.Fatalf("launch command = %q, want the gated %q, not the rewritten roster's", got, stub)
+	}
+}
