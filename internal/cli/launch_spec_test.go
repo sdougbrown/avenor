@@ -48,6 +48,30 @@ func TestSessionIdentityResolveResumeLaunchSpec(t *testing.T) {
 	}
 }
 
+// The directory a backend reported for the session's own records is part of
+// the ownership identity: two sessions that differ only there are not the same
+// session.
+func TestSessionIdentityRecordsTheReportedSessionDir(t *testing.T) {
+	mapping := newSessionBackendMap()
+	recorded := cliSessionIdentity{backend: "poo", sessionDir: "/var/lib/poo/sessions/ses_1"}
+	if err := mapping.claim("ses_1", recorded, &cliSessionAttempt{}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := mapping.resolveResume("ses_1", cliSessionIdentity{backend: "poo"})
+	if err != nil {
+		t.Fatalf("resolveResume() = %v", err)
+	}
+	if resolved.sessionDir != recorded.sessionDir {
+		t.Fatalf("resolved session dir = %q, want %q", resolved.sessionDir, recorded.sessionDir)
+	}
+
+	other := cliSessionIdentity{backend: "poo", sessionDir: "/var/lib/poo/sessions/ses_2"}
+	if err := mapping.claim("ses_1", other, &cliSessionAttempt{}, ""); err == nil {
+		t.Fatal("claim() accepted a session whose reported directory differed")
+	}
+}
+
 func TestRunRosterPooResolvesNamedCommandLaunch(t *testing.T) {
 	oldNewProvider := newProvider
 	provider := newScriptedProvider()

@@ -115,6 +115,11 @@ func runSingleAttempt(
 		fmt.Fprintf(deps.stderr, "avenor: start session: %v\n", err)
 		return attemptResult{exitCode: 1}
 	}
+	// The backend reports where it keeps the session's own records; a resume
+	// restores the recorded value, so only a reported one replaces it.
+	if session.SessionDir != "" {
+		identity.sessionDir = session.SessionDir
+	}
 
 	attempt := &cliSessionAttempt{}
 	if err := cfg.sessionBackends.claim(session.SessionID, identity, attempt, cfg.resumeID); err != nil {

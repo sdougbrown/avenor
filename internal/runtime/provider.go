@@ -32,6 +32,16 @@ type WarmMessageAdmission interface {
 	LockWarmMessageAdmission(sessionID string) (func(), bool)
 }
 
+// DenialRecovery is the optional capability for a backend that hands a denied
+// or aborted tool call to the model as an ordinary tool result and lets the run
+// continue. The run loop reads it before reclassifying a clean end_turn that
+// followed one of those calls as ToolDeniedStopReason: for such a backend the
+// model recovered, so the turn completed. A provider that does not implement it
+// keeps the reclassification.
+type DenialRecovery interface {
+	RecoveredDenialIsCompletion() bool
+}
+
 // StartOptions holds options for starting a new session.
 type StartOptions struct {
 	Agent        string
@@ -68,7 +78,11 @@ type Session struct {
 	SessionID string
 	Backend   string
 	Dir       string
-	PID       int // Consumed by longe halt (SIGTERM); set by opencode-acp backend. 0 otherwise.
+	// SessionDir is the directory a backend reports for the session's own
+	// records at start, so a resume can reopen them. Empty when the backend
+	// keeps no on-disk session.
+	SessionDir string
+	PID        int // Consumed by longe halt (SIGTERM); set by opencode-acp backend. 0 otherwise.
 }
 
 // MaxPermissionMessageBytes is the maximum allowed size for a write-in
