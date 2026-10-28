@@ -20,6 +20,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/appdir"
+	"github.com/sdougbrown/avenor/internal/backendlaunch"
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/diagnote"
@@ -217,6 +218,11 @@ type SpawnParams struct {
 	// so teardown releases the run's own slot even if another runtime wears
 	// the same label.
 	permissionDeciderSlotKey string
+	// launch is the executable identity the selected backend resolved from its
+	// roster entry before any provider existed. It carries no JSON tag: it is
+	// derived, never caller-supplied, and must not enter the spawn wire shape or
+	// the idempotency parameter hash.
+	launch backendlaunch.Spec
 	// resume carries the parameters only the resume path sets (resume.go).
 	// The nested struct carries no JSON tag and json.Marshal skips unexported
 	// fields, so none of it affects the idempotency parameter hash; each field
@@ -318,6 +324,8 @@ type childRuntime struct {
 	thinking           string
 	backend            string
 	launchWrapper      []string
+	launch             backendlaunch.Spec
+	sessionDir         string
 	rosterFile         string
 	rosterEntry        string
 	effectiveBackend   string
@@ -491,6 +499,14 @@ type effectiveIdentity struct {
 	// behind. It is part of the ownership record so a resume cannot hand a
 	// session to a differently wrapped backend.
 	LaunchWrapper []string
+	// Launch is the executable identity the backend resolved from its roster
+	// entry. It is part of the ownership record so a resume that resolves to a
+	// different binary, args or settings path is rejected.
+	Launch backendlaunch.Spec
+	// SessionDir reserves the session directory a backend reports from its
+	// create handshake. Stage 2 records it; an empty value means the backend
+	// has not reported one.
+	SessionDir string
 }
 
 type sessionIdentityEntry struct {
@@ -1812,6 +1828,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		task:                     params.Prompt,
 		taskFile:                 params.PromptFile,
 		launchWrapper:            params.LaunchWrapper,
+		launch:                   params.launch,
 		workflowID:               params.WorkflowID,
 		nodeID:                   params.NodeID,
 		activationID:             params.ActivationID,
@@ -2056,6 +2073,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		Model:         params.Model,
 		Thinking:      params.Thinking,
 		LaunchWrapper: params.LaunchWrapper,
+		Launch:        params.launch,
 		RuntimeID:     rtID,
 		Broker:        s.broker,
 		BrokerToken:   child.brokerToken,
@@ -2104,6 +2122,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		RosterFile:    params.RosterFile,
 		RosterEntry:   params.RosterEntry,
 		LaunchWrapper: params.LaunchWrapper,
+		Launch:        params.launch,
 	}, provider, params.SessionID)
 	if err != nil {
 		s.closeChildProvider(child, providerLifecycle)
@@ -2845,7 +2864,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			identity := effectiveIdentity{
 				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
 				AgentProfile: agentProfile, RosterFile: phaseRosterFile, RosterEntry: phase.RosterEntry,
-				LaunchWrapper: child.launchWrapper,
+				LaunchWrapper: child.launchWrapper, Launch: selection.Launch,
 			}
 			var resumeErr error
 			identity, resumeErr = s.resolveWorkflowResumeIdentity(prevSessionID, identity)
@@ -2865,6 +2884,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
 				LaunchWrapper: child.launchWrapper,
+				Launch:        identity.Launch,
 				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindLoop, phase.Name, child.label, &iteration, attemptNum),
 			}
 
@@ -3132,7 +3152,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			identity := effectiveIdentity{
 				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
 				AgentProfile: agentProfile, RosterFile: phaseRosterFile, RosterEntry: phase.RosterEntry,
-				LaunchWrapper: child.launchWrapper,
+				LaunchWrapper: child.launchWrapper, Launch: selection.Launch,
 			}
 			var resumeErr error
 			identity, resumeErr = s.resolveWorkflowResumeIdentity(prevSessionID, identity)
@@ -3151,6 +3171,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
 				LaunchWrapper: child.launchWrapper,
+				Launch:        identity.Launch,
 				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindTeam, phase.Name, child.label, nil, attemptNum),
 			}
 
@@ -3422,7 +3443,8 @@ func (c *childRuntime) sessionID() string {
 // is optional on direct resumes (omission inherits), so equality semantics
 // differ per path.
 func authoritativeIdentityEqual(left, right effectiveIdentity) bool {
-	return left.Backend == right.Backend && left.Agent == right.Agent && left.Model == right.Model && left.AgentProfile == right.AgentProfile
+	return left.Backend == right.Backend && left.Agent == right.Agent && left.Model == right.Model &&
+		left.AgentProfile == right.AgentProfile && left.Launch.Equal(right.Launch) && left.SessionDir == right.SessionDir
 }
 
 // launchWrapperSupplied reports whether a resume request carries an explicit
@@ -3462,6 +3484,13 @@ func (s *Supervisor) resolveDirectResumeIdentity(sessionID string, supplied, res
 		return effectiveIdentity{}, resumeIdentityConflict(sessionID, "launch_wrapper",
 			launchWrapperDisplay(supplied.LaunchWrapper), launchWrapperDisplay(mapped.LaunchWrapper))
 	}
+	// The launch spec is always resolved before a provider exists, for a
+	// backend that owns one even when no roster entry is selected, so a
+	// difference here is a real change of executable, args or settings.
+	if field := backendlaunch.Diff(resolved.Launch, mapped.Launch); field != "" {
+		return effectiveIdentity{}, resumeIdentityConflict(sessionID, field,
+			resolved.Launch.Value(field), mapped.Launch.Value(field))
+	}
 	if supplied.RosterFile != "" || supplied.RosterEntry != "" {
 		if supplied.RosterFile != mapped.RosterFile || supplied.RosterEntry != mapped.RosterEntry {
 			return effectiveIdentity{}, fmt.Errorf("cannot resume session %q with a different roster selector", sessionID)
@@ -3498,12 +3527,16 @@ func (s *Supervisor) resolveWorkflowResumeIdentity(sessionID string, resolved ef
 	if !ok {
 		return resolved, nil
 	}
-	if !authoritativeIdentityEqual(resolved, mapped) {
-		return effectiveIdentity{}, fmt.Errorf("cannot resume session %q: phase identity conflicts with the authoritative session identity", sessionID)
-	}
 	if !slices.Equal(resolved.LaunchWrapper, mapped.LaunchWrapper) {
 		return effectiveIdentity{}, resumeIdentityConflict(sessionID, "launch_wrapper",
 			launchWrapperDisplay(resolved.LaunchWrapper), launchWrapperDisplay(mapped.LaunchWrapper))
+	}
+	if field := backendlaunch.Diff(resolved.Launch, mapped.Launch); field != "" {
+		return effectiveIdentity{}, resumeIdentityConflict(sessionID, field,
+			resolved.Launch.Value(field), mapped.Launch.Value(field))
+	}
+	if !authoritativeIdentityEqual(resolved, mapped) {
+		return effectiveIdentity{}, fmt.Errorf("cannot resume session %q: phase identity conflicts with the authoritative session identity", sessionID)
 	}
 	return mapped, nil
 }
@@ -3587,6 +3620,8 @@ func (s *Supervisor) adoptSessionAttempt(child *childRuntime, attempt *sessionAt
 		child.agentProfile = attempt.identity.AgentProfile
 		child.rosterFile = attempt.identity.RosterFile
 		child.rosterEntry = attempt.identity.RosterEntry
+		child.launch = attempt.identity.Launch
+		child.sessionDir = attempt.identity.SessionDir
 	}
 	child.mu.Unlock()
 	return true
@@ -3629,6 +3664,7 @@ func resolveStablePhaseSelection(roster *rosterconfig.Config, backend, agent, mo
 		InlineAgent: phase.Agent,
 		InlineModel: phase.Model,
 		Roster:      entry,
+		RosterEntry: phase.RosterEntry,
 		Loop:        loop,
 	})
 }
@@ -3694,6 +3730,8 @@ func (s *Supervisor) beginWorkflowAttempt(child *childRuntime, provider runtime.
 	child.agentProfile = identity.AgentProfile
 	child.rosterFile = identity.RosterFile
 	child.rosterEntry = identity.RosterEntry
+	child.launch = identity.Launch
+	child.sessionDir = identity.SessionDir
 	child.mu.Unlock()
 	child.writeMu.Unlock()
 	if deferredStartErr != nil {
@@ -3742,6 +3780,8 @@ func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSe
 	child.agentProfile = final.Identity.AgentProfile
 	child.rosterFile = final.Identity.RosterFile
 	child.rosterEntry = final.Identity.RosterEntry
+	child.launch = final.Identity.Launch
+	child.sessionDir = final.Identity.SessionDir
 	child.mu.Unlock()
 	if finErr != nil {
 		s.reportLifecycleError(child, finErr)
@@ -3760,6 +3800,8 @@ func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effec
 		RosterFile:    child.rosterFile,
 		RosterEntry:   child.rosterEntry,
 		LaunchWrapper: child.launchWrapper,
+		Launch:        child.launch,
+		SessionDir:    child.sessionDir,
 	}
 	if identity.Backend == "" {
 		identity.Backend = child.backend
@@ -3832,7 +3874,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	identity := effectiveIdentity{
 		Backend: child.effectiveBackend, Agent: child.effectiveAgent, Model: child.effectiveModel,
 		AgentProfile: child.agentProfile, RosterFile: child.rosterFile, RosterEntry: child.rosterEntry,
-		LaunchWrapper: child.launchWrapper,
+		LaunchWrapper: child.launchWrapper, Launch: child.launch, SessionDir: child.sessionDir,
 	}
 	child.mu.Unlock()
 	if mapped, ok := s.sessionIdentity(session.SessionID); ok {
@@ -3931,7 +3973,11 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		Agent:         child.effectiveAgent,
 		Model:         child.effectiveModel,
 		AgentProfile:  child.agentProfile,
+		RosterFile:    child.rosterFile,
+		RosterEntry:   child.rosterEntry,
 		LaunchWrapper: child.launchWrapper,
+		Launch:        child.launch,
+		SessionDir:    child.sessionDir,
 	}
 	provider := child.provider
 	fallbackBackend := child.backend
@@ -3967,6 +4013,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		Broker:        s.broker,
 		BrokerToken:   brokerToken,
 		LaunchWrapper: identity.LaunchWrapper,
+		Launch:        identity.Launch,
 		Provenance:    runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
 	}, resumeID)
 }
@@ -5172,6 +5219,7 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 		AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
 		LaunchWrapper: params.LaunchWrapper,
 	}
+	var launch backendlaunch.Spec
 	if params.RosterFile != "" {
 		roster, err := rosterconfig.Load(params.RosterFile)
 		if err != nil {
@@ -5187,11 +5235,23 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 		if params.Thinking == "" {
 			params.Thinking = entry.Thinking
 		}
+		launch, err = roster.ResolveLaunch(params.RosterEntry)
+		if err != nil {
+			return params, backend, err
+		}
+	} else {
+		// No roster entry selects a launch: a backend that starts a configured
+		// binary still resolves its default here.
+		var err error
+		launch, err = backendlaunch.Resolve(backend, "", backendlaunch.Input{})
+		if err != nil {
+			return params, backend, err
+		}
 	}
 	resolved, err := s.resolveDirectResumeIdentity(params.SessionID, directSupplied, effectiveIdentity{
 		Backend: backend, Agent: params.Agent, Model: params.Model,
 		AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
-		LaunchWrapper: params.LaunchWrapper,
+		LaunchWrapper: params.LaunchWrapper, Launch: launch,
 	})
 	if err != nil {
 		return params, backend, err
@@ -5199,6 +5259,7 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 	backend, params.Agent, params.Model, params.AgentProfile = resolved.Backend, resolved.Agent, resolved.Model, resolved.AgentProfile
 	params.LaunchWrapper = resolved.LaunchWrapper
 	params.RosterFile, params.RosterEntry = resolved.RosterFile, resolved.RosterEntry
+	params.launch = resolved.Launch
 	if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
 		return params, backend, err
 	}
