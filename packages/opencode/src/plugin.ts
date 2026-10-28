@@ -636,9 +636,10 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   // One host provider for this plugin instance: bound to one supervisor and one
   // generation, created on the first host messaging tool call. It is rebuilt
   // when the supervisor's client changes (a shutdown followed by a fresh
-  // singleton), so a revoked generation is never reused and no call is
-  // retargeted to another session. A provider call is also how the plugin
-  // learns which OpenCode session owns the broker's supervisor turn.
+  // singleton, or a closed socket, whose drop keeps the binding's session), so
+  // a revoked generation is never reused and no call is retargeted to another
+  // session. A provider call is also how the plugin learns which OpenCode
+  // session owns the broker's supervisor turn.
   let hostProvider: { client: unknown; binding: HostProviderBinding } | undefined
   let hostBinding: HostBinding | undefined
   // Bumped by every bind that has to preflight. A bind whose sequence is stale
@@ -768,7 +769,9 @@ export const AvenorPlugin: Plugin = async (ctx) => {
   // publishes nothing. A failure is logged, never rethrown.
   async function publishHostTurn(info: Record<string, unknown>): Promise<void> {
     const binding = hostBinding
-    if (!binding) return
+    // A closed socket drops the client cache, not the binding: until the next
+    // host tool rebinds, the binding's provider is stale, so skip quietly.
+    if (!binding || !hostProvider) return
     if (info.role !== 'assistant') return
     if (info.sessionID !== binding.sessionId) return
     // A compaction summary is an assistant message on the same session that
@@ -813,11 +816,11 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       publishedTurn = { created, id: messageId }
     } catch (error) {
       if (isClosedSocketError(error)) {
-        // The cached binding's socket is dead: drop it so the next host tool
-        // redials instead of reusing the closed client. Publication stays
-        // quiet until that rebind; the log line is the one observable record.
+        // The cached client is dead: drop it so the next host tool redials
+        // through boundHostProvider, which keeps the bound session. The
+        // binding stays, so publishes skip quietly until that rebind; the log
+        // line below is the one observable record.
         hostProvider = undefined
-        hostBinding = undefined
       }
       console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
     }

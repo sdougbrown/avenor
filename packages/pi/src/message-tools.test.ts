@@ -375,6 +375,47 @@ describe('Pi host turn producer', () => {
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
+  it('reports a replacement supervisor its own first failure without session_start', async () => {
+    // Umpire round 1, finding 1: supervisor A's socket dies (reported once),
+    // avenor_shutdown stops A and a replacement B is dialled, and B fails
+    // before any successful record. B's failure is its own episode: the stale
+    // latch from A must not suppress it.
+    const closedSet = mock(async (_text: string, _stop: string, _truncated: boolean) => {
+      throw new ClosedSocketError('control socket is closed')
+    })
+    const client = {
+      messagePreflight: mock(async () => ({ protocol: 1, generation: 'gen-1' })),
+      sessionLastSet: closedSet as unknown as (_text: string, _stop: string, _truncated: boolean) => Promise<void>,
+    }
+    const getSupervisorClient = mock(async () => ({ client, isSingleton: true, sup: null, supervisorId: 'sup' }))
+    const instanceA = { supervisorId: '/tmp/a.sock', getClient: () => ({}) }
+    const instanceB = { supervisorId: '/tmp/b.sock', getClient: () => ({}) }
+    let current = instanceA
+    const harness = await startHarness({
+      deps: {
+        hostProviderFor: undefined,
+        getSupervisorClient: getSupervisorClient as any,
+        Supervisor: class {
+          static currentInstance() {
+            return current
+          }
+        } as any,
+      },
+    })
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn one', stopReason: 'stop' }))
+    expect(harness.notify).toHaveBeenCalledTimes(1)
+    await harness.registeredTools.avenor_shutdown.execute('s1', {})
+    current = instanceB
+    // B fails before any successful record: the report must be B's own.
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn two', stopReason: 'stop' }))
+    expect(getSupervisorClient).toHaveBeenCalledTimes(2)
+    expect(harness.notify).toHaveBeenCalledTimes(2)
+    // B is still dead: the latch suppresses repeats for the same instance.
+    await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
+    expect(harness.notify).toHaveBeenCalledTimes(2)
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
   it('reports an unhealthy supervisor once and skips the record until it is healthy again', async () => {
     const record = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
     const hostProviderFor = mock(async () => recordingProvider(record))

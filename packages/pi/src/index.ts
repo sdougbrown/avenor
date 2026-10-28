@@ -455,9 +455,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // attempt itself keeps running on every turn, so a healthy supervisor is
     // picked up without a session restart. The flag clears when a record
     // succeeds again, the host providers are rebound wholesale, or a new
-    // session starts. Evicting one binding must not reset it, or an unhealthy
-    // supervisor would be re-reported on every turn end.
+    // session starts, and the guard clears it when the supervisor instance
+    // changes: a replacement supervisor starts its own episode, so its first
+    // failure is never suppressed by a dead predecessor's report. Evicting one
+    // binding must not reset the latch, or an unhealthy supervisor would be
+    // re-reported on every turn end.
     let lastTurnSocketClosed = false
+    let lastTurnSocketClosedFor: string | null = null
 
     // Registry of in-flight blocking waits (avenor_result, spawn with
     // wait=true). When any run reaches a stopping point — a terminal state, a
@@ -1717,11 +1721,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // Report a failed last-turn record without disrupting the interactive TUI.
     // ui.notify is Pi's TUI-safe channel in every mode; console.error is the
     // fallback for a session that has no UI context yet. A latched report fires
-    // once per episode; an unlatched one fires on every occurrence.
-    function reportLastTurnFailure(message: string, latched: boolean): void {
+    // once per supervisor instance; an unlatched one fires on every occurrence.
+    function reportLastTurnFailure(message: string, supervisorId: string | undefined, latched: boolean): void {
       if (latched) {
         if (lastTurnSocketClosed) return
         lastTurnSocketClosed = true
+        lastTurnSocketClosedFor = supervisorId ?? null
       }
       const text = `[avenor] session_last_set failed: ${message}`
       if (sessionCtx) sessionCtx.ui.notify(text, 'warning')
@@ -1741,11 +1746,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // redials only once a healthy supervisor exists again.
       const instance = deps.Supervisor.currentInstance?.()
       if (!instance) return
+      // A replacement supervisor starts a new report episode: a latch left by
+      // a dead predecessor must not suppress this instance's first failure.
+      if (instance.supervisorId !== lastTurnSocketClosedFor) lastTurnSocketClosed = false
       try {
         instance.getClient()
       } catch (error) {
         disposeHostProvider(undefined)
-        reportLastTurnFailure(error instanceof Error ? error.message : String(error), true)
+        reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance.supervisorId, true)
         return
       }
       const turn = extractTurnText([event.message])
@@ -1764,9 +1772,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // The cached binding's socket is dead: evict it so the next turn
           // redials into whatever supervisor is healthy then.
           disposeHostProvider(undefined)
-          reportLastTurnFailure(error instanceof Error ? error.message : String(error), true)
+          reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance.supervisorId, true)
         } else {
-          reportLastTurnFailure(error instanceof Error ? error.message : String(error), false)
+          reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance.supervisorId, false)
         }
       }
     })
@@ -1782,6 +1790,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       if (trackedRuns.size > 0) startPolling()
       lastStatusEntries = []
       lastTurnSocketClosed = false
+      lastTurnSocketClosedFor = null
       pollingErrorCount = 0
       pollingErrors.length = 0
       publishedSessionName = null

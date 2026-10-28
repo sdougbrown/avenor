@@ -1755,6 +1755,10 @@ describe('OpenCode host turn producer', () => {
       await bindSession(hooks, 'session-1')
       await turn(hooks, assistant('msg-1', { finish: 'stop' }))
       expect(logged.join('\n')).toContain('session_last_set failed')
+      // The stale window skips quietly: the same session's next event neither
+      // records nor logs again.
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      expect(logged).toHaveLength(1)
       // The next host tool redials instead of reusing the closed client, and
       // publication resumes on the new binding.
       const healthy = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
@@ -1767,6 +1771,43 @@ describe('OpenCode host turn producer', () => {
     }
     expect(getSupervisorClientMock).toHaveBeenCalledTimes(dialsBefore + 2)
     expect(hostProviderOptions).toHaveLength(2)
+  })
+
+  it('keeps the bound session when a crash rebind races another session', async () => {
+    // After the closed-socket drop, a host tool from another session refreshes
+    // the provider but keeps the session that first ran a host tool.
+    const stableClient = { messagePreflight: mock(async () => ({ generation: 'gen-1' })) }
+    getSupervisorClientMock.mockImplementation(async () => ({
+      client: stableClient,
+      supervisorId: '/tmp/avenor.sock',
+      isSingleton: true,
+      sup: null,
+    }))
+    const record = mock(async () => {
+      throw new ClosedSocketError('control socket is closed')
+    })
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+      await bindSession(hooks, 'session-1')
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      const healthy = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+      providerFactory = () => makeProvider({ recordLastTurn: healthy })
+      await bindSession(hooks, 'session-2')
+      expect(logged.join('\n')).toContain('host session already bound to session-1')
+      // The original session still owns publication; the other session's turn
+      // is gated off.
+      await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+      await turn(hooks, { id: 'msg-2', sessionID: 'session-2', role: 'assistant', time: { created: 2, completed: 3 }, finish: 'stop' })
+      expect(healthy).toHaveBeenCalledTimes(1)
+      expect(healthy).toHaveBeenCalledWith('one', 'end_turn', false)
+    } finally {
+      console.error = originalError
+    }
   })
 
   it('publishes one turn when a repeat update arrives while the publish is in flight', async () => {
