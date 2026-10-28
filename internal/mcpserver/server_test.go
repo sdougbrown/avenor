@@ -311,6 +311,10 @@ func (f *fakeClient) SessionLastContext(_ context.Context, runtimeID string) (me
 	return f.SessionLast(runtimeID)
 }
 
+func (f *fakeClient) SessionLastTurnContext(_ context.Context, runtimeID, _ string) (messaging.PeerLast, error) {
+	return f.SessionLastContext(context.Background(), runtimeID)
+}
+
 type spawnCountingClient struct {
 	spawns atomic.Int32
 }
@@ -359,6 +363,10 @@ func (c *spawnCountingClient) SessionRenameContext(_ context.Context, sessionID,
 
 func (c *spawnCountingClient) SessionLastContext(_ context.Context, runtimeID string) (messaging.PeerLast, error) {
 	return messaging.PeerLast{}, nil
+}
+
+func (c *spawnCountingClient) SessionLastTurnContext(_ context.Context, runtimeID, _ string) (messaging.PeerLast, error) {
+	return c.SessionLastContext(context.Background(), runtimeID)
 }
 func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
 func (c *spawnCountingClient) WorkflowStatus(string) (map[string]any, error) { return nil, nil }

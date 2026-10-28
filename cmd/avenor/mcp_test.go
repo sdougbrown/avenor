@@ -251,6 +251,10 @@ func (s *stubControlClient) SessionLastContext(_ context.Context, runtimeID stri
 	return messaging.PeerLast{}, nil
 }
 
+func (s *stubControlClient) SessionLastTurnContext(_ context.Context, runtimeID, _ string) (messaging.PeerLast, error) {
+	return s.SessionLastContext(context.Background(), runtimeID)
+}
+
 func writeTokenFile(t *testing.T, content string, mode os.FileMode) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "token")

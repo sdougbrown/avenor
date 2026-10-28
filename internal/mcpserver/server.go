@@ -58,6 +58,7 @@ type ControlClient interface {
 	ResumeContext(ctx context.Context, req messaging.ResumeRequest) (messaging.ResumeResult, error)
 	SessionRenameContext(ctx context.Context, sessionID, name string) (messaging.RenameResult, error)
 	SessionLastContext(ctx context.Context, runtimeID string) (messaging.PeerLast, error)
+	SessionLastTurnContext(ctx context.Context, runtimeID, expectedSentinel string) (messaging.PeerLast, error)
 }
 
 type messagePermissionControlClient interface {
@@ -1045,13 +1046,6 @@ func (s *Server) retrieveFinalOutput(cl ControlClient, supervisorPath, runID str
 				status["final_output_truncated"] = false
 				fullResultRetrieved = true
 			}
-		}
-	}
-	if !fullResultRetrieved {
-		if output, found := s.recoverFinalOutput(supervisorPath, runID); found {
-			status["final_output"] = output
-			status["final_output_truncated"] = false
-			fullResultRetrieved = true
 		}
 	}
 	// Older supervisors lack Result and do not specify whether previews are

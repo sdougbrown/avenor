@@ -423,13 +423,7 @@ func (p *mcpMessageProvider) Last(ctx context.Context, runID string) (messaging.
 	if sentinel == "" {
 		last, err = p.client.SessionLastContext(ctx, runID)
 	} else {
-		guarded, ok := p.client.(interface {
-			SessionLastTurnContext(context.Context, string, string) (messaging.PeerLast, error)
-		})
-		if !ok {
-			return messaging.PeerLast{}, fmt.Errorf("turn identity unavailable for %q", runID)
-		}
-		last, err = guarded.SessionLastTurnContext(ctx, runID, sentinel)
+		last, err = p.client.SessionLastTurnContext(ctx, runID, sentinel)
 	}
 	if err != nil {
 		return messaging.PeerLast{}, authorityToolError(err)

@@ -120,6 +120,10 @@ func (f *fakeMessageControlClient) SessionLastContext(context.Context, string) (
 	return messaging.PeerLast{}, nil
 }
 
+func (f *fakeMessageControlClient) SessionLastTurnContext(_ context.Context, runtimeID, _ string) (messaging.PeerLast, error) {
+	return f.SessionLastContext(context.Background(), runtimeID)
+}
+
 func newTestMessageProvider(t *testing.T, cl ControlClient) *mcpMessageProvider {
 	t.Helper()
 	p, err := newMCPMessageProvider(context.Background(), &Server{registry: NewRunRegistry()}, cl, testSupervisorPath)
@@ -724,6 +728,9 @@ func TestMCPMessageProviderSentinellessTurnRefusesResume(t *testing.T) {
 	}
 	if facts.Live || facts.Resumable {
 		t.Fatalf("historical sentinelless turn facts = %#v, want not live and not resumable", facts)
+	}
+	if facts.Status != runstate.StatusUnknown {
+		t.Fatalf("historical sentinelless turn status = %v, want %v", facts.Status, runstate.StatusUnknown)
 	}
 }
 
