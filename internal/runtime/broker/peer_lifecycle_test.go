@@ -641,6 +641,34 @@ func TestPeerPublishesOnlyOwnLastTurn(t *testing.T) {
 	}
 }
 
+// A publish with no final output is refused before the handler can dereference it.
+// Without the guard the handler panics, and net/http answers a panicking handler by
+// dropping the connection, so the caller gets a transport error where the contract
+// promises a typed refusal and the broker logs a stack trace per bad request.
+func TestPeerPublishRequiresAFinalOutput(t *testing.T) {
+	b := peerBroker(t)
+	creds := map[string]any{"run_id": "peer", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	for name, body := range map[string]map[string]any{
+		"no final_output": {"run_id": "peer", "token": "secret", "sequence": 1},
+		"no sequence":     {"run_id": "peer", "token": "secret", "final_output": "text"},
+		"zero sequence":   {"run_id": "peer", "token": "secret", "final_output": "text", "sequence": 0},
+	} {
+		if code, result := peerPost(t, b, "/last_message", body); code != http.StatusBadRequest || result["code"] != "invalid-request" {
+			t.Fatalf("%s = %d %v", name, code, result)
+		}
+	}
+	st, _, _ := b.runStateFor("peer")
+	st.Mu.Lock()
+	record := st.LastMessage
+	st.Mu.Unlock()
+	if record != nil {
+		t.Fatalf("refused publishes still wrote a record: %+v", record)
+	}
+}
+
 func TestPeerLastTurnSequenceFencesDelayedOlderRequests(t *testing.T) {
 	b := peerBroker(t)
 	peer := map[string]any{"run_id": "peer", "token": "secret", "peer": true}
