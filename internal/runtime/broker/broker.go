@@ -1209,6 +1209,14 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusBadRequest, "reply_to in payload and envelope disagree", "invalid-request")
 			return
 		}
+		// The payload's sender is what the receiving surface prints above the body,
+		// so it is held to the authenticated envelope the way the routing fields
+		// are: a peer that could name another run here would be announcing itself
+		// as that run in the one place a reader trusts.
+		if _, ok := mergedField(am.FromRunID, fullBody.FromRunID); !ok {
+			writeCodedError(w, http.StatusForbidden, "from_run_id in payload and envelope disagree", "sender-mismatch")
+			return
+		}
 		expectsReply = expectsReply || am.ExpectsReply
 	}
 
@@ -1921,7 +1929,7 @@ func (b *Broker) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusBadRequest, "target is required", "invalid-request")
 		return
 	}
-	if !b.reachable(target) {
+	if !b.Reachable(target) {
 		writeCodedError(w, http.StatusNotFound, "run not found: "+target, "target-unavailable")
 		return
 	}
@@ -2211,10 +2219,11 @@ func (b *Broker) handleSessionName(w http.ResponseWriter, r *http.Request) {
 
 // --- accessors ---
 
-// reachable reports whether runID can still take a message: the record exists
-// and its peer identity is neither retired nor expired. It is the question a
-// routing boundary asks about a target it did not authenticate as.
-func (b *Broker) reachable(runID string) bool {
+// Reachable reports whether runID can still take part: the record exists and its
+// peer identity is neither retired nor expired. It is the question a routing
+// boundary asks about a target it did not authenticate as, and a tombstone is a
+// known run that can no longer answer yes.
+func (b *Broker) Reachable(runID string) bool {
 	st := b.GetRun(runID)
 	if st == nil {
 		return false
@@ -2780,7 +2789,7 @@ func (m localMessenger) Tell(ctx context.Context, req messaging.TellRequest) err
 }
 
 func (m localMessenger) Reachable(runID string) bool {
-	return m.broker.reachable(runID)
+	return m.broker.Reachable(runID)
 }
 
 func (m localMessenger) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {

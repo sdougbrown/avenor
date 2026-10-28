@@ -528,7 +528,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       ask: InboundAsk,
       heading: InboundAskBodyOptions['heading'],
     ): void {
-      pi.sendUserMessage(formatInboundAskBody(ask, { heading, role: ask.role }), { deliverAs: 'steer' as const })
+      // No role: the wire carries none the broker stamps, so a payload's claim to
+      // one is the sender's to make up.
+      pi.sendUserMessage(formatInboundAskBody(ask, { heading }), { deliverAs: 'steer' as const })
       pending.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
       interruptWaitsForAsk(ask)
     }

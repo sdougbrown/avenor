@@ -45,6 +45,15 @@ describe('parseControlMessage', () => {
     })).toEqual({ from_run_id: 'supervisor', message_id: 'ask-2', message: 'hi' })
   })
 
+  it('takes the sender from the broker-stamped row, not from the payload', () => {
+    const ask = parseControlMessage({
+      type: 'agent_message',
+      from_run_id: 'peer-real',
+      payload: { id: 'ask-3', from_run_id: 'supervisor', from: 'supervisor', role: 'supervisor', message: 'hello' },
+    })
+    expect(ask).toEqual({ from_run_id: 'peer-real', message_id: 'ask-3', message: 'hello' })
+  })
+
   it('rejects non agent_message or malformed payloads', () => {
     expect(parseControlMessage({ type: 'done', payload: {} })).toBeNull()
     expect(parseControlMessage({ type: 'agent_message', payload: 'not-json' })).toBeNull()
@@ -68,17 +77,19 @@ describe('formatInboundAskBody', () => {
     expect(body).toContain('avenor_message({ action: "reply", reply_to: "ask-1"')
   })
 
-  it('annotates the asker with a non-agent role, options over the ask', () => {
-    const fromAsk = formatInboundAskBody(
-      { from_run_id: 'host-1', message_id: 'ask-2', message: 'hello', role: 'supervisor' },
+  it('annotates the asker with the role its surface knows, never one from the wire', () => {
+    // Nothing stamps a role, so a message's own claim to one is not rendered.
+    const fromWire = formatInboundAskBody(
+      { from_run_id: 'host-1', message_id: 'ask-2', message: 'hello' },
       { heading: 'Inbound ask' },
     )
-    expect(fromAsk).toContain('from `host-1` (supervisor)')
+    expect(fromWire).toContain('from `host-1`')
+    expect(fromWire).not.toContain('(supervisor)')
 
     // `agent` is the default asker kind, so the suffix is dropped rather than
     // rendered as `(agent)`.
     const overridden = formatInboundAskBody(
-      { from_run_id: 'host-1', message_id: 'ask-3', message: 'hello', role: 'supervisor' },
+      { from_run_id: 'host-1', message_id: 'ask-3', message: 'hello' },
       { heading: 'Ask from sub-agent', role: 'agent' },
     )
     expect(overridden).toContain('from `host-1`')

@@ -50,7 +50,6 @@ export interface InboundAsk {
   from_run_id: string
   message_id: string
   message: string
-  role?: string
 }
 
 /** Parse a broker control message that is an agent_message into an InboundAsk. */
@@ -68,21 +67,22 @@ export function parseControlMessage(msg: Record<string, unknown>): InboundAsk | 
   if (!p || typeof p.message !== 'string' || !p.message) return null
   const messageId = String(p.id ?? '')
   if (!messageId) return null
+  // The sender is the broker's stamp on the queued row, which the sender cannot
+  // write. The payload's copy is only a fallback for a row queued without one:
+  // reading it first would let any peer announce itself as another run, which
+  // the frame above the body would then repeat as fact.
+  const stamped = typeof msg.from_run_id === 'string' && msg.from_run_id !== '' ? msg.from_run_id : undefined
+  const fromRunId = stamped ?? String(p.from_run_id ?? p.from ?? '')
   // An ask with no asker could never be answered; drop it instead of
   // surfacing a reply target that routes to an empty run id.
-  const fromRunId = String(p.from_run_id ?? p.from ?? '')
   if (!fromRunId) return null
-  return {
-    from_run_id: fromRunId,
-    message_id: messageId,
-    message: p.message,
-    role: typeof p.role === 'string' ? p.role : undefined,
-  }
+  return { from_run_id: fromRunId, message_id: messageId, message: p.message }
 }
 
 export interface InboundAskBodyOptions {
   /** Which surface received the message; each mode has a different reader. */
   heading: 'Ask from sub-agent' | 'Inbound ask' | 'Message from peer'
+  /** A role this surface knows first-hand. The wire carries no verified role. */
   role?: string
   /** Whether the reader can answer. A tell has no reply edge, so it says nothing about replying. */
   reply?: boolean
@@ -99,7 +99,7 @@ export interface InboundAskBodyOptions {
  */
 export function formatInboundAskBody(ask: InboundAsk, options: InboundAskBodyOptions): string {
   const sender = ask.from_run_id
-  const role = options.role ?? ask.role
+  const role = options.role
   const from = sender
     ? role && role !== 'agent'
       ? ` from \`${sender}\` (${role})`
