@@ -323,9 +323,15 @@ describe('Pi host turn producer', () => {
       expect(harness.notify).toHaveBeenCalledTimes(1)
       expect(errorLog).not.toHaveBeenCalled()
       await waitFor(() => receiveCount >= 3)
-      provider = makeMessageProvider({ recordLastTurn: record })
+      // The wholesale rebind cleared the latch: the same failure reports again
+      // on the rebound generation instead of staying suppressed.
       await harness.eventHandlers.turn_end(turnEnd({ content: 'turn three', stopReason: 'stop' }))
-      expect(record).toHaveBeenCalledWith('turn three', 'end_turn', false)
+      expect(closedRecord).toHaveBeenCalledTimes(3)
+      expect(harness.notify).toHaveBeenCalledTimes(2)
+      // A healthy provider publishes again without a session restart.
+      provider = makeMessageProvider({ recordLastTurn: record })
+      await harness.eventHandlers.turn_end(turnEnd({ content: 'turn four', stopReason: 'stop' }))
+      expect(record).toHaveBeenCalledWith('turn four', 'end_turn', false)
     } finally {
       console.error = originalError
       await harness.eventHandlers.session_shutdown({}, {})

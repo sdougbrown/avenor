@@ -1732,6 +1732,16 @@ describe('OpenCode host turn producer', () => {
 
   it('drops a closed host binding so the next host tool redials', async () => {
     const dialsBefore = getSupervisorClientMock.mock.calls.length
+    // A stable client makes the identity reuse check meaningful: without the
+    // drop, the second bind would return the cached dead binding instead of
+    // redialing, and the healthy provider would never be called.
+    const stableClient = { messagePreflight: mock(async () => ({ generation: 'gen-1' })) }
+    getSupervisorClientMock.mockImplementation(async () => ({
+      client: stableClient,
+      supervisorId: '/tmp/avenor.sock',
+      isSingleton: true,
+      sup: null,
+    }))
     const record = mock(async () => {
       throw new ClosedSocketError('control socket is closed')
     })
