@@ -15,10 +15,15 @@ import type {
 import { RpcError } from '../client.js'
 import { ensureRunPaths } from '../paths.js'
 import { Supervisor, retainLiveIdentity, type RunInfo } from '../supervisor.js'
-import { newMsgID, type MessageOutcome } from '../messaging-text.js'
+import { goQuote, newMsgID, type MessageOutcome } from '../messaging-text.js'
 import { ToolError } from '../message.js'
 import { findExternalRunById, listExternalRuns, registerExternalRun } from './run-registry.js'
-import { RESUMABLE_SENTINEL_STATUSES, TERMINAL_SENTINEL_STATUSES } from './sentinel-status.js'
+import {
+  RESUMABLE_SENTINEL_STATUSES,
+  resumableFromSession,
+  sentinelStatusToResult,
+  TERMINAL_SENTINEL_STATUSES,
+} from './sentinel-status.js'
 import type {
   MessageProvider,
   MessageSurface,
@@ -136,74 +141,16 @@ export function isGenerationMismatchError(error: unknown): boolean {
 }
 
 /**
- * Whether a status failure is the supervisor's absence answer for this runtime
- * rather than a refusal or a transport failure, mirroring Go's
- * `statusReportsNoRuntime`. The control plane carries that answer as a server
- * failure (-32000) whose message names the runtime it could not find, with no
- * structured data to key on, so the report is matched exactly: same code, same
- * runtime id, same sentence. The supervisor builds the sentence with Go's
- * `%q`, which is `strconv.Quote` — a different quoting from `messaging.Quote`
- * (the shared tool-text contract) for control and format characters — so the
- * id is rendered with `goQuote` rather than interpolated or quoted. Anything
- * else is a failure the caller keeps.
+ * Matches Go's `statusReportsNoRuntime`: true only for the supervisor's absence
+ * answer for this exact runtime, so a refusal or a transport failure stays the
+ * caller's error. The sentence is rendered with `goQuote` because the
+ * supervisor formats the id with Go's `%q`.
  */
-function isRuntimeNotFoundError(error: unknown, runId: string): boolean {
+function statusReportsNoRuntime(error: unknown, runId: string): boolean {
   if (!(error instanceof RpcError) || error.code !== -32000) return false
   return rpcText(error) === `runtime ${goQuote(runId)} not found`
 }
 
-/**
- * Render a value as one Go double-quoted string literal, the `%q` verb's form
- * (`strconv.Quote`): short escapes for a quote, a backslash, a bell, and the
- * whitespace controls; `\xNN` for the remaining ASCII escapes; `\uNNNN` for a
- * non-printable BMP rune; `\UNNNNNNNN` for a non-printable rune above it; and
- * a printable rune verbatim. `messaging.Quote` (see `quote`) writes the C0
- * controls as `\uNNNN` and an astral rune as a surrogate pair instead, so it
- * cannot recognize a sentence the supervisor produced.
- *
- * Printable is Go's `strconv.IsPrint`: ASCII space through `~`, and elsewhere
- * the general categories L, M, N, P and S. V8's Unicode tables can be newer
- * than Go's, so a rune assigned since Go's tables were generated renders
- * escaped here where Go writes it verbatim. That direction only fails to
- * recognize the sentence; it never recognizes one the supervisor did not
- * write.
- */
-function goQuote(value: string): string {
-  let out = '"'
-  for (const character of value) out += goEscapedRune(character)
-  return `${out}"`
-}
-
-const GO_PRINTABLE = /[\p{L}\p{M}\p{N}\p{P}\p{S}]/u
-
-function goEscapedRune(character: string): string {
-  const code = character.codePointAt(0) ?? 0
-  switch (character) {
-    case '"':
-      return '\\"'
-    case '\\':
-      return '\\\\'
-    case '\x07':
-      return '\\a'
-    case '\b':
-      return '\\b'
-    case '\f':
-      return '\\f'
-    case '\n':
-      return '\\n'
-    case '\r':
-      return '\\r'
-    case '\t':
-      return '\\t'
-    case '\v':
-      return '\\v'
-  }
-  const printable = code < 0x80 ? code >= 0x20 && code !== 0x7f : GO_PRINTABLE.test(character)
-  if (printable) return character
-  if (code < 0x80) return `\\x${code.toString(16).padStart(2, '0')}`
-  if (code < 0x10000) return `\\u${code.toString(16).padStart(4, '0')}`
-  return `\\U${code.toString(16).padStart(8, '0')}`
-}
 
 /** Reject an abort exactly the way fetch does, so the ask cleanup path runs. */
 function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -306,14 +253,14 @@ async function readSentinelStatus(filePath: string): Promise<string | undefined>
 }
 
 /**
- * Read one sentinel file's terminal status word, already translated the way
- * the rest of this file translates statuses, or undefined when the file is
- * unreadable or holds a status that is not terminal.
+ * Read one sentinel file's terminal result word, or undefined when the file is
+ * unreadable or holds a status that is not terminal. The mapping is the status
+ * surface's, so both classify a sentinel the same way.
  */
 async function terminalSentinelStatus(filePath: string): Promise<string | undefined> {
   const status = await readSentinelStatus(filePath)
   if (!status || !TERMINAL_SENTINEL_STATUSES.has(status)) return undefined
-  return translateRunFacts(status.toLowerCase(), '').status
+  return sentinelStatusToResult(status)
 }
 
 async function sentinelResumable(filePath: string): Promise<boolean> {
@@ -423,14 +370,14 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     }
   }
 
-  // listedState reads one target's state from the broker's peer listing, which
+  // peerRunState reads one target's state from the broker's peer listing, which
   // is the only authority for a run this supervisor does not run. It answers
   // nothing for a listing that could not be read completely or that does not
   // hold the run, so the caller keeps the failure it already had. A stale
   // generation is not the listing's answer: the MCP surface retries the whole
   // call once after a re-preflight, and a mismatch swallowed here would report
   // the status failure instead of letting that retry run.
-  async function listedState(runId: string): Promise<RunFacts | undefined> {
+  async function peerRunState(runId: string): Promise<RunFacts | undefined> {
     let listed: { peers: PeerRecord[]; detail?: string }
     try {
       listed = await listedPeers()
@@ -510,16 +457,11 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         // from the broker's listing instead. Only that absence answer is read
         // through the listing: a denial or a transport failure is this call's
         // outcome and stays the caller's error.
-        if (!isRuntimeNotFoundError(error, runId)) throw error
-        // The rung deliberately keeps a dead run discoverable by run id for
-        // its persisted terminal result, so a run that settled before a
-        // supervisor restart reports that outcome here, before the listing
-        // rung. The in-process instance is read first — the plane a resume
-        // through this provider registers into (resolve reads it the same
-        // way) — then the persisted external registry. Read the fallback
-        // narrowly: a run neither plane holds, an unreadable sentinel, or a
-        // sentinel without a terminal status keeps the run's absence answer
-        // for the listing rung below.
+        if (!statusReportsNoRuntime(error, runId)) throw error
+        // Mirrors the Go rung ahead of the listing: a run that settled before
+        // a supervisor restart keeps its outcome discoverable by run id. The
+        // fallback stays narrow — a run neither plane holds, an unreadable
+        // sentinel, or a non-terminal one keeps the absence answer.
         const instance = Supervisor.getInstance(supervisorId)
         const registered = instance?.getRunById(runId) ?? findExternalRunById(supervisorId, runId)
         if (registered) {
@@ -527,17 +469,12 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           if (terminal) {
             return {
               live: false,
-              // The Go rung classifies the sentinel status map through
-              // runFactsFromStatus, whose only hit here is a non-empty session
-              // id (applySentinelStatus never sets sentinel_file), so the
-              // registry entry's session decides resumable and the terminal
-              // word — DONE, TIMEOUT or KILLED alike — never gates it.
-              resumable: registered.sessionId !== undefined && registered.sessionId !== '',
+              resumable: resumableFromSession(registered.sessionId),
               status: terminal,
             }
           }
         }
-        const listed = await listedState(runId)
+        const listed = await peerRunState(runId)
         if (listed) return listed
         throw error
       }
@@ -545,7 +482,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         typeof status.status === 'string' ? status.status : '',
         typeof status.phase === 'string' ? status.phase : '',
       )
-      let resumable = typeof status.session_id === 'string' && status.session_id !== ''
+      let resumable = resumableFromSession(status.session_id)
       if (!resumable && typeof status.sentinel_file === 'string') {
         resumable = await sentinelResumable(status.sentinel_file)
       }

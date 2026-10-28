@@ -276,6 +276,10 @@ describe('host message provider', () => {
       expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'done' })
       fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'TIMEOUT\n')
       expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'timeout' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'FAILED\n')
+      expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'failed' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'BLOCKED\n')
+      expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'failed' })
     } finally {
       forgetExternalRuns(supervisorId)
       fs.rmSync(runDir, { recursive: true, force: true })

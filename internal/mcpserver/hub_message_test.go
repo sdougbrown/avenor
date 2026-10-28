@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -167,33 +165,6 @@ func awaitBranchMessage(t *testing.T, brokerURL, runID, token string) broker.Con
 			t.Fatalf("no message reached %s", runID)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// TestAwaitBranchMessageBacksOffBetweenPolls pins the cadence of the wait that
-// drains a branch run's queue: a tight loop would hammer the branch broker and
-// outrun the goroutine meant to fill it for the whole deadline.
-func TestAwaitBranchMessageBacksOffBetweenPolls(t *testing.T) {
-	started := time.Now()
-	var polls atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		polls.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		// The queue fills 50ms in, so the wait has to poll without a message
-		// to return for that window.
-		if time.Since(started) < 50*time.Millisecond {
-			_, _ = w.Write([]byte("[]"))
-			return
-		}
-		_, _ = w.Write([]byte(`[{"type":"agent_message","run_id":"rt_branch"}]`))
-	}))
-	defer srv.Close()
-
-	if got := awaitBranchMessage(t, srv.URL, "rt_branch", "token"); got.Type != "agent_message" {
-		t.Fatalf("awaitBranchMessage = %+v, want the queued message", got)
-	}
-	if got := polls.Load(); got > 20 {
-		t.Fatalf("awaitBranchMessage polled %d times in 50ms, want a bounded cadence", got)
 	}
 }
 

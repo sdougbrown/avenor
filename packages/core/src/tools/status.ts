@@ -8,6 +8,7 @@ import {
   validateRunId,
 } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
+import { sentinelStatusToResult } from './sentinel-status.js'
 import { findExternalRun, listExternalRuns } from './run-registry.js'
 import { findLocalRunByReference, findLocalRunByRuntimeId } from './run-resolution.js'
 
@@ -43,23 +44,6 @@ async function sentinelExists(filePath: string): Promise<boolean> {
 
 function rawStatusPhase(source: Record<string, unknown> | null): string {
   return stringField(source ?? {}, 'phase') || stringField(source ?? {}, 'status') || 'running'
-}
-
-function sentinelStatusToResult(sentinelStatus: string): string {
-  switch (sentinelStatus) {
-    case 'DONE':
-      return 'done'
-    case 'FAILED':
-      return 'failed'
-    case 'TIMEOUT':
-      return 'timeout'
-    case 'KILLED':
-      return 'killed'
-    case 'BLOCKED':
-      return 'failed'
-    default:
-      return 'running'
-  }
 }
 
 export function translateStatus(
