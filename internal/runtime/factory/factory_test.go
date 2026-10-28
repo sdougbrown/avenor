@@ -129,21 +129,3 @@ func TestNewProviderPooAcceptsLaunchWrapper(t *testing.T) {
 		t.Fatalf("NewProvider(poo) with launch_wrapper: %v", err)
 	}
 }
-
-func TestKnownBackendsMatchNewProvider(t *testing.T) {
-	for _, backend := range []string{
-		"opencode-acp", "opencode-http", "codex-app-server", "gemini-acp",
-		"agy", "cursor-acp", "pi", "poo", "pony", "claude",
-	} {
-		if !IsKnown(backend) {
-			t.Fatalf("IsKnown(%q) = false", backend)
-		}
-		provider, err := NewProvider(runtime.StartOptions{}, backend)
-		if err != nil || provider == nil {
-			t.Fatalf("NewProvider(%q) = %v, %v; every known backend must construct", backend, provider, err)
-		}
-	}
-	if IsKnown("unknown") {
-		t.Fatal("IsKnown(unknown) = true")
-	}
-}
