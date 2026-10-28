@@ -345,6 +345,45 @@ func TestPeerCannotAnnounceAnotherSenderInItsPayload(t *testing.T) {
 	}
 }
 
+// A tombstone keeps its record but not its name, so resolving a target by label
+// answers for the same runs resolving it by id does.
+func TestPeerTombstoneIsNotMatchableByLabel(t *testing.T) {
+	b := peerBroker(t)
+	creds := map[string]any{"run_id": "peer", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if got := b.MatchLabel("peer"); len(got) != 1 || got[0] != "peer" {
+		t.Fatalf("live peer matched by label = %v", got)
+	}
+	if code, _ := peerPost(t, b, "/retire", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if got := b.MatchLabel("peer"); len(got) != 0 {
+		t.Fatalf("retired peer matched by label = %v", got)
+	}
+}
+
+// A tell has no reply edge to wait on, so only the target's liveness stops it
+// landing in a queue nobody can drain.
+func TestTellToRetiredPeerIsRefused(t *testing.T) {
+	b := peerBroker(t)
+	creds := map[string]any{"run_id": "peer", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if code, _ := peerPost(t, b, "/retire", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	tell := map[string]any{
+		"run_id": "sender", "token": ensureRun(t, b, "sender", "sender"), "from_run_id": "sender",
+		"to_run_id": "peer", "type": "agent_message", "payload": map[string]any{"message": "hi"},
+	}
+	if code, result := peerPost(t, b, "/send", tell); code != http.StatusNotFound || result["code"] != "target-unavailable" {
+		t.Fatalf("tell to retired peer = %d %v", code, result)
+	}
+}
+
 func TestPeerRetirementCannotBeBypassedWithCredentialAlias(t *testing.T) {
 	b := peerBroker(t)
 	peer := map[string]any{"run_id": "peer", "token": "shared-secret", "peer": true}

@@ -2398,16 +2398,22 @@ func (b *Broker) DisplayName(runID string) string { return b.displayName(runID) 
 // MatchLabel returns every run whose display name is exactly label, sorted by
 // run ID so the caller can tell an ambiguous label from a unique one instead of
 // the broker guessing. A record the broker holds only for a registered child's
-// claim is never matched: the name belongs to the branch that owns the run.
+// claim is never matched: the name belongs to the branch that owns the run. A
+// tombstone is never matched either, so resolving by name and resolving by id
+// answer the same runs.
 func (b *Broker) MatchLabel(label string) []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	now := time.Now()
 	matches := make([]string, 0, 1)
 	for runID, st := range b.runs {
 		if st.descendant {
 			continue
 		}
-		if st.displayName() == label {
+		st.Mu.Lock()
+		matched := st.labelLocked() == label && st.peerUnavailableLocked(now) == ""
+		st.Mu.Unlock()
+		if matched {
 			matches = append(matches, runID)
 		}
 	}

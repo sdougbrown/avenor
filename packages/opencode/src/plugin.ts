@@ -610,14 +610,16 @@ export const AvenorPlugin: Plugin = async (ctx) => {
           try { payload = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload } catch { continue }
           const text = typeof payload?.message === 'string' ? payload.message : ''
           if (!text) continue
-          const from = payload.from_run_id ?? msg.from_run_id ?? 'unknown'
-          const role = payload.role ?? ''
+          // The broker stamps the sender on the queued row. The payload's copy is
+          // the sender's own claim and its role has no stamp anywhere, so neither
+          // is rendered: a peer must not be able to name itself in the header the
+          // model reads. Only a run this host tracks supplies a name it knows.
+          const from = msg.from_run_id ?? payload?.from_run_id ?? 'unknown'
           const resolvedRunId = trackedRuns.has(from) ? from
             : sessionIdToRunId.get(from)
             ?? runtimeIdToRunId.get(from)
           const runInfo = resolvedRunId ? trackedRuns.get(resolvedRunId) : undefined
-          const source = runInfo?.agent ?? (role ? `agent-${role}` : 'agent')
-          const channelText = formatAgentMessage(source, from, role, text)
+          const channelText = formatAgentMessage(runInfo?.agent ?? 'agent', from, '', text)
           try {
             await ctx.client.session.promptAsync({
               path: { id: sessionId },

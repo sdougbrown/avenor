@@ -69,7 +69,7 @@ describe('formatInboundAskBody', () => {
   it('includes the asker and the reply instruction', () => {
     const body = formatInboundAskBody(
       { from_run_id: 'supervisor', message_id: 'ask-1', message: 'hello' },
-      { heading: 'Ask from sub-agent', role: 'agent' },
+      { heading: 'Ask from sub-agent' },
     )
     expect(body).toContain('Ask from sub-agent')
     expect(body).toContain('supervisor')
@@ -77,29 +77,14 @@ describe('formatInboundAskBody', () => {
     expect(body).toContain('avenor_message({ action: "reply", reply_to: "ask-1"')
   })
 
-  it('annotates the asker with the role its surface knows, never one from the wire', () => {
-    // Nothing stamps a role, so a message's own claim to one is not rendered.
-    const fromWire = formatInboundAskBody(
+  it('renders no role, because nothing on the wire is stamped with one', () => {
+    const body = formatInboundAskBody(
       { from_run_id: 'host-1', message_id: 'ask-2', message: 'hello' },
       { heading: 'Inbound ask' },
     )
-    expect(fromWire).toContain('from `host-1`')
-    expect(fromWire).not.toContain('(supervisor)')
-
-    // `agent` is the default asker kind, so the suffix is dropped rather than
-    // rendered as `(agent)`.
-    const overridden = formatInboundAskBody(
-      { from_run_id: 'host-1', message_id: 'ask-3', message: 'hello' },
-      { heading: 'Ask from sub-agent', role: 'agent' },
-    )
-    expect(overridden).toContain('from `host-1`')
-    expect(overridden).not.toContain('(supervisor)')
-
-    const roleFromOptions = formatInboundAskBody(
-      { from_run_id: 'host-1', message_id: 'ask-4', message: 'hello' },
-      { heading: 'Inbound ask', role: 'supervisor' },
-    )
-    expect(roleFromOptions).toContain('from `host-1` (supervisor)')
+    expect(body).toContain('from `host-1`')
+    expect(body).not.toContain('(supervisor)')
+    expect(body).not.toContain('(agent)')
   })
 
   it('marks peer text as another session\'s words and drops the reply line for a tell', () => {
