@@ -108,7 +108,21 @@ func TestSpecEqualDiffAndValue(t *testing.T) {
 	if !(Spec{}).IsZero() {
 		t.Fatal("zero Spec.IsZero() = false")
 	}
-	if (Spec{Args: []string{}}).IsZero() {
-		t.Fatal("a spec with an explicit empty args list is not zero")
+
+	// An explicit empty args list is honored at launch, so it is a different
+	// launch identity from an absent one: IsZero and Diff hold the same rule.
+	explicitEmpty := Spec{Args: []string{}}
+	absent := Spec{}
+	if explicitEmpty.IsZero() {
+		t.Fatal("a spec with an explicit empty args list is zero")
+	}
+	if got := Diff(explicitEmpty, absent); got != "args" {
+		t.Fatalf("Diff(explicit empty args, absent args) = %q, want args", got)
+	}
+	if explicitEmpty.Equal(absent) {
+		t.Fatal("Equal(explicit empty args, absent args) = true, want distinct identities")
+	}
+	if !(Spec{Args: []string{}}).Equal(Spec{Args: []string{}}) {
+		t.Fatal("Equal(two explicit empty args specs) = false")
 	}
 }

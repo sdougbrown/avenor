@@ -151,7 +151,7 @@ A poo roster entry is the only place `command`, `args` and `settings` are accept
 }
 ```
 
-`command` is used as given and recorded as an absolute path; without it Avenor runs `poo` from `PATH`. `args` defaults to `["serve"]`. The launch argv is `<bin> <args...> --settings <path>`, with `--settings` only when the entry names a settings file. The resolved binary, args and settings path are part of the session's ownership record, so a resume that resolves differently is rejected before a provider exists. A backend that does not own these fields rejects them. A poo entry cannot carry `thinking`; the shared thinking policy refuses it like any backend without thinking support.
+`command` is used as given and recorded as an absolute path; a relative `command` resolves against Avenor's working directory, not the roster file's directory. Without `command` Avenor runs `poo` from `PATH`. `args` defaults to `["serve"]`. The launch argv is `<bin> <args...> --settings <path>`, with `--settings` only when the entry names a settings file. The resolved binary, args and settings path are part of the session's ownership record, so a resume that resolves differently is rejected before a provider exists. A backend that does not own these fields rejects them. A poo entry cannot carry `thinking`; the shared thinking policy refuses it like any backend without thinking support.
 
 ---
 

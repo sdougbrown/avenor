@@ -8,6 +8,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/backendlaunch"
+	"github.com/sdougbrown/avenor/internal/runtime/factory"
 )
 
 func writeRoster(t *testing.T, contents string) string {
@@ -356,12 +359,10 @@ func TestResolveLeavesThinkingEmptyWithoutARosterLevel(t *testing.T) {
 
 // command, args and settings are launch fields a backend must declare before a
 // roster entry may carry them. Every backend in this build that declares none
-// rejects all three, and the error names both the entry and the field.
+// rejects all three, and the error names both the entry and the field. The
+// backend list comes from the factory, so a backend added later is covered
+// without editing this test.
 func TestLoadRejectsLaunchFieldsForOtherBackends(t *testing.T) {
-	backends := []string{
-		"opencode-acp", "opencode-http", "codex-app-server", "gemini-acp",
-		"agy", "cursor-acp", "pi", "claude", "pony",
-	}
 	fields := []struct {
 		name  string
 		value string
@@ -370,7 +371,12 @@ func TestLoadRejectsLaunchFieldsForOtherBackends(t *testing.T) {
 		{name: "args", value: `["serve"]`},
 		{name: "settings", value: `"/etc/tool.yaml"`},
 	}
-	for _, backend := range backends {
+	backends := 0
+	for _, backend := range factory.KnownBackends() {
+		if len(backendlaunch.Fields(backend)) > 0 {
+			continue // it declares launch fields, so rejection is not its rule
+		}
+		backends++
 		for _, field := range fields {
 			t.Run(backend+"/"+field.name, func(t *testing.T) {
 				contents := `{"planner":{"backend":"` + backend + `","agent":"planner","` + field.name + `":` + field.value + `}}`
@@ -383,6 +389,9 @@ func TestLoadRejectsLaunchFieldsForOtherBackends(t *testing.T) {
 				}
 			})
 		}
+	}
+	if backends == 0 {
+		t.Fatal("no backend declares zero launch fields, so this test covers nothing")
 	}
 }
 
