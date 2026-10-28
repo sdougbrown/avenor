@@ -489,6 +489,57 @@ func TestPeerPollAdmittedBeforeExpiryAnswersGone(t *testing.T) {
 	}
 }
 
+// A tombstone is kept long enough to fence a delayed registration and to leave the
+// run's last turn readable, then forgotten: a long-lived broker holds one record
+// per finished session otherwise.
+func TestRetiredPeerRecordIsReapedAfterTheWindow(t *testing.T) {
+	b := peerBroker(t)
+	creds := map[string]any{"run_id": "pi-peer", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	live := map[string]any{"run_id": "still-here", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", live); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	now := time.Now()
+	b.SetHarnessName("pi-peer", "pi-scout")
+	if err := b.SetLastAgentMessage("pi-peer", "final words", "end_turn", false); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := peerPost(t, b, "/retire", creds); code != http.StatusOK {
+		t.Fatal(code)
+	}
+
+	b.reapPeers(now)
+	if b.GetRun("pi-peer") == nil {
+		t.Fatal("reaped a tombstone inside its window")
+	}
+
+	st, _, _ := b.runStateFor("pi-peer")
+	st.Mu.Lock()
+	st.peerRetiredAt = now.Add(-peerTombstoneTTL - time.Second)
+	st.Mu.Unlock()
+	b.reapPeers(now)
+
+	if b.GetRun("pi-peer") != nil {
+		t.Fatal("tombstone survived the retention window")
+	}
+	if b.GetRun("still-here") == nil {
+		t.Fatal("reaped a live peer")
+	}
+	// The last turn goes with the record, which is what the window is for.
+	if _, hasRecord := b.LastAgentMessage("pi-peer"); hasRecord {
+		t.Fatal("reaped record still answers for its last turn")
+	}
+	// The id is free again once the record is gone. Registration may be delayed,
+	// but not by thirty minutes, so a record that old is a record nobody is
+	// coming back for.
+	if code, _ := peerPost(t, b, "/register", creds); code != http.StatusOK {
+		t.Fatalf("register after reap = %d", code)
+	}
+}
+
 func TestPeerRetirementCannotBeBypassedWithCredentialAlias(t *testing.T) {
 	b := peerBroker(t)
 	peer := map[string]any{"run_id": "peer", "token": "shared-secret", "peer": true}

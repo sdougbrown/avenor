@@ -131,10 +131,11 @@ type RunState struct {
 	// read it through Broker.runToken or Broker.runStateFor.
 	Token string
 	// Peer lease and consumer state are guarded by Mu.
-	peer         bool
-	peerDeadline time.Time
-	peerRetired  bool
-	peerPolling  bool
+	peer          bool
+	peerDeadline  time.Time
+	peerRetired   bool
+	peerRetiredAt time.Time
+	peerPolling   bool
 	// peerActivity lets admitted sends finish before retirement removes their edges.
 	peerActivity        sync.RWMutex
 	ControlQueue        []*ControlMessage

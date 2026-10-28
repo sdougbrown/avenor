@@ -118,8 +118,10 @@ exchange over Tailscale before claiming that deployment is verified.
 ## Known limits
 
 The broker's open registration route relies on network access control. Leases
-are opt-in; existing Claude self-registrations are not leased. Retired identity
-records remain until broker shutdown.
+are opt-in; existing Claude self-registrations are not leased. A retired peer's
+record is reaped 30 minutes after its identity stops answering
+(`peerTombstoneTTL`), so its last turn stops being readable and its run id
+becomes registrable again after that window.
 
 A bearer credential can be copied. Overlapping-poll exclusion does not prove
 one physical consumer.
