@@ -45,6 +45,7 @@ func TestRunStableForwardsValidPolicyToSupervisorConfig(t *testing.T) {
 }
 
 func TestRunStableOmitsPolicyByDefault(t *testing.T) {
+	stubPolicyEnv(t, nil, t.TempDir())
 	var captured stable.Config
 	orig := newSupervisorFn
 	newSupervisorFn = func(cfg stable.Config) *stable.Supervisor {
