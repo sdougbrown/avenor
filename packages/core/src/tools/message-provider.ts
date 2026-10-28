@@ -357,8 +357,23 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
   }
 
   async function publicRunIdFor(runId: string): Promise<string | undefined> {
-    const local = Supervisor.getInstance(supervisorId)?.getRunByRuntimeId(runId)
-    if (local?.runId) return local.runId
+    const instance = Supervisor.getInstance(supervisorId)
+    if (instance && instance.getRunsByRuntimeId(runId).length > 0) {
+      const unique = instance.getRunByRuntimeId(runId)
+      if (unique) return unique.runId
+      // Several registered turns can share a runtime id (a warm resume, or a
+      // restart that re-minted one while the pre-restart entry stays
+      // registered). The current turn is the one whose sentinel the runtime
+      // currently holds; a sentinel no registered turn owns refuses the
+      // lookup rather than answering with an entry the map iteration
+      // reached.
+      const status = await client.status(runId)
+      const match = typeof status.sentinel_file === 'string'
+        ? instance.getRunByRuntimeTurn(runId, status.sentinel_file)
+        : undefined
+      if (!match) throw new Error(`turn identity unavailable for ${runId}`)
+      return match.runId
+    }
     const matches = listExternalRuns(supervisorId).filter(info => info.runtimeId === runId)
     if (matches.length <= 1) return matches[0]?.runId
     const status = await client.status(runId)
@@ -701,9 +716,17 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     async last(runId: string, publicRunId?: string): Promise<ProviderResult> {
       const expected = expectedSentinel(publicRunId)
       if (expected) {
-        const status = await client.status(runId)
+        let status: Record<string, unknown>
+        try {
+          status = await client.status(runId)
+        } catch (error) {
+          throw authorityError(error)
+        }
         if (typeof status.sentinel_file === 'string' && status.sentinel_file !== expected) {
-          return { outcome: 'sent', hasRecord: false }
+          // The runtime no longer owns this turn. The control guard refuses
+          // the turn-bound read; classify the mismatch the same way the Go
+          // provider classifies the guard's own refusal.
+          throw authorityError(new RpcError(-32000, `turn no longer current for runtime ${runId}`, { code: 'invalid-request' }))
         }
       }
       let last: SessionLastResult

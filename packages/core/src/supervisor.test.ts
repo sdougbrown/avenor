@@ -118,14 +118,25 @@ describe('run lookup planes', () => {
     } as RunInfo
   }
 
-  it('resolves a shared runtime to its newest public run', () => {
+  it('resolves a shared runtime only when one turn owns it, else by the turn sentinel', () => {
     const sup = bareSupervisor()
     const original = { ...runInfo('run-old', 'old'), runtimeId: 'rt-shared' }
     const resumed = { ...runInfo('run-new', 'new'), runtimeId: 'rt-shared' }
     sup.registerResumed(original)
     sup.registerResumed(resumed)
-    expect(sup.getRunByRuntimeId('rt-shared')).toBe(resumed)
+    expect(sup.getRunsByRuntimeId('rt-shared')).toEqual([original, resumed])
+    expect(sup.getRunByRuntimeId('rt-shared')).toBeUndefined()
+    expect(sup.getRunByRuntimeTurn('rt-shared', original.sentinelPath)).toBe(original)
+    expect(sup.getRunByRuntimeTurn('rt-shared', resumed.sentinelPath)).toBe(resumed)
+    expect(sup.getRunByRuntimeTurn('rt-shared', '/tmp/nobody-owns-this.done')).toBeUndefined()
     expect(sup.getRunById('run-old')).toBe(original)
+  })
+
+  it('resolves a runtime id to its unique turn', () => {
+    const sup = bareSupervisor()
+    const solo = { ...runInfo('run-solo', 'solo'), runtimeId: 'rt-solo' }
+    sup.registerResumed(solo)
+    expect(sup.getRunByRuntimeId('rt-solo')).toBe(solo)
   })
 
   it('never resolves a label on the ID plane', () => {

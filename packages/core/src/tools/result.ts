@@ -1,6 +1,8 @@
 import { normalizeRunEvent } from '../run-events.js'
 import { readNdjsonRecords } from './events.js'
+import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { inspectTool } from './inspect.js'
+import { findExternalRun } from './run-registry.js'
 import { statusTool, type StatusResult } from './status.js'
 import { validateTimeout } from './validate.js'
 
@@ -27,6 +29,10 @@ export interface ResultResult {
 interface ResultToolDeps {
   status: typeof statusTool
   inspect: typeof inspectTool
+  /** The control result verb for a runtime; older supervisors may not implement it. */
+  result(supervisorId: string | undefined, runtimeId: string): Promise<Record<string, unknown>>
+  /** The run's registered sentinel path, or undefined when the run is not registered. */
+  sentinelPath(supervisorId: string | undefined, runId: string): Promise<string | undefined>
   sleep(ms: number, signal?: AbortSignal): Promise<void>
   now(): number
   pollIntervalMs: number
@@ -71,9 +77,26 @@ async function outputFromEvents(filePath: string): Promise<string | undefined> {
   return output
 }
 
+async function realResult(supervisorId: string | undefined, runtimeId: string): Promise<Record<string, unknown>> {
+  const { client, isSingleton } = await realGetSupervisorClient(supervisorId)
+  try {
+    return await client.result(runtimeId)
+  } finally {
+    if (!isSingleton) client.close()
+  }
+}
+
+async function realSentinelPath(supervisorId: string | undefined, runId: string): Promise<string | undefined> {
+  const { sup, supervisorId: resolvedId } = await realGetSupervisorClient(supervisorId)
+  const local = sup ? sup.getRunByReference(runId) : undefined
+  return local?.sentinelPath ?? findExternalRun(resolvedId, runId)?.sentinelPath
+}
+
 const defaultDeps: ResultToolDeps = {
   status: statusTool,
   inspect: inspectTool,
+  result: realResult,
+  sentinelPath: realSentinelPath,
   sleep,
   now: Date.now,
   pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
@@ -137,7 +160,29 @@ async function executeResultTool(args: ResultToolArgs, deps: ResultToolDeps): Pr
         // Older supervisors may not implement result yet. Any presentation
         // fallback below is explicitly marked as possibly truncated.
       }
-      if (status.final_output === undefined && status.runtime_output_available !== false) {
+      if (!exactOutputRetrieved && status.runtime_output_available !== false && status.runtime_id) {
+        // The runtime can already own another turn. The control result verb
+        // answers for the runtime's current turn, so its output belongs to
+        // this turn only when it identifies this turn's sentinel. A run
+        // with no registered turn has no turn identity to check against.
+        try {
+          const result = await deps.result(args.supervisorId, status.runtime_id)
+          const output = typeof result.final_output === 'string' ? result.final_output : undefined
+          const sentinel = await deps.sentinelPath(args.supervisorId, status.run_id)
+          const matchesTurn = sentinel === undefined
+            ? true
+            : sentinel !== '' && typeof result.sentinel_file === 'string' && result.sentinel_file === sentinel
+          if (output !== undefined && matchesTurn) {
+            status.final_output = output
+            status.final_output_truncated = false
+            exactOutputRetrieved = true
+          }
+        } catch {
+          // The result verb is unavailable or refused: any presentation
+          // fallback below is explicitly marked as possibly truncated.
+        }
+      }
+      if (!exactOutputRetrieved && status.final_output === undefined && status.runtime_output_available !== false) {
         try {
           const inspected = await deps.inspect({
             runId: args.runId,

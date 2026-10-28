@@ -904,6 +904,11 @@ export class Client {
     return this.call(expectedSentinelFile ? 'session_last_turn' : 'session_last', { runtime_id: runtimeId, ...(expectedSentinelFile ? { expected_sentinel_file: expectedSentinelFile } : {}) }) as Promise<SessionLastResult>
   }
 
+  /** The complete terminal reply for a runtime, with the sentinel that turn currently owns. */
+  async result(runtimeId: string): Promise<Record<string, unknown>> {
+    return this.call('result', { runtime_id: runtimeId }) as Promise<Record<string, unknown>>
+  }
+
   async sessionLastSet(
     runtimeId: string,
     finalOutput: string,

@@ -561,14 +561,34 @@ export class Supervisor {
     this.aliases.set(run.label, run)
   }
 
-  /** Match a stored run by its broker runtime ID. */
+  /** The stored runs that carry a broker runtime ID. */
+  getRunsByRuntimeId(runtimeId: string): RunInfo[] {
+    if (!runtimeId) return []
+    return [...this.runs.values()].filter(info => info.runtimeId === runtimeId)
+  }
+
+  /**
+   * Match a stored run by its broker runtime ID, returning the entry only
+   * when exactly one run carries the id. Several registered turns can share
+   * a runtime (a warm resume, or a restart that re-minted one while the
+   * pre-restart entry stays registered); the current turn is identified by
+   * the sentinel the runtime holds, so a shared id is disambiguated with
+   * getRunByRuntimeTurn rather than by whichever entry was inserted last.
+   */
   getRunByRuntimeId(runtimeId: string): RunInfo | undefined {
-    if (!runtimeId) return undefined
-    let match: RunInfo | undefined
-    for (const runInfo of this.runs.values()) {
-      if (runInfo.runtimeId === runtimeId) match = runInfo
-    }
-    return match
+    const matches = this.getRunsByRuntimeId(runtimeId)
+    return matches.length === 1 ? matches[0] : undefined
+  }
+
+  /**
+   * Return the entry for (runtimeId, sentinelPath) only when exactly one
+   * stored run carries both. A sentinel no entry carries, or one carried by
+   * several entries, is claimed by no turn.
+   */
+  getRunByRuntimeTurn(runtimeId: string, sentinelPath: string): RunInfo | undefined {
+    if (!runtimeId || !sentinelPath) return undefined
+    const matches = this.getRunsByRuntimeId(runtimeId).filter(info => info.sentinelPath === sentinelPath)
+    return matches.length === 1 ? matches[0] : undefined
   }
 
   /**

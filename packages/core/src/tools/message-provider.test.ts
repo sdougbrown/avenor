@@ -115,12 +115,73 @@ describe('host message provider', () => {
     try {
       await expect(executeMessage(provider(client), { action: 'tell', target: 'old-turn', message: 'hello' })).rejects.toThrow()
       expect(client.send).not.toHaveBeenCalled()
-      const result = await executePeers(provider(client), { action: 'last', target: 'old-turn' })
-      expect(result.last?.final_output).toBe('')
+      await expect(executePeers(provider(client), { action: 'last', target: 'old-turn' }))
+        .rejects.toMatchObject({ code: 'refused', message: 'turn no longer current for runtime rt_shared' })
       expect(client.sessionLast).not.toHaveBeenCalled()
     } finally {
       forgetExternalRuns(supervisorId)
       fs.rmSync(sentinel, { force: true })
+    }
+  })
+
+  it('reports a registered turn whose sentinel moved as not live and refuses its resume', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const sentinel = path.join(home, 'moved-turn.done')
+    fs.writeFileSync(sentinel, 'DONE\nSESSION=old-session\n')
+    fs.mkdirSync(path.join(home, 'runs', 'moved-turn'), { recursive: true })
+    registerExternalRun({ supervisorId, runId: 'moved-turn', label: 'moved', runtimeId: 'rt_moved', sentinelPath: sentinel, eventLogPath: '' })
+    const client = fakeClient({ status: mock(async () => ({ status: 'running', sentinel_file: '/tmp/newer-turn.done', session_id: 'newer-session' })) })
+    try {
+      expect(await provider(client).state('rt_moved', 'moved-turn')).toMatchObject({ live: false, resumable: false, status: 'done' })
+      await expect(executeMessage(provider(client), { action: 'resume', target: 'moved-turn', message: 'continue' }))
+        .rejects.toMatchObject({ code: 'not_resumable' })
+    } finally {
+      forgetExternalRuns(supervisorId)
+      fs.rmSync(sentinel, { force: true })
+    }
+  })
+
+  it('keeps a moved-sentinel report as unknown when the turn sentinel is unreadable', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const sentinel = path.join(home, 'gone-turn.done')
+    fs.mkdirSync(path.join(home, 'runs', 'gone-turn'), { recursive: true })
+    registerExternalRun({ supervisorId, runId: 'gone-turn', label: 'gone', runtimeId: 'rt_gone', sentinelPath: sentinel, eventLogPath: '' })
+    const client = fakeClient({ status: mock(async () => ({ status: 'running', sentinel_file: '/tmp/newer-turn.done', session_id: 'newer-session' })) })
+    try {
+      expect(await provider(client).state('rt_gone', 'gone-turn')).toMatchObject({ live: false, resumable: false, status: 'unknown' })
+    } finally {
+      forgetExternalRuns(supervisorId)
+    }
+  })
+
+  it('resolves a shared local runtime to the turn owning the runtime sentinel, not the last inserted', async () => {
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const oldSentinel = path.join(home, 'local-old.done')
+    const newSentinel = path.join(home, 'local-new.done')
+    fs.mkdirSync(path.join(home, 'runs', 'local-old'), { recursive: true })
+    fs.mkdirSync(path.join(home, 'runs', 'local-new'), { recursive: true })
+    const sup = Object.create(Supervisor.prototype) as Supervisor
+    ;(sup as any).socketPath = supervisorId
+    ;(sup as any).runs = new Map()
+    ;(sup as any).aliases = new Map()
+    sup.registerResumed({ runId: 'local-old', label: 'lo', runtimeId: 'rt_local', sentinelPath: oldSentinel, eventLogPath: '' })
+    sup.registerResumed({ runId: 'local-new', label: 'ln', runtimeId: 'rt_local', sentinelPath: newSentinel, eventLogPath: '' })
+    const previousInstance = (Supervisor as any).instance
+    ;(Supervisor as any).instance = sup
+    const client = fakeClient({
+      status: mock(async () => ({ status: 'running', sentinel_file: oldSentinel })),
+      messagePeers: mock(async () => ({ peers: [{ run_id: 'rt_local', session: { run_id: 'rt_local', label: 'lo', status: 'running' } }] })),
+    })
+    try {
+      expect(await provider(client).resolve('lo')).toMatchObject({ publicRunId: 'local-old', runId: 'rt_local' })
+      const clientMoved = fakeClient({
+        status: mock(async () => ({ status: 'running', sentinel_file: '/tmp/nobody-owns-this.done' })),
+        messagePeers: mock(async () => ({ peers: [{ run_id: 'rt_local', session: { run_id: 'rt_local', label: 'lo', status: 'running' } }] })),
+      })
+      await expect(provider(clientMoved).resolve('lo')).rejects.toThrow('turn identity unavailable')
+    } finally {
+      ;(Supervisor as any).instance = previousInstance
+      fs.rmSync(oldSentinel, { force: true })
     }
   })
 
