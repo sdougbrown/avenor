@@ -42,6 +42,7 @@ export interface MessageClient {
     generation: string
     body: string
     no_reply?: boolean
+    expected_sentinel_file?: string
   }): Promise<MessageSendResult>
   messageWait(params: {
     message_id: string
@@ -66,7 +67,7 @@ export interface MessageClient {
     on_event?: string
   }): Promise<ResumeResult>
   sessionRename(sessionId: string, name: string): Promise<SessionRenameResult>
-  sessionLast(runtimeId: string): Promise<SessionLastResult>
+  sessionLast(runtimeId: string, expectedSentinelFile?: string): Promise<SessionLastResult>
   sessionLastSet(
     runtimeId: string,
     finalOutput: string,
@@ -355,10 +356,43 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     }
   }
 
-  function publicRunIdFor(runId: string): string | undefined {
-    const local = Supervisor.getInstance(supervisorId)?.getRunByRuntimeId(runId)
-    if (local?.runId) return local.runId
-    return listExternalRuns(supervisorId).find(info => info.runtimeId === runId)?.runId
+  async function publicRunIdFor(runId: string): Promise<string | undefined> {
+    const instance = Supervisor.getInstance(supervisorId)
+    if (instance && instance.getRunsByRuntimeId(runId).length > 0) {
+      const unique = instance.getRunByRuntimeId(runId)
+      if (unique) return unique.runId
+      // Several registered turns can share a runtime id (a warm resume, or a
+      // restart that re-minted one while the pre-restart entry stays
+      // registered). The current turn is the one whose sentinel the runtime
+      // currently holds; a sentinel no registered turn owns refuses the
+      // lookup rather than answering with an entry the map iteration
+      // reached.
+      const status = await client.status(runId)
+      const match = typeof status.sentinel_file === 'string'
+        ? instance.getRunByRuntimeTurn(runId, status.sentinel_file)
+        : undefined
+      if (!match) throw new Error(`turn identity unavailable for ${runId}`)
+      return match.runId
+    }
+    const matches = listExternalRuns(supervisorId).filter(info => info.runtimeId === runId)
+    if (matches.length <= 1) return matches[0]?.runId
+    const status = await client.status(runId)
+    const match = matches.find(info => info.sentinelPath === status.sentinel_file)
+    if (!match) throw new Error(`turn identity unavailable for ${runId}`)
+    return match.runId
+  }
+
+  function publicRunInfo(publicRunId?: string): RunInfo | undefined {
+    if (!publicRunId) return undefined
+    const instance = Supervisor.getInstance(supervisorId)
+    return instance ? instance.getRunById(publicRunId) : findExternalRunById(supervisorId, publicRunId)
+  }
+
+  function expectedSentinel(publicRunId?: string): string | undefined {
+    if (!publicRunId) return undefined
+    const info = publicRunInfo(publicRunId)
+    if (!info?.sentinelPath) throw new Error(`turn identity unavailable for ${publicRunId}`)
+    return info.sentinelPath
   }
 
   function unique(info: RunInfo): Resolution {
@@ -419,7 +453,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       if (exact) {
         return {
           runId: exact.run_id,
-          publicRunId: publicRunIdFor(exact.run_id),
+          publicRunId: await publicRunIdFor(exact.run_id),
           label: firstNonEmpty(exact.label, exact.run_id),
           match: 'unique',
         }
@@ -428,7 +462,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       if (candidates.length === 1) {
         return {
           runId: candidates[0],
-          publicRunId: publicRunIdFor(candidates[0]),
+          publicRunId: await publicRunIdFor(candidates[0]),
           label: ref,
           match: 'unique',
         }
@@ -437,7 +471,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       return { runId: '', match: 'none' }
     },
 
-    async state(runId: string): Promise<RunFacts> {
+    async state(runId: string, publicRunId?: string): Promise<RunFacts> {
       if (runId === SUPERVISOR_RUN_ID) {
         const { peers, detail } = await listedPeers()
         if (detail) {
@@ -478,6 +512,15 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         if (listed) return listed
         throw error
       }
+      const info = publicRunInfo(publicRunId)
+      if (info && typeof status.sentinel_file === 'string' && status.sentinel_file !== info.sentinelPath) {
+        // The runtime's current turn owns the live sentinel; this turn is over
+        // and not resumable through the shared runtime. Its final status is
+        // the terminal status its own sentinel recorded, mapped the way the
+        // status surface maps it; an unreadable sentinel leaves it unknown.
+        const terminal = await terminalSentinelStatus(info.sentinelPath)
+        return { live: false, resumable: false, status: terminal ?? 'unknown' }
+      }
       const translation = translateRunFacts(
         typeof status.status === 'string' ? status.status : '',
         typeof status.phase === 'string' ? status.phase : '',
@@ -489,7 +532,8 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       return { live: translation.live, resumable, status: translation.status }
     },
 
-    async tell(targetRunId: string, message: string): Promise<ProviderResult> {
+    async tell(targetRunId: string, message: string, publicRunId?: string): Promise<ProviderResult> {
+      const expected = expectedSentinel(publicRunId)
       const messageId = newMsgID()
       const body = JSON.stringify({
         from: SUPERVISOR_RUN_ID,
@@ -506,6 +550,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           generation,
           body,
           no_reply: true,
+          ...(expected ? { expected_sentinel_file: expected } : {}),
         })
       } catch (error) {
         const outcome = controlOutcome(error)
@@ -523,7 +568,9 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       message: string,
       timeoutMs?: number,
       signal?: AbortSignal,
+      publicRunId?: string,
     ): Promise<ProviderResult> {
+      const expected = expectedSentinel(publicRunId)
       const messageId = newMsgID()
       const body = JSON.stringify({
         id: messageId,
@@ -541,6 +588,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           message_id: messageId,
           generation,
           body,
+          ...(expected ? { expected_sentinel_file: expected } : {}),
         })
       } catch (error) {
         const outcome = controlOutcome(error)
@@ -669,10 +717,25 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       }
     },
 
-    async last(runId: string): Promise<ProviderResult> {
+    async last(runId: string, publicRunId?: string): Promise<ProviderResult> {
+      const expected = expectedSentinel(publicRunId)
+      if (expected) {
+        let status: Record<string, unknown>
+        try {
+          status = await client.status(runId)
+        } catch (error) {
+          throw authorityError(error)
+        }
+        if (typeof status.sentinel_file === 'string' && status.sentinel_file !== expected) {
+          // The runtime no longer owns this turn. The control guard refuses
+          // the turn-bound read; classify the mismatch the same way the Go
+          // provider classifies the guard's own refusal.
+          throw authorityError(new RpcError(-32000, `turn no longer current for runtime ${runId}`, { code: 'invalid-request' }))
+        }
+      }
       let last: SessionLastResult
       try {
-        last = await client.sessionLast(runId)
+        last = await client.sessionLast(runId, expected)
       } catch (error) {
         throw authorityError(error)
       }

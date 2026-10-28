@@ -253,6 +253,7 @@ export interface StatusResult {
   latest_seq?: number
   final_output?: string
   final_output_truncated?: boolean
+  runtime_output_available?: boolean
 }
 
 export function shapeStatusResult(result: StatusResult, view: StatusView = 'full'): StatusResult {
@@ -275,16 +276,23 @@ async function buildRunStatus(
   runInfo: RunInfo,
   liveStatus: Record<string, unknown> | null,
 ): Promise<StatusResult> {
-  if (liveStatus) retainLiveIdentity(runInfo, liveStatus)
+  const liveSentinel = stringField(liveStatus ?? {}, 'sentinel_file')
+  const belongsToRun = !liveSentinel || liveSentinel === runInfo.sentinelPath
+  if (liveStatus && belongsToRun) retainLiveIdentity(runInfo, liveStatus)
   let sentinel: Record<string, string> | null = null
   if (await sentinelExists(runInfo.sentinelPath)) {
     sentinel = await parseSentinel(runInfo.sentinelPath)
   }
 
-  const rawPhase = rawStatusPhase(liveStatus)
-  const translated = translateStatus(rawPhase, sentinel)
-  return buildBaseStatus(
-    liveStatus ?? {},
+  // When the live turn is not this run's, its session belongs to a newer
+  // turn on the shared runtime; only the run's own registered session may
+  // answer for this one.
+  const source = belongsToRun ? liveStatus : null
+  const translated = belongsToRun && liveStatus
+    ? translateStatus(rawStatusPhase(source), sentinel)
+    : sentinel ? sentinelStatusToResult(sentinel._status) : translateStatus(rawStatusPhase(source), null)
+  const result = buildBaseStatus(
+    source ?? {},
     {
       run_id: runInfo.runId,
       label: runInfo.label,
@@ -292,7 +300,7 @@ async function buildRunStatus(
       runtime_id: runInfo.runtimeId,
       session_id:
         (sentinel?.SESSION as string) ??
-        (liveStatus?.session_id as string | undefined) ??
+        (source?.session_id as string | undefined) ??
         runInfo.sessionId,
       stop_reason: sentinel?.STOP_REASON,
       identity: {
@@ -309,6 +317,10 @@ async function buildRunStatus(
     },
     translated,
   )
+  result.label = runInfo.label
+  if (!belongsToRun || !result.event_path) result.event_path = runInfo.eventLogPath
+  if (!belongsToRun || !liveStatus) result.runtime_output_available = false
+  return result
 }
 
 async function queryLiveStatus(

@@ -93,14 +93,17 @@ describe('Client.status', () => {
   })
 })
 
-describe('Client.result', () => {
+// The lossless terminal-output endpoint still exists on the control server
+// (tools/result.ts reads it via the per-run event log); the client reaches it
+// through the generic RPC call.
+describe('result endpoint via call', () => {
   let server: net.Server
 
   afterEach(() => {
     server?.close()
   })
 
-  it('requests the lossless result endpoint with runtime_id', async () => {
+  it('requests the lossless result endpoint with runtime_id and returns the full output', async () => {
     const socketPath = tempSocketPath()
     const complete = 'x'.repeat(8_000)
     server = await startMockServer(socketPath, (req, sock) => {
@@ -111,7 +114,7 @@ describe('Client.result', () => {
 
     const client = await dial(socketPath)
     try {
-      expect(await client.result('rt-123')).toEqual({ final_output: complete })
+      expect(await client.call('result', { runtime_id: 'rt-123' })).toEqual({ final_output: complete })
     } finally {
       client.close()
     }

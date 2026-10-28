@@ -22,6 +22,7 @@ const getSupervisorClientMock = mock(async (_supervisorId?: string) => ({
   supervisorId: '/tmp/avenor-events-test.sock',
 }))
 
+const { registerExternalRun, forgetExternalRuns, externalRunMetadataPath } = await import('./run-registry.js')
 const { createEventsTool } = await import('./events.js')
 const eventsTool = createEventsTool(getSupervisorClientMock)
 
@@ -34,6 +35,7 @@ describe('eventsTool', () => {
     listMock.mockReset()
     closeMock.mockReset()
     getSupervisorClientMock.mockClear()
+    forgetExternalRuns('/tmp/avenor-events-test.sock')
     if (logPath) {
       try {
         fs.unlinkSync(logPath)
@@ -128,6 +130,25 @@ describe('eventsTool', () => {
       supervisorId: '/tmp/avenor-events-test.sock',
     })).rejects.toThrow('unable to resolve run missing-run')
     expect(closeMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not use shared runtime history when a registered turn log is missing', async () => {
+    const runId = `events-old-turn-${crypto.randomUUID()}`
+    const metadataDir = path.dirname(externalRunMetadataPath(runId))
+    fs.mkdirSync(metadataDir, { recursive: true })
+    try {
+      registerExternalRun({
+        runId, label: 'worker', supervisorId: '/tmp/avenor-events-test.sock',
+        sentinelPath: '/missing/old.done', eventLogPath: '/missing/old.ndjson', runtimeId: 'rt-shared',
+      })
+      historyMock.mockResolvedValueOnce({ events: [{ event: 'session.end', text: 'new turn' }] })
+
+      await expect(eventsTool({ runId, supervisorId: '/tmp/avenor-events-test.sock' }))
+        .rejects.toThrow(`unable to read events for run ${runId}`)
+      expect(historyMock).not.toHaveBeenCalled()
+    } finally {
+      fs.rmSync(metadataDir, { recursive: true, force: true })
+    }
   })
 
   it('reports event-source failures after exhausting durable and live history', async () => {

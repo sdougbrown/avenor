@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -82,6 +83,30 @@ func (r *recordingTransport) Preflight(context.Context) (messaging.PreflightResu
 }
 
 func (r *recordingTransport) Close() error { return nil }
+
+// turnCall records one WithTurn invocation: the runtime and the sentinel the
+// turn was pinned to.
+type turnCall struct {
+	runtimeID string
+	sentinel  string
+}
+
+// turnGuardHandler is a mockStableHandler that implements the turn guard the
+// message_send_turn verb requires, recording every WithTurn invocation so a
+// test can tell a guarded send from an unguarded one.
+type turnGuardHandler struct {
+	*mockStableHandler
+	withTurnCalls []turnCall
+	withTurnErr   error
+}
+
+func (h *turnGuardHandler) WithTurn(runtimeID, sentinel string, operation func() error) error {
+	h.withTurnCalls = append(h.withTurnCalls, turnCall{runtimeID: runtimeID, sentinel: sentinel})
+	if h.withTurnErr != nil {
+		return h.withTurnErr
+	}
+	return operation()
+}
 
 func TestMessageRPCDispatch(t *testing.T) {
 	state := NewState("run_1", "", 0)
@@ -185,6 +210,70 @@ func TestMessageRPCDispatch(t *testing.T) {
 	result, _ = r.Result.(map[string]any)
 	if r.Error != nil || result["protocol"] != float64(1) || result["generation"] != "gen_1" {
 		t.Fatalf("message_preflight result = %+v", r)
+	}
+}
+
+// TestMessageSendTurnGuard pins the pinned-send boundary on a real control
+// server: a send carrying an expected sentinel selects the message_send_turn
+// dispatch and runs inside the stable handler's turn guard with the request's
+// runtime and sentinel, an unpinned send runs unguarded, a pinned method
+// without a sentinel is refused as invalid params before the transport, and a
+// guard failure propagates as a server error carrying the guard's text.
+func TestMessageSendTurnGuard(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s, cap := NewTestServer(state)
+	tr := &recordingTransport{}
+	handler := &turnGuardHandler{mockStableHandler: &mockStableHandler{messageTransport: tr}}
+	s.SetStableHandler(handler)
+	path := testSocketPath(t)
+	if err := s.Start(path); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+	owner := dialOwner(t, s, cap)
+	defer owner.Close()
+
+	// The pinned send reaches the guard with the target runtime and sentinel,
+	// and the transport send runs inside the guarded operation.
+	_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: 1, Method: "message_send_turn", Params: json.RawMessage(`{"to_run_id":"rt_2","message_id":"m1","generation":"g","body":"{}","no_reply":true,"expected_sentinel_file":"/tmp/turn-a.done"}`)})
+	r := readResp(t, owner)
+	if r.Error != nil {
+		t.Fatalf("message_send_turn: %+v", r.Error)
+	}
+	if len(handler.withTurnCalls) != 1 || handler.withTurnCalls[0] != (turnCall{runtimeID: "rt_2", sentinel: "/tmp/turn-a.done"}) {
+		t.Fatalf("WithTurn calls = %+v, want one for rt_2 pinned to /tmp/turn-a.done", handler.withTurnCalls)
+	}
+	if tr.sendReq.To.RunID != "rt_2" || tr.sendReq.ExpectedSentinelFile != "/tmp/turn-a.done" {
+		t.Fatalf("send request = %+v", tr.sendReq)
+	}
+
+	// The unpinned send never invokes the guard.
+	handler.withTurnCalls = nil
+	_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: 2, Method: "message_send", Params: json.RawMessage(`{"to_run_id":"rt_2","message_id":"m2","generation":"g","body":"{}","no_reply":true}`)})
+	if r := readResp(t, owner); r.Error != nil {
+		t.Fatalf("message_send: %+v", r.Error)
+	}
+	if len(handler.withTurnCalls) != 0 {
+		t.Fatalf("unpinned send invoked the guard: %+v", handler.withTurnCalls)
+	}
+
+	// A pinned method without a sentinel is refused as invalid params before the
+	// guard or the transport is reached.
+	_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: 3, Method: "message_send_turn", Params: json.RawMessage(`{"to_run_id":"rt_2","message_id":"m3","generation":"g","body":"{}","no_reply":true}`)})
+	r = readResp(t, owner)
+	if r.Error == nil || r.Error.Code != -32602 || r.Error.Message != "turn identity required" {
+		t.Fatalf("sentinelless pinned send = %+v, want -32602 turn identity required", r.Error)
+	}
+	if len(handler.withTurnCalls) != 0 || tr.sendReq.MessageID == "m3" {
+		t.Fatal("the sentinelless pinned send reached the guard or the transport")
+	}
+
+	// A guard failure propagates as a server error carrying the guard's text.
+	handler.withTurnErr = errors.New(`turn no longer current for runtime "rt_2"`)
+	_ = writeReq(t, owner, Request{JSONRPC: "2.0", ID: 4, Method: "message_send_turn", Params: json.RawMessage(`{"to_run_id":"rt_2","message_id":"m4","generation":"g","body":"{}","no_reply":true,"expected_sentinel_file":"/tmp/turn-a.done"}`)})
+	r = readResp(t, owner)
+	if r.Error == nil || r.Error.Code != -32000 || !strings.Contains(r.Error.Message, "turn no longer current") {
+		t.Fatalf("guard error = %+v, want -32000 naming the guard failure", r.Error)
 	}
 }
 

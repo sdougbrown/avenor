@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -117,6 +118,10 @@ func (f *fakeMessageControlClient) SessionRenameContext(ctx context.Context, ses
 
 func (f *fakeMessageControlClient) SessionLastContext(context.Context, string) (messaging.PeerLast, error) {
 	return messaging.PeerLast{}, nil
+}
+
+func (f *fakeMessageControlClient) SessionLastTurnContext(_ context.Context, runtimeID, _ string) (messaging.PeerLast, error) {
+	return f.SessionLastContext(context.Background(), runtimeID)
 }
 
 func newTestMessageProvider(t *testing.T, cl ControlClient) *mcpMessageProvider {
@@ -570,6 +575,165 @@ func TestMCPMessageProviderRunStateTranslatesStatus(t *testing.T) {
 	}
 }
 
+func TestMCPMessageProviderResolvedPublicTurnUsesItsState(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.done")
+	if err := os.WriteFile(oldPath, []byte("DONE\nSESSION=old\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status": "running", "sentinel_file": filepath.Join(dir, "new.done"),
+	}}}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{SupervisorID: testSupervisorPath, RunID: "old", RuntimeID: "rt", SentinelPath: oldPath}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := p.Resolve(context.Background(), "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := p.RunState(context.Background(), resolved.RunID)
+	if err != nil || facts.Live || facts.Status != runstate.StatusDone {
+		t.Fatalf("historical turn state = %#v, %v", facts, err)
+	}
+}
+
+// TestMCPMessageProviderHistoricalTurnRefusesResume proves a turn whose
+// sentinel is no longer its runtime's current one is neither live nor
+// resumable: the shared status's session belongs to the runtime's current
+// turn, and resuming through the shared runtime would continue that turn.
+// The router refuses the resume with the not_resumable tool error.
+func TestMCPMessageProviderHistoricalTurnRefusesResume(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := writeSentinel(t, dir, "old.done", "DONE\nSESSION=old-session\n")
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status":        "running",
+		"session_id":    "sess-new",
+		"sentinel_file": filepath.Join(dir, "new.done"),
+	}}}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{SupervisorID: testSupervisorPath, RunID: "old", RuntimeID: "rt", SentinelPath: oldPath}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := p.Resolve(context.Background(), "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := p.RunState(context.Background(), resolved.RunID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	if facts.Live || facts.Resumable {
+		t.Fatalf("historical turn facts = %#v, want not live and not resumable", facts)
+	}
+
+	// The refusal is the typed not_resumable error, not a generic refusal.
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		t.Fatal("resume reached the control verb for a historical turn")
+		return messaging.ResumeResult{}, nil
+	}
+	rt, err := router.NewRouter(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = rt.Execute(context.Background(), json.RawMessage(`{"action":"resume","target":"old","message":"next"}`))
+	var toolErr *router.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "not_resumable" {
+		t.Fatalf("resume error = %v, want the not_resumable tool error", err)
+	}
+}
+
+// TestMCPMessageProviderHistoricalPublicRunIDRefusesResume pins the live
+// drive that falsified the resume-by-run-id claim: after a warm resume moved
+// the shared runtime to a later turn, resuming the first turn's own public run
+// id is refused with the typed not_resumable error instead of continuing the
+// later turn under the first turn's identity. The runtime's current turn stays
+// resumable by its own public run id.
+func TestMCPMessageProviderHistoricalPublicRunIDRefusesResume(t *testing.T) {
+	const (
+		turn1 = "8a941319-00cc-4514-97ac-1a791dd1c71d"
+		turn2 = "37ae41d1-26f6-4c3e-8859-cb4b557da4f3"
+	)
+	dir := t.TempDir()
+	turn1Sentinel := writeSentinel(t, dir, "avenor-run-"+turn1+".done", "DONE\nSESSION=sess-turn1\n")
+	turn2Sentinel := writeSentinel(t, dir, "avenor-run-"+turn2+".done", "DONE\nSESSION=sess-turn2\n")
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status":        "done",
+		"session_id":    "sess-turn2",
+		"sentinel_file": turn2Sentinel,
+	}}}
+	p := newTestMessageProvider(t, cl)
+	for _, info := range []*RunInfo{
+		{SupervisorID: testSupervisorPath, RunID: turn1, Label: "v464", RuntimeID: "rt_1", SentinelPath: turn1Sentinel},
+		{SupervisorID: testSupervisorPath, RunID: turn2, Label: "v464-followup", RuntimeID: "rt_1", SentinelPath: turn2Sentinel},
+	} {
+		if err := p.server.registry.Store(info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rt, err := router.NewRouter(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Resuming the historical turn's own run id must not reach the control
+	// verb: the runtime now serves the later turn, and a silent continuation
+	// would misattribute the later turn's conversation to the first turn.
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		t.Fatal("resume reached the control verb for a historical run id")
+		return messaging.ResumeResult{}, nil
+	}
+	_, err = rt.Execute(context.Background(), json.RawMessage(`{"action":"resume","target":"`+turn1+`","message":"again"}`))
+	var toolErr *router.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "not_resumable" {
+		t.Fatalf("resume by historical run id error = %v, want the not_resumable tool error", err)
+	}
+
+	// The runtime's current turn is still resumable through its own run id.
+	cl.resumeFunc = func(messaging.ResumeRequest) (messaging.ResumeResult, error) {
+		return messaging.ResumeResult{RunID: uuid.NewString(), RuntimeID: "rt_1", Label: "v464-followup-followup"}, nil
+	}
+	if _, err := rt.Execute(context.Background(), json.RawMessage(`{"action":"resume","target":"`+turn2+`","message":"again"}`)); err != nil {
+		t.Fatalf("resume by the current turn's run id error = %v", err)
+	}
+}
+
+// TestMCPMessageProviderSentinellessTurnRefusesResume covers the historical
+// detection for a turn registered without a sentinel of its own: another
+// registered turn of the same runtime owning the runtime's current sentinel
+// is what makes the sentinelless turn historical.
+func TestMCPMessageProviderSentinellessTurnRefusesResume(t *testing.T) {
+	dir := t.TempDir()
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status":        "running",
+		"session_id":    "sess-new",
+		"sentinel_file": filepath.Join(dir, "new.done"),
+	}}}
+	p := newTestMessageProvider(t, cl)
+	for _, info := range []*RunInfo{
+		{SupervisorID: testSupervisorPath, RunID: "old", RuntimeID: "rt"},
+		{SupervisorID: testSupervisorPath, RunID: "new", RuntimeID: "rt", SentinelPath: filepath.Join(dir, "new.done")},
+	} {
+		if err := p.server.registry.Store(info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolved, err := p.Resolve(context.Background(), "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := p.RunState(context.Background(), resolved.RunID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	if facts.Live || facts.Resumable {
+		t.Fatalf("historical sentinelless turn facts = %#v, want not live and not resumable", facts)
+	}
+	if facts.Status != runstate.StatusUnknown {
+		t.Fatalf("historical sentinelless turn status = %v, want %v", facts.Status, runstate.StatusUnknown)
+	}
+}
+
 // TestMCPMessageProviderRunStateFallsBackToTerminalSentinel proves a run that
 // finished before a supervisor restart is still reported as done. Status fails
 // because the runtime is gone, and the registry's terminal sentinel answers;
@@ -810,5 +974,182 @@ func TestNewMCPMessageProviderSurfacesCancelledPreflight(t *testing.T) {
 	}
 	if p != nil {
 		t.Fatalf("newMCPMessageProvider returned a provider on a cancelled context: %#v", p)
+	}
+}
+
+// TestMCPMessageProviderSentinellessResolvedTurnFailsClosedBeforeControl
+// proves both Send and Last refuse a resolved turn that owns no sentinel of its
+// own, before any control call: with no sentinel there is no turn to pin, so
+// the call must not run unguarded.
+func TestMCPMessageProviderSentinellessResolvedTurnFailsClosedBeforeControl(t *testing.T) {
+	sent := false
+	cl := &lastTurnRecordingClient{fakeMessageControlClient: &fakeMessageControlClient{fakeClient: &fakeClient{}}}
+	cl.sendFunc = func(context.Context, messaging.SendRequest) (messaging.SendResult, error) {
+		sent = true
+		return messaging.SendResult{}, nil
+	}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{
+		SupervisorID: testSupervisorPath,
+		RunID:        "old",
+		RuntimeID:    "rt",
+	}); err != nil {
+		t.Fatalf("registry.Store: %v", err)
+	}
+	if _, err := p.Resolve(context.Background(), "old"); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	_, err := p.Send(context.Background(), messaging.SendRequest{To: messaging.Identity{RunID: "rt"}, MessageID: "m1"})
+	if err == nil || !strings.Contains(err.Error(), "turn identity unavailable") {
+		t.Fatalf("Send error = %v, want turn identity unavailable", err)
+	}
+	if sent || cl.lastTurnCalls != 0 {
+		t.Fatal("the sentinelless send reached the control verb")
+	}
+
+	_, err = p.Last(context.Background(), "rt")
+	if err == nil || !strings.Contains(err.Error(), "turn identity unavailable") {
+		t.Fatalf("Last error = %v, want turn identity unavailable", err)
+	}
+	if sent || cl.lastTurnCalls != 0 {
+		t.Fatal("the sentinelless last reached the control verb")
+	}
+}
+
+// TestMCPMessageProviderUnresolvedTurnFailsClosed proves a Send or Last for a
+// registry-known runtime reached without a matching resolution is refused
+// instead of running unguarded. The broker listing stays open: a runtime this
+// server holds no registry entry for has no turn identity to confuse.
+func TestMCPMessageProviderUnresolvedTurnFailsClosed(t *testing.T) {
+	sent := false
+	cl := &lastTurnRecordingClient{fakeMessageControlClient: &fakeMessageControlClient{fakeClient: &fakeClient{}}}
+	cl.sendFunc = func(context.Context, messaging.SendRequest) (messaging.SendResult, error) {
+		sent = true
+		return messaging.SendResult{}, nil
+	}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{
+		SupervisorID: testSupervisorPath,
+		RunID:        "old",
+		RuntimeID:    "rt",
+		SentinelPath: filepath.Join(t.TempDir(), "old.done"),
+	}); err != nil {
+		t.Fatalf("registry.Store: %v", err)
+	}
+
+	// No Resolve ran, so the provider holds no resolution for the target.
+	_, err := p.Send(context.Background(), messaging.SendRequest{To: messaging.Identity{RunID: "rt"}, MessageID: "m1"})
+	if err == nil || !strings.Contains(err.Error(), "turn identity unavailable") {
+		t.Fatalf("Send error = %v, want turn identity unavailable", err)
+	}
+	if sent || cl.lastTurnCalls != 0 {
+		t.Fatal("the unresolved send reached the control verb")
+	}
+
+	_, err = p.Last(context.Background(), "rt")
+	if err == nil || !strings.Contains(err.Error(), "turn identity unavailable") {
+		t.Fatalf("Last error = %v, want turn identity unavailable", err)
+	}
+
+	// A stale resolution for a different runtime refuses too.
+	p.resolvedRun = &RunInfo{SupervisorID: testSupervisorPath, RunID: "other", RuntimeID: "rt-other", SentinelPath: "/other.done"}
+	_, err = p.Send(context.Background(), messaging.SendRequest{To: messaging.Identity{RunID: "rt"}, MessageID: "m2"})
+	if err == nil || !strings.Contains(err.Error(), "turn identity unavailable") {
+		t.Fatalf("stale Send error = %v, want turn identity unavailable", err)
+	}
+
+	// The broker listing stays open for a runtime with no registry entry.
+	cl.sendFunc = func(context.Context, messaging.SendRequest) (messaging.SendResult, error) {
+		sent = true
+		return messaging.SendResult{Outcome: messaging.OutcomeSent}, nil
+	}
+	if _, err := p.Send(context.Background(), messaging.SendRequest{To: messaging.Identity{RunID: "rt-listed"}, MessageID: "m3"}); err != nil {
+		t.Fatalf("listed Send error = %v, want nil", err)
+	}
+	if _, err := p.Last(context.Background(), "rt-listed"); err != nil {
+		t.Fatalf("listed Last error = %v, want nil", err)
+	}
+}
+
+// lastTurnRecordingClient records the guarded session_last calls a test needs
+// to observe, on top of the fake's unguarded session_last.
+type lastTurnRecordingClient struct {
+	*fakeMessageControlClient
+	lastTurnCalls int
+}
+
+func (c *lastTurnRecordingClient) SessionLastTurnContext(context.Context, string, string) (messaging.PeerLast, error) {
+	c.lastTurnCalls++
+	return messaging.PeerLast{}, nil
+}
+
+// TestMCPMessageProviderStatusAndRunStateAgreeOnTerminalFallback proves the two
+// terminal-sentinel fallback paths answer a run that finished before a restart
+// identically: the MCP status path and the provider's RunState both classify
+// the same sentinel into the same turn facts, and the status fallback carries
+// no historical-turn flag, because a failed read is not a turn the runtime
+// moved away from.
+func TestMCPMessageProviderStatusAndRunStateAgreeOnTerminalFallback(t *testing.T) {
+	const publicID = "3f6a9d1c-2b44-4f0e-9d31-5a7c8e2b4d62"
+	sentinelPath := filepath.Join(t.TempDir(), "avenor-run-"+publicID+".done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_prior\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusErr: errors.New("no such runtime")}}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{
+		SupervisorID: testSupervisorPath,
+		RunID:        publicID,
+		RuntimeID:    "rt_1",
+		SentinelPath: sentinelPath,
+	}); err != nil {
+		t.Fatalf("registry.Store: %v", err)
+	}
+
+	status, err := p.server.queryRunStatus(cl, testSupervisorPath, publicID)
+	if err != nil {
+		t.Fatalf("queryRunStatus error = %v", err)
+	}
+	if _, flagged := status["_historical_turn"]; flagged {
+		t.Fatal("the status error fallback flagged a failed read as a historical turn")
+	}
+	want, err := p.RunState(context.Background(), publicID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	if got := runFactsFromStatus(publicID, status); !reflect.DeepEqual(got, want) {
+		t.Fatalf("status path facts = %#v, want the RunState facts %#v", got, want)
+	}
+}
+
+// TestMCPMessageProviderSentinellessTurnWithoutOtherOwnerStaysLive proves a
+// registered run with no sentinel of its own keeps the runtime's live status
+// when no other turn owns the runtime's current sentinel. Only another owner
+// makes it historical.
+func TestMCPMessageProviderSentinellessTurnWithoutOtherOwnerStaysLive(t *testing.T) {
+	dir := t.TempDir()
+	cl := &fakeMessageControlClient{fakeClient: &fakeClient{statusResult: map[string]any{
+		"status":        "running",
+		"session_id":    "sess-live",
+		"sentinel_file": filepath.Join(dir, "unknown.done"),
+	}}}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{SupervisorID: testSupervisorPath, RunID: "solo", RuntimeID: "rt"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := p.Resolve(context.Background(), "solo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := p.RunState(context.Background(), resolved.RunID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	if !facts.Live {
+		t.Fatalf("sentinelless turn with no other owner facts = %#v, want live", facts)
+	}
+	if facts.Status == "unknown" {
+		t.Fatalf("status = %q, want the runtime's live status", facts.Status)
 	}
 }

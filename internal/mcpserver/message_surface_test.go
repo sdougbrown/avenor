@@ -132,6 +132,10 @@ func (c *recordingControlClient) SessionLastContext(_ context.Context, runtimeID
 	return c.SessionLast(runtimeID)
 }
 
+func (c *recordingControlClient) SessionLastTurnContext(_ context.Context, runtimeID, _ string) (messaging.PeerLast, error) {
+	return c.SessionLast(runtimeID)
+}
+
 func TestControlTransportForwardsEveryVerb(t *testing.T) {
 	cl := newRecordingControlClient()
 	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
@@ -657,7 +661,7 @@ func TestPeersLastReportsOneIDSpace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.registry.Store(&RunInfo{RunID: "run-a", RuntimeID: "rt_a", Label: "alpha", SupervisorID: "sock"}); err != nil {
+	if err := s.registry.Store(&RunInfo{RunID: "run-a", RuntimeID: "rt_a", Label: "alpha", SupervisorID: "sock", SentinelPath: "/tmp/test-turn-a"}); err != nil {
 		t.Fatal(err)
 	}
 	p, err := newMCPMessageProvider(context.Background(), s, cl, "sock")
@@ -724,6 +728,62 @@ func TestTwoSupervisorsWithTheSameRuntimeIDStayDistinct(t *testing.T) {
 		if got := s.messageSupervisorPath(json.RawMessage(`{"action":"last","target":"rt_1"}`)); got != "" {
 			t.Fatalf("runtime id on two supervisors bound to %q, want the default supervisor", got)
 		}
+	}
+}
+
+// TestPeerResolutionResolvesSharedRuntimeToCurrentTurn proves a runtime
+// shared by two registered turns resolves to the turn whose sentinel the
+// runtime currently holds, so the turn guard pins operations to the current
+// turn. A runtime whose sentinel matches no registered turn stays unresolved:
+// restart ambiguity is never broken by picking an entry.
+func TestPeerResolutionResolvesSharedRuntimeToCurrentTurn(t *testing.T) {
+	cl := newRecordingControlClient()
+	cl.preflight = messaging.PreflightResult{Protocol: messaging.ProtocolVersion, Generation: "gen-7"}
+	cl.statusResult = map[string]any{"status": "running", "sentinel_file": "rt_1/current.done"}
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: cl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range []*RunInfo{
+		{RunID: "run-old", RuntimeID: "rt_1", SupervisorID: "sock", SentinelPath: "rt_1/old.done"},
+		{RunID: "run-new", RuntimeID: "rt_1", SupervisorID: "sock", SentinelPath: "rt_1/current.done"},
+	} {
+		if err := s.registry.Store(info); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, err := newMCPMessageProvider(context.Background(), s, cl, "sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := p.peerResolution("rt_1", "warm")
+	if res.PublicRunID != "run-new" {
+		t.Fatalf("shared runtime public run id = %q, want run-new", res.PublicRunID)
+	}
+	if p.resolvedRun == nil || p.resolvedRun.RunID != "run-new" {
+		t.Fatalf("resolved run = %#v, want run-new", p.resolvedRun)
+	}
+
+	// A runtime whose current sentinel matches no registered turn answers
+	// with no public run and no resolved turn.
+	cl.statusResult = map[string]any{"status": "running", "sentinel_file": "rt_1/none.done"}
+	p2, err := newMCPMessageProvider(context.Background(), s, cl, "sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p2.peerResolution("rt_1", "warm"); got.PublicRunID != "" || p2.resolvedRun != nil {
+		t.Fatalf("unmatched sentinel resolved %+v / %#v, want nothing", got, p2.resolvedRun)
+	}
+
+	// A runtime whose status cannot be read keeps the ambiguity.
+	cl.statusErr = errors.New("runtime gone")
+	cl.statusResult = nil
+	p3, err := newMCPMessageProvider(context.Background(), s, cl, "sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p3.peerResolution("rt_1", "warm"); got.PublicRunID != "" || p3.resolvedRun != nil {
+		t.Fatalf("unreadable runtime resolved %+v / %#v, want nothing", got, p3.resolvedRun)
 	}
 }
 

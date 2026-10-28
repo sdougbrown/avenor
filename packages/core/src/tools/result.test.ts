@@ -1,7 +1,9 @@
 import { describe, expect, it, mock } from 'bun:test'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { createResultTool, type ResultResult } from './result.js'
-import { inspectTool } from './inspect.js'
-import { statusTool, type StatusResult } from './status.js'
+import type { StatusResult } from './status.js'
 
 function status(overrides: Partial<StatusResult> = {}): StatusResult {
   return {
@@ -15,15 +17,17 @@ function status(overrides: Partial<StatusResult> = {}): StatusResult {
 
 function deps(statuses: StatusResult[], pollIntervalMs = 1_000) {
   const queue = [...statuses]
-  const statusMock = mock(async (_args: Parameters<typeof statusTool>[0]) =>
-    queue.shift() ?? statuses[statuses.length - 1]!)
-  const inspectMock = mock(async (_args: Parameters<typeof inspectTool>[0]) => ({
+  const statusMock = mock(async () => queue.shift() ?? statuses[statuses.length - 1]!)
+  const inspectMock = mock(async () => ({
     final_output: 'inspected fallback',
     snapshot: { final_output: 'inspected fallback', assistant_text: 'inspected fallback' },
   }))
-  const fullOutputMock = mock(
-    async (_runtimeId: string | undefined, _supervisorId?: string): Promise<string | undefined> => undefined,
-  )
+  // An older supervisor: the result verb is unavailable by default, so every
+  // output presented without a full source stays marked possibly truncated.
+  const resultMock = mock(async (): Promise<Record<string, unknown>> => {
+    throw new Error('method not found')
+  })
+  const sentinelPathMock = mock(async (): Promise<string | undefined> => '')
   let fakeTime = 0
   const sleepMock = mock(async (ms: number) => {
     fakeTime += ms
@@ -33,18 +37,34 @@ function deps(statuses: StatusResult[], pollIntervalMs = 1_000) {
     value: {
       status: statusMock,
       inspect: inspectMock,
-      fullOutput: fullOutputMock,
+      result: resultMock,
+      sentinelPath: sentinelPathMock,
       sleep: sleepMock,
       now: nowMock,
       pollIntervalMs,
     },
     statusMock,
     inspectMock,
+    resultMock,
+    sentinelPathMock,
     sleepMock,
   }
 }
 
 describe('resultTool', () => {
+  it('reads the original turn output instead of the shared runtime result', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-result-'))
+    try {
+      const eventPath = path.join(dir, 'events.log')
+      const original = 'original '.repeat(1000)
+      fs.writeFileSync(eventPath, JSON.stringify({ event: 'session.end', final_output: original }) + '\n')
+      const testDeps = deps([status({ status: 'done', event_path: eventPath, runtime_output_available: false })])
+      const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+      expect(result.output).toBe(original)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
   it('returns only terminal result fields and the final output', async () => {
     const testDeps = deps([status({
       status: 'done',
@@ -55,7 +75,6 @@ describe('resultTool', () => {
       event_path: '/tmp/events.log',
     })])
 
-    testDeps.value.fullOutput = mock(async () => 'final answer')
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
 
     expect(result).toEqual({
@@ -67,6 +86,8 @@ describe('resultTool', () => {
       session_id: 'ses-1',
       stop_reason: 'end_turn',
       output: 'final answer',
+      output_truncated: true,
+      output_event_path: '/tmp/events.log',
     })
     expect(testDeps.statusMock).toHaveBeenCalledWith({
       runId: 'run-1',
@@ -76,16 +97,11 @@ describe('resultTool', () => {
     expect(testDeps.inspectMock).not.toHaveBeenCalled()
   })
 
-  it('retrieves the complete terminal output instead of the status preview', async () => {
+  it('marks a preview uncertain when the turn event log is unavailable', async () => {
     const testDeps = deps([status({ status: 'done', final_output: 'x'.repeat(4_000) })])
-    const fullOutput = 'x'.repeat(4_000) + ' complete explore report'
-    testDeps.value.fullOutput = mock(async () => fullOutput)
-
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
-
-    expect(result.output).toBe(fullOutput)
-    expect(testDeps.value.fullOutput).toHaveBeenCalledWith('rt-1', undefined)
-    expect(testDeps.inspectMock).not.toHaveBeenCalled()
+    expect(result.output).toBe('x'.repeat(4_000))
+    expect(result.output_truncated).toBe(true)
   })
 
   it('marks an older supervisor preview as possibly truncated when result retrieval fails', async () => {
@@ -94,7 +110,6 @@ describe('resultTool', () => {
       final_output: 'bounded preview',
       event_path: '/tmp/events.ndjson',
     })])
-    testDeps.value.fullOutput = mock(async () => { throw new Error('method not found') })
 
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
 
@@ -105,9 +120,53 @@ describe('resultTool', () => {
     })
   })
 
+  it('retrieves lossless output from the result verb when the turn owns the runtime sentinel', async () => {
+    const testDeps = deps([status({ status: 'done', event_path: '/tmp/missing-events.ndjson', runtime_output_available: true })])
+    testDeps.resultMock.mockResolvedValue({ final_output: 'lossless output', sentinel_file: '/tmp/turn.done' })
+    testDeps.sentinelPathMock.mockResolvedValue('/tmp/turn.done')
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+
+    expect(result).toMatchObject({ ready: true, output: 'lossless output' })
+    expect(result.output_truncated).toBeUndefined()
+    expect(testDeps.resultMock).toHaveBeenCalledWith(undefined, 'rt-1')
+    expect(testDeps.sentinelPathMock).toHaveBeenCalledWith(undefined, 'run-1')
+  })
+
+  it('refuses the result verb output for another turn and keeps the fallback uncertain', async () => {
+    const testDeps = deps([status({ status: 'done', event_path: '/tmp/missing-events.ndjson', runtime_output_available: true })])
+    testDeps.resultMock.mockResolvedValue({ final_output: 'newer turn output', sentinel_file: '/tmp/newer-turn.done' })
+    testDeps.sentinelPathMock.mockResolvedValue('/tmp/turn.done')
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+
+    expect(result).toMatchObject({ ready: true, output: 'inspected fallback', output_truncated: true })
+    expect(testDeps.inspectMock).toHaveBeenCalled()
+  })
+
+  it('keeps a result-verb refusal for a sentinelless registration uncertain', async () => {
+    const testDeps = deps([status({ status: 'done', runtime_output_available: true })])
+    testDeps.resultMock.mockResolvedValue({ final_output: 'lossless output', sentinel_file: '/tmp/turn.done' })
+    testDeps.sentinelPathMock.mockResolvedValue('')
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+
+    expect(result).toMatchObject({ ready: true, output: 'inspected fallback', output_truncated: true })
+  })
+
+  it('accepts the result verb output for a run with no registered turn identity', async () => {
+    const testDeps = deps([status({ status: 'done', runtime_output_available: true })])
+    testDeps.resultMock.mockResolvedValue({ final_output: 'lossless output', sentinel_file: '/tmp/turn.done' })
+    testDeps.sentinelPathMock.mockResolvedValue(undefined)
+
+    const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
+
+    expect(result).toMatchObject({ ready: true, output: 'lossless output' })
+    expect(result.output_truncated).toBeUndefined()
+  })
+
   it('marks an inspection fallback as possibly truncated', async () => {
     const testDeps = deps([status({ status: 'done', event_path: '/tmp/events.ndjson' })])
-    testDeps.value.fullOutput = mock(async () => undefined)
 
     const result = await createResultTool(testDeps.value)({ runId: 'run-1' })
 
@@ -149,8 +208,8 @@ describe('resultTool', () => {
     expect(waiting).toMatchObject({
       status: 'waiting',
       ready: false,
-      pending_permission: { request_id: 'req-1' },
-    })
+      pending_permission: { request_id: 'req-1', description: 'Allow?', options: [] },
+    } satisfies Partial<ResultResult>)
     expect(waitingDeps.sleepMock).not.toHaveBeenCalled()
   })
 

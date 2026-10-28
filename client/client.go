@@ -1028,7 +1028,11 @@ func (c *Client) MessageSend(req messaging.SendRequest) (messaging.SendResult, e
 // MessageSendContext sends one message and stops waiting when ctx is done.
 func (c *Client) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	var result control.MessageSendResult
-	if err := c.CallContext(ctx, "message_send", control.NewMessageSendParams(req), &result); err != nil {
+	method := "message_send"
+	if req.ExpectedSentinelFile != "" {
+		method = "message_send_turn"
+	}
+	if err := c.CallContext(ctx, method, control.NewMessageSendParams(req), &result); err != nil {
 		return messaging.SendResult{}, err
 	}
 	return result.SendResult(), nil
@@ -1164,6 +1168,15 @@ func (c *Client) SessionLast(runtimeID string) (messaging.PeerLast, error) {
 func (c *Client) SessionLastContext(ctx context.Context, runtimeID string) (messaging.PeerLast, error) {
 	var result control.SessionLastResult
 	if err := c.CallContext(ctx, "session_last", control.SessionLastParams{RuntimeID: runtimeID}, &result); err != nil {
+		return messaging.PeerLast{}, err
+	}
+	return result.PeerLast(), nil
+}
+
+// SessionLastTurnContext reads the last message only if the runtime still owns the expected turn.
+func (c *Client) SessionLastTurnContext(ctx context.Context, runtimeID, sentinelFile string) (messaging.PeerLast, error) {
+	var result control.SessionLastResult
+	if err := c.CallContext(ctx, "session_last_turn", control.SessionLastParams{RuntimeID: runtimeID, ExpectedSentinelFile: sentinelFile}, &result); err != nil {
 		return messaging.PeerLast{}, err
 	}
 	return result.PeerLast(), nil

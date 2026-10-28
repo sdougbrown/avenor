@@ -18,11 +18,12 @@ import (
 // MessageSendParams is the message_send request. The control owner always
 // sends as the supervisor session, so the request carries no from_run_id.
 type MessageSendParams struct {
-	ToRunID    string `json:"to_run_id"`
-	MessageID  string `json:"message_id"`
-	Generation string `json:"generation"`
-	Body       string `json:"body"`
-	NoReply    bool   `json:"no_reply,omitempty"`
+	ToRunID              string `json:"to_run_id"`
+	MessageID            string `json:"message_id"`
+	Generation           string `json:"generation"`
+	Body                 string `json:"body"`
+	NoReply              bool   `json:"no_reply,omitempty"`
+	ExpectedSentinelFile string `json:"expected_sentinel_file,omitempty"`
 }
 
 // MessageSendResult is the message_send / message_reply response.
@@ -161,6 +162,7 @@ type SessionRenameResult struct {
 // SessionLastParams is the session_last request.
 type SessionLastParams struct {
 	RuntimeID string `json:"runtime_id"`
+	ExpectedSentinelFile string `json:"expected_sentinel_file,omitempty"`
 }
 
 // SessionLastResult is the session_last response. HasRecord distinguishes "no
@@ -203,6 +205,7 @@ func NewMessageSendParams(req messaging.SendRequest) MessageSendParams {
 		Generation: req.Generation,
 		Body:       req.Body,
 		NoReply:    req.NoReply,
+		ExpectedSentinelFile: req.ExpectedSentinelFile,
 	}
 }
 
@@ -216,6 +219,7 @@ func (p MessageSendParams) request(from messaging.Identity) messaging.SendReques
 		Generation: p.Generation,
 		Body:       p.Body,
 		NoReply:    p.NoReply,
+		ExpectedSentinelFile: p.ExpectedSentinelFile,
 	}
 }
 

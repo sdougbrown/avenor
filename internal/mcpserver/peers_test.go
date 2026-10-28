@@ -94,6 +94,7 @@ func TestMessageToolTellUsesDefaultSupervisor(t *testing.T) {
 	if err := s.registry.Store(&RunInfo{
 		RunID:        "run-1",
 		RuntimeID:    "rt-1",
+		SentinelPath: "/tmp/test-turn-1",
 		Label:        "worker",
 		SupervisorID: fix06DefaultSocket,
 	}); err != nil {
@@ -242,7 +243,7 @@ func (s *messageStubSupervisor) record(req client.Request) {
 	defer s.mu.Unlock()
 	s.methods = append(s.methods, req.Method)
 	switch req.Method {
-	case "message_send":
+	case "message_send", "message_send_turn":
 		var params control.MessageSendParams
 		_ = json.Unmarshal(req.Params, &params)
 		s.sends = append(s.sends, params)
@@ -303,7 +304,7 @@ func (s *messageStubSupervisor) serve(conn net.Conn, cap control.OwnerCapability
 			})
 		case "status":
 			resp = stubResult(req, runningStatus())
-		case "message_send":
+		case "message_send", "message_send_turn":
 			var params control.MessageSendParams
 			_ = json.Unmarshal(req.Params, &params)
 			resp = stubResult(req, control.MessageSendResult{
@@ -386,6 +387,7 @@ func TestMessageToolBindsNonDefaultSupervisor(t *testing.T) {
 	if err := s.registry.Store(&RunInfo{
 		RunID:        "run-remote",
 		RuntimeID:    "rt-remote",
+		SentinelPath: "/tmp/test-turn-remote",
 		Label:        "remote",
 		SupervisorID: socketPath,
 	}); err != nil {
@@ -438,6 +440,7 @@ func TestMessageToolWithdrawBindsSendSupervisor(t *testing.T) {
 		RuntimeID:    "rt-remote",
 		Label:        "remote",
 		SupervisorID: socketPath,
+		SentinelPath: "/tmp/test-turn-remote",
 	}); err != nil {
 		t.Fatalf("registry.Store: %v", err)
 	}

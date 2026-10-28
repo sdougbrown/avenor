@@ -311,6 +311,10 @@ func (f *fakeClient) SessionLastContext(_ context.Context, runtimeID string) (me
 	return f.SessionLast(runtimeID)
 }
 
+func (f *fakeClient) SessionLastTurnContext(_ context.Context, runtimeID, _ string) (messaging.PeerLast, error) {
+	return f.SessionLastContext(context.Background(), runtimeID)
+}
+
 type spawnCountingClient struct {
 	spawns atomic.Int32
 }
@@ -359,6 +363,10 @@ func (c *spawnCountingClient) SessionRenameContext(_ context.Context, sessionID,
 
 func (c *spawnCountingClient) SessionLastContext(_ context.Context, runtimeID string) (messaging.PeerLast, error) {
 	return messaging.PeerLast{}, nil
+}
+
+func (c *spawnCountingClient) SessionLastTurnContext(_ context.Context, runtimeID, _ string) (messaging.PeerLast, error) {
+	return c.SessionLastContext(context.Background(), runtimeID)
 }
 func (c *spawnCountingClient) AnswerPermission(string, string, string) error { return nil }
 func (c *spawnCountingClient) WorkflowStatus(string) (map[string]any, error) { return nil, nil }
@@ -2964,7 +2972,7 @@ func TestAvenorResultParkedTerminalAndRetrySnapshots(t *testing.T) {
 			"stop_reason":  "current_turn",
 			"final_output": "preview",
 		},
-		resultResult: map[string]any{"final_output": "complete parked answer"},
+		resultResult: map[string]any{"final_output": "complete parked answer", "sentinel_file": parkedSentinel},
 	}
 	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
 	if err != nil {
@@ -4430,5 +4438,71 @@ func TestNewServerWithSupervisorSocketDialsZeroTimes(t *testing.T) {
 	}
 	if got := dials.Load(); got != 0 {
 		t.Fatalf("dials during construction = %d, want 0", got)
+	}
+}
+
+// TestRegisterResumedTransfersLabelToNewTurn proves a warm resume registers
+// in the registry even though the admitted label is still mapped to the
+// original public run of the same runtime: the label index transfers to the
+// new turn and the historical run stays discoverable by id.
+func TestRegisterResumedTransfersLabelToNewTurn(t *testing.T) {
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: &fakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSentinel := writeSentinel(t, t.TempDir(), "old.done", "DONE\nSESSION=old-session\n")
+	if err := s.registry.Store(&RunInfo{
+		RunID:        "old-run",
+		Label:        "warm",
+		RuntimeID:    "rt_1",
+		SupervisorID: "/sup.sock",
+		SentinelPath: oldSentinel,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeClient{statusResult: map[string]any{
+		"runtime_id":    "rt_1",
+		"status":        "running",
+		"session_id":    "sess-new",
+		"sentinel_file": "/tmp/avenor-new-run.done",
+	}}
+	res := messaging.ResumeResult{
+		RunID:        "new-run",
+		RuntimeID:    "rt_1",
+		Label:        "warm",
+		SentinelFile: "/tmp/avenor-new-run.done",
+		OnEvent:      "/tmp/avenor-new-run.log",
+	}
+	if err := s.registerResumed(cl, "/sup.sock", res); err != nil {
+		t.Fatalf("registerResumed: %v", err)
+	}
+	if holder := s.registry.LabelHolder("warm"); holder == nil || holder.RunID != "new-run" {
+		t.Fatalf("label holder = %#v, want new-run", holder)
+	}
+	if info := s.registry.Lookup("/sup.sock", "old-run"); info == nil {
+		t.Fatal("historical run no longer discoverable by id")
+	}
+}
+
+// TestRegisterResumedDoesNotStealAForeignLabel proves the transfer is scoped
+// to the same supervisor and runtime: a label held by a different run is
+// not stolen, and the store keeps rejecting the collision.
+func TestRegisterResumedDoesNotStealAForeignLabel(t *testing.T) {
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: &fakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.registry.Store(&RunInfo{
+		RunID:        "other-run",
+		Label:        "warm",
+		RuntimeID:    "rt_9",
+		SupervisorID: "/other.sock",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeClient{statusResult: map[string]any{"runtime_id": "rt_1", "status": "running"}}
+	res := messaging.ResumeResult{RunID: "new-run", RuntimeID: "rt_1", Label: "warm"}
+	if err := s.registerResumed(cl, "/sup.sock", res); err == nil {
+		t.Fatal("registerResumed accepted a label held by a foreign run")
 	}
 }

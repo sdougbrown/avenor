@@ -227,6 +227,10 @@ func (f *fakeIdempotentSupervisor) SessionLastContext(_ context.Context, runtime
 	return messaging.PeerLast{}, nil
 }
 
+func (f *fakeIdempotentSupervisor) SessionLastTurnContext(_ context.Context, runtimeID, _ string) (messaging.PeerLast, error) {
+	return f.SessionLastContext(context.Background(), runtimeID)
+}
+
 func (f *fakeIdempotentSupervisor) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
 }

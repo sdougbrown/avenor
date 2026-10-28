@@ -166,6 +166,43 @@ func (r *RunRegistry) LookupRuntime(supervisorID, runtimeID string) *RunInfo {
 	return found
 }
 
+// LookupRuntimeTurn returns the entry for (supervisorID, runtimeID,
+// sentinelPath) only when exactly one entry under that supervisor carries the
+// runtime id and the sentinel path, and nil otherwise. It resolves a runtime
+// shared by several registered turns to the one whose sentinel the runtime
+// currently holds: the current turn is identified by its sentinel, not by the
+// runtime id alone. A sentinel that no entry carries answers nil, so a
+// restarted supervisor's ambiguity is never broken by picking an entry.
+func (r *RunRegistry) LookupRuntimeTurn(supervisorID, runtimeID, sentinelPath string) *RunInfo {
+	if runtimeID == "" || sentinelPath == "" {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var found *RunInfo
+	for _, info := range r.byID[supervisorID] {
+		if info.RuntimeID != runtimeID || info.SentinelPath != sentinelPath {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = info
+	}
+	return found
+}
+
+// OtherTurnOwnsSentinel reports whether the unique entry registered under
+// supervisorID with (runtimeID, sentinelPath) is other than runID. It is the
+// historical-turn test for a registered turn that has no sentinel of its own:
+// once another turn of the same runtime owns the runtime's current sentinel,
+// the sentinelless turn no longer owns the runtime. A sentinel no entry
+// carries, or one carried by several entries, is not claimed by any turn.
+func (r *RunRegistry) OtherTurnOwnsSentinel(supervisorID, runtimeID, runID, sentinelPath string) bool {
+	info := r.LookupRuntimeTurn(supervisorID, runtimeID, sentinelPath)
+	return info != nil && info.RunID != runID
+}
+
 // LookupRuntimeUnique resolves a runtime id across all supervisors and returns
 // an entry only when exactly one run owns it. It answers a call that names a
 // runtime id without naming a supervisor: an id two supervisors both mint

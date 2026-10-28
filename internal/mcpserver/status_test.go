@@ -820,3 +820,50 @@ func TestServerDiagnosticsStderrRoutesUnrecognizedStatus(t *testing.T) {
 		t.Fatalf("log lines = %#v, want one line for mystery", values)
 	}
 }
+
+func TestResultDoesNotUseOutputFromConcurrentResume(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := writeSentinel(t, dir, "old.done", "DONE\nSESSION=old-session\n")
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: &fakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.registry.Store(&RunInfo{RunID: "old", RuntimeID: "rt", SupervisorID: "/sup.sock", SentinelPath: oldPath}); err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeClient{resultResult: map[string]any{"final_output": "new answer", "sentinel_file": filepath.Join(dir, "new.done")}}
+	status := map[string]any{"run_id": "old", "runtime_id": "rt", "final_output": "old preview"}
+	s.retrieveFinalOutput(cl, "/sup.sock", "old", status)
+	if status["final_output"] != "old preview" || status["final_output_truncated"] != true {
+		t.Fatalf("result leaked newer turn: %#v", status)
+	}
+}
+
+func TestWarmResumeStatusKeepsPublicTurnsSeparate(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := writeSentinel(t, dir, "old.done", "DONE\nSESSION=old-session\nSTOP_REASON=end_turn\n")
+	newPath := filepath.Join(dir, "new.done")
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: &fakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ri := range []*RunInfo{{RunID: "old", RuntimeID: "rt", SupervisorID: "/sup.sock", SentinelPath: oldPath}, {RunID: "new", RuntimeID: "rt", SupervisorID: "/sup.sock", SentinelPath: newPath}} {
+		if err := s.registry.Store(ri); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cl := &fakeClient{statusResult: map[string]any{"runtime_id": "rt", "status": "running", "sentinel_file": newPath}}
+	old, err := s.queryRunStatus(cl, "/sup.sock", "old")
+	if err != nil || old["status"] != "done" || old["session_id"] != "old-session" {
+		t.Fatalf("old status = %#v, %v", old, err)
+	}
+	newStatus, err := s.queryRunStatus(cl, "/sup.sock", "new")
+	if err != nil || newStatus["status"] != "running" {
+		t.Fatalf("new status = %#v, %v", newStatus, err)
+	}
+	cl.resultResult = map[string]any{"final_output": "new answer"}
+	s.retrieveFinalOutput(cl, "/sup.sock", "old", old)
+	if output, ok := old["final_output"]; ok {
+		t.Fatalf("old run leaked newer output: %v", output)
+	}
+}

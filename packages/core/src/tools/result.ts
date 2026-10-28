@@ -1,6 +1,8 @@
-import { Supervisor } from '../supervisor.js'
+import { normalizeRunEvent } from '../run-events.js'
+import { readNdjsonRecords } from './events.js'
+import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { inspectTool } from './inspect.js'
-import { getSupervisorClient } from './get-supervisor-client.js'
+import { findExternalRun } from './run-registry.js'
 import { statusTool, type StatusResult } from './status.js'
 import { validateTimeout } from './validate.js'
 
@@ -30,7 +32,10 @@ interface ResultToolDeps {
   inspect: (
     args: Parameters<typeof inspectTool>[0],
   ) => Promise<{ final_output?: string; snapshot: { final_output?: string; assistant_text?: string } }>
-  fullOutput?(runtimeId: string | undefined, supervisorId?: string): Promise<string | undefined>
+  /** The control result verb for a runtime; older supervisors may not implement it. */
+  result(supervisorId: string | undefined, runtimeId: string): Promise<Record<string, unknown>>
+  /** The run's registered sentinel path, or undefined when the run is not registered. */
+  sentinelPath(supervisorId: string | undefined, runId: string): Promise<string | undefined>
   sleep(ms: number, signal?: AbortSignal): Promise<void>
   now(): number
   pollIntervalMs: number
@@ -58,26 +63,43 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-async function fullOutput(runtimeId: string | undefined, supervisorId?: string): Promise<string | undefined> {
-  if (supervisorId) {
-    const { client, isSingleton } = await getSupervisorClient(supervisorId)
+async function outputFromEvents(filePath: string): Promise<string | undefined> {
+  // A missing or unreadable log rejects and the caller's catch leaves the
+  // fallback output marked possibly truncated.
+  let output: string | undefined
+  for await (const record of readNdjsonRecords(filePath)) {
     try {
-      const result = await client.result(runtimeId)
-      return typeof result.final_output === 'string' ? result.final_output : undefined
-    } finally {
-      if (!isSingleton) client.close()
+      const event = normalizeRunEvent(record)
+      if (event?.event === 'session.end' && event.final_output !== undefined) {
+        output = event.final_output
+      }
+    } catch {
+      // Ignore incomplete or malformed events.
     }
   }
+  return output
+}
 
-  const client = (await Supervisor.get()).getClient()
-  const result = await client.result(runtimeId)
-  return typeof result.final_output === 'string' ? result.final_output : undefined
+async function realResult(supervisorId: string | undefined, runtimeId: string): Promise<Record<string, unknown>> {
+  const { client, isSingleton } = await realGetSupervisorClient(supervisorId)
+  try {
+    return await client.result(runtimeId)
+  } finally {
+    if (!isSingleton) client.close()
+  }
+}
+
+async function realSentinelPath(supervisorId: string | undefined, runId: string): Promise<string | undefined> {
+  const { sup, supervisorId: resolvedId } = await realGetSupervisorClient(supervisorId)
+  const local = sup ? sup.getRunByReference(runId) : undefined
+  return local?.sentinelPath ?? findExternalRun(resolvedId, runId)?.sentinelPath
 }
 
 const defaultDeps: ResultToolDeps = {
   status: statusTool,
   inspect: inspectTool,
-  fullOutput,
+  result: realResult,
+  sentinelPath: realSentinelPath,
   sleep,
   now: Date.now,
   pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
@@ -127,12 +149,11 @@ async function executeResultTool(args: ResultToolArgs, deps: ResultToolDeps): Pr
     if (!status) throw new Error(`run not found: ${args.runId}`)
 
     if (TERMINAL_STATUSES.has(status.status)) {
-      // Status only carries a bounded preview. The explicit result path asks
-      // control for the durable, complete terminal answer instead of replaying
-      // message chunks or widening inspector payloads.
+      // The runtime can already belong to another turn. Only the per-run
+      // event log identifies this turn's complete terminal answer.
       let exactOutputRetrieved = false
       try {
-        const output = await deps.fullOutput?.(status.runtime_id, args.supervisorId)
+        let output = status.event_path ? await outputFromEvents(status.event_path).catch(() => undefined) : undefined
         if (output !== undefined) {
           status.final_output = output
           status.final_output_truncated = false
@@ -142,7 +163,29 @@ async function executeResultTool(args: ResultToolArgs, deps: ResultToolDeps): Pr
         // Older supervisors may not implement result yet. Any presentation
         // fallback below is explicitly marked as possibly truncated.
       }
-      if (status.final_output === undefined) {
+      if (!exactOutputRetrieved && status.runtime_output_available !== false && status.runtime_id) {
+        // The runtime can already own another turn. The control result verb
+        // answers for the runtime's current turn, so its output belongs to
+        // this turn only when it identifies this turn's sentinel. A run
+        // with no registered turn has no turn identity to check against.
+        try {
+          const result = await deps.result(args.supervisorId, status.runtime_id)
+          const output = typeof result.final_output === 'string' ? result.final_output : undefined
+          const sentinel = await deps.sentinelPath(args.supervisorId, status.run_id)
+          const matchesTurn = sentinel === undefined
+            ? true
+            : sentinel !== '' && typeof result.sentinel_file === 'string' && result.sentinel_file === sentinel
+          if (output !== undefined && matchesTurn) {
+            status.final_output = output
+            status.final_output_truncated = false
+            exactOutputRetrieved = true
+          }
+        } catch {
+          // The result verb is unavailable or refused: any presentation
+          // fallback below is explicitly marked as possibly truncated.
+        }
+      }
+      if (!exactOutputRetrieved && status.final_output === undefined && status.runtime_output_available !== false) {
         try {
           const inspected = await deps.inspect({
             runId: args.runId,
