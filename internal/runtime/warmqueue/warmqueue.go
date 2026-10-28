@@ -8,17 +8,6 @@ package warmqueue
 
 import "sync"
 
-// WarmMessageAdmission is the provider-side warm-resume guard. Providers that
-// inject broker messages at turn boundaries implement it so the stable
-// supervisor can refuse admission while prompts are queued or in flight for
-// the session being resumed.
-type WarmMessageAdmission interface {
-	// LockWarmMessageAdmission reports whether a warm resume may be admitted
-	// for the session. On success it returns the unlock for the held guard;
-	// on refusal the guard is not held.
-	LockWarmMessageAdmission(sessionID string) (func(), bool)
-}
-
 // Queue is a provider's per-session queue of channel-wrapped prompts awaiting
 // injection, with the injection bookkeeping the admission guard reads. The
 // zero value holds no prompts and admits only for an in-flight injection:
@@ -70,9 +59,8 @@ func (q *Queue) Reset() {
 	q.mu.Unlock()
 }
 
-// LockWarmMessageAdmission implements WarmMessageAdmission: admission is
-// refused while the session has queued prompts or an injection in flight. A
-// nil queue always admits.
+// LockWarmMessageAdmission refuses admission while the session has queued
+// prompts or an injection in flight. A nil queue always admits.
 func (q *Queue) LockWarmMessageAdmission(sessionID string) (func(), bool) {
 	if q == nil {
 		return func() {}, true

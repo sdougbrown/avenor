@@ -294,10 +294,3 @@ func (s *Supervisor) runtimeByID(rtID string) *childRuntime {
 	defer s.controlMu.Unlock()
 	return s.runtimes[rtID]
 }
-
-// liveLabelHolder reports the runtime a live run holds newLabel under, or "".
-func (s *Supervisor) liveLabelHolder(label string) string {
-	s.controlMu.Lock()
-	defer s.controlMu.Unlock()
-	return s.labelHolderLocked(label)
-}

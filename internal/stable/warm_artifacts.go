@@ -8,7 +8,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runstate"
-	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 // warmResumeArtifacts holds everything a successful reservation produced for
@@ -141,7 +141,7 @@ func (s *Supervisor) gateWarmResumeChild(child *childRuntime) (bool, error) {
 // The caller holds controlMu and child.mu, releases with commit=true only after
 // publication, and calls any provider unlock returned.
 func (s *Supervisor) lockWarmResumeAdmission(child *childRuntime, label string) (release func(bool), unlockProvider func(), err error) {
-	guard, injectsMessages := child.provider.(warmqueue.WarmMessageAdmission)
+	guard, injectsMessages := child.provider.(runtime.WarmMessageAdmission)
 	if s.broker != nil {
 		release, err = s.broker.LockWarmAdmission(child.id, label, injectsMessages)
 		if err != nil {

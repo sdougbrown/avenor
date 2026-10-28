@@ -191,26 +191,6 @@ func TestWarmResumeRefusesPendingProviderMessage(t *testing.T) {
 	brokerRelease(false)
 }
 
-func TestWarmResumeRejectsPendingBrokerMessage(t *testing.T) {
-	root := t.TempDir()
-	b := broker.New("")
-	b.CreateRun("rt", "")
-	if err := b.Send("rt", "agent_message", nil, "msg"); err != nil {
-		t.Fatal(err)
-	}
-	child := &childRuntime{id: "rt", onEvent: filepath.Join(root, "old"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
-	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
-	child.provider = &warmGuardProvider{Queue: warmqueue.NewQueue()}
-	sup := &Supervisor{broker: b}
-	_, warm, err := sup.admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: filepath.Join(root, "new"), SentinelFile: filepath.Join(root, "new-sentinel")})
-	if !warm || err == nil {
-		t.Fatalf("pending message admission: warm=%v err=%v", warm, err)
-	}
-	if child.sentinelFile != filepath.Join(root, "old-sentinel") || len(child.promptQueue) != 0 {
-		t.Fatal("rejected admission changed turn")
-	}
-}
-
 // TestWarmResumePendingMessageCleansReservedArtifacts pins the reordered
 // admission fence: the artifacts are reserved before the broker admission
 // lock, the pending check runs under the lock, and a rejection removes

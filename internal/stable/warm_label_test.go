@@ -31,7 +31,10 @@ func TestWarmResumeImplicitLabelWithHarnessName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Label != "harness-name" || result.RuntimeID != id || h.sup.liveLabelHolder(result.Label) != id {
+	h.sup.controlMu.Lock()
+	holder := h.sup.labelHolderLocked(result.Label)
+	h.sup.controlMu.Unlock()
+	if result.Label != "harness-name" || result.RuntimeID != id || holder != id {
 		t.Fatalf("result = %+v", result)
 	}
 }
@@ -89,7 +92,10 @@ func TestWarmResumeConcurrentLabelReservation(t *testing.T) {
 	if result.Label != "shared-label" || h.sup.broker.DisplayName(result.RuntimeID) != result.Label {
 		t.Fatalf("resume label %q, broker label %q", result.Label, h.sup.broker.DisplayName(result.RuntimeID))
 	}
-	if holder := h.sup.liveLabelHolder(result.Label); holder != result.RuntimeID {
+	h.sup.controlMu.Lock()
+	holder := h.sup.labelHolderLocked(result.Label)
+	h.sup.controlMu.Unlock()
+	if holder != result.RuntimeID {
 		t.Fatalf("label holder = %q, want %q", holder, result.RuntimeID)
 	}
 }
