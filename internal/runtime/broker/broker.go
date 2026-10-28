@@ -772,7 +772,7 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		peerCode := st.peerUnavailableLocked(time.Now())
 		st.Mu.Unlock()
 		if peerCode != "" {
-			writeCodedError(w, http.StatusGone, "peer identity is no longer active", peerCode)
+			writePeerGone(w, peerCode)
 			return
 		}
 		// The authenticated run travels on the messaging leaf's caller-run key,
@@ -851,13 +851,13 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		RunID:               body.RunID,
 		Token:               token,
 		peer:                body.Peer,
-		peerDeadline:        time.Now().Add(peerLease),
 		RegisteredAt:        time.Now(),
 		LastSeen:            time.Now(),
 		Notify:              make(chan struct{}, 1),
 		PermissionRequests:  make(map[string]*PermissionState),
 		PermissionDecisions: make(map[string]string),
 	}
+	st.renewPeerLeaseLocked(time.Now())
 	b.runs[body.RunID] = st
 	b.mu.Unlock()
 	b.runSetChanged()
@@ -951,13 +951,11 @@ func (b *Broker) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	st.Mu.Lock()
 	if code := st.peerUnavailableLocked(time.Now()); code != "" {
 		st.Mu.Unlock()
-		writeCodedError(w, http.StatusGone, "peer identity is no longer active", code)
+		writePeerGone(w, code)
 		return
 	}
 	st.LastSeen = time.Now()
-	if st.peer {
-		st.peerDeadline = time.Now().Add(peerLease)
-	}
+	st.renewPeerLeaseLocked(time.Now())
 	st.Mu.Unlock()
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
@@ -985,7 +983,7 @@ func (b *Broker) handlePushControl(w http.ResponseWriter, r *http.Request) {
 	st.Mu.Lock()
 	if code := st.peerUnavailableLocked(time.Now()); code != "" {
 		st.Mu.Unlock()
-		writeCodedError(w, http.StatusGone, "peer identity is no longer active", code)
+		writePeerGone(w, code)
 		return
 	}
 	msg.CreatedAt = time.Now()
@@ -1024,7 +1022,7 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 	if st.peer {
 		if code := st.peerUnavailableLocked(time.Now()); code != "" {
 			st.Mu.Unlock()
-			writeCodedError(w, http.StatusGone, "peer identity is no longer active", code)
+			writePeerGone(w, code)
 			return
 		}
 		if st.peerPolling {
@@ -1033,7 +1031,7 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		st.peerPolling = true
-		st.peerDeadline = time.Now().Add(peerLease)
+		st.renewPeerLeaseLocked(time.Now())
 		st.LastSeen = time.Now()
 		defer func() { st.Mu.Lock(); st.peerPolling = false; st.Mu.Unlock() }()
 	}
@@ -1050,7 +1048,7 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 	}
 	if code := st.peerUnavailableLocked(time.Now()); code != "" {
 		st.Mu.Unlock()
-		writeCodedError(w, http.StatusGone, "peer identity is no longer active", code)
+		writePeerGone(w, code)
 		return
 	}
 	msgs, queued := partitionDrained(st.ControlQueue, body.AgentOnly, body.Limit)
@@ -1609,7 +1607,6 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 	b.parentRegisterMu.Lock()
 	defer b.parentRegisterMu.Unlock()
 	for _, claim := range body.Runs {
-		_, _, registered := b.runStateFor(link.Key(body.ChildID, claim.RunID))
 		switch {
 		case claim.RunID == "":
 			writeCodedError(w, http.StatusBadRequest, "every claimed run needs a run_id", "invalid-request")
@@ -1619,7 +1616,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 			// claiming one could forge another branch's supervisor identity.
 			writeCodedError(w, http.StatusBadRequest, "a claimed run id cannot contain \"@\"", "invalid-request")
 			return
-		case registered && !link.Owns(link.Key(body.ChildID, claim.RunID)):
+		case b.GetRun(link.Key(body.ChildID, claim.RunID)) != nil && !link.Owns(link.Key(body.ChildID, claim.RunID)):
 			// A record this broker minted itself under a claim key is not a child's
 			// to take: the claim is refused whole so the record keeps its credential.
 			writeCodedError(w, http.StatusConflict, "run already registered", "invalid-request")
@@ -1924,8 +1921,16 @@ func (b *Broker) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusBadRequest, "target is required", "invalid-request")
 		return
 	}
-	if b.GetRun(target) == nil {
+	st := b.GetRun(target)
+	if st == nil {
 		writeCodedError(w, http.StatusNotFound, "run not found: "+target, "target-unavailable")
+		return
+	}
+	st.Mu.Lock()
+	gone := st.peerUnavailableLocked(time.Now())
+	st.Mu.Unlock()
+	if gone != "" {
+		writePeerGone(w, gone)
 		return
 	}
 	record, hasRecord := b.LastAgentMessage(target)
@@ -2214,20 +2219,15 @@ func (b *Broker) handleSessionName(w http.ResponseWriter, r *http.Request) {
 
 // --- accessors ---
 
-// GetRun returns the RunState for a given run ID, or nil if not found.
+// GetRun returns runID's record, including the tombstone a retired or expired
+// peer leaves behind. Whether that identity may still be reached is a separate
+// question, asked at the boundary that routes to it
+// (see RunState.peerUnavailableLocked), so a reader that only needs the record
+// never has to know about leases.
 func (b *Broker) GetRun(runID string) *RunState {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	st := b.runs[runID]
-	if st != nil {
-		st.Mu.Lock()
-		unavailable := st.peerUnavailableLocked(time.Now()) != ""
-		st.Mu.Unlock()
-		if unavailable {
-			return nil
-		}
-	}
-	return st
+	return b.runs[runID]
 }
 
 // CreateRun registers a new run under name, the display label its peers see.
@@ -2850,6 +2850,12 @@ func writeSendError(w http.ResponseWriter, err error) {
 			"outcome": messaging.OutcomePossiblyPending,
 		})
 	}
+}
+
+// writePeerGone refuses a request whose peer identity is retired or expired,
+// carrying the reason as the protocol code.
+func writePeerGone(w http.ResponseWriter, code string) {
+	writeCodedError(w, http.StatusGone, "peer identity is no longer active", code)
 }
 
 // writeCodedError reports a messaging failure with the legacy message text and

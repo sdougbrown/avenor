@@ -34,6 +34,32 @@ func peerPost(t *testing.T, b *Broker, path string, body map[string]any) (int, m
 	return resp.StatusCode, result
 }
 
+// peerGet reads a GET route as creds, the way a broker client authenticates
+// one: the credential travels in headers, never in the URL.
+func peerGet(t *testing.T, b *Broker, path string, creds map[string]any) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, b.URL()+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(messaging.HeaderRunID, creds["run_id"].(string))
+	req.Header.Set(messaging.HeaderRunToken, creds["token"].(string))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if json.Unmarshal(data, &result) != nil {
+		result = map[string]any{"error": string(data)}
+	}
+	return resp.StatusCode, result
+}
+
 func peerBroker(t *testing.T) *Broker {
 	t.Helper()
 	b := New("")
@@ -55,13 +81,20 @@ func TestPeerRetirementFencesIdentityAndHidesIt(t *testing.T) {
 	if code, _ := peerPost(t, b, "/retire", credentials); code != 200 {
 		t.Fatalf("retire = %d", code)
 	}
-	if b.GetRun("pi-peer") != nil {
-		t.Fatal("retired peer remains reachable")
+	// The record outlives the identity: a tombstone is what stops a delayed
+	// registration from reviving the inbox, while every reader that routes to
+	// the run answers as if it were gone.
+	if b.GetRun("pi-peer") == nil {
+		t.Fatal("retirement dropped the peer record")
 	}
 	for _, row := range b.sessions() {
 		if row.RunID == "pi-peer" {
 			t.Fatal("retired peer listed")
 		}
+	}
+	target := map[string]any{"run_id": "reader", "token": ensureRun(t, b, "reader", "reader")}
+	if code, result := peerGet(t, b, "/last_message?target=pi-peer", target); code != http.StatusGone || result["code"] != "peer-retired" {
+		t.Fatalf("retired last_message = %d %v", code, result)
 	}
 	if code, result := peerPost(t, b, "/register", credentials); code != 409 || result["code"] != "peer-retired" {
 		t.Fatalf("revive = %d %v", code, result)
@@ -101,8 +134,10 @@ func TestPeerLeaseExpiryCannotBeRenewedByRegistration(t *testing.T) {
 	if code, _ := peerPost(t, b, "/register", credentials); code != 409 {
 		t.Fatalf("revive expired = %d", code)
 	}
-	if b.GetRun("pi-peer") != nil {
-		t.Fatal("expired peer reachable")
+	for _, row := range b.sessions() {
+		if row.RunID == "pi-peer" {
+			t.Fatal("expired peer listed")
+		}
 	}
 }
 
