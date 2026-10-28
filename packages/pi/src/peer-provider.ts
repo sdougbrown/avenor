@@ -1,4 +1,4 @@
-import { type MessageProvider, type ProviderResult, type Resolution, ToolError } from '@dougbots/avenor-core'
+import { matchPeerRows, type MessageProvider, type ProviderResult, ToolError } from '@dougbots/avenor-core'
 
 /** Compose independent authorities without treating equal IDs as proof of equal identity. */
 export function combinePeerProviders(localSource: MessageProvider | (() => MessageProvider | null), central: MessageProvider): MessageProvider {
@@ -50,26 +50,27 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
       const host = snapshot.find(provider => provider !== central)
       const results = await Promise.all(snapshot.map(p => p.peers()))
       if (results.some(r => r.detail)) throw new Error('the peer listing is incomplete: ' + results.map(r => r.detail).filter(Boolean).join('; '))
-      const rows = results.flatMap((r, i) => r.peers.map(peer => ({ peer, provider: snapshot[i] })))
-      const exact = rows.filter(r => r.peer.run_id === ref)
-      let publicResolution: Resolution | undefined
-      if (host) {
-        const candidate = await host.resolve(ref)
-        if (candidate.match === 'unique' && candidate.publicRunId === ref) publicResolution = candidate
+      const rows = results.flatMap((r, i) => r.peers.map(peer => ({ run_id: peer.run_id, label: peer.label, provider: snapshot[i] })))
+      // The host's own runs are not rows in its own listing, so its own match rule
+      // is the only thing that can name them. A public id it answers for joins the
+      // merged rows as the one row those runs contribute.
+      const own = host ? await host.resolve(ref) : undefined
+      const publicResolution = own?.match === 'unique' && own.publicRunId === ref ? own : undefined
+      if (publicResolution && host && !rows.some(row => row.provider === host && row.run_id === ref)) {
+        rows.push({ run_id: ref, label: publicResolution.label, provider: host })
       }
-      if (publicResolution && host && !exact.some(r => r.provider === host && r.peer.run_id === publicResolution.runId)) {
-        exact.push({ peer: { run_id: ref, label: publicResolution.label }, provider: host })
-      }
-      const hits = exact.length ? exact : rows.filter(r => r.peer.label === ref)
-      if (!hits.length) return { runId: '', match: 'none' }
-      if (hits.length > 1) return { runId: '', match: 'ambiguous', candidates: hits.map(r => r.peer.run_id) }
-      const hit = hits[0]
-      const resolved = hit.provider === host && publicResolution && hit.peer.run_id === ref
-        ? publicResolution : await hit.provider.resolve(hit.peer.run_id)
+      const matched = matchPeerRows(rows, ref)
+      if (matched.match !== 'unique') return matched
+      // The rule reports one row per unique id, so this lookup names exactly the
+      // authority that owns the match.
+      const hit = rows.find(row => row.run_id === matched.runId)
+      if (!hit) throw new Error('the peer changed during resolution')
+      const resolved = hit.provider === host && publicResolution && hit.run_id === ref
+        ? publicResolution : await hit.provider.resolve(hit.run_id)
       if (resolved.match !== 'unique') throw new Error('the peer changed during resolution')
       const key = JSON.stringify([authority(hit.provider), resolved.runId, resolved.publicRunId])
       routes.set(key, { provider: hit.provider, id: resolved.runId, publicId: resolved.publicRunId })
-      return { ...resolved, runId: key, resolvedRunId: resolved.runId, publicRunId: resolved.publicRunId ?? hit.peer.run_id }
+      return { ...resolved, routeKey: key, publicRunId: resolved.publicRunId ?? hit.run_id }
     },
     controlReply: (target, payload) => {
       const host = local()

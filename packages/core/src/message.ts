@@ -65,9 +65,16 @@ export interface ProviderResult {
 }
 
 export interface Resolution {
+  /** The authority's run ID for the resolved target. */
   runId: string
-  /** The authority's run ID when runId is an internal routing handle. */
-  resolvedRunId?: string
+  /**
+   * The handle this resolution routes by, when the answering provider does not
+   * accept `runId` directly. A provider that answers for several authorities
+   * returns one opaque key per binding instead of pretending their ids are
+   * comparable; `runId` stays the authority's own id, which is what a caller
+   * reports and what the state checks name.
+   */
+  routeKey?: string
   publicRunId?: string
   match: 'unique' | 'ambiguous' | 'none'
   label?: string
@@ -628,6 +635,11 @@ function resolutionLabel(resolution: { label?: string }, ref: string): string {
   return resolution.label || ref
 }
 
+/** The id to route a call by: the provider's opaque key when it registered one. */
+function routeTarget(resolution: { runId: string; routeKey?: string }): string {
+  return resolution.routeKey ?? resolution.runId
+}
+
 async function tell(
   provider: MessageProvider,
   input: MessageInput,
@@ -636,7 +648,7 @@ async function tell(
   const label = resolutionLabel(resolution, input.target ?? '')
   let result: ProviderResult
   try {
-    result = await provider.tell(resolution.runId, input.message ?? '', resolution.publicRunId)
+    result = await provider.tell(routeTarget(resolution), input.message ?? '', resolution.publicRunId)
   } catch (err) {
     throw asToolError(err)
   }
@@ -660,7 +672,7 @@ async function ask(
   const label = resolutionLabel(resolution, input.target ?? '')
   let result: ProviderResult
   try {
-    result = await provider.ask(resolution.runId, input.message ?? '', input.timeout_ms, signal, resolution.publicRunId)
+    result = await provider.ask(routeTarget(resolution), input.message ?? '', input.timeout_ms, signal, resolution.publicRunId)
   } catch (err) {
     throw asToolError(err)
   }
@@ -684,7 +696,7 @@ async function resume(
   let result: ProviderResult
   try {
     result = await provider.resume({
-      target: resolution.runId,
+      target: routeTarget(resolution),
       message: input.message ?? '',
       label: input.label,
       idempotencyKey: input.idempotency_key,
@@ -803,13 +815,13 @@ export async function executeMessage(
   if (action === 'resume' && typed.idempotency_key) return resume(provider, typed, resolution)
   let facts
   try {
-    facts = await provider.state(resolution.runId, resolution.publicRunId)
+    facts = await provider.state(routeTarget(resolution), resolution.publicRunId)
   } catch (err) {
     throw refused(err)
   }
   conditions.targetLive = facts.live
   conditions.targetResumable = facts.resumable
-  const stateDenied = stateDenial(action, conditions, resolution.resolvedRunId ?? resolution.runId, facts.status)
+  const stateDenied = stateDenial(action, conditions, resolution.runId, facts.status)
   if (stateDenied) throw stateDenied
 
   switch (action) {
@@ -882,7 +894,7 @@ export async function executePeers(
   const resolution = await resolveTarget(provider, typed.target ?? '')
   let last
   try {
-    last = await provider.last(resolution.runId, resolution.publicRunId)
+    last = await provider.last(routeTarget(resolution), resolution.publicRunId)
   } catch (err) {
     throw asToolError(err)
   }

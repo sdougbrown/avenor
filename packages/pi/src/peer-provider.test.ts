@@ -19,7 +19,7 @@ test('combined names resolve across providers and exact IDs take precedence', as
   const sent: string[] = []
   const p = combinePeerProviders(provider('local', [{ run_id: 'child', label: 'scout' }], sent), provider('central', [{ run_id: 'remote', label: 'child' }], sent))
   const r = await p.resolve('child')
-  await p.tell(r.runId, 'hello', r.publicRunId)
+  await p.tell(r.routeKey ?? r.runId, 'hello', r.publicRunId)
   expect(sent).toEqual(['local:child'])
   expect((await p.resolve('scout')).match).toBe('unique')
 })
@@ -44,7 +44,7 @@ test('withdrawals retain the sending provider and refuse unknown ownership', asy
   const sent: string[] = []
   const p = combinePeerProviders(provider('local', [{ run_id: 'child' }], sent), provider('central', [{ run_id: 'remote' }], sent))
   const r = await p.resolve('remote')
-  await p.ask(r.runId, 'question')
+  await p.ask(r.routeKey ?? r.runId, 'question')
   await p.withdraw('central-ask')
   expect(sent).toEqual(['central:withdraw:central-ask'])
   expect(() => p.withdraw('unknown')).toThrow('does not own')
@@ -104,8 +104,8 @@ test('in-flight resolution keeps its authority when a local supervisor is replac
   listing.resolve({ peers: [{ run_id: 'child' }] })
   const old = await pending
   const current = await p.resolve('child')
-  await p.tell(old.runId, 'old')
-  await p.tell(current.runId, 'new')
+  await p.tell(old.routeKey ?? old.runId, 'old')
+  await p.tell(current.routeKey ?? current.runId, 'new')
   expect(sent).toEqual(['first:child', 'second:child'])
 })
 
