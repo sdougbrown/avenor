@@ -7,6 +7,7 @@
 //   - gemini-acp: spawns gemini --acp subprocess, owns lifecycle.
 //   - cursor-acp: spawns agent acp subprocess, owns lifecycle.
 //   - pi: spawns pi --mode rpc subprocess, owns lifecycle.
+//   - poo: spawns a poo binary subprocess (protocol client lands in Stage 2).
 //   - pony: test/stub backend.
 //   - claude: Claude Code backend; PTY by default, AVENOR_CLAUDE_TERMINAL=tmux for tmux.
 package factory
@@ -24,7 +25,30 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/opencodehttp"
 	"github.com/sdougbrown/avenor/internal/runtime/pi"
 	"github.com/sdougbrown/avenor/internal/runtime/pony"
+	"github.com/sdougbrown/avenor/internal/runtime/poo"
 )
+
+// knownBackends is the single backend registry the CLI consults before a
+// provider exists. It lists every backend NewProvider dispatches; adding one
+// there without a name here, or the reverse, fails TestKnownBackendsMatchNewProvider.
+var knownBackends = map[string]bool{
+	"opencode-acp":     true,
+	"opencode-http":    true,
+	"codex-app-server": true,
+	"gemini-acp":       true,
+	"agy":              true,
+	"cursor-acp":       true,
+	"pi":               true,
+	"poo":              true,
+	"pony":             true,
+	"claude":           true,
+}
+
+// IsKnown reports whether this build registers the backend. It answers the
+// question a caller otherwise re-lists by hand before a provider exists.
+func IsKnown(backend string) bool {
+	return knownBackends[backend]
+}
 
 // noProcessBackends connect to an already-running or in-process runtime and
 // never exec a child process, so a launch wrapper has nothing to prefix.
@@ -52,6 +76,8 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 		return cursoracp.NewWithOptions(startOpts), nil
 	case "pi":
 		return pi.NewWithOptions(startOpts), nil
+	case "poo":
+		return poo.NewWithOptions(startOpts), nil
 	case "pony":
 		return pony.NewWithOptions(startOpts), nil
 	case "claude":

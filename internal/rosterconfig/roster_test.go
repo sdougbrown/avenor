@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -46,7 +48,7 @@ func TestLoadValidRosterAndLookup(t *testing.T) {
 		t.Fatalf("Lookup(planner) error = %v", err)
 	}
 	want := Entry{Backend: "opencode-acp", Agent: "planner", Model: "provider/planner"}
-	if planner != want {
+	if !reflect.DeepEqual(planner, want) {
 		t.Fatalf("planner = %+v, want %+v", planner, want)
 	}
 
@@ -193,7 +195,7 @@ func TestResolvePrecedenceAndContextSeparation(t *testing.T) {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	want := ResolvedSelection{Backend: "agy", Agent: "roster-agent", Model: "roster-model"}
-	if resolved != want {
+	if !reflect.DeepEqual(resolved, want) {
 		t.Fatalf("resolved = %+v, want %+v", resolved, want)
 	}
 	if input.AgentProfile != "cloud" || input.Thinking != "high" {
@@ -221,7 +223,7 @@ func TestResolveWithoutRosterPreservesDirectAndTeamBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("direct Resolve() error = %v", err)
 	}
-	if want := (ResolvedSelection{Backend: "opencode-acp", Agent: "run-agent", Model: "run-model"}); selection != want {
+	if want := (ResolvedSelection{Backend: "opencode-acp", Agent: "run-agent", Model: "run-model"}); !reflect.DeepEqual(selection, want) {
 		t.Fatalf("direct selection = %+v, want %+v", selection, want)
 	}
 
@@ -235,7 +237,7 @@ func TestResolveWithoutRosterPreservesDirectAndTeamBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("team Resolve() error = %v", err)
 	}
-	if want := (ResolvedSelection{Backend: "opencode-acp", Agent: "team-agent", Model: "team-model"}); selection != want {
+	if want := (ResolvedSelection{Backend: "opencode-acp", Agent: "team-agent", Model: "team-model"}); !reflect.DeepEqual(selection, want) {
 		t.Fatalf("team selection = %+v, want %+v", selection, want)
 	}
 }
@@ -257,7 +259,7 @@ func TestResolveRejectsLoopInlineOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loop roster Resolve() error = %v", err)
 	}
-	if selection != (ResolvedSelection{Backend: "agy", Agent: "loop-agent"}) {
+	if !reflect.DeepEqual(selection, ResolvedSelection{Backend: "agy", Agent: "loop-agent"}) {
 		t.Fatalf("loop roster selection = %+v", selection)
 	}
 }
@@ -336,7 +338,7 @@ func TestResolveCarriesRosterThinkingAsADefault(t *testing.T) {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	want := ResolvedSelection{Backend: "agy", Agent: "roster-agent", Thinking: "max"}
-	if resolved != want {
+	if !reflect.DeepEqual(resolved, want) {
 		t.Fatalf("resolved = %+v, want %+v", resolved, want)
 	}
 }
@@ -349,5 +351,45 @@ func TestResolveLeavesThinkingEmptyWithoutARosterLevel(t *testing.T) {
 	}
 	if resolved.Thinking != "" {
 		t.Fatalf("resolved.Thinking = %q, want empty so the run-level level applies", resolved.Thinking)
+	}
+}
+
+// command, args and settings are launch fields a backend must declare before a
+// roster entry may carry them. Every backend in this build that declares none
+// rejects all three, and the error names both the entry and the field.
+func TestLoadRejectsLaunchFieldsForOtherBackends(t *testing.T) {
+	backends := []string{
+		"opencode-acp", "opencode-http", "codex-app-server", "gemini-acp",
+		"agy", "cursor-acp", "pi", "claude", "pony",
+	}
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{name: "command", value: `"/opt/bin/tool"`},
+		{name: "args", value: `["serve"]`},
+		{name: "settings", value: `"/etc/tool.yaml"`},
+	}
+	for _, backend := range backends {
+		for _, field := range fields {
+			t.Run(backend+"/"+field.name, func(t *testing.T) {
+				contents := `{"planner":{"backend":"` + backend + `","agent":"planner","` + field.name + `":` + field.value + `}}`
+				_, err := Load(writeRoster(t, contents))
+				if err == nil {
+					t.Fatalf("Load() accepted %s on backend %s", field.name, backend)
+				}
+				if !strings.Contains(err.Error(), `entry "planner"`) || !strings.Contains(err.Error(), field.name) {
+					t.Fatalf("Load() error = %v, want the entry and field named", err)
+				}
+			})
+		}
+	}
+}
+
+func TestEntryLaunchInput(t *testing.T) {
+	entry := Entry{Backend: "poo", Agent: "search", Command: "/opt/bin/poo", Args: []string{"serve"}, Settings: "/etc/poo.yaml"}
+	input := entry.LaunchInput()
+	if input.Command != entry.Command || input.Settings != entry.Settings || !slices.Equal(input.Args, entry.Args) {
+		t.Fatalf("LaunchInput() = %+v, want the entry's launch fields", input)
 	}
 }
