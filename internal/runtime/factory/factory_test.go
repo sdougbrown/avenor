@@ -110,3 +110,40 @@ func TestNewProviderRejectsWrapperForNoProcessBackends(t *testing.T) {
 		}
 	}
 }
+
+func TestNewProviderPoo(t *testing.T) {
+	p, err := NewProvider(runtime.StartOptions{}, "poo")
+	if err != nil {
+		t.Fatalf("NewProvider(poo) error = %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewProvider(poo) provider is nil")
+	}
+}
+
+// poo starts a child process, so the launch wrapper applies to it exactly like
+// any other process backend: construction accepts a wrapper instead of failing
+// with the no-process rejection.
+func TestNewProviderPooAcceptsLaunchWrapper(t *testing.T) {
+	if _, err := NewProvider(runtime.StartOptions{LaunchWrapper: []string{"/usr/bin/nice", "-n", "5"}}, "poo"); err != nil {
+		t.Fatalf("NewProvider(poo) with launch_wrapper: %v", err)
+	}
+}
+
+func TestKnownBackendsMatchNewProvider(t *testing.T) {
+	for _, backend := range []string{
+		"opencode-acp", "opencode-http", "codex-app-server", "gemini-acp",
+		"agy", "cursor-acp", "pi", "poo", "pony", "claude",
+	} {
+		if !IsKnown(backend) {
+			t.Fatalf("IsKnown(%q) = false", backend)
+		}
+		provider, err := NewProvider(runtime.StartOptions{}, backend)
+		if err != nil || provider == nil {
+			t.Fatalf("NewProvider(%q) = %v, %v; every known backend must construct", backend, provider, err)
+		}
+	}
+	if IsKnown("unknown") {
+		t.Fatal("IsKnown(unknown) = true")
+	}
+}
