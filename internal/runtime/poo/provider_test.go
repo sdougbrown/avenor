@@ -211,6 +211,13 @@ type pooFixture struct {
 
 func newPooFixture(t *testing.T, endpoint *fakeEndpoint) pooFixture {
 	t.Helper()
+	return newPooFixtureWith(t, endpoint, nil)
+}
+
+// newPooFixtureWith adds settings blocks to the fixture's document, so a test
+// can configure the permission policy a turn runs under.
+func newPooFixtureWith(t *testing.T, endpoint *fakeEndpoint, extra map[string]any) pooFixture {
+	t.Helper()
 	dir := t.TempDir()
 	workDir := filepath.Join(dir, "work")
 	sessionDir := filepath.Join(dir, "sessions")
@@ -236,6 +243,9 @@ func newPooFixture(t *testing.T, endpoint *fakeEndpoint) pooFixture {
 		},
 		"roles":   map[string]any{"chat": "test-model"},
 		"session": map[string]any{"mode": "logged", "dir": sessionDir},
+	}
+	for key, value := range extra {
+		document[key] = value
 	}
 	encoded, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
@@ -423,6 +433,77 @@ func TestPromptSteersAnActiveRun(t *testing.T) {
 	}
 	if !steered {
 		t.Fatalf("the model never saw the steer text; requests were %#v", endpoint.promptTexts())
+	}
+}
+
+// TestAnUnansweredAskIsNotRelayedAndTheRunCarriesOn proves the Stage 2 boundary
+// for poo's permission asks: the ask is not published as a permission.request,
+// so no resolver tries to answer it, and the run continues once poo's own ask
+// times out and the chain falls back.
+func TestAnUnansweredAskIsNotRelayedAndTheRunCarriesOn(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "true"}}}},
+		scriptedTurn{Text: "carried on"},
+	)
+	// The chain timeout stands in for the wire asker's own 60 s budget: the
+	// ask is left unanswered either way, and poo resolves it by itself.
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{
+		"permission": map[string]any{
+			"unmatched":       "ask",
+			"askers":          []string{"wire"},
+			"chain_timeout_s": 2,
+		},
+	})
+	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
+
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- provider.Prompt(context.Background(), session.SessionID, "run it") }()
+
+	// The ask reaches the client — the backend is asked because the handshake
+	// declares the capability — and is echoed as the session's own record.
+	log.waitFor(t, "avenor.permission.asked", 60*time.Second)
+	select {
+	case err := <-promptDone:
+		if err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Prompt did not return after the ask timed out")
+	}
+
+	for _, ev := range log.snapshot() {
+		if ev.Event == "permission.request" {
+			t.Fatal("the ask was relayed as a permission.request, which Stage 2 cannot answer")
+		}
+	}
+	end := log.waitFor(t, "session.end", 10*time.Second)
+	if reason, _ := end.Fields["stop_reason"].(string); reason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: the run did not carry on", reason)
+	}
+	if code, _ := events.Int64(end.Fields["exit_code"]); code != 0 {
+		t.Fatalf("exit_code = %d, want 0", code)
+	}
+	// The model saw the fallback's denial as a tool result and answered again.
+	if requests := endpoint.requestBodies(); len(requests) < 2 {
+		t.Fatalf("the model sent %d requests, want a second turn after the denial", len(requests))
+	}
+}
+
+// TestPromptRetriesStartWhenTheRunSettlesBeforeTheSessionReportsIt proves the
+// busy/session-get race is closed: when the run that refused the prompt is gone
+// before session/get can name it, the prompt starts its own turn instead of
+// failing.
+func TestPromptRetriesStartWhenTheRunSettlesBeforeTheSessionReportsIt(t *testing.T) {
+	t.Setenv(helperEnv, "busysettle")
+	provider := NewWithOptions(avruntime.StartOptions{})
+	t.Cleanup(func() { _ = provider.Close() })
+
+	session, err := provider.Start(context.Background(), helperStartOptions())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := provider.Prompt(context.Background(), session.SessionID, "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
 	}
 }
 
@@ -619,6 +700,9 @@ func TestEventsBeforeTheCreateResponseAreKept(t *testing.T) {
 	if session.SessionID != "poo-early" {
 		t.Fatalf("SessionID = %q, want the id from the create result", session.SessionID)
 	}
+	if session.Mode != "ephemeral" {
+		t.Fatalf("Mode = %q, want the mode the create result reported", session.Mode)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch, err := provider.Events(ctx, session.SessionID)
@@ -793,6 +877,7 @@ func runHelperServer(mode string) int {
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 64*1024), 1<<20)
 	out := bufio.NewWriter(os.Stdout)
+	runPrompts := 0
 	write := func(value any) {
 		encoded, err := json.Marshal(value)
 		if err != nil {
@@ -815,6 +900,36 @@ func runHelperServer(mode string) int {
 			continue
 		}
 		switch request.Method {
+		case protocol.MethodSessionGet:
+			if mode == "busysettle" {
+				// The run that refused the prompt has settled, so the
+				// session names none.
+				write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": protocol.GetResult{State: "idle"}})
+				continue
+			}
+			write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{}})
+		case protocol.MethodRunPrompt:
+			if mode == "busysettle" && runPrompts == 0 {
+				runPrompts++
+				write(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      request.ID,
+					"error": map[string]any{
+						"code":    protocol.CodeServerError,
+						"message": "the session already has a run",
+						"data":    map[string]any{"code": protocol.DataBusy},
+					},
+				})
+				continue
+			}
+			runPrompts++
+			write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": protocol.PromptResult{RunID: "run-busy"}})
+		case protocol.MethodRunInspect:
+			write(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      request.ID,
+				"result":  protocol.InspectResult{Settled: &protocol.Settled{RunID: "run-busy", Reason: "end_turn"}},
+			})
 		case protocol.MethodInitialize:
 			if mode == "version" {
 				write(map[string]any{

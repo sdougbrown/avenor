@@ -181,8 +181,11 @@ poo's settle reason is classified into avenor's closed stop-reason set, and the 
 
 A denial is not a failed run on this backend: poo hands the denied call back to the model as a tool result and the run continues, so the backend declares through `runtime.DenialRecovery` that a clean `end_turn` after a denied tool call is a completion. Backends that do not declare it keep the `tool_denied` reclassification.
 
-Teardown sends `session/close`, closes stdin, and gives the process 30 s to exit before `SIGTERM` and another 5 s before `SIGKILL`. `session/create`'s `session_dir` is recorded in the session's ownership identity, so Stage 3's resume can reopen the same records.
+A permission ask is not relayed yet. Stage 2 does not publish `permission.request` for poo's `permission/ask`, because the answer path (`AnswerPermission`) lands in Stage 3 and a relayed ask would start a resolver this backend cannot answer. The ask is left unanswered, so poo's own ask budget expires and the chain defers to its next asker, or to its fallback when the wire asker was the only one. Keep `wire` out of `permission.askers` in a poo entry's settings until Stage 3: with it in the chain, each ask costs the backend's ask budget (60 s unless the settings set `permission.chain_timeout_s`) before the run continues with the fallback decision. poo's own `permission.asked` and `permission.answered` records are delivered as `avenor.permission.asked` and `avenor.permission.answered`, the prefix every backend-specific record passes through.
 
+`Prompt` returns `nil` for every settle that is not a failure, like `pi`: `end_turn`, `max_tokens`, `max_turn_requests`, `rate_limited` and `quota_exhausted` all confirm the terminal event rather than reporting an error. Only `cancelled` and a generic failure (`error`) return one; the terminal event carries the reason and the exit code either way.
+
+Teardown sends `session/close`, closes stdin, and gives the process 30 s to exit before `SIGTERM` and another 5 s before `SIGKILL`. `session/create`'s `session_dir` is recorded in the session's ownership identity, so Stage 3's resume can reopen the same records, and its `mode` is recorded on the session without acting on it yet.
 
 ---
 

@@ -115,6 +115,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		Backend:    backendID,
 		Dir:        merged.Dir,
 		SessionDir: info.SessionDir,
+		Mode:       info.Mode,
 		PID:        c.pid(),
 	}, nil
 }
@@ -167,12 +168,17 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 // acceptInput starts a run, or steers the one already active.
 func (p *Provider) acceptInput(ctx context.Context, c *client, st *sessionState, text string) (string, error) {
 	if runID := st.activeRunID(); runID != "" {
-		return p.steer(ctx, c, st, runID, text)
+		return p.steer(ctx, c, st, runID, text, startRetries)
 	}
-	return p.startRun(ctx, c, st, text)
+	return p.startRun(ctx, c, st, text, startRetries)
 }
 
-func (p *Provider) startRun(ctx context.Context, c *client, st *sessionState, text string) (string, error) {
+// startRetries bounds the start/steer handoff. A run that settles while the
+// client is choosing between steering it and starting its own costs one retry;
+// a session that keeps refusing both is reported instead of retried forever.
+const startRetries = 1
+
+func (p *Provider) startRun(ctx context.Context, c *client, st *sessionState, text string, retries int) (string, error) {
 	raw, rpcErr, err := c.call(ctx, protocol.MethodRunPrompt, protocol.PromptParams{
 		SessionID: st.id,
 		Text:      text,
@@ -184,7 +190,7 @@ func (p *Provider) startRun(ctx context.Context, c *client, st *sessionState, te
 		if isRefusal(rpcErr, protocol.DataBusy) {
 			// A run the client has not observed yet owns the session, or a run
 			// woke it: steer that run instead of starting another.
-			return p.steerActive(ctx, c, st, text)
+			return p.steerActive(ctx, c, st, text, retries)
 		}
 		return "", fmt.Errorf("run/prompt: %s", describeRefusal(rpcErr))
 	}
@@ -200,19 +206,24 @@ func (p *Provider) startRun(ctx context.Context, c *client, st *sessionState, te
 }
 
 // steerActive steers the session's run without knowing its id yet.
-func (p *Provider) steerActive(ctx context.Context, c *client, st *sessionState, text string) (string, error) {
+func (p *Provider) steerActive(ctx context.Context, c *client, st *sessionState, text string, retries int) (string, error) {
 	runID, err := p.currentRunID(ctx, c, st.id)
 	if err != nil {
 		return "", err
 	}
 	if runID == "" {
-		return "", errors.New("poo reported the session busy but named no active run")
+		if retries <= 0 {
+			return "", errors.New("poo reported the session busy but named no active run")
+		}
+		// The run that refused the prompt settled before the session could name
+		// it, so there is nothing to steer: start the turn this prompt wanted.
+		return p.startRun(ctx, c, st, text, retries-1)
 	}
 	st.setActiveRun(runID)
-	return p.steer(ctx, c, st, runID, text)
+	return p.steer(ctx, c, st, runID, text, retries)
 }
 
-func (p *Provider) steer(ctx context.Context, c *client, st *sessionState, runID, text string) (string, error) {
+func (p *Provider) steer(ctx context.Context, c *client, st *sessionState, runID, text string, retries int) (string, error) {
 	_, rpcErr, err := c.call(ctx, protocol.MethodRunMessage, protocol.MessageParams{
 		SessionID: st.id,
 		Text:      text,
@@ -226,7 +237,10 @@ func (p *Provider) steer(ctx context.Context, c *client, st *sessionState, runID
 			// The run settled between the decision and the send: start the
 			// turn this prompt was meant to be.
 			st.setActiveRun("")
-			return p.startRun(ctx, c, st, text)
+			if retries <= 0 {
+				return "", fmt.Errorf("run/message: %s", describeRefusal(rpcErr))
+			}
+			return p.startRun(ctx, c, st, text, retries-1)
 		}
 		return "", fmt.Errorf("run/message: %s", describeRefusal(rpcErr))
 	}

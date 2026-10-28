@@ -463,9 +463,11 @@ func decodeSessionEvent(raw json.RawMessage) (sessionEvent, error) {
 	return ev, nil
 }
 
-// routeServerRequest publishes a permission ask to the session's observers. The
-// answer itself is not implemented: the ask id is the request id an answer
-// will carry.
+// routeServerRequest records a server request. poo's only server request is a
+// permission ask, and Stage 2 cannot answer one: publishing it as a
+// permission.request would start a resolver whose answer this backend refuses,
+// and the run would abort. The ask is therefore left unanswered, and poo's own
+// ask budget defers it to the next asker or to the chain's fallback.
 func (c *client) routeServerRequest(msg envelope) {
 	if msg.Method != protocol.MethodPermissionAsk {
 		c.stderr.Append(fmt.Sprintf("ignored unknown server request %q", msg.Method))
@@ -476,27 +478,9 @@ func (c *client) routeServerRequest(msg envelope) {
 		c.stderr.Append(fmt.Sprintf("dropped a malformed permission ask: %v", err))
 		return
 	}
-	if params.SessionID == "" {
-		return
-	}
-	c.deliver(events.Event{
-		Event:     "permission.request",
-		SessionID: params.SessionID,
-		Fields: map[string]any{
-			"request_id":  params.AskID,
-			"kind":        "confirm",
-			"question":    params.Summary,
-			"description": params.Summary,
-			"tool":        params.Tool,
-			"class":       params.Class,
-			"reason":      params.Reason,
-			"run_id":      params.RunID,
-			"options": []any{
-				map[string]any{"optionId": protocol.DecisionAllow, "kind": "allow"},
-				map[string]any{"optionId": protocol.DecisionDeny, "kind": "reject"},
-			},
-		},
-	})
+	c.stderr.Append(fmt.Sprintf(
+		"left permission ask %q for tool %q in session %q unanswered: this backend cannot answer it yet",
+		params.AskID, params.Tool, params.SessionID))
 }
 
 // deliver fans an event out to the session's subscribers, or holds it until a
@@ -547,16 +531,27 @@ func trySend(ch chan events.Event, ev events.Event) (sent bool) {
 
 func (c *client) subscribe(sessionID string, ch chan events.Event) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.subs == nil {
-		c.mu.Unlock()
 		return
 	}
 	c.subs[sessionID] = append(c.subs[sessionID], ch)
+	// The events held before this subscriber attached are published before the
+	// lock is released: a concurrent deliver that sees the subscriber therefore
+	// publishes a newer event after the held ones, never ahead of them.
+	c.flushHeldLocked(sessionID)
+}
+
+// flushHeldLocked publishes everything held for a session to its subscribers.
+// It runs under the client's lock and uses publish, so a drop is logged rather
+// than silently swallowed. The caller does not hold pending events for the
+// session; a release that does publishes those first.
+func (c *client) flushHeldLocked(sessionID string) {
 	held := c.held[sessionID]
-	c.held[sessionID] = nil
-	c.mu.Unlock()
+	delete(c.held, sessionID)
+	subs := c.subs[sessionID]
 	for _, ev := range held {
-		trySend(ch, ev)
+		publish(subs, ev, c)
 	}
 }
 
@@ -596,16 +591,14 @@ func (c *client) pauseEvents(sessionID string) func(*events.Event) {
 			delete(c.holds, sessionID)
 			submissions := c.submissions[sessionID]
 			delete(c.submissions, sessionID)
-			held := c.held[sessionID]
-			delete(c.held, sessionID)
-			subs := append([]chan events.Event(nil), c.subs[sessionID]...)
-			c.mu.Unlock()
+			// Both lists are published before the lock is released, so no
+			// concurrent deliver slips a newer event in front of them.
+			subs := c.subs[sessionID]
 			for _, ev := range submissions {
 				publish(subs, ev, c)
 			}
-			for _, ev := range held {
-				publish(subs, ev, c)
-			}
+			c.flushHeldLocked(sessionID)
+			c.mu.Unlock()
 		})
 	}
 }

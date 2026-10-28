@@ -38,15 +38,14 @@ func translateEvent(ev sessionEvent) []events.Event {
 		return []events.Event{toolResultEvent(ev)}
 	case "usage":
 		return []events.Event{usageEvent(ev)}
-	case "permission.asked", "permission.answered":
-		// The ask itself reaches avenor as the server's permission/ask
-		// request; these records are the durable echo beside it.
-		return []events.Event{passthrough("avenor."+ev.Type, ev)}
 	case "observer.dropped":
 		// A record-only diagnostic: the backend already coalesced it into
 		// the session's log, and it is never delivered to observers.
 		return nil
 	default:
+		// A record poo names for itself — the run's progress notes, the jobs,
+		// the retries, the permission echo — passes through under the same
+		// prefix every backend applies to the events it does not standardize.
 		return []events.Event{passthrough("avenor."+ev.Type, ev)}
 	}
 }
@@ -66,7 +65,9 @@ func cloneFields(fields map[string]any) map[string]any {
 func translateDelta(ev sessionEvent) []events.Event {
 	text, _ := ev.Fields["text"].(string)
 	if text == "" {
-		return []events.Event{passthrough("avenor.message.delta", ev)}
+		// A delta with no text carries nothing a consumer can read, so it is
+		// not published at all rather than as an event with an empty body.
+		return nil
 	}
 	name := "agent.message_chunk"
 	if kind, _ := ev.Fields["kind"].(string); kind == "thinking" {
@@ -298,10 +299,14 @@ func classifyFromEvent(settled *protocol.Settled) settleOutcome {
 	return classifySettle(settled.Reason, settled.Detail)
 }
 
-// settleError is Prompt's result for a run that did not complete cleanly.
+// settleError is Prompt's result for a settled run. The terminal event carries
+// the stop reason, so the error only reports the settles that are failures.
 func settleError(sessionID string, outcome settleOutcome) error {
 	switch outcome.StopReason {
-	case "end_turn":
+	case "end_turn", "max_tokens", "max_turn_requests", runtime.RateLimitedStopReason, runtime.QuotaExhaustedStopReason:
+		// A turn that ran out of room or hit a provider limit is not a prompt
+		// failure: the run loop reads the reason off the terminal event and
+		// decides there whether to continue, retry or stop.
 		return nil
 	case "cancelled":
 		return fmt.Errorf("turn cancelled for session %s", sessionID)
