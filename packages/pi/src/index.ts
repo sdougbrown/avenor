@@ -2954,10 +2954,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 // These adapters use Pi's shared bus and do not create a second bus.
 export {
   CHANNEL_DELIVERY_ERROR,
+  CHANNEL_LAST_TURN_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   createDeliveryErrorPayload,
+  createLastTurnErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -2972,6 +2974,8 @@ export type {
   DeliveryErrorPayload,
   DeliveryErrorPayloadInput,
   DeliveryErrorSource,
+  LastTurnErrorPayload,
+  LastTurnErrorPayloadInput,
   PollCompletedPayload,
   PollErrorPayload,
   PollErrorPayloadInput,

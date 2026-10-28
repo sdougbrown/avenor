@@ -1,10 +1,12 @@
 import { describe, expect, it, mock } from 'bun:test'
 import type { EventBus } from '@earendil-works/pi-coding-agent'
 import {
+  CHANNEL_LAST_TURN_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   createDeliveryErrorPayload,
+  createLastTurnErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -312,6 +314,48 @@ describe('Avenor telemetry event bridge', () => {
       timestamp: 1_700_000_000_000,
     })
     expect(Object.isFrozen(payload)).toBe(true)
+  })
+
+  it('copies and freezes a last-turn error with sanitized text', () => {
+    const payload = createLastTurnErrorPayload({
+      message: 'session_last_set failed',
+      error: 'control socket is closed',
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload).toEqual({
+      message: 'session_last_set failed',
+      error: 'control socket is closed',
+      timestamp: 1_700_000_000_000,
+    })
+    expect(Object.isFrozen(payload)).toBe(true)
+  })
+
+  it('uses unknown error for empty last-turn text after sanitizing', () => {
+    const payload = createLastTurnErrorPayload({
+      message: '\u001b[31m\n\t  \n',
+      error: '\u001b[31m\u001b[0m',
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload.message).toBe('unknown error')
+    expect(payload.error).toBe('unknown error')
+    expect(Object.isFrozen(payload)).toBe(true)
+  })
+
+  it('sanitizes last-turn message while bounding error independently', () => {
+    const longMessage = 'a'.repeat(700)
+    const longError = 'b'.repeat(800)
+    const payload = createLastTurnErrorPayload({
+      message: longMessage,
+      error: longError,
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload.message).toHaveLength(600)
+    expect(payload.message).toEndWith('…')
+    expect(payload.error).toHaveLength(600)
+    expect(payload.error).toEndWith('…')
   })
 
   it('uses unknown error for an empty delivery failure and bounds both texts', () => {

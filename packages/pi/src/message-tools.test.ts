@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, mock } from 'bun:test'
 import conformance from '../../../schemas/message_route.conformance.json'
 import resultFixture from '../../../schemas/message_route.result.json'
 import { ClosedSocketError, messageTool as realMessageTool, renderLast, RpcError, type MessageProvider } from '@dougbots/avenor-core'
+import { CHANNEL_LAST_TURN_ERROR } from './index.js'
 import { makeMessageProvider, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 const openHarnesses: Array<{
@@ -294,8 +295,13 @@ describe('Pi host turn producer', () => {
     expect(record).toHaveBeenCalledTimes(2)
     expect(harness.notify).toHaveBeenCalledTimes(1)
     // Suppressed repeats stay observable: every failure is emitted on the
-    // last-turn error channel, even when the toast is latched.
-    expect(harness.emitted.filter(([channel]) => channel === 'avenor:last-turn:error')).toHaveLength(2)
+    // last-turn error channel, even when the toast is latched, with the
+    // failure text as the payload's error.
+    const lastTurnErrors = harness.emitted.filter(([channel]) => channel === CHANNEL_LAST_TURN_ERROR)
+    expect(lastTurnErrors).toHaveLength(2)
+    const [, payload] = lastTurnErrors[1] as [{}, { message: string; error: string }]
+    expect(payload.message).toBe('session_last_set failed')
+    expect(payload.error).toBe('broker down')
     await harness.eventHandlers.session_shutdown({}, {})
   })
 
