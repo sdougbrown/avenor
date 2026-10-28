@@ -131,6 +131,7 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 			runID:            req.RunID,
 			labelReservation: true,
 			implicitLabel:    req.Label == "",
+			mcpOrigin:        req.MCP,
 		},
 	}
 	spawned, err := s.resumeOnce(prior, runID, params)
@@ -193,6 +194,14 @@ func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams
 		return result, err
 	}
 	p.SessionID = sessionID
+	if p.resume.mcpOrigin {
+		// An MCP-originated resume re-execs the prior run's inherited launch, and
+		// nothing else on this path reads it: gate it exactly as spawn_mcp gates a
+		// resume it is handed.
+		if _, _, err := s.gateMCPLaunch(p); err != nil {
+			return result, err
+		}
+	}
 	result, err = s.spawn(p)
 	if err != nil {
 		return result, err

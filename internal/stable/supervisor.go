@@ -252,6 +252,10 @@ type resumeSpawn struct {
 	// A cold continuation uses its own follow-up label to avoid ambiguity
 	// with the completed runtime's broker record.
 	implicitLabel bool
+	// mcpOrigin marks a resume an MCP surface drove. The cold arm gates the
+	// inherited launch such a resume re-execs; a trusted caller's resume does
+	// not pay for the extra read.
+	mcpOrigin bool
 }
 
 type SpawnResult struct {
@@ -5293,6 +5297,22 @@ func (s *Supervisor) authorizeMCPLaunchFields(backend string, p SpawnParams) err
 	return fmt.Errorf("%s: launch fields are disabled for MCP spawns (%s)", subject, field)
 }
 
+// gateMCPLaunch resolves one MCP-originated spawn's effective identity and
+// refuses a launch the caller chose. Every surface that can re-exec an
+// inherited launch shares it — the spawn_mcp verb and the message tool's
+// resume — so the check and the error it renders exist once. It must run
+// before reservations, idempotency, or any process creation.
+func (s *Supervisor) gateMCPLaunch(params SpawnParams) (SpawnParams, string, error) {
+	resolved, backend, err := s.resolveDirectSpawnIdentity(params)
+	if err != nil {
+		return params, backend, err
+	}
+	if err := s.authorizeMCPLaunchFields(backend, resolved); err != nil {
+		return params, backend, err
+	}
+	return resolved, backend, nil
+}
+
 // authorizeMCPLaunchWrapper enforces the supervisor's MCP launch policy for a
 // spawn_mcp request: the launch fields a selected roster entry sets and the
 // launch wrapper argv. Both are taken from the effective identity — the argv and
@@ -5308,11 +5328,8 @@ func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) error {
 	// Resolve even when the request omits the wrapper: a resume inherits the
 	// session's authoritative wrapper, and the inherited argv is the argv that
 	// will be exec'd — it needs the same gate.
-	resolved, backend, err := s.resolveDirectSpawnIdentity(params)
+	resolved, _, err := s.gateMCPLaunch(params)
 	if err != nil {
-		return err
-	}
-	if err := s.authorizeMCPLaunchFields(backend, resolved); err != nil {
 		return err
 	}
 	if len(resolved.LaunchWrapper) == 0 {
