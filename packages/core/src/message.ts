@@ -66,6 +66,8 @@ export interface ProviderResult {
 
 export interface Resolution {
   runId: string
+  /** The authority's run ID when runId is an internal routing handle. */
+  resolvedRunId?: string
   publicRunId?: string
   match: 'unique' | 'ambiguous' | 'none'
   label?: string
@@ -807,7 +809,7 @@ export async function executeMessage(
   }
   conditions.targetLive = facts.live
   conditions.targetResumable = facts.resumable
-  const stateDenied = stateDenial(action, conditions, resolution.runId, facts.status)
+  const stateDenied = stateDenial(action, conditions, resolution.resolvedRunId ?? resolution.runId, facts.status)
   if (stateDenied) throw stateDenied
 
   switch (action) {
@@ -902,7 +904,7 @@ export async function executePeers(
     text,
     last: {
       run_id: runId,
-      runtime_id: resolution.runId,
+      runtime_id: last.runtimeId ?? resolution.runId,
       label,
       final_output: last.finalOutput ?? '',
       stop_reason: last.stopReason ?? '',

@@ -108,3 +108,27 @@ test('in-flight resolution keeps its authority when a local supervisor is replac
   await p.tell(current.runId, 'new')
   expect(sent).toEqual(['first:child', 'second:child'])
 })
+
+test('peers last exposes actual central and local runtime IDs with public run identity intact', async () => {
+  const { peersTool } = await import('@dougbots/avenor-core')
+  const local = provider('local', [{ run_id: 'rt_1', label: 'child' }], [])
+  local.resolve = async () => ({ runId: 'rt_1', publicRunId: 'run-public', label: 'child', match: 'unique' })
+  const p = combinePeerProviders(local, provider('central', [{ run_id: 'central', label: 'self-name' }], []))
+  const self = await peersTool({ action: 'last', target: 'self' }, p)
+  expect(self.last?.runtime_id).toBe('central')
+  expect(self.last?.run_id).toBe('central')
+  const child = await peersTool({ action: 'last', target: 'child' }, p)
+  expect(child.last?.runtime_id).toBe('rt_1')
+  expect(child.last?.run_id).toBe('run-public')
+})
+
+test('state-denial text identifies the runtime instead of its internal routing key', async () => {
+  const { messageTool } = await import('@dougbots/avenor-core')
+  const local = provider('local', [{ run_id: 'rt_1', label: 'child' }], [])
+  local.resolve = async () => ({ runId: 'rt_1', publicRunId: 'run-public', label: 'child', match: 'unique' })
+  local.state = async () => ({ live: false, resumable: false, status: 'done' })
+  const p = combinePeerProviders(local, provider('central', [], []))
+  const error = await messageTool({ action: 'tell', target: 'child', message: 'hello' }, p).catch(error => error)
+  expect(error.message).toContain('rt_1')
+  expect(error.message).not.toContain('[0,')
+})

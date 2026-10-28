@@ -626,7 +626,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let topLevelEnv: SubAgentEnv | null = null
     let centralSessionAbort: AbortController | null = null
     let centralTurnWrites: Promise<void> = Promise.resolve()
-    let centralPendingTurn: { generation: number; final_output: string; stop_reason: string; truncated: boolean } | null = null
+    let centralTurnSequence = 0
+    let centralPendingTurn: { sequence: number; generation: number; final_output: string; stop_reason: string; truncated: boolean } | null = null
     let topLevelRegistered = false
     let topLevelError: Error | null = null
     let topLevelTerminal = false
@@ -1817,7 +1818,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (!record || record.generation !== generation) return
           try {
             await postBroker(env, '/last_message', {
-              final_output: record.final_output, stop_reason: record.stop_reason, truncated: record.truncated,
+              sequence: record.sequence, final_output: record.final_output, stop_reason: record.stop_reason, truncated: record.truncated,
             }, fetch, signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000))
             if (centralPendingTurn === record) centralPendingTurn = null
           } catch (error) {
@@ -1862,7 +1863,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const stopReason = normalizeTurnStopReason(turn.stopReason)
       const truncated = turn.text.length > bounded.length
       if (topLevelBrokerUrl) {
-        centralPendingTurn = { generation: sessionGeneration, final_output: bounded, stop_reason: stopReason, truncated }
+        centralPendingTurn = { sequence: ++centralTurnSequence, generation: sessionGeneration, final_output: bounded, stop_reason: stopReason, truncated }
       }
       const centralWrite = publishCentralTurn()
       // Nobody can read a last-turn record while no supervisor exists, and
@@ -1927,6 +1928,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           topLevelEnv ??= createTopLevelPeerEnv(topLevelBrokerUrl)
           if (!centralProvider) {
             centralTurnWrites = Promise.resolve()
+            centralTurnSequence = 0
             centralSessionAbort = new AbortController()
             const sessionAbort = centralSessionAbort
             centralProvider = createChildMessageProvider({

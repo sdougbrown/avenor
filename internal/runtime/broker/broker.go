@@ -161,7 +161,8 @@ type RunState struct {
 	Info *SessionInfo
 	// LastMessage is the run's most recent completed turn, written by the
 	// recorder and the host turn producer. Nil means no turn was recorded.
-	LastMessage *LastAgentMessage
+	LastMessage          *LastAgentMessage
+	peerLastTurnSequence uint64
 
 	// descendant records that this broker holds only because a registered child
 	// broker claimed the run. Set when the record is adopted and read under the
@@ -2410,20 +2411,24 @@ func (b *Broker) SetLastAgentMessage(runID, text, stopReason string, truncated b
 	if st == nil {
 		return fmt.Errorf("run not found: %s", runID)
 	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	setLastAgentMessageLocked(st, text, stopReason, truncated)
+	return nil
+}
+
+func setLastAgentMessageLocked(st *RunState, text, stopReason string, truncated bool) {
 	bounded := events.BoundedFinalOutput(text)
 	if bounded != text {
 		truncated = true
 	}
-	st.Mu.Lock()
-	defer st.Mu.Unlock()
 	st.LastMessage = &LastAgentMessage{
-		RunID:      runID,
+		RunID:      st.RunID,
 		Text:       bounded,
 		StopReason: stopReason,
 		Truncated:  truncated,
 		At:         time.Now().UnixMilli(),
 	}
-	return nil
 }
 
 // LastAgentMessage returns runID's recorded last turn. ok is false when no turn

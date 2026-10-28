@@ -69,7 +69,7 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
       if (resolved.match !== 'unique') throw new Error('the peer changed during resolution')
       const key = JSON.stringify([authority(hit.provider), resolved.runId, resolved.publicRunId])
       routes.set(key, { provider: hit.provider, id: resolved.runId, publicId: resolved.publicRunId })
-      return { ...resolved, runId: key, publicRunId: resolved.publicRunId ?? hit.peer.run_id }
+      return { ...resolved, runId: key, resolvedRunId: resolved.runId, publicRunId: resolved.publicRunId ?? hit.peer.run_id }
     },
     controlReply: (target, payload) => {
       const host = local()
@@ -82,7 +82,11 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
       const r = route(key)
       return remember(r.provider, r.provider.ask(r.id, message, timeout, signal, r.publicId))
     },
-    last: (key) => { const r = route(key); return r.provider.last(r.id, r.publicId) },
+    async last(key) {
+      const r = route(key)
+      const result = await r.provider.last(r.id, r.publicId)
+      return { ...result, runtimeId: result.runtimeId ?? r.id }
+    },
     async resume(req) {
       const r = route(req.target)
       const result = await r.provider.resume({ ...req, target: r.id })

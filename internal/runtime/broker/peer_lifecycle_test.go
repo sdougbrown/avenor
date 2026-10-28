@@ -259,7 +259,7 @@ func TestPeerPublishesOnlyOwnLastTurn(t *testing.T) {
 		t.Fatal(code)
 	}
 	ensureRun(t, b, "victim", "victim")
-	body := map[string]any{"run_id": "peer", "token": "secret", "final_output": "finished work", "stop_reason": "end_turn", "truncated": true}
+	body := map[string]any{"run_id": "peer", "token": "secret", "final_output": "finished work", "sequence": 1, "stop_reason": "end_turn", "truncated": true}
 	if code, result := peerPost(t, b, "/last_message", body); code != http.StatusOK || result["ok"] != true {
 		t.Fatalf("record = %d %v", code, result)
 	}
@@ -294,5 +294,73 @@ func TestPeerPublishesOnlyOwnLastTurn(t *testing.T) {
 	delete(body, "target")
 	if code, _ := peerPost(t, b, "/last_message", body); code != http.StatusGone {
 		t.Fatalf("retired write = %d", code)
+	}
+}
+
+func TestPeerLastTurnSequenceFencesDelayedOlderRequests(t *testing.T) {
+	b := peerBroker(t)
+	peer := map[string]any{"run_id": "peer", "token": "secret", "peer": true}
+	if code, _ := peerPost(t, b, "/register", peer); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.URL()+"/last_message", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	olderDone := make(chan int, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			olderDone <- 0
+			return
+		}
+		defer resp.Body.Close()
+		olderDone <- resp.StatusCode
+	}()
+	if _, err := writer.Write([]byte(`{"run_id":"peer","token":"secret","sequence":1,`)); err != nil {
+		t.Fatal(err)
+	}
+	newer := map[string]any{"run_id": "peer", "token": "secret", "sequence": 2, "final_output": "newer", "stop_reason": "end_turn"}
+	if code, _ := peerPost(t, b, "/last_message", newer); code != http.StatusOK {
+		t.Fatalf("newer = %d", code)
+	}
+	if _, err := writer.Write([]byte(`"final_output":"older","stop_reason":"end_turn"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-olderDone; code != http.StatusOK {
+		t.Fatalf("delayed older = %d", code)
+	}
+	newer["final_output"] = "different duplicate body"
+	if code, _ := peerPost(t, b, "/last_message", newer); code != http.StatusOK {
+		t.Fatalf("retry = %d", code)
+	}
+	last, ok := b.LastAgentMessage("peer")
+	if !ok || last.Text != "newer" {
+		t.Fatalf("last after delayed/retried writes = %+v, %v", last, ok)
+	}
+}
+
+func TestPeerLastTurnRequiresPositiveIntegerSequence(t *testing.T) {
+	b := peerBroker(t)
+	if code, _ := peerPost(t, b, "/register", map[string]any{"run_id": "peer", "token": "secret", "peer": true}); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	for _, sequence := range []any{nil, 0, -1, 1.5, "1", uint64(9007199254740992)} {
+		body := map[string]any{"run_id": "peer", "token": "secret", "final_output": "invalid"}
+		if sequence != nil {
+			body["sequence"] = sequence
+		}
+		if code, _ := peerPost(t, b, "/last_message", body); code != http.StatusBadRequest {
+			t.Fatalf("sequence %v = %d", sequence, code)
+		}
 	}
 }

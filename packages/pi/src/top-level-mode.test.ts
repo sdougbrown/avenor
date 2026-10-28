@@ -323,3 +323,43 @@ test('a pending turn from failed registration is cleared before a new session re
     expect(records).toEqual(['current session'])
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
+
+test('last-turn retries preserve sequence and delayed older commits cannot replace the newer turn', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  const attempts: Array<Record<string, unknown>> = []
+  const state: { latest: Record<string, unknown> | null } = { latest: null }
+  let highest = 0
+  function commit(record: Record<string, unknown>) {
+    if (Number(record.sequence) > highest) { highest = Number(record.sequence); state.latest = record }
+  }
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    if (new URL(String(url)).pathname === '/last_message' && init?.method === 'POST') {
+      const body = JSON.parse(String(init.body))
+      attempts.push(body)
+      if (attempts.length === 1) throw new Error('response lost; remote request still in flight')
+      commit(body)
+      return Response.json({ ok: true })
+    }
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { Supervisor: class { static currentInstance() { return undefined } } as never },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test' },
+    })
+    await h.eventHandlers.turn_end({ message: { content: 'older turn', stopReason: 'stop' } })
+    await waitFor(() => state.latest?.final_output === 'older turn')
+    await h.eventHandlers.turn_end({ message: { content: 'newer turn', stopReason: 'stop' } })
+    commit(attempts[0])
+    expect(attempts.map(r => r.sequence)).toEqual([1, 1, 2])
+    expect(state.latest?.final_output).toBe('newer turn')
+    await h.eventHandlers.session_shutdown({}, {})
+    await h.eventHandlers.session_start({}, h.ctx)
+    highest = 0
+    await h.eventHandlers.turn_end({ message: { content: 'new session', stopReason: 'stop' } })
+    expect(attempts.at(-1)?.sequence).toBe(1)
+    expect(attempts.at(-1)?.run_id).not.toBe(attempts[0].run_id)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
