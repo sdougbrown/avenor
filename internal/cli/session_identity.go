@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/sdougbrown/avenor/internal/backendlaunch"
 )
 
 // cliSessionIdentity is the complete provider identity attached to a session
@@ -16,12 +18,17 @@ type cliSessionIdentity struct {
 	model         string
 	agentProfile  string
 	launchWrapper []string
+	launch        backendlaunch.Spec
+	// sessionDir reserves the session directory a backend reports from its
+	// create handshake. Stage 2 records it; an empty value means the backend
+	// has not reported one.
+	sessionDir string
 }
 
-// equal compares two identities field by field. The launch wrapper is a slice,
-// so identities cannot be compared with ==.
+// equal compares two identities field by field. The launch wrapper and args
+// are slices, so identities cannot be compared with ==.
 func (a cliSessionIdentity) equal(b cliSessionIdentity) bool {
-	return a.backend == b.backend && a.agent == b.agent && a.model == b.model && a.agentProfile == b.agentProfile && slices.Equal(a.launchWrapper, b.launchWrapper)
+	return a.backend == b.backend && a.agent == b.agent && a.model == b.model && a.agentProfile == b.agentProfile && slices.Equal(a.launchWrapper, b.launchWrapper) && a.launch.Equal(b.launch) && a.sessionDir == b.sessionDir
 }
 
 // sessionBackendMap records the complete identity that owns each session ID
@@ -97,6 +104,10 @@ func (m *sessionBackendMap) resolveResume(sessionID string, supplied cliSessionI
 	if len(supplied.launchWrapper) > 0 && !slices.Equal(supplied.launchWrapper, authoritative.launchWrapper) {
 		return cliSessionIdentity{}, fmt.Errorf("cannot resume session %q with launch_wrapper %q: session belongs to launch_wrapper %q", sessionID,
 			launchWrapperDisplay(supplied.launchWrapper), launchWrapperDisplay(authoritative.launchWrapper))
+	}
+	if field := backendlaunch.Diff(supplied.launch, authoritative.launch); field != "" {
+		return cliSessionIdentity{}, fmt.Errorf("cannot resume session %q with %s %q: session belongs to %s %q", sessionID,
+			field, supplied.launch.Value(field), field, authoritative.launch.Value(field))
 	}
 	return authoritative, nil
 }
