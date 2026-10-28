@@ -83,10 +83,12 @@ import {
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   createDeliveryErrorPayload,
+  createLastTurnErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
   emitAvenorEvent,
+  CHANNEL_LAST_TURN_ERROR,
 } from './events.js'
 import type { PollErrorPayload } from './events.js'
 import {
@@ -451,17 +453,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // idle completion sent during compaction can be rejected by the prompt
     // path, so delivery waits and leaves the notice unread.
     let compacting = false
-    // A closed-socket last-turn failure is reported once per episode. The
-    // attempt itself keeps running on every turn, so a healthy supervisor is
-    // picked up without a session restart. A report latches until a record
-    // succeeds again, the host providers are rebound wholesale, or a new
-    // session starts; the guard also clears the latch when the supervisor
-    // instance object changes, because a replacement supervisor starts its own
-    // episode and supervisorId (the socket path) is constant within one
-    // process. Evicting one binding must not reset the latch, or an unhealthy
-    // supervisor would be re-reported on every turn end.
-    let lastTurnSocketClosed = false
-    let lastTurnSocketClosedFor: unknown = null
+    // A last-turn record failure is reported once per episode, keyed on the
+    // supervisor instance object (supervisorId is the socket path, which is
+    // constant across replacements within one process); null means no latch.
+    // The latch clears when a record succeeds again, the host providers are
+    // rebound wholesale, or a new session starts; the guard also clears it
+    // when the supervisor instance changes, because a replacement supervisor
+    // starts its own episode. Evicting one binding must not clear the latch,
+    // or an unhealthy supervisor would be re-reported on every turn end.
+    let lastTurnFailureReportedFor: unknown = null
 
     // Registry of in-flight blocking waits (avenor_result, spawn with
     // wait=true). When any run reaches a stopping point — a terminal state, a
@@ -1635,7 +1635,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function disposeHostProviders(): void {
       for (const key of [...hostProviders.keys()]) disposeHostProvider(key)
       hostAskClaims.clear()
-      lastTurnSocketClosed = false
+      lastTurnFailureReportedFor = null
     }
 
     async function defaultHostProviderFor(supervisorId: string | undefined): Promise<MessageProvider> {
@@ -1718,20 +1718,22 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return hostMessageProvider(supervisorId)
     }
 
-    // Report a failed last-turn record without disrupting the interactive TUI.
-    // Every failure is recorded through the poll-error buffer and its event
-    // channel, so a suppressed repeat stays observable. The first failure in
-    // an episode additionally raises ui.notify — Pi's TUI-safe channel in
-    // every mode; console.error is the fallback for a session that has no UI
-    // context yet. A report latches until a record succeeds again, the
-    // instance is replaced, the providers rebind wholesale, or a new session
-    // starts, so a persistently failing record cannot raise a toast on every
-    // turn end.
+    // Report a failed last-turn record without disrupting the interactive
+    // TUI. Every failure is emitted on the last-turn error channel, so a
+    // suppressed repeat stays observable. The first failure in an episode
+    // additionally raises ui.notify — Pi's TUI-safe channel in every mode;
+    // console.error is the fallback for a session that has no UI context
+    // yet. The episode latches until a record succeeds again, the instance is
+    // replaced, the providers rebind wholesale, or a new session starts, so a
+    // persistently failing record cannot raise a toast on every turn end.
     function reportLastTurnFailure(message: string, instance: unknown): void {
-      recordPollingError('last-turn', 'failed to record the host last turn', message)
-      if (lastTurnSocketClosed) return
-      lastTurnSocketClosed = true
-      lastTurnSocketClosedFor = instance
+      emitAvenorEvent(pi.events, CHANNEL_LAST_TURN_ERROR, createLastTurnErrorPayload({
+        message: 'session_last_set failed',
+        error: message,
+        timestamp: Date.now(),
+      }))
+      if (lastTurnFailureReportedFor !== null) return
+      lastTurnFailureReportedFor = instance
       const text = `[avenor] session_last_set failed: ${message}`
       if (sessionCtx) sessionCtx.ui.notify(text, 'warning')
       else console.error(text)
@@ -1754,7 +1756,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // a dead predecessor must not suppress this instance's first failure.
       // The key is the instance object: supervisorId is the socket path, which
       // is constant across replacements within one process.
-      if (instance !== lastTurnSocketClosedFor) lastTurnSocketClosed = false
+      if (instance !== lastTurnFailureReportedFor) lastTurnFailureReportedFor = null
       try {
         instance.getClient()
       } catch (error) {
@@ -1773,7 +1775,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           normalizeTurnStopReason(turn.stopReason),
           turn.text.length > bounded.length,
         )
-        lastTurnSocketClosed = false
+        lastTurnFailureReportedFor = null
       } catch (error) {
         if (isClosedSocketError(error)) {
           // Evict only the binding whose record failed: a concurrent tool call
@@ -1796,8 +1798,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // polling the same way resumeAfterCompaction does.
       if (trackedRuns.size > 0) startPolling()
       lastStatusEntries = []
-      lastTurnSocketClosed = false
-      lastTurnSocketClosedFor = null
+      lastTurnFailureReportedFor = null
       pollingErrorCount = 0
       pollingErrors.length = 0
       publishedSessionName = null

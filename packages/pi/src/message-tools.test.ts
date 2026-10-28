@@ -293,9 +293,9 @@ describe('Pi host turn producer', () => {
     // turn.
     expect(record).toHaveBeenCalledTimes(2)
     expect(harness.notify).toHaveBeenCalledTimes(1)
-    // Suppressed repeats stay observable: every failure is buffered on the
-    // poll-error channel, even when the toast is latched.
-    expect(harness.emitted.filter(([channel]) => channel === 'avenor:poll:error')).toHaveLength(2)
+    // Suppressed repeats stay observable: every failure is emitted on the
+    // last-turn error channel, even when the toast is latched.
+    expect(harness.emitted.filter(([channel]) => channel === 'avenor:last-turn:error')).toHaveLength(2)
     await harness.eventHandlers.session_shutdown({}, {})
   })
 

@@ -1773,6 +1773,37 @@ describe('OpenCode host turn producer', () => {
     expect(hostProviderOptions).toHaveLength(2)
   })
 
+  it('keeps a concurrently re-cached binding when the failed publish drops', async () => {
+    const dialsBefore = getSupervisorClientMock.mock.calls.length
+    // The failing publish first rebinds through a host tool (a restarted
+    // supervisor hands back a fresh client), then throws. The drop must not
+    // discard the fresh binding: the next publish runs on it.
+    let hooksRef: { tool?: Record<string, { execute: (id: string, args: Record<string, unknown>) => Promise<unknown> }> } | undefined
+    let dial = 0
+    const client1 = { messagePreflight: mock(async () => ({ generation: 'gen-1' })) }
+    const client2 = { messagePreflight: mock(async () => ({ generation: 'gen-2' })) }
+    getSupervisorClientMock.mockImplementation(async () => {
+      dial++
+      return { client: dial === 1 ? client1 : client2, supervisorId: '/tmp/avenor.sock', isSingleton: true, sup: null }
+    })
+    const healthy = mock(async (_text: string, _stop: string, _truncated: boolean) => {})
+    const record = mock(async () => {
+      providerFactory = () => makeProvider({ recordLastTurn: healthy })
+      await (hooksRef?.tool?.avenor_peers as any)?.execute({ action: 'list' }, toolContext('session-1'))
+      throw new ClosedSocketError('control socket is closed')
+    })
+    providerFactory = () => makeProvider({ recordLastTurn: record })
+    const producer = makeProducerClient({ 'msg-1': [{ type: 'text', text: 'one' }] })
+    const hooks = await AvenorPlugin(makeCtx({ client: producer.client }) as any)
+    hooksRef = hooks as any
+    await bindSession(hooks, 'session-1')
+    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    // The fresh binding survived the drop, so the next publish runs on it.
+    await turn(hooks, assistant('msg-1', { finish: 'stop' }))
+    expect(healthy).toHaveBeenCalledWith('one', 'end_turn', false)
+    expect(getSupervisorClientMock).toHaveBeenCalledTimes(dialsBefore + 2)
+  })
+
   it('keeps the bound session when a crash rebind races another session', async () => {
     // After the closed-socket drop, a host tool from another session refreshes
     // the provider but keeps the session that first ran a host tool.

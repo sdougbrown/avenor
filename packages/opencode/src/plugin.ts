@@ -816,11 +816,11 @@ export const AvenorPlugin: Plugin = async (ctx) => {
       publishedTurn = { created, id: messageId }
     } catch (error) {
       if (isClosedSocketError(error)) {
-        // The cached client is dead: drop it so the next host tool redials
-        // through boundHostProvider, which keeps the bound session. The
-        // binding stays, so publishes skip quietly until that rebind; the log
+        // Drop only the cached client whose publish failed: a concurrent bind
+        // may have just cached a fresh one, mirroring the pi-side guard. The
+        // binding stays, so publishes skip quietly until a rebind; the log
         // line below is the one observable record.
-        hostProvider = undefined
+        if (!hostProvider || hostProvider.binding.provider === binding.provider) hostProvider = undefined
       }
       console.error('[avenor] session_last_set failed:', error instanceof Error ? error.message : error)
     }

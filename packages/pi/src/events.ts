@@ -25,8 +25,24 @@ export const CHANNEL_POLL_ERROR = 'avenor:poll:error' as const
 
 /** Emitted when a completion-notice delivery fails permanently. */
 export const CHANNEL_DELIVERY_ERROR = 'avenor:delivery:error' as const
+export const CHANNEL_LAST_TURN_ERROR = 'avenor:last-turn:error' as const
 
-export type PollErrorSource = 'singleton-list' | 'run-status' | 'spawn-status' | 'last-turn'
+export interface LastTurnErrorPayload {
+  /** Human-readable failure description. */
+  readonly message: string
+  /** Bounded, sanitized error text suitable for debug consumers. */
+  readonly error: string
+  /** Wall-clock timestamp in epoch milliseconds. */
+  readonly timestamp: number
+}
+
+export interface LastTurnErrorPayloadInput {
+  readonly message: string
+  readonly error: unknown
+  readonly timestamp: number
+}
+
+export type PollErrorSource = 'singleton-list' | 'run-status' | 'spawn-status'
 
 /** Delivery paths whose retries can be exhausted. */
 export type DeliveryErrorSource = 'idle-send'
@@ -128,6 +144,7 @@ export interface AvenorEventMap {
   [CHANNEL_RUN_TERMINAL]: RunTerminalPayload
   [CHANNEL_POLL_ERROR]: PollErrorPayload
   [CHANNEL_DELIVERY_ERROR]: DeliveryErrorPayload
+  [CHANNEL_LAST_TURN_ERROR]: LastTurnErrorPayload
 }
 
 export type AvenorEventChannel = keyof AvenorEventMap
@@ -226,6 +243,17 @@ export function createDeliveryErrorPayload(
     message: sanitizeAndBoundText(payload.message),
     error: sanitizeAndBoundText(payload.error),
     attempts: payload.attempts,
+    timestamp: payload.timestamp,
+  })
+}
+
+/** Copy, bound, sanitize, and freeze a last-turn error before publishing it. */
+export function createLastTurnErrorPayload(
+  payload: LastTurnErrorPayloadInput,
+): LastTurnErrorPayload {
+  return Object.freeze({
+    message: sanitizeAndBoundText(payload.message),
+    error: sanitizeAndBoundText(payload.error),
     timestamp: payload.timestamp,
   })
 }
