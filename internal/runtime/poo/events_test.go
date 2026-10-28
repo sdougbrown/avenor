@@ -104,3 +104,46 @@ func TestBackendRecordsTakeTheSharedPrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestToolResultEventMapsOutcomeToStatus pins what a consumer reads off a tool
+// result: the kind, the title naming the tool, and the two-state status poo's
+// own outcome reduces to.
+func TestToolResultEventMapsOutcomeToStatus(t *testing.T) {
+	cases := []struct {
+		outcome string
+		status  string
+	}{
+		{outcome: "ok", status: "completed"},
+		{outcome: "started", status: "completed"},
+		{outcome: "skipped", status: "completed"},
+		{outcome: "error", status: "failed"},
+		{outcome: "denied", status: "failed"},
+		{outcome: "cancelled", status: "failed"},
+		{outcome: "interrupted", status: "failed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.outcome, func(t *testing.T) {
+			got := translateEvent(sessionEvent{
+				SessionID: "ses_1",
+				Type:      "tool.result",
+				Fields:    map[string]any{"tool": "shell", "outcome": tc.outcome},
+			})
+			if len(got) != 1 {
+				t.Fatalf("outcome %q produced %d events, want one", tc.outcome, len(got))
+			}
+			if got[0].Event != "tool.call_update" {
+				t.Fatalf("event = %q, want tool.call_update", got[0].Event)
+			}
+			if status, _ := got[0].Fields["status"].(string); status != tc.status {
+				t.Fatalf("outcome %q became status %q, want %q", tc.outcome, status, tc.status)
+			}
+			if kind, _ := got[0].Fields["kind"].(string); kind != "tool" {
+				t.Fatalf("kind = %q, want tool", kind)
+			}
+			if title, _ := got[0].Fields["title"].(string); title != "shell" {
+				t.Fatalf("title = %q, want the tool name", title)
+			}
+		})
+	}
+}

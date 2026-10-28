@@ -185,7 +185,7 @@ A permission ask is not relayed yet. Stage 2 does not publish `permission.reques
 
 `Prompt` returns `nil` for every settle that is not a failure, like `pi`: `end_turn`, `max_tokens`, `max_turn_requests`, `rate_limited` and `quota_exhausted` all confirm the terminal event rather than reporting an error. Only `cancelled` and a generic failure (`error`) return one; the terminal event carries the reason and the exit code either way.
 
-Teardown sends `session/close`, closes stdin, and gives the process 30 s to exit before `SIGTERM` and another 5 s before `SIGKILL`. `session/create`'s `session_dir` is recorded in the session's ownership identity, so Stage 3's resume can reopen the same records, and its `mode` is recorded on the session without acting on it yet.
+Teardown sends `session/close`, closes stdin, and gives the process 30 s to exit before `SIGTERM` and another 5 s before `SIGKILL`. `session/create`'s `session_dir` and `mode` are kept on the backend's own per-session state for Stage 3's `Resume`; neither is part of the shared session identity, which nothing reads yet.
 
 ---
 
