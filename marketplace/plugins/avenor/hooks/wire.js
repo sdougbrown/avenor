@@ -99,31 +99,37 @@ export function parseControlMessage(msg) {
     payload = safeParse(payload)
   }
   const body = payload === null || typeof payload !== "object" ? {} : payload
-  const fromRunId = typeof body.from_run_id === "string" ? body.from_run_id
+  // The broker stamps the sender on the queued row, and a sender cannot write
+  // that. The payload's copies are only a fallback for a row queued without one
+  // (the self-queue push-control path), because a payload's `from` is whatever
+  // the sender chose: reading it first let a peer name itself in the frame.
+  const fromRunId = typeof entry.from_run_id === "string" && entry.from_run_id !== "" ? entry.from_run_id
+    : typeof body.from_run_id === "string" ? body.from_run_id
     : typeof body.from === "string" ? body.from : ""
   const message = typeof body.message === "string" ? body.message : ""
   const messageId = typeof body.id === "string" ? body.id : ""
   if (fromRunId === "" || message === "") return null
+  // The display name is the broker's stamp, then the stamped run id. A payload's
+  // `from` never names the sender: /send does not validate it, so it is the
+  // sender's own claim, and the frame is the one line a reader trusts.
   const sender = typeof entry.sender === "string" && entry.sender !== ""
     ? entry.sender
-    : typeof body.from === "string" ? body.from : fromRunId
-  const role = typeof body.role === "string" ? body.role : ""
+    : fromRunId
   const expectsReply = body.expects_reply === true
-  return { fromRunId, sender, messageId, message, role, expectsReply }
+  return { fromRunId, sender, messageId, message, expectsReply }
 }
 
 /**
  * The text an inbound peer frame carries. The sender is the broker's own
  * display name for the run (server-stamped), never a field of the message
- * text; the reply instruction points at the broker run id.
+ * text; the reply instruction points at the broker run id. No role is rendered:
+ * nothing on the wire is stamped with one, so printing it would print the
+ * sender's own claim about its authority.
  */
 export function frameInboundAsk(ask) {
   const sender = ask.sender !== "" ? ask.sender : ask.fromRunId
   let frame = "**📨 Message from avenor peer `" + sender + "`** (broker run `" + ask.fromRunId + "`"
   frame += ask.messageId === "" ? "" : ", message id `" + ask.messageId + "`"
-  if (ask.role !== "") {
-    frame += ", role `" + ask.role + "`"
-  }
   frame += ")\n\n"
   frame += ask.message + "\n\n"
   frame += "Reply with SendMessage to `avenor:" + ask.fromRunId + "` to answer this peer."
