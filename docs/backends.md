@@ -53,6 +53,8 @@ The policy file is strict JSON:
 
 Unknown fields, trailing data, an empty allowlist, empty entries, empty elements, NUL bytes, and non-absolute executables are rejected at supervisor startup (`mcp launch wrapper policy: <reason>`). An MCP spawn carrying a wrapper must **exactly match** one `allowed_argv` entry — same executable (absolute path), same flags, same order, no extra or missing arguments. A wrapper that is not allowed is rejected with `launch_wrapper: argv is not allowed by this supervisor` before any process is created; a supervisor with no policy rejects every wrapped MCP spawn with `launch_wrapper: disabled for MCP on this supervisor`. MCP servers also fail closed against older supervisors that predate the gated `spawn_mcp` verb.
 
+Roster launch fields are refused on the same verb. `spawn_mcp` refuses a spawn whose effective launch the caller chose — a selected roster entry that declares `command`, `args` or `settings`, or a resume whose recorded session launch is not the one its backend resolves for itself — with `roster entry "<name>": launch fields are disabled for MCP spawns (<field>)`, before any reservation, idempotency record or process. An entry that declares no launch field still spawns over MCP with the identity its backend resolves, so a roster of plain backend/agent/model entries keeps working. The fields are not allowlist-gated: there is no MCP equivalent of `allowed_argv` for them, so the refusal is unconditional.
+
 The policy path is picked up in this order, for both `avenor stable` and `avenor mcp`:
 
 1. `--mcp-launch-wrapper-policy <path>` (wins),
@@ -66,7 +68,7 @@ Approved wrappers are **trusted code with supervisor privileges**: a wrapper pro
 
 The `avenor mcp` command accepts `--mcp-launch-wrapper-policy` only to forward the policy to a supervisor it autostarts; it resolves the same flag → environment → `<config home>/launch-wrapper-policy.json` chain and forwards the path it picked. Attaching to an already-running supervisor never changes that supervisor's policy — that supervisor's own pickup chain decided it.
 
-The CLI (`avenor control spawn`) and ordinary control-socket `spawn` calls are operator-trusted surfaces: they are **not** allowlist-gated and keep the pre-existing behavior above.
+The CLI (`avenor control spawn`) and ordinary control-socket `spawn` calls are operator-trusted surfaces: they are **not** allowlist-gated, they keep accepting a roster entry's launch fields, and they keep the pre-existing behavior above.
 
 ### agy RPC host
 

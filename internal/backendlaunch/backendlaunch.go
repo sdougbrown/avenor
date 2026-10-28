@@ -158,6 +158,18 @@ func Validate(backend string, input Input) error {
 	return nil
 }
 
+// Declared returns the first launch field input sets in field order, or "" when
+// it sets none. Presence follows the rule Validate uses, so an explicit empty
+// args list is a declared launch.
+func Declared(input Input) string {
+	for _, field := range inputFields {
+		if field.present(input) {
+			return field.name
+		}
+	}
+	return ""
+}
+
 // Resolve turns one entry's declared fields into a Spec. An unregistered
 // backend resolves to the zero Spec: its roster entries cannot carry fields and
 // start no configured binary.
