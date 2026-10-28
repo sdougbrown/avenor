@@ -8,6 +8,8 @@ import { createExtension } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
 
 /** Keep message delivery on Pi so context mocks cannot hide API misuse. */
+const harnessSupervisorInstance = { supervisorId: 'sup', getClient: () => ({}) }
+
 export async function startExtensionHarness(options: {
   deps?: Partial<ExtensionDeps>
   extOptions?: { pollIntervalMs?: number; idleSendTimeoutMs?: number; subAgentEnv?: SubAgentEnv | null }
@@ -74,10 +76,12 @@ export async function startExtensionHarness(options: {
     observeRun: mock(() => null),
     dial: mock(async () => ({ close() {} })) as unknown as ExtensionDeps['dial'],
     attachOwner: mock(async () => ({ close() {} })) as unknown as ExtensionDeps['attachOwner'],
-    // A started session shares an in-process supervisor unless a test says otherwise.
+    // A started session shares an in-process supervisor unless a test says
+    // otherwise. The instance object is stable: the last-turn report latch
+    // keys an episode on the instance identity.
     Supervisor: class {
       static currentInstance() {
-        return { supervisorId: 'sup', getClient: () => ({}) }
+        return harnessSupervisorInstance
       }
     } as any,
   }

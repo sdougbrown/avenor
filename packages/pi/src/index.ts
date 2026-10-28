@@ -453,15 +453,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let compacting = false
     // A closed-socket last-turn failure is reported once per episode. The
     // attempt itself keeps running on every turn, so a healthy supervisor is
-    // picked up without a session restart. The flag clears when a record
+    // picked up without a session restart. A report latches until a record
     // succeeds again, the host providers are rebound wholesale, or a new
-    // session starts, and the guard clears it when the supervisor instance
-    // changes: a replacement supervisor starts its own episode, so its first
-    // failure is never suppressed by a dead predecessor's report. Evicting one
-    // binding must not reset the latch, or an unhealthy supervisor would be
-    // re-reported on every turn end.
+    // session starts; the guard also clears the latch when the supervisor
+    // instance object changes, because a replacement supervisor starts its own
+    // episode and supervisorId (the socket path) is constant within one
+    // process. Evicting one binding must not reset the latch, or an unhealthy
+    // supervisor would be re-reported on every turn end.
     let lastTurnSocketClosed = false
-    let lastTurnSocketClosedFor: string | null = null
+    let lastTurnSocketClosedFor: unknown = null
 
     // Registry of in-flight blocking waits (avenor_result, spawn with
     // wait=true). When any run reaches a stopping point — a terminal state, a
@@ -1720,14 +1720,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
     // Report a failed last-turn record without disrupting the interactive TUI.
     // ui.notify is Pi's TUI-safe channel in every mode; console.error is the
-    // fallback for a session that has no UI context yet. A latched report fires
-    // once per supervisor instance; an unlatched one fires on every occurrence.
-    function reportLastTurnFailure(message: string, supervisorId: string | undefined, latched: boolean): void {
-      if (latched) {
-        if (lastTurnSocketClosed) return
-        lastTurnSocketClosed = true
-        lastTurnSocketClosedFor = supervisorId ?? null
-      }
+    // fallback for a session that has no UI context yet. A report fires once
+    // per supervisor instance: the latch clears when a record succeeds again,
+    // the instance is replaced, the providers rebind wholesale, or a new
+    // session starts, so a persistently failing record cannot raise a toast on
+    // every turn end. Recurring background failures also surface through the
+    // status widget's error count.
+    function reportLastTurnFailure(message: string, instance: unknown): void {
+      if (lastTurnSocketClosed) return
+      lastTurnSocketClosed = true
+      lastTurnSocketClosedFor = instance
       const text = `[avenor] session_last_set failed: ${message}`
       if (sessionCtx) sessionCtx.ui.notify(text, 'warning')
       else console.error(text)
@@ -1748,17 +1750,20 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       if (!instance) return
       // A replacement supervisor starts a new report episode: a latch left by
       // a dead predecessor must not suppress this instance's first failure.
-      if (instance.supervisorId !== lastTurnSocketClosedFor) lastTurnSocketClosed = false
+      // The key is the instance object: supervisorId is the socket path, which
+      // is constant across replacements within one process.
+      if (instance !== lastTurnSocketClosedFor) lastTurnSocketClosed = false
       try {
         instance.getClient()
       } catch (error) {
         disposeHostProvider(undefined)
-        reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance.supervisorId, true)
+        reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance)
         return
       }
       const turn = extractTurnText([event.message])
+      let provider: MessageProvider | undefined
       try {
-        const provider = await hostProviderFor(undefined)
+        provider = await hostProviderFor(undefined)
         if (!provider.recordLastTurn) return
         const bounded = boundFinalOutput(turn.text)
         await provider.recordLastTurn(
@@ -1769,13 +1774,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         lastTurnSocketClosed = false
       } catch (error) {
         if (isClosedSocketError(error)) {
-          // The cached binding's socket is dead: evict it so the next turn
-          // redials into whatever supervisor is healthy then.
-          disposeHostProvider(undefined)
-          reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance.supervisorId, true)
-        } else {
-          reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance.supervisorId, false)
+          // Evict only the binding whose record failed: a concurrent tool call
+          // may have re-dialled and cached a fresh binding, whose claims must
+          // survive. With nothing cached there is nothing to preserve.
+          const cached = hostProviders.get('')
+          if (!cached || cached.provider === provider) disposeHostProvider(undefined)
         }
+        reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance)
       }
     })
 
