@@ -325,7 +325,9 @@ Requires ownership.
 
 #### `spawn_mcp`
 
-Identical request and response shape to `spawn`. This is the MCP-gated variant: the supervisor enforces its launch wrapper policy on this verb only — a `launch_wrapper` that does not exactly match an allowlist entry is rejected before any process is created (`launch_wrapper: argv is not allowed by this supervisor`), and a supervisor without a policy rejects every wrapped request (`launch_wrapper: disabled for MCP on this supervisor`). The same verb also refuses a caller-chosen launch identity — a roster entry that declares `command`, `args` or `settings`, or a resume on such a session — with `roster entry "<name>": launch fields are disabled for MCP spawns (<field>)`. Ordinary `spawn` and the CLI are operator-trusted: they are neither allowlist-gated nor closed to launch fields. See [backends.md](backends.md#mcp-surfaces-operator-allowlist).
+Identical request and response shape to `spawn`, minus `loop_file` and `team_file`: workflow spawns are refused on this verb with `spawn_mcp: loop_file and team_file are not accepted; workflow spawns use the spawn verb`, because the template names the roster its phases select and both paths are caller-supplied here. Workflow spawns stay on `spawn`, where the operator writes them.
+
+This is the MCP-gated variant: the supervisor enforces its launch wrapper policy on this verb only — a `launch_wrapper` that does not exactly match an allowlist entry is rejected before any process is created (`launch_wrapper: argv is not allowed by this supervisor`), and a supervisor without a policy rejects every wrapped request (`launch_wrapper: disabled for MCP on this supervisor`). The same verb also refuses a caller-chosen launch identity — a roster entry that declares `command`, `args` or `settings`, or a resume on such a session — with `roster entry "<name>": launch fields are disabled for MCP spawns (<field>)`. The gate resolves the identity once and the spawn uses it, so rewriting the roster between the check and the exec cannot change the launch. Ordinary `spawn` and the CLI are operator-trusted: they are neither allowlist-gated nor closed to launch fields. See [backends.md](backends.md#mcp-surfaces-operator-allowlist).
 
 Requires ownership.
 
@@ -367,9 +369,11 @@ Returns all active and recently-completed child runtimes with status summaries. 
 
 #### `resume`
 
-`resume` continues a prior run in a new one. Params: `{run_id, target, message, label?, idempotency_key?, sentinel_file?, on_event?}`. `target` is the prior child broker runtime id (`rt_N`), or an exact display name; the supervisor session is not a resume target. A host surface resolves its public run id to a runtime id before calling. It is owner-gated.
+`resume` continues a prior run in a new one. Params: `{run_id, target, message, label?, idempotency_key?, sentinel_file?, on_event?, mcp?}`. `target` is the prior child broker runtime id (`rt_N`), or an exact display name; the supervisor session is not a resume target. A host surface resolves its public run id to a runtime id before calling. It is owner-gated.
 
 `resume` refuses a target whose completion sentinel says `TIMEOUT` or `KILLED` with `not_resumable` (the sentinel's status word is the fact); `DONE`, `FAILED` and `BLOCKED` sentinels continue. It carries the prior run's agent/model/backend, thinking, directory, agent profile, auto-approve, roster file and roster entry, then starts the new runtime with the prior session id. The result reports the `sentinel_file` and `on_event` the spawned run actually writes, including when the request left them empty. A keyed call replays the first run: the stored result's `run_id`, `sentinel_file` and `on_event` win over the freshly minted ones.
+
+`mcp` marks a resume an MCP surface drove (the MCP message provider sets it). Such a resume gates the launch its cold arm re-execs exactly as `spawn_mcp` does, refusing one that is not the backend's own default; a warm resume, which continues a live runtime instead of spawning, has nothing to gate. Trusted callers omit it.
 
 #### `session_rename`
 
