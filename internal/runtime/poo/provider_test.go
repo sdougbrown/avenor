@@ -356,11 +356,18 @@ func TestPromptRunsToSettle(t *testing.T) {
 	fixture := newPooFixture(t, endpoint)
 	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
 
-	if session.SessionDir == "" {
-		t.Fatal("Start reported no session dir for a logged session")
-	}
 	if session.PID == 0 {
 		t.Fatal("Start reported no pid")
+	}
+	state, err := provider.session(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.sessionDir == "" {
+		t.Fatal("Start kept no session dir for a logged session")
+	}
+	if state.mode != "logged" {
+		t.Fatalf("kept mode = %q, want logged", state.mode)
 	}
 
 	promptDone := make(chan error, 1)
@@ -700,8 +707,12 @@ func TestEventsBeforeTheCreateResponseAreKept(t *testing.T) {
 	if session.SessionID != "poo-early" {
 		t.Fatalf("SessionID = %q, want the id from the create result", session.SessionID)
 	}
-	if session.Mode != "ephemeral" {
-		t.Fatalf("Mode = %q, want the mode the create result reported", session.Mode)
+	state, err := provider.session(session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.mode != "ephemeral" {
+		t.Fatalf("kept mode = %q, want the mode the create result reported", state.mode)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

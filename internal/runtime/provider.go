@@ -78,15 +78,7 @@ type Session struct {
 	SessionID string
 	Backend   string
 	Dir       string
-	// SessionDir is the directory a backend reports for the session's own
-	// records at start, so a resume can reopen them. Empty when the backend
-	// keeps no on-disk session.
-	SessionDir string
-	// Mode is the persistence mode the backend reported at start. It is
-	// informational for now: a backend that reports an ephemeral session
-	// keeps nothing to resume, which is what a resume check will read it for.
-	Mode string
-	PID  int // Consumed by longe halt (SIGTERM); set by opencode-acp backend. 0 otherwise.
+	PID       int // Consumed by longe halt (SIGTERM); set by opencode-acp backend. 0 otherwise.
 }
 
 // MaxPermissionMessageBytes is the maximum allowed size for a write-in
