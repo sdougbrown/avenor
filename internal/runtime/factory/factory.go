@@ -14,6 +14,7 @@ package factory
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -29,37 +30,51 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/poo"
 )
 
-// knownBackends is the single backend registry the CLI consults before a
-// provider exists. It lists every backend NewProvider dispatches; adding one
-// there without a name here, or the reverse, fails TestKnownBackendsMatchNewProvider.
-var knownBackends = map[string]bool{
-	"opencode-acp":     true,
-	"opencode-http":    true,
-	"codex-app-server": true,
-	"gemini-acp":       true,
-	"agy":              true,
-	"cursor-acp":       true,
-	"pi":               true,
-	"poo":              true,
-	"pony":             true,
-	"claude":           true,
+// providers is the one place a backend is registered: IsKnown, KnownBackends
+// and NewProvider all read it, so a name cannot be known without being
+// constructible. A backend whose constructor cannot fail is wrapped by a
+// closure; opencode-http already returns its own error.
+var providers = map[string]func(runtime.StartOptions) (runtime.Provider, error){
+	"opencode-acp": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return opencodeacp.NewWithOptions(o), nil
+	},
+	"opencode-http": opencodehttp.NewWithOptions,
+	"codex-app-server": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return codexappserver.NewWithOptions(o), nil
+	},
+	"gemini-acp": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return geminiacp.NewWithOptions(o), nil
+	},
+	"agy": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return agy.NewWithOptions(o), nil
+	},
+	"cursor-acp": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return cursoracp.NewWithOptions(o), nil
+	},
+	"pi": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return pi.NewWithOptions(o), nil
+	},
+	"poo": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return poo.NewWithOptions(o), nil
+	},
+	"pony": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return pony.NewWithOptions(o), nil
+	},
+	"claude": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return claude.NewWithOptions(o), nil
+	},
 }
 
 // IsKnown reports whether this build registers the backend. It answers the
 // question a caller otherwise re-lists by hand before a provider exists.
 func IsKnown(backend string) bool {
-	return knownBackends[backend]
+	return providers[backend] != nil
 }
 
 // KnownBackends returns every backend name this build registers, sorted, so a
 // caller that must cover all of them iterates this instead of re-listing them.
 func KnownBackends() []string {
-	names := make([]string, 0, len(knownBackends))
-	for name := range knownBackends {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return names
+	return slices.Sorted(maps.Keys(providers))
 }
 
 // noProcessBackends connect to an already-running or in-process runtime and
@@ -73,28 +88,9 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 	if len(startOpts.LaunchWrapper) > 0 && noProcessBackends[backend] {
 		return nil, fmt.Errorf("launch_wrapper: not supported for backend %s (spawns no process to wrap)", backend)
 	}
-	switch backend {
-	case "opencode-acp":
-		return opencodeacp.NewWithOptions(startOpts), nil
-	case "opencode-http":
-		return opencodehttp.NewWithOptions(startOpts)
-	case "codex-app-server":
-		return codexappserver.NewWithOptions(startOpts), nil
-	case "gemini-acp":
-		return geminiacp.NewWithOptions(startOpts), nil
-	case "agy":
-		return agy.NewWithOptions(startOpts), nil
-	case "cursor-acp":
-		return cursoracp.NewWithOptions(startOpts), nil
-	case "pi":
-		return pi.NewWithOptions(startOpts), nil
-	case "poo":
-		return poo.NewWithOptions(startOpts), nil
-	case "pony":
-		return pony.NewWithOptions(startOpts), nil
-	case "claude":
-		return claude.NewWithOptions(startOpts), nil
-	default:
+	construct := providers[backend]
+	if construct == nil {
 		return nil, fmt.Errorf("unknown backend %q", backend)
 	}
+	return construct(startOpts)
 }
