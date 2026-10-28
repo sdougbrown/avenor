@@ -58,14 +58,15 @@ func launchSubject(entryName string) string {
 	return fmt.Sprintf("roster entry %q", entryName)
 }
 
-// Argv returns the argv that starts a poo process for spec: the recorded
-// command, its args, then --settings when the entry named a settings file.
-func Argv(spec backendlaunch.Spec) []string {
-	argv := make([]string, 0, 1+len(spec.Args)+2)
-	argv = append(argv, spec.Command)
-	argv = append(argv, spec.Args...)
+// LaunchArgs returns the arguments a poo process starts with for spec:
+// its args, then --settings when the entry named a settings file. The
+// launch site passes them with spec.Command to launcher.Command, which
+// applies the launch wrapper.
+func LaunchArgs(spec backendlaunch.Spec) []string {
+	args := make([]string, 0, len(spec.Args)+2)
+	args = append(args, spec.Args...)
 	if spec.Settings != "" {
-		argv = append(argv, "--settings", spec.Settings)
+		args = append(args, "--settings", spec.Settings)
 	}
-	return argv
+	return args
 }

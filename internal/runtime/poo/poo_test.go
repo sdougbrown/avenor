@@ -114,14 +114,14 @@ func TestResolveMissingBinaryNamesTheBackendWithoutAnEntry(t *testing.T) {
 	}
 }
 
-func TestArgvAppendsSettingsOnlyWhenSet(t *testing.T) {
+func TestLaunchArgsAppendSettingsOnlyWhenSet(t *testing.T) {
 	spec := backendlaunch.Spec{Command: "/opt/bin/umpire-poo", Args: []string{"serve"}}
-	if got, want := Argv(spec), []string{"/opt/bin/umpire-poo", "serve"}; !slices.Equal(got, want) {
-		t.Fatalf("Argv() = %#v, want %#v", got, want)
+	if got, want := LaunchArgs(spec), []string{"serve"}; !slices.Equal(got, want) {
+		t.Fatalf("LaunchArgs() = %#v, want %#v", got, want)
 	}
 	spec.Settings = "/etc/umpire-bot/poo-settings.yaml"
-	if got, want := Argv(spec), []string{"/opt/bin/umpire-poo", "serve", "--settings", "/etc/umpire-bot/poo-settings.yaml"}; !slices.Equal(got, want) {
-		t.Fatalf("Argv() = %#v, want %#v", got, want)
+	if got, want := LaunchArgs(spec), []string{"serve", "--settings", "/etc/umpire-bot/poo-settings.yaml"}; !slices.Equal(got, want) {
+		t.Fatalf("LaunchArgs() = %#v, want %#v", got, want)
 	}
 }
 

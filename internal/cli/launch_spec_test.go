@@ -214,3 +214,65 @@ func TestRunLoopPhaseRosterPooLaunchReachesStartOptions(t *testing.T) {
 		t.Fatalf("phase StartOptions.Launch = %+v, want the roster entry's launch", got.Launch)
 	}
 }
+
+func TestRunBackendPooWithoutAnEntryResolvesPooOnPath(t *testing.T) {
+	oldNewProvider := newProvider
+	provider := newScriptedProvider()
+	var got runtime.StartOptions
+	newProvider = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		got = opts
+		return provider, nil
+	}
+	t.Cleanup(func() { newProvider = oldNewProvider })
+
+	pathDir := t.TempDir()
+	stub := filepath.Join(pathDir, "poo")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	var stderr strings.Builder
+	if code := run([]string{
+		"--dir", t.TempDir(),
+		"--prompt", "review",
+		"--backend", "poo",
+		"--agent", "search",
+	}, func(string) string { return "" }, &stderr); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	abs, err := filepath.Abs(stub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Launch.Command != abs || !slices.Equal(got.Launch.Args, []string{"serve"}) {
+		t.Fatalf("StartOptions.Launch = %+v, want PATH poo at %q with serve args", got.Launch, abs)
+	}
+}
+
+func TestRunBackendPooWithoutAnEntryAndNoBinaryFails(t *testing.T) {
+	oldNewProvider := newProvider
+	called := false
+	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		called = true
+		return newScriptedProvider(), nil
+	}
+	t.Cleanup(func() { newProvider = oldNewProvider })
+	t.Setenv("PATH", t.TempDir())
+
+	var stderr strings.Builder
+	if code := run([]string{
+		"--dir", t.TempDir(),
+		"--prompt", "review",
+		"--backend", "poo",
+		"--agent", "search",
+	}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run() = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if called {
+		t.Fatal("a provider was created for a launch that did not resolve")
+	}
+	if !strings.Contains(stderr.String(), `"poo" not found on PATH`) {
+		t.Fatalf("stderr = %q, want the missing executable named", stderr.String())
+	}
+}
