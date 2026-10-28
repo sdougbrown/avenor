@@ -49,6 +49,45 @@ func awaitBrokerURLRecord(t *testing.T, socketPath string) string {
 	}
 }
 
+// runFailingStartup drives one supervisor whose config the broker URL rules
+// refuse: stderr is captured while Run executes, a run still serving after the
+// timeout is killed and waited on with the same bound, the control socket must
+// never be bound and the broker URL record must never be published. It returns
+// Run's exit code.
+func runFailingStartup(t *testing.T, cfg Config, want ...string) int {
+	t.Helper()
+	code := 0
+	stderr := captureStderr(t, func(w io.Writer) {
+		cfg.Stderr = w
+		sup := newTestSupervisor(t, cfg)
+		done := make(chan int, 1)
+		go func() { done <- sup.Run() }()
+		select {
+		case code = <-done:
+		case <-time.After(5 * time.Second):
+			_ = sup.Shutdown("kill")
+			select {
+			case code = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Run() did not return after Shutdown(kill)")
+			}
+			t.Fatal("Run() kept serving a config the broker URL rules refuse")
+		}
+	})
+	for _, marker := range want {
+		if !strings.Contains(stderr, marker) {
+			t.Fatalf("stderr = %q, want it to name %q", stderr, marker)
+		}
+	}
+	if _, err := os.Stat(cfg.ControlSocket); !os.IsNotExist(err) {
+		t.Fatalf("control socket bound despite the refused startup: %v", err)
+	}
+	if _, err := os.Stat(BrokerURLPath(cfg.ControlSocket)); !os.IsNotExist(err) {
+		t.Fatalf("broker URL record published despite the refused startup: %v", err)
+	}
+	return code
+}
+
 // TestMissingBrokerListenerPublishesNoURL pins that a broker that never bound a
 // listener reports no URL and publishes no record. Broker messaging is optional,
 // so a supervisor whose default bind failed keeps running without one, but it
@@ -172,38 +211,12 @@ func TestSpawnResultKeepsTheBoundBrokerURL(t *testing.T) {
 // for this address, so silently falling back to the bound one would hide it.
 func TestInvalidAdvertiseURLFailsStartup(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	socketPath := newStableSocketPath(t, "brokerurl-advertise-invalid")
-
-	stderr := captureStderr(t, func(w io.Writer) {
-		sup := newTestSupervisor(t, Config{
-			ControlSocket:      socketPath,
-			BrokerAdvertiseURL: "hub.example.com:8787",
-			MaxRuntimes:        1,
-			Stderr:             w,
-		})
-		done := make(chan int, 1)
-		go func() { done <- sup.Run() }()
-		select {
-		case code := <-done:
-			if code != 1 {
-				t.Fatalf("Run() = %d, want 1 for an unreachable advertised URL", code)
-			}
-		case <-time.After(5 * time.Second):
-			_ = sup.Shutdown("kill")
-			<-done
-			t.Fatal("Run() kept serving with an unreachable advertised URL")
-		}
-	})
-	for _, want := range []string{"broker advertise URL", "hub.example.com:8787"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr = %q, want it to name %q", stderr, want)
-		}
-	}
-	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Fatalf("control socket bound despite the invalid advertised URL: %v", err)
-	}
-	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
-		t.Fatalf("broker URL record published despite the invalid advertised URL: %v", err)
+	if code := runFailingStartup(t, Config{
+		ControlSocket:      newStableSocketPath(t, "brokerurl-advertise-invalid"),
+		BrokerAdvertiseURL: "hub.example.com:8787",
+		MaxRuntimes:        1,
+	}, "broker advertise URL", "hub.example.com:8787"); code != 1 {
+		t.Fatalf("Run() = %d, want 1 for an unreachable advertised URL", code)
 	}
 }
 
@@ -213,39 +226,13 @@ func TestInvalidAdvertiseURLFailsStartup(t *testing.T) {
 // silently never registers with its parent.
 func TestInvalidParentURLFailsStartup(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	socketPath := newStableSocketPath(t, "brokerurl-parent-invalid")
-
-	stderr := captureStderr(t, func(w io.Writer) {
-		sup := newTestSupervisor(t, Config{
-			ControlSocket:     socketPath,
-			BrokerParentURL:   "hub.example.com:8787",
-			BrokerParentToken: "link-token",
-			MaxRuntimes:       1,
-			Stderr:            w,
-		})
-		done := make(chan int, 1)
-		go func() { done <- sup.Run() }()
-		select {
-		case code := <-done:
-			if code != 1 {
-				t.Fatalf("Run() = %d, want 1 for an unreachable parent URL", code)
-			}
-		case <-time.After(5 * time.Second):
-			_ = sup.Shutdown("kill")
-			<-done
-			t.Fatal("Run() kept serving with an unreachable parent URL")
-		}
-	})
-	for _, want := range []string{"broker parent URL", "hub.example.com:8787"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr = %q, want it to name %q", stderr, want)
-		}
-	}
-	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Fatalf("control socket bound despite the invalid parent URL: %v", err)
-	}
-	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
-		t.Fatalf("broker URL record published despite the invalid parent URL: %v", err)
+	if code := runFailingStartup(t, Config{
+		ControlSocket:     newStableSocketPath(t, "brokerurl-parent-invalid"),
+		BrokerParentURL:   "hub.example.com:8787",
+		BrokerParentToken: "link-token",
+		MaxRuntimes:       1,
+	}, "broker parent URL", "hub.example.com:8787"); code != 1 {
+		t.Fatalf("Run() = %d, want 1 for an unreachable parent URL", code)
 	}
 }
 
@@ -550,37 +537,11 @@ func TestWildcardBrokerAddrIsRejected(t *testing.T) {
 // socket or record, naming the two flags involved.
 func TestAdvertisedURLWithoutConcreteBindIsRejected(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	socketPath := newStableSocketPath(t, "brokerurl-advertise-ephemeral")
-
-	stderr := captureStderr(t, func(w io.Writer) {
-		sup := newTestSupervisor(t, Config{
-			ControlSocket:      socketPath,
-			BrokerAdvertiseURL: "https://hub.example.com:8443",
-			MaxRuntimes:        1,
-			Stderr:             w,
-		})
-		done := make(chan int, 1)
-		go func() { done <- sup.Run() }()
-		select {
-		case code := <-done:
-			if code != 1 {
-				t.Fatalf("Run() = %d, want 1 for an advertised URL over an ephemeral bind", code)
-			}
-		case <-time.After(5 * time.Second):
-			_ = sup.Shutdown("kill")
-			<-done
-			t.Fatal("Run() kept serving an advertised URL over an ephemeral bind")
-		}
-	})
-	for _, want := range []string{"--broker-advertise-url", "--broker-addr", token.EnvBrokerAdvertiseURL} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr = %q, want it to name %q", stderr, want)
-		}
-	}
-	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
-		t.Fatalf("control socket bound despite the advertise/ephemeral conflict: %v", err)
-	}
-	if _, err := os.Stat(BrokerURLPath(socketPath)); !os.IsNotExist(err) {
-		t.Fatalf("broker URL record published despite the advertise/ephemeral conflict: %v", err)
+	if code := runFailingStartup(t, Config{
+		ControlSocket:      newStableSocketPath(t, "brokerurl-advertise-ephemeral"),
+		BrokerAdvertiseURL: "https://hub.example.com:8443",
+		MaxRuntimes:        1,
+	}, "--broker-advertise-url", "--broker-addr", token.EnvBrokerAdvertiseURL); code != 1 {
+		t.Fatalf("Run() = %d, want 1 for an advertised URL over an ephemeral bind", code)
 	}
 }
