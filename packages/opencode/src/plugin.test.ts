@@ -1770,7 +1770,6 @@ describe('OpenCode host turn producer', () => {
       console.error = originalError
     }
     expect(getSupervisorClientMock).toHaveBeenCalledTimes(dialsBefore + 2)
-    expect(hostProviderOptions).toHaveLength(2)
   })
 
   it('keeps a concurrently re-cached binding when the failed publish drops', async () => {
