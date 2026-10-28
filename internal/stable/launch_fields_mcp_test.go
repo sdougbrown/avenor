@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,19 +27,38 @@ func stubPooOnPath(t *testing.T) string {
 	return path
 }
 
+// startOptionRecorder collects every provider creation on the run's goroutine,
+// under a lock, so a test can wait on it rather than on a bare slice.
+type startOptionRecorder struct {
+	mu      sync.Mutex
+	created []runtime.StartOptions
+}
+
+func (r *startOptionRecorder) record(opts runtime.StartOptions) {
+	r.mu.Lock()
+	r.created = append(r.created, opts)
+	r.mu.Unlock()
+}
+
+func (r *startOptionRecorder) snapshot() []runtime.StartOptions {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]runtime.StartOptions(nil), r.created...)
+}
+
 // mcpLaunchFieldsSupervisor is a supervisor whose provider factory records
 // every start option it is handed, so a refused spawn can prove no process was
 // created and an allowed one can inspect the launch it carried.
-func mcpLaunchFieldsSupervisor(t *testing.T) (*Supervisor, *[]runtime.StartOptions) {
+func mcpLaunchFieldsSupervisor(t *testing.T) (*Supervisor, *startOptionRecorder) {
 	t.Helper()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/mcp-launch-fields.sock", MaxRuntimes: 2})
-	var created []runtime.StartOptions
+	created := &startOptionRecorder{}
 	sup.newProviderFunc = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
-		created = append(created, opts)
+		created.record(opts)
 		return scriptedStage5Provider("ses_poo", "end_turn"), nil
 	}
 	t.Cleanup(func() { sup.Shutdown("kill") })
-	return sup, &created
+	return sup, created
 }
 
 // waitSeedFinished blocks until the seeded run has recorded its session's
@@ -90,7 +110,7 @@ func TestSpawnMCPRefusesRosterLaunchFields(t *testing.T) {
 			if err == nil || err.Error() != want {
 				t.Fatalf("SpawnMCP() error = %v, want %q", err, want)
 			}
-			if len(*created) != 0 {
+			if len(created.snapshot()) != 0 {
 				t.Fatal("provider was created for a refused launch")
 			}
 			if runtimeCount(sup) != 0 {
@@ -138,15 +158,15 @@ func TestSpawnMCPAllowsRosterEntryWithoutLaunchFields(t *testing.T) {
 	}
 	sup.cancelRuntime(result.RuntimeID)
 
-	if len(*created) != 1 {
-		t.Fatalf("provider creations = %d, want 1", len(*created))
+	if got := created.snapshot(); len(got) != 1 {
+		t.Fatalf("provider creations = %d, want 1", len(got))
 	}
 	absStub, err := filepath.Abs(stub)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := backendlaunch.Spec{Command: absStub, Args: []string{"serve"}}
-	if got := (*created)[0].Launch; !got.Equal(want) {
+	if got := created.snapshot()[0].Launch; !got.Equal(want) {
 		t.Fatalf("start options launch = %+v, want the poo default %+v", got, want)
 	}
 }
@@ -174,8 +194,8 @@ func TestSpawnMCPRefusesNonDefaultLaunchOnResume(t *testing.T) {
 	if err == nil || err.Error() != want {
 		t.Fatalf("SpawnMCP() error = %v, want %q", err, want)
 	}
-	if len(*created) != 1 {
-		t.Fatalf("provider creations = %d, want only the seed's", len(*created))
+	if got := created.snapshot(); len(got) != 1 {
+		t.Fatalf("provider creations = %d, want only the seed's", len(got))
 	}
 }
 
@@ -225,8 +245,8 @@ func TestSpawnWithRosterLaunchFieldsIsAllowed(t *testing.T) {
 	sup.cancelRuntime(result.RuntimeID)
 
 	want := backendlaunch.Spec{Command: "/opt/bin/umpire-poo", Args: []string{"serve"}, Settings: "/etc/poo.yaml"}
-	if len(*created) != 1 || !(*created)[0].Launch.Equal(want) {
-		t.Fatalf("start options launch = %+v, want %+v", *created, want)
+	if got := created.snapshot(); len(got) != 1 || !got[0].Launch.Equal(want) {
+		t.Fatalf("start options launch = %+v, want %+v", got, want)
 	}
 }
 
@@ -246,23 +266,23 @@ func TestSpawnMCPRefusesExplicitEmptyArgs(t *testing.T) {
 	if !strings.Contains(err.Error(), `roster entry "tool"`) || !strings.Contains(err.Error(), "(args)") {
 		t.Fatalf("SpawnMCP() error = %q, want the entry and the args field named", err)
 	}
-	if len(*created) != 0 {
+	if len(created.snapshot()) != 0 {
 		t.Fatal("provider was created for a refused launch")
 	}
 }
 
 // waitForLaunch blocks until a provider creation carries the given command.
-func waitForLaunch(t *testing.T, created *[]runtime.StartOptions, command string) {
+func waitForLaunch(t *testing.T, created *startOptionRecorder, command string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		for _, opts := range *created {
+		for _, opts := range created.snapshot() {
 			if opts.Launch.Command == command {
 				return
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for a provider launch of %q; created = %+v", command, *created)
+			t.Fatalf("timed out waiting for a provider launch of %q; created = %+v", command, created.snapshot())
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -304,7 +324,7 @@ func TestSpawnMCPRefusesWorkflowSpawns(t *testing.T) {
 			if err == nil || err.Error() != want {
 				t.Fatalf("SpawnMCP(%s) error = %v, want %q", file, err, want)
 			}
-			if len(*created) != 0 {
+			if len(created.snapshot()) != 0 {
 				t.Fatal("provider was created for a refused workflow spawn")
 			}
 			if runtimeCount(sup) != 0 {
@@ -366,7 +386,7 @@ func TestMCPToolSpawnIsRefusedByGatedVerb(t *testing.T) {
 	if err == nil || err.Error() != want {
 		t.Fatalf("SpawnMCP() error = %v, want %q", err, want)
 	}
-	if len(*created) != 0 {
+	if len(created.snapshot()) != 0 {
 		t.Fatal("provider was created for the MCP tool's refused launch")
 	}
 }
@@ -422,8 +442,8 @@ func TestMCPResumeRefusesConfiguredLaunch(t *testing.T) {
 	if err == nil || err.Error() != want {
 		t.Fatalf("Resume() error = %v, want %q", err, want)
 	}
-	if len(*created) != 1 {
-		t.Fatalf("provider creations = %d, want only the seed's", len(*created))
+	if got := created.snapshot(); len(got) != 1 {
+		t.Fatalf("provider creations = %d, want only the seed's", len(got))
 	}
 }
 
@@ -454,8 +474,8 @@ func TestMCPResumeAllowsDefaultLaunch(t *testing.T) {
 		t.Fatalf("Resume() = %v, want the default launch to continue", err)
 	}
 	defer sup.cancelRuntime(out.RuntimeID)
-	if len(*created) != 2 {
-		t.Fatalf("provider creations = %d, want the seed and the resumed run", len(*created))
+	if got := created.snapshot(); len(got) != 2 {
+		t.Fatalf("provider creations = %d, want the seed and the resumed run", len(got))
 	}
 }
 
@@ -491,10 +511,10 @@ func TestMCPGateIdentityIsWhatTheSpawnUses(t *testing.T) {
 	}
 	sup.cancelRuntime(result.RuntimeID)
 
-	if len(*created) != 1 {
-		t.Fatalf("provider creations = %d, want 1", len(*created))
+	if got := created.snapshot(); len(got) != 1 {
+		t.Fatalf("provider creations = %d, want 1", len(got))
 	}
-	if got := (*created)[0].Launch.Command; got != stub {
+	if got := created.snapshot()[0].Launch.Command; got != stub {
 		t.Fatalf("launch command = %q, want the gated %q, not the rewritten roster's", got, stub)
 	}
 }
