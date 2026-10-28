@@ -10,6 +10,7 @@ import {
   type MessageClient,
 } from './message-provider.js'
 import { RpcError } from '../client.js'
+import { Supervisor } from '../supervisor.js'
 import { forgetExternalRuns, findExternalRunById, registerExternalRun } from './run-registry.js'
 import { executeMessage, executePeers, type ProviderResult } from '../message.js'
 
@@ -312,6 +313,50 @@ describe('host message provider', () => {
       expect(await host.state('run-463')).toMatchObject({ live: false, resumable: false, status: 'killed' })
     } finally {
       forgetExternalRuns(supervisorId)
+      fs.rmSync(runDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports an in-process resumed run\'s terminal sentinel after its runtime is reaped', async () => {
+    // A run resumed through this provider registers into the in-process
+    // Supervisor instance, never the persisted external registry, so the
+    // state fallback must read the instance's run the same way resolve does.
+    // Once the runtime is reaped, the status verb answers only its absence
+    // failure and the run's terminal sentinel answers instead of the
+    // listing's never-resumable peer facts for the same run id.
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const runDir = path.join(home, 'runs', 'run-465')
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+    const sup = Object.create(Supervisor.prototype) as Supervisor
+    ;(sup as any).socketPath = supervisorId
+    ;(sup as any).runs = new Map()
+    ;(sup as any).aliases = new Map()
+    sup.registerResumed({
+      runId: 'run-465',
+      label: 'mesh-r',
+      sentinelPath: path.join(runDir, 'sentinel.done'),
+      eventLogPath: path.join(runDir, 'events.log'),
+      runtimeId: 'rt_465',
+      sessionId: 'ses_465',
+    })
+    const previousInstance = (Supervisor as any).instance
+    ;(Supervisor as any).instance = sup
+    try {
+      const client = fakeClient({
+        status: mock(async () => {
+          throw new RpcError(-32000, 'runtime "run-465" not found')
+        }),
+        messagePeers: mock(async () => ({
+          peers: [{ run_id: 'run-465', session: { run_id: 'run-465', label: 'mesh-r', status: 'running' } }],
+        })),
+      })
+      const host = provider(client)
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\n')
+      expect(await host.state('run-465')).toMatchObject({ live: false, resumable: true, status: 'done' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'TIMEOUT\n')
+      expect(await host.state('run-465')).toMatchObject({ live: false, resumable: true, status: 'timeout' })
+    } finally {
+      ;(Supervisor as any).instance = previousInstance
       fs.rmSync(runDir, { recursive: true, force: true })
     }
   })

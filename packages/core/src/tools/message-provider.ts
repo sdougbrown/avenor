@@ -518,13 +518,17 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         // through the listing: a denial or a transport failure is this call's
         // outcome and stays the caller's error.
         if (!isRuntimeNotFoundError(error, runId)) throw error
-        // The registry deliberately keeps a dead run discoverable by run id for
+        // The rung deliberately keeps a dead run discoverable by run id for
         // its persisted terminal result, so a run that settled before a
         // supervisor restart reports that outcome here, before the listing
-        // rung. Read the fallback narrowly: a run the registry does not hold,
-        // an unreadable sentinel, or a sentinel without a terminal status keeps
-        // the run's absence answer for the listing rung below.
-        const registered = findExternalRunById(supervisorId, runId)
+        // rung. The in-process instance is read first — the plane a resume
+        // through this provider registers into (resolve reads it the same
+        // way) — then the persisted external registry. Read the fallback
+        // narrowly: a run neither plane holds, an unreadable sentinel, or a
+        // sentinel without a terminal status keeps the run's absence answer
+        // for the listing rung below.
+        const instance = Supervisor.getInstance(supervisorId)
+        const registered = instance?.getRunById(runId) ?? findExternalRunById(supervisorId, runId)
         if (registered) {
           const terminal = await terminalSentinelStatus(registered.sentinelPath)
           if (terminal) {
