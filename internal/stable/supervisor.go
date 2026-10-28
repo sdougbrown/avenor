@@ -5312,12 +5312,8 @@ func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) error {
 	if err != nil {
 		return err
 	}
-	// Workflow phases resolve their own launch from the template, which is
-	// operator-authored rather than caller-authored.
-	if !spawnIsWorkflow(params) {
-		if err := s.authorizeMCPLaunchFields(backend, resolved); err != nil {
-			return err
-		}
+	if err := s.authorizeMCPLaunchFields(backend, resolved); err != nil {
+		return err
 	}
 	if len(resolved.LaunchWrapper) == 0 {
 		return nil
@@ -5338,6 +5334,14 @@ func (s *Supervisor) SpawnMCP(raw json.RawMessage) (any, error) {
 	p, err := parseStableSpawn(raw)
 	if err != nil {
 		return nil, err
+	}
+	// A workflow's phases resolve their own launch from the template, and a
+	// template names the roster its phases select. The operator authors that on
+	// the trusted spawn verb; here the caller supplies the paths, so a workflow
+	// would hand the launch-field gate a pair of files the caller wrote. Workflow
+	// spawns stay on the trusted verb, where the exemption was written for them.
+	if spawnIsWorkflow(p) {
+		return nil, errors.New("spawn_mcp: loop_file and team_file are not accepted; workflow spawns use the spawn verb")
 	}
 	s.applySpawnCallerParent(raw, &p)
 	if err := s.authorizeMCPLaunchWrapper(p); err != nil {
