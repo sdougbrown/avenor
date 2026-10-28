@@ -69,3 +69,19 @@ test('central ask waits retain their caller budget beyond short-request deadline
   expect(result.outcome).toBe('replied')
   expect(result.reply).toBe('patient reply')
 })
+
+test('a malformed central listing is refused instead of resolving against the rows it kept', async () => {
+  const { createBrokerChildBroker } = await import('./subagent-broker.js')
+  const transport = Object.assign(async (url: string | URL | Request): Promise<Response> => {
+    const path = new URL(String(url)).pathname.slice('/avenor'.length)
+    if (path === '/sessions') return Response.json({ generation: 'gen', sessions: [{ run_id: '' }] })
+    return Response.json({})
+  }, { preconnect() {} }) as typeof fetch
+  const strict = createBrokerChildBroker(createTopLevelPeerEnv('https://broker.test/avenor'), transport, { strictPeers: true })
+  await expect(strict.peers()).rejects.toThrow('incomplete or malformed')
+
+  // Without the flag the malformed row is dropped and the caller sees an empty
+  // listing, which is the silent partial read the flag exists to prevent.
+  const lax = createBrokerChildBroker(createTopLevelPeerEnv('https://broker.test/avenor'), transport)
+  expect((await lax.peers()).peers).toEqual([])
+})
