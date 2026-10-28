@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { parseAvenorAddress, matchSession } from '../hooks/addresses.js'
+import { parseAvenorAddress, parseMessageTarget, matchSession } from '../hooks/addresses.js'
 
 test('parseAvenorAddress: only the avenor: prefix is ours', () => {
   assert.equal(parseAvenorAddress('avenor:rt_1'), 'rt_1')
@@ -93,4 +93,14 @@ test('matchSession: an empty ref resolves to nothing without reading rows', () =
   const unnamed = [{ run_id: 'rt_4', label: '' }]
   assert.deepEqual(matchSession(unnamed, '', ''), { match: 'none', runId: '', candidates: [] })
   assert.deepEqual(matchSession(LISTING, '', ''), { match: 'none', runId: '', candidates: [] })
+})
+
+test('message targets accept plain refs, self, and avenor addresses without whitespace', () => {
+  for (const [input, ref] of [['scout', 'scout'], ['rt_1', 'rt_1'], ['self', 'self'], ['avenor:scout', 'scout'], ['avenor:self', 'self']]) {
+    assert.equal(parseMessageTarget(input), ref)
+  }
+  for (const input of ['', 'avenor:', ' scout', 'scout ', 'some teammate', 'avenor: scout', undefined, 7]) {
+    assert.equal(parseMessageTarget(input), null)
+  }
+  assert.equal(parseAvenorAddress('scout'), null)
 })

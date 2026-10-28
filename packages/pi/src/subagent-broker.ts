@@ -8,6 +8,8 @@
 // still go through the legacy path. These helpers are kept free of
 // extension-context dependencies so they can be exercised by unit tests.
 
+import { randomUUID } from 'node:crypto'
+
 import { extractReplyMessage, normalizeAskTimeoutMs, type MessageOutcome } from '@dougbots/avenor-core'
 import type { ChildBroker, PeerRecord, ProviderResult } from '@dougbots/avenor-core'
 
@@ -26,6 +28,22 @@ export function readSubAgentEnv(env: NodeJS.ProcessEnv = process.env): SubAgentE
   const token = env.AVENOR_BROKER_TOKEN ?? ''
   if (brokerUrl && runId && token) return { brokerUrl, runId, token }
   return null
+}
+
+/** A top-level session keeps this pair in memory for its entire lifetime. */
+export function createTopLevelPeerEnv(brokerUrl: string): SubAgentEnv {
+  const url = new URL(brokerUrl)
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error('AVENOR_BROKER_URL must be an HTTP(S) URL without credentials, query, or fragment')
+  }
+  return { brokerUrl: url.href.replace(/\/$/, ''), runId: `pi-${randomUUID()}`, token: randomUUID() }
+}
+
+export async function registerTopLevelPeer(env: SubAgentEnv, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<void> {
+  const result = await postBroker(env, '/register', { peer: true }, fetchImpl, signal) as Record<string, unknown> | null
+  if (result?.peer !== true || result?.run_id !== env.runId || result?.token !== env.token) {
+    throw new Error('the broker did not confirm the chosen peer identity')
+  }
 }
 
 export interface InboundAsk {
@@ -177,7 +195,7 @@ export async function publishHarnessName(
   name: string | undefined,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  await postBroker(env, '/session_name', { name: name ?? '' }, fetchImpl)
+  await postBroker(env, '/session_name', { name: name ?? '' }, fetchImpl, AbortSignal.timeout(5000))
 }
 
 /** Authenticated GET; broker credentials travel in headers, never the URL. */
@@ -585,8 +603,20 @@ function brokerToolError(error: unknown): Error {
 export function createBrokerChildBroker(
   env: SubAgentEnv,
   fetchImpl: typeof fetch = fetch,
+  options: { strictPeers?: boolean; requestTimeoutMs?: number } = {},
 ): ChildBroker {
-  const pin = pinGeneration(env, fetchImpl)
+  const requestTimeoutMs = options.requestTimeoutMs
+  const transport: typeof fetch = requestTimeoutMs === undefined ? fetchImpl : Object.assign(
+    (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const requestUrl = input instanceof Request ? input.url : String(input)
+      if (requestUrl === `${env.brokerUrl}/wait_reply`) return fetchImpl(input, init)
+      const deadline = AbortSignal.timeout(requestTimeoutMs)
+      const signal = init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline
+      return fetchImpl(input, { ...init, signal })
+    },
+    { preconnect: fetchImpl.preconnect },
+  )
+  const pin = pinGeneration(env, transport)
   return {
     async tell(targetRunId, message, messageId) {
       let generation: string
@@ -608,11 +638,11 @@ export function createBrokerChildBroker(
             role: 'agent',
             generation,
           }),
-          fetchImpl,
+          transport,
         ) as Record<string, unknown> | null
       } catch (error) {
         const outcome = brokerErrorOutcome(error)
-          ?? (await sendNeverReachedBroker(error, env, fetchImpl) ? 'not-sent' : 'possibly-pending')
+          ?? (await sendNeverReachedBroker(error, env, transport) ? 'not-sent' : 'possibly-pending')
         return { outcome, messageId }
       }
       return {
@@ -622,7 +652,7 @@ export function createBrokerChildBroker(
     },
 
     ask(targetRunId, message, messageId, timeoutMs, signal) {
-      return brokerAsk(env, { toRunId: targetRunId, message, timeoutMs, signal }, messageId, fetchImpl, pin)
+      return brokerAsk(env, { toRunId: targetRunId, message, timeoutMs, signal }, messageId, transport, pin)
     },
 
     // A reply carries no generation: the broker completes the edge by looking it
@@ -641,11 +671,11 @@ export function createBrokerChildBroker(
             role: 'agent',
             replyTo: inboundAskId,
           }),
-          fetchImpl,
+          transport,
         ) as Record<string, unknown> | null
       } catch (error) {
         const outcome = brokerErrorOutcome(error)
-          ?? (await sendNeverReachedBroker(error, env, fetchImpl) ? 'not-sent' : 'possibly-pending')
+          ?? (await sendNeverReachedBroker(error, env, transport) ? 'not-sent' : 'possibly-pending')
         return { outcome, messageId: inboundAskId }
       }
       return { outcome: brokerOutcome(body), messageId: inboundAskId }
@@ -663,7 +693,7 @@ export function createBrokerChildBroker(
           env,
           '/cancel_message',
           { cancel_message_id: messageId, generation },
-          fetchImpl,
+          transport,
         ) as Record<string, unknown> | null
         return { outcome: brokerOutcome(body) }
       } catch (error) {
@@ -686,7 +716,13 @@ export function createBrokerChildBroker(
     },
 
     async peers() {
-      const body = await getBroker(env, '/sessions', fetchImpl)
+      const body = await getBroker(env, '/sessions', transport)
+      if (options.strictPeers) {
+        const rows = body !== null && typeof body === 'object' ? (body as Record<string, unknown>).sessions : undefined
+        if (!Array.isArray(rows) || rows.some(row => !row || typeof row.run_id !== 'string' || !row.run_id)) {
+          throw new Error('the central peer listing is incomplete or malformed')
+        }
+      }
       const peers = peerRecords(body)
       const detail = body !== null && typeof body === 'object'
         ? (body as Record<string, unknown>).peers_error
@@ -702,7 +738,7 @@ export function createBrokerChildBroker(
           env,
           '/rename',
           { session_id: req.sessionId ?? '', name: req.name },
-          fetchImpl,
+          transport,
         ) as Record<string, unknown> | null
         return {
           outcome: 'renamed',
@@ -717,7 +753,7 @@ export function createBrokerChildBroker(
 
     async last(runId) {
       try {
-        const body = await getBroker(env, `/last_message?target=${encodeURIComponent(runId)}`, fetchImpl) as Record<string, unknown> | null
+        const body = await getBroker(env, `/last_message?target=${encodeURIComponent(runId)}`, transport) as Record<string, unknown> | null
         return {
           outcome: 'sent',
           label: typeof body?.label === 'string' ? body.label : undefined,

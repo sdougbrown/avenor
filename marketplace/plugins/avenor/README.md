@@ -59,6 +59,13 @@ avenor runs become addressable like teammates:
   own display name for the run, never a field of the message text, and the
   frame tells the model to answer with `SendMessage` to `avenor:<run id>`.
 
+The `message` tool's `ask` target accepts a plain run ID, label, or `self`;
+`avenor:<run id or label>` remains an alias. `SendMessage` still requires the
+`avenor:` prefix. The hook handles both the direct MCP name
+`mcp__avenor__message` and the plugin-scoped name
+`mcp__plugin_avenor_avenor__message`, so asks and replies use this session's
+identity with either plugin loading form.
+
 Tested Claude Code version: **2.1.311**. There is no `engines` pin in the
 manifest, so the mod gates itself at runtime with `$.session.version()`: on an
 older release the layer logs one line (peer layer off) and disables itself
@@ -168,6 +175,6 @@ the plugin it loads joins the run the supervisor provisioned for it.
   the session unchanged across the reload — an inbound ask and an outbound
   send both worked immediately after a live reload. Restart the session to
   run new module code.
-- A self-registered run's broker record outlives the session (there is no
-  run-deregistration route for non-provisioned runs); it stops being a live
-  peer when the session ends.
+- A self-registered Claude run does not request a lease or retirement. Its
+  broker record can remain listed after the session ends; the opt-in lease
+  used by top-level Pi peers does not change that lifetime.

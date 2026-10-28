@@ -129,7 +129,14 @@ type RunState struct {
 	// Token is the credential this run authenticates with. A replacement branch
 	// claim rotates it, so it is guarded by the broker's own mutex, not by Mu:
 	// read it through Broker.runToken or Broker.runStateFor.
-	Token               string
+	Token string
+	// Peer lease and consumer state are guarded by Mu.
+	peer         bool
+	peerDeadline time.Time
+	peerRetired  bool
+	peerPolling  bool
+	// peerActivity lets admitted sends finish before retirement removes their edges.
+	peerActivity        sync.RWMutex
 	ControlQueue        []*ControlMessage
 	pollDeliveries      int
 	RegisteredAt        time.Time
@@ -224,6 +231,10 @@ func (b *Broker) PushControl(runID string, msg ControlMessage) error {
 		return fmt.Errorf("run not found: %s", runID)
 	}
 	st.Mu.Lock()
+	if st.peerUnavailableLocked(time.Now()) != "" {
+		st.Mu.Unlock()
+		return fmt.Errorf("%w: %s", messaging.ErrTargetUnavailable, runID)
+	}
 	msg.CreatedAt = time.Now()
 	st.ControlQueue = append(st.ControlQueue, &msg)
 	st.signalLocked()
@@ -596,6 +607,7 @@ func (b *Broker) StartOn(addr string) error {
 	router := http.NewServeMux()
 	router.HandleFunc("/health", b.handleHealth)
 	router.HandleFunc("/register", b.withMethod("POST", b.handleRegister))
+	router.HandleFunc("/retire", b.withMethod("POST", b.withAuth(b.handleRetirePeer)))
 	router.HandleFunc("/attach", b.withMethod("POST", b.handleAttach))
 	router.HandleFunc("/heartbeat", b.withMethod("POST", b.withAuth(b.handleHeartbeat)))
 	router.HandleFunc("/push-control", b.withMethod("POST", b.withAuth(b.handlePushControl)))
@@ -609,7 +621,7 @@ func (b *Broker) StartOn(addr string) error {
 	router.HandleFunc("/sessions", b.withMethod("GET", b.withAuth(b.handleSessions)))
 	router.HandleFunc("/rename", b.withMethod("POST", b.withAuth(b.handleRename)))
 	router.HandleFunc("/session_name", b.withMethod("POST", b.withAuth(b.handleSessionName)))
-	router.HandleFunc("/last_message", b.withMethod("GET", b.withAuth(b.handleLastMessage)))
+	router.HandleFunc("/last_message", b.routeLastMessage)
 	router.HandleFunc("/permission_request", b.withMethod("POST", b.withAuth(b.handlePermissionRequest)))
 	router.HandleFunc("/permission", b.withMethod("POST", b.withAuth(b.handlePermission)))
 	router.HandleFunc("/parent/register", b.withMethod("POST", b.handleParentRegister))
@@ -630,6 +642,7 @@ func (b *Broker) StartOn(addr string) error {
 	b.pruneStop = pruneCancel
 	b.pruneMu.Unlock()
 	go b.store.RunPruneLoop(pruneCtx)
+	go b.runPeerLeaseLoop(pruneCtx)
 
 	return nil
 }
@@ -745,9 +758,20 @@ func (b *Broker) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized: missing run_id or token", http.StatusUnauthorized)
 			return
 		}
-		_, want, ok := b.runStateFor(cred.RunID)
+		st, want, ok := b.runStateFor(cred.RunID)
 		if !ok || subtle.ConstantTimeCompare([]byte(cred.Token), []byte(want)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if st.peer && (r.URL.Path == "/send" || (r.URL.Path == "/last_message" && r.Method == http.MethodPost)) {
+			st.peerActivity.RLock()
+			defer st.peerActivity.RUnlock()
+		}
+		st.Mu.Lock()
+		peerCode := st.peerUnavailableLocked(time.Now())
+		st.Mu.Unlock()
+		if peerCode != "" {
+			writeCodedError(w, http.StatusGone, "peer identity is no longer active", peerCode)
 			return
 		}
 		// The authenticated run travels on the messaging leaf's caller-run key,
@@ -764,17 +788,14 @@ func (b *Broker) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// handleRegister mints a run or re-registers one the caller already holds. It
-// answers with the run's credential and nothing else: the attach grant a
-// launch hands its child is minted in process, by the supervisor that holds
-// this broker, not over the wire. A register that minted here would rotate a
-// grant already placed in a child's environment, and no response reader wants
-// it anyway (the plugin takes token and run id; the provisioned path never
-// registers at all).
+// handleRegister mints a run or retries a registration with its credential.
+// Peer registrations acknowledge lease support; provisioned attach grants are
+// minted only in process and never returned by this open route.
 func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RunID string `json:"run_id"`
 		Token string `json:"token"`
+		Peer  bool   `json:"peer"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -793,16 +814,30 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		st.Mu.Lock()
+		if body.Peer != st.peer {
+			st.Mu.Unlock()
+			b.mu.Unlock()
+			writeCodedError(w, http.StatusConflict, "registration kind does not match this run", "registration-mismatch")
+			return
+		}
+		if st.peerUnavailableLocked(time.Now()) != "" {
+			st.Mu.Unlock()
+			b.mu.Unlock()
+			writeCodedError(w, http.StatusConflict, "peer identity cannot be registered again", "peer-retired")
+			return
+		}
 		st.RegisteredAt = time.Now()
 		st.LastSeen = time.Now()
 		st.Mu.Unlock()
 		respToken := st.Token
 		b.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"token":  respToken,
-			"run_id": st.RunID,
-		})
+		answer := map[string]any{"token": respToken, "run_id": st.RunID}
+		if body.Peer {
+			answer["peer"] = true
+			answer["lease_ms"] = peerLease.Milliseconds()
+		}
+		_ = json.NewEncoder(w).Encode(answer)
 		return
 	}
 	token := body.Token
@@ -814,6 +849,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	st := &RunState{
 		RunID:               body.RunID,
 		Token:               token,
+		peer:                body.Peer,
+		peerDeadline:        time.Now().Add(peerLease),
 		RegisteredAt:        time.Now(),
 		LastSeen:            time.Now(),
 		Notify:              make(chan struct{}, 1),
@@ -825,10 +862,12 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	b.runSetChanged()
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"token":  token,
-		"run_id": st.RunID,
-	})
+	answer := map[string]any{"token": token, "run_id": st.RunID}
+	if body.Peer {
+		answer["peer"] = true
+		answer["lease_ms"] = peerLease.Milliseconds()
+	}
+	_ = json.NewEncoder(w).Encode(answer)
 }
 
 // handleAttach trades one launch's attach credential for its run's own
@@ -909,7 +948,15 @@ func (b *Broker) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st.Mu.Lock()
+	if code := st.peerUnavailableLocked(time.Now()); code != "" {
+		st.Mu.Unlock()
+		writeCodedError(w, http.StatusGone, "peer identity is no longer active", code)
+		return
+	}
 	st.LastSeen = time.Now()
+	if st.peer {
+		st.peerDeadline = time.Now().Add(peerLease)
+	}
 	st.Mu.Unlock()
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
@@ -935,6 +982,11 @@ func (b *Broker) handlePushControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	st.Mu.Lock()
+	if code := st.peerUnavailableLocked(time.Now()); code != "" {
+		st.Mu.Unlock()
+		writeCodedError(w, http.StatusGone, "peer identity is no longer active", code)
+		return
+	}
 	msg.CreatedAt = time.Now()
 	st.ControlQueue = append(st.ControlQueue, &msg)
 	st.signalLocked()
@@ -968,6 +1020,22 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	st.Mu.Lock()
+	if st.peer {
+		if code := st.peerUnavailableLocked(time.Now()); code != "" {
+			st.Mu.Unlock()
+			writeCodedError(w, http.StatusGone, "peer identity is no longer active", code)
+			return
+		}
+		if st.peerPolling {
+			st.Mu.Unlock()
+			writeCodedError(w, http.StatusConflict, "another peer poll is active", "duplicate-consumer")
+			return
+		}
+		st.peerPolling = true
+		st.peerDeadline = time.Now().Add(peerLease)
+		st.LastSeen = time.Now()
+		defer func() { st.Mu.Lock(); st.peerPolling = false; st.Mu.Unlock() }()
+	}
 	if len(st.ControlQueue) == 0 {
 		notify := st.Notify
 		st.Mu.Unlock()
@@ -978,6 +1046,11 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		st.Mu.Lock()
+	}
+	if code := st.peerUnavailableLocked(time.Now()); code != "" {
+		st.Mu.Unlock()
+		writeCodedError(w, http.StatusGone, "peer identity is no longer active", code)
+		return
 	}
 	msgs, queued := partitionDrained(st.ControlQueue, body.AgentOnly, body.Limit)
 	st.ControlQueue = queued
@@ -1091,6 +1164,10 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	if fullBody.FromRunID == "" || fullBody.ToRunID == "" || fullBody.Type == "" {
 		writeCodedError(w, http.StatusBadRequest, "missing fields", "invalid-request")
+		return
+	}
+	if fullBody.FromRunID != authenticatedCaller(r) {
+		writeCodedError(w, http.StatusForbidden, "from_run_id does not match the authenticated run", "sender-mismatch")
 		return
 	}
 	// Validate that the authenticated caller matches from_run_id's token.
@@ -1531,6 +1608,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 	b.parentRegisterMu.Lock()
 	defer b.parentRegisterMu.Unlock()
 	for _, claim := range body.Runs {
+		_, _, registered := b.runStateFor(link.Key(body.ChildID, claim.RunID))
 		switch {
 		case claim.RunID == "":
 			writeCodedError(w, http.StatusBadRequest, "every claimed run needs a run_id", "invalid-request")
@@ -1540,7 +1618,7 @@ func (b *Broker) handleParentRegister(w http.ResponseWriter, r *http.Request) {
 			// claiming one could forge another branch's supervisor identity.
 			writeCodedError(w, http.StatusBadRequest, "a claimed run id cannot contain \"@\"", "invalid-request")
 			return
-		case b.GetRun(link.Key(body.ChildID, claim.RunID)) != nil && !link.Owns(link.Key(body.ChildID, claim.RunID)):
+		case registered && !link.Owns(link.Key(body.ChildID, claim.RunID)):
 			// A record this broker minted itself under a claim key is not a child's
 			// to take: the claim is refused whole so the record keeps its credential.
 			writeCodedError(w, http.StatusConflict, "run already registered", "invalid-request")
@@ -1869,6 +1947,10 @@ func (b *Broker) sessions() []SessionInfo {
 	sessions := make([]SessionInfo, 0, len(b.runs))
 	for _, st := range b.runs {
 		st.Mu.Lock()
+		if st.peerUnavailableLocked(time.Now()) != "" {
+			st.Mu.Unlock()
+			continue
+		}
 		info := SessionInfo{RunID: st.RunID, Label: st.labelLocked()}
 		if st.Info != nil {
 			info.Kind = st.Info.Kind
@@ -1923,6 +2005,10 @@ func (b *Broker) ParentRunClaims() []messaging.RunClaim {
 		}
 		claim := messaging.RunClaim{RunID: runID, Token: st.Token}
 		st.Mu.Lock()
+		if st.peerUnavailableLocked(time.Now()) != "" {
+			st.Mu.Unlock()
+			continue
+		}
 		claim.Label = st.labelLocked()
 		st.Mu.Unlock()
 		candidates = append(candidates, claim)
@@ -2131,7 +2217,16 @@ func (b *Broker) handleSessionName(w http.ResponseWriter, r *http.Request) {
 func (b *Broker) GetRun(runID string) *RunState {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.runs[runID]
+	st := b.runs[runID]
+	if st != nil {
+		st.Mu.Lock()
+		unavailable := st.peerUnavailableLocked(time.Now()) != ""
+		st.Mu.Unlock()
+		if unavailable {
+			return nil
+		}
+	}
+	return st
 }
 
 // CreateRun registers a new run under name, the display label its peers see.
@@ -2587,6 +2682,10 @@ func (x brokerBackend) Publish(target string, msg messaging.InboundMessage) (fun
 		CreatedAt: time.Now(),
 	}
 	st.Mu.Lock()
+	if st.peerUnavailableLocked(time.Now()) != "" {
+		st.Mu.Unlock()
+		return nil, messaging.ErrTargetUnavailable
+	}
 	st.ControlQueue = append(st.ControlQueue, queued)
 	st.signalLocked()
 	st.Mu.Unlock()

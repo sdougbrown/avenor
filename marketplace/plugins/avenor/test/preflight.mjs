@@ -326,8 +326,8 @@ probeWait(askR1, listing.generation, 30000).then((r) => {
 }).catch((err) => waitRejected('the reply-action ask', err))
 await until('the reply-action ask to submit',
   () => events.some((e) => e.kind === 'prompt.submit' && e.line.includes('answer me with the reply action')))
-const replyActionResult = JSON.parse((await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
-  tool: 'mcp__avenor__message', action: 'reply', reply_to: askR1, message: 'answered by the reply action',
+const replyActionResult = JSON.parse((await callHook('tool.call{"tool":"mcp__plugin_avenor_avenor__message"}').hook(d, {
+  tool: 'mcp__plugin_avenor_avenor__message', action: 'reply', reply_to: askR1, message: 'answered by the reply action',
 })).result)
 console.log(JSON.stringify({ check: 'reply action result', replyActionResult }))
 if (replyActionResult.action !== 'reply' || replyActionResult.outcome !== 'replied' ||
@@ -521,10 +521,10 @@ if (!olderShape.ok || !(olderShape.body || '').includes('answering the older ask
 
 console.log('=== 6. the avenor message tool ask action, served by the peer layer ===')
 let toolResult = null
-callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
-  tool: 'mcp__avenor__message',
+callHook('tool.call{"tool":"mcp__plugin_avenor_avenor__message"}').hook(d, {
+  tool: 'mcp__plugin_avenor_avenor__message',
   action: 'ask',
-  target: `avenor:${probe.runId}`,
+  target: 'probe-peer',
   message: 'probe, what runs?',
 }).then((r) => {
   toolResult = r
@@ -558,6 +558,26 @@ const answeredShape = JSON.parse(answered.result)
 if (answeredShape.outcome !== 'replied' || answeredShape.reply !== 'the probe answer' || answeredShape.message_id !== askId) {
   console.log('FAIL: the replied ask result is not the router shape', answeredShape)
   process.exit(1)
+}
+
+console.log('=== 6a. message-tool self aliases address the native session identity ===')
+for (const target of ['self', 'claude-parent', 'avenor:self']) {
+  const message = 'self alias proof ' + target
+  const pendingSelf = callHook('tool.call{"tool":"mcp__plugin_avenor_avenor__message"}').hook(d, {
+    tool: 'mcp__plugin_avenor_avenor__message', action: 'ask', target, message, timeout_ms: 30000,
+  })
+  const delivered = await until('native self ask for ' + target,
+    () => events.find(e => e.kind === 'prompt.submit' && e.line.includes(message)))
+  const ownAskId = /message id `([^`]+)`/.exec(delivered.line)?.[1]
+  if (!ownAskId) throw new Error('self ask frame had no message ID')
+  await callHook('tool.call{"tool":"mcp__plugin_avenor_avenor__message"}').hook(d, {
+    tool: 'mcp__plugin_avenor_avenor__message', action: 'reply', reply_to: ownAskId, message: 'native self reply',
+  })
+  const result = JSON.parse((await pendingSelf).result)
+  if (result.outcome !== 'replied' || result.reply !== 'native self reply') {
+    throw new Error('self alias did not use the native session identity: ' + target)
+  }
+  console.log(JSON.stringify({ check: 'native self alias', target, result }))
 }
 
 console.log('=== 6b. an unanswered ask is timed-out, with the contract sentence ===')
@@ -682,7 +702,7 @@ if (emptyMessage.outcome !== 'not-sent' || emptyMessage.message_id !== undefined
   process.exit(1)
 }
 if (foreignTarget.outcome !== 'not-sent' || foreignTarget.message_id !== undefined ||
-    !foreignTarget.text.includes('must be an avenor:')) {
+    !foreignTarget.text.includes('without whitespace')) {
   console.log('FAIL: a non-avenor ask target was not refused', foreignTarget)
   process.exit(1)
 }

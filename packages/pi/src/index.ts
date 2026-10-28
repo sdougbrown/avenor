@@ -1,9 +1,12 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
+import { combinePeerProviders } from './peer-provider.js'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import {
   BrokerHttpError,
   createBrokerChildBroker,
+  createTopLevelPeerEnv,
+  registerTopLevelPeer,
   formatInboundAskBody,
   parseControlMessage,
   postBroker,
@@ -431,6 +434,8 @@ export interface ExtensionOptions {
   idleSendTimeoutMs?: number
   /** Overrides broker-credential autodetection for sub-agent broker mode (tests). */
   subAgentEnv?: SubAgentEnv | null
+  /** Explicit central broker configuration; null disables top-level participation. */
+  topLevelBrokerUrl?: string | null
 }
 
 export function createExtension(deps: ExtensionDeps = defaultDeps, options: ExtensionOptions = {}) {
@@ -616,6 +621,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // acting as a top-level host.
     const subAgentEnv = options.subAgentEnv !== undefined ? options.subAgentEnv : readSubAgentEnv()
     const isSubAgentBrokerMode = subAgentEnv !== null
+    const topLevelBrokerUrl = options.topLevelBrokerUrl !== undefined ? options.topLevelBrokerUrl
+      : options.subAgentEnv !== undefined ? null : process.env.AVENOR_BROKER_URL || null
+    let topLevelEnv: SubAgentEnv | null = null
+    let centralSessionAbort: AbortController | null = null
+    let centralTurnWrites: Promise<void> = Promise.resolve()
+    let topLevelRegistered = false
+    let topLevelError: Error | null = null
+    let topLevelTerminal = false
+    let peerPollAbort: AbortController | null = null
     let subAgentPollTimer: ReturnType<typeof setTimeout> | null = null
     // Bumped on every start/stop so an in-flight tick cannot reschedule
     // itself after the poll was stopped.
@@ -625,6 +639,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
     function stopSubAgentPoll(): void {
       subAgentPollGeneration++
+      peerPollAbort?.abort()
+      peerPollAbort = null
       if (subAgentPollTimer) {
         clearTimeout(subAgentPollTimer)
         subAgentPollTimer = null
@@ -647,8 +663,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let refusedSessionName: string | null = null
 
     function publishSessionName(ctx: ExtensionContext): Promise<void> {
-      if (!subAgentEnv) return publishChain
-      const env = subAgentEnv
+      const env = subAgentEnv ?? (topLevelRegistered ? topLevelEnv : null)
+      if (!env) return publishChain
       // The event context does not always carry a session manager. A manager
       // that is missing is not the same as a cleared name: with nothing to read
       // the publish is skipped, because sending an empty name would clobber the
@@ -656,7 +672,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // present but reports undefined is a real clear and still publishes.
       const manager = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } }).sessionManager
       if (!manager || typeof manager.getSessionName !== 'function') return publishChain
-      const name = manager.getSessionName()
+      const name = manager.getSessionName() ?? (topLevelEnv ? process.env.AVENOR_SESSION_NAME ?? process.env.AVENOR_LABEL : undefined)
       if (publishedSessionName && publishedSessionName.name === name) return publishChain
       if (refusedSessionName === name) return publishChain
       // Record the attempt before it lands so a second read of the same name
@@ -686,30 +702,62 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     }
 
     async function startSubAgentPoll(): Promise<void> {
-      if (!subAgentEnv) return
+      const env = subAgentEnv ?? topLevelEnv
+      if (!env) return
       stopSubAgentPoll()
+      const abort = new AbortController()
+      peerPollAbort = abort
       const generation = subAgentPollGeneration
       const intervalMs = options.pollIntervalMs ?? 2000
       let consecutiveFailures = 0
+      const queuedMessages: Array<Record<string, unknown>> = []
+      function deliverQueuedMessages(): void {
+        while (queuedMessages.length > 0) {
+          const msg = queuedMessages[0]
+          const ask = parseControlMessage(msg)
+          if (ask) {
+            let payload = msg.payload
+            if (typeof payload === 'string') {
+              try { payload = JSON.parse(payload) } catch { payload = undefined }
+            }
+            const expectsReply = (payload as Record<string, unknown> | undefined)?.expects_reply === true
+            if (topLevelEnv && !expectsReply) {
+              pi.sendUserMessage(`**📨 Message from** \`${ask.from_run_id}\`\n\n${ask.message}`, { deliverAs: 'steer' })
+            } else {
+              surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
+            }
+          }
+          queuedMessages.shift()
+        }
+      }
       // Recursive setTimeout (not setInterval): a slow poll must not overlap
       // the next tick and surface asks out of order.
       const tick = async (): Promise<void> => {
         try {
+          if (topLevelEnv && !topLevelRegistered) {
+            if (topLevelTerminal) return
+            await registerCentralPeer(abort.signal)
+          }
+          deliverQueuedMessages()
           // The broker encodes an empty queue as JSON null.
-          const msgs = ((await postBroker(subAgentEnv, '/poll-control', {})) ?? []) as Array<Record<string, unknown>>
+          const msgs = ((await postBroker(env, '/poll-control', {}, fetch, AbortSignal.any([abort.signal, AbortSignal.timeout(15000)]))) ?? []) as Array<Record<string, unknown>>
           if (generation !== subAgentPollGeneration) return
           if (consecutiveFailures >= 3) console.error('[avenor] sub-agent broker poll recovered')
           consecutiveFailures = 0
-          for (const msg of msgs) {
-            const ask = parseControlMessage(msg)
-            if (!ask) continue
-            surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
-          }
+          queuedMessages.push(...msgs)
+          deliverQueuedMessages()
         } catch (error) {
           // Broker unreachable while it is starting up is expected; persistent
           // failure (e.g. a rejected token) must not stay silent.
+          if (generation !== subAgentPollGeneration) return
+          if (topLevelEnv && error instanceof BrokerHttpError && [401, 403, 409, 410].includes(error.status)) {
+            topLevelTerminal = true
+            topLevelError = new Error('the central peer identity was refused; start a new session to register again')
+            console.error('[avenor]', topLevelError.message)
+            return
+          }
           consecutiveFailures++
-          if (consecutiveFailures === 3) {
+          if (consecutiveFailures === 1 || consecutiveFailures === 3) {
             console.error('[avenor] sub-agent broker poll failing:', error instanceof Error ? error.message : error)
           }
         }
@@ -752,9 +800,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const tick = async (): Promise<void> => {
         const startedAt = Date.now()
         try {
-          const receive = () => hostReceiveGeneration
-            ? deps.brokerReceiveTool({ generation: hostReceiveGeneration, timeout_ms: intervalMs })
-            : deps.brokerReceiveTool({ timeout_ms: intervalMs })
+          const receive = () => {
+            if (topLevelBrokerUrl && !deps.Supervisor.currentInstance?.()) {
+              hostReceiveGeneration = undefined
+              return Promise.resolve({ asks: [], generation: undefined })
+            }
+            return hostReceiveGeneration
+              ? deps.brokerReceiveTool({ generation: hostReceiveGeneration, timeout_ms: intervalMs })
+              : deps.brokerReceiveTool({ timeout_ms: intervalMs })
+          }
           let received
           try {
             received = await receive()
@@ -1680,6 +1734,26 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     const hostProviderFor: (supervisorId: string | undefined) => Promise<MessageProvider> =
       deps.hostProviderFor ?? defaultHostProviderFor
 
+    let centralProvider: MessageProvider | null = null
+    let combinedProvider: MessageProvider | null = null
+    let combinedLocalProvider: MessageProvider | null = null
+
+    async function registerCentralPeer(signal: AbortSignal): Promise<void> {
+      if (!topLevelEnv) return
+      try {
+        await registerTopLevelPeer(topLevelEnv, fetch, AbortSignal.any([signal, AbortSignal.timeout(5000)]))
+        if (signal.aborted) return
+        topLevelRegistered = true
+        topLevelError = null
+        if (sessionCtx) await publishSessionName(sessionCtx)
+      } catch (error) {
+        if (signal.aborted) return
+        topLevelError = error instanceof Error ? error : new Error('central peer registration failed')
+        if ((error instanceof BrokerHttpError && error.status < 500) || (error instanceof Error && error.message === 'the broker did not confirm the chosen peer identity')) topLevelTerminal = true
+        throw error
+      }
+    }
+
     const childProvider = isSubAgentBrokerMode && subAgentEnv
       ? createChildMessageProvider({
         surface: 'pi-child',
@@ -1715,6 +1789,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // live with the child transport; host tools use the host binding.
     async function messageProvider(supervisorId: string | undefined): Promise<MessageProvider> {
       if (childProvider) return childProvider
+      if (topLevelBrokerUrl) {
+        if (!topLevelRegistered || topLevelError || !combinedProvider) {
+          throw new Error(topLevelTerminal ? 'the central peer identity is unavailable; start a new session' : 'central peer registration has not succeeded; retry after the broker reconnects')
+        }
+        if (deps.Supervisor.currentInstance?.() || deps.hostProviderFor) {
+          combinedLocalProvider = await hostMessageProvider(supervisorId)
+        } else {
+          combinedLocalProvider = null
+        }
+        return combinedProvider
+      }
       return hostMessageProvider(supervisorId)
     }
 
@@ -1745,13 +1830,31 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // from here.
     pi.on('turn_end', async event => {
       if (isSubAgentBrokerMode) return
+      const turn = extractTurnText([event.message])
+      const bounded = boundFinalOutput(turn.text)
+      const stopReason = normalizeTurnStopReason(turn.stopReason)
+      const truncated = turn.text.length > bounded.length
+      const env = topLevelRegistered && !topLevelTerminal ? topLevelEnv : null
+      const generation = sessionGeneration
+      const signal = centralSessionAbort?.signal
+      const centralWrite = env ? centralTurnWrites = centralTurnWrites.then(async () => {
+        if (env !== topLevelEnv || generation !== sessionGeneration || signal?.aborted) return
+        try {
+          await postBroker(env, '/last_message', {
+            final_output: bounded, stop_reason: stopReason, truncated,
+          }, fetch, signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000))
+        } catch (error) {
+          if (signal?.aborted) return
+          console.error('[avenor] central last-turn publication failed:', error instanceof BrokerHttpError ? `HTTP ${error.status}` : 'transport failure')
+        }
+      }) : Promise.resolve()
       // Nobody can read a last-turn record while no supervisor exists, and
       // recording one must not start a supervisor (plus its broker) in a
       // session that never delegates. A supervisor whose connection is already
       // dead is reported once and its stale binding evicted. The next turn
       // redials only once a healthy supervisor exists again.
       const instance = deps.Supervisor.currentInstance?.()
-      if (!instance) return
+      if (!instance) return centralWrite
       // A replacement supervisor starts a new report episode: a latch left by
       // a dead predecessor must not suppress this instance's first failure.
       // The key is the instance object: supervisorId is the socket path, which
@@ -1762,19 +1865,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       } catch (error) {
         disposeHostProvider(undefined)
         reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance)
-        return
+        return centralWrite
       }
-      const turn = extractTurnText([event.message])
       let provider: MessageProvider | undefined
       try {
         provider = await hostProviderFor(undefined)
-        if (!provider.recordLastTurn) return
-        const bounded = boundFinalOutput(turn.text)
-        await provider.recordLastTurn(
-          bounded,
-          normalizeTurnStopReason(turn.stopReason),
-          turn.text.length > bounded.length,
-        )
+        if (!provider.recordLastTurn) return centralWrite
+        await provider.recordLastTurn(bounded, stopReason, truncated)
         lastTurnFailureReportedFor = null
       } catch (error) {
         if (isClosedSocketError(error)) {
@@ -1786,11 +1883,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         }
         reportLastTurnFailure(error instanceof Error ? error.message : String(error), instance)
       }
+      await centralWrite
     })
 
     pi.on('session_start', async (_event, ctx) => {
       sessionCtx = ctx
       sessionGeneration++
+      const startingSessionGeneration = sessionGeneration
       compacting = false
       clearPendingNotices()
       // The replaced session may have stopped polling with terminal runs still
@@ -1802,6 +1901,34 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       pollingErrorCount = 0
       pollingErrors.length = 0
       publishedSessionName = null
+      if (!isSubAgentBrokerMode && topLevelBrokerUrl) {
+        try {
+          if (options.topLevelBrokerUrl === undefined && (process.env.AVENOR_RUN_ID || process.env.AVENOR_BROKER_TOKEN)) {
+            throw new Error('incomplete broker credentials; provide run ID and token together for child mode')
+          }
+          topLevelEnv ??= createTopLevelPeerEnv(topLevelBrokerUrl)
+          if (!centralProvider) {
+            centralTurnWrites = Promise.resolve()
+            centralSessionAbort = new AbortController()
+            const sessionAbort = centralSessionAbort
+            centralProvider = createChildMessageProvider({
+              surface: 'pi-child', runId: topLevelEnv.runId,
+              broker: createBrokerChildBroker(topLevelEnv, fetch, { strictPeers: true, requestTimeoutMs: 5000 }), pendingAsks: subAgentPendingAsks,
+              pollGeneration: () => subAgentPollGeneration,
+            })
+            const ask = centralProvider.ask
+            centralProvider.ask = (target, message, timeout, signal) => ask(
+              target, message, timeout,
+              signal ? AbortSignal.any([signal, sessionAbort.signal]) : sessionAbort.signal,
+            )
+          }
+          combinedProvider ??= combinePeerProviders(() => combinedLocalProvider, centralProvider)
+          await registerCentralPeer(centralSessionAbort!.signal)
+        } catch (error) {
+          console.error('[avenor] central peer registration failed:', error instanceof BrokerHttpError ? `HTTP ${error.status}` : error instanceof Error ? error.message : 'registration failed')
+        }
+      }
+      if (startingSessionGeneration !== sessionGeneration) return
       void publishSessionName(ctx)
       if (!isSubAgentBrokerMode) startHostAskPoll()
       void startSubAgentPoll()
@@ -1811,12 +1938,22 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // Invalidate broker work before the first await so late receives and failed replies cannot repopulate a closed session.
       stopHostAskPoll()
       stopSubAgentPoll()
+      centralSessionAbort?.abort()
+      centralSessionAbort = null
+      const retiredEnv = topLevelEnv
+      topLevelEnv = null
+      topLevelRegistered = false
+      topLevelTerminal = false
+      topLevelError = null
+      centralProvider = null
+      combinedProvider = null
+      combinedLocalProvider = null
       disposeHostProviders()
       hostPendingAsks.clear()
       subAgentPendingAsks.clear()
       sessionGeneration++
       clearPendingNotices()
-      await stopPolling()
+      const stoppedPolling = stopPolling()
       // Release any still-blocking waiters so their tool calls return instead
       // of parking on a session that no longer exists.
       for (const wait of [...pendingWaits]) {
@@ -1824,6 +1961,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         wait.interrupt({ runId: '', status: 'shutdown', synthetic: true })
       }
       sessionCtx = null
+      if (retiredEnv) {
+        try { await postBroker(retiredEnv, '/retire', {}, fetch, AbortSignal.timeout(5000)) }
+        catch { console.error('[avenor] central peer retirement could not be confirmed; its lease will expire') }
+      }
+      await stoppedPolling
     })
 
     // Delivery confirmation for idle completions. A send is only proven to
