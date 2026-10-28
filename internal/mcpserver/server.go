@@ -598,9 +598,7 @@ func terminalStatusFromRunInfo(info *RunInfo) (map[string]any, bool) {
 	if err != nil {
 		return nil, false
 	}
-	switch strings.ToUpper(sd.Status) {
-	case "DONE", "FAILED", "BLOCKED", "TIMEOUT", "KILLED":
-	default:
+	if !runstate.IsTerminalSentinel(sd.Status) {
 		return nil, false
 	}
 	status := make(map[string]any)

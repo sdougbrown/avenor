@@ -15,10 +15,15 @@ import type {
 import { RpcError } from '../client.js'
 import { ensureRunPaths } from '../paths.js'
 import { Supervisor, retainLiveIdentity, type RunInfo } from '../supervisor.js'
-import { newMsgID, type MessageOutcome } from '../messaging-text.js'
+import { goQuote, newMsgID, type MessageOutcome } from '../messaging-text.js'
 import { ToolError } from '../message.js'
 import { findExternalRunById, listExternalRuns, registerExternalRun } from './run-registry.js'
-import { RESUMABLE_SENTINEL_STATUSES } from './sentinel-status.js'
+import {
+  RESUMABLE_SENTINEL_STATUSES,
+  resumableFromSession,
+  sentinelStatusToResult,
+  TERMINAL_SENTINEL_STATUSES,
+} from './sentinel-status.js'
 import type {
   MessageProvider,
   MessageSurface,
@@ -135,6 +140,18 @@ export function isGenerationMismatchError(error: unknown): boolean {
   return error instanceof Error && /generation mismatch/i.test(error.message)
 }
 
+/**
+ * Matches Go's `statusReportsNoRuntime`: true only for the supervisor's absence
+ * answer for this exact runtime, so a refusal or a transport failure stays the
+ * caller's error. The sentence is rendered with `goQuote` because the
+ * supervisor formats the id with Go's `%q`.
+ */
+function statusReportsNoRuntime(error: unknown, runId: string): boolean {
+  if (!(error instanceof RpcError) || error.code !== -32000) return false
+  return rpcText(error) === `runtime ${goQuote(runId)} not found`
+}
+
+
 /** Reject an abort exactly the way fetch does, so the ask cleanup path runs. */
 function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise
@@ -214,15 +231,41 @@ function translateRunFacts(rawStatus: string, rawPhase: string): { status: strin
   return { status, live: !TERMINAL_STATUSES.has(status) }
 }
 
-async function sentinelResumable(filePath: string): Promise<boolean> {
-  if (!filePath) return false
+/**
+ * Classify one broker peer row into the facts the router gates on. The Go
+ * providers share this translation through `messaging.PeerRunFacts`: a peer row
+ * carries no session and no sentinel, so the run is never resumable from here —
+ * the supervisor that spawned it owns a resume.
+ */
+function peerFacts(peer: PeerRecord | undefined): RunFacts {
+  const translation = translateRunFacts(peer?.status ?? '', '')
+  return { live: translation.live, resumable: false, status: translation.status }
+}
+
+/** Read one sentinel file's status word, or undefined when the file is unreadable. */
+async function readSentinelStatus(filePath: string): Promise<string | undefined> {
   try {
     const content = (await fs.promises.readFile(filePath, 'utf-8')).trim()
-    const status = (content.split('\n')[0] ?? '').trim().toUpperCase()
-    return RESUMABLE_SENTINEL_STATUSES.has(status)
+    return (content.split('\n')[0] ?? '').trim().toUpperCase()
   } catch {
-    return false
+    return undefined
   }
+}
+
+/**
+ * Read one sentinel file's terminal result word, or undefined when the file is
+ * unreadable or holds a status that is not terminal. The mapping is the status
+ * surface's, so both classify a sentinel the same way.
+ */
+async function terminalSentinelStatus(filePath: string): Promise<string | undefined> {
+  const status = await readSentinelStatus(filePath)
+  if (!status || !TERMINAL_SENTINEL_STATUSES.has(status)) return undefined
+  return sentinelStatusToResult(status)
+}
+
+async function sentinelResumable(filePath: string): Promise<boolean> {
+  const status = await readSentinelStatus(filePath)
+  return status !== undefined && RESUMABLE_SENTINEL_STATUSES.has(status)
 }
 
 function peerRecords(peers: MessagePeersResult): PeerRecord[] {
@@ -327,6 +370,26 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     }
   }
 
+  // peerRunState reads one target's state from the broker's peer listing, which
+  // is the only authority for a run this supervisor does not run. It answers
+  // nothing for a listing that could not be read completely or that does not
+  // hold the run, so the caller keeps the failure it already had. A stale
+  // generation is not the listing's answer: the MCP surface retries the whole
+  // call once after a re-preflight, and a mismatch swallowed here would report
+  // the status failure instead of letting that retry run.
+  async function peerRunState(runId: string): Promise<RunFacts | undefined> {
+    let listed: { peers: PeerRecord[]; detail?: string }
+    try {
+      listed = await listedPeers()
+    } catch (error) {
+      if (isGenerationMismatchError(error)) throw error
+      return undefined
+    }
+    if (listed.detail) return undefined
+    const peer = listed.peers.find(entry => entry.run_id === runId)
+    return peer ? peerFacts(peer) : undefined
+  }
+
   const provider: MessageProvider = {
     caller: () => ({ kind: 'owner', runId: SUPERVISOR_RUN_ID }),
     surface: () => surface,
@@ -383,19 +446,43 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           throw new Error(`the peer listing is incomplete: ${detail}`)
         }
         const peer = peers.find(entry => entry.run_id === SUPERVISOR_RUN_ID)
-        const translation = translateRunFacts(peer?.status ?? '', '')
-        return {
-          live: translation.live,
-          resumable: false,
-          status: translation.status,
-        }
+        return peerFacts(peer)
       }
-      const status = await client.status(runId)
+      let status: Record<string, unknown>
+      try {
+        status = await client.status(runId)
+      } catch (error) {
+        // The status verb answers only for the runs this supervisor runs, so a
+        // run a registered child broker owns has no runtime here and reports
+        // from the broker's listing instead. Only that absence answer is read
+        // through the listing: a denial or a transport failure is this call's
+        // outcome and stays the caller's error.
+        if (!statusReportsNoRuntime(error, runId)) throw error
+        // Mirrors the Go rung ahead of the listing: a run that settled before
+        // a supervisor restart keeps its outcome discoverable by run id. The
+        // fallback stays narrow — a run neither plane holds, an unreadable
+        // sentinel, or a non-terminal one keeps the absence answer.
+        const instance = Supervisor.getInstance(supervisorId)
+        const registered = instance?.getRunById(runId) ?? findExternalRunById(supervisorId, runId)
+        if (registered) {
+          const terminal = await terminalSentinelStatus(registered.sentinelPath)
+          if (terminal) {
+            return {
+              live: false,
+              resumable: resumableFromSession(registered.sessionId),
+              status: terminal,
+            }
+          }
+        }
+        const listed = await peerRunState(runId)
+        if (listed) return listed
+        throw error
+      }
       const translation = translateRunFacts(
         typeof status.status === 'string' ? status.status : '',
         typeof status.phase === 'string' ? status.phase : '',
       )
-      let resumable = typeof status.session_id === 'string' && status.session_id !== ''
+      let resumable = resumableFromSession(status.session_id)
       if (!resumable && typeof status.sentinel_file === 'string') {
         resumable = await sentinelResumable(status.sentinel_file)
       }
@@ -742,8 +829,7 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
       if (!peer) {
         throw new Error(`run ${targetRunId} is not visible`)
       }
-      const translation = translateRunFacts(peer.status ?? '', '')
-      return { live: translation.live, resumable: false, status: translation.status }
+      return peerFacts(peer)
     },
 
     tell: (targetRunId, message) => broker.tell(targetRunId, message, newMsgID()),

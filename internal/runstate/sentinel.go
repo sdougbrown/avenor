@@ -63,6 +63,14 @@ func ReadSentinelSession(path string) (string, error) {
 	return sentinel.SessionID, nil
 }
 
+// IsTerminalSentinel reports whether a sentinel status word names an outcome a
+// reader may answer from after the run's runtime is gone. It composes
+// SentinelStatus with IsTerminalStatus rather than re-spelling the words, so a
+// status added to that vocabulary is classified once.
+func IsTerminalSentinel(raw string) bool {
+	return IsTerminalStatus(SentinelStatus(strings.ToUpper(raw)))
+}
+
 // IsResumableStatus reports whether a sentinel status word names a status a
 // resume may continue. It is the one classification the sentinel reader and the
 // resume authority share.

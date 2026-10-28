@@ -286,3 +286,51 @@ export function renderAskFailure(
 export function normalizeAskTimeoutMs(timeoutMs: number | undefined): number | undefined {
   return timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : undefined
 }
+
+/** Render a value the way Go's `%q` verb does (`strconv.Quote`). */
+export function goQuote(value: string): string {
+  let out = '"'
+  for (const character of value) out += goEscapedRune(character)
+  return `${out}"`
+}
+
+const GO_PRINTABLE = /[\p{L}\p{M}\p{N}\p{P}\p{S}]/u
+
+/**
+ * One rune in `strconv.Quote` form: short escapes for a quote, a backslash, a
+ * bell and the whitespace controls; `\xNN` for the remaining ASCII escapes;
+ * `\uNNNN` and `\UNNNNNNNN` for a non-printable rune; the rune itself when it
+ * is printable. Printable is Go's `strconv.IsPrint` — ASCII space through `~`,
+ * and elsewhere the categories L, M, N, P and S. V8's Unicode tables can be
+ * newer than Go's, so a rune assigned since Go's tables were generated renders
+ * escaped here where Go writes it verbatim; that direction only fails to match
+ * a sentence, never invents one.
+ */
+function goEscapedRune(character: string): string {
+  const code = character.codePointAt(0) ?? 0
+  switch (character) {
+    case '"':
+      return '\\"'
+    case '\\':
+      return '\\\\'
+    case '\x07':
+      return '\\a'
+    case '\b':
+      return '\\b'
+    case '\f':
+      return '\\f'
+    case '\n':
+      return '\\n'
+    case '\r':
+      return '\\r'
+    case '\t':
+      return '\\t'
+    case '\v':
+      return '\\v'
+  }
+  const printable = code < 0x80 ? code >= 0x20 && code !== 0x7f : GO_PRINTABLE.test(character)
+  if (printable) return character
+  if (code < 0x80) return `\\x${code.toString(16).padStart(2, '0')}`
+  if (code < 0x10000) return `\\u${code.toString(16).padStart(4, '0')}`
+  return `\\U${code.toString(16).padStart(8, '0')}`
+}

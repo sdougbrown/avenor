@@ -10,6 +10,7 @@ import {
   type MessageClient,
 } from './message-provider.js'
 import { RpcError } from '../client.js'
+import { Supervisor } from '../supervisor.js'
 import { forgetExternalRuns, findExternalRunById, registerExternalRun } from './run-registry.js'
 import { executeMessage, executePeers, type ProviderResult } from '../message.js'
 
@@ -201,6 +202,356 @@ describe('host message provider', () => {
     })
     const host = provider(client)
     await expect(host.state('supervisor')).rejects.toThrow('the peer listing is incomplete')
+  })
+
+  it('addresses a run a registered branch registered, which has no runtime here', async () => {
+    // A hub's control store holds no runtime for a branch's run, so the status
+    // verb answers as the real socket does: no such runtime. The broker that
+    // adopted the claim is the run's only authority.
+    const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
+    const client = fakeClient({
+      status: mock(async (runtimeId?: string) => {
+        // The real supervisor writes this sentence with Go's %q. The branch id
+        // stays in plain-printable range, where interpolation matches it; ids
+        // Go escapes are covered with their wire spellings below.
+        throw new RpcError(-32000, `runtime "${runtimeId ?? ''}" not found`)
+      }),
+      messagePeers: mock(async () => ({
+        peers: [
+          { run_id: 'supervisor', session: { run_id: 'supervisor', status: 'running' } },
+          { run_id: peerRunId, session: { run_id: peerRunId, label: 'branch-target', status: 'running' } },
+        ],
+      })),
+    })
+    const host = provider(client)
+    expect(await host.state(peerRunId)).toMatchObject({ live: true, resumable: false, status: 'running' })
+    expect(await host.resolve(peerRunId)).toMatchObject({ runId: peerRunId, label: 'branch-target' })
+
+    const result = await executeMessage(host, { action: 'tell', target: peerRunId, message: 'hub ping' })
+    expect(result.outcome).toBe('sent')
+    expect((client.send.mock.calls[0][0] as any).to_run_id).toBe(peerRunId)
+  })
+
+  it('keeps a status failure for a run the listing does not hold', async () => {
+    const client = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_ghost" not found')
+      }),
+    })
+    await expect(provider(client).state('rt_ghost')).rejects.toThrow('runtime "rt_ghost" not found')
+  })
+
+  it('reports a registry run\'s terminal sentinel as resumable from its session, whatever the terminal word', async () => {
+    // A run that finished before a supervisor restart has no runtime left for
+    // the status verb to find, but the registry keeps its terminal sentinel,
+    // so the terminal facts answer the call instead of the listing's
+    // never-resumable peer facts for the same run id. Resumable follows the
+    // session the registry entry carries, the same condition the Go rung
+    // reads from the sentinel's session: a supervisor-imposed termination
+    // (TIMEOUT, KILLED) with a session is just as resumable as DONE, so the
+    // status word never gates it here.
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const runDir = path.join(home, 'runs', 'run-461')
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+    registerExternalRun({
+      runId: 'run-461',
+      label: 'mesh-a',
+      supervisorId,
+      sentinelPath: path.join(runDir, 'sentinel.done'),
+      eventLogPath: path.join(runDir, 'events.log'),
+      runtimeId: 'rt_9',
+      sessionId: 'ses_9',
+    })
+    try {
+      const client = fakeClient({
+        status: mock(async () => {
+          throw new RpcError(-32000, 'runtime "run-461" not found')
+        }),
+        messagePeers: mock(async () => ({
+          peers: [{ run_id: 'run-461', session: { run_id: 'run-461', label: 'mesh-a', status: 'running' } }],
+        })),
+      })
+      const host = provider(client)
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\n')
+      expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'done' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'TIMEOUT\n')
+      expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'timeout' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'FAILED\n')
+      expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'failed' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'BLOCKED\n')
+      expect(await host.state('run-461')).toMatchObject({ live: false, resumable: true, status: 'failed' })
+    } finally {
+      forgetExternalRuns(supervisorId)
+      fs.rmSync(runDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports a registry run\'s terminal sentinel as not resumable without a session', async () => {
+    // A terminal word alone is not a resume: the Go rung answers resumable
+    // only from a non-empty session, so a registry entry without one stays
+    // not resumable even when its sentinel settled DONE or KILLED.
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const runDir = path.join(home, 'runs', 'run-463')
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+    registerExternalRun({
+      runId: 'run-463',
+      label: 'mesh-c',
+      supervisorId,
+      sentinelPath: path.join(runDir, 'sentinel.done'),
+      eventLogPath: path.join(runDir, 'events.log'),
+      runtimeId: 'rt_11',
+    })
+    try {
+      const client = fakeClient({
+        status: mock(async () => {
+          throw new RpcError(-32000, 'runtime "run-463" not found')
+        }),
+        messagePeers: mock(async () => ({
+          peers: [{ run_id: 'run-463', session: { run_id: 'run-463', label: 'mesh-c', status: 'running' } }],
+        })),
+      })
+      const host = provider(client)
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\n')
+      expect(await host.state('run-463')).toMatchObject({ live: false, resumable: false, status: 'done' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'KILLED\n')
+      expect(await host.state('run-463')).toMatchObject({ live: false, resumable: false, status: 'killed' })
+    } finally {
+      forgetExternalRuns(supervisorId)
+      fs.rmSync(runDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports an in-process resumed run\'s terminal sentinel after its runtime is reaped', async () => {
+    // A run resumed through this provider registers into the in-process
+    // Supervisor instance, never the persisted external registry, so the
+    // state fallback must read the instance's run the same way resolve does.
+    // Once the runtime is reaped, the status verb answers only its absence
+    // failure and the run's terminal sentinel answers instead of the
+    // listing's never-resumable peer facts for the same run id.
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const runDir = path.join(home, 'runs', 'run-465')
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+    const adopted = Supervisor.adoptTestInstance('avenor', supervisorId)
+    const sup = adopted.supervisor
+    sup.registerResumed({
+      runId: 'run-465',
+      label: 'mesh-r',
+      sentinelPath: path.join(runDir, 'sentinel.done'),
+      eventLogPath: path.join(runDir, 'events.log'),
+      runtimeId: 'rt_465',
+      sessionId: 'ses_465',
+    })
+    try {
+      const client = fakeClient({
+        status: mock(async () => {
+          throw new RpcError(-32000, 'runtime "run-465" not found')
+        }),
+        messagePeers: mock(async () => ({
+          peers: [{ run_id: 'run-465', session: { run_id: 'run-465', label: 'mesh-r', status: 'running' } }],
+        })),
+      })
+      const host = provider(client)
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'DONE\n')
+      expect(await host.state('run-465')).toMatchObject({ live: false, resumable: true, status: 'done' })
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'TIMEOUT\n')
+      expect(await host.state('run-465')).toMatchObject({ live: false, resumable: true, status: 'timeout' })
+    } finally {
+      adopted.restore()
+      fs.rmSync(runDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the absence error when a registry run holds no terminal sentinel', async () => {
+    // The registry entry alone is not an answer: a sentinel the call cannot
+    // read, or one that has not reached a terminal status, leaves the run's
+    // absence error standing rather than inventing terminal facts — even when
+    // the entry carries a session, since a session never makes a non-terminal
+    // rung an answer.
+    const supervisorId = '/tmp/avenor-provider.sock'
+    const runDir = path.join(home, 'runs', 'run-462')
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 })
+    registerExternalRun({
+      runId: 'run-462',
+      label: 'mesh-b',
+      supervisorId,
+      sentinelPath: path.join(runDir, 'sentinel.done'),
+      eventLogPath: path.join(runDir, 'events.log'),
+      runtimeId: 'rt_10',
+      sessionId: 'ses_10',
+    })
+    try {
+      const client = fakeClient({
+        status: mock(async () => {
+          throw new RpcError(-32000, 'runtime "run-462" not found')
+        }),
+        // The listing holds no such run, so the fall-through has nothing to
+        // answer with and the original error survives.
+        messagePeers: mock(async () => ({
+          peers: [
+            { run_id: 'supervisor', session: { run_id: 'supervisor', status: 'running' } },
+            { run_id: 'rt_7', session: { run_id: 'rt_7', label: 'mesh-a', status: 'done' } },
+          ],
+        })),
+      })
+      await expect(provider(client).state('run-462')).rejects.toThrow('runtime "run-462" not found')
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), 'RUNNING\n')
+      await expect(provider(client).state('run-462')).rejects.toThrow('runtime "run-462" not found')
+      fs.writeFileSync(path.join(runDir, 'sentinel.done'), '')
+      await expect(provider(client).state('run-462')).rejects.toThrow('runtime "run-462" not found')
+    } finally {
+      forgetExternalRuns(supervisorId)
+      fs.rmSync(runDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the status error when the listing read fails on a genuine absence answer', async () => {
+    // The listing's own failure is never the answer either: the call keeps the
+    // absence error it started with instead of trading it for a transport one.
+    const client = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_ghost" not found')
+      }),
+      messagePeers: mock(async () => {
+        throw new Error('connect ENOENT /tmp/avenor.sock')
+      }),
+    })
+    await expect(provider(client).state('rt_ghost')).rejects.toThrow('runtime "rt_ghost" not found')
+  })
+
+  it('keeps the status error when a partial listing holds the run', async () => {
+    // A partial listing is not an answer either: even a peer it did read may be
+    // shadowed by one it missed, so the absence error the call started with is
+    // the outcome rather than facts from the partial set.
+    const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
+    const client = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, `runtime "${peerRunId}" not found`)
+      }),
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: peerRunId, session: { run_id: peerRunId, label: 'branch-target', status: 'running' } }],
+        peers_error: 'the broker could not read every peer',
+      })),
+    })
+    await expect(provider(client).state(peerRunId)).rejects.toThrow('runtime "rt_branch@avenor-mcp-42-ab12cd" not found')
+  })
+
+  it('keeps a status failure that is not the absence answer, even when the listing holds the run', async () => {
+    const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
+    const listing = mock(async () => ({
+      peers: [
+        { run_id: 'supervisor', session: { run_id: 'supervisor', status: 'running' } },
+        { run_id: peerRunId, session: { run_id: peerRunId, label: 'branch-target', status: 'running' } },
+      ],
+    }))
+    // A denial is the supervisor's own refusal, not an absence: answering it
+    // from the listing would report a run the supervisor declined to describe.
+    const denied = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'permission denied', { code: 'not_permitted' })
+      }),
+      messagePeers: listing,
+    })
+    await expect(provider(denied).state(peerRunId)).rejects.toThrow('permission denied')
+
+    // A transport failure carries no control verb answer at all.
+    const transport = fakeClient({
+      status: mock(async () => {
+        throw new Error('connect ENOENT /tmp/avenor.sock')
+      }),
+      messagePeers: listing,
+    })
+    await expect(provider(transport).state(peerRunId)).rejects.toThrow('connect ENOENT /tmp/avenor.sock')
+
+    // An absence answer naming another runtime is not this run's answer.
+    const other = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_someone_else" not found')
+      }),
+      messagePeers: listing,
+    })
+    await expect(provider(other).state(peerRunId)).rejects.toThrow('rt_someone_else')
+
+    // A sentence that matches the absence answer but carries a different wire
+    // code is not the absence answer: only the supervisor's server failure is.
+    const wrongCode = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32601, 'runtime "rt_branch@avenor-mcp-42-ab12cd" not found')
+      }),
+      messagePeers: listing,
+    })
+    await expect(provider(wrongCode).state(peerRunId)).rejects.toThrow('runtime "rt_branch@avenor-mcp-42-ab12cd" not found')
+  })
+
+  it('recognizes the absence answer Go renders with %q for an id carrying quotes and a backslash', async () => {
+    const peerRunId = 'rt_a"b\\c'
+    const client = fakeClient({
+      // The supervisor builds this sentence with fmt.Errorf("runtime %q not found"),
+      // so the id arrives Go-quoted rather than interpolated.
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_a\\"b\\\\c" not found')
+      }),
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: peerRunId, session: { run_id: peerRunId, label: 'branch-target', status: 'running' } }],
+      })),
+    })
+    expect(await provider(client).state(peerRunId)).toMatchObject({ live: true, resumable: false, status: 'running' })
+  })
+
+  // Ids a broker permits that Go's %q escapes differently from messaging.Quote.
+  // The wire spelling is what the supervisor's fmt.Errorf("runtime %q not found")
+  // produces, character for character.
+  const goQuotedIds: Array<[name: string, runId: string, wireMessage: string]> = [
+    ['a C0 control', 'rt_\u0001ctl', 'runtime "rt_\\x01ctl" not found'],
+    ['a bell and a vertical tab', 'rt_\u0007bel\u000bvt', 'runtime "rt_\\abel\\vvt" not found'],
+    ['an escape and a delete', 'rt_\u001b\u007f', 'runtime "rt_\\x1b\\x7f" not found'],
+    ['a no-break space', 'rt_\u00a0nbsp', 'runtime "rt_\\u00a0nbsp" not found'],
+    ['an astral format character', 'rt_\u{e0021}tag', 'runtime "rt_\\U000e0021tag" not found'],
+  ]
+  for (const [name, runId, wireMessage] of goQuotedIds) {
+    it(`recognizes the absence answer Go renders for ${name}`, async () => {
+      const client = fakeClient({
+        status: mock(async () => {
+          throw new RpcError(-32000, wireMessage)
+        }),
+        messagePeers: mock(async () => ({
+          peers: [{ run_id: runId, session: { run_id: runId, label: 'branch-target', status: 'running' } }],
+        })),
+      })
+      expect(await provider(client).state(runId)).toMatchObject({ live: true, resumable: false, status: 'running' })
+    })
+  }
+
+  it('keeps a status failure whose id is escaped some other way than Go renders it', async () => {
+    // The messaging Quote spelling of a C0 control is `\u0001`; Go's %q writes
+    // `\x01`. Only the sentence the supervisor actually produces is the
+    // absence answer, so the escaped-any-other-way text stays this call's error.
+    const runId = 'rt_\u0001ctl'
+    const client = fakeClient({
+      status: mock(async () => {
+        throw new RpcError(-32000, 'runtime "rt_\\u0001ctl" not found')
+      }),
+      messagePeers: mock(async () => ({
+        peers: [{ run_id: runId, session: { run_id: runId, label: 'branch-target', status: 'running' } }],
+      })),
+    })
+    await expect(provider(client).state(runId)).rejects.toThrow('rt_\\u0001ctl')
+  })
+
+  it('lets a stale generation from the listing read out, so the surface can retry with a fresh one', async () => {
+    const peerRunId = 'rt_branch@avenor-mcp-42-ab12cd'
+    const client = fakeClient({
+      status: mock(async (runtimeId?: string) => {
+        throw new RpcError(-32000, `runtime "${runtimeId ?? ''}" not found`)
+      }),
+      messagePeers: mock(async () => {
+        throw new RpcError(-32000, 'messaging: generation mismatch', {
+          code: 'generation-mismatch',
+          wire_code: 'generation-mismatch',
+        })
+      }),
+    })
+    const error = await provider(client).state(peerRunId).catch(err => err)
+    expect(isGenerationMismatchError(error)).toBe(true)
   })
 
   it('refuses resolution on an incomplete listing and preserves the transport detail', async () => {
@@ -536,6 +887,23 @@ describe('child message provider', () => {
     const child = createChildMessageProvider({ surface: 'pi-child', runId: 'rt_child', broker: childBroker() })
     expect((await child.state('rt_2')).resumable).toBe(false)
     await expect(child.resume({ target: 'rt_2', message: 'x' })).rejects.toMatchObject({ code: 'not_permitted' })
+  })
+
+  it('classifies a peer row through the shared peer facts translation', async () => {
+    // The classification is the shared one (Go's messaging.PeerRunFacts), so a
+    // blocked peer reports failed and not live, and the terminal statuses fold
+    // the same way here as on the host path.
+    const broker = childBroker({
+      peers: async () => ({
+        peers: [
+          { run_id: 'rt_2', label: 'mesh-a', status: 'blocked' },
+          { run_id: 'rt_3', label: 'mesh-b', status: 'ended' },
+        ],
+      }),
+    })
+    const child = createChildMessageProvider({ surface: 'pi-child', runId: 'rt_child', broker })
+    expect(await child.state('rt_2')).toEqual({ live: false, resumable: false, status: 'failed' })
+    expect(await child.state('rt_3')).toEqual({ live: false, resumable: false, status: 'done' })
   })
 
   it('claims a pending ask once and passes the asker to the broker', async () => {

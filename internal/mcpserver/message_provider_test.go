@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runstate"
@@ -609,6 +610,164 @@ func TestMCPMessageProviderRunStateFallsBackToTerminalSentinel(t *testing.T) {
 	// The fallback is narrow: an unknown run id keeps the status failure.
 	if _, err := p.RunState(context.Background(), "run-unknown"); !errors.Is(err, statusErr) {
 		t.Fatalf("RunState of an unregistered run error = %v, want %v", err, statusErr)
+	}
+}
+
+// TestMCPMessageProviderRunStateReadsTheListingOnTheAbsenceAnswer pins the one
+// status failure the broker-listing fallback is allowed to answer: the
+// supervisor's own absence answer for this runtime, which the control plane
+// reports as a plain server failure naming the runtime it could not find.
+func TestMCPMessageProviderRunStateReadsTheListingOnTheAbsenceAnswer(t *testing.T) {
+	const branchRunID = "rt_branch@avenor-mcp-42-ab12cd"
+	cl := &fakeMessageControlClient{
+		fakeClient: &fakeClient{statusErr: &client.RPCError{Code: -32000, Message: `runtime "` + branchRunID + `" not found`}},
+		peersFunc:  branchPeerListing(branchRunID),
+	}
+	p := newTestMessageProvider(t, cl)
+
+	got, err := p.RunState(context.Background(), branchRunID)
+	if err != nil {
+		t.Fatalf("RunState error = %v, want the broker listing to answer", err)
+	}
+	want := messaging.RunFacts{RunID: branchRunID, Status: runstate.StatusRunning, Live: true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RunState = %#v, want %#v", got, want)
+	}
+}
+
+// TestMCPMessageProviderRunStateAnswersTheAbsenceAnswerFromTheSentinelFirst
+// pins the order of the two fallbacks on a genuine absence answer: a run this
+// host spawned keeps the terminal status its sentinel published even when the
+// broker's listing also holds the run and would report it live. Reading the
+// listing first would report a finished run as running.
+func TestMCPMessageProviderRunStateAnswersTheAbsenceAnswerFromTheSentinelFirst(t *testing.T) {
+	const publicID = "8d1f4a72-6c39-4f5b-b0e8-2a7f9c3d5e16"
+	sentinelPath := filepath.Join(t.TempDir(), "avenor-run-"+publicID+".done")
+	if err := os.WriteFile(sentinelPath, []byte("DONE\nSESSION=ses_prior\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cl := &fakeMessageControlClient{
+		fakeClient: &fakeClient{statusErr: &client.RPCError{
+			Code:    -32000,
+			Message: fmt.Sprintf("runtime %q not found", publicID),
+		}},
+		peersFunc: branchPeerListing(publicID),
+	}
+	p := newTestMessageProvider(t, cl)
+	if err := p.server.registry.Store(&RunInfo{
+		SupervisorID: testSupervisorPath,
+		RunID:        publicID,
+		RuntimeID:    "rt_1",
+		Label:        "finished",
+		SentinelPath: sentinelPath,
+	}); err != nil {
+		t.Fatalf("registry.Store: %v", err)
+	}
+
+	got, err := p.RunState(context.Background(), publicID)
+	if err != nil {
+		t.Fatalf("RunState error = %v", err)
+	}
+	want := messaging.RunFacts{
+		RunID:     publicID,
+		Status:    runstate.StatusDone,
+		Live:      false,
+		Resumable: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RunState = %#v, want %#v", got, want)
+	}
+}
+
+// TestMCPMessageProviderRunStateKeepsStatusFailuresThatAreNotAbsences proves a
+// refusal, a transport failure, and an absence answer naming a different
+// runtime all keep their own error even when the listing holds the run. A
+// provider that treated every status error as "no runtime here" would answer
+// from the listing and swallow the failure.
+func TestMCPMessageProviderRunStateKeepsStatusFailuresThatAreNotAbsences(t *testing.T) {
+	const branchRunID = "rt_branch@avenor-mcp-42-ab12cd"
+	cases := []struct {
+		name      string
+		statusErr error
+	}{
+		{
+			name:      "a refusal",
+			statusErr: &client.RPCError{Code: control.CodePermissionDenied, Message: "permission denied"},
+		},
+		{
+			name:      "a transport failure",
+			statusErr: errors.New("dial unix /tmp/avenor.sock: connect: connection refused"),
+		},
+		{
+			name:      "an absence answer for another runtime",
+			statusErr: &client.RPCError{Code: -32000, Message: `runtime "rt_someone_else" not found`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := &fakeMessageControlClient{
+				fakeClient: &fakeClient{statusErr: tc.statusErr},
+				peersFunc:  branchPeerListing(branchRunID),
+			}
+			p := newTestMessageProvider(t, cl)
+
+			if _, err := p.RunState(context.Background(), branchRunID); !errors.Is(err, tc.statusErr) {
+				t.Fatalf("RunState error = %v, want %v", err, tc.statusErr)
+			}
+		})
+	}
+}
+
+// TestMCPMessageProviderRunStateKeepsTheAbsenceErrorWhenTheListingCannotAnswer
+// proves the listing fallback borrows an answer, never a substitute failure:
+// on a genuine absence answer, a listing without the run and a listing that
+// cannot be read both hand back the status error the call started with.
+func TestMCPMessageProviderRunStateKeepsTheAbsenceErrorWhenTheListingCannotAnswer(t *testing.T) {
+	const branchRunID = "rt_branch@avenor-mcp-42-ab12cd"
+	statusErr := &client.RPCError{Code: -32000, Message: fmt.Sprintf("runtime %q not found", branchRunID)}
+	cases := []struct {
+		name      string
+		peersFunc func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error)
+	}{
+		{
+			name: "the listing does not hold the run",
+			peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+				return messaging.PeersResult{
+					Peers:      []messaging.Peer{testPeer("supervisor", "supervisor", "running")},
+					Generation: "gen-1",
+				}, nil
+			},
+		},
+		{
+			name: "the listing cannot be read",
+			peersFunc: func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+				return messaging.PeersResult{}, errors.New("dial unix /tmp/avenor.sock: connect: connection refused")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := &fakeMessageControlClient{
+				fakeClient: &fakeClient{statusErr: statusErr},
+				peersFunc:  tc.peersFunc,
+			}
+			p := newTestMessageProvider(t, cl)
+
+			if _, err := p.RunState(context.Background(), branchRunID); !errors.Is(err, statusErr) {
+				t.Fatalf("RunState error = %v, want the original status error %v", err, statusErr)
+			}
+		})
+	}
+}
+
+// branchPeerListing is the hub's listing once a registered branch registered
+// the run: a peer row whose id the hub adopted the claim with.
+func branchPeerListing(branchRunID string) func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+	return func(context.Context, messaging.PeersRequest) (messaging.PeersResult, error) {
+		return messaging.PeersResult{
+			Peers:      []messaging.Peer{testPeer(branchRunID, "branch-target", "running")},
+			Generation: "gen-1",
+		}, nil
 	}
 }
 

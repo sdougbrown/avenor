@@ -15,6 +15,10 @@
   join it from `AVENOR_PARENT_BROKER_URL` alone, peer discovery at the hub, and a
   hub child's ask answered by a branch's run (hub→branch; a sibling
   branch→branch ask is not covered here).
+- A hub host addresses the runs its registered branches own: the message tool on
+  the supervisor that owns the hub broker tells or asks a branch's run under the
+  run id the hub adopted its claim with, while a target neither the hub nor a
+  registered branch holds stays `unknown_target`.
 
 ## How to get to it (user POV)
 
@@ -254,6 +258,69 @@ parked runs overwrites their original sentinels with `KILLED`,
 `STOP_REASON=cancelled` and `EXIT_CODE=130`.
 `branch-a.log` and `branch-b.log` carry no `parent broker registration failed`
 line, so both joined the hub from the environment alone.
+
+### The hub host addresses a branch run
+
+This drive needs no model call: the hub's own message tool is the Go MCP host
+surface, which `avenor mcp` speaks over stdio. Reuse the hub and branch A from
+the previous section (`$HUB_SOCK`, `$HUB_URL`, `$SCRATCH`), register a run on
+branch A's broker the way one of its runs registers itself, then drive the hub
+host's `peers` and `message` tools.
+
+```sh
+BRANCH_URL=$(cat "$SCRATCH/branch-a.sock.broker.url")
+curl -sS -X POST "$BRANCH_URL/register" -d '{"run_id":"rt_branch"}' > "$EV/branch-register.json"
+RUN_TOKEN=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["token"])' "$EV/branch-register.json")
+
+python3 - "$HUB_SOCK" "$BIN" <<'PY'
+import json, subprocess, sys, time
+hub_sock, binary = sys.argv[1], sys.argv[2]
+proc = subprocess.Popen([binary, "mcp", "--control-socket", hub_sock, "--supervisor-socket", hub_sock, "--no-autostart"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+def send(msg):
+    proc.stdin.write(json.dumps(msg) + "\n"); proc.stdin.flush()
+def wait_for(want, timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("id") == want:
+            return msg
+    raise SystemExit(f"no answer to id {want}")
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "hub-drive", "version": "1"}}})
+wait_for(1)
+send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "peers", "arguments": {"action": "list"}}})
+peers = wait_for(2)["result"]["structuredContent"]["peers"]
+target = next(peer["run_id"] for peer in peers if peer["run_id"].startswith("rt_branch@"))
+print(target)
+send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "message", "arguments": {"action": "tell", "target": target, "message": "HUB-HOST-TELL"}}})
+print(json.dumps(wait_for(3)["result"]))
+send({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "message", "arguments": {"action": "tell", "target": "rt_ghost", "message": "NOBODY"}}})
+print(json.dumps(wait_for(4)["result"]))
+proc.stdin.close(); proc.terminate()
+PY
+
+curl -sS -X POST "$BRANCH_URL/poll-control" \
+  -d "{\"run_id\":\"rt_branch\",\"token\":\"$RUN_TOKEN\"}" > "$EV/branch-queue.json"
+```
+
+**Observable end state (the proof):** the `peers` answer lists
+`rt_branch@branch-a-<digest>`, which the hub adopted from branch A's claim. The
+tell's result carries `"outcome": "sent"` with no `isError`, and
+`branch-queue.json` holds exactly one `agent_message` whose payload carries
+`HUB-HOST-TELL`, queued for `rt_branch` on branch A's own broker — the message
+crossed the hub's relay. The tell to `rt_ghost` is an error result with
+`"code": "unknown_target"` and `"text": "no run matches \"rt_ghost\""`, and
+adds no second message to that queue. Before the fix, the tell to the adopted
+run was refused with `"code": "refused"` and
+`runtime "rt_branch@branch-a-<digest>" not found`, because the hub's status verb
+knows only its own runtimes.
 
 ### Interactive extension autostart joins the hub
 
