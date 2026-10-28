@@ -46,6 +46,33 @@ file; the result file holds the same text as the terminal `session.end`
 contains a `session.start` and a terminal `session.end` with
 `stop_reason: end_turn`, all carrying the `verify-smoke` label.
 
+For this Pi smoke run, also check the submission event in the same captured log:
+
+```sh
+python3 - "$SCRATCH" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+scratch = Path(sys.argv[1])
+records = [json.loads(line) for line in (scratch / "events.ndjson").read_text().splitlines()]
+sentinel = dict(line.split("=", 1) for line in (scratch / "done.env").read_text().splitlines() if "=" in line)
+submitted = [(i, event) for i, event in enumerate(records) if event["event"] == "agent.prompt_submitted"]
+assert len(submitted) == 1, submitted
+index, event = submitted[0]
+prompt = "Reply with the single word OK and nothing else."
+assert event["session_id"] == sentinel["SESSION"]
+assert event["prompt_length"] == len(prompt.encode("utf-8"))
+assert prompt not in json.dumps(event)
+assert index < next(i for i, event in enumerate(records) if event["event"] == "session.end")
+print("Pi submission proof OK")
+PY
+```
+
+**Pi submission proof:** exactly one `agent.prompt_submitted`, with the run's
+session ID and prompt byte length, precedes terminal `session.end`.
+The submission event contains no prompt text; other events can contain model output.
+
 Then drive the signal path with a run that is still alive when the signal
 lands (the essay prompt buys the time; if the run finishes first, repeat with a
 longer one):

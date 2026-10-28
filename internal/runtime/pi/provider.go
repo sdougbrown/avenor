@@ -199,25 +199,12 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		return fmt.Errorf("decode pi prompt response: %w", err)
 	}
 	if !response.Success {
-		// The child refused the prompt, so no turn started: do not report
-		// submission, and surface the refusal to the caller.
 		settle()
 		if response.Error == "" {
 			response.Error = "unsuccessful response"
 		}
 		return fmt.Errorf("pi prompt rejected: %s", response.Error)
 	}
-
-	// The prompt is delivered over RPC, so submission is the accepted
-	// command, not a keypress. Report the length, never the text: event
-	// logs are 0600 and prompts are sensitive.
-	c.fanout(&events.Event{
-		Event:     "agent.prompt_submitted",
-		SessionID: sessionID,
-		Fields: map[string]any{
-			"prompt_length": len(prompt),
-		},
-	})
 
 	select {
 	case ev := <-turnCh:

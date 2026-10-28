@@ -364,7 +364,7 @@ func (failingWriteCloser) Close() error              { return nil }
 
 func TestThinkingSetterTransportAndDecodeErrorsAreNotCapabilityErrors(t *testing.T) {
 	t.Run("transport", func(t *testing.T) {
-		c := &client{stdin: failingWriteCloser{}, pending: map[string]chan json.RawMessage{}, done: make(chan struct{})}
+		c := &client{stdin: failingWriteCloser{}, pending: map[string]pendingCommand{}, done: make(chan struct{})}
 		err := NewWithOptions(runtime.StartOptions{}).setThinkingLevel(context.Background(), c, "high")
 		if err == nil || !strings.Contains(err.Error(), `pi set_thinking_level "high":`) || strings.Contains(err.Error(), "does not support parameter") {
 			t.Fatalf("error = %v", err)
@@ -973,70 +973,82 @@ func TestPromptRecoversWhenPiAutoRetrySucceeds(t *testing.T) {
 	}
 }
 
-// The pi backend reports prompt submission through the event stream like the
-// claude backend: the event carries the prompt length, never the text.
-func TestPromptEmitsPromptSubmittedEvent(t *testing.T) {
+type gatedWriteCloser struct {
+	io.WriteCloser
+	release <-chan struct{}
+}
+
+func (w gatedWriteCloser) Write(data []byte) (int, error) {
+	n, err := w.WriteCloser.Write(data)
+	<-w.release
+	return n, err
+}
+
+func TestPromptSubmissionPrecedesFastCompletion(t *testing.T) {
 	p := NewWithOptions(runtime.StartOptions{})
-	c, wOut, rIn := fakeClient()
+	c, _, rIn := fakeClient()
 	defer c.Close()
-	c.setSessionID("ses-pi-prompt")
+	releaseWrite := make(chan struct{})
+	defer close(releaseWrite)
+	c.stdin = gatedWriteCloser{WriteCloser: c.stdin, release: releaseWrite}
+	const sessionID = "ses-pi-prompt"
+	const prompt = "hello π"
+	c.setSessionID(sessionID)
 	p.client = c
-	p.sessions = map[string]struct{}{"ses-pi-prompt": {}}
+	p.sessions[sessionID] = struct{}{}
+	eventsCh := subscribeForSession(c, sessionID)
 
-	eventsCh := subscribeForSession(c, "ses-pi-prompt")
-
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	errCh := make(chan error, 1)
-	go func() { errCh <- p.Prompt(context.Background(), "ses-pi-prompt", "hello pi") }()
+	go func() { errCh <- p.Prompt(ctx, sessionID, prompt) }()
 
-	go func() {
-		cmd, err := readCommand(rIn)
-		if err != nil {
-			return
-		}
-		writeLine(wOut, map[string]any{"type": "response", "id": cmd["id"], "success": true})
-		writeLine(wOut, map[string]any{"type": "agent_end", "stopReason": "stop"})
-	}()
-
-	var err error
-	select {
-	case err = <-errCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for prompt result")
-	}
+	cmd, err := readCommand(rIn)
 	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := json.Marshal(map[string]any{"type": "response", "id": cmd["id"], "success": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The child can accept and finish before the stdin write returns to Prompt.
+	c.dispatchLine(response)
+	c.dispatchLine(response)
+	c.dispatchLine([]byte(`{"type":"agent_end","stopReason":"stop"}`))
+	releaseWrite <- struct{}{}
+	if err := <-errCh; err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 
-	// session.end and agent.prompt_submitted both fan out to the subscriber;
-	// drain until the submission event arrives.
-	deadline := time.After(2 * time.Second)
-	for {
+	for _, want := range []string{"agent.prompt_submitted", "session.end"} {
 		select {
 		case ev := <-eventsCh:
-			if ev.Event != "agent.prompt_submitted" {
-				continue
+			if ev.Event != want || ev.SessionID != sessionID {
+				t.Fatalf("event = %s (%s), want %s (%s)", ev.Event, ev.SessionID, want, sessionID)
 			}
-			if ev.SessionID != "ses-pi-prompt" {
-				t.Errorf("session_id = %q, want ses-pi-prompt", ev.SessionID)
-			}
-			if got, _ := ev.Fields["prompt_length"].(int); got != len("hello pi") {
-				t.Errorf("prompt_length = %v, want %d", ev.Fields["prompt_length"], len("hello pi"))
-			}
-			for key, value := range ev.Fields {
-				if text, ok := value.(string); ok && strings.Contains(text, "hello pi") {
-					t.Errorf("event carries the prompt text in field %q", key)
+			if ev.Event == "agent.prompt_submitted" {
+				if got, ok := ev.Fields["prompt_length"].(int); !ok || got != len(prompt) {
+					t.Errorf("prompt_length = %v, want %d bytes", ev.Fields["prompt_length"], len(prompt))
+				}
+				encoded, err := json.Marshal(ev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(encoded), prompt) {
+					t.Errorf("event contains prompt text: %s", encoded)
 				}
 			}
-			return
-		case <-deadline:
-			t.Fatal("no agent.prompt_submitted event")
+		default:
+			t.Fatalf("missing %s event", want)
 		}
+	}
+	select {
+	case ev := <-eventsCh:
+		t.Fatalf("unexpected extra event: %s", ev.Event)
+	default:
 	}
 }
 
-// A pi child that refuses the prompt (success:false) never starts a turn, so
-// the backend must not report submission: no agent.prompt_submitted event
-// fires and Prompt returns the child's refusal.
 func TestPromptRejectedEmitsNoPromptSubmittedEvent(t *testing.T) {
 	p := NewWithOptions(runtime.StartOptions{})
 	c, wOut, rIn := fakeClient()
@@ -1071,18 +1083,9 @@ func TestPromptRejectedEmitsNoPromptSubmittedEvent(t *testing.T) {
 		t.Fatalf("error = %v; want the child's refusal in the message", err)
 	}
 
-	// The turn never started, so no submission event may have fired. The
-	// refusal path fans nothing out, so a bounded drain is safe: if the
-	// (buggy) submission event were buffered it would already be here.
-	deadline := time.After(500 * time.Millisecond)
-	for {
-		select {
-		case ev := <-eventsCh:
-			if ev.Event == "agent.prompt_submitted" {
-				t.Fatal("agent.prompt_submitted emitted for a rejected prompt")
-			}
-		case <-deadline:
-			return
-		}
+	select {
+	case ev := <-eventsCh:
+		t.Fatalf("event emitted for rejected prompt: %s", ev.Event)
+	default:
 	}
 }

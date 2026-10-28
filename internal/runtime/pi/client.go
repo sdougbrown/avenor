@@ -27,6 +27,11 @@ type pendingApproval struct {
 	sessionID string
 }
 
+type pendingCommand struct {
+	response     chan json.RawMessage
+	promptLength *int
+}
+
 type client struct {
 	proc   *exec.Cmd
 	stdin  io.WriteCloser
@@ -34,7 +39,7 @@ type client struct {
 
 	stdinMu   sync.Mutex
 	mu        sync.Mutex
-	pending   map[string]chan json.RawMessage
+	pending   map[string]pendingCommand
 	subs      map[string][]chan events.Event
 	approvals map[string]pendingApproval
 
@@ -56,7 +61,7 @@ func newClient(proc *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, stder
 		proc:       proc,
 		stdin:      stdin,
 		stdout:     stdout,
-		pending:    map[string]chan json.RawMessage{},
+		pending:    map[string]pendingCommand{},
 		subs:       map[string][]chan events.Event{},
 		approvals:  map[string]pendingApproval{},
 		stderr:     newRollingBuffer(stderrCap),
@@ -205,8 +210,8 @@ func (c *client) Close() error {
 
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
-		for _, ch := range c.pending {
-			close(ch)
+		for _, command := range c.pending {
+			close(command.response)
 		}
 		c.pending = nil
 		c.approvals = nil
@@ -245,9 +250,15 @@ func (c *client) sendCommand(ctx context.Context, cmd map[string]any) (json.RawM
 	id := newRequestID()
 	cmd["id"] = id
 	ch := make(chan json.RawMessage, 1)
+	pending := pendingCommand{response: ch}
+	if cmd["type"] == "prompt" {
+		message, _ := cmd["message"].(string)
+		length := len(message)
+		pending.promptLength = &length
+	}
 
 	c.mu.Lock()
-	c.pending[id] = ch
+	c.pending[id] = pending
 	c.mu.Unlock()
 
 	data, err := json.Marshal(cmd)
@@ -417,7 +428,7 @@ func (c *client) routeResponse(payload map[string]any) {
 	}
 
 	c.mu.Lock()
-	ch, ok := c.pending[id]
+	command, ok := c.pending[id]
 	delete(c.pending, id)
 	c.mu.Unlock()
 
@@ -428,10 +439,18 @@ func (c *client) routeResponse(payload map[string]any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		c.stderr.Append(fmt.Sprintf("marshal response for id %s: %v", id, err))
-		close(ch)
+		close(command.response)
 		return
 	}
-	ch <- json.RawMessage(data)
+	if accepted, _ := payload["success"].(bool); accepted && command.promptLength != nil {
+		// Publish acceptance on the reader before it can forward a later completion.
+		c.fanout(&events.Event{
+			Event:     "agent.prompt_submitted",
+			SessionID: c.SessionID(),
+			Fields:    map[string]any{"prompt_length": *command.promptLength},
+		})
+	}
+	command.response <- json.RawMessage(data)
 }
 
 func (c *client) routeExtensionUI(payload map[string]any) {
