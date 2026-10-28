@@ -365,6 +365,49 @@ func openFDsForPath(t *testing.T, path string) int {
 
 func containsEvent(data []byte, name string) bool { return bytes.Contains(data, []byte(name)) }
 
+// TestSameArtifactResolvesSymlinkedParent pins the artifact comparison: two
+// spellings that reach one not-yet-existing file through a symlinked parent
+// directory are the same artifact, while genuinely distinct paths and an
+// identical spelling keep their expected verdicts.
+func TestSameArtifactResolvesSymlinkedParent(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	ev := filepath.Join(real, "ev")
+	if !sameArtifact(ev, ev) {
+		t.Fatal("an identical path was not recognized as the same artifact")
+	}
+	if sameArtifact(ev, filepath.Join(real, "other")) {
+		t.Fatal("two distinct paths in one directory were reported as the same artifact")
+	}
+	if !sameArtifact(filepath.Join(link, "ev"), ev) {
+		t.Fatal("a path through a symlinked parent was not recognized as the same not-yet-existing artifact")
+	}
+}
+
+// TestWarmResumeRejectsAliasedArtifactPath pins the admission-level effect:
+// caller-supplied paths that alias the child's own not-yet-existing event path
+// through a symlinked parent directory are refused instead of reserved, so
+// admission cannot install a writer over the child's current artifact.
+func TestWarmResumeRejectsAliasedArtifactPath(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	child := &childRuntime{id: "rt", onEvent: filepath.Join(root, "ev"), sentinelFile: filepath.Join(root, "old-sentinel"), promptCh: make(chan struct{}, 1)}
+	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
+	_, _, err := (&Supervisor{}).admitWarmResume(child, SpawnParams{Prompt: "next", OnEvent: filepath.Join(link, "ev"), SentinelFile: filepath.Join(root, "new-sentinel")})
+	if err == nil || !strings.Contains(err.Error(), "must be distinct") {
+		t.Fatalf("admission over an aliased event path = %v, want a distinct-path rejection", err)
+	}
+	if child.onEvent != filepath.Join(root, "ev") || len(child.promptQueue) != 0 {
+		t.Fatal("rejected admission changed the child's turn")
+	}
+}
+
 func TestUnstartedWarmResumeWritesFailureSentinel(t *testing.T) {
 	sup := newTestSupervisor(t, Config{})
 	path := filepath.Join(t.TempDir(), "sentinel")

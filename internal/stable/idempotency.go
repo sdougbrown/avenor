@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/control"
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 // idempotencyTTL is how long a completed spawn result is retained for
@@ -157,6 +158,23 @@ func IdempotencyHash(p SpawnParams) (string, error) {
 		p.Label = ""
 	}
 	b, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// ResumeIdempotencyHash derives the parameter hash for a keyed resume, the
+// resume-side sibling of IdempotencyHash so hashing for the idempotency store
+// has one home. The inputs are exactly the resolved run id plus the caller's
+// message and label, marshaled as a []string: that byte shape is what earlier
+// keyed resumes committed, so it must not change or committed replays would
+// miss the store and re-run. A future ResumeRequest field carrying caller
+// intent must be added here explicitly — unlike SpawnParams, the request is
+// not hashed wholesale, so a new field is silently excluded until it is.
+func ResumeIdempotencyHash(runID string, req messaging.ResumeRequest) (string, error) {
+	b, err := json.Marshal([]string{runID, req.Message, req.Label})
 	if err != nil {
 		return "", err
 	}

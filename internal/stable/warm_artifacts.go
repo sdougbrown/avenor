@@ -292,8 +292,8 @@ func sameArtifact(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	aa, ea := filepath.Abs(a)
-	bb, eb := filepath.Abs(b)
+	aa, ea := cli.ResolveArtifactPath(a)
+	bb, eb := cli.ResolveArtifactPath(b)
 	if ea == nil && eb == nil && aa == bb {
 		return true
 	}

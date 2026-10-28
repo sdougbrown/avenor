@@ -1,8 +1,6 @@
 package stable
 
 import (
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -47,11 +45,10 @@ func (s *Supervisor) Resume(caller messaging.Caller, req messaging.ResumeRequest
 	}
 	if req.IdempotencyKey != "" {
 		key := runstate.FollowUpIdempotencyKeyPrefix + req.IdempotencyKey
-		intent, err := json.Marshal([]string{runID, req.Message, req.Label})
+		hash, err := ResumeIdempotencyHash(runID, req)
 		if err != nil {
 			return messaging.ResumeResult{}, err
 		}
-		hash := fmt.Sprintf("%x", sha256.Sum256(intent))
 		result, err := s.runIdempotentOperation(key, hash, func() (SpawnResult, error) {
 			return s.performResume(prior, runID, req)
 		})
