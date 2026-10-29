@@ -272,6 +272,33 @@ test('a codeless 409 keeps polling, because that is another poll in flight', asy
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
 
+test('a refused registration ends the session instead of re-registering every tick', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  let registrations = 0
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    if (new URL(String(url)).pathname === '/register') {
+      registrations++
+      return Response.json({ code: 'unauthorized' }, { status: 401 })
+    }
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { messageTool },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 100 },
+    })
+    // A refused registration is not retried: the broker will answer the same way.
+    await waitFor(() => h!.emitted.some(([channel]) => channel === 'avenor:peer:error'), 10000)
+    await Bun.sleep(400)
+    expect(registrations).toBe(1)
+    await expect(h.registeredTools.avenor_peers.execute('p', {})).rejects.toThrow('identity is unavailable')
+    const last = h.emitted.filter(([channel]) => channel === 'avenor:peer:error').at(-1)?.[1] as Record<string, unknown>
+    expect(last).toMatchObject({ operation: 'register', terminal: true })
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+}, 20000)
+
 test('a registration retried from the poll tick reports as a registration', async () => {
   const b = broker()
   const delegate = globalThis.fetch

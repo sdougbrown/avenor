@@ -1964,12 +1964,15 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // session gave up on.
     //
     // Statuses that mean the broker will keep saying no are terminal on both
-    // operations. A 409 is the one status that carries both meanings: on
-    // `/register` it is `registration-mismatch` or `peer-retired`, and on
-    // `/poll-control` it is `duplicate-consumer` — another poll still in flight,
-    // which the next tick retries. A refusal with no code at all is read as
-    // terminal on the poll path too: something in front of the broker refused this
-    // identity, and polling it every two seconds forever helps nobody.
+    // operations, with or without a code: 401, 403 and 410 are the broker refusing
+    // this identity, and something in front of the broker answering 40x is the same
+    // refusal one hop out.
+    //
+    // A 409 is the one status that carries both meanings. On `/register` it is
+    // `registration-mismatch` or `peer-retired`; on `/poll-control` it is
+    // `duplicate-consumer` — another poll still in flight, which the next tick
+    // retries — so a 409 ends the session only when the broker named an identity
+    // code with it. A codeless 409 is read as the concurrent poll it usually is.
     function peerFailureTerminal(operation: PeerErrorOperation, error: unknown): boolean {
       switch (operation) {
         case 'poll':
