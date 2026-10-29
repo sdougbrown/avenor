@@ -151,8 +151,12 @@ func (c *client) initialize(ctx context.Context, versions []int) (protocol.Initi
 		Client: protocol.Client{
 			Name:    "avenor",
 			Version: "1",
+			// The backend cannot answer a permission ask (AnswerPermission
+			// is not implemented). Declaring the capability would make poo's
+			// wire asker wait out its ask budget on every ask; without it the
+			// chain skips the wire asker at once.
 			Capabilities: protocol.ClientCapabilities{
-				PermissionAnswers: true,
+				PermissionAnswers: false,
 			},
 		},
 	}
@@ -468,10 +472,10 @@ func decodeSessionEvent(raw json.RawMessage) (sessionEvent, error) {
 }
 
 // routeServerRequest records a server request. poo's only server request is a
-// permission ask, and Stage 2 cannot answer one: publishing it as a
-// permission.request would start a resolver whose answer this backend refuses,
-// and the run would abort. The ask is therefore left unanswered, and poo's own
-// ask budget defers it to the next asker or to the chain's fallback.
+// permission ask, which it does not send to a client that declared no
+// permission answers. An ask that arrives anyway is left unanswered: publishing
+// it as a permission.request would start a resolver whose answer this backend
+// refuses, and the run would abort.
 func (c *client) routeServerRequest(msg envelope) {
 	if msg.Method != protocol.MethodPermissionAsk {
 		c.stderr.Append(fmt.Sprintf("ignored unknown server request %q", msg.Method))

@@ -84,6 +84,19 @@ func TestEmptyMessageDeltaIsDropped(t *testing.T) {
 	}
 }
 
+// TestObserverDroppedIsNotPublished proves the record-only diagnostic stays out
+// of the event stream rather than passing through under the shared prefix.
+func TestObserverDroppedIsNotPublished(t *testing.T) {
+	got := translateEvent(sessionEvent{
+		SessionID: "ses_1",
+		Type:      "observer.dropped",
+		Fields:    map[string]any{"count": float64(3)},
+	})
+	if len(got) != 0 {
+		t.Fatalf("observer.dropped produced %v, want nothing", got)
+	}
+}
+
 // TestBackendRecordsTakeTheSharedPrefix pins the pass-through rule for the
 // records avenor does not standardize. poo's permission echo takes it like the
 // run's progress notes and its jobs do: no name of its own, and its fields
