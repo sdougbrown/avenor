@@ -10,6 +10,8 @@ Install the package alongside its peer dependency:
 bun add @dougbots/avenor-opencode @opencode-ai/plugin@1.15.3
 ```
 
+OpenCode 2 additionally loads the plugin definition shape directly from the default export, so no OpenCode 2 package is needed at runtime; OpenCode 1 hosts (1.18.29+) call the same entrypoint's `server()`.
+
 You also need the `avenor` binary. Either add it to your `PATH` or set the `AVENOR_BIN` environment variable to its location.
 
 ```bash
@@ -242,4 +244,5 @@ Shut down the avenor supervisor process and clean up temp files. Call this when 
 ## Dependencies
 
 - **Peer:** `@opencode-ai/plugin` v1.15.3 (the runtime that host agents use to mount plugins)
+- **Build-time:** `@opencode/plugin` (type definitions for the OpenCode 2 loader only; the built entrypoint has no runtime reference to it, so neither generation installs it)
 - **Binary:** `avenor` must be available on `PATH` or at `AVENOR_BIN` (checked at first tool invocation, not at plugin load time)
