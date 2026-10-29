@@ -822,6 +822,20 @@ func TestWaitForSessionFilePermissionEmitsOneEffectiveRequestAndCleansUp(t *test
 	}
 }
 
+// configuredDeadlineBudget is how long a deadline-driven case gives the session to
+// reach the state being asserted. The timer starts when the wait does, and the case
+// then waits on things that must happen before the deadline fires: the sink writing
+// the request, the permission handler creating its .req file, or AnswerPermission
+// reaching its blocking point. Any of those can take tens of milliseconds on a
+// loaded machine, so a 50 ms budget turned a scheduling delay into a test failure.
+//
+// It sits under the one-second waits these cases give their setup and give the wait
+// itself, so the deadline cannot fire before a wait the test considers legitimate,
+// nor land at the same instant as the timeout that looks for it. What these cases
+// verify is that a configured deadline ends the wait and cleans up, not that it
+// ends it quickly.
+const configuredDeadlineBudget = 500 * time.Millisecond
+
 func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -854,7 +868,7 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			// stops on its own once the per-waiter timer expires. It is measured
 			// from when this case starts, not from when the table was built, so
 			// the cases ahead of it cannot spend the budget first.
-			deadlineIn: 50 * time.Millisecond,
+			deadlineIn: configuredDeadlineBudget,
 		},
 		{
 			name:             "interrupt",
@@ -2800,7 +2814,7 @@ func TestWaitForSessionTerminationCancelsBeforeJoiningPermissionAnswer(t *testin
 			if tt.trigger == "timeout" {
 				// The shared run deadline is a wall-clock deadline now: the
 				// wait stops on its own once the per-waiter timer expires.
-				cfgDeadline = time.Now().Add(50 * time.Millisecond)
+				cfgDeadline = time.Now().Add(configuredDeadlineBudget)
 			}
 
 			resultCh := make(chan sessionResult, 1)
@@ -6697,7 +6711,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 			// stops on its own once the per-waiter timer expires. It is measured
 			// from when this case starts, not from when the table was built, so
 			// the cases ahead of it cannot spend the budget first.
-			deadlineIn: 50 * time.Millisecond,
+			deadlineIn: configuredDeadlineBudget,
 		},
 		{
 			name:            "trailing tool call",
