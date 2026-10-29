@@ -752,6 +752,9 @@ func TestPromptReAsksWhenTheInspectWaitTimesOut(t *testing.T) {
 // signals, spends the kill grace and kills, and the process is gone.
 func TestCloseEscalatesFromSIGTERMToSIGKILL(t *testing.T) {
 	t.Setenv(helperEnv, "ignoreterm")
+	oldExit, oldKill := exitGrace, killGrace
+	exitGrace, killGrace = 500*time.Millisecond, 500*time.Millisecond
+	t.Cleanup(func() { exitGrace, killGrace = oldExit, oldKill })
 	provider := NewWithOptions(avruntime.StartOptions{})
 
 	session, err := provider.Start(context.Background(), helperStartOptions())
@@ -763,7 +766,7 @@ func TestCloseEscalatesFromSIGTERMToSIGKILL(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	elapsed := time.Since(start)
-	if budget := exitGrace + killGrace + 15*time.Second; elapsed > budget {
+	if budget := exitGrace + killGrace + 5*time.Second; elapsed > budget {
 		t.Fatalf("Close took %s, want it to return within %s", elapsed, budget)
 	}
 	if err := syscall.Kill(session.PID, 0); err == nil {

@@ -21,16 +21,20 @@ import (
 	"github.com/sdougbrown/poo/wire/protocol"
 )
 
+// The shutdown graces are variables so a test can shorten them.
+var (
+	// exitGrace is how long the process has to exit after stdin closes.
+	exitGrace = 30 * time.Second
+	// killGrace is how long SIGTERM gets before SIGKILL.
+	killGrace = 5 * time.Second
+)
+
 // The bounds the client enforces on the process it owns.
 const (
 	// closeAnswerTimeout is how long session/close may take to answer. The
 	// server's own close path budgets four 5 s steps, so this is a ceiling,
 	// not the expected time.
 	closeAnswerTimeout = 30 * time.Second
-	// exitGrace is how long the process has to exit after stdin closes.
-	exitGrace = 30 * time.Second
-	// killGrace is how long SIGTERM gets before SIGKILL.
-	killGrace = 5 * time.Second
 	// readDrain is how long teardown waits for the stdout reader to reach EOF.
 	readDrain = 2 * time.Second
 	// inspectWaitMS is one run/inspect wait. A wait that runs out is not a
