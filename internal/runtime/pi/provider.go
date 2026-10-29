@@ -189,6 +189,11 @@ func (p *Provider) resumePersisted(ctx context.Context, sessionID string, opts r
 	}
 
 	p.mu.Lock()
+	if len(p.sessions) > 0 {
+		p.mu.Unlock()
+		c.Close()
+		return runtime.Session{}, errors.New("pi rpc supports only one active session per provider")
+	}
 	p.sessions[sessionID] = struct{}{}
 	p.client = c
 	p.mu.Unlock()
