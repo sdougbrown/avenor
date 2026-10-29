@@ -223,6 +223,6 @@ export async function setupAvenor(ctx: V2Context): Promise<() => void> {
 
   return async () => {
     controller.abort()
-    await Promise.all(registrations.map(registration => Promise.resolve(registration.dispose()).catch(() => undefined)))
+    await Promise.all(registrations.map(registration => Promise.resolve(registration?.dispose()).catch(() => undefined)))
   }
 }
