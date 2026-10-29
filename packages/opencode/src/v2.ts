@@ -91,20 +91,31 @@ type ToolContextLike = {
 /**
  * One registered V2 tool. The execute wrapper builds the V1 tool context —
  * the session's own directory when readable, the plugin location otherwise —
- * and projects the result onto the V2 shape.
+ * and projects the result onto the V2 shape. The per-session directory is
+ * cached after its first read; a session's location does not move.
  */
 export function v2ToolEntry(
   name: string,
   definition: ToolDefinitionLike,
   ctx: Pick<V2Context, 'location' | 'session'>,
 ): { name: string; description: string; input: unknown; execute: (input: unknown, context: ToolContextLike) => Promise<unknown> } {
+  const directories = new Map<string, string>()
   return {
     name,
     description: definition.description,
     input: tool.schema.toJSONSchema(tool.schema.object(definition.args as never)),
     execute: async (rawInput, context) => {
-      const session = await ctx.session.get({ sessionID: context.sessionID }).catch(() => undefined)
-      const directory = session?.location?.directory ?? ctx.location.directory
+      let directory = directories.get(context.sessionID)
+      if (directory === undefined) {
+        // Only a successful lookup is cached; a failed one falls back for this
+        // call and retries next time.
+        const session = await ctx.session.get({ sessionID: context.sessionID }).catch(() => undefined)
+        if (session) {
+          directory = session?.location?.directory
+          if (directory) directories.set(context.sessionID, directory)
+        }
+        directory ??= ctx.location.directory
+      }
       const result = await definition.execute(rawInput as Record<string, unknown>, {
         sessionID: context.sessionID,
         agent: context.agent,
