@@ -1,9 +1,11 @@
 package poo
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/poo/wire/protocol"
 )
 
@@ -145,5 +147,93 @@ func TestToolResultEventMapsOutcomeToStatus(t *testing.T) {
 				t.Fatalf("title = %q, want the tool name", title)
 			}
 		})
+	}
+}
+
+// TestUsageEventPinsTheFieldMapping pins what a consumer reads off a usage
+// record: avenor's own token names, the total derived from the two it counts,
+// the cached read only when the backend reported one, and the identifiers of
+// the request the usage belongs to.
+func TestUsageEventPinsTheFieldMapping(t *testing.T) {
+	cases := []struct {
+		name   string
+		cached int64
+	}{
+		{name: "no cached read", cached: 0},
+		{name: "a cached read", cached: 64},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := translateEvent(sessionEvent{
+				SessionID: "ses_1",
+				Type:      "usage",
+				Fields: map[string]any{
+					"input_tokens":      120,
+					"output_tokens":     30,
+					"cache_read_tokens": tc.cached,
+					"run_id":            "run_1",
+					"turn":              3,
+					"request":           "req_1",
+				},
+			})
+			if len(got) != 1 || got[0].Event != "usage" {
+				t.Fatalf("a usage event produced %v, want one usage event", got)
+			}
+			usage, ok := got[0].Fields["usage"].(map[string]any)
+			if !ok {
+				t.Fatalf("usage = %#v, want the token map", got[0].Fields["usage"])
+			}
+			for key, want := range map[string]int64{"input_tokens": 120, "output_tokens": 30, "total_tokens": 150} {
+				if value, _ := events.Int64(usage[key]); value != want {
+					t.Errorf("usage %s = %#v, want %d", key, usage[key], want)
+				}
+			}
+			cached, present := usage["cached_read_tokens"]
+			if tc.cached > 0 {
+				if value, _ := events.Int64(cached); !present || value != tc.cached {
+					t.Errorf("cached_read_tokens = %#v, want %d", cached, tc.cached)
+				}
+			} else if present {
+				t.Errorf("cached_read_tokens = %#v, want it absent when nothing was cached", cached)
+			}
+			if got[0].Fields["run_id"] != "run_1" || got[0].Fields["request"] != "req_1" {
+				t.Errorf("the request identifiers were lost: %v", got[0].Fields)
+			}
+			if turn, _ := events.Int64(got[0].Fields["turn"]); turn != 3 {
+				t.Errorf("turn = %#v, want 3", got[0].Fields["turn"])
+			}
+		})
+	}
+}
+
+// TestSettledEventKeepsTheUndeliveredInput proves an accepted input that never
+// reached the model survives into the terminal record, because that record is
+// what tells the caller what to resend.
+func TestSettledEventKeepsTheUndeliveredInput(t *testing.T) {
+	end := settledEvent(sessionEvent{
+		SessionID: "ses_1",
+		Type:      "run.settled",
+		Fields: map[string]any{
+			"reason": "interrupted",
+			"detail": map[string]any{
+				"text": "the run was interrupted",
+				"undelivered_input": []any{
+					map[string]any{"input_id": "in_1", "mode": "steer"},
+					map[string]any{"input_id": "in_2", "mode": "queue"},
+				},
+			},
+		},
+	})
+	got, ok := end.Fields["undelivered_input"].([]protocol.UndeliveredInput)
+	if !ok {
+		t.Fatalf("undelivered_input = %#v, want the settle detail's entries", end.Fields["undelivered_input"])
+	}
+	want := []protocol.UndeliveredInput{
+		{InputID: "in_1", Mode: "steer"},
+		{InputID: "in_2", Mode: "queue"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("undelivered_input = %#v, want %#v", got, want)
 	}
 }
