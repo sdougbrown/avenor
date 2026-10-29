@@ -333,7 +333,7 @@ export type StepEndedProjection = {
  */
 function v2ErrorName(type: string): string {
   if (/abort|cancel|interrupt/i.test(type)) return 'MessageAbortedError'
-  if (/length|limit|token/i.test(type)) return 'MessageOutputLengthError'
+  if (/length/i.test(type)) return 'MessageOutputLengthError'
   return type
 }
 

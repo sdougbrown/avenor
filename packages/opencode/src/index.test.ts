@@ -318,13 +318,13 @@ describe('stepEndedInfo', () => {
     expect(settled.info.finish).toBe('tool-calls')
     expect(settled.info.error).toEqual({ name: 'MessageAbortedError' })
     const capped = stepEndedInfo({
-      content: [], time: { created: 1, completed: 2 }, error: { type: 'context_length_exceeded' },
+      content: [], time: { created: 1, completed: 2 }, error: { type: 'output_length_exceeded' },
     } as never, 's1', 'm1')!
     expect(capped.info.error).toEqual({ name: 'MessageOutputLengthError' })
     const other = stepEndedInfo({
-      content: [], time: { created: 1, completed: 2 }, error: { type: 'provider_overloaded' },
+      content: [], time: { created: 1, completed: 2 }, error: { type: 'rate_limit' },
     } as never, 's1', 'm1')!
-    expect(other.info.error).toEqual({ name: 'provider_overloaded' })
+    expect(other.info.error).toEqual({ name: 'rate_limit' })
   })
 
   test('is undefined when the message has not completed', () => {
