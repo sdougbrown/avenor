@@ -23,7 +23,7 @@ func ConfigHome() string {
 }
 
 // homeDir resolves the user's home directory: HOME, then os.UserHomeDir,
-// then the empty string that makes homePath fall back to the bare relative
+// then the empty string that makes underHome fall back to the bare relative
 // shape.
 func homeDir() string {
 	home := os.Getenv("HOME")

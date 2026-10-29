@@ -32,10 +32,15 @@ func TestStateHomeXDGAbsolute(t *testing.T) {
 }
 
 // No XDG_STATE_HOME and no HOME: the relative "avenor" keeps the documented
-// fallback shape.
+// fallback shape. The guard skips hosts where os.UserHomeDir() still resolves
+// with HOME unset (a populated /etc/passwd), since the fallback then cannot
+// be exercised.
 func TestStateHomeNoHomeFallback(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("HOME", "")
+	if u, err := os.UserHomeDir(); err == nil && u != "" {
+		t.Skipf("os.UserHomeDir resolves %q without HOME; the fallback is unreachable here", u)
+	}
 	if got, want := StateHome(), filepath.Join("avenor"); got != want {
 		t.Fatalf("StateHome() = %q, want %q", got, want)
 	}

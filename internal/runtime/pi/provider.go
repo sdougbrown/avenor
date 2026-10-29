@@ -56,15 +56,9 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		c.stderr.Append("session ID not found in get_state response, generating new session ID")
 	}
 
-	p.mu.Lock()
-	if len(p.sessions) > 0 {
-		p.mu.Unlock()
-		return runtime.Session{}, errors.New("pi rpc supports only one active session per provider")
+	if err := p.registerClient(sessionID, c); err != nil {
+		return runtime.Session{}, err
 	}
-	p.sessions[sessionID] = struct{}{}
-	p.mu.Unlock()
-
-	c.setSessionID(sessionID)
 
 	return runtime.Session{
 		SessionID: sessionID,
@@ -175,18 +169,33 @@ func (p *Provider) resumePersisted(ctx context.Context, sessionID string, opts r
 		return runtime.Session{}, fmt.Errorf("resumed pi child reports session %q, want %s", got, sessionID)
 	}
 
+	if err := p.registerClient(sessionID, c); err != nil {
+		return runtime.Session{}, err
+	}
+	return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: opts.Dir, PID: c.Pid()}, nil
+}
+
+// registerClient installs c as the provider's single live session child. pi
+// rpc supports one registered session per provider: registering while a
+// session exists refuses and closes the fresh child, and a client left
+// behind by a failed start is closed when the registration replaces it, so
+// no live pi child is orphaned.
+func (p *Provider) registerClient(sessionID string, c *client) error {
 	p.mu.Lock()
 	if len(p.sessions) > 0 {
 		p.mu.Unlock()
 		c.Close()
-		return runtime.Session{}, errors.New("pi rpc supports only one active session per provider")
+		return errors.New("pi rpc supports only one active session per provider")
 	}
+	replaced := p.client
 	p.sessions[sessionID] = struct{}{}
 	p.client = c
 	p.mu.Unlock()
-
+	if replaced != nil && replaced != c {
+		replaced.Close()
+	}
 	c.setSessionID(sessionID)
-	return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: opts.Dir, PID: c.Pid()}, nil
+	return nil
 }
 
 // childSessionID reads the session ID a fresh pi child reports at startup.

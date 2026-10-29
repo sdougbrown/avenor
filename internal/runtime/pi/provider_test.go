@@ -1243,3 +1243,30 @@ func TestResumePersistedRefusesUnsupportedThinking(t *testing.T) {
 		t.Fatal("client launched after unsupported-thinking refusal")
 	}
 }
+
+// A start that failed after the child launched leaves a live client with no
+// registered session; a persisted resume that replaces it closes the
+// survivor so no live pi child is orphaned.
+func TestResumePersistedClosesTheClientItReplaces(t *testing.T) {
+	id := "01a117d6-a744-7108-89ff-139b1a47b088"
+	p, c, wOut, rIn, _ := persistedResumeFixture(t, id)
+	orphan, _, _ := fakeClient()
+	p.client = orphan // the state a failed Start leaves behind
+	respondGetState(wOut, rIn, id)
+
+	sess, err := p.Resume(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if p.client != c {
+		t.Fatal("resume did not register the fresh client")
+	}
+	select {
+	case <-orphan.done:
+	default:
+		t.Fatal("the replaced client is still live")
+	}
+	if sess.SessionID != id {
+		t.Fatalf("SessionID = %q, want %q", sess.SessionID, id)
+	}
+}
