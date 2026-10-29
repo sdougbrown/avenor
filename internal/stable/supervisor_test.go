@@ -7331,6 +7331,11 @@ func TestResolveWorkflowRoot(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", tt.xdg)
 			t.Setenv("HOME", tt.home)
+			if tt.xdg == "" && tt.home == "" {
+				if u, err := os.UserHomeDir(); err == nil && u != "" {
+					t.Skipf("os.UserHomeDir resolves %q without HOME; the fallback is unreachable here", u)
+				}
+			}
 			if got := resolveWorkflowRoot(tt.configured); got != tt.want {
 				t.Fatalf("resolveWorkflowRoot(%q) = %q, want %q", tt.configured, got, tt.want)
 			}
