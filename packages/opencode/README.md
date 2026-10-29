@@ -4,7 +4,7 @@ OpenCode plugin that registers avenor agent runs as tools in your OpenCode sessi
 
 ## Setup
 
-Install the package alongside its peer dependencies:
+Install the package alongside its peer dependency:
 
 ```bash
 bun add @dougbots/avenor-opencode @opencode-ai/plugin@1.15.3
@@ -244,5 +244,5 @@ Shut down the avenor supervisor process and clean up temp files. Call this when 
 ## Dependencies
 
 - **Peer:** `@opencode-ai/plugin` v1.15.3 (the runtime that host agents use to mount plugins)
-- **Peer:** `@opencode/plugin` ^2.2.0 (type definitions for the OpenCode 2 loader; not required at runtime)
+- **Build-time:** `@opencode/plugin` (type definitions for the OpenCode 2 loader only; the built entrypoint has no runtime reference to it, so neither generation installs it)
 - **Binary:** `avenor` must be available on `PATH` or at `AVENOR_BIN` (checked at first tool invocation, not at plugin load time)

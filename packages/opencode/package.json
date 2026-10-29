@@ -31,8 +31,7 @@
     "@dougbots/avenor-core": "workspace:*"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "1.15.3",
-    "@opencode/plugin": "^2.2.0"
+    "@opencode-ai/plugin": "1.15.3"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "1.15.3",
