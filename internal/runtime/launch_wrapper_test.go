@@ -62,3 +62,19 @@ func TestMergeStartOptionsOverridesLaunch(t *testing.T) {
 		t.Fatalf("merged launch = %#v, want %#v", merged.Launch, base.Launch)
 	}
 }
+
+func TestMergeStartOptionsPersistSessions(t *testing.T) {
+	on := true
+	off := false
+	base := StartOptions{PersistSessions: &on}
+	// A nil override retains the base choice (the run-level record flows
+	// through merges without the environment overwriting it).
+	merged := MergeStartOptions(base, StartOptions{})
+	if merged.PersistSessions == nil || !*merged.PersistSessions {
+		t.Fatalf("merged PersistSessions = %v, want the base's true", merged.PersistSessions)
+	}
+	merged = MergeStartOptions(base, StartOptions{PersistSessions: &off})
+	if merged.PersistSessions == nil || *merged.PersistSessions {
+		t.Fatalf("merged PersistSessions = %v, want the override's false", merged.PersistSessions)
+	}
+}

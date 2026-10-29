@@ -141,3 +141,23 @@ func TestRunClaudeMCPWaitWithRosterEntry(t *testing.T) {
 		})
 	}
 }
+
+func TestRunPersistSessionsReachesStartOptions(t *testing.T) {
+	var got runtime.StartOptions
+	oldNewProvider := newProvider
+	provider := newScriptedProvider()
+	newProvider = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		got = opts
+		return provider, nil
+	}
+	t.Cleanup(func() { newProvider = oldNewProvider })
+
+	var stderr strings.Builder
+	args := []string{"--dir", t.TempDir(), "--backend", "pi", "--persist-sessions", "--prompt", "noop"}
+	if code := run(args, func(string) string { return "" }, &stderr); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got.PersistSessions == nil || !*got.PersistSessions {
+		t.Fatalf("StartOptions.PersistSessions = %v, want true", got.PersistSessions)
+	}
+}
