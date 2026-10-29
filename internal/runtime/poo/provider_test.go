@@ -444,44 +444,36 @@ func TestPromptSteersAnActiveRun(t *testing.T) {
 	}
 }
 
-// TestAnUnansweredAskIsNotRelayedAndTheRunCarriesOn proves the Stage 2 boundary
-// for poo's permission asks: the ask is not published as a permission.request,
-// so no resolver tries to answer it, and the run continues once poo's own ask
-// times out and the chain falls back.
-func TestAnUnansweredAskIsNotRelayedAndTheRunCarriesOn(t *testing.T) {
+// TestAnAskSkipsTheWireAskerAndTheRunCarriesOn proves the boundary for poo's
+// permission asks: the handshake declares no permission answers, so poo's wire
+// asker is unavailable and the chain falls back at once instead of waiting out
+// the ask budget. Nothing is published as a permission.request.
+func TestAnAskSkipsTheWireAskerAndTheRunCarriesOn(t *testing.T) {
 	endpoint := newFakeEndpoint(t,
 		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "true"}}}},
 		scriptedTurn{Text: "carried on"},
 	)
-	// The chain timeout stands in for the wire asker's own 60 s budget: the
-	// ask is left unanswered either way, and poo resolves it by itself.
 	fixture := newPooFixtureWith(t, endpoint, map[string]any{
 		"permission": map[string]any{
-			"unmatched":       "ask",
-			"askers":          []string{"wire"},
-			"chain_timeout_s": 2,
+			"unmatched": "ask",
+			"askers":    []string{"wire"},
 		},
 	})
 	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
 
-	promptDone := make(chan error, 1)
-	go func() { promptDone <- provider.Prompt(context.Background(), session.SessionID, "run it") }()
-
-	// The ask reaches the client — the backend is asked because the handshake
-	// declares the capability — and is echoed as the session's own record.
-	log.waitFor(t, "avenor.permission.asked", 60*time.Second)
-	select {
-	case err := <-promptDone:
-		if err != nil {
-			t.Fatalf("Prompt: %v", err)
-		}
-	case <-time.After(60 * time.Second):
-		t.Fatal("Prompt did not return after the ask timed out")
+	start := time.Now()
+	if err := provider.Prompt(context.Background(), session.SessionID, "run it"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	// The wire asker's own budget is 60 s; a run that waited on it would
+	// take at least that long.
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Fatalf("Prompt took %s, want the chain to skip the wire asker", elapsed)
 	}
 
 	for _, ev := range log.snapshot() {
 		if ev.Event == "permission.request" {
-			t.Fatal("the ask was relayed as a permission.request, which Stage 2 cannot answer")
+			t.Fatal("the ask was relayed as a permission.request, which this backend cannot answer")
 		}
 	}
 	end := log.waitFor(t, "session.end", 10*time.Second)
