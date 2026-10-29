@@ -490,7 +490,7 @@ func TestStartClientForwardsThinkingFlag(t *testing.T) {
 	}
 	client, err := StartClientWithAgentProfileThinkingAndDir(
 		context.Background(), "", "", "", "", "", "high", "", "", "", "",
-		nil, nil,
+		nil, nil, "",
 	)
 	if err != nil {
 		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -1056,7 +1056,7 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 
 	client, err := StartClientWithAgentProfileThinkingAndDir(
 		context.Background(), "", "sonnet", "", "jockey", "", "", "",
-		"http://127.0.0.1:9999", "rt_1", "secret-token", nil, nil,
+		"http://127.0.0.1:9999", "rt_1", "secret-token", nil, nil, "",
 	)
 	if err != nil {
 		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -1091,7 +1091,7 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 	// With no broker identity at all, stale AVENOR_*/PI_AGENT env must be
 	// stripped from the child rather than leaked through unfiltered.
 	client2, err := StartClientWithAgentProfileThinkingAndDir(
-		context.Background(), "", "sonnet", "", "", "", "", "", "", "", "", nil, nil,
+		context.Background(), "", "sonnet", "", "", "", "", "", "", "", "", nil, nil, "",
 	)
 	if err != nil {
 		t.Fatalf("second StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -1122,7 +1122,7 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 	// Intermediate case: PI_AGENT injected while broker credentials are empty
 	// must still strip the stale AVENOR_* vars.
 	client3, err := StartClientWithAgentProfileThinkingAndDir(
-		context.Background(), "", "sonnet", "", "jockey", "", "", "", "", "", "", nil, nil,
+		context.Background(), "", "sonnet", "", "jockey", "", "", "", "", "", "", nil, nil, "",
 	)
 	if err != nil {
 		t.Fatalf("third StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -1157,7 +1157,7 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 	// stale one rather than leave the child half-configured.
 	client4, err := StartClientWithAgentProfileThinkingAndDir(
 		context.Background(), "", "sonnet", "", "", "", "", "",
-		"http://127.0.0.1:9999", "rt_1", "", nil, nil,
+		"http://127.0.0.1:9999", "rt_1", "", nil, nil, "",
 	)
 	if err != nil {
 		t.Fatalf("fourth StartClientWithAgentProfileThinkingAndDir: %v", err)
@@ -1179,5 +1179,56 @@ func TestStartClientForwardsBrokerEnv(t *testing.T) {
 		if v, ok := partialEnv[key]; ok {
 			t.Errorf("%s = %q leaked into child env with two of three broker values", key, v)
 		}
+	}
+}
+
+// A persisted-session launch (sessionDir set) replaces --no-session with
+// --session-dir, so the child writes a real session file instead of an
+// ephemeral one.
+func TestStartClientPersistedSessionSwapsNoSessionForSessionDir(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var captured []string
+	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		captured = append([]string(nil), args...)
+		return exec.Command("cat")
+	}
+	client, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "", "sessions", "", "", "", "",
+		"", "", "", nil, nil, "",
+	)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client.Close()
+	got := strings.Join(captured, " ")
+	if got != "--mode rpc --session-dir sessions" {
+		t.Fatalf("args = %q, want the persisted-session launch", got)
+	}
+}
+
+// A resumed launch binds the fresh child to the persisted session the prior
+// run wrote, so the transcript continues instead of restarting.
+func TestStartClientForwardsResumeSessionID(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	var captured []string
+	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		captured = append([]string(nil), args...)
+		return exec.Command("cat")
+	}
+	client, err := StartClientWithAgentProfileThinkingAndDir(
+		context.Background(), "", "", "sessions", "", "", "", "",
+		"", "", "", nil, nil, "01a117d6-a744-7108-89ff-139b1a47b088",
+	)
+	if err != nil {
+		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)
+	}
+	defer client.Close()
+	got := strings.Join(captured, " ")
+	if got != "--mode rpc --session-dir sessions --session 01a117d6-a744-7108-89ff-139b1a47b088" {
+		t.Fatalf("args = %q, want the resumed launch", got)
 	}
 }

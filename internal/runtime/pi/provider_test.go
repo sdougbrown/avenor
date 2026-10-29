@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,10 @@ func TestResumeExisting(t *testing.T) {
 }
 
 func TestResumeRejectsSecondDistinctSession(t *testing.T) {
+	// Pin the ephemeral path: with the feature opted in, the resume would
+	// route into resumePersisted's occupied guard and fail with different
+	// text.
+	t.Setenv(SessionsEnv, "")
 	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
 	p.sessions["pi_existing"] = struct{}{}
 	c, _, _ := fakeClient()
@@ -231,7 +236,7 @@ func TestFreshStartUsesThinkingFlagWithoutSetter(t *testing.T) {
 			p := NewWithOptions(runtime.StartOptions{})
 			var launched runtime.StartOptions
 			c, wOut, rIn := fakeClient()
-			p.startClient = func(_ context.Context, opts runtime.StartOptions) (*client, error) {
+			p.startClient = func(_ context.Context, opts runtime.StartOptions, resumeSessionID string) (*client, error) {
 				launched = opts
 				return c, nil
 			}
@@ -258,7 +263,7 @@ func TestFreshStartUsesThinkingFlagWithoutSetter(t *testing.T) {
 func TestProviderRejectsInvalidThinkingBeforeClient(t *testing.T) {
 	p := NewWithOptions(runtime.StartOptions{})
 	launched := false
-	p.startClient = func(context.Context, runtime.StartOptions) (*client, error) {
+	p.startClient = func(context.Context, runtime.StartOptions, string) (*client, error) {
 		launched = true
 		return nil, errors.New("unexpected launch")
 	}
@@ -391,7 +396,7 @@ func TestThinkingHelpMismatchRejectsBeforeLaunch(t *testing.T) {
 	t.Cleanup(func() { piHelpOutput = originalHelp })
 	p := NewWithOptions(runtime.StartOptions{})
 	launched := false
-	p.startClient = func(context.Context, runtime.StartOptions) (*client, error) {
+	p.startClient = func(context.Context, runtime.StartOptions, string) (*client, error) {
 		launched = true
 		return nil, errors.New("unexpected launch")
 	}
@@ -581,6 +586,9 @@ func TestProviderStartUsesRequestedWorkingDirectory(t *testing.T) {
 }
 
 func TestProviderColdResumeRefusesBeforeStartingPi(t *testing.T) {
+	// Pin the ephemeral path: with the feature opted in, the resume would
+	// create a real session directory instead of refusing up front.
+	t.Setenv(SessionsEnv, "")
 	dir := t.TempDir()
 	captured := withFakePiCommand(t)
 	p := NewWithOptions(runtime.StartOptions{Dir: dir})
@@ -1083,5 +1091,213 @@ func TestPromptRejectedEmitsNoPromptSubmittedEvent(t *testing.T) {
 	case ev := <-eventsCh:
 		t.Fatalf("event emitted for rejected prompt: %s", ev.Event)
 	default:
+	}
+}
+
+// The resume refusal names the opt-in: a caller reading the error can turn
+// persistence on instead of only learning the resume failed.
+func TestResumeWithoutPersistedSessionsNamesTheEnv(t *testing.T) {
+	t.Setenv(SessionsEnv, "")
+	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
+	_, err := p.Resume(context.Background(), "pi_gone")
+	if err == nil {
+		t.Fatal("expected error for a session a --no-session run cannot resume")
+	}
+	if !strings.Contains(err.Error(), SessionsEnv) {
+		t.Fatalf("error = %v, want the %s opt-in named", err, SessionsEnv)
+	}
+}
+
+// A persisted session is real only when its file exists; a missing file
+// means the prior run launched ephemeral, and the refusal says so.
+func TestResumePersistedRequiresTheSessionFile(t *testing.T) {
+	t.Setenv(SessionsEnv, "1")
+	t.Setenv(SessionDirEnv, t.TempDir())
+	launched := false
+	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
+	p.startClient = func(context.Context, runtime.StartOptions, string) (*client, error) {
+		launched = true
+		return nil, errors.New("unexpected launch")
+	}
+	_, err := p.Resume(context.Background(), "01a117d6-a744-7108-89ff-139b1a47b088")
+	if err == nil {
+		t.Fatal("expected error for a missing session file")
+	}
+	if launched {
+		t.Fatal("child launched without a persisted session file")
+	}
+	if !strings.Contains(err.Error(), "no persisted pi session file") {
+		t.Fatalf("error = %v, want the missing-file refusal", err)
+	}
+}
+
+// persistedResumeFixture pins a persisted-session environment with one
+// session file on disk and wires a provider whose startClient returns the
+// shared fake client. The fixture returns the pieces each resume test
+// varies on: the provider, the fake client's response pipe, and the resume
+// session ID the launch received.
+func persistedResumeFixture(t *testing.T, id string) (*Provider, *client, *io.PipeWriter, *io.PipeReader, *string) {
+	t.Helper()
+	t.Setenv(SessionsEnv, "1")
+	dir := t.TempDir()
+	t.Setenv(SessionDirEnv, dir)
+	if err := os.WriteFile(filepath.Join(dir, "2026-10-14T14-55-09-163Z_"+id+".jsonl"), []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
+	resumedID := ""
+	c, wOut, rIn := fakeClient()
+	t.Cleanup(func() { c.Close() })
+	p.startClient = func(_ context.Context, _ runtime.StartOptions, resumeSessionID string) (*client, error) {
+		resumedID = resumeSessionID
+		return c, nil
+	}
+	return p, c, wOut, rIn, &resumedID
+}
+
+// respondGetState answers the client's next command with a success response
+// carrying sessionId, the way a pi child reports its session at startup.
+func respondGetState(wOut *io.PipeWriter, rIn *io.PipeReader, sessionID string) {
+	go func() {
+		command, _ := readCommand(rIn)
+		writeLine(wOut, map[string]any{"type": "response", "id": command["id"], "success": true, "sessionId": sessionID})
+	}()
+}
+
+// The cold resume arms a fresh child bound to the persisted session and
+// registers it, so the resumed run continues the prior transcript.
+func TestResumePersistedLaunchesChildBoundToSession(t *testing.T) {
+	id := "01a117d6-a744-7108-89ff-139b1a47b088"
+	p, _, wOut, rIn, resumedID := persistedResumeFixture(t, id)
+	respondGetState(wOut, rIn, id)
+
+	sess, err := p.Resume(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if *resumedID != id {
+		t.Fatalf("resume launch bound session %q, want %q", *resumedID, id)
+	}
+	if sess.SessionID != id {
+		t.Fatalf("SessionID = %q, want %q", sess.SessionID, id)
+	}
+	if p.client.SessionID() != id {
+		t.Fatalf("client session = %q, want %q", p.client.SessionID(), id)
+	}
+}
+
+// A child that reports a different session than the one asked for is a
+// resume that would silently continue elsewhere; refuse it and drop the
+// child.
+func TestResumePersistedRefusesAMismatchedChildSession(t *testing.T) {
+	id := "01a117d6-a744-7108-89ff-139b1a47b088"
+	p, c, wOut, rIn, _ := persistedResumeFixture(t, id)
+	respondGetState(wOut, rIn, "pi-other")
+
+	_, err := p.Resume(context.Background(), id)
+	if err == nil || !strings.Contains(err.Error(), "reports session") {
+		t.Fatalf("error = %v, want the mismatched-session refusal", err)
+	}
+	if c.SessionID() != "" {
+		t.Fatalf("mismatched client kept session %q", c.SessionID())
+	}
+}
+
+// The one-session invariant holds on the persisted path too: a provider
+// that already holds a session refuses a cold resume without launching a
+// second child.
+func TestResumePersistedRefusesWhenOccupied(t *testing.T) {
+	id := "01a117d6-a744-7108-89ff-139b1a47b088"
+	p, c, _, _, _ := persistedResumeFixture(t, id)
+	_ = c
+	p.sessions["pi_live"] = struct{}{}
+
+	_, err := p.Resume(context.Background(), id)
+	if err == nil || !strings.Contains(err.Error(), "one active session") {
+		t.Fatalf("error = %v, want the one-session refusal", err)
+	}
+	if p.client != nil {
+		t.Fatal("occupied provider launched a child for a second session")
+	}
+}
+
+// The persisted resume applies the same thinking-capability guard a fresh
+// start does: a pi without the requested level is refused before any child
+// is launched.
+func TestResumePersistedRefusesUnsupportedThinking(t *testing.T) {
+	originalHelp := piHelpOutput
+	piHelpOutput = func(context.Context) ([]byte, error) { return []byte("--model <pattern>"), nil }
+	t.Cleanup(func() { piHelpOutput = originalHelp })
+
+	id := "01a117d6-a744-7108-89ff-139b1a47b088"
+	p, _, _, _, _ := persistedResumeFixture(t, id)
+	p.startClient = func(context.Context, runtime.StartOptions, string) (*client, error) {
+		return nil, errors.New("unexpected launch")
+	}
+
+	_, err := p.ResumeWithOptions(context.Background(), id, runtime.StartOptions{Thinking: "xhigh"})
+	if err == nil || !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("error = %v, want the unsupported-thinking refusal", err)
+	}
+	if p.client != nil {
+		t.Fatal("client launched after unsupported-thinking refusal")
+	}
+}
+
+// A start that failed after the child launched leaves a live client with no
+// registered session; a persisted resume that replaces it closes the
+// survivor so no live pi child is orphaned.
+func TestResumePersistedClosesTheClientItReplaces(t *testing.T) {
+	id := "01a117d6-a744-7108-89ff-139b1a47b088"
+	p, c, wOut, rIn, _ := persistedResumeFixture(t, id)
+	orphan, _, _ := fakeClient()
+	p.client = orphan // the state a failed Start leaves behind
+	respondGetState(wOut, rIn, id)
+
+	sess, err := p.Resume(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if p.client != c {
+		t.Fatal("resume did not register the fresh client")
+	}
+	select {
+	case <-orphan.done:
+	default:
+		t.Fatal("the replaced client is still live")
+	}
+	if sess.SessionID != id {
+		t.Fatalf("SessionID = %q, want %q", sess.SessionID, id)
+	}
+}
+
+// The fresh-start persisted path drives the provider all the way to the
+// child argv: with the feature opted in, Start launches pi with the session
+// directory instead of --no-session, without a startClient fake standing
+// between the provider and the launcher.
+func TestStartLaunchesPersistedSessionDirectory(t *testing.T) {
+	t.Setenv(SessionsEnv, "1")
+	dir := filepath.Join(t.TempDir(), "sessions")
+	t.Setenv(SessionDirEnv, dir)
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+	var captured []string
+	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		captured = append([]string(nil), args...)
+		return exec.Command("cat")
+	}
+
+	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	// The fake child never answers get_state, so the start fails; the
+	// launch argv it produced is the assertion.
+	_, err := p.Start(ctx, runtime.StartOptions{Dir: "/work"})
+	if err == nil {
+		t.Fatal("expected the start to fail against a silent fake child")
+	}
+	got := strings.Join(captured, " ")
+	if got != "--mode rpc --session-dir "+dir {
+		t.Fatalf("pi args = %q, want the persisted-session launch", got)
 	}
 }

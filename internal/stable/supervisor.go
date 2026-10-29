@@ -5739,25 +5739,14 @@ func analyzeCommandPaths(command, cwd string) (resolved []string, escapes bool) 
 }
 
 // resolveWorkflowRoot returns the configured workflow root, or the default
-// under XDG_STATE_HOME (falling back to $HOME/.avenor) when unset. It never
-// creates directories; the manager creates them on first workflow use.
+// under the avenor state home (see appdir.StateHome for the fallback rule).
+// It never creates directories; the manager creates them on first workflow
+// use.
 func resolveWorkflowRoot(configured string) string {
 	if configured != "" {
 		return configured
 	}
-	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" && filepath.IsAbs(xdg) {
-		return filepath.Join(xdg, "avenor", "workflows")
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		if u, err := os.UserHomeDir(); err == nil && u != "" {
-			home = u
-		}
-	}
-	if home == "" {
-		return "avenor/workflows"
-	}
-	return filepath.Join(home, ".avenor", "workflows")
+	return filepath.Join(appdir.StateHome(), "workflows")
 }
 
 // resolveWorkflowAdapterDir returns the configured adapter manifest directory,

@@ -9,6 +9,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runstate"
+	"github.com/sdougbrown/avenor/internal/runtime/factory"
 )
 
 // Resume continues a prior run in a new one. The target is a resolved broker
@@ -162,8 +163,8 @@ func resumeResult(result SpawnResult) messaging.ResumeResult {
 
 // resumeOnce admits a parked turn or starts a cold continuation. The session
 // ladder runs only on the cold arm, just before the spawn that uses it: a warm
-// admission continues child.session, and pi has no cold arm, so no other
-// resume pays for the ladder's sentinel reads.
+// admission continues child.session, and pi without persisted sessions has no
+// cold arm, so no other resume pays for the ladder's sentinel reads.
 func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams) (result SpawnResult, err error) {
 	warmParams := p
 	if p.resume.implicitLabel {
@@ -178,7 +179,7 @@ func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams
 	if warm {
 		return result, nil
 	}
-	if p.Backend == "pi" {
+	if !factory.ResumesAcrossProcesses(p.Backend) {
 		return result, notResumableError(runID, s.piResumeDeniedStatus(prior))
 	}
 	// Completion admission closes before provider teardown. Do not open the

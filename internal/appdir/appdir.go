@@ -1,8 +1,10 @@
-// Package appdir resolves avenor's user-level config directory:
+// Package appdir resolves avenor's user-level directories: config under
 // $XDG_CONFIG_HOME/avenor when XDG_CONFIG_HOME is set to an absolute path,
-// else ~/.config/avenor. Every consumer of a file under that directory
-// (workflow adapters, the model provider registry) resolves through here so
-// the fallback rules cannot silently diverge.
+// else ~/.config/avenor, and state under $XDG_STATE_HOME/avenor, else
+// ~/.avenor. Every consumer of a file under one of these
+// directories (workflow adapters, the model provider registry, persisted pi
+// sessions) resolves through here so the fallback rules cannot silently
+// diverge.
 package appdir
 
 import (
@@ -17,14 +19,47 @@ func ConfigHome() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) {
 		return filepath.Join(xdg, "avenor")
 	}
+	return underHome(".config", "avenor")
+}
+
+// homeDir resolves the user's home directory: HOME, then os.UserHomeDir,
+// then the empty string that makes underHome fall back to the bare relative
+// shape.
+func homeDir() string {
 	home := os.Getenv("HOME")
 	if home == "" {
 		if u, err := os.UserHomeDir(); err == nil && u != "" {
 			home = u
 		}
 	}
+	return home
+}
+
+// underHome joins the home directory with the relative path. When no home
+// resolves, the relative "avenor" is the documented default shape, shared by
+// both directories.
+func underHome(rel ...string) string {
+	home := homeDir()
 	if home == "" {
 		return "avenor"
 	}
-	return filepath.Join(home, ".config", "avenor")
+	return filepath.Join(append([]string{home}, rel...)...)
+}
+
+// StateHome returns the avenor state directory, never creating it. Files
+// here outlive any run and are never pruned with run artifacts, so only
+// data a user may want later belongs under it. The fallback matches the
+// established legacy state root ($HOME/.avenor), not the XDG default, so
+// the repo has one state-home fallback rule. Three pre-existing resolvers
+// keep their own literal $HOME/.avenor path — tree-budget files
+// (internal/admission/budget.go), the board server's socket root
+// (internal/board/server.go) and the MCP supervisor socket
+// (internal/mcpserver/lifecycle.go) — because routing them through here
+// would move their locations when XDG_STATE_HOME is set. Migrating them is
+// deliberate follow-up, not an oversight of this rule.
+func StateHome() string {
+	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" && filepath.IsAbs(xdg) {
+		return filepath.Join(xdg, "avenor")
+	}
+	return underHome(".avenor")
 }

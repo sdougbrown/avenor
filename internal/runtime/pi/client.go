@@ -103,19 +103,29 @@ func StartClientWithAgentAndDir(ctx context.Context, provider string, model stri
 }
 
 func StartClientWithAgentProfileAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, cwd string) (*client, error) {
-	return StartClientWithAgentProfileThinkingAndDir(ctx, provider, model, sessionDir, agent, agentProfile, "", cwd, "", "", "", nil, nil)
+	return StartClientWithAgentProfileThinkingAndDir(ctx, provider, model, sessionDir, agent, agentProfile, "", cwd, "", "", "", nil, nil, "")
 }
 
-func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, thinking string, cwd string, brokerURL string, brokerRunID string, brokerToken string, launchWrapper []string, provenance *runtime.LaunchProvenance) (*client, error) {
-	args := []string{"--mode", "rpc", "--no-session"}
+func StartClientWithAgentProfileThinkingAndDir(ctx context.Context, provider string, model string, sessionDir string, agent string, agentProfile string, thinking string, cwd string, brokerURL string, brokerRunID string, brokerToken string, launchWrapper []string, provenance *runtime.LaunchProvenance, resumeSessionID string) (*client, error) {
+	// A persisted-session launch (sessionDir set) stores and resumes real
+	// session files; the ephemeral default still runs --no-session so the
+	// transcript is discarded with the process.
+	args := []string{"--mode", "rpc"}
+	if sessionDir != "" {
+		args = append(args, "--session-dir", sessionDir)
+	} else {
+		args = append(args, "--no-session")
+	}
 	if provider != "" {
 		args = append(args, "--provider", provider)
 	}
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	if sessionDir != "" {
-		args = append(args, "--session-dir", sessionDir)
+	if resumeSessionID != "" {
+		// Resume binds the fresh child to the persisted session the prior
+		// run wrote, so its transcript continues instead of restarting.
+		args = append(args, "--session", resumeSessionID)
 	}
 	if thinking != "" {
 		args = append(args, "--thinking", thinking)
