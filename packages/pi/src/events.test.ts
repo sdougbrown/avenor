@@ -7,6 +7,7 @@ import {
   CHANNEL_RUN_TERMINAL,
   createDeliveryErrorPayload,
   createLastTurnErrorPayload,
+  createPeerErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -314,6 +315,54 @@ describe('Avenor telemetry event bridge', () => {
       timestamp: 1_700_000_000_000,
     })
     expect(Object.isFrozen(payload)).toBe(true)
+  })
+
+  it('copies and freezes a peer error, carrying the broker code when it sent one', () => {
+    const payload = createPeerErrorPayload({
+      operation: 'poll',
+      code: 'peer-retired',
+      message: 'the central peer identity is no longer accepted',
+      error: 'broker /poll-control: 410 peer-retired',
+      terminal: true,
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload).toEqual({
+      operation: 'poll',
+      code: 'peer-retired',
+      message: 'the central peer identity is no longer accepted',
+      error: 'broker /poll-control: 410 peer-retired',
+      terminal: true,
+      timestamp: 1_700_000_000_000,
+    })
+    expect(Object.isFrozen(payload)).toBe(true)
+  })
+
+  it('omits the code for a refusal that named none', () => {
+    const payload = createPeerErrorPayload({
+      operation: 'publish-turn',
+      message: 'central last-turn publication failed',
+      error: 'transport failure',
+      terminal: false,
+      timestamp: 1_700_000_000_000,
+    })
+
+    // Absent, not empty: a consumer reading `code` must not see a code the broker
+    // never sent.
+    expect('code' in payload).toBe(false)
+  })
+
+  it('sanitizes a peer error and keeps the operation and terminal flag', () => {
+    const payload = createPeerErrorPayload({
+      operation: 'register',
+      code: 'peer-retired',
+      message: '\u001b[31m\n',
+      error: '\u001b[0m',
+      terminal: true,
+      timestamp: 1_700_000_000_000,
+    })
+
+    expect(payload).toMatchObject({ operation: 'register', message: 'unknown error', error: 'unknown error', terminal: true })
   })
 
   it('copies and freezes a last-turn error with sanitized text', () => {

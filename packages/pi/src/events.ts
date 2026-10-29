@@ -27,6 +27,41 @@ export const CHANNEL_POLL_ERROR = 'avenor:poll:error' as const
 export const CHANNEL_DELIVERY_ERROR = 'avenor:delivery:error' as const
 export const CHANNEL_LAST_TURN_ERROR = 'avenor:last-turn:error' as const
 
+/** Emitted when a central-broker peer operation fails. */
+export const CHANNEL_PEER_ERROR = 'avenor:peer:error' as const
+
+/** The peer operation that failed. Every peer failure names one of these. */
+export type PeerErrorOperation =
+  | 'session-name'
+  | 'poll'
+  | 'register'
+  | 'publish-turn'
+  | 'retire'
+
+export interface PeerErrorPayload {
+  /** Which peer operation failed. */
+  readonly operation: PeerErrorOperation
+  /** The broker's refusal code, when it answered with one. */
+  readonly code?: string
+  /** Human-readable failure description, as the session was told it. */
+  readonly message: string
+  /** Bounded, sanitized error text suitable for debug consumers. */
+  readonly error: string
+  /** True when the broker refused this identity for good, so no retry can help. */
+  readonly terminal: boolean
+  /** Wall-clock timestamp in epoch milliseconds. */
+  readonly timestamp: number
+}
+
+export interface PeerErrorPayloadInput {
+  readonly operation: PeerErrorOperation
+  readonly code?: string
+  readonly message: string
+  readonly error: unknown
+  readonly terminal: boolean
+  readonly timestamp: number
+}
+
 export interface LastTurnErrorPayload {
   /** Human-readable failure description. */
   readonly message: string
@@ -145,6 +180,7 @@ export interface AvenorEventMap {
   [CHANNEL_POLL_ERROR]: PollErrorPayload
   [CHANNEL_DELIVERY_ERROR]: DeliveryErrorPayload
   [CHANNEL_LAST_TURN_ERROR]: LastTurnErrorPayload
+  [CHANNEL_PEER_ERROR]: PeerErrorPayload
 }
 
 export type AvenorEventChannel = keyof AvenorEventMap
@@ -247,7 +283,23 @@ export function createDeliveryErrorPayload(
   })
 }
 
-/** Copy, bound, sanitize, and freeze a last-turn error before publishing it. */
+/** Copy, bound, sanitize, and freeze a peer error before publishing it. */
+export function createPeerErrorPayload(
+  payload: PeerErrorPayloadInput,
+): PeerErrorPayload {
+  return Object.freeze({
+    operation: payload.operation,
+    ...(payload.code ? { code: sanitizeAndBoundText(payload.code) } : {}),
+    message: sanitizeAndBoundText(payload.message),
+    error: sanitizeAndBoundText(payload.error),
+    terminal: payload.terminal,
+    timestamp: payload.timestamp,
+  })
+}
+
+/**
+ * Copy, bound, sanitize, and freeze a last-turn error before publishing it.
+ */
 export function createLastTurnErrorPayload(
   payload: LastTurnErrorPayloadInput,
 ): LastTurnErrorPayload {

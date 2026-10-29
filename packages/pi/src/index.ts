@@ -82,18 +82,20 @@ import { countNestedRuns } from './nested-count.js'
 import { resolveAgentProfile } from './agent-profile.js'
 import {
   CHANNEL_DELIVERY_ERROR,
+  CHANNEL_PEER_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   createDeliveryErrorPayload,
   createLastTurnErrorPayload,
+  createPeerErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
   emitAvenorEvent,
   CHANNEL_LAST_TURN_ERROR,
 } from './events.js'
-import type { PollErrorPayload } from './events.js'
+import type { PeerErrorOperation, PollErrorPayload } from './events.js'
 import {
   renderAnswerPermissionCall,
   renderAnswerPermissionResult,
@@ -634,6 +636,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let topLevelError: Error | null = null
     let topLevelTerminal = false
     let peerPollAbort: AbortController | null = null
+    /** Peer operations that have already raised their one notice this episode. */
+    const peerFailureReported = new Set<PeerErrorOperation>()
     let subAgentPollTimer: ReturnType<typeof setTimeout> | null = null
     // Bumped on every start/stop so an in-flight tick cannot reschedule
     // itself after the poll was stopped.
@@ -688,18 +692,19 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         try {
           await publishHarnessName(env, name)
           refusedSessionName = null
+          clearPeerFailure('session-name')
         } catch (error) {
           if (error instanceof BrokerHttpError && error.status === 400 && error.code === 'invalid-name') {
             // Retrying a name the broker refuses only costs a failed POST every
             // turn; a name that changes to a different value is sent again.
             refusedSessionName = name ?? null
-            console.error('[avenor] session_name_set refused:', error.message)
+            reportPeerFailure('session-name', error, { message: '[avenor] session_name_set refused' })
             return
           }
           // A later publish may already hold a newer record; only forget this
           // attempt's own record so that newer name is not re-published twice.
           if (publishedSessionName === attempt) publishedSessionName = null
-          console.error('[avenor] session_name_set failed:', error instanceof Error ? error.message : error)
+          reportPeerFailure('session-name', error, { message: '[avenor] session_name_set failed' })
         }
       })
       return publishChain
@@ -739,17 +744,27 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
       // Recursive setTimeout (not setInterval): a slow poll must not overlap
       // the next tick and surface asks out of order.
+      // Which step the tick is on, so a failure is reported as the operation that
+      // failed. A registration retried from here is still a registration, and a
+      // companion keying on `operation` must not see it as a poll failure.
+      let attemptedRegistration = false
       const tick = async (): Promise<void> => {
         try {
           if (topLevelEnv && !topLevelRegistered) {
             if (topLevelTerminal) return
+            attemptedRegistration = true
             await registerCentralPeer(abort.signal)
+            attemptedRegistration = false
           }
           deliverQueuedMessages()
           // The broker encodes an empty queue as JSON null.
           const msgs = ((await postBroker(env, '/poll-control', {}, fetch, AbortSignal.any([abort.signal, AbortSignal.timeout(15000)]))) ?? []) as Array<Record<string, unknown>>
           if (generation !== subAgentPollGeneration) return
-          if (consecutiveFailures >= 3) console.error('[avenor] sub-agent broker poll recovered')
+          if (consecutiveFailures >= 3) {
+            clearPeerFailure('poll')
+            if (topLevelEnv) sessionCtx?.ui.notify('[avenor] central broker poll recovered', 'info')
+            else console.error('[avenor] sub-agent broker poll recovered')
+          }
           consecutiveFailures = 0
           queuedMessages.push(...msgs)
           deliverQueuedMessages()
@@ -758,15 +773,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // Broker unreachable while it is starting up is expected; persistent
           // failure (e.g. a rejected token) must not stay silent.
           if (generation !== subAgentPollGeneration) return
-          if (topLevelEnv && error instanceof BrokerHttpError && [401, 403, 409, 410].includes(error.status)) {
-            topLevelTerminal = true
+          const operation: PeerErrorOperation = attemptedRegistration ? 'register' : 'poll'
+          attemptedRegistration = false
+          if (topLevelEnv && peerFailureTerminal(operation, error)) {
             topLevelError = new Error('the central peer identity was refused; start a new session to register again')
-            console.error('[avenor]', topLevelError.message)
+            topLevelTerminal = true
+            reportPeerFailure(operation, error, {
+              terminal: true,
+              message: '[avenor] the central peer identity is no longer accepted; start a new session',
+            })
             return
           }
           consecutiveFailures++
           if (consecutiveFailures === 1 || consecutiveFailures === 3) {
-            console.error('[avenor] sub-agent broker poll failing:', error instanceof Error ? error.message : error)
+            if (topLevelEnv) reportPeerFailure(operation, error)
+            else console.error('[avenor] sub-agent broker poll failing:', error instanceof Error ? error.message : error)
           }
         }
         if (generation !== subAgentPollGeneration) return
@@ -1753,12 +1774,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (signal.aborted) return
         topLevelRegistered = true
         topLevelError = null
+        clearPeerFailure('register')
         if (sessionCtx) await publishSessionName(sessionCtx)
         await publishCentralTurn()
       } catch (error) {
         if (signal.aborted) return
         topLevelError = error instanceof Error ? error : new Error('central peer registration failed')
-        if ((error instanceof BrokerHttpError && error.status < 500) || (error instanceof Error && error.message === 'the broker did not confirm the chosen peer identity')) topLevelTerminal = true
+        if (peerFailureTerminal('register', error)) topLevelTerminal = true
         throw error
       }
     }
@@ -1826,9 +1848,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               sequence: record.sequence, final_output: record.final_output, stop_reason: record.stop_reason, truncated: record.truncated,
             }, fetch, signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000))
             if (centralPendingTurn === record) centralPendingTurn = null
+            clearPeerFailure('publish-turn')
           } catch (error) {
             if (signal?.aborted) return
-            console.error('[avenor] central last-turn publication failed:', error instanceof BrokerHttpError ? `HTTP ${error.status}` : 'transport failure')
+            reportPeerFailure('publish-turn', error)
             return
           }
         }
@@ -1845,16 +1868,147 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // replaced, the providers rebind wholesale, or a new session starts, so a
     // persistently failing record cannot raise a toast on every turn end.
     function reportLastTurnFailure(message: string, instance: unknown): void {
-      emitAvenorEvent(pi.events, CHANNEL_LAST_TURN_ERROR, createLastTurnErrorPayload({
-        message: 'session_last_set failed',
-        error: message,
-        timestamp: Date.now(),
-      }))
-      if (lastTurnFailureReportedFor !== null) return
-      lastTurnFailureReportedFor = instance
-      const text = `[avenor] session_last_set failed: ${message}`
-      if (sessionCtx) sessionCtx.ui.notify(text, 'warning')
+      reportFailure({
+        emit: () => emitAvenorEvent(pi.events, CHANNEL_LAST_TURN_ERROR, createLastTurnErrorPayload({
+          message: 'session_last_set failed',
+          error: message,
+          timestamp: Date.now(),
+        })),
+        firstInEpisode: () => {
+          if (lastTurnFailureReportedFor !== null) return false
+          lastTurnFailureReportedFor = instance
+          return true
+        },
+        text: `[avenor] session_last_set failed: ${message}`,
+        // The last-turn notice has always gone to any session with a UI. Peer
+        // notices are narrower (a host, not a child), and each policy stays at its
+        // own call site rather than one being quietly changed to match the other.
+        deliver: text => {
+          if (sessionCtx) sessionCtx.ui.notify(text, 'warning')
+          else console.error(text)
+        },
+      })
+    }
+
+    /**
+     * The shape every failure report in this module shares: put it on the event
+     * bus, then deliver exactly one human-facing line per episode. The bus call
+     * runs every time so a session that drops the notice keeps a record; the
+     * notice is what must not repeat.
+     *
+     * `deliver` names the channel, because that is the caller's policy rather than
+     * a shared rule: a host has a person reading its UI, and a child's stderr is
+     * its supervisor's record. Keeping it a lambda means a call site that picks the
+     * wrong channel is visible here rather than buried in a copy.
+     */
+    function reportFailure(options: {
+      emit: () => void
+      firstInEpisode: () => boolean
+      text: string
+      deliver: (text: string) => void
+    }): void {
+      options.emit()
+      if (!options.firstInEpisode()) return
+      options.deliver(options.text)
+    }
+
+    /** Deliver one line to whoever is reading: a host's UI, else the log stream. */
+    function notifyOrLog(text: string): void {
+      if (topLevelEnv && sessionCtx) sessionCtx.ui.notify(text, 'warning')
       else console.error(text)
+    }
+
+    // Report a central-broker failure without disrupting the interactive TUI.
+    // Peer operations fail for ordinary reasons — a broker restart, a partition,
+    // an expired lease, a name the broker refuses — and a session reads that
+    // output while composing its next message, so console.error is wrong here.
+    //
+    // This is the one boundary every peer failure crosses: the event bus for
+    // observers, then exactly one human-facing line. A child's stderr is the
+    // supervisor's record, not a person's terminal, so a child keeps console.error.
+    // The notice latches per operation for the same reason the last-turn notice
+    // does: a two-second poll must not raise a toast every time it fails.
+    function reportPeerFailure(
+      operation: PeerErrorOperation,
+      error: unknown,
+      options: { terminal?: boolean; message?: string; deliver?: (text: string) => void } = {},
+    ): void {
+      const code = error instanceof BrokerHttpError ? error.code || undefined : undefined
+      const detail = error instanceof Error ? error.message : String(error)
+      const message = options.message ?? `[avenor] ${peerOperationLabel(operation)} failed`
+      const terminal = options.terminal ?? false
+      reportFailure({
+        emit: () => emitAvenorEvent(pi.events, CHANNEL_PEER_ERROR, createPeerErrorPayload({
+          operation,
+          code,
+          message,
+          error: detail,
+          terminal,
+          timestamp: Date.now(),
+        })),
+        firstInEpisode: () => {
+          if (peerFailureReported.has(operation)) return false
+          peerFailureReported.add(operation)
+          return true
+        },
+        text: `${message}: ${detail}`,
+        // A shutdown report outlives the session state it would read, so it
+        // carries its own target rather than asking whether a host is still set.
+        deliver: options.deliver ?? notifyOrLog,
+      })
+    }
+
+    // One decision, asked once per failure: does this refusal end the session?
+    // Everything that latches terminal and everything that reports `terminal` on
+    // the bus reads this, so the event cannot claim a retry for a failure the
+    // session gave up on.
+    //
+    // Statuses that mean the broker will keep saying no are terminal on both
+    // operations, with or without a code: 401, 403 and 410 are the broker refusing
+    // this identity, and something in front of the broker answering 40x is the same
+    // refusal one hop out.
+    //
+    // A 409 is the one status that carries both meanings. On `/register` it is
+    // `registration-mismatch` or `peer-retired`; on `/poll-control` it is
+    // `duplicate-consumer` — another poll still in flight, which the next tick
+    // retries — so a 409 ends the session only when the broker named an identity
+    // code with it. A codeless 409 is read as the concurrent poll it usually is.
+    function peerFailureTerminal(operation: PeerErrorOperation, error: unknown): boolean {
+      switch (operation) {
+        case 'poll':
+          if (!(error instanceof BrokerHttpError)) return false
+          if (error.status === 401 || error.status === 403 || error.status === 410) return true
+          // A 409 carries an identity code on /register and `duplicate-consumer`
+          // on the poll, so only the identity codes end the session here.
+          // `not-permitted` is a 403 code and is already terminal above.
+          return error.status === 409
+            ? error.code === 'peer-retired' || error.code === 'registration-mismatch'
+            : false
+        case 'register': {
+          // The broker answered and will answer the same way again: a malformed
+          // request, a refusal, or a registration it accepted without confirming
+          // the identity this session holds.
+          if (error instanceof BrokerHttpError) return error.status < 500
+          return error instanceof Error && error.message === 'the broker did not confirm the chosen peer identity'
+        }
+        default:
+          return false
+      }
+    }
+
+    function peerOperationLabel(operation: PeerErrorOperation): string {
+      switch (operation) {
+        case 'session-name': return 'session_name_set'
+        case 'poll': return 'central broker poll'
+        case 'register': return 'central peer registration'
+        case 'publish-turn': return 'central last-turn publication'
+        case 'retire': return 'central peer retirement confirmation'
+      }
+    }
+
+    /** Clear the latch for an operation that just succeeded. */
+    function clearPeerFailure(operation: PeerErrorOperation): void {
+      peerFailureReported.delete(operation)
     }
 
     // The host's own last-turn producer. Every turn's end is recorded, including
@@ -1925,6 +2079,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       pollingErrorCount = 0
       pollingErrors.length = 0
       publishedSessionName = null
+      peerFailureReported.clear()
       if (!isSubAgentBrokerMode && topLevelBrokerUrl) {
         try {
           if (options.topLevelBrokerUrl === undefined && (process.env.AVENOR_RUN_ID || process.env.AVENOR_BROKER_TOKEN)) {
@@ -1950,7 +2105,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           combinedProvider ??= combinePeerProviders(() => combinedLocalProvider, centralProvider)
           await registerCentralPeer(centralSessionAbort!.signal)
         } catch (error) {
-          console.error('[avenor] central peer registration failed:', error instanceof BrokerHttpError ? `HTTP ${error.status}` : error instanceof Error ? error.message : 'registration failed')
+          reportPeerFailure('register', error, { terminal: peerFailureTerminal('register', error) })
         }
       }
       if (startingSessionGeneration !== sessionGeneration) return
@@ -1967,6 +2122,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       centralSessionAbort = null
       centralPendingTurn = null
       const retiredEnv = topLevelEnv
+      // Who reads this session's notices is decided while the session still
+      // exists: the retirement report below runs after `sessionCtx` is cleared.
+      const shutdownNotices = topLevelEnv && sessionCtx ? sessionCtx : null
+      peerFailureReported.clear()
       topLevelEnv = null
       topLevelRegistered = false
       topLevelTerminal = false
@@ -1989,7 +2148,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       sessionCtx = null
       if (retiredEnv) {
         try { await postBroker(retiredEnv, '/retire', {}, fetch, AbortSignal.timeout(5000)) }
-        catch { console.error('[avenor] central peer retirement could not be confirmed; its lease will expire') }
+        catch (error) {
+          reportPeerFailure('retire', error, {
+            message: '[avenor] central peer retirement could not be confirmed; its lease will expire',
+            deliver: shutdownNotices
+              ? text => shutdownNotices.ui.notify(text, 'warning')
+              : text => console.error(text),
+          })
+        }
       }
       await stoppedPolling
     })
@@ -3130,11 +3296,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 export {
   CHANNEL_DELIVERY_ERROR,
   CHANNEL_LAST_TURN_ERROR,
+  CHANNEL_PEER_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
   createDeliveryErrorPayload,
   createLastTurnErrorPayload,
+  createPeerErrorPayload,
   createPollCompletedPayload,
   createPollErrorPayload,
   createRunTerminalPayload,
@@ -3151,6 +3319,9 @@ export type {
   DeliveryErrorSource,
   LastTurnErrorPayload,
   LastTurnErrorPayloadInput,
+  PeerErrorOperation,
+  PeerErrorPayload,
+  PeerErrorPayloadInput,
   PollCompletedPayload,
   PollErrorPayload,
   PollErrorPayloadInput,
