@@ -87,8 +87,10 @@ renaming peer; tell rendered the sender and produced no ack loop; ask returned
 `outcome: replied` with `4`; a resumed peer reused `codex-746377`, re-armed its
 poller, and received `post-resume ping`; closing a session logged
 `session ended`. Captures live in `.cache/spike-486/codex-peers/`. Offline: `node --test marketplace/plugins/avenor/test/codex-hooks.test.mjs`
-(identity ladder, attach refusal, frame text, tool dispatch, traversal guard,
-claim/restore, cancel generation).
+(identity ladder, attach and registration refusals, frame text, record mode,
+heartbeat failure, session lock) and
+`go test ./internal/mcpserver -run 'Codex|PeerSurface|AskClaim|SplitCodex|ResumeIgnores'`
+(record validation, provider identity, ask claim/restore, resume pass-through).
 
 ## Known limits
 

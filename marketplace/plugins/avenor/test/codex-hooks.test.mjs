@@ -57,7 +57,7 @@ test("attach keeps the provisioned identity and never registers", async () => {
   assert.equal(record.provisioned, true);
 });
 
-test("an attach refusal is reported, never retried", async () => {
+test("an attach refusal is reported with the broker's reason", async () => {
   await assert.rejects(
     () => registerOrAttach(
       { kind: "attach", url: baseEnv.AVENOR_BROKER_URL, runID: "rt_child", token: "spent", label: "" },
@@ -93,6 +93,23 @@ test("self-registration mints a fresh id when the broker holds the first one", a
   assert.match(record.run_id, /^codex-[0-9a-f]{6}$/);
   assert.equal(record.run_token, "minted");
   assert.equal(record.provisioned, false);
+});
+
+test("a network failure reading the record is not live", async () => {
+  const record = { broker_url: "http://127.0.0.1:4242", run_id: "rt_1", run_token: "tok" };
+  assert.equal(await recordIsLive(record, async () => {
+    throw new Error("connection refused");
+  }), false);
+});
+
+test("a non-retryable registration refusal is reported", async () => {
+  await assert.rejects(
+    () => registerOrAttach(
+      { kind: "register", url: baseEnv.AVENOR_BROKER_URL, runID: "", label: "" },
+      async () => ({ status: 500, ok: false, body: null }),
+    ),
+    /refused registration for codex-[0-9a-f]{6} with status 500/,
+  );
 });
 
 test("a live record survives a resume; a refused heartbeat does not", async () => {

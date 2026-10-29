@@ -57,7 +57,7 @@ for (;;) {
   const rows = Array.isArray(answer.body) ? answer.body : [];
   for (const row of rows) {
     const ask = parseControlMessage(row);
-    if (ask !== null) await deliver(sessionID, dir, ask);
+    if (ask !== null) await deliver(sessionID, directory, ask);
   }
 }
 
@@ -119,6 +119,16 @@ function appendUndelivered(sessionDir, ask, frame) {
   } catch {
     // Best effort.
   }
+}
+
+function installCleanup(file) {
+  const stop = () => {
+    releasePidLock(file);
+    process.exit(0);
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+  process.on("exit", () => releasePidLock(file));
 }
 
 function pause(ms) {

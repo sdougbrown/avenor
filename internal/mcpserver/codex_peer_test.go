@@ -182,3 +182,15 @@ func TestResumeIgnoresACodexPeerBinding(t *testing.T) {
 		t.Fatalf("resume read the peer record: %v", err)
 	}
 }
+
+func TestReadCodexPeerRecordRefusesRemotePlaintext(t *testing.T) {
+	if _, err := readCodexPeerRecord(writeCodexPeerRecord(t, "http://example.com:8080", "rt", "tok")); err == nil {
+		t.Fatal("a remote plaintext broker URL was accepted")
+	}
+	if _, err := readCodexPeerRecord(writeCodexPeerRecord(t, "https://example.com", "rt", "tok")); err != nil {
+		t.Fatalf("a remote https broker URL was refused: %v", err)
+	}
+	if _, err := readCodexPeerRecord(writeCodexPeerRecord(t, "http://127.0.0.1:8080", "rt", "tok")); err != nil {
+		t.Fatalf("a loopback plaintext broker URL was refused: %v", err)
+	}
+}

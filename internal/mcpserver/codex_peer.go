@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -93,7 +94,20 @@ func readCodexPeerRecord(file string) (*codexPeer, error) {
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil, fmt.Errorf("peer record carries no broker URL")
 	}
+	// The record carries the run token, so a plaintext URL may reach only this
+	// host. A broker on another host must be named over https.
+	if parsed.Scheme == "http" && !loopbackHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("peer record carries a non-loopback plaintext broker URL")
+	}
 	return &codexPeer{record: record, dir: dir}, nil
+}
+
+func loopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // provider builds the shared broker-authenticated provider over this peer's own
