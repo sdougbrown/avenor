@@ -448,7 +448,7 @@ By default a pi run's transcript is discarded with its process: the only records
 - the full transcript, prompt included, survives the process as a pi session file you can read or resume later with pi itself;
 - the message tool's `resume` action can continue a finished pi run across processes, the way it continues codex runs: the supervisor reads the prior run's session ID from its sentinel, and the resumed child launches bound to that session.
 
-Session files go to `$XDG_STATE_HOME/avenor/pi-sessions` (default `~/.local/state/avenor/pi-sessions`), or to the directory named by `AVENOR_PI_SESSION_DIR`. The state home is outside run artifacts on purpose: artifact retention prunes aggressively, and a transcript someone wants later must not be pruned with them. The knob is opt-in rather than default because session files cost disk on every fan-out, and the shared session store is one of the suspects in the same-model startup race.
+Session files go to `$XDG_STATE_HOME/avenor/pi-sessions` (default `~/.avenor/pi-sessions`), or to the directory named by `AVENOR_PI_SESSION_DIR`. The state home is outside run artifacts on purpose: artifact retention prunes aggressively, and a transcript someone wants later must not be pruned with them. The knob is opt-in rather than default because session files cost disk on every fan-out, and the shared session store is one of the suspects in the same-model startup race.
 
 A resume still refuses a run whose sentinel says `TIMEOUT` or `KILLED`, and a run that launched without persisted sessions cannot be resumed — the refusal names `AVENOR_PI_SESSIONS` so the fix is discoverable.
 

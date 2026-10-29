@@ -25,7 +25,7 @@ func TestStateHomeXDGAbsolute(t *testing.T) {
 	}
 	t.Setenv("XDG_STATE_HOME", "relative/state")
 	t.Setenv("HOME", t.TempDir())
-	want := filepath.Join(os.Getenv("HOME"), ".local", "state", "avenor")
+	want := filepath.Join(os.Getenv("HOME"), ".avenor")
 	if got := StateHome(); got != want {
 		t.Fatalf("StateHome() = %q, want the home default %q for a relative XDG_STATE_HOME", got, want)
 	}

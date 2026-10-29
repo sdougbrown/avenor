@@ -7,6 +7,8 @@ import (
 )
 
 func TestSessionsPersistEnabled(t *testing.T) {
+	// The leading empty case is also the unset state: t.Setenv with an
+	// empty value removes the variable.
 	cases := []struct {
 		value string
 		want  bool
@@ -31,7 +33,7 @@ func TestSessionsPersistEnabled(t *testing.T) {
 }
 
 func TestSessionsPersistEnabledUnset(t *testing.T) {
-	t.Setenv(SessionsEnv, "")
+	os.Unsetenv(SessionsEnv)
 	if SessionsPersistEnabled() {
 		t.Fatal("SessionsPersistEnabled() = true with the variable unset")
 	}
@@ -69,8 +71,8 @@ func TestPersistSessionsDirDefaultUnderStateHome(t *testing.T) {
 
 func TestSessionFileExists(t *testing.T) {
 	dir := t.TempDir()
-	if SessionFileExists(dir, "01a117d6-a744-7108-89ff-139b1a47b088") {
-		t.Fatal("SessionFileExists = true for an empty directory")
+	if ok, err := SessionFileExists(dir, "01a117d6-a744-7108-89ff-139b1a47b088"); ok || err != nil {
+		t.Fatalf("SessionFileExists = %v, %v for an empty directory, want false, nil", ok, err)
 	}
 	name := "2026-10-14T14-55-09-163Z_01a117d6-a744-7108-89ff-139b1a47b088.jsonl"
 	if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o600); err != nil {
@@ -82,16 +84,17 @@ func TestSessionFileExists(t *testing.T) {
 	// A partial ID that matches a prefix-named file is expected suffix
 	// behavior; avenor only passes full IDs, so the assertion pins the
 	// suffix contract rather than a partial-ID guarantee.
-	if !SessionFileExists(dir, "01a117d6") {
-		t.Fatal("SessionFileExists = false for a prefix-named session file")
+	if ok, err := SessionFileExists(dir, "01a117d6"); !ok || err != nil {
+		t.Fatalf("SessionFileExists = %v, %v for a prefix-named session file, want true, nil", ok, err)
 	}
-	if !SessionFileExists(dir, "01a117d6-a744-7108-89ff-139b1a47b088") {
-		t.Fatal("SessionFileExists = false for a matching session file")
+	if ok, err := SessionFileExists(dir, "01a117d6-a744-7108-89ff-139b1a47b088"); !ok || err != nil {
+		t.Fatalf("SessionFileExists = %v, %v for a matching session file, want true, nil", ok, err)
 	}
-	if SessionFileExists(dir, "ffffff") {
-		t.Fatal("SessionFileExists = true for an ID with no matching file")
+	if ok, err := SessionFileExists(dir, "ffffff"); ok || err != nil {
+		t.Fatalf("SessionFileExists = %v, %v for an ID with no matching file, want false, nil", ok, err)
 	}
-	if SessionFileExists(filepath.Join(dir, "missing"), "01a117d6-a744-7108-89ff-139b1a47b088") {
-		t.Fatal("SessionFileExists = true for a missing directory")
+	_, err := SessionFileExists(filepath.Join(dir, "missing"), "01a117d6-a744-7108-89ff-139b1a47b088")
+	if err == nil {
+		t.Fatal("SessionFileExists = nil error for an unreadable directory, want the read failure")
 	}
 }

@@ -54,17 +54,19 @@ func PersistSessionsDir() (string, error) {
 // SessionFileExists reports whether dir holds a persisted session file for
 // sessionID. pi names session files <timestamp>_<session id>.jsonl, so the
 // filename check matches the header-id lookup pi itself performs, without
-// parsing the file.
-func SessionFileExists(dir, sessionID string) bool {
+// parsing the file. A directory read failure is an error, not a negative:
+// the caller must not tell the user the session is missing when the store
+// is unreadable.
+func SessionFileExists(dir, sessionID string) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("read pi session dir %s: %w", dir, err)
 	}
 	suffix := "_" + sessionID + ".jsonl"
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), suffix) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

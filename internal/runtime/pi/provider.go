@@ -145,7 +145,11 @@ func (p *Provider) resumePersisted(ctx context.Context, sessionID string, opts r
 	if err != nil {
 		return runtime.Session{}, err
 	}
-	if !SessionFileExists(dir, sessionID) {
+	fileExists, err := SessionFileExists(dir, sessionID)
+	if err != nil {
+		return runtime.Session{}, err
+	}
+	if !fileExists {
 		return runtime.Session{}, fmt.Errorf("session not found: %s (no persisted pi session file in %s; the prior run may have launched without %s=1)", sessionID, dir, SessionsEnv)
 	}
 	if opts.Thinking != "" {

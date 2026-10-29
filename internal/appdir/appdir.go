@@ -48,10 +48,12 @@ func underHome(rel ...string) string {
 
 // StateHome returns the avenor state directory, never creating it. Files
 // here outlive any run and are never pruned with run artifacts, so only
-// data a user may want later belongs under it.
+// data a user may want later belongs under it. The fallback matches the
+// established legacy state root ($HOME/.avenor), not the XDG default, so
+// the repo has one state-home fallback rule.
 func StateHome() string {
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" && filepath.IsAbs(xdg) {
 		return filepath.Join(xdg, "avenor")
 	}
-	return underHome(".local", "state", "avenor")
+	return underHome(".avenor")
 }
