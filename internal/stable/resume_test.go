@@ -662,7 +662,7 @@ func TestResumeGatePerRunPersistChoice(t *testing.T) {
 func TestResumeInheritsPriorPersistedChoice(t *testing.T) {
 	t.Setenv(pi.SessionsEnv, "")
 	sup, _ := newStage2Supervisor(t, 4)
-	child := &childRuntime{id: "prior", lc: lifecycleState{completion: completionPublished}, runDone: make(chan struct{})}
+	child := &childRuntime{id: "prior", backend: "pi", persistedSessions: true, lc: lifecycleState{completion: completionPublished}, runDone: make(chan struct{})}
 	child.closeRunDone()
 	_, err := sup.performResume(child, child.id, messaging.ResumeRequest{Target: "prior", Message: "again"})
 	assertToolCode(t, err, "not_resumable")

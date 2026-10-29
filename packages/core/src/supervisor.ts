@@ -150,7 +150,6 @@ export interface RunInfo {
   brokerUrl?: string
   parentToken?: string
   autoApprove?: boolean
-  persistSessions?: boolean
 }
 
 export function retainLiveIdentity(runInfo: RunInfo, liveStatus: Record<string, unknown>): void {
@@ -761,7 +760,6 @@ export class Supervisor {
       brokerUrl: result.broker_url as string | undefined,
       parentToken: result.parent_token as string | undefined,
       autoApprove: spawnParams.auto_approve,
-      persistSessions: spawnParams.persist_sessions,
     }
 
     this.register(runInfo)
