@@ -338,6 +338,19 @@ function v2ErrorName(type: string): string {
 }
 
 /**
+ * The text parts of one settled message, in either the V1 parts or the V2
+ * content shape. Module-level so both the V1 read path and the V2 projection
+ * share one extraction.
+ */
+export function extractTextParts(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
+    .filter(part => part.type === 'text')
+    .map(part => part.text ?? '')
+}
+
+/**
  * Project one settled message onto the info shape the V1 message.updated event
  * carried. The message must be an assistant message with a completed time, or
  * the projection is undefined and nothing publishes.
@@ -352,13 +365,7 @@ export function stepEndedInfo(
   const time = record.time as { created?: number; completed?: number } | undefined
   if (typeof time?.created !== 'number' || typeof time?.completed !== 'number') return undefined
   const error = record.error as { type?: string } | undefined
-  const raw = message.parts ?? message.content
-  const settledText = Array.isArray(raw)
-    ? raw
-      .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
-      .filter(part => part.type === 'text')
-      .map(part => part.text ?? '')
-    : undefined
+  const settledText = extractTextParts(message.parts ?? message.content)
   return {
     info: {
       role: 'assistant',
@@ -802,7 +809,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
     return id > publishedTurn.id
   }
 
-  /** The raw stop reason one settled OpenCode assistant message reports. */
+/** The raw stop reason one settled OpenCode assistant message reports. */
   function stopReasonOf(info: Record<string, unknown>): string {
     const error = info.error
     if (error !== null && typeof error === 'object') {
@@ -840,11 +847,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
   async function settledTurnText(sessionId: string, messageId: string): Promise<string[]> {
     const message = await host.getMessage(sessionId, messageId)
     const raw = message?.parts ?? message?.content
-    const parts: unknown[] = Array.isArray(raw) ? raw : []
-    return parts
-      .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
-      .filter(part => part.type === 'text')
-      .map(part => part.text ?? '')
+    return extractTextParts(raw)
   }
 
   // The host's own last-turn producer. It publishes the turn the event carries
