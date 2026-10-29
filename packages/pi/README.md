@@ -221,6 +221,7 @@ Beyond the tools, the extension integrates with Pi's TUI and event system:
 - **Footer status** — the `avenor` status key carries active runs, the live agent-tree total, the unread notice count, and the current poll-failure count (see [Completion notices](#completion-notices))
 - **Completion notices** — one notice per finished run, delivered immediately when your session is idle and batched into a single continuation when it was busy
 - **Polling diagnostics** — bounded polling errors are emitted on `avenor:poll:error` for companion extensions; a completion-notice delivery that exhausts its retries is emitted separately on `avenor:delivery:error`; a failed last-turn record (`session_last_set`) is emitted per failure on `avenor:last-turn:error`
+- **Central-peer diagnostics** — in a top-level session, every central-broker failure (session name, poll, registration, turn publication, retirement) is emitted on `avenor:peer:error` with the operation, the broker's refusal code, and whether the identity is terminal. The first failure per operation raises one warning notice; a child session keeps reporting to stderr, which is its supervisor's record
 - **Live progress** — blocking `avenor_spawn` calls stream progress updates via `onUpdate`
 - **Context enrichment** — active sub-agents are automatically surfaced in the system prompt via `before_agent_start`
 - **Custom rendering** — The Pi extension renders all Avenor tool calls and results as themed, bounded summaries. Results have collapsed and expanded views.
