@@ -822,12 +822,26 @@ func TestWaitForSessionFilePermissionEmitsOneEffectiveRequestAndCleansUp(t *test
 	}
 }
 
+// configuredDeadlineBudget is how long a deadline-driven case gives the session to
+// reach the state being asserted. The timer starts when the wait does, and the case
+// then waits on things that must happen before the deadline fires: the sink writing
+// the request, the permission handler creating its .req file, or AnswerPermission
+// reaching its blocking point. Any of those can take tens of milliseconds on a
+// loaded machine, so a 50 ms budget turned a scheduling delay into a test failure.
+//
+// It sits under the one-second waits these cases give their setup and give the wait
+// itself, so the deadline cannot fire before a wait the test considers legitimate,
+// nor land at the same instant as the timeout that looks for it. What these cases
+// verify is that a configured deadline ends the wait and cleans up, not that it
+// ends it quickly.
+const configuredDeadlineBudget = 500 * time.Millisecond
+
 func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testing.T) {
 	tests := []struct {
 		name             string
 		stopReason       string
 		expectedExitCode int
-		deadline         time.Time
+		deadlineIn       time.Duration
 		trigger          func(chan<- error, chan<- time.Time, chan<- struct{})
 	}{
 		{
@@ -851,8 +865,10 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			stopReason:       "timeout",
 			expectedExitCode: 124,
 			// The shared run deadline is a wall-clock deadline now: the wait
-			// stops on its own once the per-waiter timer expires.
-			deadline: time.Now().Add(50 * time.Millisecond),
+			// stops on its own once the per-waiter timer expires. It is measured
+			// from when this case starts, not from when the table was built, so
+			// the cases ahead of it cannot spend the budget first.
+			deadlineIn: configuredDeadlineBudget,
 		},
 		{
 			name:             "interrupt",
@@ -881,6 +897,10 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			requestWritten := make(chan struct{})
 			var requestOnce sync.Once
 			sink.onRequest = func() { requestOnce.Do(func() { close(requestWritten) }) }
+			var runDeadline time.Time
+			if tt.deadlineIn > 0 {
+				runDeadline = time.Now().Add(tt.deadlineIn)
+			}
 			resultCh := make(chan sessionResult, 1)
 			go func() {
 				resultCh <- WaitForSession(context.Background(), &cliFakeProvider{}, SessionWaitConfig{
@@ -891,7 +911,7 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 					RunID:                  "run_cleanup",
 					PermissionClaimTimeout: time.Second,
 					ProgressTimeout:        time.Second,
-					Deadline:               tt.deadline,
+					Deadline:               runDeadline,
 				}, SessionWaitDeps{
 					Writer:         sink,
 					FileHandler:    handler,
@@ -2794,7 +2814,7 @@ func TestWaitForSessionTerminationCancelsBeforeJoiningPermissionAnswer(t *testin
 			if tt.trigger == "timeout" {
 				// The shared run deadline is a wall-clock deadline now: the
 				// wait stops on its own once the per-waiter timer expires.
-				cfgDeadline = time.Now().Add(50 * time.Millisecond)
+				cfgDeadline = time.Now().Add(configuredDeadlineBudget)
 			}
 
 			resultCh := make(chan sessionResult, 1)
@@ -6668,7 +6688,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 		wantOutput      string
 		wantFinalReply  string
 		wantFinalOutput string
-		deadline        time.Time
+		deadlineIn      time.Duration
 		cancel          func(context.CancelFunc)
 	}{
 		{
@@ -6688,8 +6708,10 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 			wantFinalReply:  "After the tool.",
 			wantFinalOutput: "Before the tool. After the tool.",
 			// The shared run deadline is a wall-clock deadline now: the wait
-			// stops on its own once the per-waiter timer expires.
-			deadline: time.Now().Add(50 * time.Millisecond),
+			// stops on its own once the per-waiter timer expires. It is measured
+			// from when this case starts, not from when the table was built, so
+			// the cases ahead of it cannot spend the budget first.
+			deadlineIn: configuredDeadlineBudget,
 		},
 		{
 			name:            "trailing tool call",
@@ -6721,13 +6743,17 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 					close(sent)
 				}()
 
+				var runDeadline time.Time
+				if tt.deadlineIn > 0 {
+					runDeadline = time.Now().Add(tt.deadlineIn)
+				}
 				resultCh := make(chan sessionResult, 1)
 				go func() {
 					resultCh <- WaitForSession(ctx, &cliFakeProvider{}, SessionWaitConfig{
 						EventCh:   eventCh,
 						SessionID: "ses_cancel",
 						RunID:     "run_cancel",
-						Deadline:  tt.deadline,
+						Deadline:  runDeadline,
 					}, SessionWaitDeps{Writer: writer, Stderr: io.Discard})
 				}()
 
