@@ -827,7 +827,7 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 		name             string
 		stopReason       string
 		expectedExitCode int
-		deadline         time.Time
+		deadlineIn       time.Duration
 		trigger          func(chan<- error, chan<- time.Time, chan<- struct{})
 	}{
 		{
@@ -851,8 +851,10 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			stopReason:       "timeout",
 			expectedExitCode: 124,
 			// The shared run deadline is a wall-clock deadline now: the wait
-			// stops on its own once the per-waiter timer expires.
-			deadline: time.Now().Add(50 * time.Millisecond),
+			// stops on its own once the per-waiter timer expires. It is measured
+			// from when this case starts, not from when the table was built, so
+			// the cases ahead of it cannot spend the budget first.
+			deadlineIn: 50 * time.Millisecond,
 		},
 		{
 			name:             "interrupt",
@@ -881,6 +883,10 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 			requestWritten := make(chan struct{})
 			var requestOnce sync.Once
 			sink.onRequest = func() { requestOnce.Do(func() { close(requestWritten) }) }
+			var runDeadline time.Time
+			if tt.deadlineIn > 0 {
+				runDeadline = time.Now().Add(tt.deadlineIn)
+			}
 			resultCh := make(chan sessionResult, 1)
 			go func() {
 				resultCh <- WaitForSession(context.Background(), &cliFakeProvider{}, SessionWaitConfig{
@@ -891,7 +897,7 @@ func TestWaitForSessionSynchronizesFileCleanupForEveryTerminationSource(t *testi
 					RunID:                  "run_cleanup",
 					PermissionClaimTimeout: time.Second,
 					ProgressTimeout:        time.Second,
-					Deadline:               tt.deadline,
+					Deadline:               runDeadline,
 				}, SessionWaitDeps{
 					Writer:         sink,
 					FileHandler:    handler,
