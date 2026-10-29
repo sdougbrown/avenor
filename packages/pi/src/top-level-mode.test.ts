@@ -217,6 +217,65 @@ test('a central failure reaches the session through notify, not raw stderr', asy
   } finally { console.error = originalError; await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
 
+test('a new failure episode raises a fresh notice after the broker recovers', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  let failing = false
+  let failures = 0
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    if (failing && new URL(String(url)).pathname === '/poll-control') {
+      failures++
+      return Response.json({ code: 'internal' }, { status: 500 })
+    }
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  const pollNotices = () => h!.notify.mock.calls
+    .map((call: unknown[]) => String(call[0]))
+    .filter(text => text.includes('central broker poll failed'))
+  try {
+    // A fast tick, because recovery takes three consecutive clean polls.
+    h = await startExtensionHarness({
+      deps: { messageTool },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 20 },
+    })
+    failing = true
+    await waitFor(() => pollNotices().length === 1)
+    // Recovery is three clean polls after three failures, so the episode has to
+    // reach its floor before the broker coming back means anything.
+    await waitFor(() => failures >= 3, 5000)
+    failing = false
+    await waitFor(() => h!.notify.mock.calls.some(call => String(call[0]).includes('poll recovered')), 5000)
+    failing = true
+    await waitFor(() => pollNotices().length === 2, 5000)
+    expect(pollNotices()).toHaveLength(2)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
+
+test('a retirement the broker never confirms is a notice, not raw stderr', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  const originalError = console.error
+  const errorLog = mock(() => {})
+  console.error = errorLog as any
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    if (new URL(String(url)).pathname === '/retire') throw new Error('broker gone')
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({ deps: { messageTool }, extOptions: { topLevelBrokerUrl: 'https://broker.test' } })
+    await (await import('./test-fixtures.js')).waitFor(() => b.calls.some(c => c.path === '/register'))
+    // The report runs after the session state is torn down, so it has to carry
+    // the target it was told about rather than reading a host that no longer exists.
+    await h.eventHandlers.session_shutdown({}, {})
+    const notices = h.notify.mock.calls.map((call: unknown[]) => String(call[0]))
+    expect(notices.some(text => text.includes('retirement could not be confirmed'))).toBe(true)
+    expect(errorLog.mock.calls.map((call: unknown[]) => String(call[0])).join('\n'))
+      .not.toContain('retirement could not be confirmed')
+  } finally { console.error = originalError; b.restore() }
+})
+
 test('configured central polling waits for an existing local supervisor before receiving local asks', async () => {
   const b = broker()
   let exists = false

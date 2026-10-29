@@ -283,7 +283,7 @@ export function createDeliveryErrorPayload(
   })
 }
 
-/** Copy, bound, sanitize, and freeze a last-turn error before publishing it. */
+/** Copy, bound, sanitize, and freeze a peer error before publishing it. */
 export function createPeerErrorPayload(
   payload: PeerErrorPayloadInput,
 ): PeerErrorPayload {
@@ -297,6 +297,9 @@ export function createPeerErrorPayload(
   })
 }
 
+/**
+ * Copy, bound, sanitize, and freeze a last-turn error before publishing it.
+ */
 export function createLastTurnErrorPayload(
   payload: LastTurnErrorPayloadInput,
 ): LastTurnErrorPayload {

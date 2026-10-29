@@ -692,6 +692,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         try {
           await publishHarnessName(env, name)
           refusedSessionName = null
+          clearPeerFailure('session-name')
         } catch (error) {
           if (error instanceof BrokerHttpError && error.status === 400 && error.code === 'invalid-name') {
             // Retrying a name the broker refuses only costs a failed POST every
@@ -1764,6 +1765,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (signal.aborted) return
         topLevelRegistered = true
         topLevelError = null
+        clearPeerFailure('register')
         if (sessionCtx) await publishSessionName(sessionCtx)
         await publishCentralTurn()
       } catch (error) {
@@ -1837,6 +1839,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               sequence: record.sequence, final_output: record.final_output, stop_reason: record.stop_reason, truncated: record.truncated,
             }, fetch, signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000))
             if (centralPendingTurn === record) centralPendingTurn = null
+            clearPeerFailure('publish-turn')
           } catch (error) {
             if (signal?.aborted) return
             reportPeerFailure('publish-turn', error)
@@ -1856,15 +1859,53 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // replaced, the providers rebind wholesale, or a new session starts, so a
     // persistently failing record cannot raise a toast on every turn end.
     function reportLastTurnFailure(message: string, instance: unknown): void {
-      emitAvenorEvent(pi.events, CHANNEL_LAST_TURN_ERROR, createLastTurnErrorPayload({
-        message: 'session_last_set failed',
-        error: message,
-        timestamp: Date.now(),
-      }))
-      if (lastTurnFailureReportedFor !== null) return
-      lastTurnFailureReportedFor = instance
-      const text = `[avenor] session_last_set failed: ${message}`
-      if (sessionCtx) sessionCtx.ui.notify(text, 'warning')
+      reportFailure({
+        emit: () => emitAvenorEvent(pi.events, CHANNEL_LAST_TURN_ERROR, createLastTurnErrorPayload({
+          message: 'session_last_set failed',
+          error: message,
+          timestamp: Date.now(),
+        })),
+        firstInEpisode: () => {
+          if (lastTurnFailureReportedFor !== null) return false
+          lastTurnFailureReportedFor = instance
+          return true
+        },
+        text: `[avenor] session_last_set failed: ${message}`,
+        // The last-turn notice has always gone to any session with a UI. Peer
+        // notices are narrower (a host, not a child), and each policy stays at its
+        // own call site rather than one being quietly changed to match the other.
+        deliver: text => {
+          if (sessionCtx) sessionCtx.ui.notify(text, 'warning')
+          else console.error(text)
+        },
+      })
+    }
+
+    /**
+     * The shape every failure report in this module shares: put it on the event
+     * bus, then deliver exactly one human-facing line per episode. The bus call
+     * runs every time so a session that drops the notice keeps a record; the
+     * notice is what must not repeat.
+     *
+     * `deliver` names the channel, because that is the caller's policy rather than
+     * a shared rule: a host has a person reading its UI, and a child's stderr is
+     * its supervisor's record. Keeping it a lambda means a call site that picks the
+     * wrong channel is visible here rather than buried in a copy.
+     */
+    function reportFailure(options: {
+      emit: () => void
+      firstInEpisode: () => boolean
+      text: string
+      deliver: (text: string) => void
+    }): void {
+      options.emit()
+      if (!options.firstInEpisode()) return
+      options.deliver(options.text)
+    }
+
+    /** Deliver one line to whoever is reading: a host's UI, else the log stream. */
+    function notifyOrLog(text: string): void {
+      if (topLevelEnv && sessionCtx) sessionCtx.ui.notify(text, 'warning')
       else console.error(text)
     }
 
@@ -1881,27 +1922,32 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function reportPeerFailure(
       operation: PeerErrorOperation,
       error: unknown,
-      options: { terminal?: boolean; message?: string } = {},
+      options: { terminal?: boolean; message?: string; deliver?: (text: string) => void } = {},
     ): void {
       const code = error instanceof BrokerHttpError ? error.code || undefined : undefined
       const detail = error instanceof Error ? error.message : String(error)
       const message = options.message ?? `[avenor] ${peerOperationLabel(operation)} failed`
       const terminal = options.terminal ?? false
-      emitAvenorEvent(pi.events, CHANNEL_PEER_ERROR, createPeerErrorPayload({
-        operation,
-        code,
-        message,
-        error: detail,
-        terminal,
-        timestamp: Date.now(),
-      }))
       if (terminal) topLevelTerminal = true
-      if (peerFailureReported.has(operation)) return
-      peerFailureReported.add(operation)
-      const text = `${message}: ${detail}`
-      // A person reads the host's TUI; a child's stderr is the supervisor's record.
-      if (topLevelEnv && sessionCtx) sessionCtx.ui.notify(text, 'warning')
-      else console.error(text)
+      reportFailure({
+        emit: () => emitAvenorEvent(pi.events, CHANNEL_PEER_ERROR, createPeerErrorPayload({
+          operation,
+          code,
+          message,
+          error: detail,
+          terminal,
+          timestamp: Date.now(),
+        })),
+        firstInEpisode: () => {
+          if (peerFailureReported.has(operation)) return false
+          peerFailureReported.add(operation)
+          return true
+        },
+        text: `${message}: ${detail}`,
+        // A shutdown report outlives the session state it would read, so it
+        // carries its own target rather than asking whether a host is still set.
+        deliver: options.deliver ?? notifyOrLog,
+      })
     }
 
     // The broker told this session its identity cannot be used again: retired,
@@ -2002,6 +2048,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       pollingErrorCount = 0
       pollingErrors.length = 0
       publishedSessionName = null
+      peerFailureReported.clear()
       if (!isSubAgentBrokerMode && topLevelBrokerUrl) {
         try {
           if (options.topLevelBrokerUrl === undefined && (process.env.AVENOR_RUN_ID || process.env.AVENOR_BROKER_TOKEN)) {
@@ -2044,6 +2091,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       centralSessionAbort = null
       centralPendingTurn = null
       const retiredEnv = topLevelEnv
+      // Who reads this session's notices is decided while the session still
+      // exists: the retirement report below runs after `sessionCtx` is cleared.
+      const shutdownNotices = topLevelEnv && sessionCtx ? sessionCtx : null
+      peerFailureReported.clear()
       topLevelEnv = null
       topLevelRegistered = false
       topLevelTerminal = false
@@ -2066,7 +2117,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       sessionCtx = null
       if (retiredEnv) {
         try { await postBroker(retiredEnv, '/retire', {}, fetch, AbortSignal.timeout(5000)) }
-        catch (error) { reportPeerFailure('retire', error, { message: '[avenor] central peer retirement could not be confirmed; its lease will expire' }) }
+        catch (error) {
+          reportPeerFailure('retire', error, {
+            message: '[avenor] central peer retirement could not be confirmed; its lease will expire',
+            deliver: shutdownNotices
+              ? text => shutdownNotices.ui.notify(text, 'warning')
+              : text => console.error(text),
+          })
+        }
       }
       await stoppedPolling
     })
@@ -3207,6 +3265,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 export {
   CHANNEL_DELIVERY_ERROR,
   CHANNEL_LAST_TURN_ERROR,
+  CHANNEL_PEER_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
@@ -3229,6 +3288,9 @@ export type {
   DeliveryErrorSource,
   LastTurnErrorPayload,
   LastTurnErrorPayloadInput,
+  PeerErrorOperation,
+  PeerErrorPayload,
+  PeerErrorPayloadInput,
   PollCompletedPayload,
   PollErrorPayload,
   PollErrorPayloadInput,
