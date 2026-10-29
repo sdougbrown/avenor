@@ -75,7 +75,7 @@
     },
     "packages/opencode": {
       "name": "@dougbots/avenor-opencode",
-      "version": "0.19.1",
+      "version": "0.20.0",
       "dependencies": {
         "@dougbots/avenor-core": "workspace:*",
       },
@@ -90,7 +90,6 @@
       },
       "peerDependencies": {
         "@opencode-ai/plugin": "1.15.3",
-        "@opencode/plugin": "^2.2.0",
       },
     },
     "packages/pi": {
