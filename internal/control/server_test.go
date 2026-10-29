@@ -1139,6 +1139,7 @@ func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
 		sub := &subscriber{conn: cs, ch: make(chan events.Event, 1), done: make(chan struct{}), seenSeq: map[string]int64{}, ready: true}
 
 		readerDone := make(chan struct{})
+		firstNotification := make(chan struct{}, 1)
 		go func() {
 			defer close(readerDone)
 			scanner := bufio.NewScanner(client)
@@ -1155,6 +1156,10 @@ func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
 					delivered++
 				}
 				mu.Unlock()
+				select {
+				case firstNotification <- struct{}{}:
+				default:
+				}
 			}
 		}()
 		// Two events before the reader starts force one drop per iteration,
@@ -1179,6 +1184,21 @@ func TestSubscriberBackpressureDropAgainstDrainingReader(t *testing.T) {
 			_ = client.Close()
 			_ = srv.Close()
 			t.Fatalf("iteration %d: enqueue blocked for 5s against a draining reader (subscriber deadlock)", i)
+		}
+		// The loop goroutine emits the lagged notification only when it runs, and
+		// its first write is always the lagged one because the pre-enqueued drop
+		// has already set dropped. The enqueuer can outrun the loop — its 64
+		// offers never block — and the pipe then closes before the loop's first
+		// write, which loses every lagged notification the iteration produced.
+		// Hold the pipe open until the reader has observed one notification, so
+		// the close cannot eat the iteration's evidence.
+		select {
+		case <-firstNotification:
+		case <-time.After(5 * time.Second):
+			_ = client.Close()
+			_ = srv.Close()
+			<-readerDone
+			t.Fatalf("iteration %d: the reader saw no notification before the close (the loop never delivered)", i)
 		}
 
 		sub.mu.Lock()
