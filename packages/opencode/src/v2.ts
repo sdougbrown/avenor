@@ -115,11 +115,21 @@ export function v2ToolEntry(
   ctx: Pick<V2Context, 'location' | 'session'>,
   directories: Map<string, string> = new Map(),
 ): { name: string; description: string; input: unknown; execute: (input: unknown, context: ToolContextLike) => Promise<unknown> } {
+  const inputSchema = tool.schema.toJSONSchema(tool.schema.object(definition.args as never)) as {
+    properties?: Record<string, { default?: unknown }>
+  }
   return {
     name,
     description: definition.description,
-    input: tool.schema.toJSONSchema(tool.schema.object(definition.args as never)),
+    input: inputSchema,
     execute: async (rawInput, context) => {
+      // The V1 execute signature relies on zod parsing to apply schema
+      // defaults; apply the JSON Schema defaults here rather than trusting
+      // the host to apply them before validation.
+      const input: Record<string, unknown> = { ...((rawInput ?? {}) as Record<string, unknown>) }
+      for (const [key, property] of Object.entries(inputSchema.properties ?? {})) {
+        if (input[key] === undefined && property && 'default' in property) input[key] = property.default
+      }
       let directory = directories.get(context.sessionID)
       if (directory === undefined) {
         // Only a successful lookup is cached; a failed one falls back for this
@@ -131,7 +141,7 @@ export function v2ToolEntry(
         }
         directory ??= ctx.location.directory
       }
-      const result = await definition.execute(rawInput as Record<string, unknown>, {
+      const result = await definition.execute(input, {
         sessionID: context.sessionID,
         agent: context.agent,
         messageID: context.messageID,

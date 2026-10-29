@@ -123,6 +123,25 @@ describe('setupAvenor', () => {
     expect(contextCalls).toEqual([])
   })
 
+  test('an event stream that throws does not break setup or cleanup', async () => {
+    const ctx = {
+      location: { directory: '/plugin/location' },
+      tool: { transform: async (cb: (e: { add: (t: unknown) => void }) => Promise<void>) => cb({ add: () => {} }) },
+      permission: { hook: async () => {} },
+      session: { hook: async () => {} },
+      event: {
+        subscribe: () => {
+          // The pump is fire-and-forget; a failing stream must not produce an
+          // unhandled rejection or block cleanup.
+          return { [Symbol.asyncIterator]() { return { next: () => Promise.reject(new Error('stream gone')) } } }
+        },
+      },
+    }
+    const cleanup = await setupAvenor(ctx as never)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await expect(Promise.resolve(cleanup())).resolves.toBeUndefined()
+  })
+
   test('cleanup aborts the event subscription', async () => {
     const { ctx, subscribeOptions } = makeV2Ctx()
     const cleanup = await setupAvenor(ctx as never)
@@ -135,13 +154,15 @@ describe('setupAvenor', () => {
 
 describe('createV2EventHandler', () => {
   test('a throwing handler does not stop later events', async () => {
+    const handled: string[] = []
     const onEvent = createV2EventHandler({
-      onSessionIdle: () => { throw new Error('idle boom') },
-      onStepEnded: () => { throw new Error('step boom') },
+      onSessionIdle: () => { handled.push('idle'); throw new Error('idle boom') },
+      onStepEnded: () => { handled.push('step'); throw new Error('step boom') },
     })
     await onEvent({ type: 'session.idle', data: { sessionID: 's1' } })
     await onEvent({ type: 'session.step.ended', data: { sessionID: 's1', assistantMessageID: 'm1' } })
     await onEvent({ type: 'session.idle', data: { sessionID: 's1' } })
+    expect(handled).toEqual(['idle', 'step', 'idle'])
   })
 
   test('routes idle and step.ended onto the core handlers', async () => {
@@ -215,6 +236,18 @@ describe('v2ToolEntry', () => {
     const entry = v2ToolEntry('test_tool', definition, ctx as never)
     await entry.execute({}, { sessionID: 's1', agent: 'a', messageID: 'm', signal: new AbortController().signal, progress: async () => {} })
     expect((definition as any).seenContext.directory).toBe('/plugin/location')
+  })
+
+  test('applies JSON Schema defaults before execute', async () => {
+    const { ctx } = makeV2Ctx()
+    const def = {
+      description: 'waited',
+      args: { wait: tool.schema.boolean().default(true) },
+      execute: async (input: Record<string, unknown>) => ({ output: `wait=${String(input.wait)}` }),
+    }
+    const entry = v2ToolEntry('waited', def, ctx as never, new Map())
+    const result = await entry.execute({}, { sessionID: 's1', agent: 'a', messageID: 'm', signal: new AbortController().signal, progress: async () => {} })
+    expect(result).toEqual({ content: [{ type: 'text', text: 'wait=true' }], metadata: {} })
   })
 
   test('one shared directory cache serves every tool of the instance', async () => {
