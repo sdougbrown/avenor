@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -725,6 +726,74 @@ func TestEventsBeforeTheCreateResponseAreKept(t *testing.T) {
 	log.waitFor(t, "agent.message_chunk", 10*time.Second)
 }
 
+// TestPromptReAsksWhenTheInspectWaitTimesOut proves a wait that runs out is
+// not a failure: the client asks again and returns the outcome the second wait
+// reports, not the empty first answer.
+func TestPromptReAsksWhenTheInspectWaitTimesOut(t *testing.T) {
+	t.Setenv(helperEnv, "inspecttimeout")
+	provider := NewWithOptions(avruntime.StartOptions{})
+	t.Cleanup(func() { _ = provider.Close() })
+
+	session, err := provider.Start(context.Background(), helperStartOptions())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	err = provider.Prompt(context.Background(), session.SessionID, "go")
+	if err == nil {
+		t.Fatal("Prompt returned nil, want the failure the second wait settled")
+	}
+	if !strings.Contains(err.Error(), "the second wait settled") {
+		t.Fatalf("Prompt error = %q, want the second wait's outcome", err)
+	}
+}
+
+// TestCloseEscalatesFromSIGTERMToSIGKILL proves teardown does not give up on a
+// child that ignores both stdin EOF and SIGTERM: Close spends the exit grace,
+// signals, spends the kill grace and kills, and the process is gone.
+func TestCloseEscalatesFromSIGTERMToSIGKILL(t *testing.T) {
+	t.Setenv(helperEnv, "ignoreterm")
+	provider := NewWithOptions(avruntime.StartOptions{})
+
+	session, err := provider.Start(context.Background(), helperStartOptions())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	start := time.Now()
+	if err := provider.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	elapsed := time.Since(start)
+	if budget := exitGrace + killGrace + 15*time.Second; elapsed > budget {
+		t.Fatalf("Close took %s, want it to return within %s", elapsed, budget)
+	}
+	if err := syscall.Kill(session.PID, 0); err == nil {
+		t.Fatalf("poo process %d survived Close", session.PID)
+	}
+}
+
+// TestStartRefusesASecondSession proves one provider owns one process's one
+// session: a second Start is refused rather than opening a session the client
+// cannot serve.
+func TestStartRefusesASecondSession(t *testing.T) {
+	t.Setenv(helperEnv, "early")
+	provider := NewWithOptions(avruntime.StartOptions{})
+	t.Cleanup(func() { _ = provider.Close() })
+
+	if _, err := provider.Start(context.Background(), helperStartOptions()); err != nil {
+		t.Fatalf("the first Start: %v", err)
+	}
+	second, err := provider.Start(context.Background(), helperStartOptions())
+	if err == nil {
+		t.Fatal("the second Start opened a session, want the one-session refusal")
+	}
+	if !strings.Contains(err.Error(), "poo runs one session per process") {
+		t.Fatalf("the second Start error = %q, want the one-session refusal", err)
+	}
+	if second.SessionID != "" {
+		t.Fatalf("the second Start returned session %q, want none", second.SessionID)
+	}
+}
+
 // TestClassifySettleFollowsTheStopReasonTable pins the classification,
 // including the reasons a newer binary adds and a reason nobody has thought of.
 func TestClassifySettleFollowsTheStopReasonTable(t *testing.T) {
@@ -888,7 +957,13 @@ func runHelperServer(mode string) int {
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 64*1024), 1<<20)
 	out := bufio.NewWriter(os.Stdout)
+	if mode == "ignoreterm" {
+		// The SIGKILL leg of teardown is only reached by a child that survives
+		// SIGTERM, so this mode refuses to die until it is killed.
+		signal.Ignore(syscall.SIGTERM)
+	}
 	runPrompts := 0
+	inspectWaits := 0
 	write := func(value any) {
 		encoded, err := json.Marshal(value)
 		if err != nil {
@@ -936,6 +1011,29 @@ func runHelperServer(mode string) int {
 			runPrompts++
 			write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": protocol.PromptResult{RunID: "run-busy"}})
 		case protocol.MethodRunInspect:
+			if mode == "inspecttimeout" {
+				// The first wait runs out, which is not a failure: the client has
+				// to ask again and read the outcome off the second answer.
+				inspectWaits++
+				if inspectWaits == 1 {
+					write(map[string]any{
+						"jsonrpc": "2.0",
+						"id":      request.ID,
+						"result":  protocol.InspectResult{TimedOut: true},
+					})
+					continue
+				}
+				write(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      request.ID,
+					"result": protocol.InspectResult{Settled: &protocol.Settled{
+						RunID:  "run-busy",
+						Reason: "provider_error",
+						Detail: protocol.SettleDetail{Text: "the second wait settled"},
+					}},
+				})
+				continue
+			}
 			write(map[string]any{
 				"jsonrpc": "2.0",
 				"id":      request.ID,
@@ -985,6 +1083,11 @@ func runHelperServer(mode string) int {
 		default:
 			write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{}})
 		}
+	}
+	if mode == "ignoreterm" {
+		// Stdin closed and the scanner ended; a child that ignores SIGTERM has
+		// to be killed, so stay alive here instead of returning.
+		select {}
 	}
 	return 0
 }
