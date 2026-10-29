@@ -1473,3 +1473,33 @@ func TestSupervisorPublicAPILoopStatusRunningBetweenAttempts(t *testing.T) {
 		t.Errorf("provider starts = %d, want 2", starts)
 	}
 }
+
+// TestSupervisorPublicAPILoopPhaseCarriesPersistedChoice proves a loop phase
+// attempt's start options carry the run's recorded persisted-session choice:
+// a spawn with persist_sessions set lands in the provider's Start options for
+// the phase attempt, not just on the record.
+func TestSupervisorPublicAPILoopPhaseCarriesPersistedChoice(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_loop_p1", itestSessionEnd("ses_loop_p1", "end_turn", "only phase")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop": []map[string]any{
+			{"name": "only", "prompt": "only work"},
+		},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-persist", "persist_sessions": true})
+
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if len(provider.startOpts) != 1 {
+		t.Fatalf("provider starts recorded = %d, want 1", len(provider.startOpts))
+	}
+	if provider.startOpts[0].PersistSessions == nil || !*provider.startOpts[0].PersistSessions {
+		t.Fatalf("phase start options = %+v, want the run's persisted choice", provider.startOpts[0])
+	}
+}

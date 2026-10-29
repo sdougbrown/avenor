@@ -2865,7 +2865,10 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
 
-			persistOpt := phasePersistChoice(selection.PersistSessions, child.persistedSessions)
+			// The phase entry's persisted-session choice does not exist yet (the
+			// roster lever lands in the follow-up PR): the run's recorded choice is
+			// what phase attempts carry.
+			persistOpt := phasePersistChoice(nil, child.persistedSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
@@ -3153,7 +3156,10 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			if resumeErr != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
-			persistOpt := phasePersistChoice(selection.PersistSessions, child.persistedSessions)
+			// The phase entry's persisted-session choice does not exist yet (the
+			// roster lever lands in the follow-up PR): the run's recorded choice is
+			// what phase attempts carry.
+			persistOpt := phasePersistChoice(nil, child.persistedSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
