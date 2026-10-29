@@ -744,11 +744,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
       // Recursive setTimeout (not setInterval): a slow poll must not overlap
       // the next tick and surface asks out of order.
+      // Which step the tick is on, so a failure is reported as the operation that
+      // failed. A registration retried from here is still a registration, and a
+      // companion keying on `operation` must not see it as a poll failure.
+      let attemptedRegistration = false
       const tick = async (): Promise<void> => {
         try {
           if (topLevelEnv && !topLevelRegistered) {
             if (topLevelTerminal) return
+            attemptedRegistration = true
             await registerCentralPeer(abort.signal)
+            attemptedRegistration = false
           }
           deliverQueuedMessages()
           // The broker encodes an empty queue as JSON null.
@@ -767,10 +773,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // Broker unreachable while it is starting up is expected; persistent
           // failure (e.g. a rejected token) must not stay silent.
           if (generation !== subAgentPollGeneration) return
-          if (topLevelEnv && peerFailureTerminal('poll', error)) {
+          const operation: PeerErrorOperation = attemptedRegistration ? 'register' : 'poll'
+          attemptedRegistration = false
+          if (topLevelEnv && peerFailureTerminal(operation, error)) {
             topLevelError = new Error('the central peer identity was refused; start a new session to register again')
             topLevelTerminal = true
-            reportPeerFailure('poll', error, {
+            reportPeerFailure(operation, error, {
               terminal: true,
               message: '[avenor] the central peer identity is no longer accepted; start a new session',
             })
@@ -778,7 +786,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
           consecutiveFailures++
           if (consecutiveFailures === 1 || consecutiveFailures === 3) {
-            if (topLevelEnv) reportPeerFailure('poll', error, { message: '[avenor] central broker poll failed' })
+            if (topLevelEnv) reportPeerFailure(operation, error)
             else console.error('[avenor] sub-agent broker poll failing:', error instanceof Error ? error.message : error)
           }
         }

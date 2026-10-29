@@ -272,6 +272,37 @@ test('a codeless 409 keeps polling, because that is another poll in flight', asy
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
 
+test('a registration retried from the poll tick reports as a registration', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    if (new URL(String(url)).pathname === '/register') {
+      return Response.json({ code: 'internal' }, { status: 500 })
+    }
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { messageTool },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 100 },
+    })
+    // Wait past the first report, which comes from session start, so the tick has
+    // retried the registration at least twice and labelled it itself.
+    await waitFor(() => h!.emitted.filter(([channel]) => channel === 'avenor:peer:error').length >= 3, 10000)
+    // The same failure must not be filed under two operations depending on which
+    // path hit it: `operation` is part of the payload companion extensions key on.
+    const operations = h.emitted
+      .filter(([channel]) => channel === 'avenor:peer:error')
+      .map(([, payload]) => (payload as Record<string, unknown>).operation)
+    expect(operations).toContain('register')
+    expect(operations).not.toContain('poll')
+    const notices = h.notify.mock.calls.map((call: unknown[]) => String(call[0]))
+    expect(notices.some(text => text.includes('central peer registration failed'))).toBe(true)
+    expect(notices.some(text => text.includes('central broker poll'))).toBe(false)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+}, 20000)
+
 test('a refused session name is a notice on the peer channel, not raw stderr', async () => {
   const b = broker()
   const delegate = globalThis.fetch
