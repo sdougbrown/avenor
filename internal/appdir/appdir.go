@@ -1,7 +1,7 @@
 // Package appdir resolves avenor's user-level directories: config under
 // $XDG_CONFIG_HOME/avenor when XDG_CONFIG_HOME is set to an absolute path,
 // else ~/.config/avenor, and state under $XDG_STATE_HOME/avenor, else
-// ~/.local/state/avenor. Every consumer of a file under one of these
+// ~/.avenor. Every consumer of a file under one of these
 // directories (workflow adapters, the model provider registry, persisted pi
 // sessions) resolves through here so the fallback rules cannot silently
 // diverge.
