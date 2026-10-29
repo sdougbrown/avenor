@@ -12,7 +12,8 @@ are bound to that run, and inbound peer messages are queued into the thread with
 `codex queue`. It reuses the same broker routes and framing as the Claude layer,
 but the host contract differs: Codex hooks are separate processes, so identity
 lives in a mode-0600 record under `$AVENOR_HOME/peers/codex/<session id>/`, and
-the MCP server reads that record from the property the `PreToolUse` hook adds.
+the `PreToolUse` hook serves the session-owned actions itself rather than
+letting a tool argument select an identity.
 See [codex-peers.md](../../../skills/verify-avenor/features/codex-peers.md) for
 the drive and its limits; spawned Codex children are deferred to step 5 of the
 issue.

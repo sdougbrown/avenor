@@ -145,6 +145,32 @@ export async function postAuthed(url, route, record, body, timeoutMs) {
   return postJSON(url, route, { ...body, run_id: record.run_id, token: record.run_token }, timeoutMs);
 }
 
+/** One authenticated read: the broker authenticates a GET from headers. */
+export async function getAuthed(url, route, record, query = "", timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url.replace(/\/+$/, "") + route + query, {
+      headers: {
+        "Accept": "application/json",
+        "X-Avenor-Run-Id": record.run_id,
+        "X-Avenor-Run-Token": record.run_token,
+      },
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let parsed = null;
+    try {
+      parsed = text === "" ? null : JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+    return { status: response.status, ok: response.ok, body: parsed, text };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class BrokerRefusal extends Error {}
 
 /**

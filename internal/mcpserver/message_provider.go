@@ -25,7 +25,7 @@ type mcpMessageProvider struct {
 	generation     string
 	transport      *controlTransport
 	// resolvedRun is the turn a Resolve call bound on this provider. The
-	// provider is minted per tool call by messageSurfaceFor, consumed by
+	// provider is minted per tool call by messageSurfaceProvider, consumed by
 	// one router Execute on the call's goroutine, and discarded with the
 	// call, so the field cannot be observed by a concurrent call.
 	resolvedRun *RunInfo

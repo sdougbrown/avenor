@@ -11,11 +11,14 @@ it from there:
   `/register` and names itself through `/rename`. A live record is reused on
   resume, clear and compaction; a fork has a new thread id and mints its own
   peer.
-- **Bind tools:** `PreToolUse` on `mcp__avenor__(message|peers)` adds the
-  record's path to the tool arguments. The MCP server strips that property and
-  routes the call through the shared child provider over the session's own run
-  credentials, so `tell`, `ask`, `reply`, `withdraw`, `list`, `rename` and
-  `last` speak as the Codex peer. `resume` keeps the owner path.
+- **Serve tools:** `PreToolUse` on `mcp__avenor__(message|peers)` runs the
+  actions this session owns — `message` `tell`/`ask`/`reply`/`withdraw` and
+  `peers` `rename` — over the session's own broker credentials. No tool argument
+  selects an identity: the hook reads the record its own session wrote and
+  answers the call with the routed result as the denial reason. The hook also
+  serves `peers list` and `peers last`, because they must read the session's
+  broker rather than the MCP server's default supervisor. `message resume`
+  passes through to the owner path.
 - **Deliver inbound:** a background `SessionStart` hook long-polls
   `/poll-control` and queues each framed message into the thread with
   `codex queue --thread <session id> --message <frame>`. Codex holds the
@@ -99,6 +102,13 @@ poller, and received `post-resume ping`; closing a session logged
 - **`--dangerously-bypass-hook-trust` forces embedded mode** in the TUI. Plugin
   hooks still run; the shared background app-server does not.
 - A session with no `AVENOR_LABEL` is displayed by its run id until renamed.
+- Hook-served peer actions arrive as a tool denial whose reason is the result
+  (`message "av1…" delivered to "codex-b"`). The reason ends with a line telling
+  the model not to retry; there is no success-shaped result on this host.
+- The run credential lives in the mode-0600 session record because the poller
+  and each hook invocation are separate processes. A shell-capable injection in
+  the same user account can read it; the tool-argument identity primitive is
+  gone, but the same-user boundary is not a security boundary.
 - The poller is a background hook with a seven-day timeout; a longer session
   re-arms on its next prompt.
 - `AVENOR_CODEX_BIN` overrides the `codex` used for delivery when the binary is
