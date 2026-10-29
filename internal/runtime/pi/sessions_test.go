@@ -79,6 +79,12 @@ func TestSessionFileExists(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "other_01a117d6.jsonl"), []byte{}, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A partial ID that matches a prefix-named file is expected suffix
+	// behavior; avenor only passes full IDs, so the assertion pins the
+	// suffix contract rather than a partial-ID guarantee.
+	if !SessionFileExists(dir, "01a117d6") {
+		t.Fatal("SessionFileExists = false for a prefix-named session file")
+	}
 	if !SessionFileExists(dir, "01a117d6-a744-7108-89ff-139b1a47b088") {
 		t.Fatal("SessionFileExists = false for a matching session file")
 	}

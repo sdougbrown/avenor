@@ -1,6 +1,7 @@
 package appdir
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -23,8 +24,10 @@ func TestStateHomeXDGAbsolute(t *testing.T) {
 		t.Fatalf("StateHome() = %q, want %q", got, want)
 	}
 	t.Setenv("XDG_STATE_HOME", "relative/state")
-	if got := StateHome(); got == "relative/state" {
-		t.Fatalf("StateHome() = %q, want the home default for a relative XDG_STATE_HOME", got)
+	t.Setenv("HOME", t.TempDir())
+	want := filepath.Join(os.Getenv("HOME"), ".local", "state", "avenor")
+	if got := StateHome(); got != want {
+		t.Fatalf("StateHome() = %q, want the home default %q for a relative XDG_STATE_HOME", got, want)
 	}
 }
 

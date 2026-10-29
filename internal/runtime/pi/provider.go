@@ -47,26 +47,9 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 
-	stateResult, err := c.sendCommand(ctx, map[string]any{
-		"type": "get_state",
-	})
+	sessionID, err := childSessionID(ctx, c)
 	if err != nil {
-		return runtime.Session{}, fmt.Errorf("get_state: %w", err)
-	}
-
-	var stateMap map[string]any
-	if err := json.Unmarshal(stateResult, &stateMap); err != nil {
-		return runtime.Session{}, fmt.Errorf("get_state result: %w", err)
-	}
-
-	sessionID, _ := stateMap["sessionId"].(string)
-	if sessionID == "" {
-		if data, ok := stateMap["data"].(map[string]any); ok {
-			sessionID, _ = data["sessionId"].(string)
-		}
-	}
-	if sessionID == "" {
-		sessionID, _ = stateMap["state"].(string)
+		return runtime.Session{}, err
 	}
 	if sessionID == "" {
 		sessionID = "pi-" + newRequestID()
@@ -202,9 +185,9 @@ func (p *Provider) resumePersisted(ctx context.Context, sessionID string, opts r
 	return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: opts.Dir, PID: c.Pid()}, nil
 }
 
-// childSessionID reads the session ID a fresh pi child reports at startup,
-// applying the same extraction Start uses so a resumed child is read the
-// same way a fresh one is.
+// childSessionID reads the session ID a fresh pi child reports at startup.
+// Start and resumePersisted both read it here, so a change to the get_state
+// response shape is made once.
 func childSessionID(ctx context.Context, c *client) (string, error) {
 	stateResult, err := c.sendCommand(ctx, map[string]any{"type": "get_state"})
 	if err != nil {

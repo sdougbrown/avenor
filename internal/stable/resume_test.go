@@ -73,6 +73,9 @@ func TestResumeResolution(t *testing.T) {
 }
 
 func TestResumePiDenialStatuses(t *testing.T) {
+	// The gate reads the live environment; pin the off state so the denial
+	// under test is the pi gate, not the ladder behind it.
+	t.Setenv(pi.SessionsEnv, "")
 	sup, _ := newStage2Supervisor(t, 4)
 	cases := []struct {
 		name   string

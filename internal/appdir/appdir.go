@@ -19,16 +19,31 @@ func ConfigHome() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" && filepath.IsAbs(xdg) {
 		return filepath.Join(xdg, "avenor")
 	}
+	return underHome(".config", "avenor")
+}
+
+// homeDir resolves the user's home directory: HOME, then os.UserHomeDir,
+// then the empty string that makes homePath fall back to the bare relative
+// shape.
+func homeDir() string {
 	home := os.Getenv("HOME")
 	if home == "" {
 		if u, err := os.UserHomeDir(); err == nil && u != "" {
 			home = u
 		}
 	}
+	return home
+}
+
+// underHome joins the home directory with the relative path. When no home
+// resolves, the relative "avenor" is the documented default shape, shared by
+// both directories.
+func underHome(rel ...string) string {
+	home := homeDir()
 	if home == "" {
 		return "avenor"
 	}
-	return filepath.Join(home, ".config", "avenor")
+	return filepath.Join(append([]string{home}, rel...)...)
 }
 
 // StateHome returns the avenor state directory, never creating it. Files
@@ -38,14 +53,5 @@ func StateHome() string {
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" && filepath.IsAbs(xdg) {
 		return filepath.Join(xdg, "avenor")
 	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		if u, err := os.UserHomeDir(); err == nil && u != "" {
-			home = u
-		}
-	}
-	if home == "" {
-		return "avenor"
-	}
-	return filepath.Join(home, ".local", "state", "avenor")
+	return underHome(".local", "state", "avenor")
 }
