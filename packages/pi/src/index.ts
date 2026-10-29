@@ -767,8 +767,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // Broker unreachable while it is starting up is expected; persistent
           // failure (e.g. a rejected token) must not stay silent.
           if (generation !== subAgentPollGeneration) return
-          if (topLevelEnv && peerIdentityRefused(error)) {
+          if (topLevelEnv && peerFailureTerminal('poll', error)) {
             topLevelError = new Error('the central peer identity was refused; start a new session to register again')
+            topLevelTerminal = true
             reportPeerFailure('poll', error, {
               terminal: true,
               message: '[avenor] the central peer identity is no longer accepted; start a new session',
@@ -1771,7 +1772,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       } catch (error) {
         if (signal.aborted) return
         topLevelError = error instanceof Error ? error : new Error('central peer registration failed')
-        if ((error instanceof BrokerHttpError && error.status < 500) || (error instanceof Error && error.message === 'the broker did not confirm the chosen peer identity')) topLevelTerminal = true
+        if (peerFailureTerminal('register', error)) topLevelTerminal = true
         throw error
       }
     }
@@ -1928,7 +1929,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const detail = error instanceof Error ? error.message : String(error)
       const message = options.message ?? `[avenor] ${peerOperationLabel(operation)} failed`
       const terminal = options.terminal ?? false
-      if (terminal) topLevelTerminal = true
       reportFailure({
         emit: () => emitAvenorEvent(pi.events, CHANNEL_PEER_ERROR, createPeerErrorPayload({
           operation,
@@ -1950,19 +1950,36 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       })
     }
 
-    // The broker told this session its identity cannot be used again: retired,
-    // expired, or registered as something else. Status alone cannot say that. A
-    // 409 from /register is `registration-mismatch` or `peer-retired`, but a 409
-    // from /poll-control is `duplicate-consumer` — another poll still in flight,
-    // which the next tick retries. Latching on the status turned that retryable
-    // case into a session that stops receiving until it restarts, so the decision
-    // is made on the code the broker sent.
-    function peerIdentityRefused(error: unknown): boolean {
-      if (!(error instanceof BrokerHttpError)) return false
-      if (error.status === 401 || error.status === 410) return true
-      return error.code === 'peer-retired'
-        || error.code === 'registration-mismatch'
-        || error.code === 'not-permitted'
+    // One decision, asked once per failure: does this refusal end the session?
+    // Everything that latches terminal and everything that reports `terminal` on
+    // the bus reads this, so the event cannot claim a retry for a failure the
+    // session gave up on.
+    //
+    // Statuses that mean the broker will keep saying no are terminal on both
+    // operations. A 409 is the one status that carries both meanings: on
+    // `/register` it is `registration-mismatch` or `peer-retired`, and on
+    // `/poll-control` it is `duplicate-consumer` — another poll still in flight,
+    // which the next tick retries. A refusal with no code at all is read as
+    // terminal on the poll path too: something in front of the broker refused this
+    // identity, and polling it every two seconds forever helps nobody.
+    function peerFailureTerminal(operation: PeerErrorOperation, error: unknown): boolean {
+      switch (operation) {
+        case 'poll':
+          if (!(error instanceof BrokerHttpError)) return false
+          if (error.status === 401 || error.status === 403 || error.status === 410) return true
+          return error.status === 409 && error.code !== ''
+            ? error.code === 'peer-retired' || error.code === 'registration-mismatch' || error.code === 'not-permitted'
+            : false
+        case 'register': {
+          // The broker answered and will answer the same way again: a malformed
+          // request, a refusal, or a registration it accepted without confirming
+          // the identity this session holds.
+          if (error instanceof BrokerHttpError) return error.status < 500
+          return error instanceof Error && error.message === 'the broker did not confirm the chosen peer identity'
+        }
+        default:
+          return false
+      }
     }
 
     function peerOperationLabel(operation: PeerErrorOperation): string {
@@ -2074,7 +2091,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           combinedProvider ??= combinePeerProviders(() => combinedLocalProvider, centralProvider)
           await registerCentralPeer(centralSessionAbort!.signal)
         } catch (error) {
-          reportPeerFailure('register', error, { terminal: peerIdentityRefused(error) })
+          reportPeerFailure('register', error, { terminal: peerFailureTerminal('register', error) })
         }
       }
       if (startingSessionGeneration !== sessionGeneration) return

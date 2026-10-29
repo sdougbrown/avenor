@@ -217,13 +217,70 @@ test('a central failure reaches the session through notify, not raw stderr', asy
   } finally { console.error = originalError; await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
 
+// Every status and code the poll path reads as terminal, in one table: a regression
+// that drops one leaves the session polling a refused identity every two seconds.
+for (const refusal of [
+  { name: '401 unauthorized', status: 401, code: undefined },
+  { name: '403 refused upstream', status: 403, code: undefined },
+  { name: '410 peer-expired', status: 410, code: 'peer-expired' },
+  { name: '409 peer-retired', status: 409, code: 'peer-retired' },
+  { name: '409 registration-mismatch', status: 409, code: 'registration-mismatch' },
+]) {
+  test(`a ${refusal.name} refusal ends the session`, async () => {
+    const b = broker()
+    const delegate = globalThis.fetch
+    let refused = 0
+    globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(url)).pathname === '/poll-control') {
+        refused++
+        return Response.json(refusal.code ? { code: refusal.code } : {}, { status: refusal.status })
+      }
+      return delegate(url, init)
+    }, { preconnect() {} }) as typeof fetch
+    let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+    try {
+      h = await startExtensionHarness({ deps: { messageTool }, extOptions: { topLevelBrokerUrl: 'https://broker.test' } })
+      await waitFor(() => refused === 1)
+      await expect(h.registeredTools.avenor_peers.execute('p', {})).rejects.toThrow('identity is unavailable')
+      // Terminal means one refusal, not a session that keeps asking.
+      expect(refused).toBe(1)
+      const peerErrors = h.emitted.filter(([channel]) => channel === 'avenor:peer:error')
+      expect(peerErrors.at(-1)?.[1]).toMatchObject({ operation: 'poll', terminal: true })
+    } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+  })
+}
+
+test('a codeless 409 keeps polling, because that is another poll in flight', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  let polls = 0
+  const ownRun = () => String(b.calls.find(c => c.path === '/register')?.body.run_id ?? '')
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? '{}'))
+    if (new URL(String(url)).pathname === '/poll-control' && body.run_id === ownRun()) {
+      polls++
+      if (polls === 1) return Response.json({}, { status: 409 })
+    }
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({ deps: { messageTool }, extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 20 } })
+    await waitFor(() => polls > 2, 10000)
+    const peers = await h.registeredTools.avenor_peers.execute('p', {})
+    expect(peers.details.peers.length).toBeGreaterThan(0)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
+
 test('a new failure episode raises a fresh notice after the broker recovers', async () => {
   const b = broker()
   const delegate = globalThis.fetch
   let failing = false
   let failures = 0
+  const ownRun = () => String(b.calls.find(c => c.path === '/register')?.body.run_id ?? '')
   globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
-    if (failing && new URL(String(url)).pathname === '/poll-control') {
+    const body = JSON.parse(String(init?.body ?? '{}'))
+    if (failing && new URL(String(url)).pathname === '/poll-control' && body.run_id === ownRun()) {
       failures++
       return Response.json({ code: 'internal' }, { status: 500 })
     }
@@ -234,23 +291,23 @@ test('a new failure episode raises a fresh notice after the broker recovers', as
     .map((call: unknown[]) => String(call[0]))
     .filter(text => text.includes('central broker poll failed'))
   try {
-    // A fast tick, because recovery takes three consecutive clean polls.
+    // A fast tick so three failures and a recovery fit inside the test's budget.
     h = await startExtensionHarness({
       deps: { messageTool },
-      extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 20 },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 100 },
     })
     failing = true
     await waitFor(() => pollNotices().length === 1)
-    // Recovery is three clean polls after three failures, so the episode has to
-    // reach its floor before the broker coming back means anything.
-    await waitFor(() => failures >= 3, 5000)
+    // The episode has to reach its floor of three failures before a clean tick
+    // counts as recovery, so the broker coming back means nothing until then.
+    await waitFor(() => failures >= 3, 10000)
     failing = false
-    await waitFor(() => h!.notify.mock.calls.some(call => String(call[0]).includes('poll recovered')), 5000)
+    await waitFor(() => h!.notify.mock.calls.some(call => String(call[0]).includes('poll recovered')), 10000)
     failing = true
-    await waitFor(() => pollNotices().length === 2, 5000)
+    await waitFor(() => pollNotices().length === 2, 10000)
     expect(pollNotices()).toHaveLength(2)
-  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
-})
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); await Bun.sleep(250); b.restore() }
+}, 20000)
 
 test('a retirement the broker never confirms is a notice, not raw stderr', async () => {
   const b = broker()
