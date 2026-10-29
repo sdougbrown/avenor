@@ -5,7 +5,8 @@ import { setupAvenor } from './v2.js'
 
 export { AvenorPlugin } from './plugin.js'
 export { createAvenorCore, formatChannelBlocks, terminalStatus, hostIdentityMetadata, buildWaitingText, type PluginHost } from './core.js'
-export { setupAvenor, toV2ToolResult } from './v2.js'
+export { setupAvenor, toV2ToolResult, v2Host, v2ToolEntry, createV2EventHandler, permissionAskFromEvent } from './v2.js'
+export { stepEndedInfo } from './core.js'
 
 /**
  * One entrypoint for both OpenCode generations: V2 reads `id` and `setup()`,

@@ -321,6 +321,47 @@ export type PermissionAsk = {
   id?: string
 }
 
+export type StepEndedProjection = {
+  info: Record<string, unknown>
+  settledText: string[] | undefined
+}
+
+/**
+ * Project one settled message onto the info shape the V1 message.updated event
+ * carried. The message must be an assistant message with a completed time, or
+ * the projection is undefined and nothing publishes.
+ */
+export function stepEndedInfo(
+  message: { parts?: unknown[]; content?: unknown[] } | undefined,
+  sessionID: string,
+  messageId: string,
+): StepEndedProjection | undefined {
+  if (!message) return undefined
+  const record = message as Record<string, unknown>
+  const time = record.time as { created?: number; completed?: number } | undefined
+  if (typeof time?.created !== 'number' || typeof time?.completed !== 'number') return undefined
+  const error = record.error as { type?: string } | undefined
+  const raw = message.parts ?? message.content
+  const settledText = Array.isArray(raw)
+    ? raw
+      .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
+      .filter(part => part.type === 'text')
+      .map(part => part.text ?? '')
+    : undefined
+  return {
+    info: {
+      role: 'assistant',
+      sessionID,
+      id: messageId,
+      summary: false,
+      time: { created: time.created, completed: time.completed },
+      finish: typeof record.finish === 'string' ? record.finish : undefined,
+      ...(error?.type ? { error: { name: error.type } } : {}),
+    },
+    settledText,
+  }
+}
+
 /**
  * The version-neutral plugin core: the V1 hooks plus the handlers the V2
  * adapter registers through its own domains.
@@ -922,31 +963,16 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
   /**
    * The V2 step event carries only the session and message IDs, so the settled
    * assistant message is read here and projected onto the same info shape the
-   * V1 message.updated event carried.
+   * V1 message.updated event carried. The read only happens for the bound host
+   * session, mirroring the gate inside publishHostTurn, so another session's
+   * steps never pay for a fetch.
    */
   const onStepEnded = async (sessionID: string, messageId: string): Promise<void> => {
+    if (!hostBinding || hostBinding.sessionId !== sessionID) return
     const message = await host.getMessage(sessionID, messageId).catch(() => undefined)
-    if (!message) return
-    const record = message as Record<string, unknown>
-    const time = record.time as { created?: number; completed?: number } | undefined
-    if (typeof time?.created !== 'number' || typeof time?.completed !== 'number') return
-    const error = record.error as { type?: string } | undefined
-    const raw = message.parts ?? message.content
-    const settledText = Array.isArray(raw)
-      ? raw
-        .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
-        .filter(part => part.type === 'text')
-        .map(part => part.text ?? '')
-      : undefined
-    await publishHostTurn({
-      role: 'assistant',
-      sessionID,
-      id: messageId,
-      summary: false,
-      time: { created: time.created, completed: time.completed },
-      finish: typeof record.finish === 'string' ? record.finish : undefined,
-      ...(error?.type ? { error: { name: error.type } } : {}),
-    }, settledText)
+    const settled = stepEndedInfo(message, sessionID, messageId)
+    if (!settled) return
+    await publishHostTurn(settled.info, settled.settledText)
   }
 
   const hooks: Hooks = {
