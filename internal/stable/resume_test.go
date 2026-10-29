@@ -672,17 +672,18 @@ func TestResumeInheritsPriorPersistedChoice(t *testing.T) {
 }
 
 // The spawn threads the per-run persisted-session choice into the provider's
-// start options, and the spawn payload decodes the tri-state JSON field.
+// start options in both tri-state directions, and the spawn payload decodes
+// the tri-state JSON field.
 func TestSpawnPersistSessionsThreadsToProvider(t *testing.T) {
 	var decoded SpawnParams
-	if err := json.Unmarshal([]byte(`{"prompt":"work","dir":".","backend":"pi","persist_sessions":true}`), &decoded); err != nil {
+	if err := json.Unmarshal([]byte(`{"prompt":"work","dir":".","backend":"pi","persist_sessions":false}`), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.PersistSessions == nil || !*decoded.PersistSessions {
-		t.Fatalf("decoded persist_sessions = %v, want true", decoded.PersistSessions)
+	if decoded.PersistSessions == nil || *decoded.PersistSessions {
+		t.Fatalf("decoded persist_sessions = %v, want false", decoded.PersistSessions)
 	}
 
-	on := true
+	off := false
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "persist"), MaxRuntimes: 1})
 	provider := &plainResumeProvider{}
 	constructorOpts := make(chan runtime.StartOptions, 4)
@@ -690,13 +691,13 @@ func TestSpawnPersistSessionsThreadsToProvider(t *testing.T) {
 		constructorOpts <- opts
 		return provider, nil
 	}
-	if _, err := sup.spawn(SpawnParams{Prompt: "work", Dir: t.TempDir(), Backend: "pi", PersistSessions: &on}); err != nil {
+	if _, err := sup.spawn(SpawnParams{Prompt: "work", Dir: t.TempDir(), Backend: "pi", PersistSessions: &off}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
 	select {
 	case opts := <-constructorOpts:
-		if opts.PersistSessions == nil || !*opts.PersistSessions {
-			t.Fatalf("start options = %+v, want the persisted-session choice", opts)
+		if opts.PersistSessions == nil || *opts.PersistSessions {
+			t.Fatalf("start options = %+v, want the explicit false carried", opts)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("provider construction was not observed")
