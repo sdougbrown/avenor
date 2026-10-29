@@ -94,3 +94,13 @@ Start a new Codex task after installation. MCP tools and the orchestration skill
 - [MCP server](mcp.md) covers the underlying server, transports, tools, and registry scope.
 - [Claude Code plugin](claude-plugin.md) covers the equivalent integration for Claude Code.
 - [CLI reference](cli.md) covers Avenor commands outside the Codex integration.
+
+## Peer layer
+
+The plugin also ships `hooks/codex.json`, which makes an interactive Codex
+session a broker peer of an `avenor stable` supervisor: the session registers
+its own run, `message` and `peers` act as that run, and inbound peer messages
+arrive as Codex-queued turns. Set `AVENOR_BROKER_URL` in the session's
+environment (and optionally `AVENOR_LABEL` for its display name), then approve
+the plugin's hooks when Codex asks. The full drive, proof state and limits are in
+`skills/verify-avenor/features/codex-peers.md`.

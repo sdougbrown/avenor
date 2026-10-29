@@ -1,8 +1,21 @@
-# Avenor plugin (Claude Code)
+# Avenor plugin (Claude Code and Codex)
 
 Delegate work to independent avenor runs and supervise them without leaving the
 conversation. The plugin ships the Avenor MCP server (`avenor mcp`) plus the
 skill set that teaches a model how to drive it.
+
+## Codex peer layer (issue #486)
+
+`hooks/codex.json` is the Codex command-hook counterpart: each interactive
+session registers as its own broker run, the avenor `message` and `peers` tools
+are bound to that run, and inbound peer messages are queued into the thread with
+`codex queue`. It reuses the same broker routes and framing as the Claude layer,
+but the host contract differs: Codex hooks are separate processes, so identity
+lives in a mode-0600 record under `$AVENOR_HOME/peers/codex/<session id>/`, and
+the MCP server reads that record from the property the `PreToolUse` hook adds.
+See [codex-peers.md](../../../skills/verify-avenor/features/codex-peers.md) for
+the drive and its limits; spawned Codex children are deferred to step 5 of the
+issue.
 
 ## Native peer layer (issue #391)
 

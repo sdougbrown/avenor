@@ -12,13 +12,16 @@ import (
 // owns only its rendering: the list block, the rename triple, or last's text
 // plus structured object.
 func (s *Server) handleAvenorPeers(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	raw := toolArguments(req)
-	provider, cleanup, err := s.messageSurfaceProvider(ctx, s.messageSupervisorPath(raw))
+	raw, peerFile, err := splitCodexPeerFile(toolArguments(req))
 	if err != nil {
-		return nil, err
+		return toolErrorResult(&router.ToolError{Code: "invalid_request", Message: err.Error(), Facts: map[string]string{}})
 	}
-	defer cleanup()
-	result, err := router.ExecutePeers(ctx, provider, raw)
+	surface, err := s.messageSurfaceFor(ctx, raw, peerFile, true)
+	if err != nil {
+		return toolErrorResult(err)
+	}
+	defer surface.cleanup()
+	result, err := router.ExecutePeers(ctx, surface.provider, raw)
 	if err != nil {
 		return toolErrorResult(err)
 	}
@@ -33,13 +36,16 @@ func (s *Server) handleAvenorPeers(ctx context.Context, req *mcp.CallToolRequest
 // The rendered sentence is the tool's text content and the result object is its
 // structured content, matching the other surfaces that answer this tool.
 func (s *Server) handleAvenorMessage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	raw := toolArguments(req)
-	provider, cleanup, err := s.messageSurfaceProvider(ctx, s.messageSupervisorPath(raw))
+	raw, peerFile, err := splitCodexPeerFile(toolArguments(req))
 	if err != nil {
-		return nil, err
+		return toolErrorResult(&router.ToolError{Code: "invalid_request", Message: err.Error(), Facts: map[string]string{}})
 	}
-	defer cleanup()
-	rt, err := router.NewRouter(provider)
+	surface, err := s.messageSurfaceFor(ctx, raw, peerFile, messageAction(raw) != "resume")
+	if err != nil {
+		return toolErrorResult(err)
+	}
+	defer surface.cleanup()
+	rt, err := router.NewRouter(surface.provider)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +55,7 @@ func (s *Server) handleAvenorMessage(ctx context.Context, req *mcp.CallToolReque
 	}
 	// The send is the only step that learns which supervisor a message id
 	// belongs to; a later withdraw of it names no run, so record it here.
-	s.rememberMessageSupervisor(result.MessageID, provider.supervisorPath)
+	s.rememberMessageSupervisor(result.MessageID, surface.supervisorPath)
 	return &mcp.CallToolResult{
 		Content:           []mcp.Content{&mcp.TextContent{Text: result.Text}},
 		StructuredContent: result.Output(),
@@ -179,20 +185,4 @@ func (s *Server) supervisorForPeerKey(key string) string {
 		return info.SupervisorID
 	}
 	return ""
-}
-
-// messageSurfaceProvider acquires the owner control client for the bound
-// supervisor and binds it to the router. An empty binding means the default
-// supervisor.
-func (s *Server) messageSurfaceProvider(ctx context.Context, supervisorPath string) (*mcpMessageProvider, func(), error) {
-	cl, cleanup, resolvedPath, err := s.getClientForSupervisorWithPath(supervisorPath)
-	if err != nil {
-		return nil, nil, err
-	}
-	provider, err := newMCPMessageProvider(ctx, s, cl, resolvedPath)
-	if err != nil {
-		cleanup()
-		return nil, nil, err
-	}
-	return provider, cleanup, nil
 }

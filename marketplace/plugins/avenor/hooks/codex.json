@@ -1,0 +1,63 @@
+{
+  "description": "Avenor Codex peer layer: registers each interactive Codex session as a broker peer, binds the avenor message/peers tools to that identity, and delivers inbound peer messages through Codex's own queue.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/codex/session-start.mjs",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/codex/poller.mjs",
+            "async": true,
+            "timeout": 604800
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__(avenor(_[0-9]+)?|plugin_avenor_[a-z0-9]+)__(message|peers)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/codex/pre-tool-use.mjs",
+            "timeout": 620
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/codex/session-end.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/codex/session-start.mjs",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "node ${PLUGIN_ROOT}/hooks/codex/poller.mjs",
+            "async": true,
+            "timeout": 604800
+          }
+        ]
+      }
+    ]
+  }
+}
