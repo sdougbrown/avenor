@@ -70,29 +70,27 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 		go func() {
 			defer callers.Done()
 			for round := 0; round < 100; round++ {
+				before := rotating.snapshot()
 				token, ok := b.runToken("asker")
 				if !ok {
 					t.Errorf("the run disappeared while its credential was refreshed")
 					return
 				}
-				started, done := rotating.snapshot()
 				status, err := authenticatedGet(b.Addr(), "asker", token)
 				if err != nil {
 					t.Errorf("authenticate: %v", err)
 					return
 				}
-				settledStarted, settledDone := rotating.snapshot()
-				if started == settledStarted && done == settledDone && status != http.StatusOK {
-					// A write that incremented started before the first snapshot can
-					// increment done after the second, which reads as no overlap while
-					// the credential switched mid-request. A rotation can also complete
-					// between the token read and the request, and a further rotation can
-					// race the retry itself — so a refusal is only evidence when the
-					// retry is itself proven not to overlap a rotation. Retry with the
-					// record's current credential under that proof; a refusal under a
-					// credential the record still carries is a real failure.
+				after := rotating.snapshot()
+				if rotating.settled(before, after) && status != http.StatusOK {
+					// A refusal is only evidence when the request is proven not to have
+					// overlapped a rotation, which settled guarantees: no write was in
+					// flight at the first observation and none started or finished in
+					// between. Retry with the record's current credential under that
+					// proof; a refusal under a credential the record still carries is a
+					// real failure.
 					for retry := 0; retry < 5; retry++ {
-						preStarted, preDone := rotating.snapshot()
+						pre := rotating.snapshot()
 						current, ok := b.runToken("asker")
 						if !ok {
 							t.Errorf("the run disappeared while its credential was refreshed")
@@ -107,11 +105,11 @@ func TestConcurrentClaimRefreshDoesNotRaceAuthentication(t *testing.T) {
 							t.Errorf("authenticate with the refreshed credential: %v", err)
 							return
 						}
-						postStarted, postDone := rotating.snapshot()
+						post := rotating.snapshot()
 						if status == http.StatusOK {
 							break
 						}
-						if preStarted != postStarted || preDone != postDone {
+						if !rotating.settled(pre, post) {
 							continue // a rotation raced this retry: not evidence of a defect
 						}
 						break // no overlap and still refused under the record's credential
@@ -209,22 +207,32 @@ func TestDeleteRunIfTokenKeepsARecordItsCredentialLeftBehind(t *testing.T) {
 }
 
 // rotationLog reports whether any credential write overlapped a caller's
-// request. A writer brackets its write with the counters, so a caller that saw
-// the same pair on both sides of a request cannot have shared the record with a
-// write.
+// request. The writer raises the epoch before its write and after it, so the
+// epoch is odd exactly while a write is in flight: a caller that observes the
+// same even value on both sides of a request can conclude no write crossed it,
+// because a write already in flight at the first observation would have made
+// it odd, and one started in between would have left the second observation odd
+// or advanced. Two separate counters cannot give that guarantee: a write whose
+// first increment precedes the first snapshot but whose second trails the
+// second one reads as no overlap while the credential switched mid-request.
 type rotationLog struct {
-	started atomic.Int64
-	done    atomic.Int64
+	epoch atomic.Int64
 }
 
 func (l *rotationLog) write(refresh func()) {
-	l.started.Add(1)
+	l.epoch.Add(1)
 	refresh()
-	l.done.Add(1)
+	l.epoch.Add(1)
 }
 
-func (l *rotationLog) snapshot() (started, done int64) {
-	return l.started.Load(), l.done.Load()
+// snapshot observes the epoch. Call it before reading the credential a request
+// will carry, so a write already in flight shows up as an odd first value.
+func (l *rotationLog) snapshot() int64 { return l.epoch.Load() }
+
+// settled reports whether the two observations bracket a request no write
+// crossed: the first must be even and the second must equal it.
+func (l *rotationLog) settled(before, after int64) bool {
+	return before == after && before%2 == 0
 }
 
 // authenticatedGet reads /sessions as runID with token, the way a peer broker
