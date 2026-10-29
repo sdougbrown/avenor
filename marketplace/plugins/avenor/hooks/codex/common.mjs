@@ -260,29 +260,16 @@ export function framePeerMessage(ask) {
 }
 
 
-/** One writer for the register-and-record step: two hooks can fire together on
- * the first prompt (SessionStart and UserPromptSubmit), and a second writer
- * would leave outbound on one run and the poller on another. The holder is a
- * pid, so a dead holder's lock is reclaimed. */
-export async function withSessionLock(sessionID, fn) {
-  const dir = peerDirFor(undefined, sessionID);
-  if (dir === "") return fn();
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = path.join(dir, "session.lock");
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+/** A pid-file lock. One holder at a time; a dead holder's lock is reclaimed.
+ * `waitMs` > 0 polls for the critical section; 0 gives up after `attempts`. */
+export async function acquirePidLock(dir, name, { attempts = 2, waitMs = 0 } = {}) {
+  const file = path.join(dir, name);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const fd = fs.openSync(file, "wx", 0o600);
       fs.writeSync(fd, String(process.pid));
       fs.closeSync(fd);
-      try {
-        return await fn();
-      } finally {
-        try {
-          fs.rmSync(file, { force: true });
-        } catch {
-          // Released by a later attempt.
-        }
-      }
+      return file;
     } catch {
       let pid = 0;
       try {
@@ -294,21 +281,54 @@ export async function withSessionLock(sessionID, fn) {
         try {
           fs.rmSync(file, { force: true });
         } catch {
-          return undefined;
+          return null;
         }
         continue;
       }
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (waitMs <= 0) return null;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
-  return undefined;
+  return null;
 }
 
-function processAlive(pid) {
+export function releasePidLock(file) {
+  if (file === null || file === undefined) return;
+  try {
+    fs.rmSync(file, { force: true });
+  } catch {
+    // Already released.
+  }
+}
+
+export function processAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
   } catch {
     return false;
   }
+}
+
+/** One writer for the register-and-record step: two hooks can fire together on
+ * the first prompt (SessionStart and UserPromptSubmit), and a second writer
+ * would leave outbound on one run and the poller on another. */
+export async function withSessionLock(sessionID, fn) {
+  const dir = peerDirFor(undefined, sessionID);
+  if (dir === "") return fn();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = await acquirePidLock(dir, "session.lock", { attempts: 100, waitMs: 50 });
+  if (file === null) return undefined;
+  try {
+    return await fn();
+  } finally {
+    releasePidLock(file);
+  }
+}
+
+/** A queue failure that will never succeed on retry: the thread is gone. */
+export function threadGone(reason) {
+  const text = String(reason).toLowerCase();
+  return text.includes("not found") || text.includes("no such") || text.includes("unknown thread") ||
+    text.includes("unknown session");
 }

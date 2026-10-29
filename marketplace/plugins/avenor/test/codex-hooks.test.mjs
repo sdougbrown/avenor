@@ -10,6 +10,7 @@ import {
   peerDirFor,
   readRecord,
   recordIsLive,
+  threadGone,
   recordPathFor,
   registerOrAttach,
   writeRecord,
@@ -142,4 +143,11 @@ test("an inbound frame names the sender, the ask id and the reply action", () =>
   });
   assert.match(tell, /No reply is required/);
   assert.doesNotMatch(tell, /reply_to/);
+});
+
+test("thread-gone classification separates a dead thread from a transient failure", () => {
+  assert.equal(threadGone("thread not found: 01a1"), true);
+  assert.equal(threadGone("unknown session"), true);
+  assert.equal(threadGone("connection reset by peer"), false);
+  assert.equal(threadGone("timeout"), false);
 });
