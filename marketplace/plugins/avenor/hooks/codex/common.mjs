@@ -251,7 +251,6 @@ export function framePeerMessage(ask) {
   const sender = ask.sender !== "" ? ask.sender : ask.fromRunId;
   let frame = "**📨 Message from avenor peer `" + sender + "`** (broker run `" + ask.fromRunId + "`";
   frame += ask.messageId === "" ? "" : ", message id `" + ask.messageId + "`";
-  if (typeof ask.role === "string" && ask.role !== "") frame += ", role `" + ask.role + "`";
   frame += ")\n\n" + ask.message + "\n\n";
   frame += ask.messageId === ""
     ? "No reply is required; answer only if the message itself asks you to."

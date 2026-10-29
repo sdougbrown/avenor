@@ -45,8 +45,11 @@ if (outcome === undefined) {
   // Another invocation held the lock. It writes the record; report it if it is
   // there, and otherwise stay quiet rather than duplicate the registration.
   const recorded = readRecord(sessionID);
-  if (recorded === null) process.stdout.write(JSON.stringify({}));
-  else reuse(recorded);
+  if (recorded === null) {
+    process.stdout.write(JSON.stringify({}));
+    process.exit(0);
+  }
+  reuse(recorded);
 }
 reuse(outcome.record, outcome.reused ? "reused" : "registered");
 

@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { parseControlMessage } from "../wire.js";
+import { MESSAGE_ID, parseControlMessage } from "../wire.js";
 import {
   acquirePidLock,
   asksDirFor,
@@ -24,8 +24,6 @@ import {
 
 const POLL_TIMEOUT_MS = 5000;
 const IDENTITY_WAIT_MS = 30000;
-// Only a minted id may become a file name; a peer chooses the ids it sends.
-const MESSAGE_ID = /^av1\.[0-9a-z]+\.[0-9a-f]{32}$/;
 
 const input = await readHookInput();
 const sessionID = typeof input.session_id === "string" ? input.session_id : "";

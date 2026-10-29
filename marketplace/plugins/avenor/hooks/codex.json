@@ -21,7 +21,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "^mcp__avenor(_[0-9]+)?__(message|peers)$",
+        "matcher": "^mcp__(avenor(_[0-9]+)?|plugin_avenor_[a-z0-9]+)__(message|peers)$",
         "hooks": [
           {
             "type": "command",

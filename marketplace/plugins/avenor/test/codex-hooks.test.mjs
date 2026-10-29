@@ -11,6 +11,7 @@ import {
   readRecord,
   recordIsLive,
   threadGone,
+  withSessionLock,
   recordPathFor,
   registerOrAttach,
   writeRecord,
@@ -150,4 +151,45 @@ test("thread-gone classification separates a dead thread from a transient failur
   assert.equal(threadGone("unknown session"), true);
   assert.equal(threadGone("connection reset by peer"), false);
   assert.equal(threadGone("timeout"), false);
+});
+
+test("the session lock runs its section once and releases", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "avenor-codex-lock-"));
+  const previous = process.env.AVENOR_HOME;
+  process.env.AVENOR_HOME = home;
+  try {
+    let ran = 0;
+    const value = await withSessionLock("01a1-lock", async () => {
+      ran += 1;
+      return "ok";
+    });
+    assert.equal(value, "ok");
+    assert.equal(ran, 1);
+    assert.equal(fs.existsSync(path.join(home, "peers", "codex", "01a1-lock", "session.lock")), false);
+  } finally {
+    if (previous === undefined) delete process.env.AVENOR_HOME;
+    else process.env.AVENOR_HOME = previous;
+  }
+});
+
+test("a stale session lock is reclaimed", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "avenor-codex-lock-"));
+  const previous = process.env.AVENOR_HOME;
+  process.env.AVENOR_HOME = home;
+  try {
+    const dir = path.join(home, "peers", "codex", "01a1-lock");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(dir, "session.lock"), "999999", { mode: 0o600 });
+    let ran = false;
+    const value = await withSessionLock("01a1-lock", async () => {
+      ran = true;
+      return "reclaimed";
+    });
+    assert.equal(value, "reclaimed");
+    assert.equal(ran, true);
+    assert.equal(fs.existsSync(path.join(dir, "session.lock")), false);
+  } finally {
+    if (previous === undefined) delete process.env.AVENOR_HOME;
+    else process.env.AVENOR_HOME = previous;
+  }
 });

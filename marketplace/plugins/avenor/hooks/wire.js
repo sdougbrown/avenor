@@ -12,6 +12,9 @@
 
 const MAX_WAIT_MS = 600000
 
+/** The id shape mintMessageID produces; ask records use it as a file name. */
+export const MESSAGE_ID = /^av1\.[0-9a-z]+\.[0-9a-f]{32}$/
+
 const NON_PRINTABLE = /[\p{Cf}\p{Zl}\p{Zp}]/u
 
 function safeParse(text) {
