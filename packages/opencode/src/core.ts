@@ -371,7 +371,9 @@ export function stepEndedInfo(
       role: 'assistant',
       sessionID,
       id: messageId,
-      summary: false,
+      // The publish gate skips compaction summaries; forward the message's own
+      // flag rather than assuming every step is an ordinary answer.
+      summary: record.summary === true,
       time: { created: time.created, completed: time.completed },
       finish: typeof record.finish === 'string' ? record.finish : undefined,
       ...(error?.type ? { error: { name: v2ErrorName(error.type) } } : {}),

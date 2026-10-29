@@ -8,27 +8,32 @@ function makeV2Ctx() {
   const permissionHooks: Array<{ name: string; callback: (event: any) => Promise<void> }> = []
   const sessionHooks: Record<string, (event: any) => Promise<void> | void> = {}
   const subscribeOptions: Array<Record<string, unknown>> = []
+  const disposed: string[] = []
   const contextCalls: Array<Record<string, unknown>> = []
   const getCalls: Array<Record<string, unknown>> = []
   const promptCalls: Array<Record<string, unknown>> = []
   const events: Array<Record<string, unknown>> = []
   let drainedResolve: () => void = () => {}
   const drained = new Promise<void>(resolve => { drainedResolve = resolve })
+  const registration = (name: string) => ({ dispose: async () => { disposed.push(name) } })
   const ctx = {
     location: { directory: '/plugin/location' },
     tool: {
       transform: async (callback: (editor: { add: (tool: Record<string, any>) => void }) => Promise<void>) => {
         await callback({ add: (tool) => added.push(tool) })
+        return registration('tool')
       },
     },
     permission: {
       hook: async (name: string, callback: (event: any) => Promise<void>) => {
         permissionHooks.push({ name, callback })
+        return registration('permission')
       },
     },
     session: {
       hook: async (name: string, callback: (event: any) => Promise<void> | void) => {
         sessionHooks[name] = callback
+        return registration(`session.${name}`)
       },
       get: async (input: Record<string, unknown>) => {
         getCalls.push(input)
@@ -60,7 +65,7 @@ function makeV2Ctx() {
       },
     },
   }
-  return { ctx, added, permissionHooks, sessionHooks, subscribeOptions, contextCalls, getCalls, promptCalls, events, drained }
+  return { ctx, added, permissionHooks, sessionHooks, subscribeOptions, contextCalls, getCalls, promptCalls, events, drained, disposed }
 }
 
 const assistantMessage = (id: string) => ({
@@ -100,7 +105,14 @@ describe('setupAvenor', () => {
     const cleanup = await setupAvenor(ctx as never)
     expect(typeof cleanup).toBe('function')
 
-    expect(added.length).toBeGreaterThan(10)
+    expect(added.map((tool) => tool.name).sort()).toEqual([
+      'avenor_answer_permission', 'avenor_events', 'avenor_inspect', 'avenor_kill',
+      'avenor_message', 'avenor_peers', 'avenor_result', 'avenor_shutdown',
+      'avenor_spawn', 'avenor_status', 'avenor_workflow_cancel',
+      'avenor_workflow_complete', 'avenor_workflow_controller_status',
+      'avenor_workflow_events', 'avenor_workflow_gate', 'avenor_workflow_inspect',
+      'avenor_workflow_status', 'avenor_workflow_wait',
+    ])
     const spawn = added.find((tool) => tool.name === 'avenor_spawn')!
     expect(spawn.input.type).toBe('object')
     expect(spawn.input.properties.agent).toBeDefined()
@@ -110,6 +122,16 @@ describe('setupAvenor', () => {
     expect(permissionHooks.map((hook) => hook.name)).toEqual(['evaluate'])
     expect(Object.keys(sessionHooks)).toEqual(['prompt'])
     expect(subscribeOptions.length).toBe(1)
+  })
+
+  test('cleanup disposes the registrations and aborts the subscription', async () => {
+    const { ctx, subscribeOptions, disposed } = makeV2Ctx()
+    const cleanup = await setupAvenor(ctx as never)
+    expect(disposed).toEqual([])
+    await cleanup()
+    expect(disposed).toEqual(['tool', 'permission', 'session.prompt'])
+    const signal = subscribeOptions[0]!.signal as AbortSignal
+    expect(signal.aborted).toBe(true)
   })
 
   test('prompt hook reformats channel blocks before admission', async () => {
@@ -150,15 +172,6 @@ describe('setupAvenor', () => {
     await new Promise(resolve => setTimeout(resolve, 10))
     await expect(Promise.resolve(cleanup())).resolves.toBeUndefined()
   })
-
-  test('cleanup aborts the event subscription', async () => {
-    const { ctx, subscribeOptions } = makeV2Ctx()
-    const cleanup = await setupAvenor(ctx as never)
-    const signal = subscribeOptions[0]!.signal as AbortSignal
-    expect(signal.aborted).toBe(false)
-    await cleanup()
-    expect(signal.aborted).toBe(true)
-  })
 })
 
 describe('createV2EventHandler', () => {
@@ -184,6 +197,19 @@ describe('createV2EventHandler', () => {
     await onEvent({ type: 'session.step.ended', data: { sessionID: 's1', assistantMessageID: 'm1' } })
     await onEvent({ type: 'other.event' })
     expect(calls).toEqual(['idle:s1', 'step:s1:m1'])
+  })
+
+  test('drops incomplete events without calling the core handlers', async () => {
+    const calls: string[] = []
+    const onEvent = createV2EventHandler({
+      onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
+      onStepEnded: async (sessionID, messageID) => { calls.push(`step:${sessionID}:${messageID}`) },
+    })
+    await onEvent({ type: 'session.idle', data: {} })
+    await onEvent({ type: 'session.step.ended', data: { sessionID: 's1' } })
+    await onEvent({ type: 'session.step.ended', data: { assistantMessageID: 'm1' } })
+    await onEvent({ type: 'session.idle' })
+    expect(calls).toEqual([])
   })
 })
 
@@ -257,6 +283,24 @@ describe('v2ToolEntry', () => {
     const entry = v2ToolEntry('waited', def, ctx as never, new Map())
     const result = await entry.execute({}, { sessionID: 's1', agent: 'a', messageID: 'm', signal: new AbortController().signal, progress: async () => {} })
     expect(result).toEqual({ content: [{ type: 'text', text: 'wait=true' }], metadata: {} })
+  })
+
+  test('retries the directory read after a failed lookup instead of caching the fallback', async () => {
+    let calls = 0
+    const ctx = {
+      location: { directory: '/plugin/location' },
+      session: { get: async () => {
+        calls++
+        if (calls === 1) throw new Error('gone')
+        return { location: { directory: '/session/s1/dir' } }
+      } },
+    }
+    const entry = v2ToolEntry('test_tool', definition, ctx as never, new Map())
+    const toolContext = { sessionID: 's1', agent: 'a', messageID: 'm', signal: new AbortController().signal, progress: async () => {} }
+    await entry.execute({}, toolContext)
+    await entry.execute({}, toolContext)
+    expect(calls).toBe(2)
+    expect((definition as any).seenContext.directory).toBe('/session/s1/dir')
   })
 
   test('one shared directory cache serves every tool of the instance', async () => {
@@ -372,6 +416,13 @@ describe('stepEndedInfo', () => {
   test('is undefined when the message has not completed', () => {
     expect(stepEndedInfo({ content: [], time: { created: 1 } } as never, 's1', 'm1')).toBeUndefined()
     expect(stepEndedInfo(undefined, 's1', 'm1')).toBeUndefined()
+  })
+
+  test('forwards the summary flag so the publish gate can skip compaction summaries', () => {
+    const plain = stepEndedInfo(assistantMessage('m1'), 's1', 'm1')!
+    expect(plain.info.summary).toBe(false)
+    const summary = stepEndedInfo({ ...assistantMessage('m1'), summary: true } as never, 's1', 'm1')!
+    expect(summary.info.summary).toBe(true)
   })
 })
 

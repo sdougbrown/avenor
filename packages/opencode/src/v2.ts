@@ -196,13 +196,14 @@ export function createV2EventHandler(core: Pick<AvenorCore, 'onSessionIdle' | 'o
  */
 export async function setupAvenor(ctx: V2Context): Promise<() => void> {
   const core = createAvenorCore(v2Host(ctx))
+  const registrations: Array<{ dispose(): Promise<void> | void }> = []
 
-  await ctx.tool.transform((editor) => {
+  registrations.push(await ctx.tool.transform((editor) => {
     const directories = new Map<string, string>()
     for (const [name, definition] of Object.entries(core.tool ?? {})) {
       editor.add(v2ToolEntry(name, definition, ctx, directories) as never)
     }
-  })
+  }))
 
   const controller = new AbortController()
   const onEvent = createV2EventHandler(core)
@@ -212,13 +213,16 @@ export async function setupAvenor(ctx: V2Context): Promise<() => void> {
     }
   })().catch(console.error)
 
-  await ctx.permission.hook('evaluate', evaluatePermissionAsk(core))
+  registrations.push(await ctx.permission.hook('evaluate', evaluatePermissionAsk(core)))
 
-  await ctx.session.hook('prompt', (event) => {
+  registrations.push(await ctx.session.hook('prompt', (event) => {
     if (event.prompt.text.includes('<channel ')) {
       event.prompt.text = core.formatChannelBlocks(event.prompt.text)
     }
-  })
+  }))
 
-  return () => controller.abort()
+  return async () => {
+    controller.abort()
+    await Promise.all(registrations.map(registration => Promise.resolve(registration.dispose()).catch(() => undefined)))
+  }
 }
