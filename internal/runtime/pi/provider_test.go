@@ -64,6 +64,10 @@ func TestResumeExisting(t *testing.T) {
 }
 
 func TestResumeRejectsSecondDistinctSession(t *testing.T) {
+	// Pin the ephemeral path: with the feature opted in, the resume would
+	// route into resumePersisted's occupied guard and fail with different
+	// text.
+	t.Setenv(SessionsEnv, "")
 	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
 	p.sessions["pi_existing"] = struct{}{}
 	c, _, _ := fakeClient()
@@ -582,6 +586,9 @@ func TestProviderStartUsesRequestedWorkingDirectory(t *testing.T) {
 }
 
 func TestProviderColdResumeRefusesBeforeStartingPi(t *testing.T) {
+	// Pin the ephemeral path: with the feature opted in, the resume would
+	// create a real session directory instead of refusing up front.
+	t.Setenv(SessionsEnv, "")
 	dir := t.TempDir()
 	captured := withFakePiCommand(t)
 	p := NewWithOptions(runtime.StartOptions{Dir: dir})
