@@ -11,6 +11,9 @@ import (
 // SessionLast reads one run's recorded last turn. It resolves the run before
 // reading, so an unknown runtime is a typed unknown_target refusal while a
 // known run with no recorded turn is a synthesized identity plus ok=false.
+//
+// A tombstone still answers here: this surface reads history by an id the caller
+// already holds, where a routing boundary asks whether a target can take part.
 func (s *Supervisor) SessionLast(rtID string) (broker.LastAgentMessage, bool, error) {
 	if s.broker == nil {
 		return broker.LastAgentMessage{}, false, fmt.Errorf("broker not available")

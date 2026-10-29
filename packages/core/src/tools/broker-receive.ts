@@ -12,7 +12,6 @@ export interface InboundAsk {
   from_run_id: string
   message_id: string
   message: string
-  role?: string
 }
 
 export interface BrokerReceiveResult {
@@ -46,11 +45,12 @@ async function executeBrokerReceive(
       const payload = raw !== null && typeof raw === 'object'
         ? raw as Record<string, unknown>
         : undefined
+      // Only the fields the store stamps. A payload's own role is the sender's
+      // claim, and a reader that prints it is printing an authority nobody granted.
       return {
         from_run_id: message.from_run_id,
         message_id: message.message_id,
         message: typeof payload?.message === 'string' ? payload.message : '',
-        role: typeof payload?.role === 'string' ? payload.role : undefined,
       }
     })
     return { asks, generation: received.generation || generation }

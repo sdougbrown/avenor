@@ -46,7 +46,7 @@
 // top-level function declarations; pass-through is returning undefined,
 // never calling `next`.
 
-import { parseAvenorAddress, matchSession } from "./addresses.js"
+import { parseAvenorAddress, parseMessageTarget, matchSession } from "./addresses.js"
 import {
   mintMessageID,
   randomHex,
@@ -87,6 +87,7 @@ export async function register(on) {
   await on("turn.complete", async (d, e) => turnTicked(d, e, -1))
 
   await on("tool.call", { tool: "mcp__avenor__message" }, async (d, e) => serveAskHook(d, e))
+  await on("tool.call", { tool: "mcp__plugin_avenor_avenor__message" }, async (d, e) => serveAskHook(d, e))
 }
 
 // --- session.send: outbound brokerage ---
@@ -436,9 +437,9 @@ async function serveAskHook(d, e) {
   if (isReply) {
     return serveReply(d, e)
   }
-  const ref = parseAvenorAddress(e.target === undefined || e.target === null ? "" : e.target)
+  const ref = parseMessageTarget(e.target)
   if (ref === null) {
-    return askOutcome("not-sent", null, "ask target must be an avenor:<run id or label> address")
+    return askOutcome("not-sent", null, "ask target must be a run id, label, or self without whitespace")
   }
   const message = typeof e.message === "string" ? e.message : ""
   if (message === "") {
@@ -450,7 +451,7 @@ async function serveAskHook(d, e) {
 async function serveAsk(d, ref, message, rawTimeout) {
   let target
   try {
-    target = await resolveTarget(d, ref)
+    target = await resolveTarget(d, ref, true)
   } catch (err) {
     await logLayer(d, "ask target resolution failed: " + errorText(err))
     return askOutcome("not-sent", null,
@@ -606,7 +607,7 @@ function replyOutcome(outcome, messageId) {
  * only one, so matching against it would resolve to the wrong peer. The Go and
  * TS resolvers apply the same rule to the same field.
  */
-async function resolveTarget(d, ref) {
+async function resolveTarget(d, ref, allowSelf = false) {
   const body = await brokerGet(d, "/sessions")
   const answer = body === null || typeof body !== "object" ? {} : body
   const incomplete = typeof answer.peers_error === "string" ? answer.peers_error : ""
@@ -614,7 +615,9 @@ async function resolveTarget(d, ref) {
     return { match: "incomplete", runId: "", candidates: [], generation: "", incomplete: incomplete }
   }
   const sessions = Array.isArray(answer.sessions) ? answer.sessions : []
-  const hit = matchSession(sessions, ref, broker === null ? "" : broker.runID)
+  const targetRef = allowSelf && ref === "self" && broker !== null ? broker.runID : ref
+  const excludeRunId = allowSelf || broker === null ? "" : broker.runID
+  const hit = matchSession(sessions, targetRef, excludeRunId)
   return {
     match: hit.match,
     runId: hit.runId,

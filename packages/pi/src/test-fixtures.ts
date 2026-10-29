@@ -3,7 +3,7 @@
 import { mock } from 'bun:test'
 import { getSupervisorClient, type InspectResult, type MessageProvider, type RunPermissionSummary, type RunSnapshot, type StatusResult } from '@dougbots/avenor-core'
 import { RunReducer } from '@dougbots/avenor-core'
-import type { ExtensionDeps } from './index.js'
+import type { ExtensionDeps, ExtensionOptions } from './index.js'
 import { createExtension } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
 
@@ -12,7 +12,7 @@ const harnessSupervisorInstance = { supervisorId: 'sup', getClient: () => ({}) }
 
 export async function startExtensionHarness(options: {
   deps?: Partial<ExtensionDeps>
-  extOptions?: { pollIntervalMs?: number; idleSendTimeoutMs?: number; subAgentEnv?: SubAgentEnv | null }
+  extOptions?: ExtensionOptions
   ui?: Record<string, any>
   /** The harness's user-defined session name, as pi's session manager reports it. */
   sessionName?: () => string | undefined

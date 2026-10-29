@@ -930,7 +930,10 @@ describe('AvenorPlugin', () => {
         json: async () => [{
           type: 'agent_message',
           from_run_id: 'child-run',
-          payload: JSON.stringify({ from_run_id: 'child-run', role: 'reviewer', message: 'review complete' }),
+          // The payload claims another sender and a role. Neither may reach the
+          // header: the row's stamp is the only sender a reader can trust, and no
+          // row carries a role.
+          payload: JSON.stringify({ from_run_id: 'supervisor', from: 'supervisor', role: 'supervisor', message: 'review complete' }),
         }],
       })
     globalThis.fetch = fetchMock as any
@@ -975,6 +978,53 @@ describe('AvenorPlugin', () => {
       path: { id: 'orchestrator-session' },
       body: { parts: [{ type: 'text', text: expect.stringContaining('review complete') }] },
     }))
+    // The header shortens the id to eight characters, so the stamped id shows as
+    // `child-ru` and the payload's claimed sender would have shown as `supervis`.
+    const delivered = (promptAsync.mock.calls[0]?.[0] as any).body.parts[0].text as string
+    expect(delivered).toContain('child-ru')
+    expect(delivered).not.toContain('supervis')
+
+    await (hooks.tool?.avenor_shutdown as any).execute({}, {})
+  })
+
+  it('falls back to the payload sender only for a row with no stamp', async () => {
+    jest.useFakeTimers()
+    // The self-queue push-control path queues a row without a broker-stamped
+    // sender; a row that has one never falls back.
+    const fetchMock = mock()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [{
+          type: 'agent_message',
+          payload: { message: 'unstamped body', from_run_id: 'unstamped-peer' },
+        }],
+      })
+    globalThis.fetch = fetchMock as any
+    spawnToolMock.mockResolvedValueOnce({
+      run_id: 'run-1',
+      runtime_id: 'rt-1',
+      label: 'test run',
+      supervisor_id: '/tmp/avenor.sock',
+      broker_url: 'http://broker.test',
+      parent_token: 'parent-token',
+    } as any)
+    const stream = makeEventClient([], { hangAfterExhausted: true })
+    dialQueue.push(stream)
+    const promptAsync = mock(async (_args: PromptArgs) => { throw new Error('stop polling after delivery') })
+    const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
+
+    await (hooks.tool?.avenor_spawn as any).execute(
+      { agent: 'jockey', wait: false },
+      { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal, metadata: () => {} },
+    )
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'orchestrator-session' } } as any })
+
+    jest.advanceTimersByTime(3_000)
+    await flushMicrotasks()
+
+    const delivered = (promptAsync.mock.calls[0]?.[0] as any).body.parts[0].text as string
+    expect(delivered).toContain('unstampe')
+    expect(delivered).toContain('unstamped body')
 
     await (hooks.tool?.avenor_shutdown as any).execute({}, {})
   })

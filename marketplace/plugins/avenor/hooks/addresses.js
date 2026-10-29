@@ -20,6 +20,13 @@ export function parseAvenorAddress(to) {
     : null
 }
 
+/** Message tools address peers directly; SendMessage keeps its explicit namespace. */
+export function parseMessageTarget(target) {
+  const address = parseAvenorAddress(target)
+  const ref = address === null ? target : address
+  return typeof ref === "string" && /^\S+$/.test(ref) ? ref : null
+}
+
 /**
  * Resolution over the /sessions listing rows. `excludeRunId` drops the
  * caller's own record, so a session can never route a message back to

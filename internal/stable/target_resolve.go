@@ -16,7 +16,10 @@ func (s *Supervisor) resolveRunReference(ref string) (string, error) {
 	if s.broker == nil {
 		return "", unknownTargetError(ref)
 	}
-	if s.broker.GetRun(ref) != nil {
+	// A tombstone is a run this broker knows and can no longer route to, so the
+	// ladder refuses it the way it refuses an id it has never seen: resolving it
+	// would let a rename report success on a peer nobody can reach.
+	if s.broker.Reachable(ref) {
 		return ref, nil
 	}
 	matches := s.broker.MatchLabel(ref)

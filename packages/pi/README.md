@@ -110,6 +110,76 @@ The `pi` key in `package.json` declares the extension entry point:
 
 ## Features
 
+### Top-level peers on a central broker
+
+Two independently started sessions need separate inboxes to message each other.
+Set `AVENOR_BROKER_URL` before starting Pi to register this session on a central
+broker. Pi polls that broker over outbound HTTP(S); it needs no inbound port.
+
+```bash
+AVENOR_BROKER_URL=https://avenor-broker.home.douggo.com pi --name scout
+```
+
+The broker must support leased peer registrations. Pi refuses a broker that does
+not acknowledge that capability. Leave `AVENOR_RUN_ID` and
+`AVENOR_BROKER_TOKEN` unset for a top-level session; together, those variables
+select the existing provisioned child mode. An incomplete pair is refused.
+
+Pi publishes its session name so other sessions can address `scout`. Without a
+Pi name, `AVENOR_SESSION_NAME` or `AVENOR_LABEL` supplies the display name. Use
+the existing tools:
+
+```json
+{"action":"ask","target":"scout","message":"Ready?","timeout_ms":30000}
+```
+
+An inbound ask includes the arguments for `avenor_message` action `reply`.
+Tells arrive as messages without reply instructions. The [Claude peer
+layer](../../marketplace/plugins/avenor/README.md) can join the same broker.
+
+The local supervisor remains available for spawning, status, results, and local
+child messages. Central peer tools alone do not start it. Once it exists,
+`avenor_peers` combines its peers with the central peers. `avenor_message`
+prefers an exact ID, then a unique label. Duplicate labels return
+`ambiguous_name`; duplicate IDs across independent brokers are also ambiguous.
+Matching IDs alone do not establish that two records are the same peer.
+An incomplete listing or transport failure refuses resolution across the
+combined view, including a local match, because an unseen record could shadow it.
+Replies and withdrawals retain the provider that owns their message.
+
+#### Identity and delivery lifetime
+
+Pi keeps a generated ID and credential in memory for one session. Registration
+retries use that same pair. After registration, a temporary transport failure
+retries polling without registering another identity. Successful polling renews
+the broker's 60-second lease. Session shutdown aborts the poll and pending asks,
+then requests retirement; if retirement cannot be confirmed, the lease expires.
+
+An expired or retired peer disappears from listings and cannot receive messages.
+Authentication, concurrent-poll, or expired-identity refusals stop participation;
+start a new session to obtain a new identity. A broker restart also requires a
+new session. Pi does not silently replace an inbox that may have held messages.
+The broker retains expired and retired identity records until shutdown to fence
+delayed registration retries, so those records consume memory for its lifetime.
+
+Polling removes messages from the broker queue before Pi injects them. Pi retries
+an injection failure from its in-memory batch, but a process crash or interrupted
+poll response can lose delivery. This is not an exactly-once delivery guarantee.
+The broker excludes overlapping polls for a leased peer; bearer credentials do
+not establish that only one physical process holds them.
+
+The registration route remains open to clients that can reach the broker. Restrict
+access to the intended tailnet or equivalent trusted network, and use HTTPS when
+the network does not encrypt transport. Credentials travel in request bodies or
+headers, never in broker URLs. Do not put them in logs, command arguments, or
+committed configuration. Leases apply to opt-in Pi peers; existing Claude
+self-registrations retain their existing lifetime behavior.
+
+See the [top-level peer verification
+map](../../skills/verify-avenor/features/top-level-peers.md) for the independent
+session proof. This Pi–Claude integration covers part of #434; other harnesses
+and plain MCP client identities remain separate work.
+
 ### Tools
 
 Available tools for LLM sub-agent management:
