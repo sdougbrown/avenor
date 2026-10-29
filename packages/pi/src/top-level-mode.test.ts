@@ -272,6 +272,63 @@ test('a codeless 409 keeps polling, because that is another poll in flight', asy
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
 
+test('a refused session name is a notice on the peer channel, not raw stderr', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  const errorLog = mock(() => {})
+  const originalError = console.error
+  console.error = errorLog as any
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    if (new URL(String(url)).pathname === '/session_name') {
+      return Response.json({ code: 'invalid-name' }, { status: 400 })
+    }
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({ deps: { messageTool }, extOptions: { topLevelBrokerUrl: 'https://broker.test' } })
+    await waitFor(() => h!.notify.mock.calls.some(call => String(call[0]).includes('session_name_set refused')))
+    expect(h.emitted.filter(([channel]) => channel === 'avenor:peer:error')
+      .map(([, payload]) => payload as Record<string, unknown>)
+      .some(payload => payload.operation === 'session-name' && payload.code === 'invalid-name')).toBe(true)
+    expect(errorLog.mock.calls.map((call: unknown[]) => String(call[0])).join('\n')).not.toContain('session_name_set')
+  } finally { console.error = originalError; await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
+
+test('a failed turn publication notifies once per episode and re-arms after a success', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  let failing = false
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    if (failing && new URL(String(url)).pathname === '/last_message' && init?.method === 'POST') {
+      return Response.json({ code: 'internal' }, { status: 500 })
+    }
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  const publishNotices = () => h!.notify.mock.calls
+    .map((call: unknown[]) => String(call[0]))
+    .filter(text => text.includes('central last-turn publication failed'))
+  try {
+    h = await startExtensionHarness({ deps: { messageTool }, extOptions: { topLevelBrokerUrl: 'https://broker.test' } })
+    failing = true
+    await h.eventHandlers.turn_end({ message: { content: 'first', stopReason: 'stop' } })
+    await waitFor(() => publishNotices().length === 1)
+    // A second failed turn inside the same episode stays quiet on the UI, but the
+    // bus keeps the record.
+    await h.eventHandlers.turn_end({ message: { content: 'second', stopReason: 'stop' } })
+    await waitFor(() => h!.emitted.filter(([channel]) => channel === 'avenor:peer:error').length >= 2)
+    expect(publishNotices()).toHaveLength(1)
+    // A successful publish ends the episode.
+    failing = false
+    await h.eventHandlers.turn_end({ message: { content: 'third', stopReason: 'stop' } })
+    await waitFor(() => b.calls.filter(c => c.path === '/last_message' && c.body.final_output === 'third').length > 0)
+    failing = true
+    await h.eventHandlers.turn_end({ message: { content: 'fourth', stopReason: 'stop' } })
+    await waitFor(() => publishNotices().length === 2)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+}, 20000)
+
 test('a new failure episode raises a fresh notice after the broker recovers', async () => {
   const b = broker()
   const delegate = globalThis.fetch

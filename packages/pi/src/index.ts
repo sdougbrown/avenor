@@ -1967,8 +1967,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         case 'poll':
           if (!(error instanceof BrokerHttpError)) return false
           if (error.status === 401 || error.status === 403 || error.status === 410) return true
-          return error.status === 409 && error.code !== ''
-            ? error.code === 'peer-retired' || error.code === 'registration-mismatch' || error.code === 'not-permitted'
+          // A 409 carries an identity code on /register and `duplicate-consumer`
+          // on the poll, so only the identity codes end the session here.
+          // `not-permitted` is a 403 code and is already terminal above.
+          return error.status === 409
+            ? error.code === 'peer-retired' || error.code === 'registration-mismatch'
             : false
         case 'register': {
           // The broker answered and will answer the same way again: a malformed
@@ -1988,7 +1991,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         case 'poll': return 'central broker poll'
         case 'register': return 'central peer registration'
         case 'publish-turn': return 'central last-turn publication'
-        case 'retire': return 'central peer retirement could not be confirmed'
+        case 'retire': return 'central peer retirement confirmation'
       }
     }
 
