@@ -7,8 +7,8 @@ import (
 )
 
 func TestSessionsPersistEnabled(t *testing.T) {
-	// The leading empty case is also the unset state: t.Setenv with an
-	// empty value removes the variable.
+	// The empty-value case: Setenv with "" leaves the variable present but
+	// empty. Unset is covered by TestSessionsPersistEnabledUnset.
 	cases := []struct {
 		value string
 		want  bool
