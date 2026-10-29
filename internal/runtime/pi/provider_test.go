@@ -1347,3 +1347,36 @@ func TestStartHonorsPerRunPersistChoice(t *testing.T) {
 		})
 	}
 }
+
+// The per-run choice reaches the resume gate too: an explicit true persists
+// and resumes without the env, an explicit false refuses even when the env
+// opts in, with a refusal that names the run-level choice.
+func TestResumeHonorsPerRunPersistChoice(t *testing.T) {
+	on := true
+	off := false
+
+	t.Run("opt true without env", func(t *testing.T) {
+		t.Setenv(SessionsEnv, "")
+		id := "01a117d6-a744-7108-89ff-139b1a47b088"
+		p, _, wOut, rIn, resumedID := persistedResumeFixture(t, id)
+		respondGetState(wOut, rIn, id)
+		sess, err := p.ResumeWithOptions(context.Background(), id, runtime.StartOptions{PersistSessions: &on})
+		if err != nil {
+			t.Fatalf("ResumeWithOptions: %v", err)
+		}
+		if *resumedID != id {
+			t.Fatalf("resume launch bound session %q, want %q", *resumedID, id)
+		}
+		if sess.SessionID != id {
+			t.Fatalf("SessionID = %q, want %q", sess.SessionID, id)
+		}
+	})
+	t.Run("opt false with env", func(t *testing.T) {
+		t.Setenv(SessionsEnv, "1")
+		p, _, _, _, _ := persistedResumeFixture(t, "01a117d6-a744-7108-89ff-139b1a47b088")
+		_, err := p.ResumeWithOptions(context.Background(), "01a117d6-a744-7108-89ff-139b1a47b088", runtime.StartOptions{PersistSessions: &off})
+		if err == nil || !strings.Contains(err.Error(), "forced an ephemeral session") {
+			t.Fatalf("error = %v, want the run-level-choice refusal", err)
+		}
+	})
+}

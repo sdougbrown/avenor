@@ -100,8 +100,13 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	if !exists {
 		// Without persisted sessions the prior run's transcript is gone, so
 		// a fresh process could only run an empty session under this ID's
-		// name; refuse instead of silently losing the prior context.
+		// name; refuse instead of silently losing the prior context. The
+		// refusal names the layer that decided: an explicit per-run false
+		// is not an env problem.
 		if !ResolvePersistSessions(merged.PersistSessions) {
+			if merged.PersistSessions != nil {
+				return runtime.Session{}, fmt.Errorf("session not found: %s (the run-level persist_sessions choice forced an ephemeral session; cross-process resume needs the run to have persisted)", sessionID)
+			}
 			return runtime.Session{}, fmt.Errorf("session not found: %s (pi sessions run with --no-session; set %s=1 to persist sessions and enable cross-process resume)", sessionID, SessionsEnv)
 		}
 		return p.resumePersisted(ctx, sessionID, merged)
