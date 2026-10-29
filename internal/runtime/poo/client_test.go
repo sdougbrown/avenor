@@ -109,3 +109,31 @@ func TestSubscribeLogsHeldEventDrops(t *testing.T) {
 		t.Fatalf("stderr = %q, want the dropped event named", logged)
 	}
 }
+
+// TestHeldEventsKeepOnlyTheNewest proves the hold buffer a session queues
+// through is bounded: past heldEventLimit the oldest event is dropped, so a
+// session whose subscriber never attaches cannot grow the buffer without limit
+// and the events it does keep stay the most recent ones.
+func TestHeldEventsKeepOnlyTheNewest(t *testing.T) {
+	const extra = 5
+	total := heldEventLimit + extra
+
+	c := newBareClient()
+	for i := 0; i < total; i++ {
+		c.deliver(events.Event{Event: strconv.Itoa(i), SessionID: "ses_1"})
+	}
+
+	c.mu.Lock()
+	held := append([]events.Event(nil), c.held["ses_1"]...)
+	c.mu.Unlock()
+
+	if len(held) != heldEventLimit {
+		t.Fatalf("%d events were held, want the %d limit", len(held), heldEventLimit)
+	}
+	if first := held[0].Event; first != strconv.Itoa(extra) {
+		t.Fatalf("the oldest held event = %q, want %q: the first %d were not dropped", first, strconv.Itoa(extra), extra)
+	}
+	if last := held[len(held)-1].Event; last != strconv.Itoa(total-1) {
+		t.Fatalf("the newest held event = %q, want %q", last, strconv.Itoa(total-1))
+	}
+}
