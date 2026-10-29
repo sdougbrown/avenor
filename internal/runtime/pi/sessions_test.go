@@ -32,6 +32,8 @@ func TestSessionsPersistEnabled(t *testing.T) {
 	}
 }
 
+// Unset is a distinct state from the table's empty-value case: Setenv with
+// "" leaves the variable present with an empty value, Unsetenv removes it.
 func TestSessionsPersistEnabledUnset(t *testing.T) {
 	os.Unsetenv(SessionsEnv)
 	if SessionsPersistEnabled() {

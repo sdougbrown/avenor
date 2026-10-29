@@ -11,6 +11,9 @@ import (
 func TestConfigHomeNoHomeFallback(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("HOME", "")
+	if u, err := os.UserHomeDir(); err == nil && u != "" {
+		t.Skipf("os.UserHomeDir resolves %q without HOME; the fallback is unreachable here", u)
+	}
 	if got, want := ConfigHome(), filepath.Join("avenor"); got != want {
 		t.Fatalf("ConfigHome() = %q, want %q", got, want)
 	}
