@@ -318,7 +318,7 @@ max runtimes (16) reached
 
 The limit prevents resource exhaustion and gives you a predictable constraint for scheduling.
 
-A runtime that finishes its turn successfully does not keep its slot: it parks (holding its backend process open for a potential follow-up prompt) and stops counting against the limit. A parked runtime is reaped after `--parked-timeout` (default 30m). Whether a reaped runtime's session can still be continued depends on the backend: codex persists threads and the message tool's `resume` action continues them by ID, while pi and claude sessions live only in their host process, so a resume after the reap fails with an explicit error instead of silently resuming a fresh session.
+A runtime that finishes its turn successfully does not keep its slot: it parks (holding its backend process open for a potential follow-up prompt) and stops counting against the limit. A parked runtime is reaped after `--parked-timeout` (default 30m). Whether a reaped runtime's session can still be continued depends on the backend: codex persists threads and the message tool's `resume` action continues them by ID; pi runs persist their session only when `AVENOR_PI_SESSIONS=1` is set (see [backends.md](backends.md#persisted-sessions-and-resume)), and then resume across processes the same way; claude sessions live only in their host process. Without a persisted session, a resume after the reap fails with an explicit error instead of silently resuming a fresh session.
 
 ### Tree descendant budget
 

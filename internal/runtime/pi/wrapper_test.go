@@ -41,7 +41,7 @@ func capturePiLaunch(t *testing.T, launchWrapper []string) []string {
 	}
 
 	client, err := StartClientWithAgentProfileThinkingAndDir(
-		context.Background(), "", "", "", "", "", "", "", "", "", "", launchWrapper, nil,
+		context.Background(), "", "", "", "", "", "", "", "", "", "", launchWrapper, nil, "",
 	)
 	if err != nil {
 		t.Fatalf("StartClientWithAgentProfileThinkingAndDir: %v", err)

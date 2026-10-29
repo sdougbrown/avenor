@@ -11,6 +11,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/pi"
 )
 
 const resumeUUID1 = "6f9619ff-8b86-d011-b42d-00cf4fc964ff"
@@ -604,5 +605,20 @@ func TestResumeDropsStartOnlyOptionsForClaudeResume(t *testing.T) {
 	}
 	if resumes := provider.resumesRecorded(); len(resumes) != 1 || resumes[0] != "ses_resumed" {
 		t.Fatalf("provider resumes = %v, want [ses_resumed]", resumes)
+	}
+}
+
+// With persisted pi sessions opted in, a pi runtime takes the cold resume
+// path like every other backend: the denial moves from the pi gate to the
+// session ladder, which here finds no sentinel and no live session.
+func TestResumePiWithPersistedSessionsRunsTheLadder(t *testing.T) {
+	t.Setenv(pi.SessionsEnv, "1")
+	sup, _ := newStage2Supervisor(t, 4)
+	child := &childRuntime{id: "prior", lc: lifecycleState{completion: completionPublished}, runDone: make(chan struct{})}
+	child.closeRunDone()
+	_, err := sup.resumeOnce(child, child.id, SpawnParams{Backend: "pi", Label: "next"})
+	assertToolCode(t, err, "not_resumable")
+	if !strings.Contains(err.Error(), "(status: unknown)") {
+		t.Fatalf("not-resumable text = %q, want the ladder's unknown status", err)
 	}
 }

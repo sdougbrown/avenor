@@ -20,7 +20,7 @@ type Provider struct {
 	mu          sync.Mutex
 	client      *client
 	sessions    map[string]struct{}
-	startClient func(context.Context, runtime.StartOptions) (*client, error)
+	startClient func(ctx context.Context, opts runtime.StartOptions, resumeSessionID string) (*client, error)
 }
 
 func NewWithOptions(opts runtime.StartOptions) *Provider {
@@ -121,10 +121,13 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	c := p.client
 	p.mu.Unlock()
 	if !exists {
-		// Sessions are launched with --no-session, so nothing persists on
-		// disk. A new process would run a fresh session under this ID's
+		// Without persisted sessions the prior run's transcript is gone, so
+		// a fresh process could only run an empty session under this ID's
 		// name; refuse instead of silently losing the prior context.
-		return runtime.Session{}, fmt.Errorf("session not found: %s (pi sessions run with --no-session; cross-process resume is not supported)", sessionID)
+		if !SessionsPersistEnabled() {
+			return runtime.Session{}, fmt.Errorf("session not found: %s (pi sessions run with --no-session; set %s=1 to persist sessions and enable cross-process resume)", sessionID, SessionsEnv)
+		}
+		return p.resumePersisted(ctx, sessionID, merged)
 	}
 
 	if merged.Thinking != "" {
@@ -140,6 +143,82 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 		pid = c.Pid()
 	}
 	return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: merged.Dir, PID: pid}, nil
+}
+
+// resumePersisted continues a prior run's persisted session in a fresh pi
+// child: the persisted transcript supplies the prior context, so the resumed
+// run is a real continuation, not a fresh session wearing the old ID. The
+// session file must already exist — the caller read it from a sentinel —
+// and the child's own get_state must report the same session ID, or the
+// resume is refused rather than silently continuing elsewhere.
+func (p *Provider) resumePersisted(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
+	p.mu.Lock()
+	occupied := len(p.sessions) > 0
+	p.mu.Unlock()
+	if occupied {
+		return runtime.Session{}, errors.New("pi rpc supports only one active session per provider")
+	}
+	dir, err := PersistSessionsDir()
+	if err != nil {
+		return runtime.Session{}, err
+	}
+	if !SessionFileExists(dir, sessionID) {
+		return runtime.Session{}, fmt.Errorf("session not found: %s (no persisted pi session file in %s; the prior run may have launched without %s=1)", sessionID, dir, SessionsEnv)
+	}
+	if opts.Thinking != "" {
+		if err := checkThinkingCapability(ctx); err != nil {
+			return runtime.Session{}, fmt.Errorf("%w: %v", runtime.NewUnsupportedThinkingError(backendID), err)
+		}
+	}
+	starter := p.startClient
+	if starter == nil {
+		starter = p.launchChild
+	}
+	c, err := starter(ctx, opts, sessionID)
+	if err != nil {
+		return runtime.Session{}, err
+	}
+	got, err := childSessionID(ctx, c)
+	if err != nil {
+		c.Close()
+		return runtime.Session{}, err
+	}
+	if got != sessionID {
+		c.Close()
+		return runtime.Session{}, fmt.Errorf("resumed pi child reports session %q, want %s", got, sessionID)
+	}
+
+	p.mu.Lock()
+	p.sessions[sessionID] = struct{}{}
+	p.client = c
+	p.mu.Unlock()
+
+	c.setSessionID(sessionID)
+	return runtime.Session{SessionID: sessionID, Backend: backendID, Dir: opts.Dir, PID: c.Pid()}, nil
+}
+
+// childSessionID reads the session ID a fresh pi child reports at startup,
+// applying the same extraction Start uses so a resumed child is read the
+// same way a fresh one is.
+func childSessionID(ctx context.Context, c *client) (string, error) {
+	stateResult, err := c.sendCommand(ctx, map[string]any{"type": "get_state"})
+	if err != nil {
+		return "", fmt.Errorf("get_state: %w", err)
+	}
+	var stateMap map[string]any
+	if err := json.Unmarshal(stateResult, &stateMap); err != nil {
+		return "", fmt.Errorf("get_state result: %w", err)
+	}
+	sessionID, _ := stateMap["sessionId"].(string)
+	if sessionID == "" {
+		if data, ok := stateMap["data"].(map[string]any); ok {
+			sessionID, _ = data["sessionId"].(string)
+		}
+	}
+	if sessionID == "" {
+		sessionID, _ = stateMap["state"].(string)
+	}
+	return sessionID, nil
 }
 
 func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {
@@ -396,19 +475,9 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 
 	starter := p.startClient
 	if starter == nil {
-		starter = func(ctx context.Context, opts runtime.StartOptions) (*client, error) {
-			// The child is broker-configured only as a whole: URL, run id, and
-			// token travel together or not at all, so it can never poll with a
-			// half-configured identity. pi's extension authenticates each request
-			// itself, so what it needs is the run's own credential.
-			url, runID, token := runtime.ProvisionPeer(opts).Run()
-			return StartClientWithAgentProfileThinkingAndDir(
-				ctx, "", opts.Model, "", opts.Agent, opts.AgentProfile, opts.Thinking, opts.Dir,
-				url, runID, token, opts.LaunchWrapper, opts.Provenance,
-			)
-		}
+		starter = p.launchChild
 	}
-	c, err := starter(ctx, opts)
+	c, err := starter(ctx, opts, "")
 	if err != nil {
 		p.mu.Unlock()
 		return nil, false, err
@@ -416,6 +485,30 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 	p.client = c
 	p.mu.Unlock()
 	return c, true, nil
+}
+
+// launchChild spawns the pi RPC child. A persisted-session environment
+// points the child at the shared session directory; the ephemeral default
+// launches --no-session. resumeSessionID binds a fresh child to a prior
+// run's persisted session so its transcript continues.
+func (p *Provider) launchChild(ctx context.Context, opts runtime.StartOptions, resumeSessionID string) (*client, error) {
+	sessionDir := ""
+	if SessionsPersistEnabled() {
+		dir, err := PersistSessionsDir()
+		if err != nil {
+			return nil, fmt.Errorf("pi persisted sessions: %w", err)
+		}
+		sessionDir = dir
+	}
+	// The child is broker-configured only as a whole: URL, run id, and
+	// token travel together or not at all, so it can never poll with a
+	// half-configured identity. pi's extension authenticates each request
+	// itself, so what it needs is the run's own credential.
+	url, runID, token := runtime.ProvisionPeer(opts).Run()
+	return StartClientWithAgentProfileThinkingAndDir(
+		ctx, "", opts.Model, sessionDir, opts.Agent, opts.AgentProfile, opts.Thinking, opts.Dir,
+		url, runID, token, opts.LaunchWrapper, opts.Provenance, resumeSessionID,
+	)
 }
 
 func (p *Provider) setThinkingLevel(ctx context.Context, c *client, level string) error {
