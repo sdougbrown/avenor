@@ -138,6 +138,7 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 	sentinelFile := fs.String("sentinel-file", "", "path to write a completion sentinel")
 	permissionHandler := fs.String("permission-handler", "", "permission handler, supports file:<path>")
 	autoApprove := fs.Bool("auto-approve", false, "automatically approve all permission requests")
+	persistSessions := fs.Bool("persist-sessions", false, "persist the backend session (pi: a session directory instead of --no-session)")
 	timeout := fs.Int("timeout", 0, "overall session timeout in seconds")
 	maxRetries := fs.Int("max-retries", 0, "maximum retry attempts on transient failure")
 	var launchWrapper launchWrapperFlag
@@ -189,6 +190,9 @@ func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) 
 	addString("permission_handler", *permissionHandler)
 	if *autoApprove {
 		params["auto_approve"] = true
+	}
+	if *persistSessions {
+		params["persist_sessions"] = true
 	}
 	if len(launchWrapper) > 0 {
 		params["launch_wrapper"] = []string(launchWrapper)

@@ -45,6 +45,7 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--pid-file` | (none) | Path to write the run's own pid at startup, removed when it exits. Track a backgrounded run by this pid instead of a launcher's `$!` |
 | `--permission-handler` | (derived) | Permission resolver: `file:<path>` for file-based answers, or omitted for socket/auto-approve only. If `--sentinel-file` is set and `--permission-handler` is not, defaults to `file:<sentinel-base>` |
 | `--auto-approve` | `false` | Automatically approve ordinary permission requests. Questions that require user input still wait for an answer |
+| `--persist-sessions` | `false` | Persist the backend session (pi: a session directory instead of `--no-session`, enabling post-hoc transcripts and cross-process resume). Omitted inherits `AVENOR_PI_SESSIONS` |
 | `--control-socket` | (none) | Unix socket path for control plane; enables remote commands while session is running |
 | `--http-debug` | (none) | HTTP debug adapter bind address (e.g., `127.0.0.1:8080`); enables `/debug/status` and `/debug/events` endpoints |
 | `--timeout` | `0` (disabled) | Overall session timeout (Go duration: `30s`, `5m`, etc.); fires after duration regardless of progress |
@@ -397,6 +398,7 @@ Spawn flags (all optional):
 | `--sentinel-file` | Path to write completion sentinel |
 | `--permission-handler` | Permission resolver (e.g., `file:<path>`) |
 | `--auto-approve` | Automatically approve all permission requests |
+| `--persist-sessions` | Persist the backend session (see [backends.md](backends.md#persisted-sessions-and-resume)) |
 | `--timeout` | Overall session timeout (Go duration: `30s`, `5m`, etc.) |
 | `--max-retries` | Maximum retry attempts on transient failure |
 | `--launch-wrapper` | Opaque argv prefix placed in front of the backend process command; repeatable, each use adds one element (e.g. `--launch-wrapper nice --launch-wrapper -n --launch-wrapper 5`). Avenor does not interpret the wrapper — see [backends.md](backends.md#launch-wrapper) |

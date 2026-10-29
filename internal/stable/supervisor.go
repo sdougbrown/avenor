@@ -152,8 +152,13 @@ type SpawnParams struct {
 	Label        string `json:"label,omitempty"`
 	Model        string `json:"model,omitempty"`
 	Thinking     string `json:"thinking,omitempty"`
-	ServerURL    string `json:"server_url,omitempty"`
-	Backend      string `json:"backend,omitempty"`
+	// PersistSessions opts this runtime's backend session into a persisted
+	// store where the backend supports it (pi: a session directory instead
+	// of --no-session). Nil inherits the supervisor's AVENOR_PI_SESSIONS
+	// environment; true and false force the choice for this run.
+	PersistSessions *bool  `json:"persist_sessions,omitempty"`
+	ServerURL       string `json:"server_url,omitempty"`
+	Backend         string `json:"backend,omitempty"`
 	// LaunchWrapper is an opaque argv prefix placed in front of the backend
 	// process command at launch. Avenor does not interpret it; empty or
 	// absent means the backend is launched unwrapped. Probes and helper
@@ -311,18 +316,23 @@ type childRuntime struct {
 	// see. A spawn sets it, applySessionName rewrites it, and the broker's
 	// harness-name observer rewrites it — each under s.controlMu -> child.mu,
 	// the locks List, RuntimeStatus and labelHolderLocked read it under.
-	displayName        string
-	agent              string
-	agentProfile       string
-	model              string
-	thinking           string
-	backend            string
-	launchWrapper      []string
-	rosterFile         string
-	rosterEntry        string
-	effectiveBackend   string
-	effectiveAgent     string
-	effectiveModel     string
+	displayName      string
+	agent            string
+	agentProfile     string
+	model            string
+	thinking         string
+	backend          string
+	launchWrapper    []string
+	rosterFile       string
+	rosterEntry      string
+	effectiveBackend string
+	effectiveAgent   string
+	effectiveModel   string
+	// persistedSessions records whether this runtime launched with a
+	// persisted session store: the resume gate reads it so a persisted run
+	// stays resumable even when the environment has since dropped the
+	// opt-in.
+	persistedSessions  bool
 	roster             *rosterconfig.Config
 	parentID           string   // runtime ID of the parent agent, empty for top-level
 	children           []string // runtime IDs spawned by this runtime
@@ -1789,6 +1799,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		thinking:                 params.Thinking,
 		backend:                  backend,
 		effectiveBackend:         backend,
+		persistedSessions:        factory.ResolvesPersistedSessions(backend, params.PersistSessions),
 		effectiveAgent:           params.Agent,
 		effectiveModel:           params.Model,
 		rosterFile:               params.RosterFile,
@@ -2049,17 +2060,18 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		s.ensureChildBrokerRun(child)
 	}
 	startOpts := runtime.StartOptions{
-		Agent:         params.Agent,
-		AgentProfile:  params.AgentProfile,
-		Label:         params.Label,
-		Dir:           params.Dir,
-		Model:         params.Model,
-		Thinking:      params.Thinking,
-		LaunchWrapper: params.LaunchWrapper,
-		RuntimeID:     rtID,
-		Broker:        s.broker,
-		BrokerToken:   child.brokerToken,
-		Provenance:    runtime.DirectLaunchProvenance(rtID, params.Label, 1),
+		Agent:           params.Agent,
+		AgentProfile:    params.AgentProfile,
+		Label:           params.Label,
+		Dir:             params.Dir,
+		Model:           params.Model,
+		Thinking:        params.Thinking,
+		PersistSessions: params.PersistSessions,
+		LaunchWrapper:   params.LaunchWrapper,
+		RuntimeID:       rtID,
+		Broker:          s.broker,
+		BrokerToken:     child.brokerToken,
+		Provenance:      runtime.DirectLaunchProvenance(rtID, params.Label, 1),
 	}
 	discovery := cli.DiscoverServer(params.ServerURL, os.Getenv)
 	startOpts.ServerURL = discovery.URL
@@ -2853,19 +2865,24 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
 
+			// The phase entry's persisted-session choice does not exist yet (the
+			// roster lever lands in the follow-up PR): the run's recorded choice is
+			// what phase attempts carry.
+			persistOpt := phasePersistChoice(nil, child.persistedSessions)
 			startOpts := runtime.StartOptions{
-				Agent:         identity.Agent,
-				AgentProfile:  identity.AgentProfile,
-				Label:         child.label,
-				Model:         identity.Model,
-				Thinking:      phaseThinking,
-				Dir:           child.dir,
-				ServerURL:     serverURL,
-				RuntimeID:     child.id,
-				Broker:        s.broker,
-				BrokerToken:   child.brokerToken,
-				LaunchWrapper: child.launchWrapper,
-				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindLoop, phase.Name, child.label, &iteration, attemptNum),
+				Agent:           identity.Agent,
+				AgentProfile:    identity.AgentProfile,
+				Label:           child.label,
+				Model:           identity.Model,
+				Thinking:        phaseThinking,
+				PersistSessions: persistOpt,
+				Dir:             child.dir,
+				ServerURL:       serverURL,
+				RuntimeID:       child.id,
+				Broker:          s.broker,
+				BrokerToken:     child.brokerToken,
+				LaunchWrapper:   child.launchWrapper,
+				Provenance:      runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindLoop, phase.Name, child.label, &iteration, attemptNum),
 			}
 
 			resumeID := prevSessionID
@@ -3139,19 +3156,24 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			if resumeErr != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
+			// The phase entry's persisted-session choice does not exist yet (the
+			// roster lever lands in the follow-up PR): the run's recorded choice is
+			// what phase attempts carry.
+			persistOpt := phasePersistChoice(nil, child.persistedSessions)
 			startOpts := runtime.StartOptions{
-				Agent:         identity.Agent,
-				AgentProfile:  identity.AgentProfile,
-				Label:         child.label,
-				Model:         identity.Model,
-				Thinking:      phaseThinking,
-				Dir:           child.dir,
-				ServerURL:     serverURL,
-				RuntimeID:     child.id,
-				Broker:        s.broker,
-				BrokerToken:   child.brokerToken,
-				LaunchWrapper: child.launchWrapper,
-				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindTeam, phase.Name, child.label, nil, attemptNum),
+				Agent:           identity.Agent,
+				AgentProfile:    identity.AgentProfile,
+				Label:           child.label,
+				Model:           identity.Model,
+				Thinking:        phaseThinking,
+				PersistSessions: persistOpt,
+				Dir:             child.dir,
+				ServerURL:       serverURL,
+				RuntimeID:       child.id,
+				Broker:          s.broker,
+				BrokerToken:     child.brokerToken,
+				LaunchWrapper:   child.launchWrapper,
+				Provenance:      runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindTeam, phase.Name, child.label, nil, attemptNum),
 			}
 
 			resumeID := prevSessionID
@@ -3608,6 +3630,18 @@ func (s *Supervisor) releaseSessionAttempt(attempt *sessionAttempt) {
 		}
 	}
 	s.sessionIdentityMu.Unlock()
+}
+
+// phasePersistChoice layers the phase entry's persisted-session choice over
+// the run's recorded choice: the entry wins when set, and the recorded
+// choice fills the gap so a phase attempt re-uses the session store its run
+// was spawned with instead of re-reading an environment that may have moved.
+func phasePersistChoice(entry *bool, recorded bool) *bool {
+	if entry != nil {
+		return entry
+	}
+	on := recorded
+	return &on
 }
 
 func resolveStablePhaseSelection(roster *rosterconfig.Config, backend, agent, model string, phase phaseconfig.Phase, loop bool) (rosterconfig.ResolvedSelection, error) {

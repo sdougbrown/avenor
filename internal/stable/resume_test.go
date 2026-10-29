@@ -625,3 +625,114 @@ func TestResumePiWithPersistedSessionsRunsTheLadder(t *testing.T) {
 		t.Fatalf("not-resumable text = %q, want the ladder's unknown status", err)
 	}
 }
+
+// The per-spawn choice overrides the environment at the resume gate in both
+// directions: an explicit true persists without the env, an explicit false
+// stays ephemeral even when the env opts in.
+func TestResumeGatePerRunPersistChoice(t *testing.T) {
+	on := true
+	off := false
+	sup, _ := newStage2Supervisor(t, 4)
+
+	t.Run("opt true without env", func(t *testing.T) {
+		t.Setenv(pi.SessionsEnv, "")
+		child := &childRuntime{id: "prior", lc: lifecycleState{completion: completionPublished}, runDone: make(chan struct{})}
+		child.closeRunDone()
+		_, err := sup.resumeOnce(child, child.id, SpawnParams{Backend: "pi", Label: "next", PersistSessions: &on})
+		assertToolCode(t, err, "not_resumable")
+		if !strings.Contains(err.Error(), "(status: unknown)") {
+			t.Fatalf("not-resumable text = %q, want the ladder's unknown status", err)
+		}
+	})
+	t.Run("opt false with env", func(t *testing.T) {
+		t.Setenv(pi.SessionsEnv, "1")
+		child := &childRuntime{id: "prior", lc: lifecycleState{completion: completionPublished}, runDone: make(chan struct{})}
+		child.closeRunDone()
+		_, err := sup.resumeOnce(child, child.id, SpawnParams{Backend: "pi", Label: "next", PersistSessions: &off})
+		assertToolCode(t, err, "not_resumable")
+		if !strings.Contains(err.Error(), "(status: expired)") {
+			t.Fatalf("not-resumable text = %q, want the pi gate's expired status", err)
+		}
+	})
+}
+
+// A persisted prior run stays resumable even when the environment has since
+// dropped the opt-in: performResume carries the prior run's persisted-session
+// choice into the resume spawn.
+func TestResumeInheritsPriorPersistedChoice(t *testing.T) {
+	t.Setenv(pi.SessionsEnv, "")
+	sup, _ := newStage2Supervisor(t, 4)
+	child := &childRuntime{id: "prior", backend: "pi", persistedSessions: true, lc: lifecycleState{completion: completionPublished}, runDone: make(chan struct{})}
+	child.closeRunDone()
+	_, err := sup.performResume(child, child.id, messaging.ResumeRequest{Target: "prior", Message: "again"})
+	assertToolCode(t, err, "not_resumable")
+	if !strings.Contains(err.Error(), "(status: unknown)") {
+		t.Fatalf("not-resumable text = %q, want the ladder's unknown status, not the pi gate's expiry", err)
+	}
+}
+
+// The spawn threads the per-run persisted-session choice into the provider's
+// start options in both tri-state directions, and the spawn payload decodes
+// the tri-state JSON field.
+func TestSpawnPersistSessionsThreadsToProvider(t *testing.T) {
+	var decoded SpawnParams
+	if err := json.Unmarshal([]byte(`{"prompt":"work","dir":".","backend":"pi","persist_sessions":false}`), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.PersistSessions == nil || *decoded.PersistSessions {
+		t.Fatalf("decoded persist_sessions = %v, want false", decoded.PersistSessions)
+	}
+
+	off := false
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "persist"), MaxRuntimes: 1})
+	provider := &plainResumeProvider{}
+	constructorOpts := make(chan runtime.StartOptions, 4)
+	sup.newProviderFunc = func(opts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		constructorOpts <- opts
+		return provider, nil
+	}
+	if _, err := sup.spawn(SpawnParams{Prompt: "work", Dir: t.TempDir(), Backend: "pi", PersistSessions: &off}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	select {
+	case opts := <-constructorOpts:
+		if opts.PersistSessions == nil || *opts.PersistSessions {
+			t.Fatalf("start options = %+v, want the explicit false carried", opts)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider construction was not observed")
+	}
+}
+
+// An explicitly ephemeral prior run is refused at the resume gate even when
+// the environment opts in: the prior choice, recorded at spawn, is what the
+// resume inherits, so the refusal names the truth instead of sending the
+// caller to fix an env var that is already set.
+func TestResumePriorEphemeralWithEnvSet(t *testing.T) {
+	t.Setenv(pi.SessionsEnv, "1")
+	sup, _ := newStage2Supervisor(t, 4)
+	child := &childRuntime{id: "prior", backend: "pi", lc: lifecycleState{completion: completionPublished}, runDone: make(chan struct{})}
+	child.closeRunDone()
+	_, err := sup.performResume(child, child.id, messaging.ResumeRequest{Target: "prior", Message: "again"})
+	assertToolCode(t, err, "not_resumable")
+	if !strings.Contains(err.Error(), "(status: expired)") {
+		t.Fatalf("not-resumable text = %q, want the pi gate's expired status", err)
+	}
+}
+
+func TestPhasePersistChoice(t *testing.T) {
+	on := true
+	off := false
+	if got := phasePersistChoice(&off, true); got == nil || *got {
+		t.Fatalf("phasePersistChoice(&false, true) = %v, want the entry's false", got)
+	}
+	if got := phasePersistChoice(&on, false); got == nil || !*got {
+		t.Fatalf("phasePersistChoice(&true, false) = %v, want the entry's true", got)
+	}
+	if got := phasePersistChoice(nil, true); got == nil || !*got {
+		t.Fatalf("phasePersistChoice(nil, true) = %v, want the run's recorded true", got)
+	}
+	if got := phasePersistChoice(nil, false); got == nil || *got {
+		t.Fatalf("phasePersistChoice(nil, false) = %v, want the run's recorded false", got)
+	}
+}

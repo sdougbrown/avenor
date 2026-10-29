@@ -87,6 +87,7 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 	}
 	thinking := prior.thinking
 	agentProfile := prior.agentProfile
+	persistedSessions := prior.persistedSessions
 	dir := prior.dir
 	autoApprove := prior.autoApprove
 	rosterFile := prior.rosterFile
@@ -134,6 +135,15 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 			implicitLabel:    req.Label == "",
 		},
 	}
+	// The resume carries the prior run's recorded persisted-session choice
+	// unless the request set its own, in both directions: a persisted prior
+	// run stays resumable across process boundaries even when the
+	// environment has since dropped the opt-in, and an explicitly ephemeral
+	// prior run is refused at the gate instead of dying later with a
+	// misleading env-fix message.
+	if params.PersistSessions == nil {
+		params.PersistSessions = &persistedSessions
+	}
 	spawned, err := s.resumeOnce(prior, runID, params)
 	if err != nil {
 		var toolErr *router.ToolError
@@ -179,7 +189,7 @@ func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams
 	if warm {
 		return result, nil
 	}
-	if !factory.ResumesAcrossProcesses(p.Backend) {
+	if !factory.ResolvesPersistedSessions(p.Backend, p.PersistSessions) {
 		return result, notResumableError(runID, s.piResumeDeniedStatus(prior))
 	}
 	// Completion admission closes before provider teardown. Do not open the

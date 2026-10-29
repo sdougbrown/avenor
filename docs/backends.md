@@ -413,7 +413,7 @@ avenor \
 
 ## pi
 
-Avenor spawns `pi --mode rpc --no-session` by default and talks via its own JSON-RPC protocol over stdio. Sessions are ephemeral: the transcript is discarded when the process exits. Set `AVENOR_PI_SESSIONS=1` in the environment to opt in to persisted sessions (see below).
+Avenor spawns `pi --mode rpc --no-session` by default and talks via its own JSON-RPC protocol over stdio. Sessions are ephemeral: the transcript is discarded when the process exits. Set `AVENOR_PI_SESSIONS=1` in the environment, or pass a per-run choice (see below), to opt in to persisted sessions.
 
 **One session per instance.** This is a PI protocol constraint, not something Avenor can route around. If you try to start a second session before the first ends, the backend will error. If you need multiple concurrent sessions, run multiple Avenor invocations.
 
@@ -448,9 +448,11 @@ By default a pi run's transcript is discarded with its process: the only records
 - the full transcript, prompt included, survives the process as a pi session file you can read or resume later with pi itself;
 - the message tool's `resume` action can continue a finished pi run across processes, the way it continues codex runs: the supervisor reads the prior run's session ID from its sentinel, and the resumed child launches bound to that session.
 
+The per-run choice overrides the environment in both directions: a spawn with `persist_sessions: true` (MCP `spawn` argument, `persist_sessions` spawn parameter, `--persist-sessions` on `avenor run` and `avenor control spawn`) persists without the environment; `persist_sessions: false` stays ephemeral even when the environment opts in. A run that inherited or forced persistence keeps it on resume: the resumed run carries the prior run's choice (a persisted run stays resumable even when the environment has since dropped the opt-in), and an explicit `false` on a pi resume is refused rather than silently dropping the prior transcript.
+
 Session files go to `$XDG_STATE_HOME/avenor/pi-sessions` (default `~/.avenor/pi-sessions`), or to the directory named by `AVENOR_PI_SESSION_DIR`. The state home is outside run artifacts on purpose: artifact retention prunes aggressively, and a transcript someone wants later must not be pruned with them. The knob is opt-in rather than default because session files cost disk on every fan-out, and the shared session store is one of the suspects in the same-model startup race.
 
-A resume still refuses a run whose sentinel says `TIMEOUT` or `KILLED`, and a run that launched without persisted sessions cannot be resumed — the refusal names `AVENOR_PI_SESSIONS` so the fix is discoverable.
+A resume still refuses a run whose sentinel says `TIMEOUT` or `KILLED`, and a run that launched without persisted sessions cannot be resumed — the refusal names `AVENOR_PI_SESSIONS` so the fix is discoverable. 
 
 ---
 

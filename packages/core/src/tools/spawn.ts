@@ -18,6 +18,7 @@ export interface SpawnToolArgs {
   thinking?: ThinkingLevel
   agentProfile?: string
   backend?: string
+  persistSessions?: boolean
   rosterFile?: string
   rosterEntry?: string
   serverUrl?: string
@@ -74,6 +75,9 @@ async function executeSpawnTool(
   }
   if (args.thinking !== undefined) {
     baseParams.thinking = args.thinking
+  }
+  if (args.persistSessions !== undefined) {
+    baseParams.persist_sessions = args.persistSessions
   }
 
   if (args.supervisorId) {

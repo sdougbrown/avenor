@@ -36,6 +36,9 @@ type fakeIdempotentSupervisor struct {
 	// supervisor (hits and rejected conflicts included).
 	spawnCalls int
 	listRuns   []map[string]any
+	// lastSpawnParams records the params of the most recent spawn for
+	// argument-translation assertions.
+	lastSpawnParams map[string]any
 }
 
 type fakeIdemEntry struct {
@@ -61,6 +64,7 @@ func (f *fakeIdempotentSupervisor) SpawnMCP(params map[string]any) (map[string]a
 func (f *fakeIdempotentSupervisor) spawn(params map[string]any) (map[string]any, error) {
 	f.mu.Lock()
 	f.spawnCalls++
+	f.lastSpawnParams = params
 	f.mu.Unlock()
 	key, _ := params["idempotency_key"].(string)
 	if key == "" {
@@ -500,5 +504,34 @@ func TestSpawnKeySpaceIsolatedFromResume(t *testing.T) {
 	}
 	if n := sup.RuntimeCount(); n != 2 {
 		t.Fatalf("runtimes = %d, want 2 (spawn plus resume)", n)
+	}
+}
+
+// The MCP spawn boundary translates the tri-state persist_sessions argument
+// into the spawn parameter verbatim, in both directions and with the omitted
+// state absent.
+func TestSpawnArgsPersistSessionsTranslation(t *testing.T) {
+	on := true
+	off := false
+	sup := newFakeIdempotentSupervisor()
+	s := newIdempotencyServer(t, sup)
+
+	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo", PersistSession: &on}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sup.lastSpawnParams["persist_sessions"]; got != true {
+		t.Fatalf("persist_sessions = %v, want true", got)
+	}
+	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo", PersistSession: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sup.lastSpawnParams["persist_sessions"]; got != false {
+		t.Fatalf("persist_sessions = %v, want false", got)
+	}
+	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := sup.lastSpawnParams["persist_sessions"]; present {
+		t.Fatal("persist_sessions present for an omitted argument")
 	}
 }
