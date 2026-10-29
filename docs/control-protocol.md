@@ -315,6 +315,7 @@ Params:
 - `sentinel_file` (string) — path to write exit status. If omitted, created under `$TMPDIR/avenor-stable-<euid>/run_<supervisor_run_id>/<runtime_id>/`.
 - `permission_handler` (string) — how to handle permission requests (e.g. `"file:/path"` to poll files, or omit to use `auto_approve`).
 - `auto_approve` (bool) — auto-resolve all permission requests. Overrides file handler if both are set.
+- `persist_sessions` (bool) — opt this run into a persisted backend session (pi: a session directory instead of `--no-session`, enabling post-hoc transcripts and cross-process resume). Omitted inherits the supervisor's `AVENOR_PI_SESSIONS` environment; explicit values force the choice for the run.
 - `timeout` (string) — total run timeout as a Go duration (`30s`, `5m`, etc.).
 - `max_retries` (int) — max retries after transient backend errors.
 - `loop_file` (string) — path to a loop config JSON file (advanced multi-phase mode).

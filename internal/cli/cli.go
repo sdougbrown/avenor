@@ -101,6 +101,7 @@ type runOptions struct {
 	RunID                  string
 	MaxRetries             int
 	AutoApprove            bool
+	PersistSessions        *bool
 	ControlSocket          string
 	HTTPDebug              string
 	PermissionClaimTimeout time.Duration
@@ -140,6 +141,7 @@ func RunCommand() *clicontract.Command {
 			{Name: "run-id", Kind: clicontract.String, Usage: "correlation id for this run (generated if not set)"},
 			{Name: "max-retries", Kind: clicontract.Int, Usage: "maximum retry attempts on transient failure (0 = no retry)"},
 			{Name: "auto-approve", Kind: clicontract.Bool, Usage: "automatically approve all permission requests"},
+			{Name: "persist-sessions", Kind: clicontract.Bool, Usage: "persist the backend session (pi: a session directory instead of --no-session, enabling cross-process resume; omitted inherits AVENOR_PI_SESSIONS, true and false force the choice)"},
 			{Name: "control-socket", Kind: clicontract.String, Usage: "unix socket path for control plane"},
 			{Name: "http-debug", Kind: clicontract.String, Usage: "http debug adapter bind address"},
 			{Name: "permission-claim-timeout", Kind: clicontract.Duration, Usage: "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)"},
@@ -186,6 +188,10 @@ func RunInvocation(inv clicontract.Invocation, getenv func(string) string, stder
 		RosterEntry:            inv.Flags["roster-entry"],
 		PonyConfig:             inv.Flags["pony-config"],
 		BackendSet:             inv.Supplied["backend"],
+	}
+	if inv.Supplied["persist-sessions"] {
+		persistSessions := inv.Bools["persist-sessions"]
+		opts.PersistSessions = &persistSessions
 	}
 	return runWithOptions(opts, getenv, stderr)
 }
@@ -535,13 +541,14 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 	}
 
 	startOptions := runtime.StartOptions{
-		Agent:     opts.Agent,
-		Label:     opts.Label,
-		Dir:       opts.Dir,
-		ServerURL: discovery.URL,
-		Model:     opts.Model,
-		Thinking:  opts.Thinking,
-		Launch:    launch,
+		Agent:           opts.Agent,
+		Label:           opts.Label,
+		Dir:             opts.Dir,
+		ServerURL:       discovery.URL,
+		Model:           opts.Model,
+		Thinking:        opts.Thinking,
+		PersistSessions: opts.PersistSessions,
+		Launch:          launch,
 
 		ClaudeMCPWait: opts.ClaudeMCPWait,
 	}
@@ -573,7 +580,7 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
-		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: opts.Label, Dir: opts.Dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Launch: selection.Launch, Provenance: provenance}
+		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: opts.Label, Dir: opts.Dir, ServerURL: discovery.URL, Thinking: selection.Thinking, PersistSessions: opts.PersistSessions, Launch: selection.Launch, Provenance: provenance}
 		return runAttempt(ctx, attemptConfig{
 			startOptions:           startOptions,
 			backend:                selection.Backend,

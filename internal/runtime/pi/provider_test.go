@@ -1301,3 +1301,49 @@ func TestStartLaunchesPersistedSessionDirectory(t *testing.T) {
 		t.Fatalf("pi args = %q, want the persisted-session launch", got)
 	}
 }
+
+// The per-run choice overrides the environment in both directions: an
+// explicit true persists without the env, an explicit false stays ephemeral
+// even when the env opts in.
+func TestStartHonorsPerRunPersistChoice(t *testing.T) {
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+
+	cases := []struct {
+		name string
+		env  string
+		opt  *bool
+		want string
+	}{
+		{name: "opt true without env", env: "", opt: &[]bool{true}[0], want: "--session-dir"},
+		{name: "opt false with env", env: "1", opt: &[]bool{false}[0], want: "--no-session"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(SessionsEnv, tc.env)
+			t.Setenv(SessionDirEnv, filepath.Join(t.TempDir(), "sessions"))
+			var captured []string
+			piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+				captured = append([]string(nil), args...)
+				return exec.Command("cat")
+			}
+			p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_, err := p.Start(ctx, runtime.StartOptions{Dir: "/work", PersistSessions: tc.opt})
+			if err == nil {
+				t.Fatal("expected the start to fail against a silent fake child")
+			}
+			got := strings.Join(captured, " ")
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("pi args = %q, want %q", got, tc.want)
+			}
+			if tc.want == "--no-session" && strings.Contains(got, "--session-dir") {
+				t.Fatalf("pi args = %q, want no --session-dir under the forced-ephemeral choice", got)
+			}
+			if tc.want == "--session-dir" && strings.Contains(got, "--no-session") {
+				t.Fatalf("pi args = %q, want no --no-session under the forced-persisted choice", got)
+			}
+		})
+	}
+}
