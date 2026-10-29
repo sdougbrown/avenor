@@ -1,35 +1,30 @@
-// PreToolUse: hand the peer actions this session owns to the hook, and pass
-// everything else to the MCP server. The hook learns its identity from the
-// record its own session wrote, never from a tool argument.
+// PreToolUse: bind the avenor message and peers tools to this Codex thread.
+// The model's own arguments are passed through untouched; the added record path
+// is the only thing the MCP server reads, and it is not a credential.
 
-import { servePeerCall, PASS } from "./peer-actions.mjs";
-import { peerDirFor, readHookInput, readRecord } from "./common.mjs";
+import { peerDirFor, readHookInput, readRecord, recordPathFor } from "./common.mjs";
 
 const input = await readHookInput();
 const sessionID = typeof input.session_id === "string" ? input.session_id : "";
 const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
-const args = input.tool_input !== null && typeof input.tool_input === "object" ? input.tool_input : {};
 
-if (peerDirFor(undefined, sessionID) === "" || !/__(message|peers)$/.test(toolName)) passThrough();
+if (peerDirFor(undefined, sessionID) === "" || !/__(message|peers)$/.test(toolName)) {
+  passThrough();
+}
+
 const record = readRecord(sessionID);
 if (record === null) passThrough();
 
-let result;
-try {
-  result = await servePeerCall({ record, sessionID, toolName, args });
-} catch (err) {
-  result = { text: "avenor peer request failed: " + (err instanceof Error ? err.message : String(err)), ok: false };
-}
-if (result === PASS) passThrough();
+const args = input.tool_input !== null && typeof input.tool_input === "object" ? input.tool_input : {};
+// Resume is the supervisor's own authority; a broker-authenticated run cannot
+// continue a run it did not spawn, so the unbound surface keeps serving it.
+if (toolName.endsWith("__message") && args.action === "resume") passThrough();
 
-// Only a served call is final. A refusal may be retried (a reply restores its
-// claim for exactly that reason), so it carries no stop instruction.
-const suffix = result.ok ? "\n\n(This result is final; do not retry the tool call.)" : "";
 process.stdout.write(JSON.stringify({
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
-    permissionDecision: "deny",
-    permissionDecisionReason: result.text + suffix,
+    permissionDecision: "allow",
+    updatedInput: { ...args, codex_peer_file: recordPathFor(process.env.AVENOR_HOME || undefined, sessionID) },
   },
 }));
 
