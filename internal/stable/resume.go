@@ -9,7 +9,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runstate"
-	"github.com/sdougbrown/avenor/internal/runtime/pi"
+	"github.com/sdougbrown/avenor/internal/runtime/factory"
 )
 
 // Resume continues a prior run in a new one. The target is a resolved broker
@@ -179,7 +179,7 @@ func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams
 	if warm {
 		return result, nil
 	}
-	if p.Backend == "pi" && !pi.SessionsPersistEnabled() {
+	if !factory.ResumesAcrossProcesses(p.Backend) {
 		return result, notResumableError(runID, s.piResumeDeniedStatus(prior))
 	}
 	// Completion admission closes before provider teardown. Do not open the

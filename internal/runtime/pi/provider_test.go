@@ -1270,3 +1270,34 @@ func TestResumePersistedClosesTheClientItReplaces(t *testing.T) {
 		t.Fatalf("SessionID = %q, want %q", sess.SessionID, id)
 	}
 }
+
+// The fresh-start persisted path drives the provider all the way to the
+// child argv: with the feature opted in, Start launches pi with the session
+// directory instead of --no-session, without a startClient fake standing
+// between the provider and the launcher.
+func TestStartLaunchesPersistedSessionDirectory(t *testing.T) {
+	t.Setenv(SessionsEnv, "1")
+	dir := filepath.Join(t.TempDir(), "sessions")
+	t.Setenv(SessionDirEnv, dir)
+	original := piExecCommandContext
+	t.Cleanup(func() { piExecCommandContext = original })
+	var captured []string
+	piExecCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		captured = append([]string(nil), args...)
+		return exec.Command("cat")
+	}
+
+	p := NewWithOptions(runtime.StartOptions{Dir: "/work"})
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	// The fake child never answers get_state, so the start fails; the
+	// launch argv it produced is the assertion.
+	_, err := p.Start(ctx, runtime.StartOptions{Dir: "/work"})
+	if err == nil {
+		t.Fatal("expected the start to fail against a silent fake child")
+	}
+	got := strings.Join(captured, " ")
+	if got != "--mode rpc --session-dir "+dir {
+		t.Fatalf("pi args = %q, want the persisted-session launch", got)
+	}
+}

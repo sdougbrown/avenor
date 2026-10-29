@@ -188,13 +188,16 @@ func (p *Provider) registerClient(sessionID string, c *client) error {
 		return errors.New("pi rpc supports only one active session per provider")
 	}
 	replaced := p.client
+	// The session ID is set before the registration publishes: a prompt
+	// landing after the unlock must never see a client whose events would
+	// fan out under an empty session ID.
+	c.setSessionID(sessionID)
 	p.sessions[sessionID] = struct{}{}
 	p.client = c
 	p.mu.Unlock()
 	if replaced != nil && replaced != c {
 		replaced.Close()
 	}
-	c.setSessionID(sessionID)
 	return nil
 }
 

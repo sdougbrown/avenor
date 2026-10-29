@@ -60,3 +60,15 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 		return nil, fmt.Errorf("unknown backend %q", backend)
 	}
 }
+
+// ResumesAcrossProcesses reports whether the backend can continue a prior
+// run's session in a fresh process. pi qualifies only when its sessions
+// were persisted; every other backend's resume path handles its own
+// eligibility, so the resume gate in the supervisor consults the factory
+// rather than importing a concrete backend.
+func ResumesAcrossProcesses(backend string) bool {
+	if backend != "pi" {
+		return true
+	}
+	return pi.SessionsPersistEnabled()
+}
