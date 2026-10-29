@@ -17,6 +17,7 @@
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/codex.json",
   "interface": {
     "displayName": "Avenor",
     "shortDescription": "Delegate and supervise independent agent runs",
