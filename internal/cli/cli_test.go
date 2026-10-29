@@ -6674,7 +6674,7 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 		wantOutput      string
 		wantFinalReply  string
 		wantFinalOutput string
-		deadline        time.Time
+		deadlineIn      time.Duration
 		cancel          func(context.CancelFunc)
 	}{
 		{
@@ -6694,8 +6694,10 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 			wantFinalReply:  "After the tool.",
 			wantFinalOutput: "Before the tool. After the tool.",
 			// The shared run deadline is a wall-clock deadline now: the wait
-			// stops on its own once the per-waiter timer expires.
-			deadline: time.Now().Add(50 * time.Millisecond),
+			// stops on its own once the per-waiter timer expires. It is measured
+			// from when this case starts, not from when the table was built, so
+			// the cases ahead of it cannot spend the budget first.
+			deadlineIn: 50 * time.Millisecond,
 		},
 		{
 			name:            "trailing tool call",
@@ -6727,13 +6729,17 @@ func TestWaitForSessionCancelAndEndUsesFullReply(t *testing.T) {
 					close(sent)
 				}()
 
+				var runDeadline time.Time
+				if tt.deadlineIn > 0 {
+					runDeadline = time.Now().Add(tt.deadlineIn)
+				}
 				resultCh := make(chan sessionResult, 1)
 				go func() {
 					resultCh <- WaitForSession(ctx, &cliFakeProvider{}, SessionWaitConfig{
 						EventCh:   eventCh,
 						SessionID: "ses_cancel",
 						RunID:     "run_cancel",
-						Deadline:  tt.deadline,
+						Deadline:  runDeadline,
 					}, SessionWaitDeps{Writer: writer, Stderr: io.Discard})
 				}()
 
