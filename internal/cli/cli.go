@@ -580,7 +580,13 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
-		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: opts.Label, Dir: opts.Dir, ServerURL: discovery.URL, Thinking: selection.Thinking, PersistSessions: opts.PersistSessions, Launch: selection.Launch, Provenance: provenance}
+		// The explicit flag wins over the roster entry's choice; nil on both
+		// inherits the environment.
+		persistChoice := opts.PersistSessions
+		if persistChoice == nil {
+			persistChoice = selection.PersistSessions
+		}
+		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: opts.Label, Dir: opts.Dir, ServerURL: discovery.URL, Thinking: selection.Thinking, PersistSessions: persistChoice, Launch: selection.Launch, Provenance: provenance}
 		return runAttempt(ctx, attemptConfig{
 			startOptions:           startOptions,
 			backend:                selection.Backend,

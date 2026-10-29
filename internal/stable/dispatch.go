@@ -558,6 +558,7 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 			return nil, fmt.Errorf("node assignment: %w", err)
 		}
 		selection.Backend, selection.Agent, selection.Model = entry.Backend, entry.Agent, entry.Model
+		selection.PersistSessions = entry.PersistSessions
 		if thinking == "" {
 			thinking = entry.Thinking
 		}

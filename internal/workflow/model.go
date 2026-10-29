@@ -375,6 +375,10 @@ type ExecutionSelection struct {
 	Model        string `json:"model,omitempty"`
 	Thinking     string `json:"thinking,omitempty"`
 	RosterDigest string `json:"roster_digest,omitempty"`
+	// PersistSessions carries the roster entry's persisted-session choice:
+	// nil inherits the environment, true and false force the choice for the
+	// node's runtime (pi: a session directory instead of --no-session).
+	PersistSessions *bool `json:"persist_sessions,omitempty"`
 	// AutoApprove carries the assignment's unattended permission policy:
 	// every permission request is resolved as allow and no file permission
 	// handler is derived for the spawned runtime.
