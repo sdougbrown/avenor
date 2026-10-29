@@ -105,7 +105,7 @@ Phase names must be unique across `pre`, `team`, and `post`. The name `(initial)
 
 ## Roster-backed phases
 
-A roster file is a top-level map (JSON, YAML, or TOML). `roster_file` names the file and `roster_entry` names an entry. Each entry requires `backend` and at least one of `agent` or `model`; `system` and `thinking` are not roster fields and are rejected by strict decoding.
+A roster file is a top-level map (JSON, YAML, or TOML). `roster_file` names the file and `roster_entry` names an entry. Each entry requires `backend` and at least one of `agent` or `model`; `system` is not a roster field and is rejected by strict decoding. Each entry may set `persist_sessions` (bool): the entry's persisted-session choice for its runs (pi: a session directory instead of `--no-session`), overriding the supervisor's `AVENOR_PI_SESSIONS` environment; an explicit spawn choice still wins.
 
 This is a complete team configuration with per-phase backend selection:
 
