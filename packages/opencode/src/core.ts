@@ -800,7 +800,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
   // assistant message has completed, so a turn from another session neither
   // publishes nor retargets the binding, and an idle that produced no message
   // publishes nothing. A failure is logged, never rethrown.
-  async function publishHostTurn(info: Record<string, unknown>): Promise<void> {
+  async function publishHostTurn(info: Record<string, unknown>, settledText?: string[]): Promise<void> {
     const binding = hostBinding
     // A closed socket drops the client cache, not the binding: until the next
     // host tool rebinds, the binding's provider is stale, so skip quietly.
@@ -818,7 +818,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
     if (!binding.provider.recordLastTurn) return
     const recordLastTurn = binding.provider.recordLastTurn
     const publish = publishChain.then(() =>
-      publishTurn(binding, recordLastTurn, info, created, messageId))
+      publishTurn(binding, recordLastTurn, info, created, messageId, settledText))
     // A failed publish must not stop every later one, so the chain keeps a
     // resolved tail while the caller still sees the rejection.
     publishChain = publish.catch(() => {})
@@ -835,10 +835,11 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
     info: Record<string, unknown>,
     created: number,
     messageId: string,
+    settledText?: string[],
   ): Promise<void> {
     if (!isNewerTurn(created, messageId)) return
     try {
-      const content = await settledTurnText(binding.sessionId, messageId)
+      const content = settledText ?? await settledTurnText(binding.sessionId, messageId)
       const turn = extractTurnText([
         { content, stopReason: normalizeTurnStopReason(normalizeFinish(stopReasonOf(info))) },
       ])
@@ -930,6 +931,13 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
     const time = record.time as { created?: number; completed?: number } | undefined
     if (typeof time?.created !== 'number' || typeof time?.completed !== 'number') return
     const error = record.error as { type?: string } | undefined
+    const raw = message.parts ?? message.content
+    const settledText = Array.isArray(raw)
+      ? raw
+        .filter((part): part is { type?: string; text?: string } => part !== null && typeof part === 'object')
+        .filter(part => part.type === 'text')
+        .map(part => part.text ?? '')
+      : undefined
     await publishHostTurn({
       role: 'assistant',
       sessionID,
@@ -938,7 +946,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
       time: { created: time.created, completed: time.completed },
       finish: typeof record.finish === 'string' ? record.finish : undefined,
       ...(error?.type ? { error: { name: error.type } } : {}),
-    })
+    }, settledText)
   }
 
   const hooks: Hooks = {

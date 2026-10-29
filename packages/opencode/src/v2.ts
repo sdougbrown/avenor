@@ -5,6 +5,41 @@ import { createAvenorCore } from './core.js'
 
 type V2Context = Plugin.Context
 
+type ToolResultLike = {
+  title?: string
+  output: string
+  metadata?: Record<string, unknown>
+  attachments?: Array<{ type: string; mime: string; url: string; filename?: string }>
+}
+
+/**
+ * Project the V1 tool result shape onto the V2 Tool.Result shape. A title has
+ * no V2 field, so it rides in metadata; V1 attachments map onto V2 file
+ * content entries.
+ */
+export function toV2ToolResult(result: string | ToolResultLike): {
+  content: string | Array<{ type: 'text'; text: string } | { type: 'file'; uri: string; mime: string; name?: string }>
+  metadata?: Record<string, unknown>
+} {
+  if (typeof result === 'string') return { content: result }
+  const content: Array<{ type: 'text'; text: string } | { type: 'file'; uri: string; mime: string; name?: string }> = [
+    { type: 'text', text: result.output },
+    ...(result.attachments ?? []).map(attachment => ({
+      type: 'file' as const,
+      uri: attachment.url,
+      mime: attachment.mime,
+      ...(attachment.filename ? { name: attachment.filename } : {}),
+    })),
+  ]
+  return {
+    content,
+    metadata: {
+      ...(result.metadata ?? {}),
+      ...(result.title ? { title: result.title } : {}),
+    },
+  }
+}
+
 /**
  * The OpenCode 2 plugin setup. The shared core in core.ts owns the behavior;
  * this adapter registers it through the V2 domains: tools become a transform,
@@ -50,14 +85,7 @@ export async function setupAvenor(ctx: V2Context): Promise<() => void> {
               throw new Error('permission prompts are not supported in OpenCode 2 tool context')
             },
           })
-          if (typeof result === 'string') return { content: result }
-          return {
-            content: result.output,
-            metadata: {
-              ...(result.metadata ?? {}),
-              ...(result.title ? { title: result.title } : {}),
-            },
-          }
+          return toV2ToolResult(result)
         },
       })
     }
@@ -66,16 +94,22 @@ export async function setupAvenor(ctx: V2Context): Promise<() => void> {
   const controller = new AbortController()
   void (async () => {
     for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-      if (event.type === 'session.idle') {
-        const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID
-        if (sessionID) await core.onSessionIdle(sessionID)
-        continue
-      }
-      if (event.type === 'session.step.ended') {
-        const data = event.data as { sessionID?: string; assistantMessageID?: string } | undefined
-        if (data?.sessionID && data?.assistantMessageID) {
-          await core.onStepEnded(data.sessionID, data.assistantMessageID)
+      // One failed event must not end the subscription: the next session event
+      // still has to re-prompt monitors and publish turns.
+      try {
+        if (event.type === 'session.idle') {
+          const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID
+          if (sessionID) await core.onSessionIdle(sessionID)
+          continue
         }
+        if (event.type === 'session.step.ended') {
+          const data = event.data as { sessionID?: string; assistantMessageID?: string } | undefined
+          if (data?.sessionID && data?.assistantMessageID) {
+            await core.onStepEnded(data.sessionID, data.assistantMessageID)
+          }
+        }
+      } catch (error) {
+        console.error('[avenor] event handling failed:', error instanceof Error ? error.message : error)
       }
     }
   })().catch(console.error)
