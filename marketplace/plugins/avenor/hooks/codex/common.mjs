@@ -276,10 +276,64 @@ export function framePeerMessage(ask) {
   const sender = ask.sender !== "" ? ask.sender : ask.fromRunId;
   let frame = "**📨 Message from avenor peer `" + sender + "`** (broker run `" + ask.fromRunId + "`";
   frame += ask.messageId === "" ? "" : ", message id `" + ask.messageId + "`";
-  if (ask.role !== "") frame += ", role `" + ask.role + "`";
+  if (typeof ask.role === "string" && ask.role !== "") frame += ", role `" + ask.role + "`";
   frame += ")\n\n" + ask.message + "\n\n";
   frame += ask.messageId === ""
     ? "No reply is required; answer only if the message itself asks you to."
     : "Answer with the avenor message tool: `action: \"reply\"`, `reply_to: \"" + ask.messageId + "\"`, `message: \"…\"`.";
   return frame;
+}
+
+
+/** One writer for the register-and-record step: two hooks can fire together on
+ * the first prompt (SessionStart and UserPromptSubmit), and a second writer
+ * would leave outbound on one run and the poller on another. The holder is a
+ * pid, so a dead holder's lock is reclaimed. */
+export async function withSessionLock(sessionID, fn) {
+  const dir = peerDirFor(undefined, sessionID);
+  if (dir === "") return fn();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, "session.lock");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const fd = fs.openSync(file, "wx", 0o600);
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      try {
+        return await fn();
+      } finally {
+        try {
+          fs.rmSync(file, { force: true });
+        } catch {
+          // Released by a later attempt.
+        }
+      }
+    } catch {
+      let pid = 0;
+      try {
+        pid = Number(fs.readFileSync(file, "utf8"));
+      } catch {
+        pid = 0;
+      }
+      if (!(pid > 0 && processAlive(pid))) {
+        try {
+          fs.rmSync(file, { force: true });
+        } catch {
+          return undefined;
+        }
+        continue;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  return undefined;
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }

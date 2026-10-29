@@ -23,7 +23,7 @@ it from there:
   `/poll-control` and queues each framed message into the thread with
   `codex queue --thread <session id> --message <frame>`. Codex holds the
   message while busy and starts a turn when idle. Each ask's id is recorded so
-  the MCP server can claim it for `reply`.
+  the hook can claim it for `reply`.
 - **End:** `SessionEnd` posts `/finish` with status `ended`.
 
 ## How a user reaches it
@@ -87,9 +87,9 @@ scratch broker): two peers listed with their labels; rename moved only the
 renaming peer; tell rendered the sender and produced no ack loop; ask returned
 `outcome: replied` with `4`; a resumed peer reused `codex-746377`, re-armed its
 poller, and received `post-resume ping`; closing a session logged
-`session ended`. Captures live in `.cache/spike-486/codex-peers/`. Offline:
-`node --test marketplace/plugins/avenor/test/codex-hooks.test.mjs` and
-`go test ./internal/mcpserver -run 'Codex|PeerSurface|AskClaim|SplitCodex'`.
+`session ended`. Captures live in `.cache/spike-486/codex-peers/`. Offline: `node --test marketplace/plugins/avenor/test/codex-hooks.test.mjs`
+(identity ladder, attach refusal, frame text, tool dispatch, traversal guard,
+claim/restore, cancel generation).
 
 ## Known limits
 

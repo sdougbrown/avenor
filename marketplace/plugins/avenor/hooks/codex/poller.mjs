@@ -21,6 +21,8 @@ import {
 
 const POLL_TIMEOUT_MS = 5000;
 const IDENTITY_WAIT_MS = 30000;
+// Only a minted id may become a file name; a peer chooses the ids it sends.
+const MESSAGE_ID = /^av1\.[0-9a-z]+\.[0-9a-f]{32}$/;
 
 const input = await readHookInput();
 const sessionID = typeof input.session_id === "string" ? input.session_id : "";
@@ -93,6 +95,7 @@ async function deliver(id, sessionDir, ask) {
  * The MCP server claims it by rename before answering, so two processes never
  * both believe the same ask is theirs. */
 function rememberAsk(sessionDir, ask) {
+  if (!MESSAGE_ID.test(ask.messageId)) return;
   const dir = asksDirFor(undefined, path.basename(sessionDir));
   if (dir === "") return;
   try {
