@@ -2865,14 +2865,14 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
 
-			persistedSessions := child.persistedSessions
+			persistOpt := phasePersistChoice(selection.PersistSessions, child.persistedSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
 				Label:           child.label,
 				Model:           identity.Model,
 				Thinking:        phaseThinking,
-				PersistSessions: &persistedSessions,
+				PersistSessions: persistOpt,
 				Dir:             child.dir,
 				ServerURL:       serverURL,
 				RuntimeID:       child.id,
@@ -3153,14 +3153,14 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			if resumeErr != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
-			persistedSessions := child.persistedSessions
+			persistOpt := phasePersistChoice(selection.PersistSessions, child.persistedSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
 				Label:           child.label,
 				Model:           identity.Model,
 				Thinking:        phaseThinking,
-				PersistSessions: &persistedSessions,
+				PersistSessions: persistOpt,
 				Dir:             child.dir,
 				ServerURL:       serverURL,
 				RuntimeID:       child.id,
@@ -3624,6 +3624,18 @@ func (s *Supervisor) releaseSessionAttempt(attempt *sessionAttempt) {
 		}
 	}
 	s.sessionIdentityMu.Unlock()
+}
+
+// phasePersistChoice layers the phase entry's persisted-session choice over
+// the run's recorded choice: the entry wins when set, and the recorded
+// choice fills the gap so a phase attempt re-uses the session store its run
+// was spawned with instead of re-reading an environment that may have moved.
+func phasePersistChoice(entry *bool, recorded bool) *bool {
+	if entry != nil {
+		return entry
+	}
+	on := recorded
+	return &on
 }
 
 func resolveStablePhaseSelection(roster *rosterconfig.Config, backend, agent, model string, phase phaseconfig.Phase, loop bool) (rosterconfig.ResolvedSelection, error) {

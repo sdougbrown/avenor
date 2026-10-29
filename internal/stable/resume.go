@@ -135,11 +135,13 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 			implicitLabel:    req.Label == "",
 		},
 	}
-	// A persisted prior run stays resumable across process boundaries even
-	// when the environment has since dropped the opt-in: the resume carries
-	// the prior run's persisted-session choice unless the request set its
-	// own.
-	if persistedSessions && params.PersistSessions == nil {
+	// The resume carries the prior run's recorded persisted-session choice
+	// unless the request set its own, in both directions: a persisted prior
+	// run stays resumable across process boundaries even when the
+	// environment has since dropped the opt-in, and an explicitly ephemeral
+	// prior run is refused at the gate instead of dying later with a
+	// misleading env-fix message.
+	if params.PersistSessions == nil {
 		params.PersistSessions = &persistedSessions
 	}
 	spawned, err := s.resumeOnce(prior, runID, params)

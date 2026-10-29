@@ -702,3 +702,36 @@ func TestSpawnPersistSessionsThreadsToProvider(t *testing.T) {
 		t.Fatal("provider construction was not observed")
 	}
 }
+
+// An explicitly ephemeral prior run is refused at the resume gate even when
+// the environment opts in: the prior choice, recorded at spawn, is what the
+// resume inherits, so the refusal names the truth instead of sending the
+// caller to fix an env var that is already set.
+func TestResumePriorEphemeralWithEnvSet(t *testing.T) {
+	t.Setenv(pi.SessionsEnv, "1")
+	sup, _ := newStage2Supervisor(t, 4)
+	child := &childRuntime{id: "prior", backend: "pi", lc: lifecycleState{completion: completionPublished}, runDone: make(chan struct{})}
+	child.closeRunDone()
+	_, err := sup.performResume(child, child.id, messaging.ResumeRequest{Target: "prior", Message: "again"})
+	assertToolCode(t, err, "not_resumable")
+	if !strings.Contains(err.Error(), "(status: expired)") {
+		t.Fatalf("not-resumable text = %q, want the pi gate's expired status", err)
+	}
+}
+
+func TestPhasePersistChoice(t *testing.T) {
+	on := true
+	off := false
+	if got := phasePersistChoice(&off, true); got == nil || *got {
+		t.Fatalf("phasePersistChoice(&false, true) = %v, want the entry's false", got)
+	}
+	if got := phasePersistChoice(&on, false); got == nil || !*got {
+		t.Fatalf("phasePersistChoice(&true, false) = %v, want the entry's true", got)
+	}
+	if got := phasePersistChoice(nil, true); got == nil || !*got {
+		t.Fatalf("phasePersistChoice(nil, true) = %v, want the run's recorded true", got)
+	}
+	if got := phasePersistChoice(nil, false); got == nil || *got {
+		t.Fatalf("phasePersistChoice(nil, false) = %v, want the run's recorded false", got)
+	}
+}
