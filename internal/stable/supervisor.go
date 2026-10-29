@@ -2865,10 +2865,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
 
-			// The phase entry's persisted-session choice does not exist yet (the
-			// roster lever lands in the follow-up PR): the run's recorded choice is
-			// what phase attempts carry.
-			persistOpt := phasePersistChoice(nil, child.persistedSessions)
+			persistOpt := phasePersistChoice(selection.PersistSessions, child.persistedSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
@@ -3156,10 +3153,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			if resumeErr != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
-			// The phase entry's persisted-session choice does not exist yet (the
-			// roster lever lands in the follow-up PR): the run's recorded choice is
-			// what phase attempts carry.
-			persistOpt := phasePersistChoice(nil, child.persistedSessions)
+			persistOpt := phasePersistChoice(selection.PersistSessions, child.persistedSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
@@ -5221,6 +5215,12 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 		if params.Thinking == "" {
 			params.Thinking = entry.Thinking
 		}
+		// The roster's persisted-session choice applies when the spawn did
+		// not set its own; the nil-vs-explicit distinction is what lets a
+		// spawn force ephemeral under an entry that persists.
+		if params.PersistSessions == nil {
+			params.PersistSessions = entry.PersistSessions
+		}
 	}
 	resolved, err := s.resolveDirectResumeIdentity(params.SessionID, directSupplied, effectiveIdentity{
 		Backend: backend, Agent: params.Agent, Model: params.Model,
@@ -6347,6 +6347,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Backend = ec.Selection.Backend
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
+		params.PersistSessions = ec.Selection.PersistSessions
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
@@ -6408,6 +6409,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Backend = ec.Selection.Backend
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
+		params.PersistSessions = ec.Selection.PersistSessions
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
@@ -6470,6 +6472,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Backend = ec.Selection.Backend
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
+		params.PersistSessions = ec.Selection.PersistSessions
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}

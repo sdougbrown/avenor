@@ -12,6 +12,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/pi"
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 const resumeUUID1 = "6f9619ff-8b86-d011-b42d-00cf4fc964ff"
@@ -671,6 +672,43 @@ func TestResumeInheritsPriorPersistedChoice(t *testing.T) {
 	}
 }
 
+// A workflow node's roster entry carries its persisted-session choice into
+// the execution selection, which the node's spawn threads into the runtime.
+func TestNodeAssignmentCarriesPersistSessions(t *testing.T) {
+	on := true
+	rosterPath := filepath.Join(t.TempDir(), "roster.json")
+	if err := os.WriteFile(rosterPath, []byte(`{"worker":{"backend":"pi","model":"m","persist_sessions":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selection, err := resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:  rosterPath,
+		RosterEntry: "worker",
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if selection.PersistSessions == nil || *selection.PersistSessions != on {
+		t.Fatalf("selection persist_sessions = %v, want the entry's true", selection.PersistSessions)
+	}
+
+	// A node with an entry that does not set the choice resolves nil: the
+	// environment decides, and a spawn parameter still applies on top.
+	plainPath := filepath.Join(t.TempDir(), "plain.json")
+	if err := os.WriteFile(plainPath, []byte(`{"plain":{"backend":"pi","model":"m"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selection, err = resolveAssignmentSelection(&workflow.Assignment{
+		RosterFile:  plainPath,
+		RosterEntry: "plain",
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if selection.PersistSessions != nil {
+		t.Fatalf("selection persist_sessions = %v, want nil without the entry field", selection.PersistSessions)
+	}
+}
+
 // The spawn threads the per-run persisted-session choice into the provider's
 // start options, and the spawn payload decodes the tri-state JSON field.
 func TestSpawnPersistSessionsThreadsToProvider(t *testing.T) {
@@ -733,5 +771,32 @@ func TestPhasePersistChoice(t *testing.T) {
 	}
 	if got := phasePersistChoice(nil, false); got == nil || *got {
 		t.Fatalf("phasePersistChoice(nil, false) = %v, want the run's recorded false", got)
+	}
+}
+
+func TestSpawnRosterPersistSessionsMerge(t *testing.T) {
+	off := false
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "persist-roster"), MaxRuntimes: 1})
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.json")
+	roster := `{"worker":{"backend":"pi","model":"m","persist_sessions":true}}`
+	if err := os.WriteFile(rosterPath, []byte(roster), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	params, _, err := sup.resolveDirectSpawnIdentity(SpawnParams{Prompt: "work", Backend: "pi", RosterFile: rosterPath, RosterEntry: "worker"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if params.PersistSessions == nil || !*params.PersistSessions {
+		t.Fatalf("persist_sessions = %v, want the entry's true", params.PersistSessions)
+	}
+
+	params, _, err = sup.resolveDirectSpawnIdentity(SpawnParams{Prompt: "work", Backend: "pi", RosterFile: rosterPath, RosterEntry: "worker", PersistSessions: &off})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if params.PersistSessions == nil || *params.PersistSessions {
+		t.Fatalf("persist_sessions = %v, want the spawn's explicit false", params.PersistSessions)
 	}
 }

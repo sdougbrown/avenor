@@ -24,6 +24,11 @@ type Entry struct {
 	Agent    string `json:"agent,omitempty"`
 	Model    string `json:"model,omitempty"`
 	Thinking string `json:"thinking,omitempty"`
+	// PersistSessions opts runs of this entry into a persisted session
+	// store where the backend supports it (pi: a session directory instead
+	// of --no-session). Nil inherits the environment; true and false force
+	// the choice for the entry's runs unless the spawn sets its own.
+	PersistSessions *bool `json:"persist_sessions,omitempty"`
 }
 
 // Config is the top-level roster map, keyed by roster entry name.
@@ -145,10 +150,11 @@ type ResolveInput struct {
 // callers still merge it with their run-level value (an explicit run-level
 // level wins).
 type ResolvedSelection struct {
-	Backend  string
-	Agent    string
-	Model    string
-	Thinking string
+	Backend         string
+	Agent           string
+	Model           string
+	Thinking        string
+	PersistSessions *bool
 }
 
 // Resolve applies roster and phase selection precedence without mutating any
@@ -168,10 +174,11 @@ func Resolve(input ResolveInput) (ResolvedSelection, error) {
 			return ResolvedSelection{}, fmt.Errorf("roster entry: %w", err)
 		}
 		return ResolvedSelection{
-			Backend:  input.Roster.Backend,
-			Agent:    input.Roster.Agent,
-			Model:    input.Roster.Model,
-			Thinking: input.Roster.Thinking,
+			Backend:         input.Roster.Backend,
+			Agent:           input.Roster.Agent,
+			Model:           input.Roster.Model,
+			Thinking:        input.Roster.Thinking,
+			PersistSessions: input.Roster.PersistSessions,
 		}, nil
 	}
 
