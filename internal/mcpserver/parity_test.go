@@ -100,7 +100,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		// spawnArgs — repo_dir is required.
 		// agent and model are independently optional; omitting both uses runtime defaults.
 		// All remaining fields are optional.
-		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "idempotency_key", "launch_wrapper", "auto_approve"}
+		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "idempotency_key", "launch_wrapper", "auto_approve", "persist_sessions"}
 		required := []string{"repo_dir"}
 		assertFields(t, "spawnArgs", allowed, required)
 	})
@@ -345,7 +345,7 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 	// without error into the struct.
 	obj := make(map[string]any)
 	for _, f := range allowed {
-		if f == "auto_approve" || f == "wait" {
+		if f == "auto_approve" || f == "wait" || f == "persist_sessions" {
 			obj[f] = true
 			continue
 		}
@@ -378,6 +378,9 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		}
 		if !a.AutoApprove {
 			t.Errorf("%s: auto_approve not populated", structName)
+		}
+		if a.PersistSession == nil || !*a.PersistSession {
+			t.Errorf("%s: persist_sessions not populated", structName)
 		}
 		if !reflect.DeepEqual(a.LaunchWrapper, []string{"test"}) {
 			t.Errorf("%s: launch_wrapper not populated: %v", structName, a.LaunchWrapper)

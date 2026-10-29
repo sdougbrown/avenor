@@ -101,7 +101,7 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 		// Without persisted sessions the prior run's transcript is gone, so
 		// a fresh process could only run an empty session under this ID's
 		// name; refuse instead of silently losing the prior context.
-		if !SessionsPersistEnabled() {
+		if !ResolvePersistSessions(merged.PersistSessions) {
 			return runtime.Session{}, fmt.Errorf("session not found: %s (pi sessions run with --no-session; set %s=1 to persist sessions and enable cross-process resume)", sessionID, SessionsEnv)
 		}
 		return p.resumePersisted(ctx, sessionID, merged)
@@ -497,7 +497,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 // run's persisted session so its transcript continues.
 func (p *Provider) launchChild(ctx context.Context, opts runtime.StartOptions, resumeSessionID string) (*client, error) {
 	sessionDir := ""
-	if SessionsPersistEnabled() {
+	if ResolvePersistSessions(opts.PersistSessions) {
 		dir, err := PersistSessionsDir()
 		if err != nil {
 			return nil, fmt.Errorf("pi persisted sessions: %w", err)

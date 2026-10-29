@@ -146,7 +146,9 @@ met, when a current permission request appears, or when its timeout expires.
 Call `message` with `action: "resume"` when a `done` run needs more direction.
 It spawns a new session continuing from the prior one. Treat the resumed run as
 a new run through the same lifecycle. The existing `auto_approve` policy is
-inherited, so approved runs remain unattended across continuation turns.
+inherited, so approved runs remain unattended across continuation turns, and a
+pi run's persisted-session choice is inherited so a persisted run stays
+resumable.
 
 A `failed` or permission-`blocked` run whose backend session persisted can also
 be resumed: `resume` continues the recorded session instead of rebuilding

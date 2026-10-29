@@ -100,3 +100,22 @@ func TestSessionFileExists(t *testing.T) {
 		t.Fatal("SessionFileExists = nil error for an unreadable directory, want the read failure")
 	}
 }
+
+func TestResolvePersistSessions(t *testing.T) {
+	on := true
+	off := false
+	t.Setenv(SessionsEnv, "")
+	if ResolvePersistSessions(nil) {
+		t.Fatal("nil choice with the env unset should resolve ephemeral")
+	}
+	t.Setenv(SessionsEnv, "1")
+	if !ResolvePersistSessions(nil) {
+		t.Fatal("nil choice should inherit the environment")
+	}
+	if ResolvePersistSessions(&off) {
+		t.Fatal("an explicit false should override the environment")
+	}
+	if !ResolvePersistSessions(&on) {
+		t.Fatal("an explicit true should hold with the env unset")
+	}
+}

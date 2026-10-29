@@ -61,14 +61,15 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 	}
 }
 
-// ResumesAcrossProcesses reports whether the backend can continue a prior
-// run's session in a fresh process. pi qualifies only when its sessions
-// were persisted; every other backend's resume path handles its own
-// eligibility, so the resume gate in the supervisor consults the factory
-// rather than importing a concrete backend.
-func ResumesAcrossProcesses(backend string) bool {
+// ResolvesPersistedSessions reports whether the backend can continue a prior
+// run's session in a fresh process under this spawn's persisted-session
+// choice. pi qualifies when the choice or the environment opts in; every
+// other backend's resume path handles its own eligibility, so the resume
+// gate in the supervisor consults the factory rather than importing a
+// concrete backend.
+func ResolvesPersistedSessions(backend string, opt *bool) bool {
 	if backend != "pi" {
 		return true
 	}
-	return pi.SessionsPersistEnabled()
+	return pi.ResolvePersistSessions(opt)
 }

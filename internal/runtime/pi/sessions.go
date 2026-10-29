@@ -35,6 +35,16 @@ func SessionsPersistEnabled() bool {
 	}
 }
 
+// ResolvePersistSessions applies the per-run choice over the environment:
+// nil inherits SessionsPersistEnabled, true and false force the choice for
+// the run.
+func ResolvePersistSessions(opt *bool) bool {
+	if opt != nil {
+		return *opt
+	}
+	return SessionsPersistEnabled()
+}
+
 // PersistSessionsDir returns the directory persisted pi sessions live in,
 // creating it (mode 0700) when missing. An explicit SessionDirEnv value
 // wins; the default lives under the avenor state home, outside the artifact

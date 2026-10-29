@@ -109,6 +109,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	runIDFlag := fs.String("run-id", "", "correlation id for this run (generated if not set)")
 	maxRetries := fs.Int("max-retries", 0, "maximum retry attempts on transient failure (0 = no retry)")
 	autoApprove := fs.Bool("auto-approve", false, "automatically approve all permission requests")
+	persistSessionsFlag := fs.Bool("persist-sessions", false, "persist the backend session (pi: a session directory instead of --no-session, enabling cross-process resume)")
 	controlSocket := fs.String("control-socket", "", "unix socket path for control plane")
 	httpDebug := fs.String("http-debug", "", "http debug adapter bind address")
 	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)")
@@ -468,6 +469,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		}
 	}
 
+	var persistSessions *bool
+	if *persistSessionsFlag {
+		persistOn := true
+		persistSessions = &persistOn
+	}
 	startOptions := runtime.StartOptions{
 		Agent:     *agent,
 		Label:     *label,
@@ -476,7 +482,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		Model:     *model,
 		Thinking:  *thinking,
 
-		ClaudeMCPWait: *claudeMCPWait,
+		PersistSessions: persistSessions,
+		ClaudeMCPWait:   *claudeMCPWait,
 	}
 
 	if controlServer != nil {
@@ -503,7 +510,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
-		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance}
+		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, PersistSessions: persistSessions, Provenance: provenance}
 		return runAttempt(ctx, attemptConfig{
 			startOptions:           startOptions,
 			backend:                selection.Backend,

@@ -2331,6 +2331,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         roster_file: Type.Optional(Type.String({ description: 'Path to the roster map' })),
         roster_entry: Type.Optional(Type.String({ description: 'Roster entry to select. Requires roster_file unless a roster context is configured; disables agent, model, and backend' })),
         server_url: Type.Optional(Type.String({ description: 'Backend server URL' })),
+        persist_sessions: Type.Optional(Type.Boolean({ description: 'Persist the backend session (pi: a session directory instead of --no-session, enabling cross-process resume). Omitted inherits the supervisor environment; true and false force the choice for this run' })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
         wait: Type.Optional(Type.Boolean({ description: 'Block until complete (default true)' })),
       }),
@@ -2380,6 +2381,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           ...(params.roster_entry !== undefined ? { rosterEntry: params.roster_entry } : {}),
           ...(agentProfile !== undefined ? { agentProfile } : {}),
           ...(params.server_url !== undefined ? { serverUrl: params.server_url } : {}),
+          ...(params.persist_sessions !== undefined ? { persistSessions: params.persist_sessions } : {}),
           ...(params.supervisor_id !== undefined ? { supervisorId: params.supervisor_id } : {}),
           ...(parentRunId !== undefined ? { parent_run_id: parentRunId } : {}),
         })

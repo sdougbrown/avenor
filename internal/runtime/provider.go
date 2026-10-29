@@ -40,6 +40,12 @@ type StartOptions struct {
 	Model        string
 	AgentProfile string
 	Thinking     string
+	// PersistSessions opts this run into a persisted session store where the
+	// backend supports it (pi launches with a session directory instead of
+	// --no-session, which enables post-hoc transcripts and cross-process
+	// resume). Nil inherits the AVENOR_PI_SESSIONS environment; true and
+	// false force the choice for this run regardless of the environment.
+	PersistSessions *bool
 	// ClaudeMCPWait holds the first prompt of a claude session until this long
 	// after launch, so MCP servers Claude Code connects in the background are
 	// available to the first turn. Zero sends the prompt as soon as the
@@ -213,6 +219,9 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	}
 	if override.Thinking != "" {
 		merged.Thinking = override.Thinking
+	}
+	if override.PersistSessions != nil {
+		merged.PersistSessions = override.PersistSessions
 	}
 	if override.ClaudeMCPWait != 0 {
 		merged.ClaudeMCPWait = override.ClaudeMCPWait
