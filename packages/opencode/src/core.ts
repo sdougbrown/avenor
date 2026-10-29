@@ -327,6 +327,17 @@ export type StepEndedProjection = {
 }
 
 /**
+ * Map a V2 structured error type onto the error-name spellings stopReasonOf
+ * recognizes, so a V2 turn ends with the same canonical stop reason a V1 turn
+ * would: aborted turns cancel, length errors cap, everything else is an error.
+ */
+function v2ErrorName(type: string): string {
+  if (/abort|cancel|interrupt/i.test(type)) return 'MessageAbortedError'
+  if (/length|limit|token/i.test(type)) return 'MessageOutputLengthError'
+  return type
+}
+
+/**
  * Project one settled message onto the info shape the V1 message.updated event
  * carried. The message must be an assistant message with a completed time, or
  * the projection is undefined and nothing publishes.
@@ -356,7 +367,7 @@ export function stepEndedInfo(
       summary: false,
       time: { created: time.created, completed: time.completed },
       finish: typeof record.finish === 'string' ? record.finish : undefined,
-      ...(error?.type ? { error: { name: error.type } } : {}),
+      ...(error?.type ? { error: { name: v2ErrorName(error.type) } } : {}),
     },
     settledText,
   }
@@ -933,7 +944,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
       '',
       'To answer: call `avenor_answer_permission` with:',
       `  run_id: "${runId}"`,
-      `  request_id: "${permission.id}"`,
+      ...(permission.id ? [`  request_id: "${permission.id}"`] : []),
       '  option_id: "allow_once" | "allow_always" | "deny"',
     ]
 

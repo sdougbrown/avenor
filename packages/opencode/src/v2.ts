@@ -64,16 +64,30 @@ type PermissionEventLike = {
   source?: { type: string; id: string }
 }
 
-/** Map the V2 permission evaluate event onto the V1 permission-ask shape. */
+/**
+ * Map the V2 permission evaluate event onto the V1 permission-ask shape. The
+ * source id is a tool-call ID, not the permission record ID the answer tool
+ * matches on, so it is deliberately not forwarded; the answer tool's
+ * auto-discovery resolves the real request ID.
+ */
 export function permissionAskFromEvent(event: PermissionEventLike): PermissionAsk {
   return {
     sessionID: event.sessionID,
     type: event.action,
     pattern: [...event.resources],
-    id: event.source?.type === 'tool' ? event.source.id : undefined,
+    id: undefined,
   }
 }
 
+/** The ask-only evaluate hook: an ask routes to the core, any other effect is left to the rules. */
+export function evaluatePermissionAsk(core: Pick<AvenorCore, 'onPermissionAsk'>) {
+  return async (event: PermissionEventLike & { effect: string }): Promise<void> => {
+    if (event.effect !== 'ask') return
+    await core.onPermissionAsk(permissionAskFromEvent(event))
+  }
+}
+
+/** One V1 tool-definition entry, typed loosely so both generations can register it. */
 type ToolDefinitionLike = {
   description: string
   args: Record<string, unknown>
@@ -92,14 +106,15 @@ type ToolContextLike = {
  * One registered V2 tool. The execute wrapper builds the V1 tool context —
  * the session's own directory when readable, the plugin location otherwise —
  * and projects the result onto the V2 shape. The per-session directory is
- * cached after its first read; a session's location does not move.
+ * cached after its first read; a session's location does not move. The cache
+ * is shared across every tool of one plugin instance.
  */
 export function v2ToolEntry(
   name: string,
   definition: ToolDefinitionLike,
   ctx: Pick<V2Context, 'location' | 'session'>,
+  directories: Map<string, string> = new Map(),
 ): { name: string; description: string; input: unknown; execute: (input: unknown, context: ToolContextLike) => Promise<unknown> } {
-  const directories = new Map<string, string>()
   return {
     name,
     description: definition.description,
@@ -173,8 +188,9 @@ export async function setupAvenor(ctx: V2Context): Promise<() => void> {
   const core = createAvenorCore(v2Host(ctx))
 
   await ctx.tool.transform((editor) => {
+    const directories = new Map<string, string>()
     for (const [name, definition] of Object.entries(core.tool ?? {})) {
-      editor.add(v2ToolEntry(name, definition, ctx) as never)
+      editor.add(v2ToolEntry(name, definition, ctx, directories) as never)
     }
   })
 
@@ -186,12 +202,7 @@ export async function setupAvenor(ctx: V2Context): Promise<() => void> {
     }
   })().catch(console.error)
 
-  await ctx.permission.hook('evaluate', async (event) => {
-    // An explicit configured deny is final before hooks run, and allow needs
-    // no routing; only an ask escalates to the orchestrator session.
-    if (event.effect !== 'ask') return
-    await core.onPermissionAsk(permissionAskFromEvent(event))
-  })
+  await ctx.permission.hook('evaluate', evaluatePermissionAsk(core))
 
   await ctx.session.hook('prompt', (event) => {
     if (event.prompt.text.includes('<channel ')) {

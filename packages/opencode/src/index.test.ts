@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { tool } from '@opencode-ai/plugin'
 
-import plugin, { createV2EventHandler, permissionAskFromEvent, setupAvenor, stepEndedInfo, toV2ToolResult, v2Host, v2ToolEntry } from './index.js'
+import plugin, { createV2EventHandler, evaluatePermissionAsk, permissionAskFromEvent, setupAvenor, stepEndedInfo, toV2ToolResult, v2Host, v2ToolEntry } from './index.js'
 
 function makeV2Ctx() {
   const added: Array<Record<string, any>> = []
@@ -12,6 +12,8 @@ function makeV2Ctx() {
   const getCalls: Array<Record<string, unknown>> = []
   const promptCalls: Array<Record<string, unknown>> = []
   const events: Array<Record<string, unknown>> = []
+  let drainedResolve: () => void = () => {}
+  const drained = new Promise<void>(resolve => { drainedResolve = resolve })
   const ctx = {
     location: { directory: '/plugin/location' },
     tool: {
@@ -49,12 +51,16 @@ function makeV2Ctx() {
       subscribe: (opts?: Record<string, unknown>) => {
         subscribeOptions.push(opts ?? {})
         return (async function* () {
-          for (const event of events) yield event
+          try {
+            for (const event of events) yield event
+          } finally {
+            drainedResolve()
+          }
         })()
       },
     },
   }
-  return { ctx, added, permissionHooks, sessionHooks, subscribeOptions, contextCalls, getCalls, promptCalls, events }
+  return { ctx, added, permissionHooks, sessionHooks, subscribeOptions, contextCalls, getCalls, promptCalls, events, drained }
 }
 
 const assistantMessage = (id: string) => ({
@@ -65,11 +71,17 @@ const assistantMessage = (id: string) => ({
 })
 
 describe('dual entrypoint', () => {
-  test('default export carries the V2 definition and the V1 server hook', () => {
-    expect(typeof plugin.id).toBe('string')
-    expect(plugin.id.length).toBeGreaterThan(0)
+  test('default export carries the V2 definition and a working V1 server hook', async () => {
+    expect(plugin.id).toBe('avenor')
     expect(typeof plugin.setup).toBe('function')
-    expect(typeof (plugin as Record<string, unknown>).server).toBe('function')
+    const server = (plugin as unknown as { server: (ctx: unknown) => Promise<Record<string, unknown>> }).server
+    const hooks = await server({})
+    expect(typeof hooks.event).toBe('function')
+    expect(typeof hooks['permission.ask']).toBe('function')
+    expect(typeof hooks['chat.message']).toBe('function')
+    expect(typeof hooks['experimental.text.complete']).toBe('function')
+    expect(typeof hooks.tool).toBe('object')
+    expect(Object.keys(hooks.tool as Record<string, unknown>).length).toBeGreaterThan(10)
   })
 })
 
@@ -101,13 +113,13 @@ describe('setupAvenor', () => {
   })
 
   test('step.ended for an unbound session does not read the session context', async () => {
-    const { ctx, contextCalls, events } = makeV2Ctx()
+    const { ctx, contextCalls, events, drained } = makeV2Ctx()
     events.push(
       { type: 'session.step.ended', data: { sessionID: 's1', assistantMessageID: 'm1' } },
       { type: 'session.idle', data: { sessionID: 's1' } },
     )
     await setupAvenor(ctx as never)
-    await new Promise(resolve => setTimeout(resolve, 20))
+    await drained
     expect(contextCalls).toEqual([])
   })
 
@@ -204,6 +216,18 @@ describe('v2ToolEntry', () => {
     await entry.execute({}, { sessionID: 's1', agent: 'a', messageID: 'm', signal: new AbortController().signal, progress: async () => {} })
     expect((definition as any).seenContext.directory).toBe('/plugin/location')
   })
+
+  test('one shared directory cache serves every tool of the instance', async () => {
+    const { ctx, getCalls } = makeV2Ctx()
+    const directories = new Map<string, string>()
+    const first = v2ToolEntry('tool_a', definition, ctx as never, directories)
+    const second = v2ToolEntry('tool_b', definition, ctx as never, directories)
+    const toolContext = { sessionID: 's1', agent: 'a', messageID: 'm', signal: new AbortController().signal, progress: async () => {} }
+    await first.execute({}, toolContext)
+    await second.execute({}, toolContext)
+    expect(getCalls).toEqual([{ sessionID: 's1' }])
+    expect((definition as any).seenContext.directory).toBe('/session/s1/dir')
+  })
 })
 
 describe('v2Host', () => {
@@ -239,13 +263,13 @@ describe('v2Host', () => {
 })
 
 describe('permissionAskFromEvent', () => {
-  test('maps the V2 evaluate event onto the V1 permission-ask shape', () => {
+  test('maps the V2 evaluate event onto the V1 permission-ask shape without the tool-call id', () => {
     expect(permissionAskFromEvent({
       sessionID: 's1',
       action: 'shell',
       resources: ['git push *'],
       source: { type: 'tool', id: 'call_1' },
-    })).toEqual({ sessionID: 's1', type: 'shell', pattern: ['git push *'], id: 'call_1' })
+    })).toEqual({ sessionID: 's1', type: 'shell', pattern: ['git push *'], id: undefined })
   })
 
   test('leaves the id unset when the source is not a tool call', () => {
@@ -255,14 +279,14 @@ describe('permissionAskFromEvent', () => {
   })
 
   test('the evaluate hook forwards only ask decisions', async () => {
-    const { ctx, permissionHooks } = makeV2Ctx()
-    const core = { onPermissionAsk: async () => {} }
-    await setupAvenor(ctx as never)
-    const hook = permissionHooks[0]!.callback
-    // A tracked-run lookup happens inside the core; with no runs registered
-    // the call is a quiet no-op for both effects.
-    await hook({ sessionID: 's1', action: 'shell', resources: [], effect: 'ask', source: { type: 'tool', id: 'c1' } })
-    await hook({ sessionID: 's1', action: 'edit', resources: [], effect: 'allow' })
+    const routed: Array<Record<string, unknown>> = []
+    const onAsk = evaluatePermissionAsk({ onPermissionAsk: async (ask) => { routed.push(ask) } })
+    await onAsk({ sessionID: 's1', action: 'shell', resources: [], effect: 'ask', source: { type: 'tool', id: 'c1' } })
+    await onAsk({ sessionID: 's1', action: 'edit', resources: [], effect: 'allow' })
+    await onAsk({ sessionID: 's1', action: 'edit', resources: [], effect: 'deny' })
+    expect(routed).toEqual([
+      { sessionID: 's1', type: 'shell', pattern: [], id: undefined },
+    ])
   })
 })
 
@@ -292,7 +316,15 @@ describe('stepEndedInfo', () => {
       error: { type: 'aborted' },
     } as never, 's1', 'm1')!
     expect(settled.info.finish).toBe('tool-calls')
-    expect(settled.info.error).toEqual({ name: 'aborted' })
+    expect(settled.info.error).toEqual({ name: 'MessageAbortedError' })
+    const capped = stepEndedInfo({
+      content: [], time: { created: 1, completed: 2 }, error: { type: 'context_length_exceeded' },
+    } as never, 's1', 'm1')!
+    expect(capped.info.error).toEqual({ name: 'MessageOutputLengthError' })
+    const other = stepEndedInfo({
+      content: [], time: { created: 1, completed: 2 }, error: { type: 'provider_overloaded' },
+    } as never, 's1', 'm1')!
+    expect(other.info.error).toEqual({ name: 'provider_overloaded' })
   })
 
   test('is undefined when the message has not completed', () => {
