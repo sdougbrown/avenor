@@ -74,8 +74,17 @@ describe('dual entrypoint', () => {
   test('default export carries the V2 definition and a working V1 server hook', async () => {
     expect(plugin.id).toBe('avenor')
     expect(typeof plugin.setup).toBe('function')
-    const server = (plugin as unknown as { server: (ctx: unknown) => Promise<Record<string, unknown>> }).server
-    const hooks = await server({})
+    // A V1-shaped context: the host wraps ctx.client lazily, so the hooks
+    // object must build without touching it.
+    const v1Ctx = {
+      client: {
+        session: {
+          promptAsync: async () => undefined,
+          message: async () => ({ data: undefined }),
+        },
+      },
+    }
+    const hooks = await (plugin as unknown as { server: (ctx: unknown) => Promise<Record<string, unknown>> }).server(v1Ctx)
     expect(typeof hooks.event).toBe('function')
     expect(typeof hooks['permission.ask']).toBe('function')
     expect(typeof hooks['chat.message']).toBe('function')
