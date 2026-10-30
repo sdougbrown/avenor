@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,36 @@ func loadConformanceCases(t *testing.T) []conformanceCase {
 		t.Fatal("fixture carries no case")
 	}
 	return fixture.Cases
+}
+
+// loadFixtureApplicability reads the fixture's applicability map, which is the
+// source of the generated table. Comparing the compiled table against it catches
+// a fixture edit that was never regenerated.
+func loadFixtureApplicability(t *testing.T) map[string]ActionApplicability {
+	t.Helper()
+	data, err := os.ReadFile("../../schemas/workflow_route.conformance.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	var fixture struct {
+		Applicability map[string]struct {
+			Permitted []string          `json:"permitted"`
+			Required  []string          `json:"required"`
+			Types     map[string]string `json:"types"`
+		} `json:"applicability"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	out := make(map[string]ActionApplicability, len(fixture.Applicability))
+	for action, entry := range fixture.Applicability {
+		out[action] = ActionApplicability{
+			Permitted: entry.Permitted,
+			Required:  entry.Required,
+			Types:     entry.Types,
+		}
+	}
+	return out
 }
 
 // fakeClient records the one control call the router makes and returns a canned
@@ -279,8 +310,19 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 			} else if constraint.MinLength != 0 {
 				t.Fatalf("%s.%s: table declares minLength %d but the schema declares none", action, name, constraint.MinLength)
 			}
-			if v, ok := spec["maxLength"]; ok && int(mustInt64(t, v)) != constraint.MaxLength {
-				t.Fatalf("%s.%s: schema maxLength %v, table %d", action, name, v, constraint.MaxLength)
+			if v, ok := spec["maxLength"]; ok {
+				if int(mustInt64(t, v)) != constraint.MaxLength {
+					t.Fatalf("%s.%s: schema maxLength %v, table %d", action, name, v, constraint.MaxLength)
+				}
+			} else if constraint.MaxLength != 0 {
+				t.Fatalf("%s.%s: table declares maxLength %d but the schema declares none", action, name, constraint.MaxLength)
+			}
+			if v, ok := spec["pattern"]; ok {
+				if v.(string) != constraint.Pattern {
+					t.Fatalf("%s.%s: schema pattern %v, table %q", action, name, v, constraint.Pattern)
+				}
+			} else if constraint.Pattern != "" {
+				t.Fatalf("%s.%s: table declares pattern %q but the schema declares none", action, name, constraint.Pattern)
 			}
 			if v, ok := spec["minimum"]; ok && v.(json.Number).String() != fmt.Sprint(constraint.Minimum) {
 				t.Fatalf("%s.%s: schema minimum %v, table %d", action, name, v, constraint.Minimum)
@@ -295,6 +337,47 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 				t.Fatalf("%s.%s: schema maximum presence %v, table %v", action, name, !constraint.HasMaximum, constraint.HasMaximum)
 			}
 		}
+	}
+
+	// The fixture's applicability map is the source of the generated table, so a
+	// fixture edit that was never regenerated must fail here rather than leave
+	// the router validating the old contract.
+	fixture := loadFixtureApplicability(t)
+	if len(fixture) != len(workflowApplicability) {
+		t.Fatalf("fixture declares %d actions, table has %d", len(fixture), len(workflowApplicability))
+	}
+	for action, want := range fixture {
+		got, ok := workflowApplicability[action]
+		if !ok {
+			t.Fatalf("fixture action %q has no table entry", action)
+		}
+		if !reflect.DeepEqual(got.Permitted, want.Permitted) {
+			t.Fatalf("%s: fixture permits %v, table permits %v", action, want.Permitted, got.Permitted)
+		}
+		if !reflect.DeepEqual(got.Required, want.Required) {
+			t.Fatalf("%s: fixture requires %v, table requires %v", action, want.Required, got.Required)
+		}
+		if !reflect.DeepEqual(got.Types, want.Types) {
+			t.Fatalf("%s: fixture types %v, table types %v", action, want.Types, got.Types)
+		}
+	}
+}
+
+// TestCompleteKeepsLargeIntegersExact proves the JSON-typed fields reach the
+// client as the bytes the caller sent. Decoding them into any would turn every
+// number into a float64 and round an integer above 2^53 before dispatch.
+func TestCompleteKeepsLargeIntegersExact(t *testing.T) {
+	client := &fakeClient{}
+	_, err := Execute(client, json.RawMessage(`{"action":"complete","workflow_id":"wf-1","node_id":"n1","activation_id":"a1","attempt_id":"at1","lease_id":"l1","owner_token":"tok","outcome":"success","outputs":[{"definition_id":"o1","value":9007199254740993}]}`), Options{})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	raw, err := json.Marshal(client.calls[0].args["outputs"])
+	if err != nil {
+		t.Fatalf("marshal outputs: %v", err)
+	}
+	if !strings.Contains(string(raw), "9007199254740993") {
+		t.Fatalf("outputs lost the exact integer: %s", raw)
 	}
 }
 
@@ -324,6 +407,19 @@ func TestWaitClamp(t *testing.T) {
 	}
 	if _, ok := result.Value["wait_clamped"]; ok {
 		t.Fatalf("a terminal result was marked clamped: %#v", result.Value)
+	}
+
+	// A clamp that returns the requested duration unchanged must not mark the
+	// result: only a budget the surface actually shortened is clamped.
+	client = &fakeClient{result: map[string]any{"timed_out": true, "terminal": false}}
+	result, err = Execute(client, json.RawMessage(`{"action":"wait","workflow_id":"wf-1","timeout":"5m"}`), Options{
+		ClampWait: func(requested time.Duration) (time.Duration, bool) { return requested, false },
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if _, ok := result.Value["wait_clamped"]; ok {
+		t.Fatalf("an unclamped timed-out result was marked clamped: %#v", result.Value)
 	}
 }
 
@@ -375,15 +471,23 @@ func validateAgainst(t *testing.T, schema map[string]any, input json.RawMessage)
 // the fake client matches the float64 a fixture decodes.
 func sameJSON(t *testing.T, got, want any) bool {
 	t.Helper()
-	gotJSON, err := json.Marshal(got)
-	if err != nil {
-		t.Fatalf("marshal got: %v", err)
+	// Decode both sides with UseNumber so an int64 recorded by the fake client
+	// matches the float64 a fixture decodes, a json.RawMessage matches the object
+	// it carries, and an integer above 2^53 stays exact.
+	normalize := func(value any) any {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var out any
+		if err := decoder.Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out
 	}
-	wantJSON, err := json.Marshal(want)
-	if err != nil {
-		t.Fatalf("marshal want: %v", err)
-	}
-	return string(gotJSON) == string(wantJSON)
+	return reflect.DeepEqual(normalize(got), normalize(want))
 }
 
 // TestSchemaFilesCompiled catches a stale schema.gen.go without running go

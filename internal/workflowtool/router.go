@@ -181,6 +181,9 @@ func wait(client Client, input workflowInput, opts Options) (Result, error) {
 		return Result{}, refused(err)
 	}
 	if clamped {
+		if value == nil {
+			value = map[string]any{}
+		}
 		timedOut, _ := value["timed_out"].(bool)
 		terminal, _ := value["terminal"].(bool)
 		if timedOut && !terminal {
@@ -217,11 +220,12 @@ func gate(client Client, input workflowInput) (Result, error) {
 		fields["observed_at"] = input.ObservedAt
 	}
 	if len(input.Subject) > 0 {
-		var subject any
-		if err := json.Unmarshal(input.Subject, &subject); err != nil {
+		if !json.Valid(input.Subject) {
 			return Result{}, invalidRequest(actionGate, "subject must be valid JSON")
 		}
-		fields["subject"] = subject
+		// Pass the raw bytes through: decoding into any would turn every number
+		// into a float64 and round an integer above 2^53 before dispatch.
+		fields["subject"] = input.Subject
 	}
 	if len(input.EvidenceIDs) > 0 {
 		fields["evidence_ids"] = input.EvidenceIDs
@@ -241,18 +245,16 @@ func complete(client Client, input workflowInput) (Result, error) {
 		"outcome":       input.Outcome,
 	}
 	if len(input.Outputs) > 0 {
-		var outputs any
-		if err := json.Unmarshal(input.Outputs, &outputs); err != nil {
+		if !json.Valid(input.Outputs) {
 			return Result{}, invalidRequest(actionComplete, "outputs must be valid JSON")
 		}
-		fields["outputs"] = outputs
+		fields["outputs"] = input.Outputs
 	}
 	if len(input.Artifacts) > 0 {
-		var artifacts any
-		if err := json.Unmarshal(input.Artifacts, &artifacts); err != nil {
+		if !json.Valid(input.Artifacts) {
 			return Result{}, invalidRequest(actionComplete, "artifacts must be valid JSON")
 		}
-		fields["artifacts"] = artifacts
+		fields["artifacts"] = input.Artifacts
 	}
 	return call(actionComplete, func() (map[string]any, error) {
 		return client.WorkflowComplete(input.WorkflowID, fields)
@@ -546,8 +548,10 @@ func validateStringConstraint(name, value string, constraint PropertyConstraints
 		return Repair("string_too_long", map[string]string{"name": quote(name), "max": fmt.Sprint(constraint.MaxLength)})
 	}
 	if constraint.Pattern != "" {
+		// A pattern that does not compile matches nothing, so every value is
+		// refused rather than the check being skipped.
 		re, err := regexp.Compile(constraint.Pattern)
-		if err == nil && !re.MatchString(value) {
+		if err != nil || !re.MatchString(value) {
 			return Repair("string_pattern", map[string]string{"name": quote(name)})
 		}
 	}

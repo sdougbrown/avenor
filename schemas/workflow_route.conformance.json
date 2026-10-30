@@ -145,6 +145,11 @@
       "expect": {"code": "invalid_request", "message": "invalid input for action \"wait\": invalid timeout: \"9999999999h\""}
     },
     {
+      "name": "wait accepts the largest representable timeout",
+      "input": {"action": "wait", "workflow_id": "wf-1", "timeout": "9223372036s"},
+      "expect": {"action": "wait", "call": "wait", "args": {"workflow_id": "wf-1", "timeout_ms": 9223372036000}}
+    },
+    {
       "name": "status names a supervisor without forwarding it to the client",
       "input": {"action": "status", "workflow_id": "wf-1", "supervisor_id": "/tmp/sup-a.sock"},
       "expect": {"action": "status", "call": "status", "args": {"workflow_id": "wf-1"}}

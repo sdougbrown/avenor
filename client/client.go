@@ -849,10 +849,17 @@ func (c *Client) WorkflowStatus(workflowID string) (map[string]any, error) {
 // A timeout <= 0 returns after the first poll; the server defaults to 5s.
 func (c *Client) WorkflowWait(workflowID string, timeout time.Duration) (map[string]any, error) {
 	var result map[string]any
-	err := c.Call("workflow.wait", map[string]any{
+	// The server polls for the whole requested budget, so the response wait must
+	// outlast it. The default 30s budget would time out a longer wait while the
+	// server kept polling.
+	wait := time.Duration(0)
+	if timeout > 0 {
+		wait = timeout + 10*time.Second
+	}
+	err := c.call(context.Background(), "workflow.wait", map[string]any{
 		"workflow_id": workflowID,
 		"timeout_ms":  int64(timeout.Milliseconds()),
-	}, &result)
+	}, &result, wait)
 	return result, err
 }
 

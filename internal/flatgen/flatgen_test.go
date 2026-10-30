@@ -36,3 +36,13 @@ func TestFlattenKeepsInt64BoundsExact(t *testing.T) {
 		}
 	}
 }
+
+// TestFlattenRejectsTrailingContent proves the decoder refuses a schema file
+// with content after the top-level object. json.Decoder.Decode alone accepts it,
+// so the flat file would be written from a partially read input.
+func TestFlattenRejectsTrailingContent(t *testing.T) {
+	union := []byte(`{"oneOf":[{"properties":{"action":{"const":"tell"}}}]}{"oneOf":[]}`)
+	if _, err := Flatten(union, Meta{}); err == nil {
+		t.Fatal("Flatten accepted trailing content after the top-level object")
+	}
+}

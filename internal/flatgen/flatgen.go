@@ -42,6 +42,9 @@ func Flatten(raw []byte, meta Meta) ([]byte, error) {
 	if err := decoder.Decode(&union); err != nil {
 		return nil, fmt.Errorf("decode input schema: %w", err)
 	}
+	if decoder.More() {
+		return nil, errors.New("input schema carries trailing content after the top-level object")
+	}
 	if len(union.OneOf) == 0 {
 		return nil, errors.New("input schema declares no action variant")
 	}

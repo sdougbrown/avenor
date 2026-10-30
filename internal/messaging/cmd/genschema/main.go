@@ -124,11 +124,11 @@ func main() {
 }
 
 func generate(messageSchema, peersSchema, messageFlat, peersFlat []byte, conformance genschema.ConformanceFixture, outcome outcomeFixture) (string, error) {
-	messageConstraints, _, err := genschema.ConstraintsFromSchema(messageSchema)
+	messageConstraints, messageEnums, err := genschema.ConstraintsFromSchema(messageSchema)
 	if err != nil {
 		return "", err
 	}
-	peersConstraints, _, err := genschema.ConstraintsFromSchema(peersSchema)
+	peersConstraints, peersEnums, err := genschema.ConstraintsFromSchema(peersSchema)
 	if err != nil {
 		return "", err
 	}
@@ -147,8 +147,8 @@ func generate(messageSchema, peersSchema, messageFlat, peersFlat []byte, conform
 	}
 	b.WriteString("}\n\n")
 
-	genschema.WriteApplicability(&b, "messageApplicability", "schemas/message_route.conformance.json's applicability map", conformance.Applicability, messageConstraints, nil)
-	genschema.WriteApplicability(&b, "peersApplicability", "schemas/message_route.conformance.json's peers_applicability map", conformance.PeersApplicability, peersConstraints, nil)
+	genschema.WriteApplicability(&b, "messageApplicability", "schemas/message_route.conformance.json's applicability map", conformance.Applicability, messageConstraints, messageEnums)
+	genschema.WriteApplicability(&b, "peersApplicability", "schemas/message_route.conformance.json's peers_applicability map", conformance.PeersApplicability, peersConstraints, peersEnums)
 
 	b.WriteString("// outcomeRows is the outcome contract in declaration order.\nvar outcomeRows = []OutcomeRow{\n")
 	for _, row := range outcome.Outcomes {
