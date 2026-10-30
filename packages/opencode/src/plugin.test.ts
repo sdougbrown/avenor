@@ -61,7 +61,7 @@ function makeProvider(overrides: Partial<MessageProvider> = {}): MessageProvider
     state: async () => ({ live: false, resumable: true, status: 'done' }),
     tell: async () => ({ outcome: 'sent' }),
     ask: async () => ({ outcome: 'sent' }),
-    reply: async () => ({ outcome: 'replied' }),
+    reply: async () => ({ outcome: 'edge-absent' }),
     withdraw: async () => ({ outcome: 'withdrawn' }),
     resume: async () => ({
       outcome: 'resumed',

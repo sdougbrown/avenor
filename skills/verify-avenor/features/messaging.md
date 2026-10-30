@@ -14,9 +14,11 @@ every surface returns the same snake_case result object
   milliseconds, `0`–`600000`; absent or zero uses the shared 600 s cap. Results:
   `replied` (with `reply`), `timed-out`, `withdrawn`, `edge-absent`,
   `possibly-pending`, `lost`, `not-sent`, `auth-rejected`.
-- `reply` — answer an inbound ask: `reply_to` is the ask's message id, `message`
-  is the answer. `reply` reports `edge-absent` on any surface that never
-  receives asks (the OpenCode plugin, the TypeScript MCP host).
+- `reply` — answer an inbound message: `reply_to` is the message id, `message`
+  is the answer. An ask this surface received is answered through its claim. A
+  tell has no claim: the broker routes the reply back to the tell's sender, so a
+  reply to a tell returns `sent`. A message id with no route answers
+  `edge-absent`.
 - `withdraw` — retire a pending ask by `message_id`. Only a pending ask is
   retracted: a terminal one keeps its own outcome, so a timed-out ask answers
   `timed-out` with `ask "<id>" timed out; nothing was withdrawn`.

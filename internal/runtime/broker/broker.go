@@ -1193,7 +1193,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if fullBody.FromRunID == "" || fullBody.ToRunID == "" || fullBody.Type == "" {
+	if fullBody.FromRunID == "" || fullBody.Type == "" {
 		writeCodedError(w, http.StatusBadRequest, "missing fields", "invalid-request")
 		return
 	}
@@ -1250,6 +1250,13 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		expectsReply = expectsReply || am.ExpectsReply
+	}
+
+	// A reply to a tell names no target: the broker resolves the tell's sender
+	// from the message id. Every other message needs one.
+	if fullBody.ToRunID == "" && replyTo == "" {
+		writeCodedError(w, http.StatusBadRequest, "missing fields", "invalid-request")
+		return
 	}
 
 	if expectsReply {
@@ -1323,6 +1330,16 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 		outcome := replied.Outcome
 		if outcome == messaging.OutcomeEdgeAbsent {
+			// A reply to a tell names no target: the broker resolved the sender
+			// from the message id and found no route, so there is nowhere to
+			// deliver it. Report the absence instead of a failed tell.
+			if fullBody.ToRunID == "" {
+				writeJSONBody(w, http.StatusOK, map[string]any{
+					"queued":  false,
+					"outcome": messaging.OutcomeEdgeAbsent,
+				})
+				return
+			}
 			// No live edge owns this ID, so the reply degrades to a delivery
 			// rather than completing an edge the store already retired.
 			err = b.seam().Tell(r.Context(), messaging.TellRequest{

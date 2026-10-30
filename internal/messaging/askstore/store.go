@@ -69,6 +69,11 @@ type Store struct {
 	paused   map[messaging.FenceKey]*gate
 	reached  map[messaging.FenceKey]bool
 
+	// tellRoutes records who sent each no-reply message, keyed by message id
+	// because a replier knows only the id it received. A reply to a tell is
+	// routed back to the sender instead of reporting edge-absent.
+	tellRoutes map[string]*tellRoute
+
 	// absentBySender counts each sender's edge-absent withdrawal fences and
 	// absentFences their total, so neither check scans s.terminal.
 	absentBySender map[string]int
@@ -101,6 +106,16 @@ type fence struct {
 	// remove retracts a queued delivery whose waiter gave up. It is set for a
 	// timed-out or abandoned ask, so a later withdrawal can still unqueue it.
 	remove func()
+}
+
+// tellRoute records a no-reply message's sender and target so a reply to it
+// can be routed back. It is keyed by message id because the replier knows only
+// the id it received.
+type tellRoute struct {
+	messageID string
+	sender    string
+	target    string
+	deadline  time.Time
 }
 
 // gate pauses admission for one key until it is resumed.
@@ -146,6 +161,7 @@ func New(opts Options) *Store {
 		terminal:      make(map[messaging.FenceKey]*fence),
 		paused:        make(map[messaging.FenceKey]*gate),
 		reached:       make(map[messaging.FenceKey]bool),
+		tellRoutes:    make(map[string]*tellRoute),
 
 		absentBySender: make(map[string]int),
 	}
@@ -263,6 +279,12 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 		if versionedID(req.MessageID, now) {
 			s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeSent, delivered: true})
 		}
+		s.tellRoutes[req.MessageID] = &tellRoute{
+			messageID: req.MessageID,
+			sender:    req.Sender.RunID,
+			target:    req.Target,
+			deadline:  deadline,
+		}
 		result.Outcome = messaging.OutcomeSent
 		return result, nil
 	}
@@ -360,6 +382,11 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 		e = s.findActiveLocked(key)
 	}
 	if e == nil {
+		// No ask edge. A reply to a tell is routed back to the tell's sender,
+		// which is the only run allowed to answer it.
+		if route, ok := s.tellRoutes[key.MessageID]; ok && route.target == fromRunID {
+			return s.replyToTellLocked(route, fromRunID, payload)
+		}
 		return messaging.OutcomeEdgeAbsent, nil
 	}
 	if e.target != fromRunID {
@@ -388,6 +415,45 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 	e.reply = reply
 	s.completeLocked(e, messaging.OutcomeReplied)
 	return messaging.OutcomeReplied, nil
+}
+
+// replyToTellLocked routes a reply to a no-reply message back to its sender.
+// The reply carries the original message id so the sender can correlate it.
+func (s *Store) replyToTellLocked(route *tellRoute, fromRunID string, payload json.RawMessage) (messaging.Outcome, error) {
+	if s.backend == nil {
+		return messaging.OutcomeNotSent, nil
+	}
+	body, err := replyBody(payload, route.messageID, fromRunID)
+	if err != nil {
+		return messaging.OutcomeNotSent, err
+	}
+	msg := messaging.InboundMessage{
+		MessageID: route.messageID,
+		FromRunID: fromRunID,
+		Kind:      "agent_message",
+		Payload:   body,
+	}
+	if _, err := s.backend.Publish(route.sender, msg); err != nil {
+		return messaging.OutcomeNotSent, err
+	}
+	return messaging.OutcomeSent, nil
+}
+
+// replyBody stamps the routing fields a reply needs onto the caller's payload:
+// the original message id, so the sender can correlate the answer, and
+// reply_to, so a surface can render it as one. The caller's own fields are
+// preserved.
+func replyBody(payload json.RawMessage, messageID, fromRunID string) (json.RawMessage, error) {
+	fields := map[string]any{}
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			return nil, fmt.Errorf("%w: reply body is not a JSON object", messaging.ErrInvalidRequest)
+		}
+	}
+	fields["id"] = messageID
+	fields["reply_to"] = messageID
+	fields["from_run_id"] = fromRunID
+	return json.Marshal(fields)
 }
 
 // Withdraw installs a terminal fence for the key. A withdrawal with no live
@@ -462,6 +528,11 @@ func (s *Store) RemoveRun(runID string) {
 			s.completeLocked(e, messaging.OutcomeLost)
 		}
 	}
+	for id, route := range s.tellRoutes {
+		if route.sender == runID || route.target == runID {
+			delete(s.tellRoutes, id)
+		}
+	}
 }
 
 // Reset terminates all waits, clears ask state and rotates the generation.
@@ -475,6 +546,7 @@ func (s *Store) Reset() {
 	s.terminal = make(map[messaging.FenceKey]*fence)
 	s.paused = make(map[messaging.FenceKey]*gate)
 	s.reached = make(map[messaging.FenceKey]bool)
+	s.tellRoutes = make(map[string]*tellRoute)
 	s.absentBySender = make(map[string]int)
 	s.absentFences = 0
 	s.generation = messaging.NewGeneration()
@@ -661,7 +733,7 @@ func (s *Store) findActiveLocked(key messaging.FenceKey) *edge {
 // fenceCountLocked counts the records charged to the shared capacity. Fences
 // from edge-absent withdrawals are bounded per sender instead.
 func (s *Store) fenceCountLocked() int {
-	n := len(s.active)
+	n := len(s.active) + len(s.tellRoutes)
 	for _, f := range s.terminal {
 		if !f.absent {
 			n++

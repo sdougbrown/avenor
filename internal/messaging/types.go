@@ -53,7 +53,9 @@ type WaitResult struct {
 	Reply   *InboundMessage
 }
 
-// ReplyRequest answers an ask addressed to From.
+// ReplyRequest answers an ask addressed to From, or a tell From received.
+// ToRunID is the asker for an ask; it is empty for a tell, whose sender the
+// broker resolves from the message id.
 type ReplyRequest struct {
 	From          Identity
 	ToRunID       string

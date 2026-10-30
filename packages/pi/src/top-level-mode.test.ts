@@ -55,7 +55,7 @@ test('top-level peer receives and replies centrally while local child tools keep
   }
 })
 
-test('central-only peer listing does not create a supervisor and tell does not invite replies', async () => {
+test('central-only peer listing does not create a supervisor and a tell frame does not invite replies', async () => {
   const b = broker()
   let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
   try {
@@ -74,7 +74,9 @@ test('central-only peer listing does not create a supervisor and tell does not i
     // here where the tell is actually delivered, not only on the formatter.
     expect(frame).toContain('another session')
     expect(frame).not.toContain('reply_to')
-    expect((await h.registeredTools.avenor_message.execute('r', { action: 'reply', reply_to: 'tell', message: 'bad' })).details.outcome).toBe('edge-absent')
+    // The frame does not invite a reply, but a reply still reaches the sender:
+    // the broker routes it back to the tell's sender.
+    expect((await h.registeredTools.avenor_message.execute('r', { action: 'reply', reply_to: 'tell', message: 'bad' })).details.outcome).toBe('replied')
     b.disconnect()
     const polls = b.calls.filter(c => c.path === '/poll-control').length
     await waitFor(() => b.calls.filter(c => c.path === '/poll-control').length > polls)

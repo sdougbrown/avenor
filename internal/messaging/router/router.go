@@ -350,41 +350,41 @@ func (r *Router) ask(ctx context.Context, input messageInput, res messaging.Reso
 func (r *Router) reply(ctx context.Context, input messageInput) (Result, error) {
 	result := Result{Action: actionReply, MessageID: input.ReplyTo}
 	facts := map[string]string{"message_id": quote(input.ReplyTo)}
-	edgeAbsent := func() (Result, error) {
-		result.Outcome = messaging.OutcomeEdgeAbsent
-		result.Text = messaging.RenderOutcome(actionReply, result.Outcome, facts)
-		return result, nil
-	}
-	claimer, ok := r.provider.(AskClaimer)
-	if !ok {
-		return edgeAbsent()
-	}
-	asker, claimed := claimer.ClaimAsk(input.ReplyTo)
-	if !claimed {
-		return edgeAbsent()
-	}
 	body, err := json.Marshal(struct {
 		Message string `json:"message"`
 		Role    string `json:"role"`
-	}{Message: input.Message, Role: r.provider.Role()})
+		ReplyTo string `json:"reply_to,omitempty"`
+	}{Message: input.Message, Role: r.provider.Role(), ReplyTo: input.ReplyTo})
 	if err != nil {
-		claimer.RestoreAsk(input.ReplyTo, asker)
 		return Result{}, refused(err)
+	}
+	// An ask this surface received is answered through its claim, so the claim
+	// is restored unless the reply provably landed. A tell has no claim: the
+	// broker routes the reply back to the tell's sender.
+	if claimer, ok := r.provider.(AskClaimer); ok {
+		if asker, claimed := claimer.ClaimAsk(input.ReplyTo); claimed {
+			sent, _ := r.provider.Reply(ctx, messaging.ReplyRequest{
+				From:          messaging.Identity{RunID: r.provider.Caller().RunID},
+				ToRunID:       asker,
+				MessageID:     input.ReplyTo,
+				CorrelationID: input.ReplyTo,
+				Body:          string(body),
+			})
+			if sent.Outcome != messaging.OutcomeReplied {
+				claimer.RestoreAsk(input.ReplyTo, asker)
+			}
+			result.Outcome, result.Text = outcomeText(actionReply, sent.Outcome, facts)
+			return result, nil
+		}
 	}
 	sent, err := r.provider.Reply(ctx, messaging.ReplyRequest{
 		From:          messaging.Identity{RunID: r.provider.Caller().RunID},
-		ToRunID:       asker,
 		MessageID:     input.ReplyTo,
 		CorrelationID: input.ReplyTo,
 		Body:          string(body),
 	})
-	// The claim is restored unless the outcome proves delivery. An outcome that
-	// is not replied — including a nil-error not-sent, edge-absent or
-	// possibly-pending — never proves the asker received the answer, and a
-	// possibly-pending reply must leave the ask answerable rather than consume
-	// the claim.
-	if sent.Outcome != messaging.OutcomeReplied {
-		claimer.RestoreAsk(input.ReplyTo, asker)
+	if err != nil && sent.Outcome == "" {
+		return Result{}, refused(err)
 	}
 	result.Outcome, result.Text = outcomeText(actionReply, sent.Outcome, facts)
 	return result, nil

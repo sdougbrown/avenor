@@ -102,6 +102,7 @@ async function startSubAgentExtension(opts: {
 
 describe('sub-agent broker mode (integration)', () => {
   it('surfaces an inbound ask as a steer and avenor_message answers the asker with reply_to', async () => {
+    let sends = 0
     const fetchStub = stubBrokerFetch([
       [
         {
@@ -110,7 +111,12 @@ describe('sub-agent broker mode (integration)', () => {
         },
       ],
     ], 0, 0, 0, {
-      '/send': () => Response.json({ queued: true, outcome: 'replied' }),
+      '/send': () => {
+        sends++
+        return Response.json(sends === 1
+          ? { queued: true, outcome: 'replied' }
+          : { queued: false, outcome: 'edge-absent' })
+      },
     })
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
@@ -234,9 +240,17 @@ describe('sub-agent broker mode (integration)', () => {
   })
 
   it('answers a shared ask at most once under concurrent replies', async () => {
+    let sends = 0
     const fetchStub = stubBrokerFetch(
       [[{ type: 'agent_message', payload: { id: 'ask-c', from_run_id: 'supervisor', message: 'race me' } }]],
-      0, 0, 0, { '/send': () => Response.json({ queued: true, outcome: 'replied' }) },
+      0, 0, 0, {
+        '/send': () => {
+          sends++
+          return Response.json(sends === 1
+            ? { queued: true, outcome: 'replied' }
+            : { queued: false, outcome: 'edge-absent' })
+        },
+      },
     )
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
@@ -250,7 +264,7 @@ describe('sub-agent broker mode (integration)', () => {
       ])
       const outcomes = [first.details.outcome, second.details.outcome].sort()
       expect(outcomes).toEqual(['edge-absent', 'replied'])
-      expect(fetchStub.calls.filter(call => call.path === '/send')).toHaveLength(1)
+      expect(fetchStub.calls.filter(call => call.path === '/send')).toHaveLength(2)
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()
@@ -386,7 +400,9 @@ describe('sub-agent broker mode (integration)', () => {
   })
 
   it('does not deliver an old sub-agent receive into a restarted session', async () => {
-    const fetchStub = stubBrokerFetch([])
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/send': () => Response.json({ queued: false, outcome: 'edge-absent' }),
+    })
     const delegate = globalThis.fetch
     const receive = Promise.withResolvers<Response>()
     let polls = 0
@@ -421,7 +437,11 @@ describe('sub-agent broker mode (integration)', () => {
   it('does not restore a sub-agent ask when its failed send outlives the session', async () => {
     const fetchStub = stubBrokerFetch(
       [[{ type: 'agent_message', payload: { id: 'old-child-reply', from_run_id: 'supervisor', message: 'reply before shutdown' } }]],
-      0, 0, 0, { '/send': () => Response.json({ queued: true, outcome: 'replied' }) },
+      0, 0, 0, {
+        // The first send is intercepted below; the retry reaches this handler
+        // and finds no route, so the broker reports the edge absent.
+        '/send': () => Response.json({ queued: false, outcome: 'edge-absent' }),
+      },
     )
     const delegate = globalThis.fetch
     const send = Promise.withResolvers<Response>()
@@ -452,7 +472,7 @@ describe('sub-agent broker mode (integration)', () => {
         message: 'stale retry',
       })
       expect(retry.details.outcome).toBe('edge-absent')
-      expect(sendCalls).toBe(1)
+      expect(sendCalls).toBe(2)
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       send.resolve(new Response('{}'))

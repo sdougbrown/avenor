@@ -294,12 +294,14 @@ func TestStorePruneFencesUnconsumedReply(t *testing.T) {
 type recordingBackend struct {
 	mu        sync.Mutex
 	published []messaging.InboundMessage
+	targets   []string
 }
 
 func (r *recordingBackend) Publish(target string, msg messaging.InboundMessage) (func(), error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.published = append(r.published, msg)
+	r.targets = append(r.targets, target)
 	return func() {}, nil
 }
 
@@ -308,6 +310,86 @@ func (r *recordingBackend) Receive(sender string, limit int) ([]messaging.Inboun
 }
 
 func (r *recordingBackend) Peers() ([]messaging.Peer, error) { return nil, nil }
+
+// TestStoreReplyToTellRoutesBackToTheSender pins the reply-to-tell path: a
+// reply to a no-reply message is delivered to the tell's sender, and only the
+// tell's target may answer it.
+func TestStoreReplyToTellRoutesBackToTheSender(t *testing.T) {
+	store := New(Options{})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	now := time.Now()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+		Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	key := messaging.FenceKey{Sender: "bob", MessageID: msgID, Generation: store.Generation()}
+	if outcome, err := store.Reply(key, "carol", json.RawMessage(`{"message":"nope"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Reply from a non-target = (%q, %v), want edge-absent", outcome, err)
+	}
+
+	outcome, err := store.Reply(key, "bob", json.RawMessage(`{"message":"ack"}`))
+	if err != nil || outcome != messaging.OutcomeSent {
+		t.Fatalf("Reply = (%q, %v), want sent", outcome, err)
+	}
+	if len(backend.published) != 2 {
+		t.Fatalf("published %d messages, want the tell and its reply", len(backend.published))
+	}
+	reply := backend.published[1]
+	if reply.FromRunID != "bob" || reply.MessageID != msgID {
+		t.Fatalf("reply = %+v, want bob's answer to %s", reply, msgID)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(reply.Payload, &body); err != nil {
+		t.Fatalf("reply payload: %v", err)
+	}
+	if body["reply_to"] != msgID || body["message"] != "ack" {
+		t.Fatalf("reply payload = %v, want reply_to %s and the message", body, msgID)
+	}
+	if backend.targets[1] != "alice" {
+		t.Fatalf("reply target = %q, want alice", backend.targets[1])
+	}
+}
+
+// TestStoreReplyToTellExpiresWithItsRoute pins the retention bound: a tell
+// route is pruned at its deadline, so a late reply reports edge-absent rather
+// than delivering to a sender the store no longer tracks.
+func TestStoreReplyToTellExpiresWithItsRoute(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	clk := &clock{now: base}
+	store := New(Options{Clock: clk.Now})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	msgID, err := messaging.NewMsgID(base, base.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+		Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	clk.Advance(2 * time.Minute)
+	store.Prune(clk.Now())
+	key := messaging.FenceKey{Sender: "bob", MessageID: msgID, Generation: store.Generation()}
+	if outcome, err := store.Reply(key, "bob", json.RawMessage(`{"message":"ack"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Reply after prune = (%q, %v), want edge-absent", outcome, err)
+	}
+	if len(backend.published) != 1 {
+		t.Fatalf("published %d messages, want only the tell", len(backend.published))
+	}
+}
 
 func TestStoreNoReplyCreatesNoEdge(t *testing.T) {
 	store := New(Options{})

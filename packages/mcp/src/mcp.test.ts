@@ -656,7 +656,7 @@ describe('avenor MCP messaging tools', () => {
       },
       {
         label: 'message reply',
-        provider: () => makeProvider(),
+        provider: () => makeProvider({ reply: async () => ({ outcome: 'edge-absent', messageId: 'a-1' }) }),
         call: { name: 'message', arguments: { action: 'reply', reply_to: 'a-1', message: 'pong' } },
         expected: expected.message.reply_edge_absent,
       },

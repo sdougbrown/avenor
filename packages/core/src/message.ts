@@ -111,7 +111,7 @@ export interface MessageProvider {
     signal?: AbortSignal,
     publicRunId?: string,
   ): Promise<ProviderResult>
-  reply(inboundAskId: string, message: string, askerRunId: string): Promise<ProviderResult>
+  reply(inboundAskId: string, message: string, askerRunId?: string): Promise<ProviderResult>
   withdraw(messageId: string): Promise<ProviderResult>
   controlReply?(target: string, payload: unknown): Promise<ProviderResult>
   /** `target` is the RESOLVED runtime id; the provider mints runId and paths. */
@@ -727,24 +727,20 @@ async function resume(
 async function reply(provider: MessageProvider, input: MessageInput): Promise<ProviderResult> {
   const messageId = input.reply_to ?? ''
   const facts = { message_id: quote(messageId) }
-  const edgeAbsent = (): ProviderResult => {
-    const result: ProviderResult = { action: 'reply', outcome: 'edge-absent', messageId }
-    result.text = renderOutcome('reply', result.outcome, facts)
-    return result
-  }
-  if (!provider.claimAsk) return edgeAbsent()
-  const asker = provider.claimAsk(messageId)
-  if (asker === undefined) return edgeAbsent()
+  // An ask this surface received is answered through its claim, so the claim
+  // is restored unless the reply provably landed. A tell has no claim: the
+  // broker routes the reply back to the tell's sender.
+  const asker = provider.claimAsk?.(messageId)
   let result: ProviderResult
   try {
     result = await provider.reply(messageId, input.message ?? '', asker)
   } catch (err) {
-    provider.restoreAsk?.(messageId, asker)
+    if (asker !== undefined) provider.restoreAsk?.(messageId, asker)
     throw asToolError(err)
   }
   // Only a replied outcome proves the asker received the answer, so every other
   // outcome leaves the ask claimable.
-  if (result.outcome !== 'replied') provider.restoreAsk?.(messageId, asker)
+  if (asker !== undefined && result.outcome !== 'replied') provider.restoreAsk?.(messageId, asker)
   result.action = 'reply'
   result.messageId = messageId
   const rendered = outcomeText('reply', result.outcome, facts)
