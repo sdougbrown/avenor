@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"regexp"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/toolerr"
 )
 
 // ActionApplicability is the per-action input contract. It is the one table
@@ -59,19 +61,9 @@ func (r Result) Text() string {
 	return string(data)
 }
 
-// ToolError is a typed tool denial. Code is one of the fixed error codes; the
-// message is the rendered template.
-type ToolError struct {
-	Code    string
-	Message string
-	Facts   map[string]string
-}
-
-// ToolCode lets a consumer outside this package classify the error through a
-// local interface instead of importing internal/workflowtool.
-func (e *ToolError) ToolCode() string { return e.Code }
-
-func (e *ToolError) Error() string { return e.Message }
+// ToolError is the shared typed tool denial. The alias keeps this package's
+// spelling while one type serves every tool surface.
+type ToolError = toolerr.ToolError
 
 // Client is the control surface the router dispatches to. It is the workflow
 // subset of the supervisor control client, so the MCP server and the tests can
@@ -270,7 +262,6 @@ func complete(client Client, input workflowInput) (Result, error) {
 // workflowInput is the decoded avenor_workflow call. Admission has already been
 // decided against the applicability table, so every field here is well typed.
 type workflowInput struct {
-	Action       string          `json:"action"`
 	WorkflowID   string          `json:"workflow_id"`
 	ControllerID string          `json:"controller_id"`
 	SupervisorID string          `json:"supervisor_id"`
@@ -325,8 +316,34 @@ func InputSchema() map[string]any { return decodeSchema(workflowInputSchemaJSON)
 // only the keys every action requires — the action itself.
 func InputFlatSchema() map[string]any { return decodeSchema(workflowInputFlatSchemaJSON) }
 
-// ApplicabilityTable returns the per-action input contract.
-func ApplicabilityTable() map[string]ActionApplicability { return workflowApplicability }
+// ApplicabilityTable returns the per-action input contract. The table is
+// cloned so a caller that mutates it cannot change what Execute validates for
+// the process lifetime.
+func ApplicabilityTable() map[string]ActionApplicability {
+	out := make(map[string]ActionApplicability, len(workflowApplicability))
+	for action, entry := range workflowApplicability {
+		types := make(map[string]string, len(entry.Types))
+		for name, kind := range entry.Types {
+			types[name] = kind
+		}
+		enums := make(map[string][]string, len(entry.Enums))
+		for name, values := range entry.Enums {
+			enums[name] = append([]string(nil), values...)
+		}
+		constraints := make(map[string]PropertyConstraints, len(entry.Constraints))
+		for name, constraint := range entry.Constraints {
+			constraints[name] = constraint
+		}
+		out[action] = ActionApplicability{
+			Permitted:   append([]string(nil), entry.Permitted...),
+			Required:    append([]string(nil), entry.Required...),
+			Types:       types,
+			Enums:       enums,
+			Constraints: constraints,
+		}
+	}
+	return out
+}
 
 // Repair renders one repair template with its facts. An unknown code returns
 // the code itself, so a missing template is visible rather than silent.
@@ -335,11 +352,7 @@ func Repair(code string, facts map[string]string) string {
 	if !ok {
 		return code
 	}
-	out := template
-	for name, value := range facts {
-		out = strings.ReplaceAll(out, "{"+name+"}", value)
-	}
-	return out
+	return toolerr.Substitute(template, facts)
 }
 
 func decodeSchema(raw string) map[string]any {
@@ -591,7 +604,7 @@ func invalidRequest(action, detail string) *ToolError {
 }
 
 func refused(err error) *ToolError {
-	return &ToolError{Code: "refused", Message: err.Error(), Facts: map[string]string{}}
+	return toolerr.Refused(err, Repair("refused_io", nil))
 }
 
 // quote and quoteList render template facts through the shared escaping rule,
@@ -611,24 +624,32 @@ func contains(values []string, target string) bool {
 
 var timeoutRE = regexp.MustCompile(`^(\d+)(s|m|h)?$`)
 
-func parseTimeoutSeconds(value string) (int, error) {
+// maxWaitSeconds is the largest whole-second wait that fits a time.Duration. A
+// larger request would overflow the nanosecond conversion and dispatch a
+// negative budget, so it is refused with the invalid_timeout repair instead.
+const maxWaitSeconds = int64(math.MaxInt64) / int64(time.Second)
+
+func parseTimeoutSeconds(value string) (int64, error) {
 	trimmed := strings.TrimSpace(value)
 	match := timeoutRE.FindStringSubmatch(trimmed)
 	if match == nil {
 		return 0, fmt.Errorf("invalid timeout: %s", value)
 	}
-	amount, err := strconv.Atoi(match[1])
+	amount, err := strconv.ParseInt(match[1], 10, 64)
 	if err != nil || amount <= 0 {
 		return 0, fmt.Errorf("invalid timeout: %s", value)
 	}
+	multiplier := int64(1)
 	switch match[2] {
 	case "m":
-		return amount * 60, nil
+		multiplier = 60
 	case "h":
-		return amount * 3600, nil
-	default:
-		return amount, nil
+		multiplier = 3600
 	}
+	if amount > maxWaitSeconds/multiplier {
+		return 0, fmt.Errorf("invalid timeout: %s", value)
+	}
+	return amount * multiplier, nil
 }
 
 // The nine workflow actions. The spellings are the schema's action enum.

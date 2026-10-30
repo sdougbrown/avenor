@@ -272,8 +272,12 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 			// Every declared limit must survive compilation into the table, so a
 			// schema edit that adds a bound cannot drift from the router.
 			constraint := entry.Constraints[name]
-			if v, ok := spec["minLength"]; (ok || constraint.MinLength != 0) && int(mustInt64(t, v)) != constraint.MinLength {
-				t.Fatalf("%s.%s: schema minLength %v, table %d", action, name, v, constraint.MinLength)
+			if v, ok := spec["minLength"]; ok {
+				if int(mustInt64(t, v)) != constraint.MinLength {
+					t.Fatalf("%s.%s: schema minLength %v, table %d", action, name, v, constraint.MinLength)
+				}
+			} else if constraint.MinLength != 0 {
+				t.Fatalf("%s.%s: table declares minLength %d but the schema declares none", action, name, constraint.MinLength)
 			}
 			if v, ok := spec["maxLength"]; ok && int(mustInt64(t, v)) != constraint.MaxLength {
 				t.Fatalf("%s.%s: schema maxLength %v, table %d", action, name, v, constraint.MaxLength)
