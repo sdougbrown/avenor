@@ -2763,7 +2763,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       name: 'avenor_message',
       label: 'Avenor Message',
       description:
-        'Send a message to another agent run, answer an inbound ask, withdraw a pending ask, or resume a completed run. Every action is explicit and the result states whether a failed ask can still be withdrawn. `control_reply` is retained in the contract but no surface can deliver one.',
+        'Send a message to another agent run, answer an inbound message, withdraw a pending ask, or resume a completed run. Every action is explicit and the result states whether a failed ask can still be withdrawn. `control_reply` is retained in the contract but no surface can deliver one.',
       parameters: Type.Object({
         action: Type.Union([
           Type.Literal('tell'),
@@ -2775,7 +2775,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         ], { description: 'tell | ask | reply | resume | withdraw | control_reply' }),
         target: Type.Optional(Type.String({ description: 'Recipient for tell/ask/resume (a run id, a peer label, or "self"), or the opaque control message id for control_reply' })),
         message: Type.Optional(Type.String({ description: 'Message text for tell/ask/reply/resume' })),
-        reply_to: Type.Optional(Type.String({ description: 'Inbound ask id being answered (reply)' })),
+        reply_to: Type.Optional(Type.String({ description: 'Inbound message id being answered (reply)' })),
         message_id: Type.Optional(Type.String({ description: 'Ask id being withdrawn (withdraw)' })),
         timeout_ms: Type.Optional(Type.Integer({ description: 'Bound on the ask wait in milliseconds' })),
         label: Type.Optional(Type.String({ description: 'Override label for the resumed run (resume)' })),

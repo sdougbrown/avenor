@@ -112,10 +112,9 @@ type fence struct {
 // can be routed back. It is keyed by message id because the replier knows only
 // the id it received.
 type tellRoute struct {
-	messageID string
-	sender    string
-	target    string
-	deadline  time.Time
+	sender   string
+	target   string
+	deadline time.Time
 }
 
 // gate pauses admission for one key until it is resumed.
@@ -283,15 +282,7 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 				return result, err
 			}
 		}
-		if versionedID(req.MessageID, now) {
-			s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeSent, delivered: true})
-		}
-		s.tellRoutes[req.MessageID] = &tellRoute{
-			messageID: req.MessageID,
-			sender:    req.Sender.RunID,
-			target:    req.Target,
-			deadline:  deadline,
-		}
+		s.recordTellRouteLocked(key, req.MessageID, req.Sender.RunID, req.Target, deadline, now)
 		result.Outcome = messaging.OutcomeSent
 		return result, nil
 	}
@@ -489,11 +480,18 @@ func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time,
 	if s.fenceCountLocked() >= s.fenceCapacity {
 		return messaging.ErrFenceCapacity
 	}
+	s.recordTellRouteLocked(key, messageID, sender, target, deadline, now)
+	return nil
+}
+
+// recordTellRouteLocked records a no-reply message's reply route and, for a
+// versioned id, the delivered dedup fence a local admission sets. Callers hold
+// s.mu and have already checked uniqueness and capacity.
+func (s *Store) recordTellRouteLocked(key messaging.FenceKey, messageID, sender, target string, deadline, now time.Time) {
 	if versionedID(messageID, now) {
 		s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeSent, delivered: true})
 	}
-	s.tellRoutes[messageID] = &tellRoute{messageID: messageID, sender: sender, target: target, deadline: deadline}
-	return nil
+	s.tellRoutes[messageID] = &tellRoute{sender: sender, target: target, deadline: deadline}
 }
 
 // DeleteTellRoute retracts the route a failed delivery left behind, with the

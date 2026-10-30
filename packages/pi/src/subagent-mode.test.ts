@@ -264,7 +264,6 @@ describe('sub-agent broker mode (integration)', () => {
       ])
       const outcomes = [first.details.outcome, second.details.outcome].sort()
       expect(outcomes).toEqual(['edge-absent', 'replied'])
-      expect(fetchStub.calls.filter(call => call.path === '/send')).toHaveLength(2)
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()

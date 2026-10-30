@@ -1230,7 +1230,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
 
       avenor_message: tool({
         description:
-          'Send a message to another agent run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn. `reply` always reports edge-absent here: this session receives no inbound asks, so nothing is sent.',
+          'Send a message to another agent run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn. `reply` answers an inbound message: an ask this surface received is answered through its claim, and a tell is routed back to its sender by the broker. A message id with no route reports edge-absent.',
         args: {
           action: tool.schema.enum(['tell', 'ask', 'reply', 'resume', 'withdraw', 'control_reply']).describe('tell | ask | reply | resume | withdraw | control_reply'),
           target: tool.schema.string().optional().describe('Recipient for tell/ask/resume (a run id, a peer label, or "self"), or the opaque control message id for control_reply'),

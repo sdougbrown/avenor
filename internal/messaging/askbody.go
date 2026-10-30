@@ -1,7 +1,9 @@
 package messaging
 
-import "encoding/json"
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // AskBody builds the agent_message payload for an ask: the reply correlation
 // id, both run identities, the question, and the reply expectation the receiver
@@ -32,29 +34,27 @@ func SendBody(fromRunID, toRunID, message, role string) ([]byte, error) {
 	})
 }
 
-// ReplyID reports the message id a reply carries: the id it answers with
+// ReplyID reports the route key a reply carries: the id it answers with
 // .reply, so the reply's own route is keyed by the id a recipient's surface
-// renders as its reply_to target.
+// renders as its reply_to target. It is deliberately not a versioned message
+// id — ParseMsgID rejects it — so the route is retained for DefaultAskTimeout
+// from the reply rather than the tell's encoded deadline. It is deterministic,
+// so a repeat reply to the same tell resolves to the same route.
 func ReplyID(messageID string) string {
 	return messageID + ".reply"
 }
 
 // ReplyBody stamps the correlation fields a reply needs onto the caller's
-// payload: the reply's own message id (what a recipient's surface renders as
-// the reply_to target) and the id the reply answers, so the sender can
-// correlate the answer. The replier's identity travels in the envelope the
-// transport stamps and validates, never in the payload: a relay rewrites the
-// envelope's from_run_id to the id the receiving branch knows, and a payload
-// that named a different run would be refused as a sender mismatch. The
-// caller's own fields are preserved; these two win, because they name the
-// conversation the reply belongs to. This stamping is the correlation
-// authority on the tell path: the route is keyed by the request's message id,
-// and the rendered reply_to names that same id. The router's own reply_to
-// body field serves the ask path, whose transport (Store.Reply) stores the
-// payload without re-stamping — the two never disagree because both derive
-// from the router's single correlation id.
-// The payload must be a JSON object or
-// absent; a JSON null is an empty body.
+// payload: the reply's own route key (what a recipient's surface renders as
+// the reply_to target) and the id the reply answers. The replier's identity
+// travels in the envelope the transport stamps and validates, never in the
+// payload: a relay rewrites the envelope's from_run_id to the id the receiving
+// branch knows, and a payload that named a different run would be refused as a
+// sender mismatch. The caller's own fields are preserved; these two win,
+// because they name the conversation the reply belongs to. The ask path stamps
+// only reply_to (the router does it) and carries no id, so a reply to an ask
+// reply is not routable yet. The payload must be a JSON object or absent; a
+// JSON null is an empty body.
 func ReplyBody(payload json.RawMessage, replyTo string) (json.RawMessage, error) {
 	fields := map[string]any{}
 	if len(payload) > 0 {

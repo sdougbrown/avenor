@@ -272,7 +272,7 @@ async function peersCall(args: unknown): Promise<ToolReply> {
 }
 
 server.registerTool('message', {
-  description: 'Send a message to another agent run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn. `reply` always reports edge-absent here: this server receives no inbound asks, so nothing is sent. This tool is bound to the default supervisor and takes no `supervisor_id`.',
+  description: 'Send a message to another agent run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and the result states whether a failed ask can still be withdrawn. `reply` answers an inbound message: an ask this surface received is answered through its claim, and a tell is routed back to its sender by the broker. A message id with no route reports edge-absent. This tool is bound to the default supervisor and takes no `supervisor_id`.',
   inputSchema: messageInputSchema,
 }, async args => messageCall(args))
 

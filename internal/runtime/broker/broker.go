@@ -1268,7 +1268,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 	// A message with an id is admitted through the store — the ask edge an
 	// expects_reply send allocates, the tell route a fire-and-forget message
 	// records — so one send dance serves both. A reply takes the reply path
-	// above; a message without an id is published directly.
+	// below; a message without an id is published directly.
 	if msgID != "" && replyTo == "" {
 		target := fullBody.ToRunID
 
@@ -1890,11 +1890,7 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 		// admitted instead of being refused for a message that was never
 		// exposed.
 		b.store.DeleteTellRoute(body.MessageID)
-		if errors.Is(err, messaging.ErrTargetUnavailable) {
-			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeSendError(w, err)
 		return
 	}
 	writeJSONBody(w, http.StatusOK, map[string]any{
@@ -2878,7 +2874,7 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	}
 	// No ask edge. A reply to a tell is delivered to the tell's sender through
 	// the seam, which relays across a branch boundary the way a tell does. The
-	// reply carries its own message id — the original id with .reply — whose
+	// reply carries its own route key — the original id with .reply — whose
 	// route names the previous replier as its sender, which is what makes a
 	// reply chain work. Only the tell's target may answer it.
 	sender, target, ok := m.broker.store.TellRoute(req.MessageID)
@@ -2892,8 +2888,15 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	}
 	// The reply's own route is recorded before the reply is exposed — the same
 	// rule a relayed ask follows — so the recipient's answer always finds a
-	// route.
+	// route. A repeat reply to the same tell resolves to the same route, so it
+	// is idempotent: the answer is already delivered.
 	if err := m.broker.store.RecordTellRoute(replyID, req.From.RunID, sender, time.Now(), true); err != nil {
+		if errors.Is(err, messaging.ErrDuplicateMessageID) {
+			if existingSender, existingTarget, ok := m.broker.store.TellRoute(replyID); ok &&
+				existingSender == req.From.RunID && existingTarget == sender {
+				return messaging.SendResult{Outcome: messaging.OutcomeSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
+			}
+		}
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
 	}
 	if err := m.broker.seam().Tell(ctx, messaging.TellRequest{

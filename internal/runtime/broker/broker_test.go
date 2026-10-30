@@ -1105,6 +1105,17 @@ func TestBrokerReplyToTellReachesTheSender(t *testing.T) {
 		t.Fatalf("reply = %v (%v), want bob's answer to tell-1", got[0], payload)
 	}
 
+	// A repeat reply to the same tell is idempotent: the route already names
+	// bob and alice, so the answer is already delivered and nothing new is
+	// queued.
+	repeat := sendReplyWithoutTarget(t, addr, bobToken, "bob", "tell-1", "hi alice again")
+	if st := repeat["status"]; st != http.StatusOK || repeat["outcome"] != "sent" {
+		t.Fatalf("repeat reply = %v, want a 200 sent", repeat)
+	}
+	if got := pollAgentMessages(t, addr, "alice", aliceToken); len(got) != 0 {
+		t.Fatalf("alice poll after repeat reply = %v, want no duplicate", got)
+	}
+
 	stranger := sendReplyWithoutTarget(t, addr, carolToken, "carol", "tell-1", "not mine")
 	if st := stranger["status"]; st != http.StatusOK || stranger["outcome"] != "edge-absent" {
 		t.Fatalf("stranger reply = %v, want edge-absent", stranger)

@@ -358,7 +358,7 @@ One tool for every message between runs, with an explicit `action`. The shared r
 |---|---|---|
 | `tell` | `target`, `message` | Deliver a message and return; no ask edge is created. |
 | `ask` | `target`, `message`, optional `timeout_ms` | Deliver a message and wait for the reply. |
-| `reply` | `reply_to`, `message` | Answer an inbound ask this surface received. |
+| `reply` | `reply_to`, `message` | Answer an inbound message: an ask through its claim, a tell through the broker's route. |
 | `resume` | `target`, `message`, optional `label`, `idempotency_key` | Continue a completed run's session in a new run. |
 | `withdraw` | `message_id` | Retract a pending ask. |
 | `control_reply` | `target`, optional `payload` | Deliver a control reply (no surface can deliver one; the action answers `unsupported_action`) |

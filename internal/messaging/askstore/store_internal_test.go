@@ -311,11 +311,11 @@ func (r *recordingBackend) Receive(sender string, limit int) ([]messaging.Inboun
 
 func (r *recordingBackend) Peers() ([]messaging.Peer, error) { return nil, nil }
 
-// TestStoreTellRouteLookupPinsTheReplyContract pins what the store owns for a
-// reply to a tell: the route lookup, the replier check, and the delivery
-// decision the caller (the broker's messenger) makes. The store performs no
-// delivery itself.
-func TestStoreTellRouteLookupPinsTheReplyContract(t *testing.T) {
+// TestStoreTellRouteLookupLeavesDeliveryToTheCaller pins what the store owns
+// for a reply to a tell: the route lookup and the replier check. The store
+// performs no delivery itself, which is what keeps a cross-branch reply
+// routable.
+func TestStoreTellRouteLookupLeavesDeliveryToTheCaller(t *testing.T) {
 	store := New(Options{})
 	backend := &recordingBackend{}
 	store.SetBackend(backend)
