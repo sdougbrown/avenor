@@ -612,12 +612,10 @@ func TestRunnerCapacityBlockedSuppressionPersistsAcrossPasses(t *testing.T) {
 	// dispatch attempt follows, then the block is re-recorded.
 	clock.Advance(6 * time.Second)
 	waitUntil(t, "one dispatch after anti-entropy", func() bool { return deps.dispatchCount() >= 4 })
+	waitUntil(t, "block re-recorded after anti-entropy", func() bool { return r.Status().CapacityBlocked == "local" })
 	time.Sleep(150 * time.Millisecond)
 	if n := deps.dispatchCount(); n != 4 {
 		t.Fatalf("%d dispatches after anti-entropy tick, want exactly 4", n)
-	}
-	if s := r.Status(); s.CapacityBlocked != "local" {
-		t.Fatalf("status capacity blocked = %q, want local after re-block", s.CapacityBlocked)
 	}
 }
 

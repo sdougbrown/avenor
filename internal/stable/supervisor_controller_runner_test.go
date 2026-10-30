@@ -256,19 +256,15 @@ func (f *runnerFixture) waitRunning(t *testing.T, wf string) {
 // can lose that race; retry until the slot is held.
 func (f *runnerFixture) exhaustTreeBudget(t *testing.T) (release func()) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
 	var token string
-	for {
+	waitFor(t, "free tree budget slot", func() bool {
 		tok, err := f.sup.acquireTreeAdmission()
-		if err == nil {
-			token = tok
-			break
+		if err != nil {
+			return false
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("exhaust tree budget: %v", err)
-		}
-		time.Sleep(time.Millisecond)
-	}
+		token = tok
+		return true
+	})
 	f.sup.signalCapacityChange()
 	return func() {
 		f.sup.treeBudgetMu.Lock()
