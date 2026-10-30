@@ -229,7 +229,7 @@ For the full deployment walkthrough — service units, token generation, Tailsca
 
 ## Tools
 
-This server registers tool names **without** the `avenor_` prefix: `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown`, and the `workflow_*` set. An MCP client namespaces its own servers (Claude Code shows `spawn` as `mcp__avenor__spawn`), so the prefix would only repeat itself. The Pi extension and the OpenCode plugin register the same tools with the `avenor_` prefix (`avenor_spawn`, `avenor_message`, and so on). Every tool here is scoped to this MCP process's supervisor.
+This server registers tool names **without** the `avenor_` prefix: `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown`, and `workflow`. An MCP client namespaces its own servers (Claude Code shows `spawn` as `mcp__avenor__spawn`), so the prefix would only repeat itself. The Pi extension and the OpenCode plugin register the same tools with the `avenor_` prefix (`avenor_spawn`, `avenor_message`, and so on). Every tool here is scoped to this MCP process's supervisor.
 
 ### `spawn`
 
@@ -440,28 +440,29 @@ Shuts down the supervisor and cleans up MCP-owned files.
 }
 ```
 
-### Workflow tools
+### Workflow tool
 
-The `workflow_*` tools drive a [durable workflow](workflow.md) against a supervisor's control socket. They require the supervisor to have workflow support (a `--workflow-root` manager); otherwise the call fails with a method-not-found error.
+The `workflow` tool drives a [durable workflow](workflow.md) against a supervisor's control socket. It requires the supervisor to have workflow support (a `--workflow-root` manager); otherwise the call fails with a method-not-found error. One `action` selects the verb:
 
-| Tool | Purpose |
-|------|---------|
-| `workflow_status` | Lightweight status for a workflow instance. |
-| `workflow_wait` | Wait for a workflow to reach a terminal state or until timeout. |
-| `workflow_inspect` | Full instance detail for a workflow. |
-| `workflow_events` | Read log events from a workflow instance's event log. |
-| `workflow_complete` | Atomically complete a machine/external handoff activation. |
-| `workflow_gate` | Record a gate decision on a parked `awaiting_gate` activation. |
-| `workflow_cancel` | Cancel a whole workflow instance (terminal `canceled`). |
-| `workflow_controller_status` | Read-only: with `controller_id`, the full status for that controller; without it, a summary list of all controllers. |
+| Action | Purpose |
+|--------|---------|
+| `status` | Lightweight status for a workflow instance. |
+| `wait` | Wait for a workflow to reach a terminal state or until timeout. |
+| `inspect` | Full instance detail for a workflow. |
+| `events` | Read log events from a workflow instance's event log. |
+| `ready` | Read-only: report claimable auto-dispatch candidates for a controller; grants no lease. |
+| `controller_status` | Read-only: with `controller_id`, the full status for that controller; without it, a summary list of all controllers. |
+| `gate` | Record a gate decision on a parked `awaiting_gate` activation. |
+| `complete` | Atomically complete a machine/external handoff activation. |
+| `cancel` | Cancel a whole workflow instance (terminal `canceled`). |
 
-All take an optional `supervisor_id` (supervisor socket path). `workflow_status`, `workflow_inspect`, and `workflow_events` take `workflow_id` (and `after_seq`/`limit` for events). `workflow_wait` takes `workflow_id` and an optional `timeout` (e.g. `30s`, `5m`). `workflow_complete` takes `workflow_id`, `node_id`, `activation_id`, `attempt_id`, `lease_id`, `owner_token`, `outcome`, and optional `outputs`/`artifacts`. `workflow_gate` takes `workflow_id`, `node_id`, `gate_id`, `activation_id`, `operation` (`satisfy`, `reject`, `waive`, or `external_result`), and the operation's fields. `workflow_cancel` takes `workflow_id`, the required `reason`, and `actor` — who is cancelling. The manager rejects a missing actor before it looks at the reason, so this server supplies the caller's value or defaults it to `mcp`; the Pi, OpenCode and `packages/mcp` tools require `actor` explicitly.
+Every action takes an optional `supervisor_id` (supervisor socket path). `status`, `inspect`, and `events` take `workflow_id` (and `after_seq`/`limit` for events). `wait` takes `workflow_id` and an optional `timeout` (e.g. `30s`, `5m`). `ready` takes `controller_id` and an optional `limit`. `controller_status` takes an optional `controller_id`. `complete` takes `workflow_id`, `node_id`, `activation_id`, `attempt_id`, `lease_id`, `owner_token`, `outcome`, and optional `outputs`/`artifacts`. `gate` takes `workflow_id`, `node_id`, `gate_id`, `activation_id`, `operation` (`satisfy`, `reject`, `waive`, or `external_result`), and the operation's fields. `cancel` takes `workflow_id`, the required `reason`, and `actor` — who is cancelling. The manager rejects a missing actor before it looks at the reason, so this server supplies the caller's value or defaults it to `mcp`; the Pi, OpenCode and `packages/mcp` tools require `actor` explicitly.
 
-`workflow_cancel` is a host-surface tool. The Pi extension (`avenor_workflow_cancel`), the OpenCode plugin, the TypeScript MCP server and this server register it; the Go child tool servers (`channeltools`) register no workflow tools at all. A Pi child still sees `avenor_workflow_cancel` registered — the extension publishes the whole host tool set in both modes — but it holds no control connection, so a cancel from a child fails.
+`workflow` is a host-surface tool. The Pi extension (`avenor_workflow`), the OpenCode plugin, the TypeScript MCP server and this server register it; the Go child tool servers (`channeltools`) register no workflow tools at all. A Pi child still sees `avenor_workflow` registered — the extension publishes the whole host tool set in both modes — but it holds no control connection, so a cancel from a child fails.
 
 ### Workflow controllers
 
-`workflow_controller_status` is read-only: pass `controller_id` to get that controller's full status, or omit it to list all controllers with summary state. Creating, enabling, and disabling a workflow controller are CLI-only, via `avenor workflow controller create|enable|disable`. A controller is registered with `avenor workflow controller create` (`controller_id` and a positive `max_inflight`) and starts **disabled**; `avenor workflow controller enable` turns it on so it dispatches and polls, and `avenor workflow controller disable` (with a `reason`) stops future dispatch and polling but never cancels running attempts. The underlying control methods are documented in [control-protocol.md](control-protocol.md#workflow-methods).
+`workflow` with `action: "controller_status"` is read-only: pass `controller_id` to get that controller's full status, or omit it to list all controllers with summary state. `action: "ready"` reports the claimable auto-dispatch candidates for one controller without granting a lease. Creating, enabling, and disabling a workflow controller are CLI-only, via `avenor workflow controller create|enable|disable`. A controller is registered with `avenor workflow controller create` (`controller_id` and a positive `max_inflight`) and starts **disabled**; `avenor workflow controller enable` turns it on so it dispatches and polls, and `avenor workflow controller disable` (with a `reason`) stops future dispatch and polling but never cancels running attempts. The underlying control methods are documented in [control-protocol.md](control-protocol.md#workflow-methods).
 
 ## Registry scope: important limitation
 

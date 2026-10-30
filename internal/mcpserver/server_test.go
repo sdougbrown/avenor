@@ -109,6 +109,9 @@ type fakeClient struct {
 	workflowControllerListErr      error
 	workflowControllerStatusCalls  []string
 	workflowControllerListCalls    int
+	workflowReadyResult            map[string]any
+	workflowReadyErr               error
+	workflowReadyCalls             []workflowReadyCall
 	messagePreflight               *messaging.PreflightResult
 	messagePreflightErr            error
 	resumeFunc                     func(messaging.ResumeRequest) (messaging.ResumeResult, error)
@@ -140,6 +143,11 @@ type workflowCancelCall struct {
 	workflowID string
 	actor      string
 	reason     string
+}
+
+type workflowReadyCall struct {
+	controllerID string
+	limit        int
 }
 
 type permissionCall struct {
@@ -251,6 +259,11 @@ func (f *fakeClient) WorkflowControllerStatus(controllerID string) (map[string]a
 func (f *fakeClient) WorkflowControllerList() (map[string]any, error) {
 	f.workflowControllerListCalls++
 	return f.workflowControllerListResult, f.workflowControllerListErr
+}
+
+func (f *fakeClient) WorkflowReady(controllerID string, limit int) (map[string]any, error) {
+	f.workflowReadyCalls = append(f.workflowReadyCalls, workflowReadyCall{controllerID, limit})
+	return f.workflowReadyResult, f.workflowReadyErr
 }
 
 func (f *fakeClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
@@ -390,6 +403,9 @@ func (c *spawnCountingClient) WorkflowControllerStatus(string) (map[string]any, 
 	return nil, nil
 }
 func (c *spawnCountingClient) WorkflowControllerList() (map[string]any, error) {
+	return nil, nil
+}
+func (c *spawnCountingClient) WorkflowReady(string, int) (map[string]any, error) {
 	return nil, nil
 }
 

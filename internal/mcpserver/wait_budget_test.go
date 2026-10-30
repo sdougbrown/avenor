@@ -2,8 +2,11 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func newWaitBudgetServer(t *testing.T, maxWait time.Duration) (*Server, *fakeClient) {
@@ -177,21 +180,27 @@ func TestWorkflowWaitClampPassesEffectiveTimeout(t *testing.T) {
 		s, fake := newWaitBudgetServer(t, maxWait)
 		return s, fake
 	}
+	call := func(s *Server, args string) map[string]any {
+		t.Helper()
+		result, err := s.handleAvenorWorkflow(context.Background(), &mcpsdk.CallToolRequest{
+			Params: &mcpsdk.CallToolParamsRaw{Arguments: json.RawMessage(args)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.StructuredContent.(map[string]any)
+	}
 
 	// Clamped: default 30s request exceeds the 25s budget.
 	s, fake := newS(25 * time.Second)
 	fake.workflowWaitResult = map[string]any{"terminal": false, "timed_out": true}
-	_, value, err := s.handleAvenorWorkflowWait(context.Background(), nil, workflowWaitArgs{WorkflowID: "wf-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := call(s, `{"action":"wait","workflow_id":"wf-1"}`)
 	if got := len(fake.workflowWaitCalls); got != 1 {
 		t.Fatalf("workflow wait calls = %d, want 1", got)
 	}
 	if got := fake.workflowWaitCalls[0].timeout; got != 25*time.Second {
 		t.Fatalf("WorkflowWait timeout = %v, want 25s", got)
 	}
-	result := value.(map[string]any)
 	if result["wait_clamped"] != true {
 		t.Fatalf("result = %#v, want wait_clamped", result)
 	}
@@ -199,11 +208,7 @@ func TestWorkflowWaitClampPassesEffectiveTimeout(t *testing.T) {
 	// Terminal result inside the budget is never flagged.
 	s, fake = newS(25 * time.Second)
 	fake.workflowWaitResult = map[string]any{"terminal": true, "timed_out": false}
-	_, value, err = s.handleAvenorWorkflowWait(context.Background(), nil, workflowWaitArgs{WorkflowID: "wf-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result = value.(map[string]any)
+	result = call(s, `{"action":"wait","workflow_id":"wf-1"}`)
 	if _, ok := result["wait_clamped"]; ok {
 		t.Fatalf("result = %#v, want no wait_clamped", result)
 	}
@@ -211,10 +216,7 @@ func TestWorkflowWaitClampPassesEffectiveTimeout(t *testing.T) {
 	// Under-max explicit timeout passes through unflagged.
 	s, fake = newS(25 * time.Second)
 	fake.workflowWaitResult = map[string]any{"terminal": false, "timed_out": true}
-	_, _, err = s.handleAvenorWorkflowWait(context.Background(), nil, workflowWaitArgs{WorkflowID: "wf-1", Timeout: "10s"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	call(s, `{"action":"wait","workflow_id":"wf-1","timeout":"10s"}`)
 	if got := fake.workflowWaitCalls[0].timeout; got != 10*time.Second {
 		t.Fatalf("WorkflowWait timeout = %v, want 10s", got)
 	}
@@ -222,10 +224,7 @@ func TestWorkflowWaitClampPassesEffectiveTimeout(t *testing.T) {
 	// MaxWait=0 passes the raw request through.
 	s, fake = newS(0)
 	fake.workflowWaitResult = map[string]any{"terminal": false, "timed_out": true}
-	_, _, err = s.handleAvenorWorkflowWait(context.Background(), nil, workflowWaitArgs{WorkflowID: "wf-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	call(s, `{"action":"wait","workflow_id":"wf-1"}`)
 	if got := fake.workflowWaitCalls[0].timeout; got != 30*time.Second {
 		t.Fatalf("WorkflowWait timeout = %v, want 30s", got)
 	}
