@@ -30,7 +30,8 @@ export function validateObservedAt(observedAt: string): void {
   // RFC3339: a calendar date and time with a timezone. The regex pins the shape
   // and the component checks reject an impossible date, matching what the Go
   // router's time.Parse(time.RFC3339) rejects.
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(observedAt)
+  // Go's RFC3339 parser accepts either "." or "," before the fractional second.
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:[.,]\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(observedAt)
   if (!match) {
     throw new Error('observed_at must be an RFC3339 timestamp')
   }

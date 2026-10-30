@@ -164,7 +164,7 @@ describe('avenor_workflow numeric and timestamp bounds', () => {
     for (const observedAt of refused) {
       await expect(executeWorkflow(fakeProvider().provider, gate(observedAt))).rejects.toMatchObject({ code: 'invalid_request' })
     }
-    const accepted = ['2024-02-29T00:00:00Z', '2000-02-29T00:00:00Z', '2026-01-31T23:59:59Z', '2026-01-01T00:00:00.123Z', '2026-01-01T00:00:00.5+02:00']
+    const accepted = ['2024-02-29T00:00:00Z', '2000-02-29T00:00:00Z', '2026-01-31T23:59:59Z', '2026-01-01T00:00:00.123Z', '2026-01-01T00:00:00.5+02:00', '2026-01-01T00:00:00,5Z']
     for (const observedAt of accepted) {
       await expect(executeWorkflow(fakeProvider().provider, gate(observedAt))).resolves.toMatchObject({ action: 'gate' })
     }
@@ -242,6 +242,24 @@ describe('avenor_workflow surface wiring', () => {
         supervisorId: supervisorId ?? '',
       })),
     ).rejects.toMatchObject({ code: 'refused', message: 'the supervisor could not be reached' })
+  })
+
+  it('leaves a singleton client open', async () => {
+    let closed = false
+    const client = {
+      workflowStatus: async () => ({ status: 'active' }),
+      close: () => {
+        closed = true
+      },
+    } as unknown as Client
+    const result = await runWorkflowTool({ action: 'status', workflow_id: 'wf-1', supervisor_id: '/tmp/s.sock' }, async supervisorId => ({
+      client,
+      isSingleton: true,
+      sup: null,
+      supervisorId: supervisorId ?? '',
+    }))
+    expect(result.action).toBe('status')
+    expect(closed).toBe(false)
   })
 
   it('denies a malformed call before acquiring a client', async () => {
