@@ -335,6 +335,28 @@ func TestWorkflowCancelHandlerEmptyActor(t *testing.T) {
 	}
 }
 
+func TestWorkflowCancelHandlerNonStringActor(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+	code, text := workflowError(t, callWorkflow(t, s, `{"action":"cancel","workflow_id":"wf_1","reason":"why","actor":7}`))
+	if code != "invalid_request" {
+		t.Fatalf("code got %q want invalid_request (text %q)", code, text)
+	}
+	if len(fake.workflowCancelCalls) != 0 {
+		t.Fatalf("a refused cancel reached the client: %#v", fake.workflowCancelCalls)
+	}
+}
+
+func TestWorkflowCancelHandlerEmptyReason(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+	code, text := workflowError(t, callWorkflow(t, s, `{"action":"cancel","workflow_id":"wf_1","reason":"","actor":"op"}`))
+	if code != "invalid_request" {
+		t.Fatalf("code got %q want invalid_request (text %q)", code, text)
+	}
+	if len(fake.workflowCancelCalls) != 0 {
+		t.Fatalf("a refused cancel reached the client: %#v", fake.workflowCancelCalls)
+	}
+}
+
 func TestWorkflowCancelHandlerExplicitActor(t *testing.T) {
 	s, fake := newWorkflowTestServer(t)
 	callWorkflow(t, s, `{"action":"cancel","workflow_id":"wf_1","reason":"why","actor":"review-pr-auto"}`)

@@ -98,15 +98,15 @@ type Options struct {
 func Admit(input json.RawMessage) (string, error) {
 	fields, err := decodeObject(input)
 	if err != nil {
-		return "", InvalidActionError()
+		return "", invalidActionError()
 	}
 	action, ok := fieldString(fields, "action")
 	if !ok {
-		return "", InvalidActionError()
+		return "", invalidActionError()
 	}
 	entry, known := workflowApplicability[action]
 	if !known {
-		return "", InvalidActionError()
+		return "", invalidActionError()
 	}
 	if detail := validateFields(fields, entry); detail != "" {
 		return "", invalidRequest(action, detail)
@@ -162,7 +162,7 @@ func Execute(client Client, input json.RawMessage, opts Options) (Result, error)
 			return client.WorkflowCancel(typed.WorkflowID, typed.Actor, typed.Reason)
 		})
 	}
-	return Result{}, InvalidActionError()
+	return Result{}, invalidActionError()
 }
 
 func call(action string, work func() (map[string]any, error)) (Result, error) {
@@ -631,10 +631,10 @@ func maxIntegerBound(constraint PropertyConstraints) string {
 	return "9223372036854775807"
 }
 
-// InvalidActionError is the typed denial for an input that names no known
-// action, exported so a surface that pre-admits renders the same sentence
-// Execute does instead of assembling the error by hand.
-func InvalidActionError() *ToolError {
+// invalidActionError is the typed denial for an input that names no known
+// action. Admit is the exported entry point, so a pre-admitting surface renders
+// the same sentence Execute does instead of assembling the error by hand.
+func invalidActionError() *ToolError {
 	return &ToolError{Code: "invalid_action", Message: Repair("workflow_invalid_action", nil), Facts: map[string]string{}}
 }
 

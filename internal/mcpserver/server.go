@@ -1606,7 +1606,12 @@ func withDefaultCancelActor(raw json.RawMessage) json.RawMessage {
 	}
 	if existing, ok := fields["actor"]; ok {
 		var value string
-		if json.Unmarshal(existing, &value) == nil && value != "" {
+		if err := json.Unmarshal(existing, &value); err != nil {
+			// A non-string actor is a wire-type violation, not an omission. Leave
+			// it in place so admission refuses it instead of silently defaulting.
+			return raw
+		}
+		if value != "" {
 			return raw
 		}
 	}

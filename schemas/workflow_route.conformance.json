@@ -149,6 +149,11 @@
       "expect": {"code": "invalid_request", "message": "invalid input for action \"wait\": invalid timeout: \"0s\""}
     },
     {
+      "name": "cancel refuses an empty reason",
+      "input": {"action": "cancel", "workflow_id": "wf-1", "reason": "", "actor": "op"},
+      "expect": {"code": "invalid_request", "message": "invalid input for action \"cancel\": property \"reason\" must be at least 1 characters"}
+    },
+    {
       "name": "a timeout beyond the duration range is refused",
       "input": {"action": "wait", "workflow_id": "wf-1", "timeout": "9999999999h"},
       "expect": {"code": "invalid_request", "message": "invalid input for action \"wait\": invalid timeout: \"9999999999h\""}
