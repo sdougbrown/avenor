@@ -1533,3 +1533,61 @@ func TestControlVerbContextStopsWaitingWhenCancelled(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkflowWaitOutlivesServerPollingBudget pins the client-side deadline for
+// workflow.wait: the server polls for the whole requested budget, so the
+// response timer must outlast it rather than fall back to call's 30s default.
+// It runs on synthetic time so the wait costs nothing.
+func TestWorkflowWaitOutlivesServerPollingBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer serverConn.Close()
+		defer clientConn.Close()
+
+		c := &Client{
+			conn:    clientConn,
+			pending: map[int]chan Response{},
+			eventCh: make(chan Event, 1),
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := c.WorkflowWait("wf-1", time.Minute)
+			done <- err
+		}()
+
+		var raw map[string]any
+		if err := json.NewDecoder(serverConn).Decode(&raw); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if raw["method"] != "workflow.wait" {
+			t.Fatalf("method = %v, want workflow.wait", raw["method"])
+		}
+
+		// Past call's 30s fallback, but still inside the requested budget.
+		time.Sleep(45 * time.Second)
+		select {
+		case err := <-done:
+			t.Fatalf("client gave up while the server could still answer: %v", err)
+		default:
+		}
+
+		resp := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      raw["id"],
+			"result":  map[string]any{"workflow_id": "wf-1", "status": "active"},
+		}
+		data, _ := json.Marshal(resp)
+		if _, err := serverConn.Write(append(data, '\n')); err != nil {
+			t.Fatalf("write response: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("WorkflowWait: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("the wait never observed the late response")
+		}
+	})
+}

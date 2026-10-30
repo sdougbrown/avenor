@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -550,12 +551,29 @@ func validateStringConstraint(name, value string, constraint PropertyConstraints
 	if constraint.Pattern != "" {
 		// A pattern that does not compile matches nothing, so every value is
 		// refused rather than the check being skipped.
-		re, err := regexp.Compile(constraint.Pattern)
-		if err != nil || !re.MatchString(value) {
+		if pattern, ok := compiledPattern(constraint.Pattern); !ok || !pattern.MatchString(value) {
 			return Repair("string_pattern", map[string]string{"name": quote(name)})
 		}
 	}
 	return ""
+}
+
+// constraintPatterns caches every pattern the table declares, compiled once. A
+// pattern that failed to compile is cached as nil so it is not retried per call.
+var constraintPatterns sync.Map
+
+func compiledPattern(pattern string) (*regexp.Regexp, bool) {
+	if cached, ok := constraintPatterns.Load(pattern); ok {
+		compiled, _ := cached.(*regexp.Regexp)
+		return compiled, compiled != nil
+	}
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		constraintPatterns.Store(pattern, (*regexp.Regexp)(nil))
+		return nil, false
+	}
+	constraintPatterns.Store(pattern, compiled)
+	return compiled, true
 }
 
 func validateIntegerConstraint(name string, raw json.RawMessage, constraint PropertyConstraints) string {
