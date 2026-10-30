@@ -1356,7 +1356,12 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			// carries its own id — the id it answers with .reply — and its route
 			// is recorded before the delivery, so the recipient's answer finds a
 			// route whether or not this broker relayed the original message.
-			if err := b.store.RecordTellRoute(messaging.ReplyID(replyTo), fullBody.FromRunID, fullBody.ToRunID, time.Now(), true); err != nil {
+			stamped, err := messaging.ReplyBody(fullBody.Payload, replyTo)
+			if err != nil {
+				writeSendError(w, err)
+				return
+			}
+			if err := b.store.RecordTellRoute(messaging.ReplyID(replyTo), fullBody.FromRunID, fullBody.ToRunID, true); err != nil {
 				writeSendError(w, err)
 				return
 			}
@@ -1364,7 +1369,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 				FromRunID:     fullBody.FromRunID,
 				ToRunID:       fullBody.ToRunID,
 				Kind:          fullBody.Type,
-				Payload:       fullBody.Payload,
+				Payload:       stamped,
 				CorrelationID: messaging.ReplyID(replyTo),
 			})
 			if err != nil {
@@ -1869,7 +1874,7 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusConflict, err.Error(), "invalid-request")
 			return
 		}
-	} else if err := b.store.RecordTellRoute(body.MessageID, body.FromRunID, body.ToRunID, time.Now(), true); err != nil {
+	} else if err := b.store.RecordTellRoute(body.MessageID, body.FromRunID, body.ToRunID, true); err != nil {
 		// A relayed tell records the reply route before the message is exposed,
 		// so a consumer can never answer a message whose route is not bound
 		// yet. A refused route refuses the relay: the ancestor's sender then
@@ -2890,7 +2895,7 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	// rule a relayed ask follows — so the recipient's answer always finds a
 	// route. A repeat reply to the same tell resolves to the same route, so it
 	// is idempotent: the answer is already delivered.
-	if err := m.broker.store.RecordTellRoute(replyID, req.From.RunID, sender, time.Now(), true); err != nil {
+	if err := m.broker.store.RecordTellRoute(replyID, req.From.RunID, sender, true); err != nil {
 		if errors.Is(err, messaging.ErrDuplicateMessageID) {
 			if existingSender, existingTarget, ok := m.broker.store.TellRoute(replyID); ok &&
 				existingSender == req.From.RunID && existingTarget == sender {

@@ -421,7 +421,7 @@ func (s *Store) TellRoute(messageID string) (sender, target string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	route, ok := s.tellRoutes[messageID]
-	if !ok {
+	if !ok || !s.now().Before(route.deadline) {
 		return "", "", false
 	}
 	return route.sender, route.target, true
@@ -454,12 +454,13 @@ func (s *Store) checkTellRouteLocked(messageID string) error {
 // edge or another route holds is refused. A versioned id also records the
 // delivered dedup fence a local admission would have set, so a retried relay
 // is refused instead of queueing the tell twice.
-func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time, legacy bool) error {
+func (s *Store) RecordTellRoute(messageID, sender, target string, legacy bool) error {
 	if messageID == "" || sender == "" || target == "" {
 		return fmt.Errorf("%w: message id, sender and target are required", messaging.ErrInvalidRequest)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
 	key := messaging.FenceKey{Sender: sender, MessageID: messageID, Generation: s.generation}
 	if err := s.generationErrorLocked(s.generation, messageID, now, legacy); err != nil {
 		return err

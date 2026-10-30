@@ -1834,12 +1834,29 @@ func TestBrokerReplyAfterRotationFallsBackToDelivery(t *testing.T) {
 	if reply["status"] != http.StatusOK || reply["note"] == nil {
 		t.Fatalf("reply = %+v, want the fire-and-forget fallback", reply)
 	}
-	sender := b.GetRun("rotated_asker")
-	sender.Mu.Lock()
-	queued := len(sender.ControlQueue)
-	sender.Mu.Unlock()
-	if queued != 1 {
-		t.Fatalf("asker queue = %d, want the reply delivered", queued)
+	got := pollAgentMessages(t, addr, "rotated_asker", senderToken)
+	if len(got) != 1 {
+		t.Fatalf("asker poll = %v, want the reply delivered", got)
+	}
+	payload, ok := got[0]["payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("reply payload = %v, want an object", got[0]["payload"])
+	}
+	replyID := msgID + ".reply"
+	if payload["id"] != replyID || payload["reply_to"] != msgID {
+		t.Fatalf("reply payload = %v, want the stamped correlation fields", payload)
+	}
+
+	// The fallback records the reply's own route, so the asker can answer the
+	// answer even though the edge did not survive the rotation.
+	pollAgentMessages(t, addr, "rotated_replier", targetToken) // drain the original ask
+	counter := sendReplyWithoutTarget(t, addr, senderToken, "rotated_asker", replyID, "back after the rotation")
+	if counter["status"] != http.StatusOK || counter["outcome"] != "sent" {
+		t.Fatalf("counter-reply = %+v, want a 200 sent", counter)
+	}
+	got = pollAgentMessages(t, addr, "rotated_replier", targetToken)
+	if len(got) != 1 || got[0]["from_run_id"] != "rotated_asker" {
+		t.Fatalf("replier poll after counter-reply = %v, want the asker's answer", got)
 	}
 }
 

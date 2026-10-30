@@ -369,6 +369,11 @@ func TestStoreReplyToTellExpiresWithItsRoute(t *testing.T) {
 	}
 
 	clk.Advance(2 * time.Minute)
+	// The lookup enforces the deadline itself, so an expired route is absent
+	// even before the prune tick reclaims it.
+	if _, _, ok := store.TellRoute(msgID); ok {
+		t.Fatal("an expired route was reachable before the prune tick")
+	}
 	store.Prune(clk.Now())
 	if _, _, ok := store.TellRoute(msgID); ok {
 		t.Fatal("expired route survived prune")
@@ -397,10 +402,10 @@ func TestStoreTellRouteRefusesASecondSender(t *testing.T) {
 	}
 	// Any id that already carries a route is refused — a retried relay would
 	// queue the tell twice, whatever the sender is.
-	if err := store.RecordTellRoute(msgID, "carol", "bob", now, false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+	if err := store.RecordTellRoute(msgID, "carol", "bob", false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
 		t.Fatalf("RecordTellRoute over another sender's route = %v, want a duplicate refusal", err)
 	}
-	if err := store.RecordTellRoute(msgID, "alice", "bob", now, false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+	if err := store.RecordTellRoute(msgID, "alice", "bob", false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
 		t.Fatalf("the sender's own re-record = %v, want a duplicate refusal", err)
 	}
 	// An ask whose id carries a tell route is refused too.
@@ -424,7 +429,7 @@ func TestStoreTellRouteRefusesASecondSender(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ask Admit: %v", err)
 	}
-	if err := store.RecordTellRoute(askID, "alice", "bob", now2, false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+	if err := store.RecordTellRoute(askID, "alice", "bob", false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
 		t.Fatalf("RecordTellRoute over an ask edge = %v, want a duplicate refusal", err)
 	}
 	res, err = store.Admit(t.Context(), AdmitRequest{
@@ -471,10 +476,10 @@ func TestStoreTellRoutesCountAgainstFenceCapacity(t *testing.T) {
 	}
 	// A relayed route charges the same capacity.
 	capStore := New(Options{FenceCapacity: 1})
-	if err := capStore.RecordTellRoute("legacy-id", "alice", "bob", time.Now(), true); err != nil {
+	if err := capStore.RecordTellRoute("legacy-id", "alice", "bob", true); err != nil {
 		t.Fatalf("RecordTellRoute: %v", err)
 	}
-	if err := capStore.RecordTellRoute("legacy-id-2", "carol", "bob", time.Now(), true); !errors.Is(err, messaging.ErrFenceCapacity) {
+	if err := capStore.RecordTellRoute("legacy-id-2", "carol", "bob", true); !errors.Is(err, messaging.ErrFenceCapacity) {
 		t.Fatalf("second RecordTellRoute = %v, want a capacity refusal", err)
 	}
 }
