@@ -47,7 +47,13 @@ func ReplyID(messageID string) string {
 // envelope's from_run_id to the id the receiving branch knows, and a payload
 // that named a different run would be refused as a sender mismatch. The
 // caller's own fields are preserved; these two win, because they name the
-// conversation the reply belongs to. The payload must be a JSON object or
+// conversation the reply belongs to. This stamping is the correlation
+// authority on the tell path: the route is keyed by the request's message id,
+// and the rendered reply_to names that same id. The router's own reply_to
+// body field serves the ask path, whose transport (Store.Reply) stores the
+// payload without re-stamping — the two never disagree because both derive
+// from the router's single correlation id.
+// The payload must be a JSON object or
 // absent; a JSON null is an empty body.
 func ReplyBody(payload json.RawMessage, replyTo string) (json.RawMessage, error) {
 	fields := map[string]any{}

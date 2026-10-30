@@ -442,20 +442,24 @@ func TestRelayRecordsTheTellRoute(t *testing.T) {
 		})
 	}
 
-	status, body := relay(parent.key("supervisor"), "tell-r1")
+	// The relay carries a versioned id, so the retried relay below is refused
+	// by the delivered fence RecordTellRoute records, not only by the
+	// route-uniqueness check.
+	tellID := newMsgID(t)
+	status, body := relay(parent.key("supervisor"), tellID)
 	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
 		t.Fatalf("relayed tell = (%d, %v), want 200 sent", status, body)
 	}
 	if queued := queuedAgentMessages(t, bob.broker, "bob"); len(queued) != 1 {
 		t.Fatalf("bob queue = %d messages, want the relayed tell", len(queued))
 	}
-	sender, target, ok := bob.broker.Store().TellRoute("tell-r1")
+	sender, target, ok := bob.broker.Store().TellRoute(tellID)
 	if !ok || sender != parent.key("supervisor") || target != "bob" {
 		t.Fatalf("TellRoute = (%q, %q, %v), want supervisor -> bob", sender, target, ok)
 	}
 
 	// A different sender's tell with the same id is refused and queues nothing.
-	status, _ = relay(parent.key("other"), "tell-r1")
+	status, _ = relay(parent.key("other"), tellID)
 	if status != http.StatusConflict {
 		t.Fatalf("conflicting relay = %d, want 409", status)
 	}
@@ -464,7 +468,7 @@ func TestRelayRecordsTheTellRoute(t *testing.T) {
 	}
 
 	// A retried relay is refused by the delivered fence a versioned id records.
-	status, _ = relay(parent.key("supervisor"), "tell-r1")
+	status, _ = relay(parent.key("supervisor"), tellID)
 	if status != http.StatusConflict {
 		t.Fatalf("retried relay = %d, want 409", status)
 	}
