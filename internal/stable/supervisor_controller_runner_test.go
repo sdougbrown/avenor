@@ -251,11 +251,23 @@ func (f *runnerFixture) waitRunning(t *testing.T, wf string) {
 // exhaustTreeBudget acquires a tree-budget slot and signals the capacity
 // change, returning a release func that frees the slot (and signals the
 // release). It lets a test exhaust the tree budget without touching the
-// supervisor's tree-budget fields directly.
-func (f *runnerFixture) exhaustTreeBudget() (release func()) {
-	token, err := f.sup.acquireTreeAdmission()
-	if err != nil {
-		panic(fmt.Sprintf("exhaust tree budget: %v", err))
+// supervisor's tree-budget fields directly. The controller's dispatch retry
+// loop acquires and releases the same slot on every pass, so a single attempt
+// can lose that race; retry until the slot is held.
+func (f *runnerFixture) exhaustTreeBudget(t *testing.T) (release func()) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var token string
+	for {
+		tok, err := f.sup.acquireTreeAdmission()
+		if err == nil {
+			token = tok
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("exhaust tree budget: %v", err)
+		}
+		time.Sleep(time.Millisecond)
 	}
 	f.sup.signalCapacityChange()
 	return func() {
@@ -1008,7 +1020,7 @@ func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 	// capacity-change signal fires (the budget notifier only announces
 	// releases) and the next pass re-attempts dispatch, changing the reason
 	// to tree and appending the second event.
-	releaseTree := f.exhaustTreeBudget()
+	releaseTree := f.exhaustTreeBudget(t)
 	waitBlocked("tree")
 	blocked, _ = capacityEvents(t)
 	if len(blocked) != 2 || blocked[0] != "local" || blocked[1] != "tree" {

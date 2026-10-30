@@ -781,10 +781,15 @@ func TestSupervisorReaperReclaimsStaleDescendant(t *testing.T) {
 // This is a test-only helper to simulate a crashed supervisor.
 func injectDeadPID(t *testing.T, b *admission.Budget, pid int) {
 	t.Helper()
-	raw := b.RawFile()
-	if raw == nil {
-		t.Fatal("budget has no raw file")
+	// Open a second descriptor rather than locking the budget's own *os.File:
+	// flock is per open file description, so a lock taken on the budget's
+	// descriptor would not exclude the budget's own lock(b.f) calls in this
+	// process, and the rewrite would race the reaper's Reap.
+	raw, err := os.OpenFile(b.Path(), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open budget file: %v", err)
 	}
+	defer raw.Close()
 	if err := flock(raw); err != nil {
 		t.Fatalf("flock: %v", err)
 	}
