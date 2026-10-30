@@ -124,6 +124,38 @@
       "expect": {"action": "complete", "call": "complete", "args": {"workflow_id": "wf-1", "node_id": "n1", "activation_id": "a1", "attempt_id": "at1", "lease_id": "l1", "owner_token": "t1", "outcome": "ok", "outputs": [{"definition_id": "o1", "value": 1}], "artifacts": [{"src_path": "a", "stored_path": "b"}]}}
     },
     {
+      "name": "wait accepts a unitless second count",
+      "input": {"action": "wait", "workflow_id": "wf-1", "timeout": "45"},
+      "expect": {"action": "wait", "call": "wait", "args": {"workflow_id": "wf-1", "timeout_ms": 45000}}
+    },
+    {
+      "name": "wait accepts an hour suffix",
+      "input": {"action": "wait", "workflow_id": "wf-1", "timeout": "1h"},
+      "expect": {"action": "wait", "call": "wait", "args": {"workflow_id": "wf-1", "timeout_ms": 3600000}}
+    },
+    {
+      "name": "wait refuses a zero timeout",
+      "input": {"action": "wait", "workflow_id": "wf-1", "timeout": "0s"},
+      "expect": {"code": "invalid_request", "message": "invalid input for action \"wait\": invalid timeout: \"0s\""}
+    },
+    {
+      "name": "status names a supervisor without forwarding it to the client",
+      "input": {"action": "status", "workflow_id": "wf-1", "supervisor_id": "/tmp/sup-a.sock"},
+      "expect": {"action": "status", "call": "status", "args": {"workflow_id": "wf-1"}}
+    },
+    {
+      "name": "a non-string supervisor_id is refused",
+      "input": {"action": "status", "workflow_id": "wf-1", "supervisor_id": 7},
+      "schema": true,
+      "expect": {"code": "invalid_request", "message": "invalid input for action \"status\": property \"supervisor_id\" must be a string"}
+    },
+    {
+      "name": "an integer beyond the int64 range is refused",
+      "input": {"action": "events", "workflow_id": "wf-1", "after_seq": 99999999999999999999},
+      "schema": true,
+      "expect": {"code": "invalid_request", "message": "invalid input for action \"events\": property \"after_seq\" must be at most 9223372036854775807"}
+    },
+    {
       "name": "cancel records the actor and reason",
       "input": {"action": "cancel", "workflow_id": "wf-1", "actor": "operator", "reason": "superseded"},
       "expect": {"action": "cancel", "call": "cancel", "args": {"workflow_id": "wf-1", "actor": "operator", "reason": "superseded"}}

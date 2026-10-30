@@ -1,9 +1,13 @@
 package workflowtool
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -204,7 +208,7 @@ func TestConformanceSchemaCases(t *testing.T) {
 // entry admit the same set: same properties, same required keys, same declared
 // types, enums and array item types.
 func TestSchemaMatchesRouteTable(t *testing.T) {
-	schema := InputSchema()
+	schema := schemaWithExactNumbers(t)
 	variants, _ := schema["oneOf"].([]any)
 	if len(variants) != len(workflowApplicability) {
 		t.Fatalf("schema has %d variants, table has %d actions", len(variants), len(workflowApplicability))
@@ -264,6 +268,27 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 				if entry.Constraints[name].ItemType != items["type"] {
 					t.Fatalf("%s.%s: schema item type %v, table item type %q", action, name, items["type"], entry.Constraints[name].ItemType)
 				}
+			}
+			// Every declared limit must survive compilation into the table, so a
+			// schema edit that adds a bound cannot drift from the router.
+			constraint := entry.Constraints[name]
+			if v, ok := spec["minLength"]; (ok || constraint.MinLength != 0) && int(mustInt64(t, v)) != constraint.MinLength {
+				t.Fatalf("%s.%s: schema minLength %v, table %d", action, name, v, constraint.MinLength)
+			}
+			if v, ok := spec["maxLength"]; ok && int(mustInt64(t, v)) != constraint.MaxLength {
+				t.Fatalf("%s.%s: schema maxLength %v, table %d", action, name, v, constraint.MaxLength)
+			}
+			if v, ok := spec["minimum"]; ok && v.(json.Number).String() != fmt.Sprint(constraint.Minimum) {
+				t.Fatalf("%s.%s: schema minimum %v, table %d", action, name, v, constraint.Minimum)
+			}
+			if _, ok := spec["minimum"]; ok != constraint.HasMinimum {
+				t.Fatalf("%s.%s: schema minimum presence %v, table %v", action, name, !constraint.HasMinimum, constraint.HasMinimum)
+			}
+			if v, ok := spec["maximum"]; ok && v.(json.Number).String() != fmt.Sprint(constraint.Maximum) {
+				t.Fatalf("%s.%s: schema maximum %v, table %d", action, name, v, constraint.Maximum)
+			}
+			if _, ok := spec["maximum"]; ok != constraint.HasMaximum {
+				t.Fatalf("%s.%s: schema maximum presence %v, table %v", action, name, !constraint.HasMaximum, constraint.HasMaximum)
 			}
 		}
 	}
@@ -355,4 +380,196 @@ func sameJSON(t *testing.T, got, want any) bool {
 		t.Fatalf("marshal want: %v", err)
 	}
 	return string(gotJSON) == string(wantJSON)
+}
+
+// TestSchemaFilesCompiled catches a stale schema.gen.go without running go
+// generate: the compiled constant and the checked-in file decode identically.
+func TestSchemaFilesCompiled(t *testing.T) {
+	if got, want := InputSchema(), readSchemaFile(t, "../../schemas/workflow.input.json"); !reflect.DeepEqual(got, want) {
+		t.Fatal("workflow.input.json and schema.gen.go disagree; run go generate ./internal/workflowtool/...")
+	}
+	if got, want := InputFlatSchema(), readSchemaFile(t, "../../schemas/workflow.input.flat.json"); !reflect.DeepEqual(got, want) {
+		t.Fatal("workflow.input.flat.json and schema.gen.go disagree; run go generate ./internal/workflowtool/...")
+	}
+}
+
+// TestFlatSchemaAcceptsEveryValidInput proves the flat schema MCP surfaces
+// publish admits every input the router admits, the valid conformance cases'
+// integer and object arguments included, so publishing it cannot turn a valid
+// call into a client-side schema error.
+func TestFlatSchemaAcceptsEveryValidInput(t *testing.T) {
+	valid := 0
+	for _, c := range loadConformanceCases(t) {
+		if c.Schema || c.Expect.Code != "" {
+			continue
+		}
+		valid++
+		t.Run(c.Name, func(t *testing.T) {
+			if err := validateAgainst(t, InputFlatSchema(), c.Input); err != nil {
+				t.Fatalf("flat schema rejected the valid input %s: %v", c.Input, err)
+			}
+		})
+	}
+	if valid == 0 {
+		t.Fatal("fixture carries no valid case")
+	}
+}
+
+// TestFlatSchemaIsTheUnion pins the flat schema to the union it is compiled
+// from: every action's properties, each keeping the type and limits its action
+// declares, an action enum, no union keyword, and only a key every action
+// requires. A generator change that drops a property, a limit or the required
+// intersection fails here.
+func TestFlatSchemaIsTheUnion(t *testing.T) {
+	union, flat := InputSchema(), InputFlatSchema()
+	for _, banned := range []string{"oneOf", "anyOf"} {
+		if _, ok := flat[banned]; ok {
+			t.Fatalf("flat schema carries %s", banned)
+		}
+	}
+	if flat["type"] != "object" {
+		t.Fatalf("flat type = %v, want object", flat["type"])
+	}
+	if additional, ok := flat["additionalProperties"].(bool); !ok || additional {
+		t.Fatal("flat additionalProperties must be false")
+	}
+	flatProperties, ok := flat["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("flat properties is not an object")
+	}
+
+	var actions []any
+	flatRequired := []string{}
+	declaring := map[string][]string{}
+	declared := map[string][]map[string]any{}
+	variants, _ := union["oneOf"].([]any)
+	for i, rawVariant := range variants {
+		variant, _ := rawVariant.(map[string]any)
+		properties, _ := variant["properties"].(map[string]any)
+		action, _ := properties["action"].(map[string]any)["const"].(string)
+		actions = append(actions, action)
+		required := stringList(variant["required"])
+		if i == 0 {
+			flatRequired = required
+		} else {
+			flatRequired = intersectStrings(flatRequired, required)
+		}
+		for name, rawProperty := range properties {
+			property, _ := rawProperty.(map[string]any)
+			if name == "action" {
+				continue
+			}
+			declaring[name] = append(declaring[name], action)
+			declared[name] = append(declared[name], withoutKey(property, "description"))
+		}
+	}
+	for _, name := range flatRequired {
+		if name != "action" {
+			t.Fatalf("flat schema would require %q, which is not the action", name)
+		}
+	}
+	if got := stringList(flat["required"]); !slices.Equal(got, flatRequired) {
+		t.Fatalf("flat required = %v, the union's intersection = %v", got, flatRequired)
+	}
+
+	names := make([]string, 0, len(flatProperties))
+	for name := range flatProperties {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	wantNames := make([]string, 0, len(declared)+1)
+	for name := range declared {
+		wantNames = append(wantNames, name)
+	}
+	wantNames = append(wantNames, "action")
+	sort.Strings(wantNames)
+	if !slices.Equal(names, wantNames) {
+		t.Fatalf("flat properties = %v, the union's = %v", names, wantNames)
+	}
+
+	for name, declarations := range declared {
+		flatProperty, _ := flatProperties[name].(map[string]any)
+		got := withoutKey(flatProperty, "description")
+		for i, want := range declarations {
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: flat declaration = %v, union declaration = %v", declaring[name][i], got, want)
+			}
+		}
+	}
+	actionProperty, _ := flatProperties["action"].(map[string]any)
+	if !reflect.DeepEqual(actionProperty["enum"], actions) {
+		t.Fatalf("flat action enum = %v, want %v", actionProperty["enum"], actions)
+	}
+}
+
+// schemaWithExactNumbers decodes the checked-in union with json.Number, so a
+// declared bound at the int64 limit survives the comparison.
+func schemaWithExactNumbers(t *testing.T) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile("../../schemas/workflow.input.json")
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var schema map[string]any
+	if err := decoder.Decode(&schema); err != nil {
+		t.Fatalf("decode schema: %v", err)
+	}
+	return schema
+}
+
+func readSchemaFile(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	// Same decode rule as decodeSchema: an integer bound at the int64 limit
+	// must survive as an exact number on both sides of the comparison.
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var schema map[string]any
+	if err := decoder.Decode(&schema); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	return schema
+}
+
+func mustInt64(t *testing.T, value any) int64 {
+	t.Helper()
+	number, ok := value.(json.Number)
+	if !ok {
+		t.Fatalf("constraint %v is not a JSON number", value)
+	}
+	out, err := number.Int64()
+	if err != nil {
+		t.Fatalf("constraint %v: %v", value, err)
+	}
+	return out
+}
+
+func stringList(value any) []string {
+	raw, _ := value.([]any)
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		out = append(out, item.(string))
+	}
+	return out
+}
+
+func intersectStrings(first, second []string) []string {
+	out := make([]string, 0, len(first))
+	for _, name := range first {
+		if slices.Contains(second, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func withoutKey(property map[string]any, key string) map[string]any {
+	out := maps.Clone(property)
+	delete(out, key)
+	return out
 }

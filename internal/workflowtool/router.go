@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 // ActionApplicability is the per-action input contract. It is the one table
@@ -341,8 +343,10 @@ func Repair(code string, facts map[string]string) string {
 }
 
 func decodeSchema(raw string) map[string]any {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
 	var schema map[string]any
-	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
+	if err := decoder.Decode(&schema); err != nil {
 		panic(err)
 	}
 	return schema
@@ -475,8 +479,8 @@ func hasWireType(raw json.RawMessage, kind string) bool {
 		_, ok := value.(string)
 		return ok
 	case "integer":
-		rational, ok := exactInteger(raw)
-		return ok && rational.Num().IsInt64()
+		_, ok := exactInteger(raw)
+		return ok
 	case "object":
 		_, ok := value.(map[string]any)
 		return ok
@@ -539,8 +543,16 @@ func validateStringConstraint(name, value string, constraint PropertyConstraints
 
 func validateIntegerConstraint(name string, raw json.RawMessage, constraint PropertyConstraints) string {
 	rational, ok := exactInteger(raw)
-	if !ok || !rational.Num().IsInt64() {
+	if !ok {
 		return Repair("wrong_type_integer", map[string]string{"name": quote(name)})
+	}
+	if !rational.Num().IsInt64() {
+		// The declared bound is the int64 limit the schema publishes, so a
+		// value outside it names the same bound the schema rejects with.
+		if rational.Sign() < 0 {
+			return Repair("integer_too_small", map[string]string{"name": quote(name), "min": minIntegerBound(constraint)})
+		}
+		return Repair("integer_too_large", map[string]string{"name": quote(name), "max": maxIntegerBound(constraint)})
 	}
 	value := rational.Num().Int64()
 	if constraint.HasMinimum && value < constraint.Minimum {
@@ -550,6 +562,23 @@ func validateIntegerConstraint(name string, raw json.RawMessage, constraint Prop
 		return Repair("integer_too_large", map[string]string{"name": quote(name), "max": fmt.Sprint(constraint.Maximum)})
 	}
 	return ""
+}
+
+// minIntegerBound and maxIntegerBound render the bound a property declares, or
+// the int64 limit as text when the schema declares none — the wire type's
+// range, written literally because 2^63 does not fit an int64 constant.
+func minIntegerBound(constraint PropertyConstraints) string {
+	if constraint.HasMinimum {
+		return fmt.Sprint(constraint.Minimum)
+	}
+	return "-9223372036854775808"
+}
+
+func maxIntegerBound(constraint PropertyConstraints) string {
+	if constraint.HasMaximum {
+		return fmt.Sprint(constraint.Maximum)
+	}
+	return "9223372036854775807"
 }
 
 func invalidAction() *ToolError {
@@ -565,15 +594,11 @@ func refused(err error) *ToolError {
 	return &ToolError{Code: "refused", Message: err.Error(), Facts: map[string]string{}}
 }
 
-func quote(value string) string { return strconv.Quote(value) }
+// quote and quoteList render template facts through the shared escaping rule,
+// so the two routers cannot disagree on how an id is quoted.
+func quote(value string) string { return messaging.Quote(value) }
 
-func quoteList(values []string) string {
-	quoted := make([]string, len(values))
-	for i, value := range values {
-		quoted[i] = strconv.Quote(value)
-	}
-	return strings.Join(quoted, ", ")
-}
+func quoteList(values []string) string { return messaging.QuoteList(values) }
 
 func contains(values []string, target string) bool {
 	for _, value := range values {

@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/avenor/internal/flatgen"
 )
 
 // TestGenerateKeepsADeclaredZeroMaximum pins the compiled table's distinction
@@ -36,7 +38,7 @@ func TestFlattenReportsAPropertyTypeDisagreement(t *testing.T) {
 		{"properties":{"action":{"const":"tell"},"payload":{"type":"object"}}},
 		{"properties":{"action":{"const":"reply"},"payload":{"type":"string"}}}
 	]}`)
-	_, err := flattenInput(union, flatSchemaMeta{})
+	_, err := flatgen.Flatten(union, flatgen.Meta{})
 	if err == nil {
 		t.Fatal("flattenInput accepted two declarations of one property")
 	}
@@ -57,7 +59,7 @@ func TestFlattenReportsAPropertyConstraintDisagreement(t *testing.T) {
 		{"properties":{"action":{"const":"tell"},"timeout_ms":{"type":"integer","minimum":0,"maximum":600000}}},
 		{"properties":{"action":{"const":"reply"},"timeout_ms":{"type":"integer","minimum":0,"maximum":300000}}}
 	]}`)
-	_, err := flattenInput(union, flatSchemaMeta{})
+	_, err := flatgen.Flatten(union, flatgen.Meta{})
 	if err == nil {
 		t.Fatal("flattenInput accepted two declarations of one property")
 	}
@@ -103,7 +105,7 @@ func TestFlattenRejectsMalformedUnions(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			flat, err := flattenInput([]byte(c.union), flatSchemaMeta{})
+			flat, err := flatgen.Flatten([]byte(c.union), flatgen.Meta{})
 			if err == nil {
 				t.Fatalf("flattenInput accepted the union and returned:\n%s", flat)
 			}
@@ -128,7 +130,7 @@ func TestFlattenKeepsTheActionDeclarations(t *testing.T) {
 		{"properties":{"action":{"const":"rename","description":"Rename a run's display name."},"name":{"type":"string"}},"required":["action","name"]},
 		{"properties":{"action":{"const":"last","description":"Read a peer's last agent message."},"target":{"type":"string"}},"required":["action","target"]}
 	]}`)
-	flat, err := flattenInput(union, flatSchemaMeta{Title: "t", ID: "id", Description: "d"})
+	flat, err := flatgen.Flatten(union, flatgen.Meta{Title: "t", ID: "id", Description: "d"})
 	if err != nil {
 		t.Fatalf("flattenInput: %v", err)
 	}
@@ -162,7 +164,7 @@ func TestFlattenNamesEveryActionWithoutDescriptions(t *testing.T) {
 		{"properties":{"action":{"const":"tell"}}},
 		{"properties":{"action":{"const":"ask"}}}
 	]}`)
-	flat, err := flattenInput(union, flatSchemaMeta{Title: "t", ID: "id", Description: "d"})
+	flat, err := flatgen.Flatten(union, flatgen.Meta{Title: "t", ID: "id", Description: "d"})
 	if err != nil {
 		t.Fatalf("flattenInput: %v", err)
 	}
@@ -187,7 +189,7 @@ func TestFlattenRequiresOnlyTheIntersection(t *testing.T) {
 		{"properties":{"action":{"const":"ask"},"target":{"type":"string","description":"Recipient."},"timeout_ms":{"type":"integer","minimum":0,"maximum":600000}},"required":["action","target"]},
 		{"properties":{"action":{"const":"resume"},"target":{"type":"string","description":"Prior run."}},"required":["action"]}
 	]}`)
-	flat, err := flattenInput(union, flatSchemaMeta{Title: "t", ID: "id", Description: "d"})
+	flat, err := flatgen.Flatten(union, flatgen.Meta{Title: "t", ID: "id", Description: "d"})
 	if err != nil {
 		t.Fatalf("flattenInput: %v", err)
 	}

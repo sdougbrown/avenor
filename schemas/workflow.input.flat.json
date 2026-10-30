@@ -29,6 +29,8 @@
     },
     "after_seq": {
       "description": "Only include events with sequence greater than this value.",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
       "type": "integer"
     },
     "artifacts": {
@@ -59,6 +61,8 @@
     },
     "limit": {
       "description": "Max events to return (0 for the server default). Max candidates to report (0 for the server default).",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
       "type": "integer"
     },
     "node_id": {

@@ -56,10 +56,14 @@
         },
         "after_seq": {
           "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807,
           "description": "Only include events with sequence greater than this value."
         },
         "limit": {
           "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807,
           "description": "Max events to return (0 for the server default)."
         },
         "supervisor_id": {
@@ -106,6 +110,8 @@
         },
         "limit": {
           "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807,
           "description": "Max candidates to report (0 for the server default)."
         },
         "supervisor_id": {
