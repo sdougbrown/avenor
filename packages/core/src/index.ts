@@ -132,7 +132,7 @@ export { workflowControllerStatusTool, createWorkflowControllerStatusTool, type 
 export { workflowReadyTool, createWorkflowReadyTool, type WorkflowReadyToolArgs, type WorkflowReadyResult } from './tools/workflow-ready.js'
 export { workflowCancelTool, createWorkflowCancelTool } from './tools/workflow-cancel.js'
 export type { WorkflowCancelArgs, WorkflowCancelResult } from './tools/workflow-cancel.js'
-export { assertWorkflowInput, executeWorkflow, workflowSupervisorId, WorkflowToolError } from './workflow.js'
+export { WorkflowToolError } from './workflow.js'
 export type { WorkflowAction, WorkflowInput, WorkflowProvider, WorkflowResult } from './workflow.js'
-export { workflowTool, createWorkflowTool, clientWorkflowProvider, withWorkflowProvider, runWorkflowTool } from './tools/workflow.js'
+export { runWorkflowTool } from './tools/workflow.js'
 

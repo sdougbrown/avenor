@@ -336,12 +336,24 @@ export async function executeWorkflow(provider: WorkflowProvider, input: unknown
   throw invalidAction()
 }
 
+/**
+ * The largest whole-second wait that fits a signed 64-bit nanosecond duration,
+ * the same bound the Go router applies. A larger request would overflow the
+ * conversion and dispatch a negative budget.
+ */
+const MAX_WAIT_SECONDS = 9_223_372_036
+
 function parseTimeout(value: string): number {
+  let seconds: number
   try {
-    return validateTimeout(value) * 1000
+    seconds = validateTimeout(value)
   } catch {
     throw invalidRequest('wait', repair('invalid_timeout', { value: quote(value) }))
   }
+  if (seconds > MAX_WAIT_SECONDS) {
+    throw invalidRequest('wait', repair('invalid_timeout', { value: quote(value) }))
+  }
+  return seconds * 1000
 }
 
 function assertObservedAt(value: string): void {

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Language-neutral conformance fixture for the avenor_workflow contract. 'repairs' is the template table every Repair()-rendered tool error is built from; 'applicability' is the per-action input contract the router validates against (permitted keys, required keys, and each key's declared type); 'cases' drives the router and the Go JSON-Schema test. A case's 'schema': true marks an input the JSON Schema must also reject. Facts are pre-quoted: a template carries no literal quotes and every fact that should render quoted arrives quoted.",
+  "description": "Language-neutral conformance fixture shared by the Go router (internal/workflowtool) and the TypeScript router (packages/core/src/workflow.ts). 'repairs' is the template table every Repair()-rendered tool error is built from; 'applicability' is the per-action input contract both routers validate against (permitted keys, required keys, and each key's declared type); 'cases' drives both routers and the Go JSON-Schema test. A case's 'schema': true marks an input the JSON Schema must also reject. Facts are pre-quoted: a template carries no literal quotes and every fact that should render quoted arrives quoted.",
   "repairs": {
     "invalid_request": "invalid input for action {action}: {detail}",
     "unknown_property": "unknown property {name}",
