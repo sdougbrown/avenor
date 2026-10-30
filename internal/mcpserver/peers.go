@@ -3,11 +3,10 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
-	"errors"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
-	"github.com/sdougbrown/avenor/internal/workflowtool"
+	"github.com/sdougbrown/avenor/internal/toolerr"
 )
 
 // handleAvenorPeers is a thin wrapper over the one peers executor. This surface
@@ -67,19 +66,11 @@ func (s *Server) handleAvenorMessage(ctx context.Context, req *mcp.CallToolReque
 // toolErrorResult renders one merged tool's typed error the way every surface
 // does: the rendered sentence as content, the same object as structured
 // content, and the error flag set so a client branching on it sees the failure.
-// The messaging and workflow routers share the shape (code, text, facts), so
-// one renderer serves both. Any other error goes back to the JSON-RPC layer.
+// Both routers raise the shared tool error, so one mapping serves them. Any
+// other error goes back to the JSON-RPC layer.
 func toolErrorResult(err error) (*mcp.CallToolResult, error) {
-	var routerErr *router.ToolError
-	var workflowErr *workflowtool.ToolError
-	var message string
-	var object map[string]any
-	switch {
-	case errors.As(err, &routerErr):
-		message, object = routerErr.Message, map[string]any{"code": routerErr.Code, "text": routerErr.Message}
-	case errors.As(err, &workflowErr):
-		message, object = workflowErr.Message, map[string]any{"code": workflowErr.Code, "text": workflowErr.Message}
-	default:
+	object, message, ok := toolerr.ToolFailure(err)
+	if !ok {
 		return nil, err
 	}
 	return &mcp.CallToolResult{

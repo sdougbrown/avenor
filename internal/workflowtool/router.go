@@ -162,7 +162,7 @@ func Execute(client Client, input json.RawMessage, opts Options) (Result, error)
 			return client.WorkflowCancel(typed.WorkflowID, typed.Actor, typed.Reason)
 		})
 	}
-	return Result{}, invalidAction()
+	return Result{}, InvalidActionError()
 }
 
 func call(action string, work func() (map[string]any, error)) (Result, error) {
@@ -637,8 +637,6 @@ func InvalidActionError() *ToolError {
 	return &ToolError{Code: "invalid_action", Message: Repair("workflow_invalid_action", nil), Facts: map[string]string{}}
 }
 
-func invalidAction() *ToolError { return InvalidActionError() }
-
 func invalidRequest(action, detail string) *ToolError {
 	facts := map[string]string{"action": quote(action), "detail": detail}
 	return &ToolError{Code: "invalid_request", Message: Repair("invalid_request", facts), Facts: facts}
@@ -703,8 +701,7 @@ func IsReadOnly(action string) bool {
 
 // The access levels an applicability entry carries.
 const (
-	accessRead  = "read"
-	accessOwner = ""
+	accessRead = "read"
 )
 
 // The nine workflow actions. The spellings are the schema's action enum.

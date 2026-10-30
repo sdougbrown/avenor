@@ -17,6 +17,7 @@ import (
 // ApplicabilityEntry is one action's row in a conformance fixture's
 // applicability map.
 type ApplicabilityEntry struct {
+	Access    string            `json:"access"`
 	Permitted []string          `json:"permitted"`
 	Required  []string          `json:"required"`
 	Types     map[string]string `json:"types"`
@@ -127,7 +128,11 @@ func WriteApplicability(b *strings.Builder, name, description string, table map[
 				panic(fmt.Sprintf("%s: property %q declares unsupported type %q", action, property, kind))
 			}
 		}
-		fmt.Fprintf(b, "\t%s: {Permitted: %s, Required: %s, Types: map[string]string{", strconv.Quote(action), StringSlice(entry.Permitted), StringSlice(entry.Required))
+		fmt.Fprintf(b, "\t%s: {", strconv.Quote(action))
+		if entry.Access != "" {
+			fmt.Fprintf(b, "Access: %s, ", strconv.Quote(entry.Access))
+		}
+		fmt.Fprintf(b, "Permitted: %s, Required: %s, Types: map[string]string{", StringSlice(entry.Permitted), StringSlice(entry.Required))
 		for _, property := range SortedKeys(entry.Types) {
 			fmt.Fprintf(b, "%s: %s, ", strconv.Quote(property), strconv.Quote(entry.Types[property]))
 		}
