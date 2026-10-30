@@ -512,6 +512,13 @@ func TestStoreRemoveRunAndResetDropTellRoutes(t *testing.T) {
 		t.Fatal("a surviving route was dropped by RemoveRun")
 	}
 
+	// The target arm: a route leaves with its target too, so a reply cannot
+	// report sent into a queue the run's removal deleted.
+	store.RemoveRun("carol")
+	if _, _, ok := store.TellRoute(carolMsg); ok {
+		t.Fatal("a removed target's route survived RemoveRun")
+	}
+
 	store.Reset()
 	if _, _, ok := store.TellRoute(carolMsg); ok {
 		t.Fatal("a route survived Reset")

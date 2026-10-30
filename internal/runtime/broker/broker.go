@@ -1359,6 +1359,10 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 				CorrelationID: replyTo + ".reply",
 			})
 			if err != nil {
+				// The delivery failed, so the route is retracted: a retried
+				// reply is admitted instead of being refused for a message
+				// that was never exposed.
+				b.store.DeleteTellRoute(replyTo + ".reply")
 				writeCodedError(w, http.StatusNotFound, err.Error(), "invalid-request")
 				return
 			}
@@ -1901,6 +1905,10 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 		sender = b.DisplayName(body.FromRunID)
 	}
 	if err := b.sendToAs(body.FromRunID, body.ToRunID, body.Type, body.Payload, body.MessageID, sender); err != nil {
+		// The delivery failed, so the route is retracted: a retried relay is
+		// admitted instead of being refused for a message that was never
+		// exposed.
+		b.store.DeleteTellRoute(body.MessageID)
 		if errors.Is(err, messaging.ErrTargetUnavailable) {
 			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
 			return
@@ -2916,6 +2924,10 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 		// renders a reply_to that names a message a route exists for.
 		CorrelationID: replyID,
 	}); err != nil {
+		// The delivery failed, so the route is retracted: a retried reply is
+		// admitted instead of being refused for a message that was never
+		// exposed.
+		m.broker.store.DeleteTellRoute(replyID)
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
 	}
 	return messaging.SendResult{Outcome: messaging.OutcomeSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil

@@ -259,9 +259,9 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 	// Tell and ask share one message-id namespace: a reply to an id must
 	// resolve to one record, so an ask whose id carries a tell route is a
 	// duplicate whatever the sender is.
-	if _, ok := s.tellRoutes[req.MessageID]; ok {
+	if err := s.checkTellRouteLocked(req.MessageID); err != nil {
 		result.Outcome = messaging.OutcomeNotSent
-		return result, messaging.ErrDuplicateMessageID
+		return result, err
 	}
 	if !req.NoReply {
 		for _, e := range s.active {
@@ -277,15 +277,6 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 	}
 
 	if req.NoReply {
-		// The route was already refused above when another sender's tell route
-		// or any ask edge holds this id. The delivery runs after the checks, so
-		// a refused tell is never published.
-		for _, e := range s.active {
-			if e.key.MessageID == req.MessageID {
-				result.Outcome = messaging.OutcomeNotSent
-				return result, messaging.ErrDuplicateMessageID
-			}
-		}
 		if s.backend != nil {
 			if _, err := s.backend.Publish(req.Target, msg); err != nil {
 				result.Outcome = messaging.OutcomeNotSent
@@ -445,14 +436,33 @@ func (s *Store) TellRoute(messageID string) (sender, target string, ok bool) {
 	return route.sender, route.target, true
 }
 
+// checkTellRouteLocked refuses a message id another tell route or ask edge
+// holds. Both tell admissions — a local NoReply admit and a relayed tell's
+// route record — call it, so the namespace rules live in one place. The ask
+// path's own terminal-fence handling (a withdrawn ask reports withdrawn to
+// its caller) runs before it; a relayed tell refuses instead, because a
+// withdrawn id must never be delivered over and the relay caller classifies
+// only through the wire table.
+func (s *Store) checkTellRouteLocked(messageID string) error {
+	if _, ok := s.tellRoutes[messageID]; ok {
+		return messaging.ErrDuplicateMessageID
+	}
+	for _, e := range s.active {
+		if e.key.MessageID == messageID {
+			return messaging.ErrDuplicateMessageID
+		}
+	}
+	return nil
+}
+
 // RecordTellRoute records the reply route for a no-reply message this store's
 // queues hold without an admission of its own — a tell an ancestor broker
 // relayed in. The sender and target are the ids this broker addresses them by.
-// The same uniqueness rules as a NoReply admission apply: the message id is
-// shared with asks, so a route is refused while an ask edge holds the id, and
-// an id that already carries a route is refused — a retried relay would queue
-// the tell twice. A versioned id also records the delivered dedup fence a
-// local admission would have set.
+// The same uniqueness rules as a NoReply admission apply, through
+// checkTellRouteLocked: the message id is shared with asks, so an id an ask
+// edge or another route holds is refused. A versioned id also records the
+// delivered dedup fence a local admission would have set, so a retried relay
+// is refused instead of queueing the tell twice.
 func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time, legacy bool) error {
 	if messageID == "" || sender == "" || target == "" {
 		return fmt.Errorf("%w: message id, sender and target are required", messaging.ErrInvalidRequest)
@@ -469,20 +479,12 @@ func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time,
 	}
 	s.reclaimLocked(now)
 	if _, ok := s.terminal[key]; ok {
-		// A versioned id's delivered fence is spent: the relay already queued
-		// this tell once, and a second queue entry would deliver it twice.
+		// A versioned id's delivered fence is spent, and a withdrawn ask's fence
+		// must never be delivered over: either way the id is not free.
 		return messaging.ErrDuplicateMessageID
 	}
-	if _, ok := s.tellRoutes[messageID]; ok {
-		// The route exists, so the message was already queued once — a retried
-		// relay would deliver it twice, and a different sender's tell with the
-		// same id would misroute the first sender's answers.
-		return messaging.ErrDuplicateMessageID
-	}
-	for _, e := range s.active {
-		if e.key.MessageID == messageID {
-			return messaging.ErrDuplicateMessageID
-		}
+	if err := s.checkTellRouteLocked(messageID); err != nil {
+		return err
 	}
 	if s.fenceCountLocked() >= s.fenceCapacity {
 		return messaging.ErrFenceCapacity
@@ -492,6 +494,24 @@ func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time,
 	}
 	s.tellRoutes[messageID] = &tellRoute{messageID: messageID, sender: sender, target: target, deadline: deadline}
 	return nil
+}
+
+// DeleteTellRoute retracts the route a failed delivery left behind, with the
+// delivered fence a versioned record set, so a retried relay can be admitted.
+// The route must have been recorded for this generation; a route the store no
+// longer holds is a no-op.
+func (s *Store) DeleteTellRoute(messageID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	route, ok := s.tellRoutes[messageID]
+	if !ok {
+		return
+	}
+	delete(s.tellRoutes, messageID)
+	key := messaging.FenceKey{Sender: route.sender, MessageID: messageID, Generation: s.generation}
+	if f, ok := s.terminal[key]; ok && f.delivered {
+		s.dropFenceLocked(key)
+	}
 }
 
 // Withdraw installs a terminal fence for the key. A withdrawal with no live
