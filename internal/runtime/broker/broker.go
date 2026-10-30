@@ -1345,12 +1345,15 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// No live edge owns this ID, so the reply degrades to a delivery
-			// rather than completing an edge the store already retired.
+			// rather than completing an edge the store already retired. The reply
+			// carries its own id — the id it answers with .reply — so the relay
+			// records the route the recipient's answer needs.
 			err = b.seam().Tell(r.Context(), messaging.TellRequest{
-				FromRunID: fullBody.FromRunID,
-				ToRunID:   fullBody.ToRunID,
-				Kind:      fullBody.Type,
-				Payload:   fullBody.Payload,
+				FromRunID:     fullBody.FromRunID,
+				ToRunID:       fullBody.ToRunID,
+				Kind:          fullBody.Type,
+				Payload:       fullBody.Payload,
+				CorrelationID: replyTo + ".reply",
 			})
 			if err != nil {
 				writeCodedError(w, http.StatusNotFound, err.Error(), "invalid-request")
@@ -1878,6 +1881,13 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusConflict, err.Error(), "invalid-request")
 			return
 		}
+	} else if err := b.store.RecordTellRoute(body.MessageID, body.FromRunID, body.ToRunID, time.Now(), true); err != nil {
+		// A relayed tell records the reply route before the message is exposed,
+		// so a consumer can never answer a message whose route is not bound
+		// yet. A refused route refuses the relay: the ancestor's sender then
+		// sees not-sent instead of an answerable tell that cannot be answered.
+		writeSendError(w, err)
+		return
 	}
 	// The branch that owns the asker is the one that knows its display name,
 	// so the relay carries the name it resolved; the receiving branch cannot
@@ -2871,7 +2881,43 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	}
 	key := m.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, m.broker.store.Generation())
 	outcome, err := m.broker.store.Reply(key, req.From.RunID, payload)
-	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	if outcome != messaging.OutcomeEdgeAbsent || err != nil {
+		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	}
+	// No ask edge. A reply to a tell is delivered to the tell's sender through
+	// the seam, which relays across a branch boundary the way a tell does. The
+	// reply carries its own message id — the original id with .reply — so the
+	// recipient's answer routes back through a route of its own instead of
+	// colliding with the original tell's route. Only the tell's target may
+	// answer it.
+	sender, target, ok := m.broker.store.TellRoute(req.MessageID)
+	if !ok || target != req.From.RunID {
+		return messaging.SendResult{Outcome: messaging.OutcomeEdgeAbsent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
+	}
+	body, err := messaging.ReplyBody(payload, req.MessageID)
+	if err != nil {
+		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	}
+	replyID := req.MessageID + ".reply"
+	// The reply's own route is recorded before the reply is exposed — the same
+	// rule a relayed ask follows — so the recipient's answer always finds a
+	// route. Each reply carries an id whose route names the previous replier as
+	// its sender, which is what makes a reply chain work.
+	if err := m.broker.store.RecordTellRoute(replyID, req.From.RunID, sender, time.Now(), true); err != nil {
+		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	}
+	if err := m.broker.seam().Tell(ctx, messaging.TellRequest{
+		FromRunID: req.From.RunID,
+		ToRunID:   sender,
+		Kind:      "agent_message",
+		Payload:   body,
+		// The correlation id is the reply's own id, so the recipient's surface
+		// renders a reply_to that names a message a route exists for.
+		CorrelationID: replyID,
+	}); err != nil {
+		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	}
+	return messaging.SendResult{Outcome: messaging.OutcomeSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
 }
 
 func (m localMessenger) Tell(ctx context.Context, req messaging.TellRequest) error {

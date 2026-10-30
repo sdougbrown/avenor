@@ -256,6 +256,13 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 		result.Outcome = messaging.OutcomeNotSent
 		return result, messaging.ErrDuplicateMessageID
 	}
+	// Tell and ask share one message-id namespace: a reply to an id must
+	// resolve to one record, so an ask whose id carries a tell route is a
+	// duplicate whatever the sender is.
+	if _, ok := s.tellRoutes[req.MessageID]; ok {
+		result.Outcome = messaging.OutcomeNotSent
+		return result, messaging.ErrDuplicateMessageID
+	}
 	if !req.NoReply {
 		for _, e := range s.active {
 			if e.key.Sender == req.Target && e.target == req.Sender.RunID {
@@ -270,19 +277,26 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 	}
 
 	if req.NoReply {
+		// The route is keyed by message id because a replier knows only the id
+		// it received. A second tell with the same id is refused rather than
+		// allowed to move the route to another sender, which would misroute
+		// the first sender's answers, and the checks run before the delivery so
+		// a refused tell is never published.
+		if prev, ok := s.tellRoutes[req.MessageID]; ok && prev.sender != req.Sender.RunID {
+			result.Outcome = messaging.OutcomeNotSent
+			return result, messaging.ErrDuplicateMessageID
+		}
+		for _, e := range s.active {
+			if e.key.MessageID == req.MessageID {
+				result.Outcome = messaging.OutcomeNotSent
+				return result, messaging.ErrDuplicateMessageID
+			}
+		}
 		if s.backend != nil {
 			if _, err := s.backend.Publish(req.Target, msg); err != nil {
 				result.Outcome = messaging.OutcomeNotSent
 				return result, err
 			}
-		}
-		// The route is keyed by message id because a replier knows only the id
-		// it received. A second tell with the same id is refused rather than
-		// allowed to move the route to another sender, which would misroute
-		// the first sender's answers.
-		if prev, ok := s.tellRoutes[req.MessageID]; ok && prev.sender != req.Sender.RunID {
-			result.Outcome = messaging.OutcomeNotSent
-			return result, messaging.ErrDuplicateMessageID
 		}
 		if versionedID(req.MessageID, now) {
 			s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeSent, delivered: true})
@@ -390,11 +404,9 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 		e = s.findActiveLocked(key)
 	}
 	if e == nil {
-		// No ask edge. A reply to a tell is routed back to the tell's sender,
-		// which is the only run allowed to answer it.
-		if route, ok := s.tellRoutes[key.MessageID]; ok && route.target == fromRunID {
-			return s.replyToTellLocked(route, fromRunID, payload)
-		}
+		// No ask edge. A reply to a tell is routed by the caller, which asks for
+		// the route and delivers through its own seam; the delivery may cross a
+		// branch boundary, which the store performs no network I/O to do.
 		return messaging.OutcomeEdgeAbsent, nil
 	}
 	if e.target != fromRunID {
@@ -425,47 +437,61 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 	return messaging.OutcomeReplied, nil
 }
 
-// replyToTellLocked routes a reply to a no-reply message back to its sender.
-// The reply carries the original message id so the sender can correlate it.
-func (s *Store) replyToTellLocked(route *tellRoute, fromRunID string, payload json.RawMessage) (messaging.Outcome, error) {
-	if s.backend == nil {
-		return messaging.OutcomeNotSent, nil
+// TellRoute reports the recorded route for a no-reply message: the sender the
+// reply must reach, and the target the replier must be. It is the one lookup
+// a caller needs to deliver a reply to a tell, including across a branch
+// boundary through its own transport.
+func (s *Store) TellRoute(messageID string) (sender, target string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	route, ok := s.tellRoutes[messageID]
+	if !ok {
+		return "", "", false
 	}
-	body, err := replyBody(payload, route.messageID, fromRunID)
-	if err != nil {
-		return messaging.OutcomeNotSent, err
-	}
-	msg := messaging.InboundMessage{
-		MessageID: route.messageID,
-		FromRunID: fromRunID,
-		Kind:      "agent_message",
-		Payload:   body,
-	}
-	if _, err := s.backend.Publish(route.sender, msg); err != nil {
-		return messaging.OutcomeNotSent, err
-	}
-	return messaging.OutcomeSent, nil
+	return route.sender, route.target, true
 }
 
-// replyBody stamps the routing fields a reply needs onto the caller's payload:
-// the original message id, so the sender can correlate the answer, and
-// reply_to, so a surface can render it as one. The caller's own fields are
-// preserved.
-func replyBody(payload json.RawMessage, messageID, fromRunID string) (json.RawMessage, error) {
-	fields := map[string]any{}
-	if len(payload) > 0 {
-		if err := json.Unmarshal(payload, &fields); err != nil {
-			return nil, fmt.Errorf("%w: reply body is not a JSON object", messaging.ErrInvalidRequest)
+// RecordTellRoute records the reply route for a no-reply message this store's
+// queues hold without an admission of its own — a tell an ancestor broker
+// relayed in. The sender and target are the ids this broker addresses them by.
+// The same uniqueness rules as a NoReply admission apply: the message id is
+// shared with asks, so a route is refused while an ask edge holds the id, and
+// a route that would move another sender's route is refused.
+func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time, legacy bool) error {
+	if messageID == "" || sender == "" || target == "" {
+		return fmt.Errorf("%w: message id, sender and target are required", messaging.ErrInvalidRequest)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.generationErrorLocked(s.generation, messageID, now, legacy); err != nil {
+		return err
+	}
+	deadline, err := s.deadlineLocked(now, AdmitRequest{MessageID: messageID, Legacy: legacy})
+	if err != nil {
+		return err
+	}
+	s.reclaimLocked(now)
+	if _, ok := s.tellRoutes[messageID]; ok {
+		// The same tell relayed again (a retry) refreshes in place; a different
+		// sender's tell with the same id would move the route and misroute the
+		// first sender's answers.
+		if prev := s.tellRoutes[messageID]; prev.sender == sender {
+			prev.target = target
+			prev.deadline = deadline
+			return nil
 		}
-		// A JSON null unmarshals into a nil map without error.
-		if fields == nil {
-			fields = map[string]any{}
+		return messaging.ErrDuplicateMessageID
+	}
+	for _, e := range s.active {
+		if e.key.MessageID == messageID {
+			return messaging.ErrDuplicateMessageID
 		}
 	}
-	fields["id"] = messageID
-	fields["reply_to"] = messageID
-	fields["from_run_id"] = fromRunID
-	return json.Marshal(fields)
+	if s.fenceCountLocked() >= s.fenceCapacity {
+		return messaging.ErrFenceCapacity
+	}
+	s.tellRoutes[messageID] = &tellRoute{messageID: messageID, sender: sender, target: target, deadline: deadline}
+	return nil
 }
 
 // Withdraw installs a terminal fence for the key. A withdrawal with no live

@@ -311,10 +311,11 @@ func (r *recordingBackend) Receive(sender string, limit int) ([]messaging.Inboun
 
 func (r *recordingBackend) Peers() ([]messaging.Peer, error) { return nil, nil }
 
-// TestStoreReplyToTellRoutesBackToTheSender pins the reply-to-tell path: a
-// reply to a no-reply message is delivered to the tell's sender, and only the
-// tell's target may answer it.
-func TestStoreReplyToTellRoutesBackToTheSender(t *testing.T) {
+// TestStoreTellRouteLookupPinsTheReplyContract pins what the store owns for a
+// reply to a tell: the route lookup, the replier check, and the delivery
+// decision the caller (the broker's messenger) makes. The store performs no
+// delivery itself.
+func TestStoreTellRouteLookupPinsTheReplyContract(t *testing.T) {
 	store := New(Options{})
 	backend := &recordingBackend{}
 	store.SetBackend(backend)
@@ -331,31 +332,18 @@ func TestStoreReplyToTellRoutesBackToTheSender(t *testing.T) {
 		t.Fatalf("Admit: %v", err)
 	}
 
+	sender, target, ok := store.TellRoute(msgID)
+	if !ok || sender != "alice" || target != "bob" {
+		t.Fatalf("TellRoute = (%q, %q, %v), want alice -> bob", sender, target, ok)
+	}
+	// The store's Reply answers edge-absent for a tell: the delivery is the
+	// caller's, which is what keeps a cross-branch reply routable.
 	key := messaging.FenceKey{Sender: "bob", MessageID: msgID, Generation: store.Generation()}
-	if outcome, err := store.Reply(key, "carol", json.RawMessage(`{"message":"nope"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
-		t.Fatalf("Reply from a non-target = (%q, %v), want edge-absent", outcome, err)
+	if outcome, err := store.Reply(key, "bob", json.RawMessage(`{"message":"ack"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Reply = (%q, %v), want edge-absent (delivery belongs to the caller)", outcome, err)
 	}
-
-	outcome, err := store.Reply(key, "bob", json.RawMessage(`{"message":"ack"}`))
-	if err != nil || outcome != messaging.OutcomeSent {
-		t.Fatalf("Reply = (%q, %v), want sent", outcome, err)
-	}
-	if len(backend.published) != 2 {
-		t.Fatalf("published %d messages, want the tell and its reply", len(backend.published))
-	}
-	reply := backend.published[1]
-	if reply.FromRunID != "bob" || reply.MessageID != msgID {
-		t.Fatalf("reply = %+v, want bob's answer to %s", reply, msgID)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(reply.Payload, &body); err != nil {
-		t.Fatalf("reply payload: %v", err)
-	}
-	if body["reply_to"] != msgID || body["message"] != "ack" {
-		t.Fatalf("reply payload = %v, want reply_to %s and the message", body, msgID)
-	}
-	if backend.targets[1] != "alice" {
-		t.Fatalf("reply target = %q, want alice", backend.targets[1])
+	if len(backend.published) != 1 {
+		t.Fatalf("published %d messages, want only the tell", len(backend.published))
 	}
 }
 
@@ -382,18 +370,15 @@ func TestStoreReplyToTellExpiresWithItsRoute(t *testing.T) {
 
 	clk.Advance(2 * time.Minute)
 	store.Prune(clk.Now())
-	key := messaging.FenceKey{Sender: "bob", MessageID: msgID, Generation: store.Generation()}
-	if outcome, err := store.Reply(key, "bob", json.RawMessage(`{"message":"ack"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
-		t.Fatalf("Reply after prune = (%q, %v), want edge-absent", outcome, err)
-	}
-	if len(backend.published) != 1 {
-		t.Fatalf("published %d messages, want only the tell", len(backend.published))
+	if _, _, ok := store.TellRoute(msgID); ok {
+		t.Fatal("expired route survived prune")
 	}
 }
 
 // TestStoreTellRouteRefusesASecondSender pins the route-ownership rule: a
-// tell whose id is already routed is refused for a different sender, so the
+// record for an id already routed is refused for a different sender, so the
 // route cannot be moved and the first sender's answers cannot be misrouted.
+// The same-id check covers an ask edge holding the id, in both directions.
 func TestStoreTellRouteRefusesASecondSender(t *testing.T) {
 	store := New(Options{})
 	backend := &recordingBackend{}
@@ -410,20 +395,42 @@ func TestStoreTellRouteRefusesASecondSender(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
+	if err := store.RecordTellRoute(msgID, "carol", "bob", now, false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+		t.Fatalf("RecordTellRoute over another sender's route = %v, want a duplicate refusal", err)
+	}
+	if err := store.RecordTellRoute(msgID, "alice", "bob", now, false); err != nil {
+		t.Fatalf("the sender's own re-record = %v, want it accepted", err)
+	}
+	// An ask whose id carries a tell route is refused too.
 	res, err := store.Admit(t.Context(), AdmitRequest{
 		Sender: messaging.Identity{RunID: "carol"}, Target: "bob", MessageID: msgID,
-		Generation: store.Generation(), Body: `{"message":"route steal"}`, NoReply: true,
+		Generation: store.Generation(), Body: `{"message":"ask"}`,
 	})
 	if !errors.Is(err, messaging.ErrDuplicateMessageID) || res.Outcome != messaging.OutcomeNotSent {
-		t.Fatalf("second-sender Admit = (%+v, %v), want a duplicate refusal", res, err)
+		t.Fatalf("ask over a tell route = (%+v, %v), want a duplicate refusal", res, err)
 	}
-	// The same sender re-sending its own id stays refused by the dedup fence.
+
+	// The reverse: a tell whose id an ask edge holds is refused.
+	now2 := time.Now()
+	askID, err := messaging.NewMsgID(now2, now2.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "carol"}, Target: "bob", MessageID: askID,
+		Generation: store.Generation(), Body: `{"message":"question"}`,
+	}); err != nil {
+		t.Fatalf("ask Admit: %v", err)
+	}
+	if err := store.RecordTellRoute(askID, "alice", "bob", now2, false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+		t.Fatalf("RecordTellRoute over an ask edge = %v, want a duplicate refusal", err)
+	}
 	res, err = store.Admit(t.Context(), AdmitRequest{
-		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+		Sender: messaging.Identity{RunID: "alice"}, Target: "carol", MessageID: askID,
 		Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
 	})
-	if !errors.Is(err, messaging.ErrDuplicateMessageID) {
-		t.Fatalf("same-sender Admit = (%+v, %v), want a duplicate refusal", res, err)
+	if !errors.Is(err, messaging.ErrDuplicateMessageID) || res.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("tell over an ask edge = (%+v, %v), want a duplicate refusal", res, err)
 	}
 }
 
@@ -460,6 +467,14 @@ func TestStoreTellRoutesCountAgainstFenceCapacity(t *testing.T) {
 	if !errors.Is(err, messaging.ErrFenceCapacity) || res.Outcome != messaging.OutcomeNotSent {
 		t.Fatalf("third Admit = (%+v, %v), want a capacity refusal", res, err)
 	}
+	// A relayed route charges the same capacity.
+	capStore := New(Options{FenceCapacity: 1})
+	if err := capStore.RecordTellRoute("legacy-id", "alice", "bob", time.Now(), true); err != nil {
+		t.Fatalf("RecordTellRoute: %v", err)
+	}
+	if err := capStore.RecordTellRoute("legacy-id-2", "carol", "bob", time.Now(), true); !errors.Is(err, messaging.ErrFenceCapacity) {
+		t.Fatalf("second RecordTellRoute = %v, want a capacity refusal", err)
+	}
 }
 
 // TestStoreRemoveRunAndResetDropTellRoutes pins the lifecycle: routes leave
@@ -488,59 +503,22 @@ func TestStoreRemoveRunAndResetDropTellRoutes(t *testing.T) {
 	aliceMsg := admitTell("alice")
 	carolMsg := admitTell("carol")
 	store.RemoveRun("alice")
-	bobKey := messaging.FenceKey{Sender: "bob", MessageID: aliceMsg, Generation: store.Generation()}
-	if outcome, err := store.Reply(bobKey, "bob", json.RawMessage(`{"message":"ack"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
-		t.Fatalf("Reply after RemoveRun = (%q, %v), want edge-absent", outcome, err)
+	if _, _, ok := store.TellRoute(aliceMsg); ok {
+		t.Fatal("a removed run's route survived RemoveRun")
 	}
-	if outcome, err := store.Reply(messaging.FenceKey{Sender: "bob", MessageID: carolMsg, Generation: store.Generation()}, "bob", json.RawMessage(`{"message":"ack"}`)); err != nil || outcome != messaging.OutcomeSent {
-		t.Fatalf("Reply to a surviving route = (%q, %v), want sent", outcome, err)
+	if _, _, ok := store.TellRoute(carolMsg); !ok {
+		t.Fatal("a surviving route was dropped by RemoveRun")
 	}
 
 	store.Reset()
-	if outcome, err := store.Reply(messaging.FenceKey{Sender: "bob", MessageID: carolMsg, Generation: store.Generation()}, "bob", json.RawMessage(`{"message":"ack"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
-		t.Fatalf("Reply after Reset = (%q, %v), want edge-absent", outcome, err)
+	if _, _, ok := store.TellRoute(carolMsg); ok {
+		t.Fatal("a route survived Reset")
 	}
 }
 
-// TestStoreReplyToTellRejectsNonObjectPayload pins the tell path's body
-// validation: a reply payload that is valid JSON but not an object is refused
-// not-sent, and a JSON null delivers as an empty body.
-func TestStoreReplyToTellRejectsNonObjectPayload(t *testing.T) {
-	store := New(Options{})
-	backend := &recordingBackend{}
-	store.SetBackend(backend)
-
-	now := time.Now()
-	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
-	if err != nil {
-		t.Fatalf("NewMsgID: %v", err)
-	}
-	if _, err := store.Admit(t.Context(), AdmitRequest{
-		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
-		Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
-	}); err != nil {
-		t.Fatalf("Admit: %v", err)
-	}
-	key := messaging.FenceKey{Sender: "bob", MessageID: msgID, Generation: store.Generation()}
-
-	if outcome, err := store.Reply(key, "bob", json.RawMessage(`[1,2]`)); outcome != messaging.OutcomeNotSent || !errors.Is(err, messaging.ErrInvalidRequest) {
-		t.Fatalf("Reply with an array payload = (%q, %v), want not-sent invalid-request", outcome, err)
-	}
-	if outcome, err := store.Reply(key, "bob", json.RawMessage(`null`)); err != nil || outcome != messaging.OutcomeSent {
-		t.Fatalf("Reply with a null payload = (%q, %v), want sent", outcome, err)
-	}
-	if len(backend.published) != 2 {
-		t.Fatalf("published %d messages, want the tell and the null reply", len(backend.published))
-	}
-	var body map[string]any
-	if err := json.Unmarshal(backend.published[1].Payload, &body); err != nil {
-		t.Fatalf("null reply payload: %v", err)
-	}
-	if body["reply_to"] != msgID {
-		t.Fatalf("null reply payload = %v, want reply_to %s", body, msgID)
-	}
-}
-
+// TestStoreNoReplyCreatesNoEdge pins the no-reply admission against the
+// delivery ordering: a tell whose id is already routed is refused before the
+// message is published, so a refused tell is never delivered.
 func TestStoreNoReplyCreatesNoEdge(t *testing.T) {
 	store := New(Options{})
 	backend := &recordingBackend{}

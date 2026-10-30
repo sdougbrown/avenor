@@ -360,31 +360,34 @@ func (r *Router) reply(ctx context.Context, input messageInput) (Result, error) 
 	}
 	// An ask this surface received is answered through its claim, so the claim
 	// is restored unless the reply provably landed. A tell has no claim: the
-	// broker routes the reply back to the tell's sender.
-	if claimer, ok := r.provider.(AskClaimer); ok {
-		if asker, claimed := claimer.ClaimAsk(input.ReplyTo); claimed {
-			sent, _ := r.provider.Reply(ctx, messaging.ReplyRequest{
-				From:          messaging.Identity{RunID: r.provider.Caller().RunID},
-				ToRunID:       asker,
-				MessageID:     input.ReplyTo,
-				CorrelationID: input.ReplyTo,
-				Body:          string(body),
-			})
-			if sent.Outcome != messaging.OutcomeReplied {
-				claimer.RestoreAsk(input.ReplyTo, asker)
-			}
-			result.Outcome, result.Text = outcomeText(actionReply, sent.Outcome, facts)
-			return result, nil
-		}
+	// broker routes the reply back to the tell's sender. Both paths answer a
+	// transport failure the same way: the claim is restored, and a failure
+	// that carried no outcome is a refusal rather than an uncertainty.
+	claimer, hasClaim := r.provider.(AskClaimer)
+	var asker string
+	if hasClaim {
+		asker, _ = claimer.ClaimAsk(input.ReplyTo)
 	}
 	sent, err := r.provider.Reply(ctx, messaging.ReplyRequest{
 		From:          messaging.Identity{RunID: r.provider.Caller().RunID},
+		ToRunID:       asker,
 		MessageID:     input.ReplyTo,
 		CorrelationID: input.ReplyTo,
 		Body:          string(body),
 	})
 	if err != nil && sent.Outcome == "" {
+		if hasClaim && asker != "" {
+			claimer.RestoreAsk(input.ReplyTo, asker)
+		}
 		return Result{}, refused(err)
+	}
+	// The claim is consumed only when the outcome proves delivery. An outcome
+	// that is not replied — including a nil-error not-sent, edge-absent or
+	// possibly-pending — never proves the asker received the answer, and a
+	// possibly-pending reply must leave the ask answerable rather than consume
+	// the claim.
+	if hasClaim && asker != "" && sent.Outcome != messaging.OutcomeReplied {
+		claimer.RestoreAsk(input.ReplyTo, asker)
 	}
 	result.Outcome, result.Text = outcomeText(actionReply, sent.Outcome, facts)
 	return result, nil

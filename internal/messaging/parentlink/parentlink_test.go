@@ -329,3 +329,93 @@ func TestLocalAskNeverCrossesTheParentLink(t *testing.T) {
 		t.Fatalf("local wait payload = %v, want the reply", body["payload"])
 	}
 }
+
+// tell posts one fire-and-forget message with a message id, the way the merged
+// message tool sends a tell.
+func tell(t *testing.T, from *branch, fromRunID, toRunID, msgID, text string) (int, map[string]any) {
+	t.Helper()
+	return postJSON(t, from.broker.Addr(), "/send", fromRunID, from.token(t, fromRunID), map[string]any{
+		"from_run_id": fromRunID,
+		"to_run_id":   toRunID,
+		"type":        "agent_message",
+		"message_id":  msgID,
+		"payload":     map[string]any{"message": text},
+	})
+}
+
+// replyWithoutTarget answers a queued message the way the router does when the
+// surface held no claim for it: reply_to set, no to_run_id, so the broker
+// resolves the sender from the message id.
+func replyWithoutTarget(t *testing.T, from *branch, fromRunID, msgID, text string) (int, map[string]any) {
+	t.Helper()
+	return postJSON(t, from.broker.Addr(), "/send", fromRunID, from.token(t, fromRunID), map[string]any{
+		"from_run_id": fromRunID,
+		"type":        "agent_message",
+		"reply_to":    msgID,
+		"payload":     map[string]any{"message": text},
+	})
+}
+
+// TestReplyToTellCrossesBranches pins the cross-branch reply route: a tell from
+// one branch's run to another branch's run is relayed through the parent, the
+// receiving branch records the route at relay time, and the target's reply with
+// no to_run_id climbs back into the sender's queue.
+func TestReplyToTellCrossesBranches(t *testing.T) {
+	parent := startBranch(t, "", "supervisor")
+	bob := startBranch(t, parent.url(), "bob")
+	awaitRegistered(t, parent, bob.key("bob"))
+	// Alice lives in her own branch so the reply's delivery leg crosses one too.
+	alice := startBranch(t, parent.url(), "alice")
+	awaitRegistered(t, parent, alice.key("alice"))
+
+	msgID := newMsgID(t)
+	status, body := tell(t, alice, "alice", bob.key("bob"), msgID, "hello bob")
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("cross-branch tell = (%d, %v), want 200 sent", status, body)
+	}
+	deadline := time.Now().Add(awaitDeadline)
+	for len(queuedAgentMessages(t, bob.broker, "bob")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("bob never received the relayed tell")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	status, body = replyWithoutTarget(t, bob, "bob", msgID, "hi alice")
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("cross-branch reply = (%d, %v), want 200 sent", status, body)
+	}
+	deadline = time.Now().Add(awaitDeadline)
+	var queued []*broker.ControlMessage
+	for {
+		queued = queuedAgentMessages(t, alice.broker, "alice")
+		if len(queued) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("alice never received the reply")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	var payload map[string]any
+	raw, err := json.Marshal(queued[0].Payload)
+	if err != nil {
+		t.Fatalf("encode reply payload: %v", err)
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode reply payload %s: %v", raw, err)
+	}
+	if payload["reply_to"] != msgID || payload["message"] != "hi alice" {
+		t.Fatalf("reply payload = %v, want bob's answer to %s", payload, msgID)
+	}
+	if queued[0].FromRunID != bob.key("bob") {
+		t.Fatalf("reply sender = %q, want bob's adopted key", queued[0].FromRunID)
+	}
+
+	// A reply from a run that is not the tell's target is refused with no
+	// delivery anywhere.
+	status, body = replyWithoutTarget(t, alice, "alice", msgID, "not mine")
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeEdgeAbsent) {
+		t.Fatalf("stranger reply = (%d, %v), want edge-absent", status, body)
+	}
+}
