@@ -350,6 +350,7 @@ func ApplicabilityTable() map[string]ActionApplicability {
 			constraints[name] = constraint
 		}
 		out[action] = ActionApplicability{
+			Access:      entry.Access,
 			Permitted:   append([]string(nil), entry.Permitted...),
 			Required:    append([]string(nil), entry.Required...),
 			Types:       types,

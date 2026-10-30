@@ -60,6 +60,7 @@ func loadFixtureApplicability(t *testing.T) map[string]ActionApplicability {
 	}
 	var fixture struct {
 		Applicability map[string]struct {
+			Access    string            `json:"access"`
 			Permitted []string          `json:"permitted"`
 			Required  []string          `json:"required"`
 			Types     map[string]string `json:"types"`
@@ -71,6 +72,7 @@ func loadFixtureApplicability(t *testing.T) map[string]ActionApplicability {
 	out := make(map[string]ActionApplicability, len(fixture.Applicability))
 	for action, entry := range fixture.Applicability {
 		out[action] = ActionApplicability{
+			Access:    entry.Access,
 			Permitted: entry.Permitted,
 			Required:  entry.Required,
 			Types:     entry.Types,
@@ -351,6 +353,9 @@ func TestSchemaMatchesRouteTable(t *testing.T) {
 		if !ok {
 			t.Fatalf("fixture action %q has no table entry", action)
 		}
+		if got.Access != want.Access {
+			t.Fatalf("%s: fixture access %q, table access %q", action, want.Access, got.Access)
+		}
 		if !reflect.DeepEqual(got.Permitted, want.Permitted) {
 			t.Fatalf("%s: fixture permits %v, table permits %v", action, want.Permitted, got.Permitted)
 		}
@@ -378,6 +383,29 @@ func TestCompleteKeepsLargeIntegersExact(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "9007199254740993") {
 		t.Fatalf("outputs lost the exact integer: %s", raw)
+	}
+}
+
+// TestApplicabilityTableCarriesAccess proves the exported accessor returns each
+// action's access level and hands out a copy. The credential mode is chosen from
+// it, so a clone that dropped the field would make every read action look
+// owner-gated.
+func TestApplicabilityTableCarriesAccess(t *testing.T) {
+	table := ApplicabilityTable()
+	for action, want := range workflowApplicability {
+		if got := table[action].Access; got != want.Access {
+			t.Fatalf("%s: exported access %q, want %q", action, got, want.Access)
+		}
+	}
+	if got := table["status"].Access; got != accessRead {
+		t.Fatalf("status: exported access %q, want %q", got, accessRead)
+	}
+	table["status"] = ActionApplicability{Access: "tampered", Permitted: []string{"tampered"}}
+	if got := workflowApplicability["status"].Access; got == "tampered" {
+		t.Fatal("ApplicabilityTable handed out the live table")
+	}
+	if got := workflowApplicability["status"].Permitted; len(got) == 1 && got[0] == "tampered" {
+		t.Fatal("ApplicabilityTable handed out a live Permitted slice")
 	}
 }
 

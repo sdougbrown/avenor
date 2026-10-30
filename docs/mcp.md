@@ -458,7 +458,7 @@ The `workflow` tool drives a [durable workflow](workflow.md) against a superviso
 
 Every action takes an optional `supervisor_id` (supervisor socket path). `status`, `inspect`, and `events` take `workflow_id` (and `after_seq`/`limit` for events). `wait` takes `workflow_id` and an optional `timeout` (e.g. `30s`, `5m`). `ready` takes `controller_id` and an optional `limit`. `controller_status` takes an optional `controller_id`. `complete` takes `workflow_id`, `node_id`, `activation_id`, `attempt_id`, `lease_id`, `owner_token`, `outcome`, and optional `outputs`/`artifacts`. `gate` takes `workflow_id`, `node_id`, `gate_id`, `activation_id`, `operation` (`satisfy`, `reject`, `waive`, or `external_result`), and the operation's fields. `cancel` takes `workflow_id`, the required `reason`, and `actor` — who is cancelling. The manager rejects a missing actor before it looks at the reason, so this server supplies the caller's value or defaults it to `mcp`; the Pi, OpenCode and `packages/mcp` tools require `actor` explicitly.
 
-`workflow` is a host-surface tool. The Pi extension (`avenor_workflow`), the OpenCode plugin, the TypeScript MCP server and this server register it; the Go child tool servers (`channeltools`) register no workflow tools at all. A Pi child still sees `avenor_workflow` registered — the extension publishes the whole host tool set in both modes — but it holds no control connection, so a cancel from a child fails.
+`workflow` is a host-surface tool: this server registers it, and the Go child tool servers (`channeltools`) register no workflow tools at all.
 
 ### Workflow controllers
 
