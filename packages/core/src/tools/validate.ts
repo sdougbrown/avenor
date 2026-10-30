@@ -20,10 +20,26 @@ export function validateTimeout(value: string): number {
   return amount
 }
 
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
+}
+
 export function validateObservedAt(observedAt: string): void {
-  // RFC3339 pattern that matches ISO 8601 dates with timezone
-  const rfc3339Regex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-  if (!rfc3339Regex.test(observedAt)) {
+  // RFC3339: a calendar date and time with a timezone. The regex pins the shape
+  // and the component checks reject an impossible date such as month 13, which
+  // the Go router's time.Parse(time.RFC3339) also rejects.
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(observedAt)
+  if (!match) {
+    throw new Error('observed_at must be an RFC3339 timestamp')
+  }
+  const [year, month, day, hour, minute, second] = match.slice(1).map(Number)
+  if (month < 1 || month > 12) {
+    throw new Error('observed_at must be an RFC3339 timestamp')
+  }
+  const maxDay = month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month - 1]
+  if (day < 1 || day > maxDay || hour > 23 || minute > 59 || second > 59) {
     throw new Error('observed_at must be an RFC3339 timestamp')
   }
 }

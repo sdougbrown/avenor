@@ -7,6 +7,7 @@
 import workflowInputSchema from '../../../schemas/workflow.input.json'
 import workflowConformance from '../../../schemas/workflow_route.conformance.json'
 import type { WorkflowCompleteParams, WorkflowGateParams, WorkflowGateOperation } from './client.js'
+import { refused, ToolError } from './message.js'
 import { quote, quoteList, substitute } from './messaging-text.js'
 import { validateObservedAt, validateTimeout } from './tools/validate.js'
 
@@ -75,18 +76,12 @@ export interface WorkflowResult {
   value: Record<string, unknown>
 }
 
-/** A typed tool denial. Code is one of the fixed error codes; message is the rendered template. */
-export class WorkflowToolError extends Error {
-  readonly code: string
-  readonly facts: Record<string, string>
-
-  constructor(code: string, message: string, facts: Record<string, string> = {}) {
-    super(message)
-    this.name = 'WorkflowToolError'
-    this.code = code
-    this.facts = facts
-  }
-}
+/**
+ * The workflow router raises the shared tool error, so one surface renderer
+ * handles both routers. The alias keeps this module's spelling.
+ */
+export const WorkflowToolError = ToolError
+export type WorkflowToolError = ToolError
 
 interface ApplicabilityEntry {
   permitted: string[]
@@ -246,8 +241,10 @@ function validateFields(fields: Record<string, unknown>, entry: ApplicabilityEnt
       // renders for the same input. A bound at the int64 limit does not survive
       // JSON.parse exactly, so the limit is named literally there.
       const number = value as number
-      if (number >= 2 ** 63 || number < -(2 ** 63)) {
-        const bound = number >= 2 ** 63 ? 'integer_too_large' : 'integer_too_small'
+      // JSON.parse rounds the maximum valid int64 up to 2**63, so only a value
+      // strictly beyond it is out of range.
+      if (number > 2 ** 63 || number < -(2 ** 63)) {
+        const bound = number > 2 ** 63 ? 'integer_too_large' : 'integer_too_small'
         const declaredMax = constraint?.maximum
         const declaredMin = constraint?.minimum
         return repair(bound, {
@@ -306,6 +303,17 @@ export function workflowSupervisorId(input: unknown): string | undefined {
 export async function executeWorkflow(provider: WorkflowProvider, input: unknown): Promise<WorkflowResult> {
   assertWorkflowInput(input)
   const fields = input as WorkflowInput
+  try {
+    return await dispatchWorkflow(provider, fields)
+  } catch (error) {
+    // A transport failure reaches the model as the shared refusal sentence, the
+    // same way the Go router wraps every client call. A router denial passes
+    // through unchanged.
+    throw refused(error, repair('refused_io'))
+  }
+}
+
+async function dispatchWorkflow(provider: WorkflowProvider, fields: WorkflowInput): Promise<WorkflowResult> {
   switch (fields.action) {
     case 'status':
       return { action: 'status', value: await provider.status(fields.workflow_id!) }
