@@ -276,6 +276,14 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 				return result, err
 			}
 		}
+		// The route is keyed by message id because a replier knows only the id
+		// it received. A second tell with the same id is refused rather than
+		// allowed to move the route to another sender, which would misroute
+		// the first sender's answers.
+		if prev, ok := s.tellRoutes[req.MessageID]; ok && prev.sender != req.Sender.RunID {
+			result.Outcome = messaging.OutcomeNotSent
+			return result, messaging.ErrDuplicateMessageID
+		}
 		if versionedID(req.MessageID, now) {
 			s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeSent, delivered: true})
 		}
@@ -448,6 +456,10 @@ func replyBody(payload json.RawMessage, messageID, fromRunID string) (json.RawMe
 	if len(payload) > 0 {
 		if err := json.Unmarshal(payload, &fields); err != nil {
 			return nil, fmt.Errorf("%w: reply body is not a JSON object", messaging.ErrInvalidRequest)
+		}
+		// A JSON null unmarshals into a nil map without error.
+		if fields == nil {
+			fields = map[string]any{}
 		}
 	}
 	fields["id"] = messageID

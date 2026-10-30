@@ -750,6 +750,23 @@ describe('host message provider', () => {
     expect(pending.has('ask-1')).toBe(true)
   })
 
+  it('sends an unclaimed reply with an empty to_run_id for the broker to resolve', async () => {
+    const client = fakeClient({
+      messageReply: mock(async () => ({ outcome: 'sent' })),
+    })
+    const host = createHostMessageProvider({
+      surface: 'pi-host',
+      supervisorId: '/tmp/avenor-provider.sock',
+      generation: 'gen-1',
+      client,
+    })
+    const result = await executeMessage(host, { action: 'reply', reply_to: 'tell-1', message: 'OK' })
+    expect(result.outcome).toBe('sent')
+    expect(client.messageReply).toHaveBeenCalledWith(
+      expect.objectContaining({ to_run_id: '', message_id: 'tell-1', correlation_id: 'tell-1' }),
+    )
+  })
+
   it('reports a fence-capacity withdrawal as possibly-pending', async () => {
     const client = fakeClient({
       messageWithdraw: mock(async () => {

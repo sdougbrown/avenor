@@ -343,6 +343,19 @@ describe('child broker routes', () => {
     expect(calls.some(call => call.url.endsWith('/sessions'))).toBe(false)
   })
 
+  it('sends a reply to a tell with no to_run_id, leaving the broker to resolve the sender', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Response.json({ queued: true, outcome: 'sent' }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).reply(undefined, 'tell-9', 'ack')
+    expect(result).toEqual({ outcome: 'sent', messageId: 'tell-9' })
+    const send = calls.find(call => call.url.endsWith('/send'))
+    expect(send?.body).not.toHaveProperty('to_run_id')
+    const payload = send?.body.payload as Record<string, unknown>
+    expect(payload).toMatchObject({ id: 'tell-9.reply', reply_to: 'tell-9', message: 'ack' })
+    expect(payload).not.toHaveProperty('to_run_id')
+  })
+
   it('classifies a rejection the envelope does not describe by its status', async () => {
     const boom = stubFetch({ '/send': () => new Response('boom', { status: 500 }) })
     expect(await createBrokerChildBroker(env, boom.fetchImpl).tell('rt_2', 'hi', 'av1.t.2')).toEqual({

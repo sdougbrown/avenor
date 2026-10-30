@@ -996,6 +996,157 @@ func waitReply(t *testing.T, addr, token, runID, waitingFor string) map[string]a
 	return result
 }
 
+// sendTellWithID sends a fire-and-forget message that carries a message id
+// (no expects_reply, no reply_to), so the broker records a reply route.
+func sendTellWithID(t *testing.T, addr, fromToken, fromRunID, toRunID, msgID, message string) map[string]any {
+	t.Helper()
+	payload := fmt.Sprintf(`{"id":%q,"from":%q,"from_run_id":%q,"to_run_id":%q,"message":%q}`,
+		msgID, fromRunID, fromRunID, toRunID, message)
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": %q,
+		"token": %q,
+		"from_run_id": %q,
+		"to_run_id": %q,
+		"type": "agent_message",
+		"message_id": %q,
+		"payload": %s
+	}`, fromRunID, fromToken, fromRunID, toRunID, msgID, payload)))
+	return postSend(t, addr, body)
+}
+
+// sendReplyWithoutTarget sends a reply with reply_to set and no to_run_id, the
+// shape the router sends when the surface held no claim for the message.
+func sendReplyWithoutTarget(t *testing.T, addr, fromToken, fromRunID, replyTo, message string) map[string]any {
+	t.Helper()
+	payload := fmt.Sprintf(`{"id":%q,"from":%q,"from_run_id":%q,"message":%q,"reply_to":%q}`,
+		replyTo+".reply", fromRunID, fromRunID, message, replyTo)
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": %q,
+		"token": %q,
+		"from_run_id": %q,
+		"type": "agent_message",
+		"reply_to": %q,
+		"payload": %s
+	}`, fromRunID, fromToken, fromRunID, replyTo, payload)))
+	return postSend(t, addr, body)
+}
+
+func postSend(t *testing.T, addr string, body *bytes.Reader) map[string]any {
+	t.Helper()
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", addr), "application/json", body)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("send decode: %v", err)
+	}
+	result["status"] = resp.StatusCode
+	return result
+}
+
+// TestBrokerReplyToTellReachesTheSender pins the reply-to-tell path end to
+// end: a tell with a message id is admitted, the target's reply with no
+// to_run_id is routed back to the tell's sender, and a reply from another run
+// or to an unknown id is refused with no delivery.
+func TestBrokerReplyToTellReachesTheSender(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	addr := b.Addr()
+	aliceToken, err := b.CreateRun("alice", "")
+	if err != nil {
+		t.Fatalf("create alice: %v", err)
+	}
+	bobToken, err := b.CreateRun("bob", "")
+	if err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+	carolToken, err := b.CreateRun("carol", "")
+	if err != nil {
+		t.Fatalf("create carol: %v", err)
+	}
+
+	tell := sendTellWithID(t, addr, aliceToken, "alice", "bob", "tell-1", "hello bob")
+	if st := tell["status"]; st != http.StatusOK || tell["outcome"] != "sent" {
+		t.Fatalf("tell = %v, want a 200 sent", tell)
+	}
+	if got := pollAgentMessages(t, addr, "bob", bobToken); len(got) != 1 || got[0]["from_run_id"] != "alice" {
+		t.Fatalf("bob poll = %v, want the tell", got)
+	}
+
+	// A tell whose id is already routed is refused for a second sender: the
+	// route must not move, or the first sender's answers follow it.
+	hijack := sendTellWithID(t, addr, carolToken, "carol", "bob", "tell-1", "route steal")
+	if st := hijack["status"]; st != http.StatusConflict {
+		t.Fatalf("hijacking tell = %v, want a conflict refusal", hijack)
+	}
+
+	reply := sendReplyWithoutTarget(t, addr, bobToken, "bob", "tell-1", "hi alice")
+	if st := reply["status"]; st != http.StatusOK || reply["outcome"] != "sent" {
+		t.Fatalf("reply = %v, want a 200 sent", reply)
+	}
+	got := pollAgentMessages(t, addr, "alice", aliceToken)
+	if len(got) != 1 {
+		t.Fatalf("alice poll = %v, want one reply", got)
+	}
+	payloadRaw, err := json.Marshal(got[0]["payload"])
+	if err != nil {
+		t.Fatalf("encode reply payload: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(payloadRaw, &payload); err != nil {
+		t.Fatalf("reply payload %s: %v", payloadRaw, err)
+	}
+	if payload["reply_to"] != "tell-1" || payload["message"] != "hi alice" || got[0]["from_run_id"] != "bob" {
+		t.Fatalf("reply = %v (%v), want bob's answer to tell-1", got[0], payload)
+	}
+
+	stranger := sendReplyWithoutTarget(t, addr, carolToken, "carol", "tell-1", "not mine")
+	if st := stranger["status"]; st != http.StatusOK || stranger["outcome"] != "edge-absent" {
+		t.Fatalf("stranger reply = %v, want edge-absent", stranger)
+	}
+	unknown := sendReplyWithoutTarget(t, addr, bobToken, "bob", "no-such-message", "nowhere")
+	if st := unknown["status"]; st != http.StatusOK || unknown["outcome"] != "edge-absent" {
+		t.Fatalf("unknown reply = %v, want edge-absent", unknown)
+	}
+	if got := pollAgentMessages(t, addr, "alice", aliceToken); len(got) != 0 {
+		t.Fatalf("alice poll after refusals = %v, want none", got)
+	}
+
+	// Neither to_run_id nor reply_to is a malformed request.
+	nothing := postSend(t, addr, bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "bob", "token": %q, "from_run_id": "bob", "type": "agent_message",
+		"payload": {"id":"x","from":"bob","from_run_id":"bob","message":"hi"}
+	}`, bobToken))))
+	if st := nothing["status"]; st != http.StatusBadRequest {
+		t.Fatalf("send with no target and no reply_to = %v, want 400", nothing)
+	}
+	// A non-object reply payload is client input, refused with 400.
+	nonObject := postSend(t, addr, bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "bob", "token": %q, "from_run_id": "bob", "type": "agent_message",
+		"reply_to": "tell-1", "payload": [1,2]
+	}`, bobToken))))
+	if st := nonObject["status"]; st != http.StatusBadRequest {
+		t.Fatalf("non-object reply payload = %v, want 400", nonObject)
+	}
+	// A JSON null reply payload must not take the broker down.
+	nullPayload := postSend(t, addr, bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "bob", "token": %q, "from_run_id": "bob", "type": "agent_message",
+		"reply_to": "tell-1", "payload": null
+	}`, bobToken))))
+	if st := nullPayload["status"]; st != http.StatusOK {
+		t.Fatalf("null reply payload = %v, want 200", nullPayload)
+	}
+	got = pollAgentMessages(t, addr, "alice", aliceToken)
+	if len(got) != 1 {
+		t.Fatalf("alice poll after null reply = %v, want the routed answer", got)
+	}
+}
+
 func TestBrokerAskReplyHappyPath(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {

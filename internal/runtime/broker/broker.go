@@ -1324,6 +1324,10 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusForbidden, "not the target of this ask", "not-ask-target")
 			return
 		}
+		if errors.Is(err, messaging.ErrInvalidRequest) {
+			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
+			return
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

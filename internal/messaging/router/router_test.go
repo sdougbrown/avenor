@@ -526,8 +526,8 @@ func assertRequest(t *testing.T, c messaging.ConformanceCase, provider *fakeProv
 			t.Fatalf("timeout_ms = %d, want %v", provider.waited.Timeout.Milliseconds(), want)
 		}
 	case "reply":
-		if got, want := provider.replied.ToRunID, substitute(stringOf(request["to_run_id"])); want != "" && got != want {
-			t.Fatalf("reply target = %q, want %q", got, want)
+		if want, ok := request["to_run_id"]; ok && provider.replied.ToRunID != substitute(stringOf(want)) {
+			t.Fatalf("reply target = %q, want %q", provider.replied.ToRunID, stringOf(want))
 		}
 		if want := stringOf(request["message_id"]); want != "" && provider.replied.MessageID != want {
 			t.Fatalf("reply message_id = %q, want %q", provider.replied.MessageID, want)

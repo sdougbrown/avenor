@@ -338,7 +338,7 @@ function assertMessageRequest(
         expect(provider.calls.reply?.message, testCase.name).toBe(stringOf(request.message))
       }
       if (request?.to_run_id !== undefined) {
-        expect(provider.calls.reply?.askerRunId, testCase.name).toBe(stringOf(request.to_run_id))
+        expect(provider.calls.reply?.askerRunId ?? '', testCase.name).toBe(stringOf(request.to_run_id))
       }
       break
     case 'withdraw':
