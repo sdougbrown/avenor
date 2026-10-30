@@ -700,20 +700,4 @@ describe('avenor MCP messaging tools', () => {
     })
   })
 
-  it('forwards the workflow cancel call unchanged', async () => {
-    await withClient(async (client) => {
-      const result: any = await client.callTool({
-        name: 'workflow',
-        arguments: { action: 'cancel', workflow_id: 'w-1', actor: 'operator', reason: 'superseded', supervisor_id: 'sup-a' },
-      })
-      expect(result).toMatchObject({ routed: true })
-    })
-    expect(workflowCalls.at(-1)).toEqual({
-      action: 'cancel',
-      workflow_id: 'w-1',
-      actor: 'operator',
-      reason: 'superseded',
-      supervisor_id: 'sup-a',
-    })
-  })
 })

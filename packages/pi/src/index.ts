@@ -48,7 +48,6 @@ import {
   THINKING_LEVELS,
   validateSpawnSelection,
   runWorkflowTool,
-  withCandidateCount,
   type AskClaims,
   type Client,
   type InspectResult,
@@ -2847,8 +2846,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         ], { description: 'Action to perform' }),
         workflow_id: Type.Optional(Type.String({ description: 'Workflow ID' })),
         controller_id: Type.Optional(Type.String({ description: 'Controller ID; omit for controller_status to list all controllers' })),
-        after_seq: Type.Optional(Type.Number({ description: 'Only include events with sequence greater than this value (events)' })),
-        limit: Type.Optional(Type.Number({ description: 'Max events or candidates to return (0 for the server default)' })),
+        after_seq: Type.Optional(Type.Integer({ description: 'Only include events with sequence greater than this value (events)' })),
+        limit: Type.Optional(Type.Integer({ description: 'Max events or candidates to return (0 for the server default)' })),
         timeout: Type.Optional(Type.String({ description: 'Maximum wait time, such as 30s, 5m, or 1h (default 30s; wait)' })),
         node_id: Type.Optional(Type.String({ description: 'Node ID (gate, complete)' })),
         gate_id: Type.Optional(Type.String({ description: 'Gate ID (gate)' })),
@@ -2863,7 +2862,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           Type.Literal('external_result'),
         ], { description: 'Gate operation (gate)' })),
         actor: Type.Optional(Type.String({ description: 'Actor id (gate, cancel)' })),
-        reason: Type.Optional(Type.String({ description: 'Reason (gate, cancel)' })),
+        reason: Type.Optional(Type.String({ minLength: 1, description: 'Reason (gate, cancel)' })),
         outcome: Type.Optional(Type.String({ description: 'Outcome (gate, complete)' })),
         subject: Type.Optional(Type.Unknown({ description: 'Bound exact subject as JSON (gate)' })),
         poll_id: Type.Optional(Type.String({ description: 'External poll id (gate external_result)' })),
@@ -2880,7 +2879,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const result = await deps.runWorkflowTool(params)
         return {
           content: [{ type: 'text', text: JSON.stringify(result.value, null, 2) }],
-          details: await withCandidateCount(deps.runWorkflowTool, params, result.value),
+          details: result.value,
         }
       },
       renderCall(args, theme) {

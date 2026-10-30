@@ -43,32 +43,3 @@ export async function runWorkflowTool(
     getSupervisorClient,
   )
 }
-
-/**
- * The controller-status view reports how many candidates are claimable. `ready`
- * is advisory: a supervisor without workflow support, or a failed query, leaves
- * the count absent and the status view renders without it.
- */
-export async function withCandidateCount(
-  run: (args: unknown) => Promise<WorkflowResult>,
-  args: Record<string, unknown>,
-  value: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  if (args.action !== 'controller_status' || typeof args.controller_id !== 'string' || !args.controller_id) {
-    return value
-  }
-  // Only carry supervisor_id when the caller set one: a present-but-undefined
-  // key is a wire-type violation the router refuses, and the advisory catch
-  // would then swallow it and never attach the count.
-  const readyArgs: Record<string, unknown> = { action: 'ready', controller_id: args.controller_id }
-  if (typeof args.supervisor_id === 'string') readyArgs.supervisor_id = args.supervisor_id
-  try {
-    const ready = await run(readyArgs)
-    if (Array.isArray(ready.value.candidates)) {
-      return { ...value, candidate_count: ready.value.candidates.length }
-    }
-  } catch {
-    // Advisory only — the status view renders without it.
-  }
-  return value
-}

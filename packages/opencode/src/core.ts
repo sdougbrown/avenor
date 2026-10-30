@@ -44,7 +44,6 @@ import {
   THINKING_LEVELS,
   validateSpawnSelection,
   runWorkflowTool,
-  withCandidateCount,
 } from '@dougbots/avenor-core'
 
 type TrackedRun = {
@@ -1339,8 +1338,8 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
           action: tool.schema.enum(['status', 'inspect', 'events', 'wait', 'ready', 'controller_status', 'gate', 'complete', 'cancel']).describe('Action to perform'),
           workflow_id: tool.schema.string().optional().describe('Workflow ID'),
           controller_id: tool.schema.string().optional().describe('Controller ID; omit for controller_status to list all controllers'),
-          after_seq: tool.schema.number().optional().describe('Only include events with sequence greater than this value (events)'),
-          limit: tool.schema.number().optional().describe('Max events or candidates to return (0 for the server default)'),
+          after_seq: tool.schema.number().int().optional().describe('Only include events with sequence greater than this value (events)'),
+          limit: tool.schema.number().int().optional().describe('Max events or candidates to return (0 for the server default)'),
           timeout: tool.schema.string().optional().describe('Maximum wait time, such as 30s, 5m, or 1h (default 30s; wait)'),
           node_id: tool.schema.string().optional().describe('Node ID (gate, complete)'),
           gate_id: tool.schema.string().optional().describe('Gate ID (gate)'),
@@ -1350,7 +1349,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
           owner_token: tool.schema.string().optional().describe('Lease owner token (complete)'),
           operation: tool.schema.enum(['satisfy', 'reject', 'waive', 'external_result']).optional().describe('Gate operation (gate)'),
           actor: tool.schema.string().optional().describe('Actor id (gate, cancel)'),
-          reason: tool.schema.string().optional().describe('Reason (gate, cancel)'),
+          reason: tool.schema.string().min(1).optional().describe('Reason (gate, cancel)'),
           outcome: tool.schema.string().optional().describe('Outcome (gate, complete)'),
           subject: tool.schema.unknown().optional().describe('Bound exact subject as JSON (gate)'),
           poll_id: tool.schema.string().optional().describe('External poll id (gate external_result)'),
@@ -1366,7 +1365,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
         async execute(args, _context) {
           const result = await runWorkflowTool(args)
           if (args.action === 'controller_status') {
-            return formatWorkflowControllerStatusOutput(args, await withCandidateCount(runWorkflowTool, args, result.value))
+            return formatWorkflowControllerStatusOutput(args, result.value)
           }
           return { title: 'workflow', output: JSON.stringify(result.value, null, 2) }
         },

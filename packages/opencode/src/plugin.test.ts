@@ -9,11 +9,11 @@ import { THINKING_LEVELS } from '../../core/src/thinking-policy.js'
 import { ToolError, renderPeerList } from '../../core/src/message.js'
 import { ClosedSocketError, isClosedSocketError } from '../../core/src/client.js'
 import { boundFinalOutput, extractTurnText, normalizeTurnStopReason, renderLast } from '../../core/src/messaging-text.js'
-import { withCandidateCount } from '../../core/src/tools/workflow.js'
 import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
 import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
 import type { MessageProvider } from '../../core/src/tools/message.js'
 import conformance from '../../../schemas/message_route.conformance.json'
+import workflowConformance from '../../../schemas/workflow_route.conformance.json'
 import resultFixture from '../../../schemas/message_route.result.json'
 import { peersDetails, resultOutput } from '../../core/src/message.js'
 
@@ -204,7 +204,6 @@ mock.module('@dougbots/avenor-core', () => ({
   extractTurnText,
   normalizeTurnStopReason,
   runWorkflowTool: runWorkflowToolMock,
-  withCandidateCount,
   resultTool: resultToolMock,
   shutdownTool: shutdownToolMock,
   killTool: killToolMock,
@@ -1096,34 +1095,11 @@ describe('AvenorPlugin', () => {
     expect(JSON.parse(output.output)).toEqual({ workflow_id: 'wf-1', status: 'active' })
   })
 
-  it('enriches controller status metadata with an advisory candidate count', async () => {
-    runWorkflowToolMock.mockImplementation(async (args: Record<string, unknown>) => {
-      if (args.action === 'ready') return { action: 'ready', value: { candidates: [{}, {}] } }
-      return { action: 'controller_status', value: { controller_id: 'ctl', desired_state: 'enabled', inflight: 1 } }
-    })
-
-    const hooks = await AvenorPlugin(makeCtx() as any)
-    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
-    const output = await (hooks.tool?.avenor_workflow as any).execute({ action: 'controller_status', controller_id: 'ctl' }, context)
-
-    expect(output.metadata.candidate_count).toBe(2)
-    expect(output.metadata.controller_id).toBe('ctl')
-  })
-
-  it('omits the candidate count when the ready query fails', async () => {
-    runWorkflowToolMock.mockImplementation(async (args: Record<string, unknown>) => {
-      if (args.action === 'ready') throw new Error('-32601 method not found')
-      return { action: 'controller_status', value: { controller_id: 'ctl', desired_state: 'enabled' } }
-    })
-
-    const hooks = await AvenorPlugin(makeCtx() as any)
-    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
-    const output = await (hooks.tool?.avenor_workflow as any).execute({ action: 'controller_status', controller_id: 'ctl' }, context)
-
-    expect(output.metadata.candidate_count).toBeUndefined()
-    expect(output.metadata.controller_id).toBe('ctl')
-  })
 })
+
+const workflowContractFixture = workflowConformance as unknown as {
+  applicability: Record<string, { permitted: string[], types: Record<string, string> }>
+}
 
 const contractFixture = conformance as unknown as {
   applicability: Record<string, { permitted: string[], types: Record<string, string> }>
@@ -1935,5 +1911,19 @@ describe('OpenCode host turn producer', () => {
     expect(recorded).toEqual(['one', 'two'])
     await turn(hooks, assistant('msg-3', { time: { created: 3, completed: 4 }, finish: 'stop' }))
     expect(recorded).toEqual(['one', 'two', 'three'])
+  })
+})
+
+describe('OpenCode workflow tool parity', () => {
+  it('registers avenor_workflow with the contract field set', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const workflow = toolArgs(hooks, 'avenor_workflow')
+    expect(Object.keys(workflow).sort()).toEqual(fieldSet(workflowContractFixture.applicability))
+    expect(enumValues(workflow.action)).toEqual(['cancel', 'complete', 'controller_status', 'events', 'gate', 'inspect', 'ready', 'status', 'wait'])
+  })
+
+  it('keeps the contract JSON type for every shared workflow parameter', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    expect(typeMismatches('avenor_workflow', toolArgs(hooks, 'avenor_workflow'), workflowContractFixture.applicability)).toEqual([])
   })
 })

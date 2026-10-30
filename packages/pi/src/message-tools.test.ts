@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test'
 import conformance from '../../../schemas/message_route.conformance.json'
+import workflowConformance from '../../../schemas/workflow_route.conformance.json'
 import resultFixture from '../../../schemas/message_route.result.json'
 import { ClosedSocketError, messageTool as realMessageTool, renderLast, RpcError, type MessageProvider } from '@dougbots/avenor-core'
 import { CHANNEL_LAST_TURN_ERROR } from './index.js'
@@ -29,6 +30,10 @@ afterEach(async () => {
   openHarnesses.length = 0
   if (leaked.length > 0) throw new Error(`${leaked.length} test(s) left the extension poll running`)
 })
+
+const workflowFixture = workflowConformance as unknown as {
+  applicability: Record<string, { permitted: string[], types: Record<string, string> }>
+}
 
 const fixture = conformance as unknown as {
   applicability: Record<string, { permitted: string[], types: Record<string, string> }>
@@ -863,6 +868,24 @@ describe('Pi default host provider wiring', () => {
     await tell()
     expect(getSupervisorClient).toHaveBeenCalledTimes(1)
     expect(client.messageSend).toHaveBeenCalledTimes(2)
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+})
+
+describe('Pi workflow tool parity', () => {
+  it('registers avenor_workflow with the contract field set', async () => {
+    const harness = await startHarness({})
+    const { fields, actions } = registered(harness.registeredTools.avenor_workflow.parameters)
+    expect(fields).toEqual(fieldSet(workflowFixture.applicability))
+    expect(actions).toEqual(['cancel', 'complete', 'controller_status', 'events', 'gate', 'inspect', 'ready', 'status', 'wait'])
+    await harness.eventHandlers.session_shutdown({}, {})
+  })
+
+  it('keeps the contract JSON type for every shared workflow parameter', async () => {
+    const harness = await startHarness({})
+    expect(
+      typeMismatches('avenor_workflow', harness.registeredTools.avenor_workflow.parameters, workflowFixture.applicability),
+    ).toEqual([])
     await harness.eventHandlers.session_shutdown({}, {})
   })
 })

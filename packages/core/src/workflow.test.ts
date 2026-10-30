@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import conformance from '../../../schemas/workflow_route.conformance.json'
 import type { Client } from './client.js'
-import { runWorkflowTool, withCandidateCount } from './tools/workflow.js'
+import { runWorkflowTool } from './tools/workflow.js'
 import { executeWorkflow, WorkflowToolError, workflowSupervisorId, type WorkflowAction, type WorkflowProvider } from './workflow.js'
 
 interface ConformanceCase {
@@ -66,9 +66,12 @@ describe('avenor_workflow conformance', () => {
       }
       const result = await executeWorkflow(provider, testCase.input)
       expect(result.action).toBe(testCase.expect.action!)
-      expect(calls).toHaveLength(1)
-      expect(calls[0].method).toBe(testCase.expect.call!)
-      expect(calls[0].args).toEqual(testCase.expect.args!)
+      const primary = calls.find(call => call.method === testCase.expect.call)
+      expect(primary).toBeDefined()
+      expect(primary!.args).toEqual(testCase.expect.args!)
+      // A controller_status with a controller_id adds an advisory `ready` call
+      // on the same client; nothing else may be dispatched.
+      expect(calls.filter(call => call !== primary).every(call => call.method === 'ready')).toBe(true)
     })
   }
 })
@@ -274,75 +277,56 @@ describe('avenor_workflow surface wiring', () => {
   })
 })
 
-describe('withCandidateCount', () => {
+describe('avenor_workflow advisory candidate count', () => {
   function providerWith(ready: WorkflowProvider['ready']): WorkflowProvider {
     return { ...fakeProvider().provider, ready }
   }
 
-  it('attaches the count when the caller omits supervisor_id', async () => {
-    // The advisory call runs through the real router, so a present-but-undefined
-    // supervisor_id would be refused and the count silently dropped.
+  it('attaches the count to a controller_status result', async () => {
     const provider = providerWith(async () => ({ candidates: [{}, {}] }))
-    const value = await withCandidateCount(
-      args => executeWorkflow(provider, args),
-      { action: 'controller_status', controller_id: 'ctl' },
-      { controller_id: 'ctl' },
-    )
-    expect(value.candidate_count).toBe(2)
-  })
-
-  it('returns the value unchanged for a non-controller_status action', async () => {
-    let called = false
-    const value = { workflow_id: 'wf-1', status: 'active' }
-    const result = await withCandidateCount(
-      async () => {
-        called = true
-        return { action: 'ready', value: { candidates: [] } }
-      },
-      { action: 'status', workflow_id: 'wf-1' },
-      value,
-    )
-    expect(result).toBe(value)
-    expect(called).toBe(false)
-  })
-
-  it('returns the value unchanged when controller_id is missing', async () => {
-    let called = false
-    const value = { controllers: [] }
-    const result = await withCandidateCount(
-      async () => {
-        called = true
-        return { action: 'ready', value: { candidates: [] } }
-      },
-      { action: 'controller_status' },
-      value,
-    )
-    expect(result).toBe(value)
-    expect(called).toBe(false)
-  })
-
-  it('forwards supervisor_id to the advisory ready call', async () => {
-    const calls: unknown[] = []
-    const provider = providerWith(async () => ({ candidates: [{}] }))
-    const value = await withCandidateCount(
-      args => {
-        calls.push(args)
-        return executeWorkflow(provider, args)
-      },
-      { action: 'controller_status', controller_id: 'ctl', supervisor_id: 'sup-a' },
-      { controller_id: 'ctl' },
-    )
-    expect(value.candidate_count).toBe(1)
-    expect(calls[0]).toEqual({ action: 'ready', controller_id: 'ctl', supervisor_id: 'sup-a' })
+    const result = await executeWorkflow(provider, { action: 'controller_status', controller_id: 'ctl' })
+    expect(result.value.candidate_count).toBe(2)
   })
 
   it('leaves the count absent when ready returns no candidates array', async () => {
     const provider = providerWith(async () => ({}))
-    const value = await withCandidateCount(
-      args => executeWorkflow(provider, args),
-      { action: 'controller_status', controller_id: 'ctl' },
-      { controller_id: 'ctl' },
-    )
-    expect(value.candidate_count).toBeUndefined()
+    const result = await executeWorkflow(provider, { action: 'controller_status', controller_id: 'ctl' })
+    expect(result.value.candidate_count).toBeUndefined()
+  })
+
+  it('leaves the count absent when the ready query fails', async () => {
+    const provider = providerWith(async () => {
+      throw new Error('-32601 method not found')
+    })
+    const result = await executeWorkflow(provider, { action: 'controller_status', controller_id: 'ctl' })
+    expect(result.value.candidate_count).toBeUndefined()
+  })
+
+  it('does not query ready for the controller list', async () => {
+    let queried = false
+    const provider = providerWith(async () => {
+      queried = true
+      return {}
+    })
+    await executeWorkflow(provider, { action: 'controller_status' })
+    expect(queried).toBe(false)
+  })
+
+  it('asks ready on the same dispatched client, not a second dial', async () => {
+    const calls: string[] = []
+    const provider: WorkflowProvider = {
+      ...fakeProvider().provider,
+      controllerStatus: async (id: string) => {
+        calls.push(`status:${id}`)
+        return { controller_id: id }
+      },
+      ready: async (id: string) => {
+        calls.push(`ready:${id}`)
+        return { candidates: [{}] }
+      },
+    }
+    const result = await executeWorkflow(provider, { action: 'controller_status', controller_id: 'ctl' })
+    expect(calls).toEqual(['status:ctl', 'ready:ctl'])
+    expect(result.value.candidate_count).toBe(1)
   })
 })
