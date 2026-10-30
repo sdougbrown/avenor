@@ -32,6 +32,13 @@ func SendBody(fromRunID, toRunID, message, role string) ([]byte, error) {
 	})
 }
 
+// ReplyID reports the message id a reply carries: the id it answers with
+// .reply, so the reply's own route is keyed by the id a recipient's surface
+// renders as its reply_to target.
+func ReplyID(messageID string) string {
+	return messageID + ".reply"
+}
+
 // ReplyBody stamps the correlation fields a reply needs onto the caller's
 // payload: the reply's own message id (what a recipient's surface renders as
 // the reply_to target) and the id the reply answers, so the sender can
@@ -42,7 +49,7 @@ func SendBody(fromRunID, toRunID, message, role string) ([]byte, error) {
 // caller's own fields are preserved; these two win, because they name the
 // conversation the reply belongs to. The payload must be a JSON object or
 // absent; a JSON null is an empty body.
-func ReplyBody(payload json.RawMessage, id, replyTo string) (json.RawMessage, error) {
+func ReplyBody(payload json.RawMessage, replyTo string) (json.RawMessage, error) {
 	fields := map[string]any{}
 	if len(payload) > 0 {
 		if err := json.Unmarshal(payload, &fields); err != nil {
@@ -53,7 +60,7 @@ func ReplyBody(payload json.RawMessage, id, replyTo string) (json.RawMessage, er
 			fields = map[string]any{}
 		}
 	}
-	fields["id"] = id
+	fields["id"] = ReplyID(replyTo)
 	fields["reply_to"] = replyTo
 	return json.Marshal(fields)
 }

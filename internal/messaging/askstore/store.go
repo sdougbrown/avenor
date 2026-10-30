@@ -467,9 +467,9 @@ func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time,
 	if messageID == "" || sender == "" || target == "" {
 		return fmt.Errorf("%w: message id, sender and target are required", messaging.ErrInvalidRequest)
 	}
-	key := messaging.FenceKey{Sender: sender, MessageID: messageID, Generation: s.generation}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	key := messaging.FenceKey{Sender: sender, MessageID: messageID, Generation: s.generation}
 	if err := s.generationErrorLocked(s.generation, messageID, now, legacy); err != nil {
 		return err
 	}

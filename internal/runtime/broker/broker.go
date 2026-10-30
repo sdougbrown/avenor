@@ -1259,12 +1259,17 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if expectsReply {
-		if msgID == "" {
-			writeCodedError(w, http.StatusBadRequest, "expects_reply requires a message id", "invalid-request")
-			return
-		}
+	// An expects_reply send without an id has nothing to wait on.
+	if expectsReply && msgID == "" {
+		writeCodedError(w, http.StatusBadRequest, "expects_reply requires a message id", "invalid-request")
+		return
+	}
 
+	// A message with an id is admitted through the store — the ask edge an
+	// expects_reply send allocates, the tell route a fire-and-forget message
+	// records — so one send dance serves both. A reply takes the reply path
+	// above; a message without an id is published directly.
+	if msgID != "" && replyTo == "" {
 		target := fullBody.ToRunID
 
 		if !b.seam().Reachable(target) {
@@ -1278,6 +1283,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			MessageID:  msgID,
 			Generation: fullBody.Generation,
 			Body:       string(fullBody.Payload),
+			NoReply:    !expectsReply,
 			Legacy:     true,
 		})
 		if err != nil {
@@ -1291,12 +1297,15 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		writeJSONBody(w, http.StatusOK, map[string]any{
-			"queued":        true,
-			"message_id":    msgID,
-			"expects_reply": true,
-			"outcome":       messaging.OutcomeSent,
-		})
+		response := map[string]any{
+			"queued":     true,
+			"message_id": msgID,
+			"outcome":    messaging.OutcomeSent,
+		}
+		if expectsReply {
+			response["expects_reply"] = true
+		}
+		writeJSONBody(w, http.StatusOK, response)
 		return
 	}
 
@@ -1347,7 +1356,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			// carries its own id — the id it answers with .reply — and its route
 			// is recorded before the delivery, so the recipient's answer finds a
 			// route whether or not this broker relayed the original message.
-			if err := b.store.RecordTellRoute(replyTo+".reply", fullBody.FromRunID, fullBody.ToRunID, time.Now(), true); err != nil {
+			if err := b.store.RecordTellRoute(messaging.ReplyID(replyTo), fullBody.FromRunID, fullBody.ToRunID, time.Now(), true); err != nil {
 				writeSendError(w, err)
 				return
 			}
@@ -1356,13 +1365,13 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 				ToRunID:       fullBody.ToRunID,
 				Kind:          fullBody.Type,
 				Payload:       fullBody.Payload,
-				CorrelationID: replyTo + ".reply",
+				CorrelationID: messaging.ReplyID(replyTo),
 			})
 			if err != nil {
 				// The delivery failed, so the route is retracted: a retried
 				// reply is admitted instead of being refused for a message
 				// that was never exposed.
-				b.store.DeleteTellRoute(replyTo + ".reply")
+				b.store.DeleteTellRoute(messaging.ReplyID(replyTo))
 				writeCodedError(w, http.StatusNotFound, err.Error(), "invalid-request")
 				return
 			}
@@ -1382,37 +1391,9 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fire-and-forget: deliver to the target's control queue. A tell with a
-	// message id is admitted through the store so a reply to it can be routed
-	// back; a tell without one has no id to reply to and is published directly.
-	if msgID != "" {
-		res, err := b.seam().Send(r.Context(), messaging.SendRequest{
-			From:       messaging.Identity{RunID: fullBody.FromRunID, Sender: senderName},
-			To:         messaging.Identity{RunID: fullBody.ToRunID, Sender: fullBody.ToRunID},
-			MessageID:  msgID,
-			Generation: fullBody.Generation,
-			Body:       string(fullBody.Payload),
-			NoReply:    true,
-			Legacy:     true,
-		})
-		if err != nil {
-			writeSendError(w, err)
-			return
-		}
-		if res.Outcome != messaging.OutcomeSent {
-			writeJSONBody(w, http.StatusConflict, map[string]any{
-				"error":   "message id withdrawn",
-				"outcome": res.Outcome,
-			})
-			return
-		}
-		writeJSONBody(w, http.StatusOK, map[string]any{
-			"queued":     true,
-			"message_id": msgID,
-			"outcome":    messaging.OutcomeSent,
-		})
-		return
-	}
+	// Fire-and-forget without an id: deliver to the target's control queue. A
+	// tell with a message id took the store branch above, where its reply
+	// route was recorded.
 	err = b.seam().Tell(r.Context(), messaging.TellRequest{
 		FromRunID: fullBody.FromRunID,
 		ToRunID:   fullBody.ToRunID,
@@ -2904,8 +2885,8 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	if !ok || target != req.From.RunID {
 		return messaging.SendResult{Outcome: messaging.OutcomeEdgeAbsent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
 	}
-	replyID := req.MessageID + ".reply"
-	body, err := messaging.ReplyBody(payload, replyID, req.MessageID)
+	replyID := messaging.ReplyID(req.MessageID)
+	body, err := messaging.ReplyBody(payload, req.MessageID)
 	if err != nil {
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
 	}

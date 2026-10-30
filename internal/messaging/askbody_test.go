@@ -10,7 +10,7 @@ import (
 // the reply's own id and the id it answer win over the caller's fields, a JSON
 // null is an empty body, and a non-object payload is refused.
 func TestReplyBodyStampsTheConversationFields(t *testing.T) {
-	stamped, err := ReplyBody(json.RawMessage(`{"message":"ack","id":"forged","reply_to":"other"}`), "m1.reply", "m1")
+	stamped, err := ReplyBody(json.RawMessage(`{"message":"ack","id":"forged","reply_to":"other"}`), "m1")
 	if err != nil {
 		t.Fatalf("ReplyBody: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestReplyBodyStampsTheConversationFields(t *testing.T) {
 		t.Fatalf("body = %v, want no from_run_id: the identity travels in the envelope", body)
 	}
 
-	empty, err := ReplyBody(json.RawMessage(`null`), "m2.reply", "m2")
+	empty, err := ReplyBody(json.RawMessage(`null`), "m2")
 	if err != nil {
 		t.Fatalf("ReplyBody(null): %v", err)
 	}
@@ -37,7 +37,7 @@ func TestReplyBodyStampsTheConversationFields(t *testing.T) {
 		t.Fatalf("empty body = %v, want the stamped fields", emptyBody)
 	}
 
-	if _, err := ReplyBody(json.RawMessage(`[1,2]`), "m3.reply", "m3"); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := ReplyBody(json.RawMessage(`[1,2]`), "m3"); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("ReplyBody(array) = %v, want invalid-request", err)
 	}
 }
