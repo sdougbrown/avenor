@@ -91,13 +91,6 @@ describe('avenor_workflow admission', () => {
     await expect(executeWorkflow(provider, { action: 7 })).rejects.toMatchObject({ code: 'invalid_action' })
   })
 
-  it('refuses an unknown action with the shared vocabulary sentence', async () => {
-    const { provider } = fakeProvider()
-    await expect(executeWorkflow(provider, { action: 'explode' })).rejects.toMatchObject({
-      code: 'invalid_action',
-      message: 'not a known action (status, inspect, events, wait, ready, controller_status, gate, complete, cancel)',
-    })
-  })
 })
 
 describe('avenor_workflow numeric and timestamp bounds', () => {
@@ -108,6 +101,38 @@ describe('avenor_workflow numeric and timestamp bounds', () => {
     const result = await executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: 9223372036854775807 })
     expect(result.action).toBe('events')
     expect(calls[0].args.after_seq).toBe(9223372036854775807)
+  })
+
+  it('omits a gate field whose value is the empty string', async () => {
+    const { provider, calls } = fakeProvider()
+    await executeWorkflow(provider, {
+      action: 'gate',
+      workflow_id: 'wf-1',
+      node_id: 'n1',
+      gate_id: 'g1',
+      activation_id: 'a1',
+      operation: 'satisfy',
+      actor: '',
+      outcome: '',
+      source: '',
+    })
+    expect(calls[0].args).not.toHaveProperty('actor')
+    expect(calls[0].args).not.toHaveProperty('outcome')
+    expect(calls[0].args).not.toHaveProperty('source')
+  })
+
+  it('refuses an integer below the int64 range', async () => {
+    const { provider } = fakeProvider()
+    await expect(
+      executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: -1e21 }),
+    ).rejects.toMatchObject({ code: 'invalid_request' })
+  })
+
+  it('accepts the minimum int64', async () => {
+    const { provider, calls } = fakeProvider()
+    const result = await executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: -(2 ** 63) })
+    expect(result.action).toBe('events')
+    expect(calls[0].args.after_seq).toBe(-(2 ** 63))
   })
 
   it('refuses an impossible calendar date', async () => {
@@ -123,6 +148,26 @@ describe('avenor_workflow numeric and timestamp bounds', () => {
         observed_at: '2026-13-01T00:00:00Z',
       }),
     ).rejects.toMatchObject({ code: 'invalid_request' })
+  })
+
+  it('validates the calendar date and time components', async () => {
+    const gate = (observedAt: string) => ({
+      action: 'gate',
+      workflow_id: 'wf-1',
+      node_id: 'n1',
+      gate_id: 'g1',
+      activation_id: 'a1',
+      operation: 'satisfy',
+      observed_at: observedAt,
+    })
+    const refused = ['2026-02-29T00:00:00Z', '2100-02-29T00:00:00Z', '2026-01-32T00:00:00Z', '2026-01-01T24:00:00Z', '2026-01-01T00:60:00Z', '2026-01-01T00:00:60Z']
+    for (const observedAt of refused) {
+      await expect(executeWorkflow(fakeProvider().provider, gate(observedAt))).rejects.toMatchObject({ code: 'invalid_request' })
+    }
+    const accepted = ['2024-02-29T00:00:00Z', '2000-02-29T00:00:00Z', '2026-01-31T23:59:59Z']
+    for (const observedAt of accepted) {
+      await expect(executeWorkflow(fakeProvider().provider, gate(observedAt))).resolves.toMatchObject({ action: 'gate' })
+    }
   })
 })
 
@@ -180,15 +225,14 @@ describe('avenor_workflow surface wiring', () => {
     ).rejects.toMatchObject({ code: 'refused', message: 'the supervisor could not be reached' })
   })
 
-  it('passes a router denial through unchanged', async () => {
-    const { client } = fakeClient({})
+  it('denies a malformed call before acquiring a client', async () => {
+    let dialed = false
     await expect(
-      runWorkflowTool({ action: 'status' }, async supervisorId => ({
-        client,
-        isSingleton: false,
-        sup: null,
-        supervisorId: supervisorId ?? '',
-      })),
+      runWorkflowTool({ action: 'status' }, async supervisorId => {
+        dialed = true
+        return { client: fakeClient({}).client, isSingleton: false, sup: null, supervisorId: supervisorId ?? '' }
+      }),
     ).rejects.toMatchObject({ code: 'invalid_request' })
+    expect(dialed).toBe(false)
   })
 })

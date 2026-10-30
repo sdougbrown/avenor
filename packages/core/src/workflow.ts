@@ -381,15 +381,17 @@ function gateParams(fields: WorkflowInput): WorkflowGateParams {
     activation_id: fields.activation_id!,
     operation: fields.operation!,
   }
-  if (fields.actor !== undefined) params.actor = fields.actor
-  if (fields.reason !== undefined) params.reason = fields.reason
-  if (fields.outcome !== undefined) params.outcome = fields.outcome
+  // The Go router omits a field whose value is the empty string, so an empty
+  // string must not reach the wire here either.
+  if (fields.actor !== undefined && fields.actor !== '') params.actor = fields.actor
+  if (fields.reason !== undefined && fields.reason !== '') params.reason = fields.reason
+  if (fields.outcome !== undefined && fields.outcome !== '') params.outcome = fields.outcome
   if (fields.subject !== undefined) params.subject = fields.subject
-  if (fields.poll_id !== undefined) params.poll_id = fields.poll_id
-  if (fields.source !== undefined) params.source = fields.source
-  if (fields.result !== undefined) params.result = fields.result
-  if (fields.response_hash !== undefined) params.response_hash = fields.response_hash
-  if (fields.observed_at !== undefined) params.observed_at = fields.observed_at
+  if (fields.poll_id !== undefined && fields.poll_id !== '') params.poll_id = fields.poll_id
+  if (fields.source !== undefined && fields.source !== '') params.source = fields.source
+  if (fields.result !== undefined && fields.result !== '') params.result = fields.result
+  if (fields.response_hash !== undefined && fields.response_hash !== '') params.response_hash = fields.response_hash
+  if (fields.observed_at !== undefined && fields.observed_at !== '') params.observed_at = fields.observed_at
   if (fields.evidence_ids !== undefined) params.evidence_ids = fields.evidence_ids
   return params
 }

@@ -1,5 +1,5 @@
 import type { Client } from '../client.js'
-import { executeWorkflow, workflowSupervisorId, type WorkflowProvider, type WorkflowResult } from '../workflow.js'
+import { assertWorkflowInput, executeWorkflow, workflowSupervisorId, type WorkflowProvider, type WorkflowResult } from '../workflow.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { withWorkflowClient, type GetSupervisorClient } from './workflow-client.js'
 
@@ -33,6 +33,10 @@ export async function runWorkflowTool(
   args: unknown,
   getSupervisorClient: GetSupervisorClient = realGetSupervisorClient,
 ): Promise<WorkflowResult> {
+  // Admit before acquiring a client, the way the Go surface does: a malformed
+  // call must answer with the repairable sentence, not a dial error for a
+  // supervisor it should never have reached.
+  assertWorkflowInput(args)
   return withWorkflowClient(
     workflowSupervisorId(args),
     client => executeWorkflow(clientWorkflowProvider(client), args),
