@@ -36,6 +36,7 @@ type MessageResumeArgs = {
 type EventsArgs = { run_id?: string; types?: string[]; limit?: number; supervisor_id?: string }
 type ShutdownArgs = { supervisor_id?: string; force?: boolean }
 type WorkflowControllerStatusArgs = { controller_id?: string; supervisor_id?: string }
+type WorkflowArgs = { action?: string; workflow_id?: string; controller_id?: string; supervisor_id?: string }
 
 function asRecord(value: unknown): RecordValue | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -510,7 +511,7 @@ function controllerStatusLines(details: unknown, args: WorkflowControllerStatusA
   lines.push(
     desiredState === 'disabled'
       ? `Guidance: Run \`avenor workflow controller enable ${controllerId}\` to start dispatch and polling.`
-      : `Guidance: Call avenor_workflow_controller_status without controller_id to review all controllers.`,
+      : `Guidance: Call avenor_workflow with action "controller_status" and no controller_id to review all controllers.`,
   )
   if (!expanded) return lines
   const supervisor = stringValue(args.supervisor_id) ? scalar(args.supervisor_id) : 'singleton'
@@ -680,16 +681,20 @@ export function renderShutdownResult(result: ToolResult, options: ToolRenderResu
   return render('shutdown', result, options, theme, () => shutdownLines(result.details, args, options.expanded))
 }
 
-export function renderWorkflowControllerStatusCall(args: WorkflowControllerStatusArgs, theme: Theme): Text {
-  const pieces = stringValue(args.controller_id)
-    ? [`avenor_workflow_controller_status controller_id ${quoted(args.controller_id)}`]
-    : ['avenor_workflow_controller_status (all controllers)']
+export function renderWorkflowCall(args: WorkflowArgs, theme: Theme): Text {
+  const pieces = [`avenor_workflow action ${quoted(args.action)}`]
+  if (stringValue(args.workflow_id)) pieces.push(`workflow_id ${quoted(args.workflow_id)}`)
+  if (stringValue(args.controller_id)) pieces.push(`controller_id ${quoted(args.controller_id)}`)
   const supervisor = optionalQuoted(args.supervisor_id)
   if (supervisor) pieces.push(`supervisor_id ${supervisor}`)
   return linesText([pieces.join(' ')], theme)
 }
 
-export function renderWorkflowControllerStatusResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: WorkflowControllerStatusArgs): Text {
-  return render('workflow controller status', result, options, theme, () =>
-    controllerStatusLines(result.details, args, options.expanded) ?? controllerListLines(result.details, args, options.expanded))
+export function renderWorkflowResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: WorkflowArgs): Text {
+  if (args.action === 'controller_status') {
+    return render('workflow controller status', result, options, theme, () =>
+      controllerStatusLines(result.details, args, options.expanded) ?? controllerListLines(result.details, args, options.expanded))
+  }
+  return render('workflow', result, options, theme, () => undefined)
 }
+

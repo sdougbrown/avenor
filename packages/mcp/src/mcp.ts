@@ -9,6 +9,7 @@ import { spawnInputShape } from './spawn-schema.js'
 import { routerAdmittedSchema } from './router-schema.js'
 import messageFlatContract from '../../../schemas/message.input.flat.json'
 import peersFlatContract from '../../../schemas/peers.input.flat.json'
+import workflowFlatContract from '../../../schemas/workflow.input.flat.json'
 import {
   spawnTool,
   statusTool,
@@ -26,14 +27,8 @@ import {
   renderPeerList,
   resultOutput,
   ToolError,
-  workflowCancelTool,
-  workflowStatusTool,
-  workflowWaitTool,
-  workflowInspectTool,
-  workflowEventsTool,
-  workflowCompleteTool,
-  workflowGateTool,
-  workflowControllerStatusTool,
+  WorkflowToolError,
+  runWorkflowTool,
   type MessageProvider,
   type PeersRouterResult,
   validateSpawnSelection,
@@ -178,6 +173,7 @@ server.registerTool('answer_permission', {
  */
 const messageInputSchema = routerAdmittedSchema(messageFlatContract)
 const peersInputSchema = routerAdmittedSchema(peersFlatContract)
+const workflowInputSchema = routerAdmittedSchema(workflowFlatContract)
 
 /**
  * The bound host provider: one supervisor and one generation at a time. It is
@@ -236,7 +232,7 @@ async function passthroughResult<T extends object>(result: T | Promise<T>): Prom
 
 /** A router tool error is a failure result on every surface; anything else is the transport's to report. */
 function toolFailure(error: unknown): ToolReply {
-  if (!(error instanceof ToolError)) throw error
+  if (!(error instanceof ToolError) && !(error instanceof WorkflowToolError)) throw error
   const text = error.message
   return {
     content: [{ type: 'text', text }],
@@ -286,28 +282,16 @@ server.registerTool('peers', {
   inputSchema: peersInputSchema,
 }, async args => peersCall(args))
 
-server.registerTool('workflow_cancel', {
-  description: 'Cancel a workflow instance. The actor and reason are required.',
-  inputSchema: {
-    workflow_id: z.string().describe('Workflow ID'),
-    actor: z.string().describe('Who is cancelling'),
-    reason: z.string().describe('Why the workflow is being cancelled'),
-    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-  },
-}, async ({ workflow_id, actor, reason, supervisor_id }) => {
-  return passthroughResult(workflowCancelTool({ workflow_id, actor, reason, supervisorId: supervisor_id }))
-})
-
-server.registerTool('events', {
-  description: 'Get event log for a run',
-  inputSchema: {
-    run_id: z.string().describe('Run ID or label'),
-    types: z.array(z.string()).optional().describe('Filter by event types'),
-    limit: z.number().optional().describe('Max events to return (default 50)'),
-    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-  },
-}, async ({ run_id, types, limit, supervisor_id }) => {
-  return passthroughResult(eventsTool({ runId: run_id, types, limit, supervisorId: supervisor_id }))
+server.registerTool('workflow', {
+  description: "Drive a durable workflow instance: read its status, detail, events or wait for it; report controller readiness or status; or record a gate decision, complete a handoff activation, or cancel the instance. One `action` selects the verb. Read-only actions need no permission; gate, complete and cancel keep their authority checks.",
+  inputSchema: workflowInputSchema,
+}, async args => {
+  try {
+    const result = await runWorkflowTool(args)
+    return passthroughResult(result.value)
+  } catch (error) {
+    return toolFailure(error)
+  }
 })
 
 server.registerTool('kill', {
@@ -330,101 +314,16 @@ server.registerTool('shutdown', {
   return passthroughResult(shutdownTool({ supervisorId: supervisor_id, force }))
 })
 
-server.registerTool('workflow_status', {
-  description: 'Get lightweight status for a workflow instance',
+server.registerTool('events', {
+  description: 'Get event log for a run',
   inputSchema: {
-    workflow_id: z.string().describe('Workflow ID'),
-    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-  },
-}, async ({ workflow_id, supervisor_id }) => {
-  return passthroughResult(workflowStatusTool({ workflowId: workflow_id, supervisorId: supervisor_id }))
-})
-
-server.registerTool('workflow_wait', {
-  description: 'Wait for a workflow to reach a terminal state or until timeout',
-  inputSchema: {
-    workflow_id: z.string().describe('Workflow ID'),
-    timeout: z.string().optional().describe('Timeout (e.g. 30s, 5m)'),
-    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-  },
-}, async ({ workflow_id, timeout, supervisor_id }) => {
-  return passthroughResult(workflowWaitTool({ workflowId: workflow_id, timeout, supervisorId: supervisor_id }))
-})
-
-server.registerTool('workflow_inspect', {
-  description: 'Return the full instance detail for a workflow',
-  inputSchema: {
-    workflow_id: z.string().describe('Workflow ID'),
-    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-  },
-}, async ({ workflow_id, supervisor_id }) => {
-  return passthroughResult(workflowInspectTool({ workflowId: workflow_id, supervisorId: supervisor_id }))
-})
-
-server.registerTool('workflow_events', {
-  description: 'Read log events from a workflow instance\'s event log',
-  inputSchema: {
-    workflow_id: z.string().describe('Workflow ID'),
-    after_seq: z.number().optional().describe('Only include events after this sequence number'),
+    run_id: z.string().describe('Run ID or label'),
+    types: z.array(z.string()).optional().describe('Filter by event types'),
     limit: z.number().optional().describe('Max events to return (default 50)'),
     supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
   },
-}, async ({ workflow_id, after_seq, limit, supervisor_id }) => {
-  return passthroughResult(workflowEventsTool({ workflowId: workflow_id, afterSeq: after_seq, limit, supervisorId: supervisor_id }))
-})
-
-server.registerTool('workflow_complete', {
-  description: 'Atomically complete a machine/external handoff activation',
-  inputSchema: {
-    workflow_id: z.string().describe('Workflow ID'),
-    node_id: z.string().describe('Node ID'),
-    activation_id: z.string().describe('Activation ID'),
-    attempt_id: z.string().describe('Attempt ID'),
-    lease_id: z.string().describe('Lease ID'),
-    owner_token: z.string().describe('Owner token'),
-    outcome: z.string().describe('Outcome'),
-    outputs: z.unknown().optional().describe('Outputs'),
-    artifacts: z.unknown().optional().describe('Artifacts'),
-    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-  },
-}, async (args) => {
-  const { supervisor_id, ...rest } = args
-  return passthroughResult(workflowCompleteTool({ ...rest, supervisorId: supervisor_id }))
-})
-
-server.registerTool('workflow_gate', {
-  description: 'Record a gate decision on a parked awaiting_gate activation',
-  inputSchema: {
-    workflow_id: z.string().describe('Workflow ID'),
-    node_id: z.string().describe('Node ID'),
-    gate_id: z.string().describe('Gate ID'),
-    activation_id: z.string().describe('Activation ID'),
-    operation: z.enum(['satisfy','reject','waive','external_result']).describe('Gate operation'),
-    actor: z.string().optional().describe('Actor'),
-    reason: z.string().optional().describe('Reason'),
-    outcome: z.string().optional().describe('Outcome'),
-    subject: z.unknown().optional().describe('Subject'),
-    poll_id: z.string().optional().describe('Poll ID'),
-    source: z.string().optional().describe('Source'),
-    result: z.string().optional().describe('Result'),
-    response_hash: z.string().optional().describe('Response hash'),
-    observed_at: z.string().optional().describe('Observed at'),
-    evidence_ids: z.array(z.string()).optional().describe('Evidence IDs'),
-    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-  },
-}, async (args) => {
-  const { supervisor_id, ...rest } = args
-  return passthroughResult(workflowGateTool({ ...rest, supervisorId: supervisor_id }))
-})
-
-server.registerTool('workflow_controller_status', {
-  description: 'Show workflow controller status. With controller_id, returns that controller\'s full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).',
-  inputSchema: {
-    controller_id: z.string().optional().describe('Controller ID; omit to list all controllers'),
-    supervisor_id: z.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-  },
-}, async ({ controller_id, supervisor_id }) => {
-  return passthroughResult(workflowControllerStatusTool({ controllerId: controller_id, supervisorId: supervisor_id }))
+}, async ({ run_id, types, limit, supervisor_id }) => {
+  return passthroughResult(eventsTool({ runId: run_id, types, limit, supervisorId: supervisor_id }))
 })
 
 export interface HttpServerOptions {
