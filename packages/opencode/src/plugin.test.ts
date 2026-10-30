@@ -1086,6 +1086,16 @@ describe('AvenorPlugin', () => {
     expect(output.output).toBe('No workflow controllers configured.')
   })
 
+  it('renders a non-controller workflow result as its JSON output', async () => {
+    runWorkflowToolMock.mockImplementation(async () => ({ action: 'status', value: { workflow_id: 'wf-1', status: 'active' } }))
+
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const output = await (hooks.tool?.avenor_workflow as any).execute({ action: 'status', workflow_id: 'wf-1' }, toolContext('session-1'))
+
+    expect(output.title).toBe('workflow')
+    expect(JSON.parse(output.output)).toEqual({ workflow_id: 'wf-1', status: 'active' })
+  })
+
   it('enriches controller status metadata with an advisory candidate count', async () => {
     runWorkflowToolMock.mockImplementation(async (args: Record<string, unknown>) => {
       if (args.action === 'ready') return { action: 'ready', value: { candidates: [{}, {}] } }

@@ -86,7 +86,7 @@ SSE mode restricts incoming requests to `localhost` / `127.0.0.1` / `[::1]` orig
 
 ## Tools
 
-This surface registers tool names **without** the `avenor_` prefix — `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown`, and the `workflow_*` set. MCP clients namespace their own servers (Claude Code shows them as `mcp__avenor__spawn`, for example), so the prefix would only repeat itself. The `avenor` binary's own MCP server uses the same names.
+This surface registers tool names **without** the `avenor_` prefix — `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown`, and `workflow`. MCP clients namespace their own servers (Claude Code shows them as `mcp__avenor__spawn`, for example), so the prefix would only repeat itself. The `avenor` binary's own MCP server uses the same names.
 
 ### `spawn`
 

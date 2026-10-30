@@ -432,6 +432,9 @@ describe('Avenor Pi renderers', () => {
     expect(text(renderWorkflowCall({ action: 'status', workflow_id: 'wf-1' }, theme))).toBe(
       'avenor_workflow action "status" workflow_id "wf-1"',
     )
+    expect(text(renderWorkflowCall({ action: 'gate', workflow_id: 'wf-1', node_id: 'n1', gate_id: 'g1', activation_id: 'a1', operation: 'satisfy' }, theme))).toBe(
+      'avenor_workflow action "gate" workflow_id "wf-1" node_id "n1" gate_id "g1" activation_id "a1" operation "satisfy"',
+    )
 
     const enabled = text(renderWorkflowResult(result({
       controller_id: 'software-factory',

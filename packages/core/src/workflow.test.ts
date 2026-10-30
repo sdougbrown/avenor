@@ -291,6 +291,51 @@ describe('withCandidateCount', () => {
     expect(value.candidate_count).toBe(2)
   })
 
+  it('returns the value unchanged for a non-controller_status action', async () => {
+    let called = false
+    const value = { workflow_id: 'wf-1', status: 'active' }
+    const result = await withCandidateCount(
+      async () => {
+        called = true
+        return { action: 'ready', value: { candidates: [] } }
+      },
+      { action: 'status', workflow_id: 'wf-1' },
+      value,
+    )
+    expect(result).toBe(value)
+    expect(called).toBe(false)
+  })
+
+  it('returns the value unchanged when controller_id is missing', async () => {
+    let called = false
+    const value = { controllers: [] }
+    const result = await withCandidateCount(
+      async () => {
+        called = true
+        return { action: 'ready', value: { candidates: [] } }
+      },
+      { action: 'controller_status' },
+      value,
+    )
+    expect(result).toBe(value)
+    expect(called).toBe(false)
+  })
+
+  it('forwards supervisor_id to the advisory ready call', async () => {
+    const calls: unknown[] = []
+    const provider = providerWith(async () => ({ candidates: [{}] }))
+    const value = await withCandidateCount(
+      args => {
+        calls.push(args)
+        return executeWorkflow(provider, args)
+      },
+      { action: 'controller_status', controller_id: 'ctl', supervisor_id: 'sup-a' },
+      { controller_id: 'ctl' },
+    )
+    expect(value.candidate_count).toBe(1)
+    expect(calls[0]).toEqual({ action: 'ready', controller_id: 'ctl', supervisor_id: 'sup-a' })
+  })
+
   it('leaves the count absent when ready returns no candidates array', async () => {
     const provider = providerWith(async () => ({}))
     const value = await withCandidateCount(
