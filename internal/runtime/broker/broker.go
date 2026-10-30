@@ -1368,7 +1368,37 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fire-and-forget: deliver to the target's control queue.
+	// Fire-and-forget: deliver to the target's control queue. A tell with a
+	// message id is admitted through the store so a reply to it can be routed
+	// back; a tell without one has no id to reply to and is published directly.
+	if msgID != "" {
+		res, err := b.seam().Send(r.Context(), messaging.SendRequest{
+			From:       messaging.Identity{RunID: fullBody.FromRunID, Sender: senderName},
+			To:         messaging.Identity{RunID: fullBody.ToRunID, Sender: fullBody.ToRunID},
+			MessageID:  msgID,
+			Generation: fullBody.Generation,
+			Body:       string(fullBody.Payload),
+			NoReply:    true,
+			Legacy:     true,
+		})
+		if err != nil {
+			writeSendError(w, err)
+			return
+		}
+		if res.Outcome != messaging.OutcomeSent {
+			writeJSONBody(w, http.StatusConflict, map[string]any{
+				"error":   "message id withdrawn",
+				"outcome": res.Outcome,
+			})
+			return
+		}
+		writeJSONBody(w, http.StatusOK, map[string]any{
+			"queued":     true,
+			"message_id": msgID,
+			"outcome":    messaging.OutcomeSent,
+		})
+		return
+	}
 	err = b.seam().Tell(r.Context(), messaging.TellRequest{
 		FromRunID: fullBody.FromRunID,
 		ToRunID:   fullBody.ToRunID,
