@@ -229,7 +229,7 @@ For the full deployment walkthrough — service units, token generation, Tailsca
 
 ## Tools
 
-This server registers tool names **without** the `avenor_` prefix: `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown`, and `workflow`. An MCP client namespaces its own servers (Claude Code shows `spawn` as `mcp__avenor__spawn`), so the prefix would only repeat itself. The Pi extension and the OpenCode plugin register the same tools with the `avenor_` prefix (`avenor_spawn`, `avenor_message`, and so on); their workflow surface is still the eight per-action tools. Every tool here is scoped to this MCP process's supervisor.
+This server registers tool names **without** the `avenor_` prefix: `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown`, and `workflow`. An MCP client namespaces its own servers (Claude Code shows `spawn` as `mcp__avenor__spawn`), so the prefix would only repeat itself. The Pi extension and the OpenCode plugin register the same tools with the `avenor_` prefix (`avenor_spawn`, `avenor_message`, and so on). Every tool here is scoped to this MCP process's supervisor.
 
 ### `spawn`
 
