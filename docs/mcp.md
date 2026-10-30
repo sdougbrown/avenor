@@ -367,7 +367,7 @@ One tool for every message between runs, with an explicit `action`. The shared r
 
 `resume` is the follow-up: it spawns a new runtime that continues the prior session instead of prompting the old one. The default label is `<prior-label>-followup`, an `auto_approve` policy is inherited, and the result carries `run_id`, `label`, `sentinel_file` and `on_event` for the new run. A keyed `resume` whose key already produced a run replays that run rather than spawning a second one.
 
-`reply` answers an inbound message. An ask this surface received is answered through its claim. A tell has no claim: the broker routes the reply back to the tell's sender, so a reply to a tell returns `sent`. A message id the broker has no route for answers `edge-absent` with the text "no ask … is pending on this surface; nothing was sent".
+`reply` answers an inbound message. An ask this surface received is answered through its claim. A tell has no claim: the broker routes the reply back to the tell's sender, so a reply to a tell returns `sent`. The reply carries its own route key (`<id>.reply`) and the id it answers, so the recipient can answer the answer. A message id the broker has no route for answers `edge-absent` with the text "no ask … is pending on this surface; nothing was sent".
 
 `control_reply` is retained in the contract for the retired claude-channel backend's reply path, and no surface can deliver one any more. Every surface rejects it with code `unsupported_action` and the static reason `action "control_reply" is retained in the contract but no surface can deliver one`.
 

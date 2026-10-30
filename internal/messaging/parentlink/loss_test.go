@@ -2,6 +2,7 @@ package parentlink
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -206,8 +207,13 @@ func TestConcurrentCrossBranchAsksAndWithdrawals(t *testing.T) {
 			})
 			if err != nil || waited.Outcome != messaging.OutcomeReplied {
 				t.Errorf("wait = (%+v, %v), want replied", waited, err)
-			} else if string(waited.Reply.Payload) != `{"message":"pong"}` {
-				t.Errorf("wait reply payload = %v, want the reply the target sent", waited.Reply.Payload)
+			} else {
+				var replyBody map[string]any
+				if err := json.Unmarshal(waited.Reply.Payload, &replyBody); err != nil {
+					t.Errorf("wait reply payload %s: %v", waited.Reply.Payload, err)
+				} else if replyBody["message"] != "pong" {
+					t.Errorf("wait reply payload = %v, want the reply the target sent", waited.Reply.Payload)
+				}
 			}
 			<-repliedDone
 			repliedCount.Add(1)

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -10,9 +11,9 @@ import (
 )
 
 // TestMessengerReplyRejectsNonJSONWithoutConsumingTheEdge pins the reply
-// validation on the broker-routed path: the local messenger forwards the raw
-// reply body to the store, so a body that is not JSON is refused not-sent
-// there and the edge stays live for the reply that parses. The bare
+// validation on the broker-routed path: the local messenger stamps the reply
+// body before the store sees it, so a body that is not JSON is refused
+// not-sent there and the edge stays live for the reply that parses. The bare
 // in-process transport shares the store's validation.
 func TestMessengerReplyRejectsNonJSONWithoutConsumingTheEdge(t *testing.T) {
 	b, _, _ := startSeamBroker(t)
@@ -63,7 +64,14 @@ func TestMessengerReplyRejectsNonJSONWithoutConsumingTheEdge(t *testing.T) {
 	if err != nil || waited.Outcome != messaging.OutcomeReplied {
 		t.Fatalf("Wait = (%+v, %v), want the replied edge", waited, err)
 	}
-	if waited.Reply == nil || string(waited.Reply.Payload) != `{"payload":"pong"}` {
+	var replyBody map[string]any
+	if waited.Reply == nil {
+		t.Fatal("reply payload = nil, want the valid reply stored")
+	}
+	if err := json.Unmarshal(waited.Reply.Payload, &replyBody); err != nil {
+		t.Fatalf("reply payload %s: %v", waited.Reply.Payload, err)
+	}
+	if replyBody["payload"] != "pong" {
 		t.Fatalf("reply payload = %+v, want the valid reply stored", waited.Reply)
 	}
 }

@@ -17,8 +17,9 @@ every surface returns the same snake_case result object
 - `reply` — answer an inbound message: `reply_to` is the message id, `message`
   is the answer. An ask this surface received is answered through its claim. A
   tell has no claim: the broker routes the reply back to the tell's sender, so a
-  reply to a tell returns `sent`. A message id with no route answers
-  `edge-absent`.
+  reply to a tell returns `sent`. The reply carries its own route key
+  (`<id>.reply`) and the id it answers, so the recipient can answer the answer.
+  A message id with no route answers `edge-absent`.
 - `withdraw` — retire a pending ask by `message_id`. Only a pending ask is
   retracted: a terminal one keeps its own outcome, so a timed-out ask answers
   `timed-out` with `ask "<id>" timed out; nothing was withdrawn`.

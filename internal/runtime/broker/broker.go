@@ -2872,8 +2872,22 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	if req.Body != "" {
 		payload = json.RawMessage(req.Body)
 	}
+	// Stamp the reply's correlation fields once, for both paths: the reply's
+	// own route key and the id it answers. The ask path stores this payload on
+	// the edge; the tell path delivers it.
+	body, err := messaging.ReplyBody(payload, req.MessageID)
+	if err != nil {
+		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	}
 	key := m.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, m.broker.store.Generation())
-	outcome, err := m.broker.store.Reply(key, req.From.RunID, payload)
+	outcome, err := m.broker.store.Reply(key, req.From.RunID, body)
+	if outcome == messaging.OutcomeReplied && err == nil {
+		// The ask is answered. Record the reply's own route so the asker can
+		// answer the answer, the same way a tell reply is routable. A route
+		// failure only costs the chain, not the delivery.
+		_ = m.broker.store.RecordTellRoute(messaging.ReplyID(req.MessageID), req.From.RunID, req.ToRunID, true)
+		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
+	}
 	if outcome != messaging.OutcomeEdgeAbsent || err != nil {
 		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
 	}
@@ -2887,10 +2901,6 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 		return messaging.SendResult{Outcome: messaging.OutcomeEdgeAbsent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
 	}
 	replyID := messaging.ReplyID(req.MessageID)
-	body, err := messaging.ReplyBody(payload, req.MessageID)
-	if err != nil {
-		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
-	}
 	// The reply's own route is recorded before the reply is exposed — the same
 	// rule a relayed ask follows — so the recipient's answer always finds a
 	// route. A repeat reply to the same tell resolves to the same route, so it

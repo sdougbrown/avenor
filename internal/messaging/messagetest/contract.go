@@ -1,6 +1,7 @@
 package messagetest
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -92,7 +93,11 @@ func RunTransportSuite(t *testing.T, newTransport TransportFactory) {
 		if waited.Reply.MessageID != msgID || waited.Reply.FromRunID != bob.RunID {
 			t.Fatalf("reply identity = %+v", waited.Reply)
 		}
-		if waited.Reply.Kind != "agent_message" || string(waited.Reply.Payload) != `{"message":"pong"}` {
+		var replyBody map[string]any
+		if err := json.Unmarshal(waited.Reply.Payload, &replyBody); err != nil {
+			t.Fatalf("reply payload %s: %v", waited.Reply.Payload, err)
+		}
+		if waited.Reply.Kind != "agent_message" || replyBody["message"] != "pong" {
 			t.Fatalf("reply = %+v", waited.Reply)
 		}
 	})
