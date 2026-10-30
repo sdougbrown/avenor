@@ -277,15 +277,9 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 	}
 
 	if req.NoReply {
-		// The route is keyed by message id because a replier knows only the id
-		// it received. A second tell with the same id is refused rather than
-		// allowed to move the route to another sender, which would misroute
-		// the first sender's answers, and the checks run before the delivery so
+		// The route was already refused above when another sender's tell route
+		// or any ask edge holds this id. The delivery runs after the checks, so
 		// a refused tell is never published.
-		if prev, ok := s.tellRoutes[req.MessageID]; ok && prev.sender != req.Sender.RunID {
-			result.Outcome = messaging.OutcomeNotSent
-			return result, messaging.ErrDuplicateMessageID
-		}
 		for _, e := range s.active {
 			if e.key.MessageID == req.MessageID {
 				result.Outcome = messaging.OutcomeNotSent
@@ -456,11 +450,14 @@ func (s *Store) TellRoute(messageID string) (sender, target string, ok bool) {
 // relayed in. The sender and target are the ids this broker addresses them by.
 // The same uniqueness rules as a NoReply admission apply: the message id is
 // shared with asks, so a route is refused while an ask edge holds the id, and
-// a route that would move another sender's route is refused.
+// an id that already carries a route is refused — a retried relay would queue
+// the tell twice. A versioned id also records the delivered dedup fence a
+// local admission would have set.
 func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time, legacy bool) error {
 	if messageID == "" || sender == "" || target == "" {
 		return fmt.Errorf("%w: message id, sender and target are required", messaging.ErrInvalidRequest)
 	}
+	key := messaging.FenceKey{Sender: sender, MessageID: messageID, Generation: s.generation}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.generationErrorLocked(s.generation, messageID, now, legacy); err != nil {
@@ -471,15 +468,15 @@ func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time,
 		return err
 	}
 	s.reclaimLocked(now)
+	if _, ok := s.terminal[key]; ok {
+		// A versioned id's delivered fence is spent: the relay already queued
+		// this tell once, and a second queue entry would deliver it twice.
+		return messaging.ErrDuplicateMessageID
+	}
 	if _, ok := s.tellRoutes[messageID]; ok {
-		// The same tell relayed again (a retry) refreshes in place; a different
-		// sender's tell with the same id would move the route and misroute the
-		// first sender's answers.
-		if prev := s.tellRoutes[messageID]; prev.sender == sender {
-			prev.target = target
-			prev.deadline = deadline
-			return nil
-		}
+		// The route exists, so the message was already queued once — a retried
+		// relay would deliver it twice, and a different sender's tell with the
+		// same id would misroute the first sender's answers.
 		return messaging.ErrDuplicateMessageID
 	}
 	for _, e := range s.active {
@@ -489,6 +486,9 @@ func (s *Store) RecordTellRoute(messageID, sender, target string, now time.Time,
 	}
 	if s.fenceCountLocked() >= s.fenceCapacity {
 		return messaging.ErrFenceCapacity
+	}
+	if versionedID(messageID, now) {
+		s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeSent, delivered: true})
 	}
 	s.tellRoutes[messageID] = &tellRoute{messageID: messageID, sender: sender, target: target, deadline: deadline}
 	return nil

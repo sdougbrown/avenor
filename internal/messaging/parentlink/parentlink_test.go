@@ -419,3 +419,56 @@ func TestReplyToTellCrossesBranches(t *testing.T) {
 		t.Fatalf("stranger reply = (%d, %v), want edge-absent", status, body)
 	}
 }
+
+// TestRelayRecordsTheTellRoute pins the NoReply relay branch: the relayed tell
+// records its reply route before the message is exposed, a relay whose route
+// is refused does not queue the message, and a versioned id is fenced so a
+// retried relay cannot queue it twice.
+func TestRelayRecordsTheTellRoute(t *testing.T) {
+	parent := startBranch(t, "", "supervisor")
+	_ = parent
+	bob := startBranch(t, parent.url(), "bob")
+	_ = bob
+	// The relay authenticates as the target run with the branch-local
+	// credential the branch created it with.
+	relay := func(fromKey, msgID string) (int, map[string]any) {
+		return postJSON(t, bob.broker.Addr(), "/relay", "bob", bob.token(t, "bob"), map[string]any{
+			"from_run_id": fromKey,
+			"to_run_id":   "bob",
+			"type":        "agent_message",
+			"message_id":  msgID,
+			"generation":  bob.broker.Store().Generation(),
+			"payload":     map[string]any{"message": "hello"},
+		})
+	}
+
+	status, body := relay(parent.key("supervisor"), "tell-r1")
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("relayed tell = (%d, %v), want 200 sent", status, body)
+	}
+	if queued := queuedAgentMessages(t, bob.broker, "bob"); len(queued) != 1 {
+		t.Fatalf("bob queue = %d messages, want the relayed tell", len(queued))
+	}
+	sender, target, ok := bob.broker.Store().TellRoute("tell-r1")
+	if !ok || sender != parent.key("supervisor") || target != "bob" {
+		t.Fatalf("TellRoute = (%q, %q, %v), want supervisor -> bob", sender, target, ok)
+	}
+
+	// A different sender's tell with the same id is refused and queues nothing.
+	status, _ = relay(parent.key("other"), "tell-r1")
+	if status != http.StatusConflict {
+		t.Fatalf("conflicting relay = %d, want 409", status)
+	}
+	if queued := queuedAgentMessages(t, bob.broker, "bob"); len(queued) != 1 {
+		t.Fatalf("bob queue after the refusal = %d messages, want the original only", len(queued))
+	}
+
+	// A retried relay is refused by the delivered fence a versioned id records.
+	status, _ = relay(parent.key("supervisor"), "tell-r1")
+	if status != http.StatusConflict {
+		t.Fatalf("retried relay = %d, want 409", status)
+	}
+	if queued := queuedAgentMessages(t, bob.broker, "bob"); len(queued) != 1 {
+		t.Fatalf("bob queue after the retry = %d messages, want the original only", len(queued))
+	}
+}

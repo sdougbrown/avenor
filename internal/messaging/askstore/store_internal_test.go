@@ -395,11 +395,13 @@ func TestStoreTellRouteRefusesASecondSender(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
+	// Any id that already carries a route is refused — a retried relay would
+	// queue the tell twice, whatever the sender is.
 	if err := store.RecordTellRoute(msgID, "carol", "bob", now, false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
 		t.Fatalf("RecordTellRoute over another sender's route = %v, want a duplicate refusal", err)
 	}
-	if err := store.RecordTellRoute(msgID, "alice", "bob", now, false); err != nil {
-		t.Fatalf("the sender's own re-record = %v, want it accepted", err)
+	if err := store.RecordTellRoute(msgID, "alice", "bob", now, false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+		t.Fatalf("the sender's own re-record = %v, want a duplicate refusal", err)
 	}
 	// An ask whose id carries a tell route is refused too.
 	res, err := store.Admit(t.Context(), AdmitRequest{

@@ -1133,10 +1133,19 @@ func TestBrokerReplyToTellReachesTheSender(t *testing.T) {
 	if st := nonObject["status"]; st != http.StatusBadRequest {
 		t.Fatalf("non-object reply payload = %v, want 400", nonObject)
 	}
-	// A JSON null reply payload must not take the broker down.
+	// A JSON null reply payload must not take the broker down, and the
+	// delivered message still carries the stamped correlation fields. The null
+	// reply answers its own tell so the reply id is fresh.
+	secondTell := sendTellWithID(t, addr, aliceToken, "alice", "bob", "tell-2", "again")
+	if st := secondTell["status"]; st != http.StatusOK || secondTell["outcome"] != "sent" {
+		t.Fatalf("second tell = %v, want a 200 sent", secondTell)
+	}
+	if got := pollAgentMessages(t, addr, "bob", bobToken); len(got) != 1 {
+		t.Fatalf("bob poll after the second tell = %v, want the tell", got)
+	}
 	nullPayload := postSend(t, addr, bytes.NewReader([]byte(fmt.Sprintf(`{
 		"run_id": "bob", "token": %q, "from_run_id": "bob", "type": "agent_message",
-		"reply_to": "tell-1", "payload": null
+		"reply_to": "tell-2", "payload": null
 	}`, bobToken))))
 	if st := nullPayload["status"]; st != http.StatusOK {
 		t.Fatalf("null reply payload = %v, want 200", nullPayload)
@@ -1144,6 +1153,39 @@ func TestBrokerReplyToTellReachesTheSender(t *testing.T) {
 	got = pollAgentMessages(t, addr, "alice", aliceToken)
 	if len(got) != 1 {
 		t.Fatalf("alice poll after null reply = %v, want the routed answer", got)
+	}
+	nullRaw, err := json.Marshal(got[0]["payload"])
+	if err != nil {
+		t.Fatalf("encode null-reply payload: %v", err)
+	}
+	var nullBody map[string]any
+	if err := json.Unmarshal(nullRaw, &nullBody); err != nil {
+		t.Fatalf("decode null-reply payload %s: %v", nullRaw, err)
+	}
+	if nullBody["id"] != "tell-2.reply" || nullBody["reply_to"] != "tell-2" {
+		t.Fatalf("null reply payload = %v, want the stamped correlation fields", nullBody)
+	}
+
+	// The reply chain: alice answers the reply (its own id, no to_run_id) and
+	// bob's queue receives it.
+	counter := sendReplyWithoutTarget(t, addr, aliceToken, "alice", "tell-1.reply", "and hi bob")
+	if st := counter["status"]; st != http.StatusOK || counter["outcome"] != "sent" {
+		t.Fatalf("counter-reply = %v, want a 200 sent", counter)
+	}
+	got = pollAgentMessages(t, addr, "bob", bobToken)
+	if len(got) != 1 {
+		t.Fatalf("bob poll after counter-reply = %v, want the routed answer", got)
+	}
+	counterRaw, err := json.Marshal(got[0]["payload"])
+	if err != nil {
+		t.Fatalf("encode counter-reply payload: %v", err)
+	}
+	var counterBody map[string]any
+	if err := json.Unmarshal(counterRaw, &counterBody); err != nil {
+		t.Fatalf("decode counter-reply payload %s: %v", counterRaw, err)
+	}
+	if counterBody["reply_to"] != "tell-1.reply" || counterBody["message"] != "and hi bob" || got[0]["from_run_id"] != "alice" {
+		t.Fatalf("counter-reply = %v (%v), want alice's answer to tell-1.reply", got[0], counterBody)
 	}
 }
 

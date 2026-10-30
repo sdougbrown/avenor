@@ -1324,12 +1324,10 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusForbidden, "not the target of this ask", "not-ask-target")
 			return
 		}
-		if errors.Is(err, messaging.ErrInvalidRequest) {
-			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
-			return
-		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			// Every other failure is a client input or store-capacity class the
+			// wire table already classifies: duplicate ids, capacity, expiry.
+			writeSendError(w, err)
 			return
 		}
 		outcome := replied.Outcome
@@ -1346,8 +1344,13 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			}
 			// No live edge owns this ID, so the reply degrades to a delivery
 			// rather than completing an edge the store already retired. The reply
-			// carries its own id — the id it answers with .reply — so the relay
-			// records the route the recipient's answer needs.
+			// carries its own id — the id it answers with .reply — and its route
+			// is recorded before the delivery, so the recipient's answer finds a
+			// route whether or not this broker relayed the original message.
+			if err := b.store.RecordTellRoute(replyTo+".reply", fullBody.FromRunID, fullBody.ToRunID, time.Now(), true); err != nil {
+				writeSendError(w, err)
+				return
+			}
 			err = b.seam().Tell(r.Context(), messaging.TellRequest{
 				FromRunID:     fullBody.FromRunID,
 				ToRunID:       fullBody.ToRunID,
@@ -2886,23 +2889,21 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	}
 	// No ask edge. A reply to a tell is delivered to the tell's sender through
 	// the seam, which relays across a branch boundary the way a tell does. The
-	// reply carries its own message id — the original id with .reply — so the
-	// recipient's answer routes back through a route of its own instead of
-	// colliding with the original tell's route. Only the tell's target may
-	// answer it.
+	// reply carries its own message id — the original id with .reply — whose
+	// route names the previous replier as its sender, which is what makes a
+	// reply chain work. Only the tell's target may answer it.
 	sender, target, ok := m.broker.store.TellRoute(req.MessageID)
 	if !ok || target != req.From.RunID {
 		return messaging.SendResult{Outcome: messaging.OutcomeEdgeAbsent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
 	}
-	body, err := messaging.ReplyBody(payload, req.MessageID)
+	replyID := req.MessageID + ".reply"
+	body, err := messaging.ReplyBody(payload, replyID, req.MessageID)
 	if err != nil {
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
 	}
-	replyID := req.MessageID + ".reply"
 	// The reply's own route is recorded before the reply is exposed — the same
 	// rule a relayed ask follows — so the recipient's answer always finds a
-	// route. Each reply carries an id whose route names the previous replier as
-	// its sender, which is what makes a reply chain work.
+	// route.
 	if err := m.broker.store.RecordTellRoute(replyID, req.From.RunID, sender, time.Now(), true); err != nil {
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
 	}
