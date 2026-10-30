@@ -175,6 +175,12 @@
       "expect": {"code": "invalid_request", "message": "invalid input for action \"status\": property \"supervisor_id\" must be a string"}
     },
     {
+      "name": "an integer below the int64 range is refused",
+      "input": {"action": "events", "workflow_id": "wf-1", "after_seq": -99999999999999999999},
+      "schema": true,
+      "expect": {"code": "invalid_request", "message": "invalid input for action \"events\": property \"after_seq\" must be at least -9223372036854775808"}
+    },
+    {
       "name": "an integer beyond the int64 range is refused",
       "input": {"action": "events", "workflow_id": "wf-1", "after_seq": 99999999999999999999},
       "schema": true,
