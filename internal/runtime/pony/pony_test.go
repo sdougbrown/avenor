@@ -1166,7 +1166,6 @@ func TestProvider_Start_withInitialPrompt(t *testing.T) {
 }
 
 func TestProvider_NewWithOptions(t *testing.T) {
-	t.Parallel()
 	cfg := Config{Model: "base-model", WorkingDir: "/base"}
 	SetGlobalConfig(&cfg)
 
@@ -1185,7 +1184,6 @@ func TestProvider_NewWithOptions(t *testing.T) {
 }
 
 func TestProvider_NewWithOptions_noGlobalConfig(t *testing.T) {
-	t.Parallel()
 	SetGlobalConfig(nil)
 
 	p := NewWithOptions(runtime.StartOptions{Model: "m", Dir: "/d"})
@@ -1203,7 +1201,6 @@ func TestProvider_NewWithOptions_noGlobalConfig(t *testing.T) {
 }
 
 func TestProvider_NewWithOptions_profileByAgent(t *testing.T) {
-	t.Parallel()
 	SetGlobalProfiles("primary", map[string]Config{
 		"primary": {Model: "primary-model", WorkingDir: "/primary"},
 		"mule":    {Model: "mule-model", WorkingDir: "/mule"},
@@ -1224,7 +1221,6 @@ func TestProvider_NewWithOptions_profileByAgent(t *testing.T) {
 }
 
 func TestProvider_NewWithOptions_profileModelOverride(t *testing.T) {
-	t.Parallel()
 	SetGlobalProfiles("primary", map[string]Config{
 		"primary": {Model: "primary-model"},
 		"mule":    {Model: "mule-model"},
@@ -1242,7 +1238,6 @@ func TestProvider_NewWithOptions_profileModelOverride(t *testing.T) {
 }
 
 func TestProvider_NewWithOptions_profileDefaultAgentFallback(t *testing.T) {
-	t.Parallel()
 	SetGlobalProfiles("primary", map[string]Config{
 		"primary": {Model: "primary-model", WorkingDir: "/primary"},
 		"mule":    {Model: "mule-model", WorkingDir: "/mule"},
@@ -1263,7 +1258,6 @@ func TestProvider_NewWithOptions_profileDefaultAgentFallback(t *testing.T) {
 }
 
 func TestProvider_NewWithOptions_profileUnknownAgentFailsClosed(t *testing.T) {
-	t.Parallel()
 	SetGlobalProfiles("primary", map[string]Config{
 		"primary": {Model: "primary-model"},
 		"mule":    {Model: "mule-model"},
