@@ -99,6 +99,7 @@ func mustAcquire(t *testing.T, s *ControllerStore, id, owner string) ControllerR
 }
 
 func TestCreateIdempotentAndConflict(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 
 	first := mustCreate(t, s, "alpha", 4)
@@ -120,6 +121,7 @@ func TestCreateIdempotentAndConflict(t *testing.T) {
 }
 
 func TestCreateValidation(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	for _, id := range []string{"", "a/b", ".hidden", "sp ace"} {
 		if _, err := s.Create(id, 1); !errors.Is(err, ErrInvalidController) {
@@ -134,6 +136,7 @@ func TestCreateValidation(t *testing.T) {
 }
 
 func TestCompetingLeadersSequential(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	s1 := NewStoreWithClock(root, time.Now)
 	s2 := NewStoreWithClock(root, time.Now)
@@ -172,6 +175,7 @@ func TestCompetingLeadersSequential(t *testing.T) {
 // event log has no duplicate sequence numbers. A no-op lockFile would let
 // two racers both read the same revision and both "acquire".
 func TestConcurrentCompetingLeaders(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	clock := &fakeClock{cur: time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)}
 	s1 := NewStoreWithClock(root, clock.Now)
@@ -264,6 +268,7 @@ func TestConcurrentCompetingLeaders(t *testing.T) {
 }
 
 func TestRenewReleaseCASConflicts(t *testing.T) {
+	t.Parallel()
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	rec := mustAcquire(t, s, "alpha", "owner-1")
@@ -307,6 +312,7 @@ func TestRenewReleaseCASConflicts(t *testing.T) {
 }
 
 func TestDisableReleasesLiveLease(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	rec := mustAcquire(t, s, "alpha", "owner-1")
@@ -357,6 +363,7 @@ func TestDisableReleasesLiveLease(t *testing.T) {
 // record's CapacityBlocked, and replaying the event log into a fresh store
 // (no snapshot) reproduces the cleared state.
 func TestDisableEnableClearsCapacityBlocked(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	s := NewStoreWithClock(root, time.Now)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
@@ -414,6 +421,7 @@ func TestDisableEnableClearsCapacityBlocked(t *testing.T) {
 // record that is not capacity-blocked is a no-op: no error, changed is
 // false, and no event is appended.
 func TestClearCapacityBlockedNoopUnblocked(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	mustCreate(t, s, "alpha", 10)
 
@@ -433,6 +441,7 @@ func TestClearCapacityBlockedNoopUnblocked(t *testing.T) {
 }
 
 func TestRecoverExpiresLease(t *testing.T) {
+	t.Parallel()
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	rec := mustAcquire(t, s, "alpha", "owner-1")
@@ -463,6 +472,7 @@ func TestRecoverExpiresLease(t *testing.T) {
 }
 
 func TestAcquireLeaseReplacesExpiredLease(t *testing.T) {
+	t.Parallel()
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	rec := mustAcquire(t, s, "alpha", "owner-1")
@@ -494,6 +504,7 @@ func TestAcquireLeaseReplacesExpiredLease(t *testing.T) {
 }
 
 func TestTruncatedFinalEventLine(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	mustCreate(t, s, "alpha", 1)
 
@@ -521,6 +532,7 @@ func TestTruncatedFinalEventLine(t *testing.T) {
 }
 
 func TestMidFileCorruptionIsError(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 
@@ -543,6 +555,7 @@ func TestMidFileCorruptionIsError(t *testing.T) {
 }
 
 func TestProjectionFailureIsolation(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 
 	// A directory at the projection path must not block Create...
@@ -565,6 +578,7 @@ func TestProjectionFailureIsolation(t *testing.T) {
 // TestRenewLeaseLogsEveryRenewal proves a renewal inside the old one-minute
 // event window still logs its event and bumps the revision.
 func TestRenewLeaseLogsEveryRenewal(t *testing.T) {
+	t.Parallel()
 	s, clock := newTestStore(t)
 	mustEnable(t, s, mustCreate(t, s, "alpha", 1).ControllerID)
 	acquired := mustAcquire(t, s, "alpha", "owner-1")
@@ -717,6 +731,7 @@ func TestReplayRejectsHistoryHole(t *testing.T) {
 // TestCompactLogThreshold pins the rotation boundary and the default a store
 // built without a threshold falls back to.
 func TestCompactLogThreshold(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name               string
 		compactBytes, size int64
@@ -749,6 +764,7 @@ func TestCompactLogThreshold(t *testing.T) {
 // that cannot rotate its log still lands and stays loadable, and a later
 // commit compacts once the rename can succeed again.
 func TestCompactionFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	// Every commit attempts a rotation; a non-empty directory at the previous
 	// generation's path blocks that rename.
@@ -805,6 +821,7 @@ func TestLogHoleIsolatesOneController(t *testing.T) {
 }
 
 func TestListSortedAndMissingDir(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 
 	listed, err := s.List()
@@ -833,6 +850,7 @@ func TestListSortedAndMissingDir(t *testing.T) {
 }
 
 func TestUnknownControllerIsNotFound(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	id := "ghost"
 
@@ -859,6 +877,7 @@ func TestUnknownControllerIsNotFound(t *testing.T) {
 // change wakes a subscriber: the wake lands after the commit returns, so a
 // woken reader observes the committed state.
 func TestSubscribeChangesWakeOnCommit(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	ch, cancel := s.SubscribeChanges()
 	defer cancel()
@@ -876,6 +895,7 @@ func TestSubscribeChangesWakeOnCommit(t *testing.T) {
 // delivery guarantee: a subscriber that never reads coalesces to one buffered
 // signal while every commit still lands, and no commit ever blocks on it.
 func TestSubscribeChangesNeverBlocksCommit(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	ch, cancel := s.SubscribeChanges()
 	defer cancel()
@@ -903,6 +923,7 @@ func TestSubscribeChangesNeverBlocksCommit(t *testing.T) {
 // TestSubscribeChangesCancelStopsWakes proves the cancel func unsubscribes:
 // commits after the cancel leave no signal in the channel.
 func TestSubscribeChangesCancelStopsWakes(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	ch, cancel := s.SubscribeChanges()
 
@@ -923,6 +944,7 @@ func TestSubscribeChangesCancelStopsWakes(t *testing.T) {
 }
 
 func TestControllerStateFilesAreOwnerOnly(t *testing.T) {
+	t.Parallel()
 	s, _ := newTestStore(t)
 	mustCreate(t, s, "perm", 1)
 	mustEnable(t, s, "perm")

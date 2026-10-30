@@ -19,6 +19,7 @@ import (
 // The spawn path is what MCP-driven delegation uses, so the roster default
 // has to survive the trip to StartOptions here too, not only through the CLI.
 func TestStableDirectRosterSuppliesThinkingUnlessSpawnOverridesIt(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name          string
 		entry         string
@@ -76,6 +77,7 @@ func TestStableDirectRosterSuppliesThinkingUnlessSpawnOverridesIt(t *testing.T) 
 // (an explicit run-level level wins) before StartOptions. Covers both the
 // loop and the team child paths.
 func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name        string
 		entry       string
@@ -160,6 +162,7 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 // backend consume a runtime; failing with nothing reserved pins the check to
 // the merged roster value too.
 func TestStableRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/roster-thinking-agy.sock", MaxRuntimes: 1})
 	providerCalled := false
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
@@ -188,6 +191,7 @@ func TestStableRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) {
 // must survive the cache: the merge runs against the resolved (or cached)
 // selection on every attempt, not only on the cache miss that resolves it.
 func TestStableLoopPhaseCachedSelectionKeepsRosterThinking(t *testing.T) {
+	t.Parallel()
 	end := func(id string) stableScriptedEvent {
 		return stableScriptedEvent{event: events.Event{
 			Event:     "session.end",
@@ -250,6 +254,7 @@ func TestStableLoopPhaseCachedSelectionKeepsRosterThinking(t *testing.T) {
 // the entry's thinking level as the default (an explicit assignment level
 // wins), not the template's — or no — level (#287).
 func TestStableWorkflowAssignmentRosterSuppliesThinkingUnlessAssignmentOverridesIt(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name               string
 		entry              string
@@ -293,6 +298,7 @@ func TestStableWorkflowAssignmentRosterSuppliesThinkingUnlessAssignmentOverrides
 // spawn path: a regression that validates only the assignment value would
 // let an unsupported roster level through to the start.
 func TestStableWorkflowAssignmentRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) {
+	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(),
 		`{"horse":{"backend":"agy","agent":"windsurf-swe","thinking":"low"}}`)
 	_, err := resolveAssignmentSelection(&workflow.Assignment{

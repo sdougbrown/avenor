@@ -18,6 +18,7 @@ import (
 // runtime, so the table must never return effectSideUnknown for a defined
 // kind.
 func TestEffectExecutionPartitionCoversEveryKind(t *testing.T) {
+	t.Parallel()
 	owned := []effectKind{
 		effectClearPresentation, effectSetAgentPresentation, effectSetSuccessPresentation,
 		effectSetSessionEndPresentation, effectSetIdleEndData, effectRecordOutcomeExit,
@@ -58,6 +59,7 @@ func TestEffectExecutionPartitionCoversEveryKind(t *testing.T) {
 }
 
 func TestReportLifecycleErrorCountsIllegalTransitions(t *testing.T) {
+	t.Parallel()
 	s := newLifecycleTestOwner()
 	s.errWriter = io.Discard // keep the expected-error log out of test output
 	child := &childRuntime{id: "rt_report", done: make(chan struct{})}
@@ -90,6 +92,7 @@ func TestReportLifecycleErrorCountsIllegalTransitions(t *testing.T) {
 // count for both attempt classes, the presentation writes, the idle-end data,
 // the settled/finalized waiter release, parking and completion.
 func TestApplyLifecycleCommitsOwnedEffects(t *testing.T) {
+	t.Parallel()
 	apply := func(t *testing.T, s *Supervisor, child *childRuntime, sig lifecycleSignal) {
 		t.Helper()
 		child.mu.Lock()
@@ -290,6 +293,7 @@ func TestApplyLifecycleCommitsOwnedEffects(t *testing.T) {
 }
 
 func TestFinishSyntheticRunChildDrivesFullTeardown(t *testing.T) {
+	t.Parallel()
 	owner := newLifecycleTestOwner()
 	child := newTestChildLifecycle(t, owner, testLifecycleOptions{id: "rt_finish_helper", exec: execStarting, class: directAttemptClass})
 	finishSyntheticChildLifecycle(owner, child)

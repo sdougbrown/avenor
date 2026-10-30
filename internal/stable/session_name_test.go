@@ -17,6 +17,7 @@ import (
 )
 
 func TestSessionRenameLevelsAndResolution(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -80,6 +81,7 @@ func TestSessionRenameLevelsAndResolution(t *testing.T) {
 }
 
 func TestSessionRenameAmbiguousLabel(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	for _, id := range []string{"rt_b", "rt_a"} {
 		if _, err := sup.broker.CreateRun(id, "shared"); err != nil {
@@ -94,6 +96,7 @@ func TestSessionRenameAmbiguousLabel(t *testing.T) {
 }
 
 func TestSessionRenameNameRules(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	cases := map[string]string{
 		"empty":      "",
@@ -117,6 +120,7 @@ func TestSessionRenameNameRules(t *testing.T) {
 }
 
 func TestSessionRenameThenSendDelivers(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	token, err := sup.broker.CreateRun("rt_a", "old-name")
 	if err != nil {
@@ -202,6 +206,7 @@ func TestSessionRenameThenSendDelivers(t *testing.T) {
 // that reports or reserves a run's name: status, list, MCP label resolution, the
 // messaging plane, and the label reservation a keyed spawn checks.
 func TestSessionRenameUpdatesRuntimeLabel(t *testing.T) {
+	t.Parallel()
 	const spawnLabel, renamedLabel = "spawn-name", "renamed-name"
 	sup, _ := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
@@ -297,6 +302,7 @@ func listLabelMatch(entries []map[string]any, label string) string {
 }
 
 func TestSessionLastRecordsSupervisorOnly(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	if _, err := sup.broker.CreateRun("rt_a", "peer-a"); err != nil {
 		t.Fatalf("create run: %v", err)
@@ -341,6 +347,7 @@ func assertToolCode(t *testing.T, err error, want string) {
 // without it a control history or tail read for the renamed runtime cannot see
 // the rename.
 func TestSessionRenameIndexesRuntimeHistory(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	socket := newStableSocketPath(t, "s2-history")
 	if err := sup.control.Start(socket); err != nil {
@@ -380,6 +387,7 @@ func TestSessionRenameIndexesRuntimeHistory(t *testing.T) {
 // broker's resolved name into the runtime's display name, the copy status and
 // label reservation read.
 func TestHarnessNameObserverMirrorsIntoTheRuntimeLabel(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "harnessname"), MaxRuntimes: 2})
 	if sup.broker == nil {
 		t.Fatal("the test supervisor has no broker")
@@ -433,6 +441,7 @@ func runtimeDisplayName(sup *Supervisor, runID string) string {
 // the resolved display name keeps winning with the harness name, and clearing
 // the harness name falls back to the renamed model-set label.
 func TestSessionRenameUnderAHarnessName(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "harnessrename"), MaxRuntimes: 2})
 	if sup.broker == nil {
 		t.Fatal("the test supervisor has no broker")

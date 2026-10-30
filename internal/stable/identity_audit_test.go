@@ -14,6 +14,7 @@ import (
 )
 
 func TestSessionAttemptRejectsConcurrentProviderIDCollision(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-session-collision.sock", MaxRuntimes: 1})
 	providers := []runtime.Provider{&stableFakeProvider{}, &stableFakeProvider{}}
 	identities := []effectiveIdentity{
@@ -61,6 +62,7 @@ func TestSessionAttemptRejectsConcurrentProviderIDCollision(t *testing.T) {
 }
 
 func TestSessionAttemptRejectsAuthoritativeIDCollision(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-authoritative-collision.sock", MaxRuntimes: 1})
 	firstProvider, secondProvider := &stableFakeProvider{}, &stableFakeProvider{}
 	firstIdentity := effectiveIdentity{Backend: "pi", Agent: "first", Model: "first-model"}
@@ -88,6 +90,7 @@ func TestSessionAttemptRejectsAuthoritativeIDCollision(t *testing.T) {
 }
 
 func TestStableTeamAuthoritativeIDCollisionFailsWorkflowDeterministically(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{
 		"first":{"backend":"pi","agent":"first","model":"model-first"},
@@ -152,6 +155,7 @@ func TestStableTeamAuthoritativeIDCollisionFailsWorkflowDeterministically(t *tes
 }
 
 func TestStableParallelTeamAdoptionUsesPerAttemptOwnership(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{
 		"first":{"backend":"pi","agent":"first","model":"model-first"},
@@ -252,6 +256,7 @@ func TestStableParallelTeamAdoptionUsesPerAttemptOwnership(t *testing.T) {
 }
 
 func TestStableWorkflowRejectsSameBackendIdentityChangeOnResume(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{
 		"first":{"backend":"pi","agent":"first","model":"first-model"},
@@ -309,6 +314,7 @@ func TestStableWorkflowRejectsSameBackendIdentityChangeOnResume(t *testing.T) {
 }
 
 func TestStableFailedTeamFinalizesIdentityBeforeErrorReturn(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{
 		"first":{"backend":"pi","agent":"first","model":"first-model"},
@@ -357,6 +363,7 @@ func TestStableFailedTeamFinalizesIdentityBeforeErrorReturn(t *testing.T) {
 }
 
 func TestStableDirectResumeRestoresCompleteAuthoritativeIdentity(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-resume-restore.sock", MaxRuntimes: 1})
 	mapped := effectiveIdentity{
 		Backend: "pi", Agent: "mapped-agent", Model: "mapped-model", AgentProfile: "cloud",
@@ -404,6 +411,7 @@ func TestStableDirectResumeRestoresCompleteAuthoritativeIdentity(t *testing.T) {
 }
 
 func TestStableResumeRejectsChangedRosterWithoutOverwritingMapping(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	rosterPath := writeStage5Roster(t, dir, `{"planner":{"backend":"pi","agent":"changed","model":"changed-model"}}`)
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/audit-resume-roster.sock", MaxRuntimes: 1})
@@ -434,10 +442,12 @@ func TestStableResumeRejectsChangedRosterWithoutOverwritingMapping(t *testing.T)
 }
 
 func TestStableCompletedLoopRetainsFinalRosterIdentity(t *testing.T) {
+	t.Parallel()
 	testStableCompletedWorkflowRetainsFinalRosterIdentity(t, "loop")
 }
 
 func TestStableCompletedTeamRetainsFinalRosterIdentity(t *testing.T) {
+	t.Parallel()
 	testStableCompletedWorkflowRetainsFinalRosterIdentity(t, "team")
 }
 

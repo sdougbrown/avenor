@@ -105,6 +105,7 @@ func TestReplayFromEmptyReproducesLiveSnapshot(t *testing.T) {
 // activation_ids, instance_id, or started attempt_id. The reducer must still
 // fold them, filling the missing fields itself.
 func TestReplayLegacyEventsWithoutMintedFields(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "events.ndjson")
 	legacy := `{"id":"e1","kind":"workflow.event.instantiated","sequence":1,"identity":{"workflow_id":"wf-legacy"},"instantiated":{"template_id":"t1","template_version":"1","terminal_outcomes":["done"],"entry_nodes":["a","b"]}}
 `
@@ -192,6 +193,7 @@ func TestReplayLegacyEventsWithoutMintedFields(t *testing.T) {
 // back from an empty snapshot — with the store's policies — into exactly the
 // live snapshot, retry budget and stamped dispatch included.
 func TestReplayWithPoliciesReproducesLiveSnapshot(t *testing.T) {
+	t.Parallel()
 	template := []byte(`{
   "schema_version": 1,
   "template_id": "replay-policy",
@@ -287,6 +289,7 @@ func TestReplayWithPoliciesReproducesLiveSnapshot(t *testing.T) {
 // store's events and readiness, so injected time shows up exactly in the
 // snapshot.
 func TestStoreAndManagerShareOneClock(t *testing.T) {
+	t.Parallel()
 	wf := WorkflowID("wf-clock")
 	times := []time.Time{
 		time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
@@ -391,6 +394,7 @@ func managerRunningActivation(t *testing.T, m *Manager, s *Store, wf WorkflowID,
 // runtime identity a dispatch finalization records must come wholly from the
 // event, so a from-empty fold rebuilds the identified attempt exactly.
 func TestReplayAttemptIdentifiedParity(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	actID, res, attemptID := managerRunningActivation(t, m, s, wf, node)
 	if err := m.FinalizeDispatch(FinalizeDispatchRequest{
@@ -412,6 +416,7 @@ func TestReplayAttemptIdentifiedParity(t *testing.T) {
 // boundary: the skip's actor, reason, and timestamp live on the event, so a
 // from-empty fold rebuilds the skipped activation exactly.
 func TestReplaySkippedParity(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf-replay-skipped")
 	snap := mustInstantiate(t, s, wf)
@@ -451,6 +456,7 @@ func TestReplaySkippedParity(t *testing.T) {
 // boundary: the fresh activation's ID, iteration, and selection ride on the
 // event, so a from-empty fold rebuilds the rerouted activation exactly.
 func TestReplayReroutedParity(t *testing.T) {
+	t.Parallel()
 	_, s, wf := newAutoDispatchFixture(t, "dispatch-reroute-replay", "ctl-a", -1)
 	snap, ok, err := s.loadCurrent(wf)
 	if err != nil || !ok {
@@ -482,6 +488,7 @@ func TestReplayReroutedParity(t *testing.T) {
 // live-leased activation and stamps the instance terminal, and a from-empty
 // fold reproduces the released lease and the terminal attribution exactly.
 func TestReplayCanceledParity(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	managerRunningActivation(t, m, s, wf, node)
 	payload, err := json.Marshal(map[string]string{"actor": "ops", "reason": "superseded by a newer run"})
@@ -498,6 +505,7 @@ func TestReplayCanceledParity(t *testing.T) {
 // LastHeartbeatAt and ExpiresAt ride on the event's lease metadata, so a
 // from-empty fold rebuilds the renewed liveness fields exactly.
 func TestReplayHeartbeatParity(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	actID, res, _ := managerRunningActivation(t, m, s, wf, node)
 	if err := m.Heartbeat(wf, NodeID(node), actID, LeaseID(res["lease_id"].(string)), res["owner_token"].(string)); err != nil {
@@ -511,6 +519,7 @@ func TestReplayHeartbeatParity(t *testing.T) {
 // out attempt's end), so a from-empty fold rebuilds the expired activation
 // exactly.
 func TestReplayLeaseExpiredParity(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, ok, err := s.loadCurrent(wf)
 	if err != nil || !ok {
@@ -539,6 +548,7 @@ func TestReplayLeaseExpiredParity(t *testing.T) {
 // from-empty fold rebuilds the decided gate and the branch activation
 // exactly.
 func TestReplayGateDecisionParity(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 	if _, err := m.WorkflowCommand(string(wf), gateCommandPayload(t, string(actID), "review", "satisfy", map[string]any{
@@ -611,6 +621,7 @@ func TestReplayExternalParkedParity(t *testing.T) {
 // command boundary mints, and folding the whole log from the legacy
 // snapshot must reproduce the live snapshot exactly.
 func TestLegacySnapshotMigrationAcceptsNewCommands(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)

@@ -17,6 +17,7 @@ import (
 // instantiate adds a candidate, claim removes it, and a failed attempt
 // termination re-arms it with an advanced revision.
 func TestCommitHookKeepsCandidateIndexFresh(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "hook-fresh", "ctl-a", 50)
 	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)
@@ -81,6 +82,7 @@ func TestCommitHookKeepsCandidateIndexFresh(t *testing.T) {
 // index recovered: before a rebuild (or empty-mark) the query still reports
 // ErrCandidatesNotRecovered even though commands have committed.
 func TestCommitHookNoopBeforeRecovery(t *testing.T) {
+	t.Parallel()
 	m, _, _ := newAutoDispatchFixture(t, "hook-noop", "ctl-a", 50)
 	if _, err := m.CandidatesForController("ctl-a", 10); !errors.Is(err, ErrCandidatesNotRecovered) {
 		t.Fatalf("candidates before recovery: err = %v, want ErrCandidatesNotRecovered", err)
@@ -92,6 +94,7 @@ func TestCommitHookNoopBeforeRecovery(t *testing.T) {
 // observe the committed snapshot: the wake fires only after the upsert,
 // so a woken runner never reads the pre-commit index.
 func TestObserveCommitWakesAfterIndexUpsert(t *testing.T) {
+	t.Parallel()
 	m, _, _ := newAutoDispatchFixture(t, "hook-wake", "ctl-a", 50)
 	m.MarkCandidateIndexEmpty("sup-1")
 	ch, cancel := m.SubscribeChanges()
@@ -122,6 +125,7 @@ func TestObserveCommitWakesAfterIndexUpsert(t *testing.T) {
 // regress the candidate index when an older revision is observed after a
 // newer one (out-of-order delivery from concurrent commits).
 func TestObserveCommitIgnoresStaleRevision(t *testing.T) {
+	t.Parallel()
 	s := New(filepath.Join(t.TempDir(), "wfroot"))
 	m := NewManager(s)
 	m.MarkCandidateIndexEmpty("sup-1")
@@ -141,6 +145,7 @@ func TestObserveCommitIgnoresStaleRevision(t *testing.T) {
 // empty catalog: the index is marked recovered-and-empty without creating the
 // root, and later instances enter the index through the commit hook.
 func TestMarkCandidateIndexEmptyAbsentRoot(t *testing.T) {
+	t.Parallel()
 	s := New(filepath.Join(t.TempDir(), "wfroot")) // no CreateRoot: the root does not exist
 	m := NewManager(s)
 

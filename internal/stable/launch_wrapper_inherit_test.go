@@ -12,6 +12,7 @@ import (
 // TestStableLoopAndTeamInheritLaunchWrapper proves phase starts inside a loop
 // and a team inherit the parent run's wrapper, mirroring how dir inherits.
 func TestStableLoopAndTeamInheritLaunchWrapper(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"loop", "team"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()

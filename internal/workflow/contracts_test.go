@@ -6,6 +6,7 @@ import (
 )
 
 func TestValidateDeclaredOutputs(t *testing.T) {
+	t.Parallel()
 	node := &NodeDefinition{
 		ID: "build",
 		Outputs: []OutputDefinition{
@@ -48,6 +49,7 @@ func TestValidateDeclaredOutputs(t *testing.T) {
 }
 
 func TestResolveOutcome(t *testing.T) {
+	t.Parallel()
 	tmpl := &Template{TemplateID: "tpl", TerminalOutcomes: []OutcomeName{"blocked"}}
 	node := &NodeDefinition{
 		ID:       "build",
@@ -83,6 +85,7 @@ func TestResolveOutcome(t *testing.T) {
 }
 
 func TestValidateDeclaredOutcome(t *testing.T) {
+	t.Parallel()
 	other := &NodeDefinition{
 		ID:       "test",
 		Outcomes: []OutcomeDefinition{{Name: "passed", TargetNodeID: "ship"}},
@@ -116,6 +119,7 @@ func TestValidateDeclaredOutcome(t *testing.T) {
 }
 
 func TestCompletionRequiresTerminal(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		contract *CompletionContract
@@ -136,6 +140,7 @@ func TestCompletionRequiresTerminal(t *testing.T) {
 }
 
 func TestAttemptHasTerminalFact(t *testing.T) {
+	t.Parallel()
 	var nilAttempt *Attempt
 	if attemptHasTerminalFact(nilAttempt) {
 		t.Fatal("nil attempt: expected false")
@@ -157,6 +162,7 @@ func TestAttemptHasTerminalFact(t *testing.T) {
 }
 
 func TestUnsatisfiedRequiredGates(t *testing.T) {
+	t.Parallel()
 	act := &Activation{ID: "act1", NodeID: "build"}
 	defs := []GateDefinition{
 		{ID: "g-pass", Required: true},

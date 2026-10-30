@@ -19,6 +19,7 @@ import (
 )
 
 func TestPiWarmResumePreservesUnreadInbox(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	b := broker.New("")
 	if _, err := b.CreateRun("rt", "worker"); err != nil {
@@ -52,6 +53,7 @@ func TestPiWarmResumePreservesUnreadInbox(t *testing.T) {
 }
 
 func TestWarmResumeRejectsDerivedPermissionArtifactCollisions(t *testing.T) {
+	t.Parallel()
 	for _, suffix := range []string{".req", ".req.response"} {
 		t.Run(suffix, func(t *testing.T) {
 			root := t.TempDir()
@@ -75,6 +77,7 @@ func TestWarmResumeRejectsDerivedPermissionArtifactCollisions(t *testing.T) {
 }
 
 func TestWarmResumeRejectsEmptyMessage(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	b := broker.New("")
 	if _, err := b.CreateRun("rt", "worker"); err != nil {
@@ -100,6 +103,7 @@ func TestWarmResumeRejectsEmptyMessage(t *testing.T) {
 }
 
 func TestWarmReservationAllowsControlAndRechecksAdmission(t *testing.T) {
+	t.Parallel()
 	for _, change := range []string{"label", "shutdown"} {
 		t.Run(change, func(t *testing.T) {
 			root := t.TempDir()
@@ -193,6 +197,7 @@ func (s *slowCloseSink) Close() error {
 }
 
 func TestWarmWriterCloseAllowsControl(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	sink := &slowCloseSink{entered: make(chan struct{}), release: make(chan struct{})}
 	child := &childRuntime{id: "rt", eventWriter: sink, promptCh: make(chan struct{}, 1)}

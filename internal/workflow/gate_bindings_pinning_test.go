@@ -251,6 +251,7 @@ func TestCorrectionLoopRepinsNewHead(t *testing.T) {
 }
 
 func TestFanInAmbiguousBindingFailsCommand(t *testing.T) {
+	t.Parallel()
 	// The joiner node is completed by a command whose causal chain fans in to
 	// two completed publication activations, so the review gate's references
 	// have no unique nearest source.
@@ -365,6 +366,7 @@ func TestReplayReproducesResolvedGates(t *testing.T) {
 }
 
 func TestChildOutputProvenancePinning(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -582,6 +584,7 @@ func TestChildOutputProvenancePinning(t *testing.T) {
 // output VALUES (repository, pull request number, revision) — not just the
 // pinned references.
 func TestChildOutputSubjectValuesPinnedThroughBindings(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)

@@ -75,6 +75,7 @@ const validPublicationOutputs = `{"definition_id":"repository","value":"org/repo
 // gate bindings integral within the safe integer range, and required outputs
 // never null. Every rejection leaves the store untouched.
 func TestCompleteRejectsMalformedBoundOutputs(t *testing.T) {
+	t.Parallel()
 	malformed := []struct {
 		name    string
 		outputs string
@@ -128,6 +129,7 @@ func TestCompleteRejectsMalformedBoundOutputs(t *testing.T) {
 // outputs once the values satisfy the hardened primitive contract. The
 // optional report output is omitted and therefore not recorded.
 func TestCompleteAcceptsWellFormedBoundOutputs(t *testing.T) {
+	t.Parallel()
 	m, s, wf, res, actID, attemptID := boundPublicationFixture(t)
 
 	out, err := m.commandComplete(wf, boundCompletePayload(t, string(actID), string(attemptID), res,
@@ -160,6 +162,7 @@ func TestCompleteAcceptsWellFormedBoundOutputs(t *testing.T) {
 // non-integral float delivered to a number output that no gate binding
 // consumes is accepted and its value is recorded.
 func TestCompleteAcceptsNonIntegralUnboundNumberOutput(t *testing.T) {
+	t.Parallel()
 	m, s, wf, res, actID, attemptID := boundPublicationFixtureTemplate(t, string(mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
 		publication := boundGateNode(template, "publication")
 		publication["outputs"] = append(publication["outputs"].([]any),

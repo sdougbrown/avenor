@@ -49,6 +49,7 @@ func startControlSocket(t *testing.T, stub control.StableHandler) string {
 // TestPonyExecutorAttachesAsOwner proves the local executor still reaches the
 // gated spawn and prompt verbs.
 func TestPonyExecutorAttachesAsOwner(t *testing.T) {
+	t.Parallel()
 	stub := &controlStub{}
 	socket := startControlSocket(t, stub)
 	exec, err := NewControlSocketExecutor(socket)
@@ -75,6 +76,7 @@ func TestPonyExecutorAttachesAsOwner(t *testing.T) {
 // cannot prove is the operator's owner: a missing record is an error, never a
 // credential-free fallback that would later fail on a gated verb.
 func TestPonyExecutorForeignTargetRejected(t *testing.T) {
+	t.Parallel()
 	socket := startControlSocket(t, &controlStub{})
 	if err := os.Remove(control.OwnerRecordPath(socket)); err != nil {
 		t.Fatal(err)

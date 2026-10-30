@@ -275,6 +275,7 @@ func (f *runnerFixture) exhaustTreeBudget() (release func()) {
 // handoff completes each node with its granted lease, and all instances reach
 // completed.
 func TestControllerRunnerAutoProgressesMultipleWorkflows(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "runner-auto", "", 4, 4, false)
 	var wfs []string
 	for _, name := range []string{"alpha", "beta", "gamma"} {
@@ -312,6 +313,7 @@ func TestControllerRunnerAutoProgressesMultipleWorkflows(t *testing.T) {
 // live at once, and the remaining two dispatch only as earlier attempts go
 // terminal.
 func TestControllerRunnerNeverExceedsMaxInflight(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "runner-bound", "", 4, 4, true)
 	for _, name := range []string{"w1", "w2", "w3", "w4"} {
 		f.addWorkflow(t, "bound-"+name, "c1", "")
@@ -375,6 +377,7 @@ func TestControllerRunnerNeverExceedsMaxInflight(t *testing.T) {
 // as the first attempt terminates, driven by the manager's change
 // notification on the terminal attempt — no external signal from the test.
 func TestControllerRunnerReplenishesAfterTerminalAttempt(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "runner-replenish", "", 4, 4, false)
 	wf1 := f.addWorkflow(t, "replenish-1", "c1", "")
 	wf2 := f.addWorkflow(t, "replenish-2", "c1", "")
@@ -436,6 +439,7 @@ func waitBlockedSource(t *testing.T, f *runnerFixture, id, source string) {
 // dispatch while a manual runtime holds the only local slot, then an
 // automatic dispatch after it is canceled.
 func TestControllerRunnerFullCapacityWaitThenProgress(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "runner-capacity", "", 1, 4, true)
 	wf := f.addWorkflow(t, "capacity-1", "c1", "")
 	// Exhaust the single local slot with an ordinary runtime before the
@@ -471,6 +475,7 @@ func TestControllerRunnerFullCapacityWaitThenProgress(t *testing.T) {
 // retry policy re-arms the activation, and the runner re-dispatches it
 // automatically.
 func TestControllerRunnerRetriesFailedAttempt(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "runner-retry", "", 4, 4, false)
 	f.exec.failFirst.Store(1)
 	wf := f.addWorkflow(t, "retry-1", "c1", "")
@@ -504,6 +509,7 @@ func TestControllerRunnerRetriesFailedAttempt(t *testing.T) {
 // parking rests on — see claimableActivationStatus), the runner never
 // dispatches it again.
 func TestControllerRunnerGateParkedActivationNeverDispatched(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "runner-parked", "", 4, 4, false)
 	tmplID := "tmpl-runner-parked"
 	gated := map[string]any{
@@ -590,6 +596,7 @@ func waitForDeadline(t *testing.T, d time.Duration, what string, cond func() boo
 }
 
 func TestControllerRunnerRestartResumesWithoutDuplicateDispatch(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
 
@@ -646,6 +653,7 @@ func TestControllerRunnerRestartResumesWithoutDuplicateDispatch(t *testing.T) {
 // cross-correlate in-flight views: each supervisor's runner dispatches and
 // tracks only its own controller's workflow, and both progress concurrently.
 func TestControllerRunnerCollidingRuntimeIDsIndependentProgress(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	f1 := newRunnerFixture(t, "runner-rt-a", root, 2, 4, true)
 	f2 := newRunnerFixture(t, "runner-rt-b", root, 2, 4, true)
@@ -753,6 +761,7 @@ func TestControllerRunnerCollidingRuntimeIDsIndependentProgress(t *testing.T) {
 // activation, and attempt, so the controller on supervisor A never counts or
 // selects supervisor B's rt_1 attempt.
 func TestControllerViewsIsolatedAcrossSupervisorRoots(t *testing.T) {
+	t.Parallel()
 	f1 := newRunnerFixture(t, "runner-iso-a", filepath.Join(t.TempDir(), "root-a"), 2, 4, true)
 	f1.controllerID = "c1"
 	wf1 := f1.addWorkflow(t, "iso-a", "c1", "")
@@ -869,6 +878,7 @@ func TestControllerViewsIsolatedAcrossSupervisorRoots(t *testing.T) {
 // attempt) rather than collapsing the two rt_1 attempts into one, and a
 // controller that owns only one of the attempts counts exactly one in flight.
 func TestControllerInflightViewDistinguishesSupervisorsOnSharedRoot(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	f1 := newRunnerFixture(t, "runner-shared-a", root, 2, 4, true)
 	f1.controllerID = "c1"
@@ -943,6 +953,7 @@ func TestControllerInflightViewDistinguishesSupervisorsOnSharedRoot(t *testing.T
 // the second, and a successful dispatch clears the block with one
 // capacity_cleared event.
 func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "runner-cap-event", "", 1, 2, true)
 	wf := f.addWorkflow(t, "cap-event-1", "c1", "")
 	// Occupy the only local slot; the tree budget keeps one free slot so the
@@ -1028,6 +1039,7 @@ func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 // advancing and ExpiresAt always sits beyond the wall clock, so the lease
 // never lapses even though the outstanding worker never reports back.
 func TestControllerRunnerRenewsLeaseWhileStartBlocked(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "runner-renew-blocked", "", 4, 4, false)
 	f.sup.controllerRenewInterval = 15 * time.Millisecond
 	wf := f.addWorkflow(t, "renew-1", "c1", "")
@@ -1083,6 +1095,7 @@ func TestControllerRunnerRenewsLeaseWhileStartBlocked(t *testing.T) {
 // the persisted record has no leader and desired state disabled, and newly
 // ready candidates are never dispatched.
 func TestControllerRunnerDisableReleasesLeaseAndStopsDispatch(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "runner-disable", "", 4, 4, false)
 	f.sup.controllerRenewInterval = 15 * time.Millisecond
 	wf := f.addWorkflow(t, "disable-1", "c1", "")

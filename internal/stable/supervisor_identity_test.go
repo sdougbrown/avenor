@@ -91,6 +91,7 @@ func okConstruction(n int) stableScriptedAttempt {
 // execution, never the supervisor run ID, and each path reports its own kind,
 // phase, iteration and attempt.
 func TestLaunchProvenancePerPath(t *testing.T) {
+	t.Parallel()
 	iteration := func(v int) *int { return &v }
 	perConstruction := func() func(runtime.StartOptions, string) (runtime.Provider, error) {
 		return perConstructionProvider(okConstruction)

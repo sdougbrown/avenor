@@ -336,6 +336,7 @@ func startRunner(t *testing.T, store *ControllerStore, deps RunnerDeps, renew, a
 // hand-off, observed via the strictly increasing RenewedAt each dispatch
 // reads from the store.
 func TestRunnerRenewsBeforeEveryDispatch(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 4)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
@@ -365,6 +366,7 @@ func TestRunnerRenewsBeforeEveryDispatch(t *testing.T) {
 // under the old lease epoch and subsequent dispatches carry the re-acquired
 // lease's epoch.
 func TestRunnerFailedRenewalStopsDispatchAndReacquires(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 2)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
@@ -422,6 +424,7 @@ func TestRunnerFailedRenewalStopsDispatchAndReacquires(t *testing.T) {
 // forever, whether the hole surfaces on the first acquisition or on a
 // renewal.
 func TestRunnerStopsOnLogHole(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name string
 		// holeBeforeStart holed the log before the runner starts, so its
@@ -471,6 +474,7 @@ func storeLeaderEpoch(t *testing.T, store *ControllerStore) int64 {
 // blocked Dispatch, at most max_inflight dispatches run concurrently and no
 // further dispatch starts across subsequent reconcile passes.
 func TestRunnerMaxInflightCountsUnreportedWorkers(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 2)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
@@ -516,6 +520,7 @@ func TestRunnerMaxInflightCountsUnreportedWorkers(t *testing.T) {
 // clears the block, and each clear produces exactly one new dispatch attempt.
 // Workflow change signals and worker results never clear the block.
 func TestRunnerCapacityBlockedSuppressionPersistsAcrossPasses(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 4)
 	deps := newFakeDeps(store, "c1")
 	// First dispatch holds the pass open until released, then reports stale;
@@ -621,6 +626,7 @@ func TestRunnerCapacityBlockedSuppressionPersistsAcrossPasses(t *testing.T) {
 // anti-entropy refresh rebuilds the host view and the next pass dispatches
 // the new candidate.
 func TestRunnerMissedNotificationRecoveredByAntiEntropy(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 4)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
@@ -658,6 +664,7 @@ func TestRunnerMissedNotificationRecoveredByAntiEntropy(t *testing.T) {
 // attempts re-acquisition; once the store-side lease is gone, leadership is
 // regained and dispatching resumes.
 func TestRunnerNotLeaderDropsLeadershipAndReacquires(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 4)
 	deps := newFakeDeps(store, "c1")
 	deps.setScript(DispatchResult{Kind: ResultNotLeader})
@@ -697,6 +704,7 @@ func TestRunnerNotLeaderDropsLeadershipAndReacquires(t *testing.T) {
 // completes and its result is consumed: Stop does not return until the
 // in-flight dispatch finishes, and no dispatch begins after cancellation.
 func TestRunnerDisableCancelsUnstartedWorkersOnly(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 2)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
@@ -758,6 +766,7 @@ func TestRunnerDisableCancelsUnstartedWorkersOnly(t *testing.T) {
 // exit on Stop: the goroutine count returns to its pre-stop level within a
 // loose, retry-sampled tolerance.
 func TestRunnerStopCleanNoGoroutineLeak(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 2)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
@@ -795,6 +804,7 @@ func TestRunnerStopCleanNoGoroutineLeak(t *testing.T) {
 // blocked until released, so the follow-up pass triggered by the failed
 // worker's result cannot overwrite the recorded outcome.
 func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 2)
 	deps := newFakeDeps(store, "c1")
 	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
@@ -845,6 +855,7 @@ func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
 // reporting or a live attempt terminating changes it) instead of holding the
 // value from the last unblocked pass.
 func TestRunnerInflightRefreshedDuringCapacityBlock(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 4)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultCapacityBlocked, Source: "local"})
@@ -902,6 +913,7 @@ func TestRunnerInflightRefreshedDuringCapacityBlock(t *testing.T) {
 // worker is unreported, instead of being picked and failing host-side as
 // key_held.
 func TestRunnerUnreportedWorkerHoldsConcurrencyKey(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 2)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
@@ -940,6 +952,7 @@ func TestRunnerUnreportedWorkerHoldsConcurrencyKey(t *testing.T) {
 // error is contained: the runner records a refresh_error outcome, keeps
 // leading, and dispatches on the following pass once the error is cleared.
 func TestRunnerRefreshErrorKeepsRunningAndRecovers(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 4)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
@@ -970,6 +983,7 @@ func TestRunnerRefreshErrorKeepsRunningAndRecovers(t *testing.T) {
 // leading without dispatching, and dispatches on the following pass once the
 // error is cleared.
 func TestRunnerCandidatesErrorKeepsRunningAndRecovers(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 4)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
@@ -1003,6 +1017,7 @@ func TestRunnerCandidatesErrorKeepsRunningAndRecovers(t *testing.T) {
 // leading without dispatching, and dispatches on the following pass once the
 // error is cleared.
 func TestRunnerInFlightErrorKeepsRunningAndRecovers(t *testing.T) {
+	t.Parallel()
 	store, _ := newRunnerStore(t, 4)
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})

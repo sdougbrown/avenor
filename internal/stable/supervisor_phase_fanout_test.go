@@ -77,6 +77,7 @@ func assertNoLifecycleErrorLine(t *testing.T, stderr string) {
 }
 
 func TestFanoutUnknownPhaseNormalizesLogsOnceAndCompletes(t *testing.T) {
+	t.Parallel()
 	var stderr bytes.Buffer
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "fanout-unknown-phase"),
@@ -125,6 +126,7 @@ func TestFanoutUnknownPhaseNormalizesLogsOnceAndCompletes(t *testing.T) {
 }
 
 func TestUnknownPhaseDiagnosticCacheSaturatesAtCap(t *testing.T) {
+	t.Parallel()
 	var stderr bytes.Buffer
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "unknown-phase-cap"),
@@ -179,6 +181,7 @@ func TestUnknownPhaseDiagnosticCacheSaturatesAtCap(t *testing.T) {
 // A recognized phase report reaches the stored phase verbatim: it never logs
 // and never normalizes to unknown.
 func TestReportPhaseReachesStoredPhase(t *testing.T) {
+	t.Parallel()
 	var stderr bytes.Buffer
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "report-phase"),
@@ -211,6 +214,7 @@ func TestReportPhaseReachesStoredPhase(t *testing.T) {
 }
 
 func TestUnknownPhaseDiagnosticCacheConcurrentWrites(t *testing.T) {
+	t.Parallel()
 	var stderr syncBuffer
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "unknown-phase-concurrent"),
@@ -266,6 +270,7 @@ func TestUnknownPhaseDiagnosticCacheConcurrentWrites(t *testing.T) {
 // backend-supplied number never wins), a session gets at most one run end, and
 // a child with no session publishes none.
 func TestRunEndPublishesOnceWithDerivedExitCode(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-run-end.sock"})
 	sink := &seqCaptureSink{}
 	child := &childRuntime{
@@ -313,6 +318,7 @@ func TestRunEndPublishesOnceWithDerivedExitCode(t *testing.T) {
 // end as the run's terminal record: the ordinary write path strips end_kind,
 // and the run-level writer stamps it.
 func TestEndKindIsStampedOnlyByTheRunEnd(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-end-kind.sock"})
 	sink := &seqCaptureSink{}
 	child := &childRuntime{
@@ -354,6 +360,7 @@ func TestEndKindIsStampedOnlyByTheRunEnd(t *testing.T) {
 // the workflow identity, so an end published early reaches the same places an
 // installed writer's does.
 func TestFallbackFanoutWriterCarriesRecorderAndWorkflowMetadata(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-fanout-fallback.sock"})
 	sink := &seqCaptureSink{}
 	child := &childRuntime{
@@ -408,6 +415,7 @@ func (failingWriteSink) Close() error { return nil }
 // TestRecorderFeedsOnlyAfterTheDurableWrite proves a failed durable write
 // leaves no terminal record in the broker for a run that did not end.
 func TestRecorderFeedsOnlyAfterTheDurableWrite(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-recorder-order.sock"})
 	child := &childRuntime{
 		id:          "rt_recorder_order",

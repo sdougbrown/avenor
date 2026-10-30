@@ -116,6 +116,7 @@ func appendLoop(t Template, loop BoundedLoopDefinition) Template {
 }
 
 func TestValidateGraph(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		template Template
@@ -338,6 +339,7 @@ func TestValidateGraph(t *testing.T) {
 }
 
 func TestDeclaredTerminalOutcomes(t *testing.T) {
+	t.Parallel()
 	got := declaredTerminalOutcomes(Template{TerminalOutcomes: []OutcomeName{"a", "a", "b", "c"}})
 	want := []OutcomeName{"a", "b", "c"}
 	if !slices.Equal(got, want) {
@@ -356,6 +358,7 @@ func TestDeclaredTerminalOutcomes(t *testing.T) {
 // ID that is not a safe path component must be rejected at template validation
 // so the projector cannot write outside the instance directory.
 func TestValidateGraphRejectsUnsafeNodeIDs(t *testing.T) {
+	t.Parallel()
 	for _, id := range []NodeID{"../../etc", "a/b", `..\..\x`, "a\x00b"} {
 		tmpl := validGraphTemplate()
 		tmpl.Nodes[0].ID = id

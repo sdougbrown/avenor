@@ -37,6 +37,7 @@ func TestWithLeaderRunsCallbackUnderLiveLease(t *testing.T) {
 }
 
 func TestWithLeaderRejectsWrongLeaseOrEpoch(t *testing.T) {
+	t.Parallel()
 	s, id, leaseID, epoch := newWithLeaderStore(t)
 	cases := map[string]struct {
 		leaseID string
@@ -62,6 +63,7 @@ func TestWithLeaderRejectsWrongLeaseOrEpoch(t *testing.T) {
 // controller's flock for the whole callback: a second store handle on the
 // same root cannot run a locked command until the callback returns.
 func TestWithLeaderHoldsControllerLock(t *testing.T) {
+	t.Parallel()
 	s, id, leaseID, epoch := newWithLeaderStore(t)
 	second := NewStore(s.Root())
 	ready := make(chan struct{})
@@ -99,6 +101,7 @@ func TestWithLeaderHoldsControllerLock(t *testing.T) {
 }
 
 func TestWithLeaderRejectsDisabledAndExpired(t *testing.T) {
+	t.Parallel()
 	s, id, leaseID, epoch := newWithLeaderStore(t)
 	if _, err := s.SetDesiredState(id, DesiredDisabled, "test"); err != nil {
 		t.Fatalf("disable: %v", err)

@@ -51,6 +51,7 @@ func loadHorseLoopTemplate(t *testing.T) Template {
 // TestHorseLoopTemplateIsValid asserts the shipped template passes the full
 // validation boundary (Profile structure, strict decode, graph rules).
 func TestHorseLoopTemplateIsValid(t *testing.T) {
+	t.Parallel()
 	tmpl := loadHorseLoopTemplate(t)
 	if tmpl.TemplateID != "horse-loop-work" {
 		t.Fatalf("template_id = %q, want horse-loop-work", tmpl.TemplateID)
@@ -65,6 +66,7 @@ func TestHorseLoopTemplateIsValid(t *testing.T) {
 // declared branch to correction, `abandoned` resolves as a declared terminal
 // outcome so the human decision is never a dead end.
 func TestHorseLoopAdvisorOutcomesResolve(t *testing.T) {
+	t.Parallel()
 	tmpl := loadHorseLoopTemplate(t)
 	node := nodeByID(tmpl, "advisor")
 	if node == nil {
@@ -86,6 +88,7 @@ func TestHorseLoopAdvisorOutcomesResolve(t *testing.T) {
 // select an outcome; run attempts carry no marker, so widening this node's
 // vocabulary (e.g. with replan) would leave every attempt contract-unmet.
 func TestHorseLoopCorrectionSingleOutcomeVocabulary(t *testing.T) {
+	t.Parallel()
 	tmpl := loadHorseLoopTemplate(t)
 	node := nodeByID(tmpl, "correction")
 	if node == nil {
@@ -103,6 +106,7 @@ func TestHorseLoopCorrectionSingleOutcomeVocabulary(t *testing.T) {
 // overrides it, and instantiation rejects non-absolute or unclean path
 // values while accepting a clean absolute path that does not exist yet.
 func TestHorseLoopTemplateWorkingDirectoryResolves(t *testing.T) {
+	t.Parallel()
 	tmpl := loadHorseLoopTemplate(t)
 	if tmpl.WorkingDirectory == nil || tmpl.WorkingDirectory.FromInstanceParam != "worktree_path" {
 		t.Fatalf("working_directory = %+v, want from_instance_param worktree_path", tmpl.WorkingDirectory)
@@ -126,6 +130,7 @@ func TestHorseLoopTemplateWorkingDirectoryResolves(t *testing.T) {
 // referenced by the template exists on disk. A dangling fixture would fail
 // at dispatch time, not validation time.
 func TestHorseLoopTemplateFixtureFilesExist(t *testing.T) {
+	t.Parallel()
 	tmpl := loadHorseLoopTemplate(t)
 	dir := filepath.Dir(horseLoopTemplatePath)
 	for _, node := range tmpl.Nodes {

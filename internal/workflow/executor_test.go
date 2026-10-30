@@ -36,6 +36,7 @@ func (f *fakeExecutor) last() ExecutorContext {
 }
 
 func TestStartDispatchesToRegisteredExecutorOnce(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newRunTemplateFixture(t)
 	fake := &fakeExecutor{}
 	m.RegisterExecutor(ActionRun, fake)
@@ -95,6 +96,7 @@ func TestStartDispatchesToRegisteredExecutorOnce(t *testing.T) {
 }
 
 func TestStartProviderWithoutExecutor(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newRunTemplateFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {

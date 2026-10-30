@@ -35,6 +35,7 @@ func dispatchNodeMutation(nodeID string, action map[string]any, dispatch map[str
 }
 
 func TestDispatchTemplateValidation(t *testing.T) {
+	t.Parallel()
 	runAction := map[string]any{"type": "run", "prompt": "go"}
 	loopAction := map[string]any{"type": "loop", "loop_file": "loop.json"}
 	teamAction := map[string]any{"type": "team", "team_file": "team.json"}
@@ -99,6 +100,7 @@ func TestDispatchTemplateValidation(t *testing.T) {
 // dispatch metadata and asserts legacy activations read as manual, are never
 // candidates, and the query guards on recovery.
 func TestDispatchLegacyReadsManual(t *testing.T) {
+	t.Parallel()
 	m, s, wf, _ := newManagerFixture(t)
 	if _, err := m.CandidatesForController("ctl-a", 10); !errors.Is(err, ErrCandidatesNotRecovered) {
 		t.Fatalf("CandidatesForController before rebuild error = %v, want ErrCandidatesNotRecovered", err)
@@ -248,6 +250,7 @@ func resetToPostInstantiate(snap Snapshot, nodeID NodeID) Snapshot {
 // explicit event timestamp on instantiation, updated on retry re-arm, and
 // reproduced identically by replay.
 func TestDispatchReadyAtOnCreateAndRearm(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "dispatch-rearm", "ctl-a", -1)
 	node := NodeID("start")
 
@@ -339,6 +342,7 @@ func TestDispatchReadyAtOnCreateAndRearm(t *testing.T) {
 // gets a stamped ReadyAt and an auto dispatch policy, and surfaces as a
 // candidate after a rebuild.
 func TestRerouteStampsReadyAtAndDispatch(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "dispatch-reroute", "ctl-a", -1)
 	node := NodeID("start")
 
@@ -413,6 +417,7 @@ func TestRerouteStampsReadyAtAndDispatch(t *testing.T) {
 // TestCandidatesForControllerQuery covers recovery gating, controller scoping,
 // lease exclusion, revision stability, and rebuild reproducibility.
 func TestCandidatesForControllerQuery(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "dispatch-query", "ctl-a", 70)
 
 	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
@@ -503,6 +508,7 @@ func TestCandidatesForControllerQuery(t *testing.T) {
 // candidates across three workflows must truncate to the limit in ascending
 // workflow-ID order.
 func TestCandidatesForControllerLimitAndOrdering(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -551,6 +557,7 @@ func TestCandidatesForControllerLimitAndOrdering(t *testing.T) {
 // TestClaimableActivationStatus pins the shared claim-eligibility predicate:
 // gate-parked, checkpoint-blocked, and terminal statuses are never claimable.
 func TestClaimableActivationStatus(t *testing.T) {
+	t.Parallel()
 	claimable := []ActivationStatus{
 		ActivationPending, ActivationReady, ActivationLeaseExpired,
 	}
@@ -581,6 +588,7 @@ func TestClaimableActivationStatus(t *testing.T) {
 // candidate after a rebuild. The template is two-node so the transition
 // actually crosses nodes: a manual entry node branches to an auto target.
 func TestTransitionCreatesAutoDispatchCandidate(t *testing.T) {
+	t.Parallel()
 	template := map[string]any{
 		"schema_version":   1,
 		"template_id":      "transition-auto",
@@ -720,6 +728,7 @@ func TestTransitionCreatesAutoDispatchCandidate(t *testing.T) {
 // permission_policy node re-dispatches instead of failing the
 // selection-conflict check.
 func TestSameSelectionComparesModelDeciderByContent(t *testing.T) {
+	t.Parallel()
 	pinned := &ExecutionSelection{
 		PermissionModelDecider: &PermissionModelDecider{Provider: "groq", Model: "m", BaseURL: "http://x/v1", APIKeyEnv: "K"},
 	}

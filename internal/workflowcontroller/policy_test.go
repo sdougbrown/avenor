@@ -88,6 +88,7 @@ func ids(decisions []Decision) string {
 }
 
 func TestSelectOrdering(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    SelectInput
@@ -215,6 +216,7 @@ func TestSelectOrdering(t *testing.T) {
 }
 
 func TestSelectPermutationInvariance(t *testing.T) {
+	t.Parallel()
 	candidates := []Candidate{
 		cand("wf2", "n1", "a1", withPriority(80), withKey("k1")),
 		cand("wf1", "n1", "a1", withPriority(90), withKey("k1")),
@@ -258,6 +260,7 @@ func TestSelectPermutationInvariance(t *testing.T) {
 }
 
 func TestSelectStaleCandidateExcluded(t *testing.T) {
+	t.Parallel()
 	input := SelectInput{
 		ControllerID: "ctrl",
 		Now:          now,
@@ -278,6 +281,7 @@ func TestSelectStaleCandidateExcluded(t *testing.T) {
 }
 
 func TestSelectControllerMismatchIgnored(t *testing.T) {
+	t.Parallel()
 	input := SelectInput{
 		ControllerID: "ctrl",
 		Now:          now,
@@ -297,6 +301,7 @@ func TestSelectControllerMismatchIgnored(t *testing.T) {
 }
 
 func TestSelectInflightCounting(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		inflight    []InFlightAttempt
@@ -359,6 +364,7 @@ func TestSelectInflightCounting(t *testing.T) {
 }
 
 func TestSelectConcurrencyKeys(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		inflight   []InFlightAttempt
@@ -426,6 +432,7 @@ func TestSelectConcurrencyKeys(t *testing.T) {
 }
 
 func TestSelectSameKeyOnlyFirstSelected(t *testing.T) {
+	t.Parallel()
 	input := SelectInput{
 		ControllerID: "ctrl",
 		Now:          now,
@@ -443,6 +450,7 @@ func TestSelectSameKeyOnlyFirstSelected(t *testing.T) {
 }
 
 func TestSelectExternalPark(t *testing.T) {
+	t.Parallel()
 	input := SelectInput{
 		ControllerID: "ctrl",
 		Now:          now,
@@ -475,6 +483,7 @@ func TestSelectExternalPark(t *testing.T) {
 }
 
 func TestSelectDuplicateCandidateSelectedOnce(t *testing.T) {
+	t.Parallel()
 	input := SelectInput{
 		ControllerID: "ctrl",
 		Now:          now,
@@ -498,6 +507,7 @@ func TestSelectDuplicateCandidateSelectedOnce(t *testing.T) {
 }
 
 func TestSelectRevisionPassedThrough(t *testing.T) {
+	t.Parallel()
 	revisions := []int64{0, 42, -1}
 	candidates := make([]Candidate, 0, len(revisions))
 	for i, rev := range revisions {

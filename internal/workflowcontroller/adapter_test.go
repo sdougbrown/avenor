@@ -57,6 +57,7 @@ func TestInvokeTypedInputReachesAdapter(t *testing.T) {
 }
 
 func TestInvokeRejectsInvalidInputBeforeExec(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		inputs  string // manifest inputs schema; "" uses the shared test schema
@@ -401,6 +402,7 @@ func TestInvokeEnvOnlyAllowlisted(t *testing.T) {
 }
 
 func TestInvokeParsesResultKinds(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		fixture string
 		want    string
@@ -505,6 +507,7 @@ func TestInvokeResponseHash(t *testing.T) {
 }
 
 func TestClampRetryDelay(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in, floor, want time.Duration
 	}{

@@ -350,6 +350,7 @@ func (f *pollFixture) gateInstances(t *testing.T) []workflow.GateInstance {
 // and cursor creation) gets its cursor re-seeded by a freshly started runner
 // and the gate is polled.
 func TestControllerRunnerReseedsParkedCursor(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-reseed", "poll-reseed-tmpl",
 		map[string]string{"gh-review": "passed.sh"},
 		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
@@ -411,6 +412,7 @@ func TestControllerRunnerReseedsParkedCursor(t *testing.T) {
 // behind its human gate — the adapter can never satisfy a human gate or
 // trigger a merge.
 func TestControllerPollAutoParkPassesWithEvidence(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-passed", "poll-passed-tmpl",
 		map[string]string{"gh-review": "passed.sh"},
 		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
@@ -472,6 +474,7 @@ func TestControllerPollAutoParkPassesWithEvidence(t *testing.T) {
 // changes_requested result routes through result_outcomes onto the declared
 // correction branch.
 func TestControllerPollChangesRequestedRoutesCorrection(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-changes", "poll-changes-tmpl",
 		map[string]string{"gh-review": "changes-requested.sh"},
 		[]map[string]any{{
@@ -507,6 +510,7 @@ func TestControllerPollChangesRequestedRoutesCorrection(t *testing.T) {
 // output and silence both leave the gate pending: the review stays parked
 // with scheduled cursors and no terminal result.
 func TestControllerPollPendingAndSilentStayParked(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-pending", "poll-pending-tmpl",
 		map[string]string{
 			"gh-review": "empty-commented.sh",
@@ -546,6 +550,7 @@ func TestControllerPollPendingAndSilentStayParked(t *testing.T) {
 // creates a new review activation that polls with the new subject while the
 // old activation can never land another result.
 func TestControllerPollNewHeadSupersedesOldReview(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-head", "poll-head-tmpl",
 		map[string]string{"gh-review": "echo-input.sh"},
 		[]map[string]any{{
@@ -619,6 +624,7 @@ func TestControllerPollNewHeadSupersedesOldReview(t *testing.T) {
 // TestControllerPollAdapterUnavailableDiagnostic proves an unknown adapter
 // leaves the gate pending and records a deduplicated diagnostic.
 func TestControllerPollAdapterUnavailableDiagnostic(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-missing", "poll-missing-tmpl",
 		map[string]string{},
 		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "not-registered"}})
@@ -644,6 +650,7 @@ func TestControllerPollAdapterUnavailableDiagnostic(t *testing.T) {
 // in-flight adapter invocation: the poll context's cancellation kills the
 // adapter's whole process group.
 func TestControllerDisableKillsInFlightAdapter(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-hang", "poll-hang-tmpl",
 		map[string]string{"gh-review": "hang.sh"},
 		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
@@ -695,6 +702,7 @@ func TestControllerDisableKillsInFlightAdapter(t *testing.T) {
 // with a nil error, so the runner records not_leader instead of a raw
 // dispatch_error and keeps leadership.
 func TestControllerParkLostLeaseReportsNotLeader(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-notleader", "poll-notleader-tmpl",
 		map[string]string{"gh-review": "passed.sh"},
 		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
@@ -795,6 +803,7 @@ func pollUnresolvedSubjectTemplate(t *testing.T, templateID string) []byte {
 // ErrStaleCandidate onto ResultStale with a nil error, so the runner records
 // stale instead of a raw dispatch error.
 func TestControllerParkStaleCandidateReportsStale(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-stale", "poll-stale-tmpl",
 		map[string]string{"gh-review": "passed.sh"},
 		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
@@ -840,6 +849,7 @@ func TestControllerParkStaleCandidateReportsStale(t *testing.T) {
 // ErrUnresolvedBinding onto ResultUnresolvedBinding with a nil error and a
 // diagnostic detail, leaving the activation claimable.
 func TestControllerParkUnresolvedBindingReportsUnresolved(t *testing.T) {
+	t.Parallel()
 	f := newPollFixtureWithTemplate(t, "poll-unresolved", map[string]string{"gh-review": "passed.sh"},
 		pollUnresolvedSubjectTemplate(t, "poll-unresolved-tmpl"))
 	f.sup.stopControllerLoop("c1")
@@ -888,6 +898,7 @@ func TestControllerParkUnresolvedBindingReportsUnresolved(t *testing.T) {
 // registered and its gate still polls to the success outcome, while the bad
 // file is reported as a per-file load error.
 func TestControllerLoadAdapterRegistrySkipsBadManifest(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-badmanifest", "poll-badmanifest-tmpl",
 		map[string]string{"gh-review": "passed.sh"},
 		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
@@ -919,6 +930,7 @@ func TestControllerLoadAdapterRegistrySkipsBadManifest(t *testing.T) {
 // subdirectory (the sweep only removes non-directory entries), and a real
 // evidence copy staged by a live workflow is immutable across the sweep.
 func TestStartupSweepRemovesOrphanedStagingFilesOnly(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	staging := filepath.Join(root, "adapter-poll")
 	if err := os.MkdirAll(staging, 0o755); err != nil {
@@ -971,6 +983,7 @@ func TestStartupSweepRemovesOrphanedStagingFilesOnly(t *testing.T) {
 // stays open for the next poll. The workflow's event log is made unwritable
 // after parking, so every store read succeeds but every command commit fails.
 func TestControllerPollFailedGateCommandDiscardsEvidence(t *testing.T) {
+	t.Parallel()
 	f := newPollFixture(t, "poll-discard", "poll-discard-tmpl",
 		map[string]string{"gh-review": "passed.sh"},
 		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
@@ -1028,6 +1041,7 @@ func TestControllerPollFailedGateCommandDiscardsEvidence(t *testing.T) {
 // uses before applying an adapter result: every compared field must match
 // the pinned subject, and a missing pinned subject never matches.
 func TestAdapterSubjectMatches(t *testing.T) {
+	t.Parallel()
 	pinned := &workflow.Subject{Type: "pull_request", Repository: "sdougbrown/avenor", PullRequest: 143, Revision: "cc793f7"}
 	exact := workflowcontroller.AdapterSubject{Type: "pull_request", Repository: "sdougbrown/avenor", PullRequest: 143, Revision: "cc793f7"}
 	tests := []struct {

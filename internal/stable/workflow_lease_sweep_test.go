@@ -372,6 +372,7 @@ func TestLeaseSweepStopsAfterShutdown(t *testing.T) {
 // already passed: once stopLeaseSweep has run, startLeaseSweepLoop is a no-op
 // — structurally, no loop-start is ever reported.
 func TestLeaseSweepNeverStartsAfterStop(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:              newStableSocketPath(t, "lease-sweep-late-start"),
 		MaxRuntimes:                2,
@@ -408,6 +409,7 @@ func TestLeaseSweepNeverStartsAfterStop(t *testing.T) {
 // through restart recovery. Both facts are checked structurally through the
 // loop-start seam, with no reliance on observing the absence of ticks.
 func TestLeaseSweepDoesNotStartWhenDisabledOrBarrierFails(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		interval time.Duration

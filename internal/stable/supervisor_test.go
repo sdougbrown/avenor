@@ -32,6 +32,7 @@ import (
 )
 
 func TestNewSupervisor(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   "/tmp/test-stable.sock",
 		MaxRuntimes:     4,
@@ -46,6 +47,7 @@ func TestNewSupervisor(t *testing.T) {
 }
 
 func TestStableHandlerNoRuntimes(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-stable-none.sock",
 		MaxRuntimes:   4,
@@ -87,6 +89,7 @@ func TestStableHandlerNoRuntimes(t *testing.T) {
 }
 
 func TestStableHandlerListIncludesStartedAt(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-stable-started-at.sock", MaxRuntimes: 4})
 	statusChild := &childRuntime{id: "rt_1", startedAt: 123456789, done: make(chan struct{})}
 	registerSyntheticChild(t, sup, statusChild, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
@@ -118,6 +121,7 @@ func TestStableHandlerListIncludesStartedAt(t *testing.T) {
 }
 
 func TestShutdownModeValidation(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-shutdown.sock",
 		MaxRuntimes:   4,
@@ -280,6 +284,7 @@ func TestSpawnParamsValidation(t *testing.T) {
 }
 
 func TestSpawnLoopFileFailureCleansReservedRuntime(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-loop-spawn-cleanup.sock",
 		MaxRuntimes:   1,
@@ -298,6 +303,7 @@ func TestSpawnLoopFileFailureCleansReservedRuntime(t *testing.T) {
 }
 
 func TestSpawnTeamFileFailureCleansReservedRuntime(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-team-spawn-cleanup.sock",
 		MaxRuntimes:   1,
@@ -319,6 +325,7 @@ func TestSpawnTeamFileFailureCleansReservedRuntime(t *testing.T) {
 // child but fails before it can launch the child goroutine. Shutdown must be
 // able to wait for that reservation to reach a terminal completion.
 func TestShutdownWaitsForFailedReservedRuntime(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "failed-reservation"),
 		MaxRuntimes:     1,
@@ -406,6 +413,7 @@ func TestShutdownWaitsForFailedReservedRuntime(t *testing.T) {
 }
 
 func TestActiveRuntimeCountIgnoresCompletedHistory(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-active-count.sock",
 		MaxRuntimes:   1,
@@ -424,6 +432,7 @@ func TestActiveRuntimeCountIgnoresCompletedHistory(t *testing.T) {
 }
 
 func TestRuntimeInterruptAndPromptCancelsTurnNotRuntime(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-interrupt-turn.sock",
 		MaxRuntimes:   1,
@@ -458,6 +467,7 @@ func TestRuntimeInterruptAndPromptCancelsTurnNotRuntime(t *testing.T) {
 }
 
 func TestRunChildAttemptUsesInitialSpawnSession(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-initial-session.sock",
 		MaxRuntimes:   1,
@@ -494,6 +504,7 @@ func TestRunChildAttemptUsesInitialSpawnSession(t *testing.T) {
 }
 
 func TestStableChildCancelsProviderOnNonCleanSessionWait(t *testing.T) {
+	t.Parallel()
 	baseProvider := &stableScriptedProvider{
 		attempt: 0,
 		scripts: []stableScriptedAttempt{{sessionID: "ses_stable_non_clean"}},
@@ -544,6 +555,7 @@ func TestStableChildCancelsProviderOnNonCleanSessionWait(t *testing.T) {
 }
 
 func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: 0,
 		scripts: []stableScriptedAttempt{{
@@ -589,6 +601,7 @@ func TestRunChildAttemptClearsPhaseAfterSessionEnd(t *testing.T) {
 }
 
 func TestRunChildAllowsNewPhaseAfterSameRuntimeFollowUp(t *testing.T) {
+	t.Parallel()
 	releaseSecondEnd := make(chan struct{})
 	provider := &stableScriptedProvider{
 		attempt: 0,
@@ -641,6 +654,7 @@ func TestRunChildAllowsNewPhaseAfterSameRuntimeFollowUp(t *testing.T) {
 }
 
 func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: 0,
 		scripts: []stableScriptedAttempt{{
@@ -692,6 +706,7 @@ func TestRunChildParksSuccessfulTurnWithDonePhase(t *testing.T) {
 // writers and the supervisors are built directly (not through the suite-wide
 // zero-error owner), with the expected counter values asserted here.
 func TestIdleEndFaultMapsContextEnds(t *testing.T) {
+	t.Parallel()
 	child := &childRuntime{}
 	cases := []struct {
 		name   string
@@ -717,6 +732,7 @@ func TestIdleEndFaultMapsContextEnds(t *testing.T) {
 }
 
 func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
+	t.Parallel()
 	newFaultSupervisor := func(t *testing.T, name string, buf *bytes.Buffer) *Supervisor {
 		sup := NewSupervisor(Config{ControlSocket: "/tmp/test-fault-" + name + ".sock", MaxRuntimes: 1, Stderr: buf})
 		t.Cleanup(func() { _ = sup.broker.Stop() })
@@ -1489,6 +1505,7 @@ func TestRunChildTransitionFailureRunsFailSafe(t *testing.T) {
 }
 
 func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: 0,
 		emitted: make(chan int, 4),
@@ -1527,6 +1544,7 @@ func TestRunChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 }
 
 func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		emitted: make(chan int, 4),
@@ -1567,6 +1585,7 @@ func TestRunLoopChildClearsPhaseDuringRetryBackoff(t *testing.T) {
 }
 
 func TestRunTeamChildClearsPhaseDuringRetryBackoff(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		emitted: make(chan int, 4),
@@ -1651,6 +1670,7 @@ func TestRunChildRetryWaitHonorsProviderHint(t *testing.T) {
 // The fail-safe writes the sentinel it owns with the provider's hint: it is the
 // last thing an illegal transition leaves a sentinel consumer.
 func TestFailSafeSentinelCarriesRetryAfter(t *testing.T) {
+	t.Parallel()
 	sup := newLifecycleTestOwner()
 	sup.errWriter = io.Discard
 	child := &childRuntime{id: "rt_failsafe_hint", done: make(chan struct{}), eventWriter: stableTestSink{},
@@ -1670,6 +1690,7 @@ func TestFailSafeSentinelCarriesRetryAfter(t *testing.T) {
 }
 
 func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		scripts: []stableScriptedAttempt{{sessionID: "ses_loop_failure", startErr: fmt.Errorf("start failed")}},
@@ -1688,6 +1709,7 @@ func TestRunLoopChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
 }
 
 func TestRunTeamChildClearsStalePhaseOnAttemptSetupFailure(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		scripts: []stableScriptedAttempt{{sessionID: "ses_team_failure", startErr: fmt.Errorf("start failed")}},
@@ -1736,6 +1758,7 @@ func waitForStableDone(t *testing.T, child *childRuntime) {
 }
 
 func TestShutdownRejectsSpawnAfterReservationBoundary(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "shutdown-spawn-boundary"),
 		MaxRuntimes:     2,
@@ -1801,6 +1824,7 @@ func TestShutdownRejectsSpawnAfterReservationBoundary(t *testing.T) {
 }
 
 func TestShutdownClosesPermissionAdmissionBeforeManagedHTTPTeardown(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "shutdown-permission-boundary"),
 		MaxRuntimes:     1,
@@ -1864,6 +1888,7 @@ func TestShutdownClosesPermissionAdmissionBeforeManagedHTTPTeardown(t *testing.T
 }
 
 func TestConcurrentShutdownDoesNotCloseChannelTwice(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "concurrent-shutdown"), MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
 	cancelled := make(chan struct{})
@@ -1899,6 +1924,7 @@ func TestConcurrentShutdownDoesNotCloseChannelTwice(t *testing.T) {
 }
 
 func TestShutdownTimeoutDoesNotHangWithMultipleStuckRuntimes(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   "/tmp/test-shutdown-timeout.sock",
 		MaxRuntimes:     2,
@@ -2070,6 +2096,7 @@ func assertShutdownWaitsForNestedChildCleanup(t *testing.T, kind string, run fun
 }
 
 func TestShutdownWaitsForLoopChildCleanup(t *testing.T) {
+	t.Parallel()
 	assertShutdownWaitsForNestedChildCleanup(t, "loop", func(sup *Supervisor, ctx context.Context, child *childRuntime, provider *stableScriptedProvider) {
 		sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 			return provider, nil
@@ -2082,6 +2109,7 @@ func TestShutdownWaitsForLoopChildCleanup(t *testing.T) {
 }
 
 func TestShutdownWaitsForTeamChildCleanup(t *testing.T) {
+	t.Parallel()
 	assertShutdownWaitsForNestedChildCleanup(t, "team", func(sup *Supervisor, ctx context.Context, child *childRuntime, provider *stableScriptedProvider) {
 		sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 			return provider, nil
@@ -2155,6 +2183,7 @@ func TestRunLoopChildCleansUpOnLooprunnerError(t *testing.T) {
 }
 
 func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
+	t.Parallel()
 	b := broker.New("team-test-token")
 	if err := b.Start(); err != nil {
 		t.Fatalf("broker.Start: %v", err)
@@ -2210,6 +2239,7 @@ func TestRunTeamChildCleansUpBrokerRuns(t *testing.T) {
 }
 
 func TestRuntimeFanoutWriterFeedsRecorder(t *testing.T) {
+	t.Parallel()
 	b := broker.New("writer-test-token")
 	if err := b.Start(); err != nil {
 		t.Fatalf("broker.Start: %v", err)
@@ -2255,6 +2285,7 @@ func TestRuntimeFanoutWriterFeedsRecorder(t *testing.T) {
 }
 
 func TestRuntimeAnswerPermissionRejectsRuntimeWithoutActiveSession(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-loop-answer-no-session.sock",
 		MaxRuntimes:   1,
@@ -2282,6 +2313,7 @@ func TestRuntimeAnswerPermissionRejectsRuntimeWithoutActiveSession(t *testing.T)
 // exactly its prior run/runtime/label identity and must NOT gain any workflow
 // fields.
 func TestNonWorkflowEventMetadataHasNoWorkflowFields(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-non-wf-meta.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
 	child := &childRuntime{id: "rt_meta", label: "lbl"}
@@ -2307,6 +2339,7 @@ func TestNonWorkflowEventMetadataHasNoWorkflowFields(t *testing.T) {
 // termination hook: a workflow child that ends its turn successfully records
 // AttemptSucceeded (and does not park awaiting a follow-up prompt).
 func TestWorkflowRunChildRecordsSucceededTermination(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: 0,
 		scripts: []stableScriptedAttempt{{
@@ -2358,6 +2391,7 @@ func TestWorkflowRunChildRecordsSucceededTermination(t *testing.T) {
 }
 
 func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-runtime-status-surface.sock",
 		MaxRuntimes:   2,
@@ -2511,6 +2545,7 @@ func TestRuntimeStatusSurfacesPhaseAndPermission(t *testing.T) {
 // TestListRuntimesSurfacesPhaseAndPermission verifies the list path also
 // surfaces phase and pending_permission for each runtime.
 func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-list-surface.sock",
 		MaxRuntimes:   2,
@@ -2560,6 +2595,7 @@ func TestListRuntimesSurfacesPhaseAndPermission(t *testing.T) {
 }
 
 func TestRuntimeStatusAndListRuntimesSurfaceAutoApproveFalse(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-auto-approve-false.sock",
 		MaxRuntimes:   1,
@@ -2591,6 +2627,7 @@ func TestRuntimeStatusAndListRuntimesSurfaceAutoApproveFalse(t *testing.T) {
 }
 
 func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-runtime-meta.sock", MaxRuntimes: 1})
 	child := &childRuntime{
 		id:           "rt_meta",
@@ -2662,6 +2699,7 @@ func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
 }
 
 func TestRuntimeFanoutWriterPreservesBackendFinalOutputAndBoundsStatus(t *testing.T) {
+	t.Parallel()
 	owner := newLifecycleTestOwner()
 	child := newTestChildLifecycle(t, owner, testLifecycleOptions{id: "rt_bound", exec: execStarting, class: directAttemptClass})
 	sink := &metadataCaptureSink{}
@@ -2709,6 +2747,7 @@ func TestRuntimeFanoutWriterPreservesBackendFinalOutputAndBoundsStatus(t *testin
 }
 
 func TestStableResultOverControlSocketUsesRuntimeIDAndPreservesLargeOutput(t *testing.T) {
+	t.Parallel()
 	socket := filepath.Join(newStableSocketTestDir(t, "stable-result"), "control.sock")
 	sup := newTestSupervisor(t, Config{ControlSocket: socket, MaxRuntimes: 1})
 	complete := strings.Repeat("é", 40_000) // 80 KiB UTF-8, beyond Scanner's 64 KiB default.
@@ -2748,6 +2787,7 @@ func attachOwnerForTest(t *testing.T, c *client.Client, socketPath string) {
 }
 
 func TestRuntimeFanoutWriterWritesSameStampedEventToFileAndControl(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-runtime-live.sock", MaxRuntimes: 1})
 	path := filepath.Join(t.TempDir(), "events.ndjson")
 	fileWriter, err := cli.NewEventWriter(path)
@@ -3596,6 +3636,7 @@ func (p *controlClaimProvider) Capabilities(context.Context) (runtime.Capabiliti
 // control permission claim is ever registered and avenor_answer_permission
 // fails with "no registered resolver state" for every stable run.
 func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          filepath.Join(newStableSocketTestDir(t, "stable-attempt-claim"), "control.sock"),
 		MaxRuntimes:            1,
@@ -3683,6 +3724,7 @@ func TestRunChildAttemptWiresControlServerForClaims(t *testing.T) {
 // permission.request, then answers via sup.answerPermission and verifies the
 // provider received the answer.
 func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
+	t.Parallel()
 	socketPath := filepath.Join(newStableSocketTestDir(t, "loop-claim"), "control.sock")
 
 	sup := newTestSupervisor(t, Config{
@@ -3790,6 +3832,7 @@ func TestRunLoopChildWiresControlServerForClaims(t *testing.T) {
 // permission.request, then answers via sup.answerPermission and verifies the
 // provider received the answer.
 func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
+	t.Parallel()
 	soc := filepath.Join(newStableSocketTestDir(t, "team-claim"), "control.sock")
 
 	sup := newTestSupervisor(t, Config{
@@ -3891,6 +3934,7 @@ func TestRunTeamChildWiresControlServerForClaims(t *testing.T) {
 }
 
 func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/test-answer-unknown.sock",
 		MaxRuntimes:            1,
@@ -3932,6 +3976,7 @@ func TestAnswerPermissionRejectsUnknownOptionIDWithoutConsumingCache(t *testing.
 }
 
 func TestAnswerPermissionRequiresWriteInBeforeConsumingClaim(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-write-in.sock", MaxRuntimes: 1, PermissionClaimTimeout: 5 * time.Second})
 	provider := &permRecordingProvider{}
 	lcFixtureChild := &childRuntime{id: "rt_write", provider: provider, session: runtime.Session{SessionID: "ses_write"}, done: make(chan struct{}), promptCh: make(chan struct{}, 1)}
@@ -3965,6 +4010,7 @@ func TestAnswerPermissionRequiresWriteInBeforeConsumingClaim(t *testing.T) {
 }
 
 func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/test-answer-claim.sock",
 		MaxRuntimes:            1,
@@ -4018,6 +4064,7 @@ func TestAnswerPermissionUsesActiveControlClaim(t *testing.T) {
 }
 
 func TestAnswerPermissionScopesSameRequestIDByRuntime(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/test-answer-scoped-claims.sock",
 		MaxRuntimes:            2,
@@ -4080,6 +4127,7 @@ func TestAnswerPermissionScopesSameRequestIDByRuntime(t *testing.T) {
 }
 
 func TestStableWaitersRouteSameRequestIDThroughScopedResolvers(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          filepath.Join(newStableSocketTestDir(t, "stable-claims"), "control.sock"),
 		MaxRuntimes:            2,
@@ -4212,6 +4260,7 @@ func TestStableWaitersRouteSameRequestIDThroughScopedResolvers(t *testing.T) {
 }
 
 func TestAnswerPermissionRejectsLateAnswerOwnedByFileResolver(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-file-owned.sock", MaxRuntimes: 1})
 	provider := &permRecordingProvider{}
 	lcFixtureChild := &childRuntime{
@@ -4249,6 +4298,7 @@ func TestAnswerPermissionRejectsLateAnswerOwnedByFileResolver(t *testing.T) {
 }
 
 func TestAnswerPermissionRejectsUnsupportedKindWithoutConsumingCache(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/test-answer-kind-bad.sock",
 		MaxRuntimes:            1,
@@ -4289,6 +4339,7 @@ func TestAnswerPermissionRejectsUnsupportedKindWithoutConsumingCache(t *testing.
 }
 
 func TestAnswerPermissionMapsAllowByKind(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/test-answer-kind.sock",
 		MaxRuntimes:            1,
@@ -4360,6 +4411,7 @@ func TestAnswerPermissionMapsAllowByKind(t *testing.T) {
 }
 
 func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/test-answer-clear.sock",
 		MaxRuntimes:            1,
@@ -4398,6 +4450,7 @@ func TestAnswerPermissionClearsCacheEntry(t *testing.T) {
 }
 
 func TestAnswerPermissionDirectPublishesThroughCanonicalFanout(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-direct-fanout.sock", MaxRuntimes: 1})
 	provider := &permRecordingProvider{}
 	sink := &metadataCaptureSink{}
@@ -4470,6 +4523,7 @@ func TestAnswerPermissionDirectPublishesThroughCanonicalFanout(t *testing.T) {
 }
 
 func TestFailedDirectResponseWriteKeepsReusedIDTombstone(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-direct-write-failure.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
 	provider := &permRecordingProvider{}
@@ -4514,6 +4568,7 @@ func TestFailedDirectResponseWriteKeepsReusedIDTombstone(t *testing.T) {
 }
 
 func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-direct-reuse-order.sock", MaxRuntimes: 1})
 	provider := &blockingPermissionProvider{
 		started: make(chan struct{}, 1),
@@ -4608,6 +4663,7 @@ func TestDirectPermissionResponseOrdersReusedRequestIDStatus(t *testing.T) {
 }
 
 func TestCloseChildEventWriterIsIdempotent(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-writer-close-idempotent.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
 	sink := &orderedCloseSink{}
@@ -4621,6 +4677,7 @@ func TestCloseChildEventWriterIsIdempotent(t *testing.T) {
 }
 
 func TestTerminationCancelsProviderBeforeJoiningContextIgnoringAnswer(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-cancel-before-join.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -4693,6 +4750,7 @@ func TestTerminationCancelsProviderBeforeJoiningContextIgnoringAnswer(t *testing
 }
 
 func TestNormalChildTeardownWaitsForAcceptedDirectResponse(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-direct-teardown.sock", MaxRuntimes: 1})
 	provider := &blockingPermissionProvider{
 		started: make(chan struct{}, 1),
@@ -4756,6 +4814,7 @@ func TestNormalChildTeardownWaitsForAcceptedDirectResponse(t *testing.T) {
 }
 
 func TestCancellingLifecycleReleasesDirectAnswerAndWriterClose(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-direct-cancel-teardown.sock", MaxRuntimes: 1})
 	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
 	defer cancelLifecycle()
@@ -4860,6 +4919,7 @@ func TestCancellingLifecycleReleasesDirectAnswerAndWriterClose(t *testing.T) {
 }
 
 func TestShutdownWaitsForDirectPermissionTeardown(t *testing.T) {
+	t.Parallel()
 	provider := &shutdownBlockedDirectPermissionProvider{
 		events:          make(chan events.Event, 1),
 		answerStarted:   make(chan struct{}),
@@ -4989,6 +5049,7 @@ func TestShutdownWaitsForDirectPermissionTeardown(t *testing.T) {
 }
 
 func TestChildModesDrainAcceptedDirectAnswerBeforeProviderClose(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"direct", "loop", "team"} {
 		t.Run(mode, func(t *testing.T) {
 			assertChildModeDrainsAcceptedDirectAnswer(t, mode)
@@ -5143,6 +5204,7 @@ func assertChildModeDrainsAcceptedDirectAnswer(t *testing.T, mode string) {
 }
 
 func TestProviderCloseWaitsForAdmittedPermissionReservation(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-provider-reservation-drain.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
 	provider := newDrainingPermissionProvider("ses_reservation_drain")
@@ -5219,6 +5281,7 @@ func TestProviderCloseWaitsForAdmittedPermissionReservation(t *testing.T) {
 }
 
 func TestConcurrentTeamStreamsUseProviderAndWriterGenerationThatReservedClaim(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-provider-generation.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -5269,6 +5332,7 @@ func TestConcurrentTeamStreamsUseProviderAndWriterGenerationThatReservedClaim(t 
 }
 
 func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/test-answer-direct-concurrent.sock",
 		MaxRuntimes:            1,
@@ -5362,6 +5426,7 @@ func TestAnswerPermissionNoResolverAllowsOnlyOneConcurrentProviderCall(t *testin
 }
 
 func TestAnswerPermissionAlreadyResolvedWithoutOptionsComparesRepeat(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-answer-resolved.sock", MaxRuntimes: 1})
 	provider := &permRecordingProvider{}
 	lcFixtureChild := &childRuntime{
@@ -5396,6 +5461,7 @@ func TestAnswerPermissionAlreadyResolvedWithoutOptionsComparesRepeat(t *testing.
 }
 
 func TestAnswerPermissionNoResolverRetriesAfterProviderError(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/test-answer-direct-retry.sock",
 		MaxRuntimes:            1,
@@ -5493,6 +5559,7 @@ func holdDirectCleanup(t *testing.T, sup *Supervisor, runtimeID, requestID, opti
 }
 
 func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-answer-cleanup-order.sock",
 		MaxRuntimes:   1,
@@ -5555,6 +5622,7 @@ func TestDirectPermissionCleanupBlocksReuseUntilOldOptionsAreDeleted(t *testing.
 }
 
 func TestAnswerPermissionOptionReadWaitsForDirectCleanupEnvelope(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:          "/tmp/test-answer-options-envelope.sock",
 		MaxRuntimes:            1,
@@ -5632,6 +5700,7 @@ func TestAnswerPermissionOptionReadWaitsForDirectCleanupEnvelope(t *testing.T) {
 }
 
 func TestReleasePermissionDeciderReleasesEachLabelOnce(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-decider-release-once.sock",
 		MaxRuntimes:   1,
@@ -5680,6 +5749,7 @@ func TestReleasePermissionDeciderReleasesEachLabelOnce(t *testing.T) {
 }
 
 func TestChildQuestionTimeoutStartupDiagnostic(t *testing.T) {
+	t.Parallel()
 	// The default (120s) is applied when the config leaves the field unset,
 	// and the passthrough keeps an explicit value intact.
 	defaulted := newTestSupervisor(t, Config{
@@ -5757,6 +5827,7 @@ func TestChildQuestionTimeoutStartupDiagnostic(t *testing.T) {
 }
 
 func TestTombstoneOnStartFailed(t *testing.T) {
+	t.Parallel()
 	tmpDir := newStableSocketTestDir(t, "startfail")
 	parentFile := filepath.Join(tmpDir, "not-a-dir")
 	if err := os.WriteFile(parentFile, []byte("not a directory"), 0o600); err != nil {
@@ -5790,6 +5861,7 @@ func TestTombstoneOnStartFailed(t *testing.T) {
 }
 
 func TestTombstoneOnGracefulShutdown(t *testing.T) {
+	t.Parallel()
 	socketPath := newStableSocketPath(t, "shutdown")
 	tombstonePath := socketPath + ".dead"
 
@@ -5831,6 +5903,7 @@ func TestTombstoneOnGracefulShutdown(t *testing.T) {
 // timeout, the end lands about 200ms out, neither immediately nor a further
 // 400ms away.
 func TestIdleCheckWindowStartsAtLastRuntimeActivity(t *testing.T) {
+	t.Parallel()
 	const idleTimeout = 400 * time.Millisecond
 	idleCh := idleCheck(idleTimeout, 0, time.Now().Add(-200*time.Millisecond))
 	if idleCh == nil {
@@ -5850,6 +5923,7 @@ func TestIdleCheckWindowStartsAtLastRuntimeActivity(t *testing.T) {
 }
 
 func TestTombstoneOnIdleTimeout(t *testing.T) {
+	t.Parallel()
 	socketPath := newStableSocketPath(t, "idle")
 	tombstonePath := socketPath + ".dead"
 
@@ -5910,6 +5984,7 @@ func awaitIdleRunExit(t *testing.T, done <-chan int, tombstonePath string, timeo
 // idle window expire while it is parked. The parked runtime's own reap starts a
 // fresh idle window.
 func TestIdleTimeoutWaitsForParkedRuntime(t *testing.T) {
+	t.Parallel()
 	socketPath := newStableSocketPath(t, "idle-parked")
 	tombstonePath := socketPath + ".dead"
 
@@ -5992,6 +6067,7 @@ func awaitRuntimeEnded(t *testing.T, sup *Supervisor, rtID string) time.Time {
 }
 
 func TestTombstoneOnSignal(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("AVENOR_TEST_SIGNAL_SUBPROCESS") == "1" {
 		testTombstoneOnSignalSubprocess(t)
 		return
@@ -6157,6 +6233,7 @@ func withFakeExec(t *testing.T, fake func(name string, arg ...string) *exec.Cmd)
 }
 
 func TestSpawnParentNoteIsBackendNeutral(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: newStableSocketPath(t, "spawn-parent-note"),
 		MaxRuntimes:   2,
@@ -6220,6 +6297,7 @@ func TestSpawnParentNoteIsBackendNeutral(t *testing.T) {
 }
 
 func TestSpawnParentRunIDMissingPrompt(t *testing.T) {
+	t.Parallel()
 	newSup := func(t *testing.T, name string) (*Supervisor, *promptRecordingProvider) {
 		sup := newTestSupervisor(t, Config{
 			ControlSocket: newStableSocketPath(t, name),
@@ -6272,6 +6350,7 @@ func TestSpawnParentRunIDMissingPrompt(t *testing.T) {
 // parent context, send a message from a child to the parent, and verify the
 // child.question event is emitted.
 func TestSpawnAndSendToParent(t *testing.T) {
+	t.Parallel()
 	socketPath := newStableSocketPath(t, "spawn-parent-child")
 
 	sup := newTestSupervisor(t, Config{
@@ -6442,6 +6521,7 @@ func TestSpawnAndSendToParent(t *testing.T) {
 }
 
 func TestSendToParentTimeoutInjectsSyntheticPrompt(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ChildQuestionTimeout: 25 * time.Millisecond})
 
 	parent := &childRuntime{id: "rt_parent", promptCh: make(chan struct{}, 1)}
@@ -6478,6 +6558,7 @@ func TestSendToParentTimeoutInjectsSyntheticPrompt(t *testing.T) {
 }
 
 func TestSendToParentTimeoutCancelledByPrompt(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ChildQuestionTimeout: 50 * time.Millisecond})
 
 	parent := &childRuntime{id: "rt_parent", promptCh: make(chan struct{}, 1)}
@@ -6517,6 +6598,7 @@ func TestSendToParentTimeoutCancelledByPrompt(t *testing.T) {
 }
 
 func TestSendToParentDuplicateRequestIDIgnored(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ChildQuestionTimeout: time.Second})
 
 	child := &childRuntime{id: "rt_child", promptCh: make(chan struct{}, 1)}
@@ -6573,6 +6655,7 @@ func childrenList(entry map[string]any) []string {
 }
 
 func TestAnalyzeCommandPathsNoEscape(t *testing.T) {
+	t.Parallel()
 	resolved, escapes := analyzeCommandPaths("ls -la /tmp/agy-stage15-terra/probe-workdir", "/tmp/agy-stage15-terra")
 	if escapes {
 		t.Error("expected no escape for path inside cwd")
@@ -6592,6 +6675,7 @@ func TestAnalyzeCommandPathsNoEscape(t *testing.T) {
 }
 
 func TestAnalyzeCommandPathsEscapeDetected(t *testing.T) {
+	t.Parallel()
 	resolved, escapes := analyzeCommandPaths("cat /etc/passwd", "/tmp/agy-stage15-terra")
 	if !escapes {
 		t.Error("expected escape for /etc/passwd outside cwd")
@@ -6602,6 +6686,7 @@ func TestAnalyzeCommandPathsEscapeDetected(t *testing.T) {
 }
 
 func TestAnalyzeCommandPathsRelativeEscape(t *testing.T) {
+	t.Parallel()
 	resolved, escapes := analyzeCommandPaths("cat ../../../etc/passwd", "/tmp/agy-stage15-terra/sub")
 	if !escapes {
 		t.Error("expected escape for ../../etc/passwd")
@@ -6618,6 +6703,7 @@ func TestAnalyzeCommandPathsRelativeEscape(t *testing.T) {
 }
 
 func TestAnalyzeCommandPathsRelativeInsideCwd(t *testing.T) {
+	t.Parallel()
 	_, escapes := analyzeCommandPaths("cat ./subdir/file", "/tmp/agy-stage15-terra")
 	if escapes {
 		t.Error("expected no escape for ./subdir inside cwd")
@@ -6625,6 +6711,7 @@ func TestAnalyzeCommandPathsRelativeInsideCwd(t *testing.T) {
 }
 
 func TestAnalyzeCommandPathsFlagsSkipped(t *testing.T) {
+	t.Parallel()
 	resolved, _ := analyzeCommandPaths("git -C /tmp/repo status", "/tmp/agy-stage15-terra")
 	for _, p := range resolved {
 		if p == "/tmp/agy-stage15-terra/-C" {
@@ -6648,6 +6735,7 @@ func TestAnalyzeCommandPathsFlagsSkipped(t *testing.T) {
 }
 
 func TestAnalyzeCommandPathsNoPaths(t *testing.T) {
+	t.Parallel()
 	resolved, escapes := analyzeCommandPaths("echo hello", "/tmp/agy-stage15-terra")
 	if escapes {
 		t.Error("expected no escape for echo hello")
@@ -6658,6 +6746,7 @@ func TestAnalyzeCommandPathsNoPaths(t *testing.T) {
 }
 
 func TestRuntimeFanoutWriterStampsPathAnalysisOnPermissionRequest(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-path-analysis.sock", MaxRuntimes: 1})
 	path := filepath.Join(t.TempDir(), "events.ndjson")
 	fileWriter, err := cli.NewEventWriter(path)
@@ -6731,6 +6820,7 @@ func TestRuntimeFanoutWriterStampsPathAnalysisOnPermissionRequest(t *testing.T) 
 }
 
 func TestRuntimeFanoutWriterDetectsPathEscape(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-path-escape.sock", MaxRuntimes: 1})
 	path := filepath.Join(t.TempDir(), "events.ndjson")
 	fileWriter, err := cli.NewEventWriter(path)
@@ -6792,6 +6882,7 @@ func TestRuntimeFanoutWriterDetectsPathEscape(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSpawnEmptyBackendResolvesToDefault(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-empty-backend.sock",
 		MaxRuntimes:   2,
@@ -6814,6 +6905,7 @@ func TestSpawnEmptyBackendResolvesToDefault(t *testing.T) {
 }
 
 func TestSpawnExplicitBackendPreserved(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-explicit-backend.sock",
 		MaxRuntimes:   2,
@@ -6839,6 +6931,7 @@ func TestSpawnExplicitBackendPreserved(t *testing.T) {
 // called with an empty Backend, the resolved cli.DefaultBackend propagates
 // through runLoopChild into every phase attempt's newProviderFunc call.
 func TestLoopChildReceivesResolvedDefaultBackend(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		scripts: []stableScriptedAttempt{{
@@ -6887,6 +6980,7 @@ func TestLoopChildReceivesResolvedDefaultBackend(t *testing.T) {
 // TestLoopChildReceivesExplicitBackend verifies that an explicitly supplied
 // backend is propagated unchanged through runLoopChild.
 func TestLoopChildReceivesExplicitBackend(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		scripts: []stableScriptedAttempt{{
@@ -6934,6 +7028,7 @@ func TestLoopChildReceivesExplicitBackend(t *testing.T) {
 // called with an empty Backend, the resolved cli.DefaultBackend propagates
 // through runTeamChild into every phase attempt's newProviderFunc call.
 func TestTeamChildReceivesResolvedDefaultBackend(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		scripts: []stableScriptedAttempt{{
@@ -6980,6 +7075,7 @@ func TestTeamChildReceivesResolvedDefaultBackend(t *testing.T) {
 // TestTeamChildReceivesExplicitBackend verifies that an explicitly supplied
 // backend is propagated unchanged through runTeamChild.
 func TestTeamChildReceivesExplicitBackend(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		scripts: []stableScriptedAttempt{{
@@ -7027,6 +7123,7 @@ func TestTeamChildReceivesExplicitBackend(t *testing.T) {
 // to confirm that an empty params.Backend resolves to cli.DefaultBackend and
 // that value is passed to newProviderFunc.
 func TestSpawnDirectPathUsesResolvedBackend(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-direct-resolved-backend.sock",
 		MaxRuntimes:   2,
@@ -7055,6 +7152,7 @@ func TestSpawnDirectPathUsesResolvedBackend(t *testing.T) {
 // TestSpawnDirectPathPreservesExplicitBackend confirms that a non-empty
 // params.Backend survives the spawn path unchanged.
 func TestSpawnDirectPathPreservesExplicitBackend(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-direct-explicit-backend.sock",
 		MaxRuntimes:   2,
@@ -7081,6 +7179,7 @@ func TestSpawnDirectPathPreservesExplicitBackend(t *testing.T) {
 }
 
 func TestWorkflowManagerLazyConstruction(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot") // path that does not exist yet
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/lazy-wf.sock", WorkflowRoot: root})
 	if sup.workflowMgr != nil {
@@ -7105,6 +7204,7 @@ func TestWorkflowManagerLazyConstruction(t *testing.T) {
 }
 
 func TestLazyWorkflowHandlerForwardsToManager(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/lazy-fwd.sock", WorkflowRoot: filepath.Join(t.TempDir(), "wfroot")})
 	_, err := (lazyWorkflowHandler{sup}).WorkflowStatus("wf-missing")
 	if err == nil || !strings.Contains(err.Error(), "workflow not found") {
@@ -7270,6 +7370,7 @@ func stageTerminalChildComposition(t *testing.T, root string) (parentID, childID
 // already terminal) is resolved by the best-effort resume hook on the first
 // workflowManager() call, before any normal workflow operation.
 func TestWorkflowManagerStartupResumesAwaitingChildren(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	parentID, childID := stageTerminalChildComposition(t, root)
 
@@ -7346,6 +7447,7 @@ func TestResolveWorkflowRoot(t *testing.T) {
 // TestWorkflowRunChildRecordsFailedTermination verifies the direct-run
 // termination hook records a plain failure as AttemptFailed.
 func TestWorkflowRunChildRecordsFailedTermination(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: 0,
 		scripts: []stableScriptedAttempt{{
@@ -7406,6 +7508,7 @@ func TestWorkflowRunChildRecordsFailedTermination(t *testing.T) {
 // terminal marker directive/label), direct runs have no marker, and the label
 // is dropped for all kinds.
 func TestWorkflowMarkerForKind(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		kind                workflow.ActionKind
 		wantKind, wantLabel string
@@ -7427,6 +7530,7 @@ func TestWorkflowMarkerForKind(t *testing.T) {
 // child carrying workflow identity fires the termination callback with
 // AttemptSucceeded when the loop completes cleanly.
 func TestWorkflowLoopChildRecordsTermination(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		scripts: []stableScriptedAttempt{{
@@ -7484,6 +7588,7 @@ func TestWorkflowLoopChildRecordsTermination(t *testing.T) {
 // loop executor (spawn fails loading the missing loop file) instead of being
 // rejected as an unsupported/unregistered executor.
 func TestWorkflowLoopExecutorRegistered(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-wf-loop-reg.sock", MaxRuntimes: 1, WorkflowRoot: filepath.Join(t.TempDir(), "wfroot")})
 	mgr := sup.workflowManager()
 	const loopTemplate = `{
@@ -7551,6 +7656,7 @@ func TestWorkflowLoopExecutorRegistered(t *testing.T) {
 // semantics are teamrunner-local (member exit/continue stay action-local);
 // only the aggregate terminal state reaches the kernel.
 func TestWorkflowTeamChildRecordsTermination(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: -1,
 		scripts: []stableScriptedAttempt{{
@@ -7608,6 +7714,7 @@ func TestWorkflowTeamChildRecordsTermination(t *testing.T) {
 // team executor (spawn fails loading the missing team file) instead of being
 // rejected as an unsupported/unregistered executor.
 func TestWorkflowTeamExecutorRegistered(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-wf-team-reg.sock", MaxRuntimes: 1, WorkflowRoot: filepath.Join(t.TempDir(), "wfroot")})
 	mgr := sup.workflowManager()
 	const teamTemplate = `{
@@ -7674,6 +7781,7 @@ func TestWorkflowTeamExecutorRegistered(t *testing.T) {
 // empty label (the parsed terminal directive stays action-local and never
 // becomes a kernel command).
 func TestWorkflowMarkerEvidenceParity(t *testing.T) {
+	t.Parallel()
 	cases := map[workflow.ActionKind]struct{ kind, label string }{
 		workflow.ActionRun:  {"", ""},
 		workflow.ActionLoop: {"loop", ""},
@@ -7812,6 +7920,7 @@ func (s *seqCaptureSink) Close() error { return nil }
 // dedup by (runtime_id, seq) — silently dropping every follow-up turn's
 // session.end.
 func TestRunChildEventSeqMonotonicAcrossTurns(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: 0,
 		scripts: []stableScriptedAttempt{
@@ -8057,6 +8166,7 @@ func runControlTurnsTest(t *testing.T, turns int, betweenTurn func(turn int, sup
 // cross-turn seq fix, turn N+1's events carried seqs at or below turn N's and
 // the subscriber dedup silently dropped the whole turn, including session.end.
 func TestControlSubscribeDeliversSessionEndAcrossTurns(t *testing.T) {
+	t.Parallel()
 	seqs := runControlTurnsTest(t, 3, nil)
 
 	if len(seqs) != 3 {
@@ -8077,6 +8187,7 @@ func TestControlSubscribeDeliversSessionEndAcrossTurns(t *testing.T) {
 // carry seqs at or below the subscriber's seen-max — silently dropping the
 // whole turn. With one shared counter, every turn delivers.
 func TestControlStampedEventsBetweenTurnsKeepSeqMonotonic(t *testing.T) {
+	t.Parallel()
 	seqs := runControlTurnsTest(t, 2, func(turn int, sup *Supervisor, c *client.Client, runtimeID string) {
 		// Simulate the supervisor's control-stamped emissions (error,
 		// child.question, synthetic session.end) landing between turns.
@@ -8106,6 +8217,7 @@ func TestControlStampedEventsBetweenTurnsKeepSeqMonotonic(t *testing.T) {
 // for the runtime it prompts. Before the client-side auto-subscribe, this
 // scenario hung waiting for events that were never delivered.
 func TestSubscribeRuntimeOnlyReceivesSessionEnd(t *testing.T) {
+	t.Parallel()
 	socketPath := newStableSocketPath(t, "subscribe-runtime")
 
 	provider := &turnEndProvider{}

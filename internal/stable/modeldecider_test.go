@@ -8,6 +8,7 @@ import (
 )
 
 func TestBuildModelDecisionPromptFramesUntrustedData(t *testing.T) {
+	t.Parallel()
 	system, user := buildModelDecisionPrompt("worker-1", "clean the build dir", map[string]any{
 		"tool":    "bash",
 		"command": "rm -rf /tmp/build",
@@ -31,6 +32,7 @@ func TestBuildModelDecisionPromptFramesUntrustedData(t *testing.T) {
 }
 
 func TestBuildModelDecisionPromptWithoutRequestMirror(t *testing.T) {
+	t.Parallel()
 	_, user := buildModelDecisionPrompt("w", "task", nil, []byte(`[]`))
 	if !strings.Contains(user, "unavailable") {
 		t.Fatalf("user prompt should note the missing request mirror:\n%s", user)
@@ -38,6 +40,7 @@ func TestBuildModelDecisionPromptWithoutRequestMirror(t *testing.T) {
 }
 
 func TestParseModelDecision(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		raw      string
@@ -77,6 +80,7 @@ func TestParseModelDecision(t *testing.T) {
 }
 
 func TestModelDecisionOption(t *testing.T) {
+	t.Parallel()
 	options := []any{
 		map[string]any{"optionId": "reject_once", "kind": "reject"},
 		map[string]any{"optionId": "allow_once", "kind": "allow"},
@@ -116,6 +120,7 @@ func TestModelDecisionOption(t *testing.T) {
 }
 
 func TestTruncateRunes(t *testing.T) {
+	t.Parallel()
 	if got := truncateRunes("short", 10); got != "short" {
 		t.Fatalf("truncateRunes = %q", got)
 	}
@@ -125,6 +130,7 @@ func TestTruncateRunes(t *testing.T) {
 }
 
 func TestReasonSuffix(t *testing.T) {
+	t.Parallel()
 	if got := reasonSuffix(""); got != "" {
 		t.Fatalf("reasonSuffix(empty) = %q", got)
 	}
@@ -175,6 +181,7 @@ func TestResolvePermissionModelDeciderKey(t *testing.T) {
 // vocabulary: a verbose completion carrying an unrelated object before the
 // real answer still yields the real answer instead of burning a retry.
 func TestParseModelDecisionSkipsUndecidableObjects(t *testing.T) {
+	t.Parallel()
 	raw := `Analysis: {"tool":"bash"} and then {"decision":"reject","reason":"destructive"}`
 	decision, reason, err := parseModelDecision(raw)
 	if err != nil || decision != "reject" || reason != "destructive" {
@@ -186,6 +193,7 @@ func TestParseModelDecisionSkipsUndecidableObjects(t *testing.T) {
 // cannot carry terminal escape sequences into stderr logs: C0/C1 control
 // bytes are stripped, length still bounded.
 func TestReasonSuffixStripsControlCharacters(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, in, want string }{
 		{"ansi escape", "a\x1b[31mb", " (a[31mb)"},
 		{"del", "a\x7fb", " (ab)"},

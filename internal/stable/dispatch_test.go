@@ -237,6 +237,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // consumes exactly one tree slot and one local slot: no second acquire inside
 // spawn.
 func TestDispatchConsumesExactlyOneReservation(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-one", 4, 4, "")
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
 	if err != nil {
@@ -267,6 +268,7 @@ func TestDispatchConsumesExactlyOneReservation(t *testing.T) {
 // failure releases the reservation, records the terminal attempt fact, and
 // leaves capacity reclaimable.
 func TestDispatchReservationReleasedOnPreStartFailure(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-fail", 1, 2, "")
 	f.failStart = make(chan struct{})
 	close(f.failStart)
@@ -299,6 +301,7 @@ func TestDispatchReservationReleasedOnPreStartFailure(t *testing.T) {
 // TestDispatchCapacityBlockedLocal proves a local capacity denial is a
 // no-event, no-revision-change result and the node stays a candidate.
 func TestDispatchCapacityBlockedLocal(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-local-full", 1, 4, "")
 	// Occupy the only local slot with an ordinary spawn.
 	if _, err := f.sup.spawn(SpawnParams{Prompt: "occupy", Dir: t.TempDir()}); err != nil {
@@ -341,6 +344,7 @@ func (f *dispatchFixture) workflowRevision(t *testing.T) int64 {
 // TestDispatchCapacityBlockedTree proves a tree-budget denial reports source
 // tree and leaves no workflow state behind.
 func TestDispatchCapacityBlockedTree(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-tree-full", 4, 1, "")
 	// Exhaust the one tree slot directly (simulating another process).
 	if _, err := f.sup.acquireTreeAdmission(); err != nil {
@@ -361,6 +365,7 @@ func TestDispatchCapacityBlockedTree(t *testing.T) {
 // TestDispatchStaleCandidateReleasesReservation proves a stale candidate
 // releases its reservation and appends no events.
 func TestDispatchStaleCandidateReleasesReservation(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-stale", 4, 4, "")
 	req := f.dispatchRequest(nil)
 	req.ExpectedRevision = f.revision + 100
@@ -385,6 +390,7 @@ func TestDispatchStaleCandidateReleasesReservation(t *testing.T) {
 // TestDispatchNotLeaderReleasesReservation proves a lost/expired leader lease
 // or disabled controller yields not_leader with no leaked slot.
 func TestDispatchNotLeaderReleasesReservation(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-not-leader", 4, 4, "")
 	req := f.dispatchRequest(nil)
 	req.OwnerEpoch = f.ownerEpoch + 1
@@ -419,6 +425,7 @@ func TestDispatchNotLeaderReleasesReservation(t *testing.T) {
 // TestDispatchPanicReleasesReservation proves a panicking executor start
 // still releases the reservation through the panic unwinding.
 func TestDispatchPanicReleasesReservation(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-panic", 4, 4, "")
 	f.sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		panic("provider start panic")
@@ -450,6 +457,7 @@ func TestDispatchPanicReleasesReservation(t *testing.T) {
 // admits exactly one live attempt across two controller IDs and a manual
 // actor on one shared root.
 func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-key", 4, 4, "deploys")
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
 	if err != nil {
@@ -586,6 +594,7 @@ func TestDispatchKeyHeldAcrossControllersAndManual(t *testing.T) {
 // TestDispatchPinnedSelectionInheritance proves a re-armed candidate keeps
 // its pinned selection and conflicting selections are rejected.
 func TestDispatchPinnedSelectionInheritance(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-pin", 4, 4, "")
 	sel := &workflow.ExecutionSelection{Backend: "codex", Agent: "agent-a", Model: "m1"}
 	// Fail the first start pre-provider so the activation re-arms with the
@@ -652,6 +661,7 @@ func TestDispatchPinnedSelectionInheritance(t *testing.T) {
 // auto_approve flag resolves into the pinned selection, including an
 // auto_approve-only assignment (which is not an empty assignment).
 func TestResolveAssignmentSelectionAutoApprove(t *testing.T) {
+	t.Parallel()
 	sel, err := resolveAssignmentSelection(&workflow.Assignment{Backend: "codex", AutoApprove: true})
 	if err != nil {
 		t.Fatalf("resolveAssignmentSelection: %v", err)
@@ -676,6 +686,7 @@ func TestResolveAssignmentSelectionAutoApprove(t *testing.T) {
 // never stays pending until the claim timeout and no decider run is spawned
 // (no permdec: label ever appears).
 func TestDispatchAssignmentAutoApproveRunsUnattended(t *testing.T) {
+	t.Parallel()
 	template := mustJSON(t, map[string]any{
 		"schema_version":   1,
 		"template_id":      "tmpl-dispatch-dispatch-auto-approve",
@@ -761,6 +772,7 @@ func TestDispatchAssignmentAutoApproveRunsUnattended(t *testing.T) {
 // identity's level), a decider without a roster file is rejected, and
 // auto_approve plus permission_policy are mutually exclusive.
 func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
+	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"},
@@ -825,6 +837,7 @@ func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
 // identity selector, so the spawn-selection rules fire and the assignment
 // cannot silently run on the default backend.
 func TestResolveAssignmentSelectionRosterFileOnlyRejected(t *testing.T) {
+	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker": {"backend": "pi", "agent": "worker", "model": "m"}
 	}`)
@@ -845,6 +858,7 @@ func TestResolveAssignmentSelectionRosterFileOnlyRejected(t *testing.T) {
 // resolves every request as allow, a permission decider routes requests to a
 // judging agent — and the guard must fire before any provider work happens.
 func TestSpawnRejectsAutoApproveWithPermissionDecider(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: "/tmp/test-permdec-exclusive.sock",
 		MaxRuntimes:   1,
@@ -888,6 +902,7 @@ func TestSpawnRejectsAutoApproveWithPermissionDecider(t *testing.T) {
 // declared decider run (auto-approved so the decider itself cannot stall)
 // while the request stays pending — never silently allowed.
 func TestDispatchAssignmentPermissionDeciderRoutesRequest(t *testing.T) {
+	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m", "thinking": "high"}
@@ -1060,6 +1075,7 @@ func dispatchPermdecTemplate(rosterPath, templateID string) map[string]any {
 // retry happens from the cached options without a further event instead of
 // stalling pending with only a stderr line.
 func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
+	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
@@ -1137,6 +1153,7 @@ func TestDispatchPermissionDeciderSpawnFailureReroutesRequest(t *testing.T) {
 // runtime status, and the request stays pending for a human gate — never
 // silently rejected.
 func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
+	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
@@ -1218,6 +1235,7 @@ func TestDispatchPermissionDeciderSpawnFailuresBounded(t *testing.T) {
 // request is re-routed internally from its cached options without a further
 // permission.request event.
 func TestDispatchPermissionDeciderConcurrencyCapHolds(t *testing.T) {
+	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
@@ -1296,6 +1314,7 @@ func TestDispatchPermissionDeciderConcurrencyCapHolds(t *testing.T) {
 // is a failed attempt against the retry bound, no decider run starts, and the
 // request stays pending for a human gate once the bound is exhausted.
 func TestPermissionDeciderMarshalFailureDoesNotSpawnBlind(t *testing.T) {
+	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
@@ -1351,6 +1370,7 @@ func TestPermissionDeciderMarshalFailureDoesNotSpawnBlind(t *testing.T) {
 // resolved (for example by a human answering through the control plane while
 // the spawn was being prepared) spawns no decider run.
 func TestPermissionDeciderSkipsAlreadyResolvedRequest(t *testing.T) {
+	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"}
@@ -1421,6 +1441,7 @@ func TestPermissionDeciderSkipsAlreadyResolvedRequest(t *testing.T) {
 // the attempt intent leaves an expiring lease that the lease-expiry sweep
 // recovers without creating a second live attempt.
 func TestDispatchCrashAfterBeginDispatchRecovers(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixtureTTL(t, "dispatch-crash", 4, 4, "", 1)
 	res, err := f.sup.reserveAdmission()
 	if err != nil {
@@ -1542,6 +1563,7 @@ func TestReservationDegradedLocalOnlyMode(t *testing.T) {
 // TestReservationHoldsLocalSlotAgainstSpawn proves outstanding reservations
 // count against the local limit.
 func TestReservationHoldsLocalSlotAgainstSpawn(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "dispatch-hold"),
 		MaxRuntimes:     1,
@@ -1567,6 +1589,7 @@ func TestReservationHoldsLocalSlotAgainstSpawn(t *testing.T) {
 // TestSpawnConsumesReservationOnSuccess proves the ordinary spawn path
 // converts its reservation into the registered runtime (tree token included).
 func TestSpawnConsumesReservationOnSuccess(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:   newStableSocketPath(t, "dispatch-spawn-convert"),
 		MaxRuntimes:     2,
@@ -1619,6 +1642,7 @@ func (c *cancelAfterContext) Err() error {
 // admission reservation reports canceled with nothing reserved and no
 // workflow state appended.
 func TestDispatchCanceledBeforeReservation(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-cancel-pre", 4, 4, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1646,6 +1670,7 @@ func TestDispatchCanceledBeforeReservation(t *testing.T) {
 // TestDispatchCanceledAfterReservation proves a cancel arriving after the
 // reservation but before leader validation releases the reservation unused.
 func TestDispatchCanceledAfterReservation(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-cancel-resv", 4, 4, "")
 	out, err := f.sup.dispatchWorkflowNode(&cancelAfterContext{Context: t.Context(), after: 1}, f.dispatchRequest(nil))
 	if err != nil {
@@ -1674,6 +1699,7 @@ func TestDispatchCanceledAfterReservation(t *testing.T) {
 // node's retry policy re-arms the activation, the reservation is released,
 // and the outcome reports canceled.
 func TestDispatchCanceledAfterBeginDispatch(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-cancel-post", 4, 4, "")
 	out, err := f.sup.dispatchWorkflowNode(&cancelAfterContext{Context: t.Context(), after: 2}, f.dispatchRequest(nil))
 	if err != nil {
@@ -1728,6 +1754,7 @@ func activationByNodeStable(acts []workflow.Activation, nodeID string) *workflow
 // through dispatchWorkflowNode reports key_held and leaves no reservation or
 // extra tree token behind.
 func TestDispatchKeyHeldOutcomeReleasesReservation(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-key-outcome", 4, 4, "deploys")
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
 	if err != nil {
@@ -1794,6 +1821,7 @@ func TestDispatchKeyHeldOutcomeReleasesReservation(t *testing.T) {
 // and one local slot, the run, loop, and team executors all start without a
 // release-and-reacquire, which would fail the local limit.
 func TestDispatchSingleAcquirePerAction(t *testing.T) {
+	t.Parallel()
 	actions := []struct {
 		name     string
 		writeCfg func(t *testing.T, dir string) string
@@ -1853,6 +1881,7 @@ func TestDispatchSingleAcquirePerAction(t *testing.T) {
 // records the attempt_identified runtime identity in the persisted snapshot,
 // not only in the in-memory outcome.
 func TestDispatchPersistsRuntimeIdentityOnSnapshot(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-identity", 4, 4, "")
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
 	if err != nil {
@@ -1881,6 +1910,7 @@ func TestDispatchPersistsRuntimeIdentityOnSnapshot(t *testing.T) {
 // translated to ResultStale through the runner deps and leaves no
 // admission reservation held.
 func TestDispatchStaleThroughRunnerDeps(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "stale-deps", 4, 4, "")
 	deps := &stableRunnerDeps{s: f.sup, controllerID: "c1"}
 	dec := workflowcontroller.Decision{Candidate: workflowcontroller.Candidate{
@@ -1915,6 +1945,7 @@ func TestDispatchStaleThroughRunnerDeps(t *testing.T) {
 // ResultKeyHeld through the runner deps and leaves no admission
 // reservation held.
 func TestDispatchKeyHeldThroughRunnerDeps(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixture(t, "keyheld-deps", 4, 4, "ck")
 	// A second workflow on the same template (and the same concurrency key).
 	out, err := f.mgr.WorkflowInstantiate(mustJSON(t, map[string]string{"template_id": "tmpl-dispatch-keyheld-deps", "template_version": "1"}))
@@ -1975,6 +2006,7 @@ func TestDispatchKeyHeldThroughRunnerDeps(t *testing.T) {
 // TestTranslateDispatchOutcome covers every DispatchOutcomeKind to
 // DispatchResultKind mapping, including the default case.
 func TestTranslateDispatchOutcome(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		in   DispatchOutcomeKind
 		want workflowcontroller.DispatchResultKind

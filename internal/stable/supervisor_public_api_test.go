@@ -1059,6 +1059,7 @@ func TestSupervisorPublicAPIParkAndResume(t *testing.T) {
 // runs the queued prompt as its next turn with no further RuntimePrompt to
 // wake it.
 func TestResumeExpiredPiSessionIsNotResumable(t *testing.T) {
+	t.Parallel()
 	provider := newItestProvider(itestAttempt("ses_ephemeral", itestSessionEnd("ses_ephemeral", "end_turn", "first")))
 	h := newItestHarness(t, Config{ParkedRuntimeTimeout: 20 * time.Millisecond}, itestSingleProvider(provider))
 	rt := h.spawn(map[string]any{"backend": "pi"})
@@ -1075,6 +1076,7 @@ func TestResumeExpiredPiSessionIsNotResumable(t *testing.T) {
 }
 
 func TestResumeContinuesParkedRuntime(t *testing.T) {
+	t.Parallel()
 	provider := newItestProvider(
 		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "first")),
 		itestAttempt("ses_warm", itestSessionEnd("ses_warm", "end_turn", "second")),
@@ -1116,6 +1118,7 @@ func TestResumeContinuesParkedRuntime(t *testing.T) {
 // after a warm resume rotates the child onto the next turn's sentinel the
 // reported path follows the rotation.
 func TestRuntimeResultReportsSentinelPath(t *testing.T) {
+	t.Parallel()
 	provider := newItestProvider(
 		itestAttempt("ses_result_sentinel", itestSessionEnd("ses_result_sentinel", "end_turn", "first")),
 		itestAttempt("ses_result_sentinel", itestSessionEnd("ses_result_sentinel", "end_turn", "second")),
@@ -1182,6 +1185,7 @@ func TestRuntimeResultReportsSentinelPath(t *testing.T) {
 }
 
 func TestWarmResumeKeyedReplayQueuesOnce(t *testing.T) {
+	t.Parallel()
 	gate := newItestGate()
 	defer gate.open()
 	provider := newItestProvider(

@@ -214,17 +214,20 @@ func checkGolden(t *testing.T, rel, got string) {
 }
 
 func TestProjectionWorkflowMD(t *testing.T) {
+	t.Parallel()
 	snap := goldenSnapshot()
 	checkGolden(t, "workflow.md.golden", ProjectWorkflowMD(snap))
 }
 
 func TestProjectionExecutionMD(t *testing.T) {
+	t.Parallel()
 	snap := goldenSnapshot()
 	checkGolden(t, "nodes/build/execution.md.golden", ProjectExecutionMD(snap, "build"))
 	checkGolden(t, "nodes/review/execution.md.golden", ProjectExecutionMD(snap, "review"))
 }
 
 func TestProjectionReviewMD(t *testing.T) {
+	t.Parallel()
 	snap := goldenSnapshot()
 	// build's single gate -> review-1.md under build; review's gate -> review-1.md under review.
 	checkGolden(t, "nodes/build/review-1.md.golden", ProjectReviewMD(snap, snap.Instance.Gates[0]))
@@ -232,6 +235,7 @@ func TestProjectionReviewMD(t *testing.T) {
 }
 
 func TestProjectionWriteProjections(t *testing.T) {
+	t.Parallel()
 	snap := goldenSnapshot()
 	dir := t.TempDir()
 	if err := WriteProjections(dir, snap); err != nil {
@@ -282,6 +286,7 @@ func stripGolden(rel string) string {
 }
 
 func TestProjectionDeterministic(t *testing.T) {
+	t.Parallel()
 	snap := goldenSnapshot()
 	if a, b := ProjectWorkflowMD(snap), ProjectWorkflowMD(snap); a != b {
 		t.Error("ProjectWorkflowMD not byte-stable across calls")
@@ -305,6 +310,7 @@ func TestProjectionDeterministic(t *testing.T) {
 // committed transition: it does not panic and returns nothing (void) even when
 // writing fails.
 func TestProjectionErrorIsNonFatal(t *testing.T) {
+	t.Parallel()
 	snap := goldenSnapshot()
 	// A store rooted at a path whose instance dir cannot be created/written:
 	// point the instance dir at an existing regular file so MkdirAll fails.
@@ -333,6 +339,7 @@ func TestProjectionErrorIsNonFatal(t *testing.T) {
 // are neutralized so rendered projections cannot inject table rows or arbitrary
 // Markdown lines.
 func TestMdEsc(t *testing.T) {
+	t.Parallel()
 	got := mdEsc("a|b\nc\rd\te\x00f")
 	if strings.ContainsAny(got, "\n\r\t\x00") {
 		t.Fatalf("mdEsc leaked a control character: %q", got)

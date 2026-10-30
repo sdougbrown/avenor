@@ -23,6 +23,7 @@ import (
 // available. The test is skipped when the file is absent so it does
 // not break for developers without the original artifact.
 func TestReplayFailedRun18_TerminatesOnControlToken(t *testing.T) {
+	t.Parallel()
 	const logPath = "/tmp/pony/failed-run-18.ndjson"
 	f, err := os.Open(logPath)
 	if err != nil {

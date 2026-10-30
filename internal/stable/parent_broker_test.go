@@ -120,6 +120,7 @@ func awaitRegistryOwner(t *testing.T, what string, registry *parentlink.Registry
 // middle's claim to its own parent never carries the grandchild's run, so the
 // grandparent's registry records no route for it at all.
 func TestThreeTierBranchAttribution(t *testing.T) {
+	t.Parallel()
 	grandparentBroker, grandparentLink := startTestParentBroker(t)
 	middleBroker, middleLink, _ := startTestBranch(t, grandparentBroker, "mid-run")
 	childBroker, _, _ := startTestBranch(t, middleBroker, "child-run")
@@ -155,6 +156,7 @@ func TestThreeTierBranchAttribution(t *testing.T) {
 // branch that owns the target, and the reply correlates back through the
 // supervisor's own transport.
 func TestSupervisorParentBrokerLink(t *testing.T) {
+	t.Parallel()
 	parentBroker, parentLink := startTestParentBroker(t)
 	peerBroker, _, peerTokens := startTestBranch(t, parentBroker, "rt_remote")
 	if !parentLink.Registry().Owns(branchKey(peerBroker, "rt_remote")) {
@@ -264,6 +266,7 @@ func TestSupervisorParentBrokerLink(t *testing.T) {
 // child's supervisor is addressed under its branch identity, and an ask to one
 // of them still relays into that branch and correlates its reply.
 func TestSupervisorParentAcceptsSupervisorChildren(t *testing.T) {
+	t.Parallel()
 	parentSup := newTestSupervisor(t, Config{
 		ControlSocket:     newStableSocketPath(t, "root"),
 		MaxRuntimes:       2,
@@ -359,6 +362,7 @@ func TestSupervisorParentAcceptsSupervisorChildren(t *testing.T) {
 // TestSupervisorWithoutParentBrokerKeepsLocalMessaging pins that an unconfigured
 // supervisor installs nothing: no parent link and no parent routes.
 func TestSupervisorWithoutParentBrokerKeepsLocalMessaging(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "noparent"), MaxRuntimes: 2})
 	t.Cleanup(func() { _ = sup.Shutdown("kill") })
 	if sup.parentLink != nil {
@@ -431,6 +435,7 @@ func parentLinkedPost(t *testing.T, addr, path, runID, token string, body map[st
 // bound address, so a regression back to the bound address leaves the proxy
 // unused.
 func TestAdvertisedBrokerURLIsTheParentRelayEndpoint(t *testing.T) {
+	t.Parallel()
 	parentBroker, parentLink := startTestParentBroker(t)
 	bindAddr := reserveStableLoopbackAddr(t)
 

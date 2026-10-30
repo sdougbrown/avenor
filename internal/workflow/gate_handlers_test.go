@@ -154,6 +154,7 @@ func snapshotUnchanged(t *testing.T, s *Store, wf WorkflowID, rev int64, status 
 }
 
 func TestCommandGateSatisfyResolvesBranch(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 	revBefore := revision(t, s, wf)
@@ -194,6 +195,7 @@ func TestCommandGateSatisfyResolvesBranch(t *testing.T) {
 }
 
 func TestCommandGateSatisfyTerminalWorkflow(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, gateTerminalTemplateJSON, "gate-terminal", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 
@@ -235,6 +237,7 @@ func externalResultExtras(result string) map[string]any {
 }
 
 func TestCommandGateExternalResultPassedResolves(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 
@@ -259,6 +262,7 @@ func TestCommandGateExternalResultPassedResolves(t *testing.T) {
 }
 
 func TestCommandGateExternalResultFailedRejects(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 
@@ -285,6 +289,7 @@ func TestCommandGateExternalResultFailedRejects(t *testing.T) {
 // idempotent no-op of the first report. Without the result in the key, the
 // gate could never progress past its first report.
 func TestCommandGateExternalResultPollProgression(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 
@@ -338,6 +343,7 @@ func TestCommandGateExternalResultPollProgression(t *testing.T) {
 // a reject: an explicit outcome that resolves to a declared branch target
 // creates the branch activation while the parked one is rejected.
 func TestCommandGateRejectResolvesBranch(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, gateRejectBranchTemplateJSON, "gate-reject-branch", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 
@@ -367,6 +373,7 @@ func TestCommandGateRejectResolvesBranch(t *testing.T) {
 // case: an action_required report leaves the activation awaiting_gate with no
 // branch and no workflow completion.
 func TestCommandGateExternalResultActionRequired(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 
@@ -394,6 +401,7 @@ func TestCommandGateExternalResultActionRequired(t *testing.T) {
 }
 
 func TestCommandGateUnknownExternalResultUnchanged(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 	revBefore := revision(t, s, wf)
@@ -409,6 +417,7 @@ func TestCommandGateUnknownExternalResultUnchanged(t *testing.T) {
 }
 
 func TestCommandGateUnknownOperation(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 	revBefore := revision(t, s, wf)
@@ -426,6 +435,7 @@ func TestCommandGateUnknownOperation(t *testing.T) {
 }
 
 func TestCommandGateMissingActorUnchanged(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 	revBefore := revision(t, s, wf)
@@ -440,6 +450,7 @@ func TestCommandGateMissingActorUnchanged(t *testing.T) {
 }
 
 func TestCommandGateUndeclaredGate(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 	revBefore := revision(t, s, wf)
@@ -457,6 +468,7 @@ func TestCommandGateUndeclaredGate(t *testing.T) {
 }
 
 func TestCommandGateActivationNotAwaitingGate(t *testing.T) {
+	t.Parallel()
 	// A fresh instance's start activation is still pending, not parked.
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	snap, _, err := s.loadCurrent(wf)
@@ -479,6 +491,7 @@ func TestCommandGateActivationNotAwaitingGate(t *testing.T) {
 }
 
 func TestCommandGateIdempotentReissue(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 	extra := map[string]any{"actor": "alice", "reason": "approved", "evidence_ids": []string{"ev_1"}}
@@ -528,6 +541,7 @@ func TestCommandGateIdempotentReissue(t *testing.T) {
 }
 
 func TestCommandSkipWaivesRequiredGates(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, gateDoubleTemplateJSON, "gate-double", "1")
 	parkGatedActivation(t, m, s, wf)
 
@@ -568,6 +582,7 @@ func TestCommandSkipWaivesRequiredGates(t *testing.T) {
 }
 
 func TestCommandSkipAlreadyResolvedRejected(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	actID := parkGatedActivation(t, m, s, wf)
 
@@ -596,6 +611,7 @@ func TestCommandSkipAlreadyResolvedRejected(t *testing.T) {
 // is only reachable through a state the reducer itself cannot produce, so the
 // helper is tested directly).
 func TestRemainingRequiredGatesEmptyWhenAllPassed(t *testing.T) {
+	t.Parallel()
 	node := &NodeDefinition{Gates: []GateDefinition{
 		{ID: "review", Required: true},
 		{ID: "signoff", Required: true},
@@ -647,6 +663,7 @@ func blockActivation(t *testing.T, m *Manager, s *Store, wf WorkflowID) {
 }
 
 func TestCommandUnblockBlockedActivation(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, unblockTemplateJSON, "unblock-test", "1")
 	blockActivation(t, m, s, wf)
 
@@ -675,6 +692,7 @@ func TestCommandUnblockBlockedActivation(t *testing.T) {
 // to ready, and the second unblock must succeed (not be swallowed as a false
 // idempotent no-op against a permanent key).
 func TestCommandUnblockAfterReblock(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, unblockTemplateJSON, "unblock-test", "1")
 
 	// First block episode: fail to exhaustion, then unblock back to ready.
@@ -714,6 +732,7 @@ func TestCommandUnblockAfterReblock(t *testing.T) {
 }
 
 func TestCommandUnblockNonBlockedRejected(t *testing.T) {
+	t.Parallel()
 	// A fresh instance's start activation is pending, not blocked.
 	m, s, wf := newCompleteFixture(t, unblockTemplateJSON, "unblock-test", "1")
 	revBefore := revision(t, s, wf)
@@ -731,6 +750,7 @@ func TestCommandUnblockNonBlockedRejected(t *testing.T) {
 }
 
 func TestCommandUnblockIdempotentReissue(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, unblockTemplateJSON, "unblock-test", "1")
 	blockActivation(t, m, s, wf)
 	payload := unblockCommandPayload(t, "alice", "root cause fixed")
@@ -791,6 +811,7 @@ func unblockCommandPayload(t *testing.T, actor, reason string) json.RawMessage {
 // source, observed_at, subject, response_hash, or evidence_ids must fail
 // before any store mutation.
 func TestCommandGateExternalResultRequiredFields(t *testing.T) {
+	t.Parallel()
 	drops := []struct{ drop, want string }{
 		{"poll_id", "external_result requires poll_id"},
 		{"source", "external_result requires source"},
@@ -819,6 +840,7 @@ func TestCommandGateExternalResultRequiredFields(t *testing.T) {
 // satisfy/reject/waive: omitting reason or evidence_ids fails for every human
 // operation before mutation (actor is already covered elsewhere).
 func TestCommandGateHumanOpsRequiredFields(t *testing.T) {
+	t.Parallel()
 	for _, op := range []string{"satisfy", "reject", "waive"} {
 		for _, d := range []struct{ drop, want string }{
 			{"reason", "requires a reason"},
@@ -844,6 +866,7 @@ func TestCommandGateHumanOpsRequiredFields(t *testing.T) {
 // validation for skip (node_id/actor/reason/evidence_ids) and unblock
 // (node_id/actor/reason).
 func TestCommandSkipUnblockRequiredFields(t *testing.T) {
+	t.Parallel()
 	skipCases := []struct {
 		payload map[string]any
 		want    string

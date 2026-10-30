@@ -142,6 +142,7 @@ type retryScenario struct {
 // outcome. Every step asserts the single-activation / constant-iteration
 // invariant: retry never branches, checkpoints, or creates a new activation.
 func TestDurableRetryExhaustion(t *testing.T) {
+	t.Parallel()
 	scenarios := []retryScenario{
 		{"block", "retry-block", 3, RetryExhaustionBlock, "", ActivationBlocked, WorkflowBlocked},
 		{"fail", "retry-fail", 2, RetryExhaustionFail, "", ActivationAttemptFailed, WorkflowFailed},
@@ -453,6 +454,7 @@ func noBranchEvents(t *testing.T, s *Store, wf WorkflowID) bool {
 // applies the template's default_retry_policy to a node that declares no
 // retry_policy, while a node's own policy still overrides it.
 func TestRetryPolicyFallsBackToTemplateDefault(t *testing.T) {
+	t.Parallel()
 	const templateID = "retry-default"
 	templateJSON := []byte(`{
   "schema_version": 1,
@@ -514,6 +516,7 @@ func mustTerminateAs(t *testing.T, m *Manager, wf WorkflowID, nodeID NodeID, act
 // terminations: the activation re-arms while budget remains and exhausts per
 // the node's policy when it is gone.
 func TestTimedOutAndPanickedAttemptsConsumeRetryBudget(t *testing.T) {
+	t.Parallel()
 	scenarios := []struct {
 		name   string
 		status AttemptStatus
@@ -642,6 +645,7 @@ func TestCanceledAttemptBlocksWithoutRetrying(t *testing.T) {
 // not overwrite that instance status with the terminal failed — the failure
 // is recorded on the activation, while the blocked branch stays surfaced.
 func TestFailExhaustionDoesNotHideBlockedInstance(t *testing.T) {
+	t.Parallel()
 	templateJSON := []byte(`{
   "schema_version": 1,
   "template_id": "retry-parallel-fail",
@@ -687,6 +691,7 @@ func TestFailExhaustionDoesNotHideBlockedInstance(t *testing.T) {
 // instance blocked (the other is still parked), and unblocking the last one
 // restores active.
 func TestUnblockKeepsInstanceBlockedWhileAnotherActivationBlocks(t *testing.T) {
+	t.Parallel()
 	templateJSON := []byte(`{
   "schema_version": 1,
   "template_id": "unblock-parallel",
@@ -766,6 +771,7 @@ func TestUnblockKeepsInstanceBlockedWhileAnotherActivationBlocks(t *testing.T) {
 // branch must not regress the terminal status — markInstanceBlocked only
 // transitions active/blocked instances.
 func TestBlockExhaustionDoesNotResurrectFailedInstance(t *testing.T) {
+	t.Parallel()
 	templateJSON := []byte(`{
   "schema_version": 1,
   "template_id": "retry-parallel-reverse",

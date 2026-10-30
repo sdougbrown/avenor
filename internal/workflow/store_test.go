@@ -83,6 +83,7 @@ func readFileBytes(t *testing.T, path string) []byte {
 }
 
 func TestStore_InstantiatePersists(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf1")
 	snap := mustInstantiate(t, s, wf)
@@ -121,6 +122,7 @@ func TestStore_InstantiatePersists(t *testing.T) {
 // isolated from the command path: the command still commits and the panic
 // does not propagate past ApplyCommand.
 func TestCommitObserverPanicIsolation(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	s.SetCommitObserver(func(wf WorkflowID, snap Snapshot) {
 		panic("observer must not break the command path")
@@ -132,6 +134,7 @@ func TestCommitObserverPanicIsolation(t *testing.T) {
 }
 
 func TestStore_ApplyAdvancesRevisionAndRoundTrips(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf1")
 	snap := mustInstantiate(t, s, wf)
@@ -163,6 +166,7 @@ func TestStore_ApplyAdvancesRevisionAndRoundTrips(t *testing.T) {
 }
 
 func TestStore_RevisionConflictRejected(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf1")
 	snap := mustInstantiate(t, s, wf)
@@ -186,6 +190,7 @@ func TestStore_RevisionConflictRejected(t *testing.T) {
 }
 
 func TestStore_DuplicateIdempotencyRejected(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf1")
 	snap := mustInstantiate(t, s, wf)
@@ -224,6 +229,7 @@ func TestStore_DuplicateIdempotencyRejected(t *testing.T) {
 }
 
 func TestStore_MissingInstanceRejected(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf1")
 	cmd := Command{
@@ -245,6 +251,7 @@ func TestStore_MissingInstanceRejected(t *testing.T) {
 }
 
 func TestStore_CrashAfterEventAppendBeforeSnapshotReplace(t *testing.T) {
+	t.Parallel()
 	// CONTRACT under test: crash-window durability. An event durably appended
 	// to events.ndjson but not yet reflected in workflow.json must be replayed on
 	// recovery, the snapshot advanced, and workflow.json rewritten to match. That
@@ -361,6 +368,7 @@ func TestStore_CrashAfterEventAppendBeforeSnapshotReplace(t *testing.T) {
 }
 
 func TestStore_SnapshotReplaceBeforeProjectionNoop(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf1")
 	snap := mustInstantiate(t, s, wf)
@@ -384,6 +392,7 @@ func TestStore_SnapshotReplaceBeforeProjectionNoop(t *testing.T) {
 }
 
 func TestStore_LockContentionSerializes(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf1")
 	snap := mustInstantiate(t, s, wf)
@@ -429,6 +438,7 @@ func TestStore_LockContentionSerializes(t *testing.T) {
 }
 
 func TestStore_MissingWorkflowJSONNotCataloged(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf2")
 	if err := os.MkdirAll(s.instanceDir(wf), 0o755); err != nil {
@@ -451,6 +461,7 @@ func TestStore_MissingWorkflowJSONNotCataloged(t *testing.T) {
 }
 
 func TestStore_CatalogHappyPath(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wfA := WorkflowID("wfA")
 	wfB := WorkflowID("wfB")
@@ -497,6 +508,7 @@ func assertCataloged(t *testing.T, got, wantFromWrite Snapshot, wf WorkflowID) {
 }
 
 func TestStore_LeaseExpiredOnRecovery(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf1")
 	mustInstantiate(t, s, wf)
@@ -554,6 +566,7 @@ func TestStore_LeaseExpiredOnRecovery(t *testing.T) {
 }
 
 func TestStore_LeaseRetainedOnRecovery(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf1")
 	mustInstantiate(t, s, wf)
@@ -767,6 +780,7 @@ func storeTemplateFixture(t *testing.T, id, version string) Template {
 // with identical content under the same id+version succeeds without touching
 // the stored file: the stored bytes are unchanged after the second store.
 func TestStoreTemplateIdenticalRecreateIsNoOp(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	tmpl := storeTemplateFixture(t, "dup", "1")
 	if err := s.StoreTemplate("dup", "1", tmpl); err != nil {
@@ -793,6 +807,7 @@ func TestStoreTemplateIdenticalRecreateIsNoOp(t *testing.T) {
 // under an already-registered id+version fails with a TemplateConflictError
 // and leaves the originally stored template intact.
 func TestStoreTemplateRejectsConflictingContent(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.StoreTemplate("dup", "1", storeTemplateFixture(t, "dup", "1")); err != nil {
 		t.Fatalf("first StoreTemplate: %v", err)
@@ -825,6 +840,7 @@ func TestStoreTemplateRejectsConflictingContent(t *testing.T) {
 // all get a TemplateConflictError and the stored file holds the winner's
 // content, never a mixture or a silent overwrite by a later writer.
 func TestStoreTemplateConcurrentConflictingCreateHasOneWinner(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	const writers = 32
 	errs := make([]error, writers)
@@ -870,6 +886,7 @@ func TestStoreTemplateConcurrentConflictingCreateHasOneWinner(t *testing.T) {
 // file that cannot be parsed reports a TemplateCorruptError rather than
 // claiming the content differs, and leaves the stored file untouched.
 func TestStoreTemplateCorruptStoredFileIsNotAConflict(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	dir := filepath.Join(s.root, "templates", "corrupt")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -904,6 +921,7 @@ func TestStoreTemplateCorruptStoredFileIsNotAConflict(t *testing.T) {
 // serialization (different key order and spacing) but decode to a
 // semantically equal template is accepted as a no-op re-store.
 func TestStoreTemplateAcceptsCanonicallyEquivalentRestores(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	tmpl := storeTemplateFixture(t, "canon", "1")
 	if err := s.StoreTemplate("canon", "1", tmpl); err != nil {
@@ -934,6 +952,7 @@ func TestStoreTemplateAcceptsCanonicallyEquivalentRestores(t *testing.T) {
 // canonical form ("1.0" vs 1.0) must be judged by semantic equality, not raw
 // bytes — equal content is a no-op, different content is a conflict.
 func TestStoreTemplateCanonicalizesMetadataNumbers(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	tmpl := storeTemplateFixture(t, "num", "1")
 	tmpl.Metadata = map[string]any{"limit": json.Number("1.0"), "name": "x"}
@@ -992,6 +1011,7 @@ const (
 // registers one template against the root passed in the environment and
 // writes the outcome ("ok", "conflict", or "error: ...") to the result file.
 func TestStoreTemplateCrossProcessHelper(t *testing.T) {
+	t.Parallel()
 	root := os.Getenv(helperEnvRoot)
 	if root == "" {
 		return
@@ -1048,6 +1068,7 @@ func storeTemplateHelperCmd(t *testing.T, root, nodeName, resultPath, arrivedPat
 // released the helper must report a cross-process TemplateConflictError
 // against the already-stored template.
 func TestStoreTemplateCrossProcessRegistrationBlocksOnRootLock(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	first := storeTemplateFixture(t, "cross", "1")
 	first.Nodes[0].Name = "first"
@@ -1180,6 +1201,7 @@ func TestStoreTemplateCrossProcessRaceHasOneWinner(t *testing.T) {
 }
 
 func TestStore_StateFilesAreOwnerOnly(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf_perm")
 	mustInstantiate(t, s, wf)

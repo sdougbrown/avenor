@@ -7,6 +7,7 @@ import (
 )
 
 func TestResolveDirectResumeIdentityLaunchWrapper(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/launch-wrapper-resume.sock"})
 	sup.rememberSessionIdentity("wrap-session", effectiveIdentity{
 		Backend: "pi", Agent: "planner", Model: "planner-model", LaunchWrapper: []string{"nice", "-n", "5"},
@@ -44,6 +45,7 @@ func TestResolveDirectResumeIdentityLaunchWrapper(t *testing.T) {
 }
 
 func TestResolveDirectResumeIdentityRosterLaunchWrapper(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/launch-wrapper-roster-resume.sock"})
 	sup.rememberSessionIdentity("roster-wrap-session", effectiveIdentity{
 		Backend: "pi", Agent: "planner", Model: "planner-model",
@@ -73,6 +75,7 @@ func TestResolveDirectResumeIdentityRosterLaunchWrapper(t *testing.T) {
 }
 
 func TestResolveWorkflowResumeIdentityLaunchWrapperConflict(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/launch-wrapper-workflow-resume.sock"})
 	sup.rememberSessionIdentity("phase-session", effectiveIdentity{
 		Backend: "pi", Agent: "planner", Model: "planner-model", LaunchWrapper: []string{"nice"},

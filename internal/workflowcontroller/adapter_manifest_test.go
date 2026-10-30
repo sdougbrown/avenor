@@ -127,6 +127,7 @@ func TestLoadAdapterRegistryValid(t *testing.T) {
 }
 
 func TestLoadAdapterRegistryMissingDir(t *testing.T) {
+	t.Parallel()
 	reg, err := LoadAdapterRegistry(filepath.Join(t.TempDir(), "absent"))
 	if err != nil {
 		t.Fatalf("missing dir must yield empty registry, got %v", err)
@@ -219,6 +220,7 @@ func TestLoadAdapterRegistryIsolatesBadManifest(t *testing.T) {
 // is gone or non-executable is reported as a per-file untrusted load error
 // while the registry itself still loads and the bad adapter ID is absent.
 func TestLoadAdapterRegistryUnusableExecutable(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, dir string) string

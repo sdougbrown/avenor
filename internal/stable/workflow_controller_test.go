@@ -65,6 +65,7 @@ func stopLoopsAtCleanup(t *testing.T, sups ...*Supervisor) {
 // and even a lazily-triggered barrier (via a controller status of an unknown
 // id) never create the root, instances/, or controllers/.
 func TestControllerBarrierIdleCreatesNothing(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-noroot"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
@@ -89,6 +90,7 @@ func TestControllerBarrierIdleCreatesNothing(t *testing.T) {
 // through the same once-barrier: both succeed and exactly one leader loop per
 // enabled controller exists.
 func TestControllerBarrierConcurrentWorkflowAndController(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	if err := workflow.New(root).CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -145,6 +147,7 @@ func TestControllerBarrierConcurrentWorkflowAndController(t *testing.T) {
 // instance's event log so catalog recovery fails: controller methods must
 // return the barrier error while workflow RPCs keep serving.
 func TestControllerBarrierCatalogFailureDisablesControllers(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	parentID, childID := stageTerminalChildComposition(t, root)
 
@@ -202,6 +205,7 @@ func TestControllerBarrierCatalogFailureDisablesControllers(t *testing.T) {
 // the lease, dies (lease expired via a future-clock recovery), and B on the
 // same root re-acquires with owner epoch+1 while A never leads again.
 func TestControllerRestartReacquiresLease(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	if err := workflow.New(root).CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -285,6 +289,7 @@ func TestControllerRestartReacquiresLease(t *testing.T) {
 // first read fails the whole call, only a corrupt second read reaches the
 // surfaced error.
 func TestControllerStatusSurfacesNextPollReadError(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-nextpoll-err"), WorkflowRoot: root})
 	stopLoopsAtCleanup(t, sup)
@@ -321,6 +326,7 @@ func TestControllerStatusSurfacesNextPollReadError(t *testing.T) {
 // persists desired=disabled with the reason, durably releases the lease,
 // removes the loop, and refuses further acquisition.
 func TestControllerDisableReleasesLiveLease(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-disable"), WorkflowRoot: root})
@@ -375,6 +381,7 @@ func TestControllerDisableReleasesLiveLease(t *testing.T) {
 // TestControllerEnableTwiceSingleLoop proves enabling the same controller
 // twice keeps exactly one leader loop and one stable lease in this process.
 func TestControllerEnableTwiceSingleLoop(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-enable-twice"), WorkflowRoot: root})
@@ -416,6 +423,7 @@ func TestControllerEnableTwiceSingleLoop(t *testing.T) {
 // process starts a fresh loop that acquires leadership instead of finding a
 // stale entry and no-oping.
 func TestControllerSelfExitThenReenable(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-self-exit"), WorkflowRoot: root})
@@ -475,6 +483,7 @@ func TestControllerSelfExitThenReenable(t *testing.T) {
 // goroutines finish, loop presence matches the last persisted desired state
 // and exactly one loop serves an enabled controller.
 func TestControllerEnableDisableRaceMatchesDesiredState(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-race-hammer"), WorkflowRoot: root})
@@ -539,6 +548,7 @@ func TestControllerEnableDisableRaceMatchesDesiredState(t *testing.T) {
 // state and the enabled controller gains a leader without any workflow or
 // controller RPC being issued, and the candidate index is recovered.
 func TestControllerEagerBarrierStartsLeaderWithoutRPC(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	prev := workflowcontroller.NewStore(root)
 	if _, err := prev.Create("c1", 5); err != nil {
@@ -570,6 +580,7 @@ func TestControllerEagerBarrierStartsLeaderWithoutRPC(t *testing.T) {
 // with a small injectable renew interval, RenewedAt advances across at least
 // two renewals and ExpiresAt moves forward.
 func TestControllerLeaseRenewalObserved(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	store := workflowcontroller.NewStore(root)
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-renew"), WorkflowRoot: root})
@@ -621,6 +632,7 @@ func TestControllerLeaseRenewalObserved(t *testing.T) {
 // instantiating auto-dispatch workflows surfaces them as advisory candidates
 // for the owning controller, and the limit is honored.
 func TestWorkflowReadyAdvisoryCandidates(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	if err := workflow.New(root).CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -742,6 +754,7 @@ func TestWorkflowReadyAdvisoryCandidates(t *testing.T) {
 // on the next renew), the loop yields (holding=false) instead of exiting,
 // keeps its map entry, and re-acquires once the lease is released.
 func TestControllerRenewFailureYieldsAndReacquires(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")
 	if err := workflow.New(root).CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)

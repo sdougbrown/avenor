@@ -7,6 +7,7 @@ import (
 )
 
 func TestTurnGuardCallbackMayAcquireControlLock(t *testing.T) {
+	t.Parallel()
 	child := &childRuntime{sentinelFile: "turn-a"}
 	s := &Supervisor{runtimes: map[string]*childRuntime{"rt": child}}
 	done := make(chan error, 1)
@@ -24,6 +25,7 @@ func TestTurnGuardCallbackMayAcquireControlLock(t *testing.T) {
 }
 
 func TestTurnGuardRejectsReusedRuntime(t *testing.T) {
+	t.Parallel()
 	child := &childRuntime{sentinelFile: "turn-a"}
 	s := &Supervisor{runtimes: map[string]*childRuntime{"rt": child}}
 	called := false
@@ -41,6 +43,7 @@ func TestTurnGuardRejectsReusedRuntime(t *testing.T) {
 // a turn-bound operation held open on one runtime must not block turn-bound
 // work on another.
 func TestTurnGuardDoesNotBlockOtherRuntimes(t *testing.T) {
+	t.Parallel()
 	a := &childRuntime{sentinelFile: "turn-a"}
 	b := &childRuntime{sentinelFile: "turn-b"}
 	s := &Supervisor{runtimes: map[string]*childRuntime{"rt_a": a, "rt_b": b}}
@@ -72,6 +75,7 @@ func TestTurnGuardDoesNotBlockOtherRuntimes(t *testing.T) {
 // second WithTurn on that runtime until it returns, while another runtime's
 // turn proceeds independently.
 func TestTurnGuardBlocksSameRuntimeTurnWhileOperationOpen(t *testing.T) {
+	t.Parallel()
 	a := &childRuntime{sentinelFile: "turn-a"}
 	b := &childRuntime{sentinelFile: "turn-b"}
 	s := &Supervisor{runtimes: map[string]*childRuntime{"rt_a": a, "rt_b": b}}
@@ -123,6 +127,7 @@ func TestTurnGuardBlocksSameRuntimeTurnWhileOperationOpen(t *testing.T) {
 }
 
 func TestTurnGuardRefusesAnUnknownRuntime(t *testing.T) {
+	t.Parallel()
 	child := &childRuntime{id: "rt", sentinelFile: "turn-a", mu: sync.Mutex{}}
 	sup := &Supervisor{runtimes: map[string]*childRuntime{"rt": child}}
 	called := false

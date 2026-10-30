@@ -12,6 +12,7 @@ import (
 )
 
 func TestWarmAdmissionRejectsShutdownAndExistingArtifacts(t *testing.T) {
+	t.Parallel()
 	for _, shutdown := range []bool{false, true} {
 		root := t.TempDir()
 		path := filepath.Join(root, "historical")
@@ -33,6 +34,7 @@ func TestWarmAdmissionRejectsShutdownAndExistingArtifacts(t *testing.T) {
 }
 
 func TestWarmAdmissionDrainsAnswersAndRotatesDerivedHandler(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	done := make(chan struct{})
 	child := &childRuntime{id: "rt", directAnswers: 1, directAnswersDone: done, derivedFileHandler: true, fileHandler: permission.NewFileHandler("old"), promptCh: make(chan struct{}, 1)}
@@ -68,6 +70,7 @@ func TestWarmAdmissionDrainsAnswersAndRotatesDerivedHandler(t *testing.T) {
 }
 
 func TestWarmAdmissionClearsBrokerLastAndUpdatesTask(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	b := broker.New("")
 	b.CreateRun("rt", "")

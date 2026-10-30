@@ -152,6 +152,7 @@ func retryPolicies(maximum int, exhaustion RetryExhaustionKind, outcome OutcomeN
 }
 
 func TestApply(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		run  func(t *testing.T)
@@ -1047,6 +1048,7 @@ func testGateAwaitedOnComplete(t *testing.T) {
 // activations array the reducer writes into (via act.Status). Before the
 // cloneSnapshot fix this leaked into the caller's array and the test fails.
 func TestReduceDoesNotMutateInput(t *testing.T) {
+	t.Parallel()
 	state := newInstance(t)
 	actID := actStart(state).ID
 	events, err := Apply(state, Command{
@@ -1082,6 +1084,7 @@ func TestReduceDoesNotMutateInput(t *testing.T) {
 // into the caller's snapshot: mutating the result must not leak into the input,
 // and vice versa.
 func TestReduceDoesNotMutateInputDispatch(t *testing.T) {
+	t.Parallel()
 	state := newInstance(t)
 	act := actStart(state)
 	prio := 42

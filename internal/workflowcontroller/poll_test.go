@@ -34,6 +34,7 @@ func newPollStore(t *testing.T) (*ControllerStore, string) {
 }
 
 func TestCommitPollBeforeInvoke(t *testing.T) {
+	t.Parallel()
 	s, id := newPollStore(t)
 	c := testCursor()
 	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
@@ -65,6 +66,7 @@ func TestCommitPollBeforeInvoke(t *testing.T) {
 }
 
 func TestCrashAfterCommitReusesCountAndPollID(t *testing.T) {
+	t.Parallel()
 	s, id := newPollStore(t)
 	c := testCursor()
 	first, err := s.CommitPoll(id, c, time.Now())
@@ -98,6 +100,7 @@ func TestCrashAfterCommitReusesCountAndPollID(t *testing.T) {
 }
 
 func TestEnsurePollCursorIdempotent(t *testing.T) {
+	t.Parallel()
 	s, id := newPollStore(t)
 	c := testCursor()
 	firstAt := time.Now().Add(30 * time.Second)
@@ -125,6 +128,7 @@ func TestEnsurePollCursorIdempotent(t *testing.T) {
 }
 
 func TestSchedulePollRetrySkipsUnchanged(t *testing.T) {
+	t.Parallel()
 	s, id := newPollStore(t)
 	c := testCursor()
 	next := time.Now().Add(time.Minute)
@@ -146,6 +150,7 @@ func TestSchedulePollRetrySkipsUnchanged(t *testing.T) {
 }
 
 func TestPollDueIncludesCrashedInFlight(t *testing.T) {
+	t.Parallel()
 	s, id := newPollStore(t)
 	now := time.Now()
 	crashed := testCursor()
@@ -182,6 +187,7 @@ func TestPollDueIncludesCrashedInFlight(t *testing.T) {
 }
 
 func TestPollBackoffSequence(t *testing.T) {
+	t.Parallel()
 	// With no jitter the post-park sequence continues at 60s (the first poll
 	// after a park waits the 30s base), doubling to the 5m cap.
 	want := []time.Duration{60 * time.Second, 120 * time.Second,
@@ -197,6 +203,7 @@ func TestPollBackoffSequence(t *testing.T) {
 }
 
 func TestPollBackoffJitterBounds(t *testing.T) {
+	t.Parallel()
 	delay, _ := PollBackoffDelay(pollBaseDelay, 1, nil, func() float64 { return 0 })
 	if delay != 120*time.Second {
 		t.Fatalf("mid jitter = %v, want 120s", delay)
@@ -216,6 +223,7 @@ func TestPollBackoffJitterBounds(t *testing.T) {
 // retry_after follows the backoff schedule; an explicit zero clamps to the
 // base minimum; and an explicit retry_after ignores the retry count.
 func TestPollBackoffRetryAfterTable(t *testing.T) {
+	t.Parallel()
 	zero := int64(0)
 	halfMs := int64(1)
 	halfSec := int64(500)
@@ -248,6 +256,7 @@ func TestPollBackoffRetryAfterTable(t *testing.T) {
 }
 
 func TestRecordDiagnosticDeduplicates(t *testing.T) {
+	t.Parallel()
 	s, id := newPollStore(t)
 	recorded, err := s.RecordDiagnostic(id, "adapter_unavailable", "gh-review", "not registered")
 	if err != nil || !recorded {
@@ -275,6 +284,7 @@ func TestRecordDiagnosticDeduplicates(t *testing.T) {
 }
 
 func TestPollCursorsRoundTripThroughSnapshot(t *testing.T) {
+	t.Parallel()
 	s, id := newPollStore(t)
 	c := testCursor()
 	if _, err := s.CommitPoll(id, c, time.Now()); err != nil {

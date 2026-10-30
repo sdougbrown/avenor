@@ -126,6 +126,7 @@ func mustManualStart(t *testing.T, m *Manager, wf WorkflowID, nodeID NodeID, act
 // permission policies: auto-approve and a permission decider are mutually
 // exclusive, and the conflict must surface before any attempt is recorded.
 func TestBeginDispatchRejectsBothAutoApproveAndDecider(t *testing.T) {
+	t.Parallel()
 	m, _, wf := newAutoDispatchFixture(t, "begin-permdec-both", "ctl-a", -1)
 	if err := m.RebuildCandidateIndex("test"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)
@@ -156,6 +157,7 @@ func TestBeginDispatchRejectsBothAutoApproveAndDecider(t *testing.T) {
 // permission policies, without consuming the claim's lease: a valid start of
 // the same activation still succeeds afterward.
 func TestManualStartRejectsBothAutoApproveAndDecider(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -205,6 +207,7 @@ func TestManualStartRejectsBothAutoApproveAndDecider(t *testing.T) {
 // a controller dispatch on the same key and a live controller attempt blocks
 // the manual start. A keyed manual node never surfaces as a candidate.
 func TestManualConcurrencyKeysSerializeAcrossBoundaries(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -331,6 +334,7 @@ func mustLoadInstance(t *testing.T, s *Store, wf WorkflowID) *WorkflowInstance {
 // committing on the same workflow between the candidate read and the attempt
 // commit maps the revision mismatch onto ErrStaleCandidate.
 func TestBeginDispatchRevisionRaceMapsToStaleCandidate(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -385,6 +389,7 @@ func TestBeginDispatchRevisionRaceMapsToStaleCandidate(t *testing.T) {
 // resolved selection carries an equal-content decider under a different
 // pointer, while a decider with different content is still rejected.
 func TestBeginDispatchPermissionDeciderSelectionReDispatch(t *testing.T) {
+	t.Parallel()
 	m, _, wf := newAutoDispatchFixture(t, "begin-sel-permdec", "ctl-a", -1)
 	if err := m.RebuildCandidateIndex("test"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)
@@ -568,6 +573,7 @@ func TestBeginDispatchPermissionDeciderSelectionReDispatch(t *testing.T) {
 // start with a selection conflicting with the one pinned by BeginDispatch is
 // rejected, and a start without a selection inherits the pinned one.
 func TestManualStartSelectionRespectsPinnedSelection(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "begin-sel-manual", "ctl-a", -1)
 	if err := m.RebuildCandidateIndex("test"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)

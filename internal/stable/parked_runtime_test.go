@@ -96,6 +96,7 @@ func childParked(child *childRuntime) bool {
 // A runtime parked after a successful end_turn must not count against
 // MaxRuntimes: the slot belongs to turns in flight, not to parked sessions.
 func TestParkedRuntimeDoesNotCountAgainstMaxRuntimes(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-not-counted"),
 		MaxRuntimes:          1,
@@ -148,6 +149,7 @@ func TestParkedRuntimeDoesNotCountAgainstMaxRuntimes(t *testing.T) {
 // tears down its provider, leaves the sentinel at its last turn result, and
 // stays addressable as a status tombstone.
 func TestParkedRuntimeReapedAfterTimeout(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-reap"),
 		MaxRuntimes:          2,
@@ -226,6 +228,7 @@ func TestParkedRuntimeReapedAfterTimeout(t *testing.T) {
 // runtime instead of letting the timeout reap it, and the runtime parks again
 // after the resumed turn ends.
 func TestParkedRuntimePromptWithinGraceResumes(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: newStableSocketPath(t, "parked-resume"),
 		MaxRuntimes:   2,
@@ -285,6 +288,7 @@ func TestParkedRuntimePromptWithinGraceResumes(t *testing.T) {
 // RuntimePrompt on a reaped runtime reports that the runtime has ended
 // instead of silently queueing a prompt that can never run.
 func TestRuntimePromptOnReapedRuntimeFails(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-prompt-ended"),
 		MaxRuntimes:          2,
@@ -321,6 +325,7 @@ func TestRuntimePromptOnReapedRuntimeFails(t *testing.T) {
 // while a first runtime is mid-turn (not parked), guarding against a fix that
 // exempts every non-active runtime from the count.
 func TestRunningRuntimeStillCountsAgainstMaxRuntimes(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-running-counts"),
 		MaxRuntimes:          1,
@@ -361,6 +366,7 @@ func TestRunningRuntimeStillCountsAgainstMaxRuntimes(t *testing.T) {
 // A follow-up prompt to a parked runtime must wait for a free local slot:
 // parking freed the slot, and a later spawn may have claimed it.
 func TestParkedRuntimeResumeWaitsForLocalCapacity(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "parked-resume-capacity"),
 		MaxRuntimes:          1,
@@ -433,6 +439,7 @@ func TestParkedRuntimeResumeWaitsForLocalCapacity(t *testing.T) {
 // runtime, so a parked runtime's follow-up must wait for it and resume once
 // the reservation is released.
 func TestParkedRuntimeResumeWaitsForHeldReservation(t *testing.T) {
+	t.Parallel()
 	t.Run("tree budget", func(t *testing.T) { testParkedRuntimeResumeWaitsForHeldReservation(t, false) })
 	t.Run("local only", func(t *testing.T) { testParkedRuntimeResumeWaitsForHeldReservation(t, true) })
 }
@@ -501,6 +508,7 @@ func testParkedRuntimeResumeWaitsForHeldReservation(t *testing.T, localOnly bool
 // the prompt. (A prompt queued via RuntimePrompt would usually be dequeued at
 // the top of the loop instead; both paths must return the prompt.)
 func TestWaitForNextPromptTimerHonorsQueuedPrompt(t *testing.T) {
+	t.Parallel()
 	sup := newLifecycleTestOwner()
 	c := newTestChildLifecycle(t, sup, testLifecycleOptions{id: "rt_wait_honor", exec: execParked, class: directAttemptClass})
 	go func() {
@@ -532,6 +540,7 @@ func TestWaitForNextPromptTimerHonorsQueuedPrompt(t *testing.T) {
 // completed in the same critical section, so later RuntimePrompt calls see
 // the runtime ended instead of queueing onto a runtime about to tear down.
 func TestWaitForNextPromptTimerReapsWithoutPrompt(t *testing.T) {
+	t.Parallel()
 	sup := newLifecycleTestOwner()
 	c := newTestChildLifecycle(t, sup, testLifecycleOptions{id: "rt_wait_reap", exec: execParked, class: directAttemptClass})
 	prompt, ok := c.waitForNextPrompt(sup, context.Background(), 50*time.Millisecond)
@@ -558,6 +567,7 @@ func TestWaitForNextPromptTimerReapsWithoutPrompt(t *testing.T) {
 // runs through waitForNextPrompt, and the modeled finish publishes only when
 // the test calls it.
 func TestRuntimePromptRejectedBeforeTeardownPublication(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: newStableSocketPath(t, "park-admission-window"),
 		MaxRuntimes:   2,

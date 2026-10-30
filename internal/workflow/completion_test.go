@@ -205,6 +205,7 @@ func evidenceEntries(t *testing.T, s *Store, wf WorkflowID) int {
 }
 
 func TestCommandCompleteSatisfies(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
@@ -265,6 +266,7 @@ func TestCommandCompleteSatisfies(t *testing.T) {
 // snapshot write after the completion had landed. The completion handler
 // must therefore reject it up front, before any evidence is staged.
 func TestCommandCompleteNullJSONOutputRejected(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, jsonNullTemplateJSON, "json-null-test", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
@@ -297,6 +299,7 @@ func TestCommandCompleteNullJSONOutputRejected(t *testing.T) {
 }
 
 func TestCommandCompleteMissingRequiredOutput(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, _ := writeEvidence(t, "evidence.txt", "run output\n")
@@ -327,6 +330,7 @@ func TestCommandCompleteMissingRequiredOutput(t *testing.T) {
 }
 
 func TestCommandCompleteUndeclaredOutcome(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, _ := writeEvidence(t, "evidence.txt", "run output\n")
@@ -348,6 +352,7 @@ func TestCommandCompleteUndeclaredOutcome(t *testing.T) {
 }
 
 func TestCommandCompleteBadEvidence(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, _ := writeEvidence(t, "evidence.txt", "run output\n")
@@ -380,6 +385,7 @@ func TestCommandCompleteBadEvidence(t *testing.T) {
 }
 
 func TestCommandCompleteHashMismatch(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, _ := writeEvidence(t, "evidence.txt", "run output\n")
@@ -402,6 +408,7 @@ func TestCommandCompleteHashMismatch(t *testing.T) {
 }
 
 func TestCommandCompleteIdempotentDuplicate(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
@@ -456,6 +463,7 @@ func TestCommandCompleteIdempotentDuplicate(t *testing.T) {
 // prior facts (the prior OutputValue stays byte-identical; the new entry
 // carries revision+1).
 func TestNextRevisionForAppendOnly(t *testing.T) {
+	t.Parallel()
 	inst := &WorkflowInstance{}
 	if got := nextRevisionFor(inst, "summary"); got != 1 {
 		t.Fatalf("next revision for empty instance = %d, want 1", got)
@@ -490,6 +498,7 @@ func TestNextRevisionForAppendOnly(t *testing.T) {
 }
 
 func TestCommandCompleteGatedAwaitsGate(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeGatedTemplateJSON, "complete-gated", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
@@ -558,6 +567,7 @@ func completeToRunningNoTerminal(t *testing.T, m *Manager, s *Store, wf Workflow
 // contract: a machine contract depending on terminal output waits for the
 // corresponding termination fact; explicit handoff may not precede it.
 func TestCommandCompleteWaitsForTerminalFact(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	res, actID, attemptID := completeToRunningNoTerminal(t, m, s, wf)
 	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
@@ -608,6 +618,7 @@ func TestCommandCompleteWaitsForTerminalFact(t *testing.T) {
 // list is rejected, and the foreign idempotency key is not consumed (the
 // legitimate completion still succeeds afterward).
 func TestCommandCompleteForeignAttemptRejected(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
@@ -648,6 +659,7 @@ func TestCommandCompleteForeignAttemptRejected(t *testing.T) {
 // TestCommandCompleteViaWorkflowCommand pins the public surface path: the
 // workflow command dispatcher routes op "complete" to the same atomic handler.
 func TestCommandCompleteViaWorkflowCommand(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	res, actID, attemptID := completeToRunning(t, m, s, wf)
 	src, digest := writeEvidence(t, "evidence.txt", "run output\n")
@@ -710,6 +722,7 @@ const selfBranchTemplateJSON = `{
 // with revision 2, while the first record stays byte-identical (revision 1,
 // same value) — prior facts are never mutated.
 func TestCommandCompleteAppendOnlyRevisionE2E(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newCompleteFixture(t, selfBranchTemplateJSON, "self-branch", "1")
 
 	// Activation 1: claim, start, complete with the self-branch outcome.

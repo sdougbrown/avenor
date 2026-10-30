@@ -10,6 +10,7 @@ import (
 // gives workflow-controlled run, loop, and team actions an explicit enforceable
 // execution deadline.
 func TestActionTimeoutRoundTripAndValidation(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		input, wantTimeout string
 	}{

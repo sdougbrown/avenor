@@ -14,6 +14,7 @@ import (
 // answer the same way, so a rename cannot report success on a run nobody can
 // reach and a resume cannot be admitted by one spelling and refused by the other.
 func TestResolveRunReferenceRefusesATombstoneEitherWay(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 0)
 	credentials := map[string]any{"run_id": "pi-peer", "token": "secret", "peer": true}
 	for _, path := range []string{"/register", "/retire"} {

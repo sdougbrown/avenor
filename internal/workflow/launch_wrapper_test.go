@@ -56,6 +56,7 @@ func validClaudeWrapper() map[string]any {
 }
 
 func TestValidateLaunchWrapperIngress(t *testing.T) {
+	t.Parallel()
 	valid := func(mutate func(w map[string]any)) map[string]any {
 		w := validClaudeWrapper()
 		if mutate != nil {
@@ -170,6 +171,7 @@ func TestValidateLaunchWrapperIngress(t *testing.T) {
 // the JSON ingress: wrong, missing, and null discriminators, extraneous
 // variant fields, and non-object elements are each rejected.
 func TestValidateLaunchWrapperArgIngress(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		element any
@@ -235,6 +237,7 @@ func TestValidateLaunchWrapperArgIngress(t *testing.T) {
 // can only name a required param: an unsupplied optional param would resolve
 // to an empty argv element.
 func TestValidateLaunchWrapperRequiresRequiredParam(t *testing.T) {
+	t.Parallel()
 	var tmpl map[string]any
 	if err := json.Unmarshal(launchWrapperTemplateJSON(t, "lw-optional", []any{validClaudeWrapper()}, nil), &tmpl); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -253,6 +256,7 @@ func TestValidateLaunchWrapperRequiresRequiredParam(t *testing.T) {
 // team nodes may select a launch wrapper: child-workflow, manual, and
 // external nodes are rejected.
 func TestValidateLaunchWrapperUnsupportedNodeActions(t *testing.T) {
+	t.Parallel()
 	wrapper := func() map[string]any { return validClaudeWrapper() }
 	tests := []struct {
 		name   string
@@ -282,6 +286,7 @@ func TestValidateLaunchWrapperUnsupportedNodeActions(t *testing.T) {
 }
 
 func TestValidateLaunchWrapperInMemoryCrossFields(t *testing.T) {
+	t.Parallel()
 	absolute := "/usr/local/bin/claude"
 	tests := []struct {
 		name    string
@@ -376,6 +381,7 @@ func TestValidateLaunchWrapperInMemoryCrossFields(t *testing.T) {
 // TestLaunchWrapperRegistrationAndInstantiate proves the manager path accepts
 // a valid wrapper template and instantiates it with the required param.
 func TestLaunchWrapperRegistrationAndInstantiate(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -400,6 +406,7 @@ func TestLaunchWrapperRegistrationAndInstantiate(t *testing.T) {
 // TestLaunchWrapperRoundTripPreservesExactArguments proves literal strings
 // containing spaces and $ survive the JSON round trip byte-for-byte.
 func TestLaunchWrapperRoundTripPreservesExactArguments(t *testing.T) {
+	t.Parallel()
 	spaces := "--workdir flag with spaces and $dollar"
 	data := launchWrapperTemplateJSON(t, "lw-roundtrip", []any{validClaudeWrapper()}, "claude")
 	var template Template
@@ -439,6 +446,7 @@ func TestLaunchWrapperRoundTripPreservesExactArguments(t *testing.T) {
 // TestResolveNodeLaunchWrapper covers the pure resolver: selection, exact
 // values, fresh slices, and fail-closed behavior on bad inputs.
 func TestResolveNodeLaunchWrapper(t *testing.T) {
+	t.Parallel()
 	template := Template{
 		LaunchWrappers: []LaunchWrapperDefinition{{
 			ID: "claude",

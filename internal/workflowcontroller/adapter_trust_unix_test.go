@@ -31,6 +31,7 @@ func (f fakeFileInfo) Sys() any           { return f.st }
 // regular file with the same bits is still rejected. Ownership is enforced
 // for both.
 func TestCheckOwnedModeIgnoresSymlinkModeBits(t *testing.T) {
+	t.Parallel()
 	owned := &syscall.Stat_t{Uid: uint32(os.Getuid())}
 
 	if err := checkOwnedMode(fakeFileInfo{mode: os.ModeSymlink | 0o777, st: owned}, "/x/link"); err != nil {
@@ -52,6 +53,7 @@ func TestCheckOwnedModeIgnoresSymlinkModeBits(t *testing.T) {
 // sticky bit, and a world-writable regular file even with the sticky bit,
 // are both rejected — the exception excuses directories only.
 func TestCheckOwnedModeStickyDirectory(t *testing.T) {
+	t.Parallel()
 	owned := &syscall.Stat_t{Uid: uint32(os.Getuid())}
 
 	tests := []struct {
