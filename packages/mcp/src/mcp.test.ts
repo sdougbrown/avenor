@@ -20,6 +20,10 @@ import resultFixture from '../../../schemas/message_route.result.json'
 // supervisor; the stubs record the args the registrations forward.
 const killCalls: Array<Record<string, unknown>> = []
 const workflowCalls: Array<Record<string, unknown>> = []
+const runWorkflowToolMock = mock(async (args: Record<string, unknown>) => {
+  workflowCalls.push(args)
+  return { action: args.action, value: { routed: true } }
+})
 
 function makeProvider(overrides: Partial<MessageProvider> = {}): MessageProvider {
   return {
@@ -110,10 +114,7 @@ mock.module('@dougbots/avenor-core', () => ({
     return { killed: true }
   }),
   shutdownTool: mock(async () => ({})),
-  runWorkflowTool: mock(async (args: Record<string, unknown>) => {
-    workflowCalls.push(args)
-    return { action: args.action, value: { routed: true } }
-  }),
+  runWorkflowTool: runWorkflowToolMock,
   WorkflowToolError: RealWorkflowToolError,
   validateSpawnSelection,
 }))
@@ -147,6 +148,24 @@ describe('avenor MCP server', () => {
     })
     expect(result).toMatchObject({ routed: true })
     expect(workflowCalls.at(-1)).toEqual({ action: 'controller_status', controller_id: 'ctl-1', supervisor_id: 'sup-1' })
+    await client.close()
+    await server.close()
+  })
+
+  it('renders a workflow router denial as a tool error', async () => {
+    runWorkflowToolMock.mockImplementationOnce(async () => {
+      throw new RealWorkflowToolError('invalid_request', 'invalid input for action "status": missing required property "workflow_id"')
+    })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    const client = new Client({ name: 'test-client', version: '0.1.0' })
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
+
+    const result = await client.callTool({ name: 'workflow', arguments: { action: 'status' } })
+    expect(result.isError).toBe(true)
+    expect(result.structuredContent).toEqual({
+      code: 'invalid_request',
+      text: 'invalid input for action "status": missing required property "workflow_id"',
+    })
     await client.close()
     await server.close()
   })

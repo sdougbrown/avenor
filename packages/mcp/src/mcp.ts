@@ -27,7 +27,6 @@ import {
   renderPeerList,
   resultOutput,
   ToolError,
-  WorkflowToolError,
   runWorkflowTool,
   type MessageProvider,
   type PeersRouterResult,
@@ -232,7 +231,7 @@ async function passthroughResult<T extends object>(result: T | Promise<T>): Prom
 
 /** A router tool error is a failure result on every surface; anything else is the transport's to report. */
 function toolFailure(error: unknown): ToolReply {
-  if (!(error instanceof ToolError) && !(error instanceof WorkflowToolError)) throw error
+  if (!(error instanceof ToolError)) throw error
   const text = error.message
   return {
     content: [{ type: 'text', text }],

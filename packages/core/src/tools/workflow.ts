@@ -57,8 +57,13 @@ export async function withCandidateCount(
   if (args.action !== 'controller_status' || typeof args.controller_id !== 'string' || !args.controller_id) {
     return value
   }
+  // Only carry supervisor_id when the caller set one: a present-but-undefined
+  // key is a wire-type violation the router refuses, and the advisory catch
+  // would then swallow it and never attach the count.
+  const readyArgs: Record<string, unknown> = { action: 'ready', controller_id: args.controller_id }
+  if (typeof args.supervisor_id === 'string') readyArgs.supervisor_id = args.supervisor_id
   try {
-    const ready = await run({ action: 'ready', controller_id: args.controller_id, supervisor_id: args.supervisor_id })
+    const ready = await run(readyArgs)
     if (Array.isArray(ready.value.candidates)) {
       return { ...value, candidate_count: ready.value.candidates.length }
     }

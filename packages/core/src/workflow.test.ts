@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import conformance from '../../../schemas/workflow_route.conformance.json'
 import type { Client } from './client.js'
-import { runWorkflowTool } from './tools/workflow.js'
+import { runWorkflowTool, withCandidateCount } from './tools/workflow.js'
 import { executeWorkflow, WorkflowToolError, workflowSupervisorId, type WorkflowAction, type WorkflowProvider } from './workflow.js'
 
 interface ConformanceCase {
@@ -271,5 +271,33 @@ describe('avenor_workflow surface wiring', () => {
       }),
     ).rejects.toMatchObject({ code: 'invalid_request' })
     expect(dialed).toBe(false)
+  })
+})
+
+describe('withCandidateCount', () => {
+  function providerWith(ready: WorkflowProvider['ready']): WorkflowProvider {
+    return { ...fakeProvider().provider, ready }
+  }
+
+  it('attaches the count when the caller omits supervisor_id', async () => {
+    // The advisory call runs through the real router, so a present-but-undefined
+    // supervisor_id would be refused and the count silently dropped.
+    const provider = providerWith(async () => ({ candidates: [{}, {}] }))
+    const value = await withCandidateCount(
+      args => executeWorkflow(provider, args),
+      { action: 'controller_status', controller_id: 'ctl' },
+      { controller_id: 'ctl' },
+    )
+    expect(value.candidate_count).toBe(2)
+  })
+
+  it('leaves the count absent when ready returns no candidates array', async () => {
+    const provider = providerWith(async () => ({}))
+    const value = await withCandidateCount(
+      args => executeWorkflow(provider, args),
+      { action: 'controller_status', controller_id: 'ctl' },
+      { controller_id: 'ctl' },
+    )
+    expect(value.candidate_count).toBeUndefined()
   })
 })
