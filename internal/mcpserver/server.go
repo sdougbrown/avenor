@@ -1559,27 +1559,25 @@ func (s *Server) registerResumed(cl ControlClient, supervisorPath string, res me
 // answer this tool.
 func (s *Server) handleAvenorWorkflow(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	raw := toolArguments(req)
-	action := workflowtool.ActionOf(raw)
-	if action == "" {
-		return workflowToolErrorResult(&workflowtool.ToolError{
-			Code:    "invalid_action",
-			Message: workflowtool.Repair("workflow_invalid_action", nil),
-			Facts:   map[string]string{},
-		})
-	}
 	// The Go MCP surface defaults the cancel actor to "mcp"; the other surfaces
 	// require it explicitly, so the shared schema requires it and this surface
-	// supplies the default before admission.
-	if action == "cancel" {
+	// supplies the default before admission. An empty actor names nobody, so it
+	// takes the default too.
+	if workflowtool.ActionOf(raw) == "cancel" {
 		raw = withDefaultCancelActor(raw)
+	}
+	// Admission runs before a client is acquired, so a malformed action answers
+	// with the repairable sentence even when the named supervisor is undialable.
+	action, err := workflowtool.Admit(raw)
+	if err != nil {
+		return toolErrorResult(err)
 	}
 	supervisorID := workflowtool.SupervisorIDOf(raw)
 	var (
 		cl      ControlClient
 		cleanup func()
-		err     error
 	)
-	if isWorkflowReadAction(action) {
+	if workflowtool.IsReadOnly(action) {
 		cl, cleanup, err = s.getReadClientForSupervisor(supervisorID)
 	} else {
 		cl, cleanup, err = s.getClientForSupervisor(supervisorID)
@@ -1590,7 +1588,7 @@ func (s *Server) handleAvenorWorkflow(ctx context.Context, req *mcp.CallToolRequ
 	defer cleanup()
 	result, err := workflowtool.Execute(cl, raw, workflowtool.Options{ClampWait: s.clampWait})
 	if err != nil {
-		return workflowToolErrorResult(err)
+		return toolErrorResult(err)
 	}
 	return &mcp.CallToolResult{
 		Content:           []mcp.Content{&mcp.TextContent{Text: result.Text()}},
@@ -1598,42 +1596,19 @@ func (s *Server) handleAvenorWorkflow(ctx context.Context, req *mcp.CallToolRequ
 	}, nil
 }
 
-// workflowToolErrorResult renders one router tool error the way the other
-// surfaces do: the rendered sentence as content, the same object as structured
-// content, and the error flag set so a client branching on it sees the failure.
-// Any other error goes back to the JSON-RPC layer.
-func workflowToolErrorResult(err error) (*mcp.CallToolResult, error) {
-	var toolErr *workflowtool.ToolError
-	if !errors.As(err, &toolErr) {
-		return nil, err
-	}
-	return &mcp.CallToolResult{
-		Content:           []mcp.Content{&mcp.TextContent{Text: toolErr.Message}},
-		StructuredContent: map[string]any{"code": toolErr.Code, "text": toolErr.Message},
-		IsError:           true,
-	}, nil
-}
-
-// isWorkflowReadAction reports whether an action only reads supervisor state,
-// so it acquires the credential-free client the read-only tools use.
-func isWorkflowReadAction(action string) bool {
-	switch action {
-	case "status", "inspect", "events", "wait", "ready", "controller_status":
-		return true
-	}
-	return false
-}
-
 // withDefaultCancelActor supplies the Go MCP surface's "mcp" actor when a
-// cancel call omits one. The shared schema requires the actor, so the default
-// is applied before admission rather than after it.
+// cancel call omits one or names nobody (""). The shared schema requires the
+// actor, so the default is applied before admission rather than after it.
 func withDefaultCancelActor(raw json.RawMessage) json.RawMessage {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return raw
 	}
-	if _, ok := fields["actor"]; ok {
-		return raw
+	if existing, ok := fields["actor"]; ok {
+		var value string
+		if json.Unmarshal(existing, &value) == nil && value != "" {
+			return raw
+		}
 	}
 	fields["actor"] = json.RawMessage(`"mcp"`)
 	out, err := json.Marshal(fields)

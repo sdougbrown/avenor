@@ -23,46 +23,55 @@
   },
   "applicability": {
     "status": {
+      "access": "read",
       "permitted": ["action", "workflow_id", "supervisor_id"],
       "required": ["action", "workflow_id"],
       "types": {"action": "string", "workflow_id": "string", "supervisor_id": "string"}
     },
     "inspect": {
+      "access": "read",
       "permitted": ["action", "workflow_id", "supervisor_id"],
       "required": ["action", "workflow_id"],
       "types": {"action": "string", "workflow_id": "string", "supervisor_id": "string"}
     },
     "events": {
+      "access": "read",
       "permitted": ["action", "workflow_id", "after_seq", "limit", "supervisor_id"],
       "required": ["action", "workflow_id"],
       "types": {"action": "string", "workflow_id": "string", "after_seq": "integer", "limit": "integer", "supervisor_id": "string"}
     },
     "wait": {
+      "access": "read",
       "permitted": ["action", "workflow_id", "timeout", "supervisor_id"],
       "required": ["action", "workflow_id"],
       "types": {"action": "string", "workflow_id": "string", "timeout": "string", "supervisor_id": "string"}
     },
     "ready": {
+      "access": "read",
       "permitted": ["action", "controller_id", "limit", "supervisor_id"],
       "required": ["action", "controller_id"],
       "types": {"action": "string", "controller_id": "string", "limit": "integer", "supervisor_id": "string"}
     },
     "controller_status": {
+      "access": "read",
       "permitted": ["action", "controller_id", "supervisor_id"],
       "required": ["action"],
       "types": {"action": "string", "controller_id": "string", "supervisor_id": "string"}
     },
     "gate": {
+      "access": "owner",
       "permitted": ["action", "workflow_id", "node_id", "gate_id", "activation_id", "operation", "actor", "reason", "outcome", "subject", "poll_id", "source", "result", "response_hash", "observed_at", "evidence_ids", "supervisor_id"],
       "required": ["action", "workflow_id", "node_id", "gate_id", "activation_id", "operation"],
       "types": {"action": "string", "workflow_id": "string", "node_id": "string", "gate_id": "string", "activation_id": "string", "operation": "string", "actor": "string", "reason": "string", "outcome": "string", "subject": "json", "poll_id": "string", "source": "string", "result": "string", "response_hash": "string", "observed_at": "string", "evidence_ids": "array", "supervisor_id": "string"}
     },
     "complete": {
+      "access": "owner",
       "permitted": ["action", "workflow_id", "node_id", "activation_id", "attempt_id", "lease_id", "owner_token", "outcome", "outputs", "artifacts", "supervisor_id"],
       "required": ["action", "workflow_id", "node_id", "activation_id", "attempt_id", "lease_id", "owner_token", "outcome"],
       "types": {"action": "string", "workflow_id": "string", "node_id": "string", "activation_id": "string", "attempt_id": "string", "lease_id": "string", "owner_token": "string", "outcome": "string", "outputs": "json", "artifacts": "json", "supervisor_id": "string"}
     },
     "cancel": {
+      "access": "owner",
       "permitted": ["action", "workflow_id", "reason", "actor", "supervisor_id"],
       "required": ["action", "workflow_id", "reason", "actor"],
       "types": {"action": "string", "workflow_id": "string", "reason": "string", "actor": "string", "supervisor_id": "string"}

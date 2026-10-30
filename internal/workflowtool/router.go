@@ -22,6 +22,7 @@ import (
 // both the Go and the TypeScript router validate against; the JSON Schema
 // variants are proven equal to it by TestSchemaMatchesRouteTable.
 type ActionApplicability struct {
+	Access      string                         // read (credential-free) or empty (socket owner)
 	Permitted   []string                       // every property the action accepts, including "action"
 	Required    []string                       // the subset that must be present
 	Types       map[string]string              // declared wire type per permitted property: string, integer, object, array or json
@@ -90,23 +91,35 @@ type Options struct {
 	ClampWait func(time.Duration) (time.Duration, bool)
 }
 
-// Execute routes one avenor_workflow call: decode, validate against the
-// action's applicability entry, then dispatch to the control client.
-func Execute(client Client, input json.RawMessage, opts Options) (Result, error) {
+// Admit validates one call against its action's applicability entry and
+// returns the action it names. Execute runs it first, so a surface can
+// classify the call before it acquires a control client without admitting
+// through a second code path.
+func Admit(input json.RawMessage) (string, error) {
 	fields, err := decodeObject(input)
 	if err != nil {
-		return Result{}, invalidAction()
+		return "", InvalidActionError()
 	}
 	action, ok := fieldString(fields, "action")
 	if !ok {
-		return Result{}, invalidAction()
+		return "", InvalidActionError()
 	}
 	entry, known := workflowApplicability[action]
 	if !known {
-		return Result{}, invalidAction()
+		return "", InvalidActionError()
 	}
 	if detail := validateFields(fields, entry); detail != "" {
-		return Result{}, invalidRequest(action, detail)
+		return "", invalidRequest(action, detail)
+	}
+	return action, nil
+}
+
+// Execute routes one avenor_workflow call: admit, then dispatch to the
+// control client.
+func Execute(client Client, input json.RawMessage, opts Options) (Result, error) {
+	action, err := Admit(input)
+	if err != nil {
+		return Result{}, err
 	}
 
 	var typed workflowInput
@@ -124,17 +137,14 @@ func Execute(client Client, input json.RawMessage, opts Options) (Result, error)
 			return client.WorkflowInspect(typed.WorkflowID)
 		})
 	case actionEvents:
-		afterSeq, _ := fieldInt64(fields, "after_seq")
-		limit, _ := fieldInt(fields, "limit")
 		return call(action, func() (map[string]any, error) {
-			return client.WorkflowEvents(typed.WorkflowID, afterSeq, limit)
+			return client.WorkflowEvents(typed.WorkflowID, typed.afterSeq(), typed.limit())
 		})
 	case actionWait:
 		return wait(client, typed, opts)
 	case actionReady:
-		limit, _ := fieldInt(fields, "limit")
 		return call(action, func() (map[string]any, error) {
-			return client.WorkflowReady(typed.ControllerID, limit)
+			return client.WorkflowReady(typed.ControllerID, typed.limit())
 		})
 	case actionControllerStatus:
 		if typed.ControllerID == "" {
@@ -268,6 +278,8 @@ type workflowInput struct {
 	WorkflowID   string          `json:"workflow_id"`
 	ControllerID string          `json:"controller_id"`
 	SupervisorID string          `json:"supervisor_id"`
+	AfterSeq     json.Number     `json:"after_seq"`
+	Limit        json.Number     `json:"limit"`
 	Timeout      string          `json:"timeout"`
 	NodeID       string          `json:"node_id"`
 	GateID       string          `json:"gate_id"`
@@ -391,21 +403,23 @@ func fieldString(fields map[string]json.RawMessage, name string) (string, bool) 
 	return value, true
 }
 
-func fieldInt64(fields map[string]json.RawMessage, name string) (int64, bool) {
-	raw, ok := fields[name]
-	if !ok {
-		return 0, false
-	}
-	rational, ok := exactInteger(raw)
+// afterSeq and limit convert the admitted integers. Admission has already
+// pinned them to the int64 range, so the conversion cannot overflow. An
+// omitted number decodes as the zero value, which is the server default.
+func (in workflowInput) afterSeq() int64 {
+	rational, ok := exactInteger(json.RawMessage(in.AfterSeq))
 	if !ok || !rational.Num().IsInt64() {
-		return 0, false
+		return 0
 	}
-	return rational.Num().Int64(), true
+	return rational.Num().Int64()
 }
 
-func fieldInt(fields map[string]json.RawMessage, name string) (int, bool) {
-	value, ok := fieldInt64(fields, name)
-	return int(value), ok
+func (in workflowInput) limit() int {
+	rational, ok := exactInteger(json.RawMessage(in.Limit))
+	if !ok || !rational.Num().IsInt64() {
+		return 0
+	}
+	return int(rational.Num().Int64())
 }
 
 // validateFields applies one action's applicability entry in the fixed order:
@@ -616,9 +630,14 @@ func maxIntegerBound(constraint PropertyConstraints) string {
 	return "9223372036854775807"
 }
 
-func invalidAction() *ToolError {
+// InvalidActionError is the typed denial for an input that names no known
+// action, exported so a surface that pre-admits renders the same sentence
+// Execute does instead of assembling the error by hand.
+func InvalidActionError() *ToolError {
 	return &ToolError{Code: "invalid_action", Message: Repair("workflow_invalid_action", nil), Facts: map[string]string{}}
 }
+
+func invalidAction() *ToolError { return InvalidActionError() }
 
 func invalidRequest(action, detail string) *ToolError {
 	facts := map[string]string{"action": quote(action), "detail": detail}
@@ -673,6 +692,20 @@ func parseTimeoutSeconds(value string) (int64, error) {
 	}
 	return amount * multiplier, nil
 }
+
+// IsReadOnly reports whether an action only reads supervisor state, so it
+// acquires the credential-free client the read-only tools use. The access
+// level is the applicability table's, so a new action cannot silently
+// authenticate as the socket owner.
+func IsReadOnly(action string) bool {
+	return workflowApplicability[action].Access == accessRead
+}
+
+// The access levels an applicability entry carries.
+const (
+	accessRead  = "read"
+	accessOwner = ""
+)
 
 // The nine workflow actions. The spellings are the schema's action enum.
 const (

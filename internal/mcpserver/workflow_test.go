@@ -4,11 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/control"
 )
 
 // newWorkflowTestServer builds a server wired to a fake control client and no
@@ -79,7 +85,7 @@ func TestWorkflowRequiredArgs(t *testing.T) {
 			if !strings.Contains(text, tc.want) {
 				t.Fatalf("error %q does not mention %q", text, tc.want)
 			}
-			if len(fake.workflowStatusCalls)+len(fake.workflowWaitCalls)+len(fake.workflowCompleteCalls)+len(fake.workflowGateCalls)+len(fake.workflowCancelCalls) != 0 {
+			if len(fake.workflowStatusCalls)+len(fake.workflowWaitCalls)+len(fake.workflowEventsCalls)+len(fake.workflowReadyCalls)+len(fake.workflowCompleteCalls)+len(fake.workflowGateCalls)+len(fake.workflowCancelCalls) != 0 {
 				t.Fatal("a refused call reached the control client")
 			}
 		})
@@ -321,10 +327,98 @@ func TestWorkflowCancelHandler(t *testing.T) {
 	}
 }
 
+func TestWorkflowCancelHandlerEmptyActor(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+	callWorkflow(t, s, `{"action":"cancel","workflow_id":"wf_1","reason":"why","actor":""}`)
+	if got := fake.workflowCancelCalls[0].actor; got != "mcp" {
+		t.Fatalf("empty actor got %q want mcp", got)
+	}
+}
+
 func TestWorkflowCancelHandlerExplicitActor(t *testing.T) {
 	s, fake := newWorkflowTestServer(t)
 	callWorkflow(t, s, `{"action":"cancel","workflow_id":"wf_1","reason":"why","actor":"review-pr-auto"}`)
 	if got := fake.workflowCancelCalls[0].actor; got != "review-pr-auto" {
 		t.Fatalf("actor got %q want review-pr-auto", got)
+	}
+}
+
+// fakeControlWorkflowHandler answers the workflow methods a merged-tool call
+// dispatches, over a real in-process control server.
+type fakeControlWorkflowHandler struct{ mu sync.Mutex }
+
+func (f *fakeControlWorkflowHandler) WorkflowCreate(json.RawMessage) (any, error) {
+	return map[string]any{}, nil
+}
+func (f *fakeControlWorkflowHandler) WorkflowInstantiate(json.RawMessage) (any, error) {
+	return map[string]any{}, nil
+}
+func (f *fakeControlWorkflowHandler) WorkflowStatus(string) (any, error) {
+	return map[string]any{"status": "active"}, nil
+}
+func (f *fakeControlWorkflowHandler) WorkflowWait(string, time.Duration) (any, error) {
+	return map[string]any{"terminal": true}, nil
+}
+func (f *fakeControlWorkflowHandler) WorkflowInspect(string) (any, error) {
+	return map[string]any{"attempts": map[string]any{}}, nil
+}
+func (f *fakeControlWorkflowHandler) WorkflowEvents(string, int64, int) (any, error) {
+	return map[string]any{"events": []any{}}, nil
+}
+func (f *fakeControlWorkflowHandler) WorkflowCancel(string, json.RawMessage) (any, error) {
+	return map[string]any{"status": "canceled"}, nil
+}
+func (f *fakeControlWorkflowHandler) WorkflowCommand(string, json.RawMessage) (any, error) {
+	return map[string]any{"accepted": true}, nil
+}
+
+// TestWorkflowActionAccessChoosesTheDialSeam proves the access level the shared
+// contract carries decides the credential mode: a read action dials the
+// credential-free seam, a mutating action attaches as the socket owner.
+func TestWorkflowActionAccessChoosesTheDialSeam(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "wf-access.sock")
+	owner, err := control.GenerateOwnerCapability()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlServer := control.NewServer(control.NewState("run_1", "demo", 0), owner)
+	controlServer.SetWorkflowHandler(&fakeControlWorkflowHandler{})
+	if err := controlServer.Start(sock); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	t.Cleanup(func() { _ = controlServer.Stop() })
+
+	var readDials, ownerDials atomic.Int32
+	origDial, origAttach := dialSupervisorClient, attachSupervisorClient
+	dialSupervisorClient = func(p string) (*client.Client, error) {
+		readDials.Add(1)
+		return origDial(p)
+	}
+	attachSupervisorClient = func(p string) (*client.Client, error) {
+		ownerDials.Add(1)
+		return origAttach(p)
+	}
+	t.Cleanup(func() { dialSupervisorClient, attachSupervisorClient = origDial, origAttach })
+
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, SupervisorSocket: sock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	result := callWorkflow(t, s, `{"action":"status","workflow_id":"wf-1"}`)
+	if res, ok := result.StructuredContent.(map[string]any); !ok || res["status"] != "active" {
+		t.Fatalf("status result = %#v, want the fake handler's snapshot", result.StructuredContent)
+	}
+	if readDials.Load() != 1 || ownerDials.Load() != 0 {
+		t.Fatalf("read action: read dials = %d, owner dials = %d, want 1/0", readDials.Load(), ownerDials.Load())
+	}
+
+	result = callWorkflow(t, s, `{"action":"cancel","workflow_id":"wf-1","reason":"why","actor":"verify"}`)
+	if res, ok := result.StructuredContent.(map[string]any); !ok || res["status"] != "canceled" {
+		t.Fatalf("cancel result = %#v, want the fake handler's snapshot", result.StructuredContent)
+	}
+	if ownerDials.Load() != 1 {
+		t.Fatalf("mutating action: owner dials = %d, want 1", ownerDials.Load())
 	}
 }
