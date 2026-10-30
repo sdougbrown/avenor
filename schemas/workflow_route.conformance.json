@@ -149,6 +149,11 @@
       "expect": {"code": "invalid_request", "message": "invalid input for action \"wait\": invalid timeout: \"0s\""}
     },
     {
+      "name": "gate refuses an impossible timezone offset",
+      "input": {"action": "gate", "workflow_id": "wf-1", "node_id": "n1", "gate_id": "g1", "activation_id": "a1", "operation": "satisfy", "observed_at": "2026-01-01T00:00:00+99:99"},
+      "expect": {"code": "invalid_request", "message": "invalid input for action \"gate\": property \"observed_at\" must be an RFC3339 timestamp"}
+    },
+    {
       "name": "cancel refuses an empty reason",
       "input": {"action": "cancel", "workflow_id": "wf-1", "reason": "", "actor": "op"},
       "expect": {"code": "invalid_request", "message": "invalid input for action \"cancel\": property \"reason\" must be at least 1 characters"}

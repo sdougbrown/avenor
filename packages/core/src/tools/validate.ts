@@ -28,18 +28,27 @@ function isLeapYear(year: number): boolean {
 
 export function validateObservedAt(observedAt: string): void {
   // RFC3339: a calendar date and time with a timezone. The regex pins the shape
-  // and the component checks reject an impossible date such as month 13, which
-  // the Go router's time.Parse(time.RFC3339) also rejects.
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(observedAt)
+  // and the component checks reject an impossible date, matching what the Go
+  // router's time.Parse(time.RFC3339) rejects.
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(observedAt)
   if (!match) {
     throw new Error('observed_at must be an RFC3339 timestamp')
   }
-  const [year, month, day, hour, minute, second] = match.slice(1).map(Number)
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number)
   if (month < 1 || month > 12) {
     throw new Error('observed_at must be an RFC3339 timestamp')
   }
   const maxDay = month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month - 1]
   if (day < 1 || day > maxDay || hour > 23 || minute > 59 || second > 59) {
     throw new Error('observed_at must be an RFC3339 timestamp')
+  }
+  // Go's parser deliberately accepts an offset of 24 hours or 60 minutes
+  // ("some people do write" them) and rejects anything beyond.
+  if (match[7] !== undefined) {
+    const offsetHour = Number(match[7])
+    const offsetMinute = Number(match[8])
+    if (offsetHour > 24 || offsetMinute > 60) {
+      throw new Error('observed_at must be an RFC3339 timestamp')
+    }
   }
 }

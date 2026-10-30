@@ -169,6 +169,25 @@ describe('avenor_workflow numeric and timestamp bounds', () => {
       await expect(executeWorkflow(fakeProvider().provider, gate(observedAt))).resolves.toMatchObject({ action: 'gate' })
     }
   })
+
+  it('bounds the timezone offset the way the Go parser does', async () => {
+    const gate = (observedAt: string) => ({
+      action: 'gate',
+      workflow_id: 'wf-1',
+      node_id: 'n1',
+      gate_id: 'g1',
+      activation_id: 'a1',
+      operation: 'satisfy',
+      observed_at: observedAt,
+    })
+    for (const observedAt of ['2026-01-01T00:00:00+25:00', '2026-01-01T00:00:00+00:61', '2026-01-01T00:00:00+99:99']) {
+      await expect(executeWorkflow(fakeProvider().provider, gate(observedAt))).rejects.toMatchObject({ code: 'invalid_request' })
+    }
+    // Go's parser deliberately accepts 24 hours and 60 minutes.
+    for (const observedAt of ['2026-01-01T00:00:00+24:00', '2026-01-01T00:00:00+00:60', '2026-01-01T00:00:00-23:59']) {
+      await expect(executeWorkflow(fakeProvider().provider, gate(observedAt))).resolves.toMatchObject({ action: 'gate' })
+    }
+  })
 })
 
 describe('avenor_workflow supervisor binding', () => {
