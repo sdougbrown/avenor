@@ -19,6 +19,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/internal/mcpserver"
+	"github.com/sdougbrown/avenor/internal/runstate"
 )
 
 type resultAuthTransport struct{}
@@ -38,6 +39,11 @@ func TestMCPResultUsesRealSupervisorTurnOwnership(t *testing.T) {
 	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
 	rt := h.spawn(map[string]any{"sentinel_file": sentinel, "on_event": eventPath, "label": "mcp-result"})
 	h.waitTurn(rt)
+	// waitTurn returns when the turn settles, which is before the success
+	// presentation sets the terminal phase: the settle clears the phase and
+	// the presentation sets it again. Wait for the terminal status so the
+	// result tool reads a completed run rather than a mid-transition one.
+	waitForTerminalStatus(t, h.sup, rt)
 	if err := os.Remove(eventPath); err != nil {
 		t.Fatal(err)
 	}
@@ -70,4 +76,22 @@ func TestMCPResultUsesRealSupervisorTurnOwnership(t *testing.T) {
 	if got != output || data["output_truncated"] == true {
 		t.Fatalf("result output length = %d, truncated = %v", len(got), data["output_truncated"])
 	}
+}
+
+// waitForTerminalStatus blocks until the runtime's consumer-facing status is
+// terminal. A settled turn clears its phase before the success presentation
+// sets it again, so the raw status reads idle with no phase in between.
+func waitForTerminalStatus(t *testing.T, sup *Supervisor, rtID string) {
+	t.Helper()
+	waitFor(t, "terminal status for "+rtID, func() bool {
+		raw, err := sup.RuntimeStatus(rtID)
+		if err != nil {
+			return false
+		}
+		status, _ := raw.(map[string]any)
+		rawStatus, _ := status["status"].(string)
+		rawPhase, _ := status["phase"].(string)
+		return runstate.IsTerminalStatus(runstate.RuntimeStatus(rawStatus)) ||
+			runstate.Translate(runstate.RuntimeStatus(rawStatus), runstate.Phase(rawPhase)).TurnComplete
+	})
 }
