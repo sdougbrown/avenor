@@ -35,7 +35,7 @@ Add `@dougbots/avenor-opencode` to your OpenCode configuration. If you use a glo
 
 For a project-level config, add the same entry to `.opencode.json` in your repo root.
 
-Once registered, the plugin exposes these tools that your OpenCode agent can call directly — no extra configuration required: `avenor_spawn`, `avenor_status`, `avenor_result`, `avenor_inspect`, `avenor_answer_permission`, `avenor_message`, `avenor_peers`, `avenor_events`, `avenor_kill`, `avenor_shutdown`, `avenor_workflow_cancel`, `avenor_workflow_status`, `avenor_workflow_wait`, `avenor_workflow_inspect`, `avenor_workflow_events`, `avenor_workflow_complete`, `avenor_workflow_gate`, and `avenor_workflow_controller_status`.
+Once registered, the plugin exposes these tools that your OpenCode agent can call directly — no extra configuration required: `avenor_spawn`, `avenor_status`, `avenor_result`, `avenor_inspect`, `avenor_answer_permission`, `avenor_message`, `avenor_peers`, `avenor_events`, `avenor_kill`, `avenor_shutdown`, and `avenor_workflow`.
 
 ## Behaviour
 
@@ -185,30 +185,23 @@ Terminate a run without shutting down the supervisor. Other runs and the supervi
 | `run_id` | yes | Run ID or label of the run to terminate |
 | `supervisor_id` | no | Supervisor ID for multi-supervisor mode |
 
-### `avenor_workflow_cancel`
+### `avenor_workflow`
 
-Cancel a workflow instance. Both the actor and the reason are required; the manager rejects a missing actor before it looks at the reason.
+Drive a durable workflow instance. One `action` selects the verb; every action takes an optional `supervisor_id` for multi-supervisor mode. Read-only actions need no permission; `gate`, `complete` and `cancel` keep their authority checks.
 
-| Argument | Required | Description |
+| Action | Arguments | Purpose |
 |---|---|---|
-| `workflow_id` | yes | Workflow ID |
-| `actor` | yes | Who is cancelling |
-| `reason` | yes | Why the workflow is being cancelled |
-| `supervisor_id` | no | Supervisor ID for multi-supervisor mode |
+| `status` | `workflow_id` | Lightweight instance status |
+| `inspect` | `workflow_id` | Full instance detail |
+| `events` | `workflow_id`, `after_seq`, `limit` | The instance's log events |
+| `wait` | `workflow_id`, `timeout` | Wait for a terminal state or a timeout |
+| `ready` | `controller_id`, `limit` | Claimable auto-dispatch candidates; grants no lease |
+| `controller_status` | `controller_id` | One controller's status with an advisory candidate count, or a summary list without it |
+| `gate` | `workflow_id`, `node_id`, `gate_id`, `activation_id`, `operation`, and the operation's fields | Record a gate decision on a parked `awaiting_gate` activation |
+| `complete` | `workflow_id`, `node_id`, `activation_id`, `attempt_id`, `lease_id`, `owner_token`, `outcome`, `outputs`, `artifacts` | Complete a machine/external handoff activation |
+| `cancel` | `workflow_id`, `actor`, `reason` | Cancel the whole instance (terminal `canceled`) |
 
-### Workflow tools
-
-The remaining workflow tools read or drive workflow instances. Their argument lists are in [`docs/control-protocol.md`](../../docs/control-protocol.md).
-
-| Tool | Purpose |
-|---|---|
-| `avenor_workflow_status` | Lightweight instance status |
-| `avenor_workflow_wait` | Wait for a terminal state or a timeout |
-| `avenor_workflow_inspect` | Full instance detail |
-| `avenor_workflow_events` | The instance's log events |
-| `avenor_workflow_complete` | Complete a machine/external handoff activation |
-| `avenor_workflow_gate` | Record a gate decision on a parked activation |
-| `avenor_workflow_controller_status` | Controller status, with an advisory candidate count |
+The underlying control methods are in [`docs/control-protocol.md`](../../docs/control-protocol.md).
 
 ### `avenor_shutdown`
 

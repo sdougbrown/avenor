@@ -31,7 +31,7 @@ Pi returns JSON model content in `content[0].text` and structured `details` for 
 
 The OpenCode plugin uses the shared observer for live tool metadata, waiting/permission transitions, and final output. It also exposes `avenor_inspect`. OpenCode does not currently reproduce Pi's full-screen overlay; presentation remains host-specific.
 
-OpenCode returns concise, bounded prose in its shared `output` for `avenor_status`, `avenor_result`, `avenor_answer_permission`, `avenor_message`, `avenor_peers`, `avenor_workflow_cancel`, `avenor_events`, `avenor_inspect`, `avenor_kill`, and `avenor_shutdown`. Structured metadata stays in host/session state. MCP clients render their own results.
+OpenCode returns concise, bounded prose in its shared `output` for `avenor_status`, `avenor_result`, `avenor_answer_permission`, `avenor_message`, `avenor_peers`, `avenor_workflow`, `avenor_events`, `avenor_inspect`, `avenor_kill`, and `avenor_shutdown`. Structured metadata stays in host/session state. MCP clients render their own results.
 
 ## Fidelity boundaries
 

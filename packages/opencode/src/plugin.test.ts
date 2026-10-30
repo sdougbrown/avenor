@@ -9,6 +9,7 @@ import { THINKING_LEVELS } from '../../core/src/thinking-policy.js'
 import { ToolError, renderPeerList } from '../../core/src/message.js'
 import { ClosedSocketError, isClosedSocketError } from '../../core/src/client.js'
 import { boundFinalOutput, extractTurnText, normalizeTurnStopReason, renderLast } from '../../core/src/messaging-text.js'
+import { withCandidateCount } from '../../core/src/tools/workflow.js'
 import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
 import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
 import type { MessageProvider } from '../../core/src/tools/message.js'
@@ -203,6 +204,7 @@ mock.module('@dougbots/avenor-core', () => ({
   extractTurnText,
   normalizeTurnStopReason,
   runWorkflowTool: runWorkflowToolMock,
+  withCandidateCount,
   resultTool: resultToolMock,
   shutdownTool: shutdownToolMock,
   killTool: killToolMock,
@@ -1082,6 +1084,34 @@ describe('AvenorPlugin', () => {
 
     expect(runWorkflowToolMock).toHaveBeenCalledWith({ action: 'controller_status', controller_id: 'ctl', supervisor_id: 'sup-a' })
     expect(output.output).toBe('No workflow controllers configured.')
+  })
+
+  it('enriches controller status metadata with an advisory candidate count', async () => {
+    runWorkflowToolMock.mockImplementation(async (args: Record<string, unknown>) => {
+      if (args.action === 'ready') return { action: 'ready', value: { candidates: [{}, {}] } }
+      return { action: 'controller_status', value: { controller_id: 'ctl', desired_state: 'enabled', inflight: 1 } }
+    })
+
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
+    const output = await (hooks.tool?.avenor_workflow as any).execute({ action: 'controller_status', controller_id: 'ctl' }, context)
+
+    expect(output.metadata.candidate_count).toBe(2)
+    expect(output.metadata.controller_id).toBe('ctl')
+  })
+
+  it('omits the candidate count when the ready query fails', async () => {
+    runWorkflowToolMock.mockImplementation(async (args: Record<string, unknown>) => {
+      if (args.action === 'ready') throw new Error('-32601 method not found')
+      return { action: 'controller_status', value: { controller_id: 'ctl', desired_state: 'enabled' } }
+    })
+
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
+    const output = await (hooks.tool?.avenor_workflow as any).execute({ action: 'controller_status', controller_id: 'ctl' }, context)
+
+    expect(output.metadata.candidate_count).toBeUndefined()
+    expect(output.metadata.controller_id).toBe('ctl')
   })
 })
 

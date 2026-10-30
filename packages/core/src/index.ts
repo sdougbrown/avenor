@@ -124,5 +124,5 @@ export type { BrokerReceiveArgs, InboundAsk, BrokerReceiveResult } from './tools
 export type { ExecutionIdentity, WorkflowGateOperation, WorkflowCompleteParams, WorkflowGateParams, WorkflowHeartbeatParams, WorkflowControllerCreateParams } from './client.js'
 export { WorkflowToolError } from './workflow.js'
 export type { WorkflowAction, WorkflowInput, WorkflowProvider, WorkflowResult } from './workflow.js'
-export { runWorkflowTool } from './tools/workflow.js'
+export { runWorkflowTool, withCandidateCount } from './tools/workflow.js'
 

@@ -48,6 +48,7 @@ import {
   THINKING_LEVELS,
   validateSpawnSelection,
   runWorkflowTool,
+  withCandidateCount,
   type AskClaims,
   type Client,
   type InspectResult,
@@ -2879,7 +2880,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const result = await deps.runWorkflowTool(params)
         return {
           content: [{ type: 'text', text: JSON.stringify(result.value, null, 2) }],
-          details: result.value,
+          details: await withCandidateCount(deps.runWorkflowTool, params, result.value),
         }
       },
       renderCall(args, theme) {
@@ -2890,7 +2891,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       },
     })
 
-pi.registerTool({
+    pi.registerTool({
       name: 'avenor_events',
       label: 'Avenor Events',
       description: 'Read events from a run. Filter by type. Returns last N events.',
@@ -2997,13 +2998,6 @@ pi.registerTool({
       },
     })
 
-    
-    
-    
-    
-    
-    
-    
     pi.registerCommand('avenor-status', {
       description: 'Show status of all avenor runs',
       handler: async (_args, ctx) => {

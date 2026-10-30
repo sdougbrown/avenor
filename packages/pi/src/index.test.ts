@@ -202,6 +202,30 @@ describe('Avenor Pi extension', () => {
     expect(outcome.details).toEqual({ status: 'active' })
   })
 
+  it('enriches controller status details with an advisory candidate count', async () => {
+    const runTool = mock(async (args: any) => {
+      if (args.action === 'ready') return { action: 'ready', value: { candidates: [{}, {}] } } as WorkflowResult
+      return { action: 'controller_status', value: { controller_id: 'ctl', desired_state: 'enabled', inflight: 1 } } as WorkflowResult
+    })
+    const harness = await startExtensionHarness({ deps: { runWorkflowTool: runTool } })
+    const tool = harness.registeredTools.avenor_workflow
+    const outcome = await tool.execute('tool-1', { action: 'controller_status', controller_id: 'ctl' })
+    expect(outcome.details.candidate_count).toBe(2)
+    expect(outcome.details.controller_id).toBe('ctl')
+  })
+
+  it('omits the candidate count when the ready query fails', async () => {
+    const runTool = mock(async (args: any) => {
+      if (args.action === 'ready') throw new Error('-32601 method not found')
+      return { action: 'controller_status', value: { controller_id: 'ctl', desired_state: 'enabled' } } as WorkflowResult
+    })
+    const harness = await startExtensionHarness({ deps: { runWorkflowTool: runTool } })
+    const tool = harness.registeredTools.avenor_workflow
+    const outcome = await tool.execute('tool-1', { action: 'controller_status', controller_id: 'ctl' })
+    expect(outcome.details.candidate_count).toBeUndefined()
+    expect(outcome.details.controller_id).toBe('ctl')
+  })
+
 
   it('only reuses a supervisor socket when the caller supplied one', () => {
     expect(statusSupervisorId(undefined, '/tmp/spawned.sock')).toBeUndefined()

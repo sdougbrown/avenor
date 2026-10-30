@@ -690,11 +690,26 @@ export function renderWorkflowCall(args: WorkflowArgs, theme: Theme): Text {
   return linesText([pieces.join(' ')], theme)
 }
 
+/**
+ * The workflow actions other than controller_status return the control
+ * method's result object unchanged, and their shapes differ per action. The
+ * renderer shows that object as JSON: a preview when collapsed, the whole
+ * object when expanded.
+ */
+function workflowLines(details: unknown, expanded: boolean): string[] | undefined {
+  if (details === undefined || details === null) return undefined
+  const json = JSON.stringify(details, null, 2)
+  if (!json) return undefined
+  const lines = json.split('\n')
+  if (expanded || lines.length <= STATUS_ROWS) return lines
+  return [...lines.slice(0, STATUS_ROWS), lineMarker(lines.length - STATUS_ROWS)]
+}
+
 export function renderWorkflowResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: WorkflowArgs): Text {
   if (args.action === 'controller_status') {
     return render('workflow controller status', result, options, theme, () =>
       controllerStatusLines(result.details, args, options.expanded) ?? controllerListLines(result.details, args, options.expanded))
   }
-  return render('workflow', result, options, theme, () => undefined)
+  return render('workflow', result, options, theme, () => workflowLines(result.details, options.expanded))
 }
 

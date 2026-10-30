@@ -44,6 +44,7 @@ import {
   THINKING_LEVELS,
   validateSpawnSelection,
   runWorkflowTool,
+  withCandidateCount,
 } from '@dougbots/avenor-core'
 
 type TrackedRun = {
@@ -1365,7 +1366,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
         async execute(args, _context) {
           const result = await runWorkflowTool(args)
           if (args.action === 'controller_status') {
-            return formatWorkflowControllerStatusOutput(args, result.value)
+            return formatWorkflowControllerStatusOutput(args, await withCandidateCount(runWorkflowTool, args, result.value))
           }
           return { title: 'workflow', output: JSON.stringify(result.value, null, 2) }
         },

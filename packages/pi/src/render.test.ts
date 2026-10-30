@@ -518,4 +518,23 @@ describe('Avenor Pi renderers', () => {
       'Retry the tool or use avenor_status/avenor_inspect.',
     ].join('\n'))
   })
+
+  it('renders every other workflow action as its result JSON', () => {
+    const status = result({ workflow_id: 'wf-1', status: 'active' })
+    const want = ['{', '  "workflow_id": "wf-1",', '  "status": "active"', '}'].join('\n')
+    for (const action of ['status', 'inspect', 'events', 'wait', 'ready', 'gate', 'complete', 'cancel']) {
+      expect(text(renderWorkflowResult(status, collapsed, theme, { action }))).toBe(want)
+    }
+    expect(text(renderWorkflowResult(status, expanded, theme, { action: 'status' }))).toBe(want)
+  })
+
+  it('clips a long workflow result when collapsed and shows it whole when expanded', () => {
+    const details = { workflow_id: 'wf-1', nodes: Array.from({ length: 20 }, (_, i) => ({ id: `n${i}` })) }
+    const collapsedView = text(renderWorkflowResult(result(details), collapsed, theme, { action: 'inspect' }))
+    expect(collapsedView).toContain('lines omitted')
+    expect(collapsedView).not.toContain('"n19"')
+    const expandedView = text(renderWorkflowResult(result(details), expanded, theme, { action: 'inspect' }))
+    expect(expandedView).not.toContain('lines omitted')
+    expect(expandedView).toContain('"n19"')
+  })
 })
