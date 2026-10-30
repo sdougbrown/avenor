@@ -175,9 +175,7 @@ function hasWireType(value: unknown, kind: string): boolean {
     case 'string':
       return typeof value === 'string'
     case 'integer':
-      // Go's wire type requires the exact rational to fit int64; a JSON number
-      // outside that range is a type error, not a violated bound.
-      return typeof value === 'number' && Number.isInteger(value) && value >= -(2 ** 63) && value < 2 ** 63
+      return typeof value === 'number' && Number.isInteger(value)
     case 'object':
       return value !== null && typeof value === 'object' && !Array.isArray(value)
     case 'array':
@@ -243,6 +241,21 @@ function validateFields(fields: Record<string, unknown>, entry: ApplicabilityEnt
     }
     if (kind === 'integer') {
       const constraint = constraints.integers[name]
+      // A value beyond the int64 wire range names the declared bound, or the
+      // int64 limit where the schema declares none — the sentence the Go router
+      // renders for the same input. A bound at the int64 limit does not survive
+      // JSON.parse exactly, so the limit is named literally there.
+      const number = value as number
+      if (number >= 2 ** 63 || number < -(2 ** 63)) {
+        const bound = number >= 2 ** 63 ? 'integer_too_large' : 'integer_too_small'
+        const declaredMax = constraint?.maximum
+        const declaredMin = constraint?.minimum
+        return repair(bound, {
+          name: quote(name),
+          max: declaredMax !== undefined && Number.isSafeInteger(declaredMax) ? String(declaredMax) : '9223372036854775807',
+          min: declaredMin !== undefined && Number.isSafeInteger(declaredMin) ? String(declaredMin) : '-9223372036854775808',
+        })
+      }
       if (!constraint) continue
       if (constraint.minimum !== undefined && (value as number) < constraint.minimum) {
         return repair('integer_too_small', { name: quote(name), min: String(constraint.minimum) })
