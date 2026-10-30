@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/flatgen"
+	"github.com/sdougbrown/avenor/internal/flatgen/genschema"
 )
 
 // TestGenerateKeepsADeclaredZeroMaximum pins the compiled table's distinction
@@ -16,7 +17,7 @@ import (
 func TestGenerateKeepsADeclaredZeroMaximum(t *testing.T) {
 	messageSchema := []byte(`{"oneOf":[{"properties":{"action":{"const":"ask"},"timeout_ms":{"type":"integer","minimum":0,"maximum":0}}}]}`)
 	peersSchema := []byte(`{"oneOf":[]}`)
-	conformance := conformanceFixture{Applicability: map[string]applicabilityEntry{
+	conformance := genschema.ConformanceFixture{Applicability: map[string]genschema.ApplicabilityEntry{
 		"ask": {Permitted: []string{"action", "timeout_ms"}, Types: map[string]string{"action": "string", "timeout_ms": "integer"}},
 	}}
 
