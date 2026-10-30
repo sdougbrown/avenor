@@ -352,7 +352,7 @@ function listedTool(tools: Array<{ name: string; inputSchema: any }>, name: stri
 }
 
 describe('avenor MCP messaging tools', () => {
-  it('registers message, peers, and workflow_cancel without the avenor_ prefix', async () => {
+  it('registers the exact merged tool set without the avenor_ prefix', async () => {
     await withClient(async (client) => {
       const { tools } = await client.listTools()
       const names = tools.map(tool => tool.name).sort()
