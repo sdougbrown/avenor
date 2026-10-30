@@ -164,7 +164,7 @@ describe('avenor_workflow numeric and timestamp bounds', () => {
     for (const observedAt of refused) {
       await expect(executeWorkflow(fakeProvider().provider, gate(observedAt))).rejects.toMatchObject({ code: 'invalid_request' })
     }
-    const accepted = ['2024-02-29T00:00:00Z', '2000-02-29T00:00:00Z', '2026-01-31T23:59:59Z']
+    const accepted = ['2024-02-29T00:00:00Z', '2000-02-29T00:00:00Z', '2026-01-31T23:59:59Z', '2026-01-01T00:00:00.123Z', '2026-01-01T00:00:00.5+02:00']
     for (const observedAt of accepted) {
       await expect(executeWorkflow(fakeProvider().provider, gate(observedAt))).resolves.toMatchObject({ action: 'gate' })
     }
