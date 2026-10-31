@@ -317,7 +317,7 @@ func TestDirectCLINamesTheOmittedBackendForMCPWait(t *testing.T) {
 
 // A wait outside the limit is a duration mistake, so naming the backend would
 // send the caller to the wrong flag.
-func TestDirectCLIKeeepsTheDurationErrorForMCPWait(t *testing.T) {
+func TestDirectCLIKeepsTheDurationErrorForMCPWait(t *testing.T) {
 	called := stubRunAttempt(t)
 	var stderr strings.Builder
 	if code := run([]string{"--claude-mcp-wait", "90s", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
