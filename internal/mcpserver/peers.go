@@ -6,6 +6,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
+	"github.com/sdougbrown/avenor/internal/toolerr"
 )
 
 // handleAvenorPeers is a thin wrapper over the one peers executor. This surface
@@ -62,17 +63,18 @@ func (s *Server) handleAvenorMessage(ctx context.Context, req *mcp.CallToolReque
 	}, nil
 }
 
-// toolErrorResult renders one router tool error the way the two child surfaces
-// do: the rendered sentence as content, the same object as structured content,
-// and the error flag set so a client branching on it sees the failure. Any
+// toolErrorResult renders one merged tool's typed error the way every surface
+// does: the rendered sentence as content, the same object as structured
+// content, and the error flag set so a client branching on it sees the failure.
+// Both routers raise the shared tool error, so one mapping serves them. Any
 // other error goes back to the JSON-RPC layer.
 func toolErrorResult(err error) (*mcp.CallToolResult, error) {
-	object, text, ok := router.ToolFailure(err)
+	object, message, ok := toolerr.ToolFailure(err)
 	if !ok {
 		return nil, err
 	}
 	return &mcp.CallToolResult{
-		Content:           []mcp.Content{&mcp.TextContent{Text: text}},
+		Content:           []mcp.Content{&mcp.TextContent{Text: message}},
 		StructuredContent: object,
 		IsError:           true,
 	}, nil

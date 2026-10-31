@@ -100,6 +100,7 @@
     },
     "reason": {
       "description": "Reason for human gate operations. Reason for the cancel; recorded on the workflow.canceled event.",
+      "minLength": 1,
       "type": "string"
     },
     "response_hash": {

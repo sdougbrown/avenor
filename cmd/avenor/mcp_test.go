@@ -220,6 +220,9 @@ func (s *stubControlClient) WorkflowControllerStatus(string) (map[string]any, er
 func (s *stubControlClient) WorkflowControllerList() (map[string]any, error) {
 	return nil, nil
 }
+func (s *stubControlClient) WorkflowReady(string, int) (map[string]any, error) {
+	return nil, nil
+}
 func (s *stubControlClient) MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	return messaging.SendResult{}, nil
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
+	"github.com/sdougbrown/avenor/internal/workflowtool"
 )
 
 type ControlClient interface {
@@ -47,6 +48,7 @@ type ControlClient interface {
 	WorkflowCancel(workflowID, actor, reason string) (map[string]any, error)
 	WorkflowControllerStatus(controllerID string) (map[string]any, error)
 	WorkflowControllerList() (map[string]any, error)
+	WorkflowReady(controllerID string, limit int) (map[string]any, error)
 
 	MessageSendContext(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error)
 	MessageWaitContext(ctx context.Context, req messaging.WaitRequest) (messaging.WaitResult, error)
@@ -219,73 +221,6 @@ type eventsArgs struct {
 	SupervisorID string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
 }
 
-type workflowStatusArgs struct {
-	WorkflowID   string `json:"workflow_id" jsonschema:"required workflow ID"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowWaitArgs struct {
-	WorkflowID   string `json:"workflow_id" jsonschema:"required workflow ID"`
-	Timeout      string `json:"timeout,omitempty" jsonschema:"optional maximum wait time, such as 30s, 5m, or 1h (default 30s)"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowInspectArgs struct {
-	WorkflowID   string `json:"workflow_id" jsonschema:"required workflow ID"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowEventsArgs struct {
-	WorkflowID   string `json:"workflow_id" jsonschema:"required workflow ID"`
-	AfterSeq     int64  `json:"after_seq,omitempty" jsonschema:"optional only events with sequence greater than this value"`
-	Limit        int    `json:"limit,omitempty" jsonschema:"optional max events to return (0 for server default)"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowCompleteArgs struct {
-	WorkflowID   string          `json:"workflow_id" jsonschema:"required workflow ID"`
-	NodeID       string          `json:"node_id" jsonschema:"required node ID"`
-	ActivationID string          `json:"activation_id" jsonschema:"required activation ID"`
-	AttemptID    string          `json:"attempt_id" jsonschema:"required attempt ID"`
-	LeaseID      string          `json:"lease_id" jsonschema:"required lease ID"`
-	OwnerToken   string          `json:"owner_token" jsonschema:"required lease owner token"`
-	Outcome      string          `json:"outcome" jsonschema:"required declared outcome"`
-	Outputs      json.RawMessage `json:"outputs,omitempty" jsonschema:"optional declared outputs as JSON, for example [{\"definition_id\":\"o1\",\"value\":...}]"`
-	Artifacts    json.RawMessage `json:"artifacts,omitempty" jsonschema:"optional staged evidence artifacts as JSON, for example [{\"src_path\":\"...\",\"stored_path\":\"...\"}]"`
-	SupervisorID string          `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowGateArgs struct {
-	WorkflowID   string          `json:"workflow_id" jsonschema:"required workflow ID"`
-	NodeID       string          `json:"node_id" jsonschema:"required node ID"`
-	GateID       string          `json:"gate_id" jsonschema:"required gate ID"`
-	ActivationID string          `json:"activation_id" jsonschema:"required activation ID"`
-	Operation    string          `json:"operation" jsonschema:"required gate operation (satisfy, reject, waive, or external_result)"`
-	Actor        string          `json:"actor,omitempty" jsonschema:"optional actor id for human gate operations"`
-	Reason       string          `json:"reason,omitempty" jsonschema:"optional reason for human gate operations"`
-	Outcome      string          `json:"outcome,omitempty" jsonschema:"optional outcome for the gate decision (used to branch reject/fail cases)"`
-	Subject      json.RawMessage `json:"subject,omitempty" jsonschema:"optional bound exact subject as JSON, for example {\"type\":\"pr\",\"repository\":\"org/repo\",\"pull_request\":12,\"revision\":\"abc\"}"`
-	PollID       string          `json:"poll_id,omitempty" jsonschema:"optional external poll id (external_result)"`
-	Source       string          `json:"source,omitempty" jsonschema:"optional external result source (external_result)"`
-	Result       string          `json:"result,omitempty" jsonschema:"optional external result status (external_result)"`
-	ResponseHash string          `json:"response_hash,omitempty" jsonschema:"optional response hash (external_result)"`
-	ObservedAt   string          `json:"observed_at,omitempty" jsonschema:"optional observed-at RFC3339 timestamp (external_result)"`
-	EvidenceIDs  []string        `json:"evidence_ids,omitempty" jsonschema:"optional evidence IDs"`
-	SupervisorID string          `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowControllerStatusArgs struct {
-	ControllerID string `json:"controller_id,omitempty" jsonschema:"optional controller ID; omit to list all controllers"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
-type workflowCancelArgs struct {
-	WorkflowID   string `json:"workflow_id" jsonschema:"required workflow ID"`
-	Reason       string `json:"reason" jsonschema:"required reason for the cancel; recorded on the workflow.canceled event"`
-	Actor        string `json:"actor,omitempty" jsonschema:"optional actor id recorded as the canceling operator (default mcp)"`
-	SupervisorID string `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-}
-
 // stderrOr resolves the server's diagnostic writer: the configured writer
 // when set, else the process stderr.
 func stderrOr(w io.Writer) io.Writer {
@@ -331,14 +266,7 @@ func NewServer(opts Options) (*Server, error) {
 			"peers",
 			"events",
 			"kill",
-			"workflow_status",
-			"workflow_wait",
-			"workflow_inspect",
-			"workflow_events",
-			"workflow_complete",
-			"workflow_gate",
-			"workflow_cancel",
-			"workflow_controller_status",
+			"workflow",
 		},
 		diag: &statusDiagnostics{stderr: stderrOr(opts.Stderr)},
 	}
@@ -403,45 +331,16 @@ func NewServer(opts Options) (*Server, error) {
 		InputSchema: messaging.PeersInputFlatSchema(),
 	}, s.handleAvenorPeers)
 
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "workflow_status",
-		Description: "Get lightweight status for a workflow instance",
-	}, s.handleAvenorWorkflowStatus)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "workflow_wait",
-		Description: "Wait for a workflow to reach a terminal state or until timeout. The wait budget is approximate: a single underlying wait may add up to its own timeout.",
-	}, s.handleAvenorWorkflowWait)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "workflow_inspect",
-		Description: "Return the full instance detail for a workflow",
-	}, s.handleAvenorWorkflowInspect)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "workflow_events",
-		Description: "Read log events from a workflow instance's event log",
-	}, s.handleAvenorWorkflowEvents)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "workflow_complete",
-		Description: "Atomically complete a machine/external handoff activation",
-	}, s.handleAvenorWorkflowComplete)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "workflow_gate",
-		Description: "Record a gate decision on a parked awaiting_gate activation",
-	}, s.handleAvenorWorkflowGate)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "workflow_cancel",
-		Description: "Cancel a workflow instance: records the attributed cancel event (actor, reason), releases leases, parks non-terminal activations, and terminates the instance's in-flight attempt runtimes. The instance becomes terminal (canceled); re-canceling is an idempotent no-op, and a completed or failed instance cannot be canceled.",
-	}, s.handleAvenorWorkflowCancel)
-
-	mcp.AddTool(mcpServer, &mcp.Tool{
-		Name:        "workflow_controller_status",
-		Description: "Show workflow controller status. With controller_id, returns that controller's full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).",
-	}, s.handleAvenorWorkflowControllerStatus)
+	// The merged workflow tool publishes the flat object schema compiled from
+	// the shared contract's per-action union and registers through the
+	// raw-arguments handler: admission belongs to the router, so the SDK's own
+	// schema validation must not answer first with an error shape the other
+	// surfaces never produce.
+	mcpServer.AddTool(&mcp.Tool{
+		Name:        "workflow",
+		Description: "Drive a durable workflow instance: read its status, detail, events or wait for it; report controller readiness or status; or record a gate decision, complete a handoff activation, or cancel the instance. Read-only actions need no permission; gate, complete and cancel keep their authority checks.",
+		InputSchema: workflowtool.InputFlatSchema(),
+	}, s.handleAvenorWorkflow)
 
 	return s, nil
 }
@@ -1654,272 +1553,74 @@ func (s *Server) registerResumed(cl ControlClient, supervisorPath string, res me
 	return s.registry.Store(info)
 }
 
-// handleAvenorWorkflowStatus mirrors the workflow.status control verb against
-// the typed WorkflowStatus client method. The workflow ID is passed through
-// unchanged; no identifier is remapped or rewritten.
-func (s *Server) handleAvenorWorkflowStatus(ctx context.Context, req *mcp.CallToolRequest, args workflowStatusArgs) (*mcp.CallToolResult, any, error) {
-	if args.WorkflowID == "" {
-		return nil, nil, fmt.Errorf("workflow_id is required")
+// handleAvenorWorkflow routes the merged workflow tool through the shared
+// router. The control method's result object is the tool's structured content
+// and its indented JSON is the text content, matching the other surfaces that
+// answer this tool.
+func (s *Server) handleAvenorWorkflow(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	raw := toolArguments(req)
+	// The Go MCP surface defaults the cancel actor to "mcp"; the other surfaces
+	// require it explicitly, so the shared schema requires it and this surface
+	// supplies the default before admission. An empty actor names nobody, so it
+	// takes the default too.
+	if workflowtool.ActionOf(raw) == "cancel" {
+		raw = withDefaultCancelActor(raw)
 	}
-	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
+	// Admission runs before a client is acquired, so a malformed action answers
+	// with the repairable sentence even when the named supervisor is undialable.
+	action, err := workflowtool.Admit(raw)
 	if err != nil {
-		return nil, nil, err
+		return toolErrorResult(err)
+	}
+	supervisorID := workflowtool.SupervisorIDOf(raw)
+	var (
+		cl      ControlClient
+		cleanup func()
+	)
+	if workflowtool.IsReadOnly(action) {
+		cl, cleanup, err = s.getReadClientForSupervisor(supervisorID)
+	} else {
+		cl, cleanup, err = s.getClientForSupervisor(supervisorID)
+	}
+	if err != nil {
+		return nil, err
 	}
 	defer cleanup()
-	result, err := cl.WorkflowStatus(args.WorkflowID)
+	result, err := workflowtool.Execute(cl, raw, workflowtool.Options{ClampWait: s.clampWait})
 	if err != nil {
-		return nil, nil, fmt.Errorf("workflow status: %w", err)
+		return toolErrorResult(err)
 	}
-	return nil, result, nil
+	return &mcp.CallToolResult{
+		Content:           []mcp.Content{&mcp.TextContent{Text: result.Text()}},
+		StructuredContent: result.Value,
+	}, nil
 }
 
-// handleAvenorWorkflowWait waits for a workflow to reach a terminal state or
-// until the bounded timeout elapses. It returns the current workflow snapshot.
-func (s *Server) handleAvenorWorkflowWait(ctx context.Context, req *mcp.CallToolRequest, args workflowWaitArgs) (*mcp.CallToolResult, any, error) {
-	if args.WorkflowID == "" {
-		return nil, nil, fmt.Errorf("workflow_id is required")
+// withDefaultCancelActor supplies the Go MCP surface's "mcp" actor when a
+// cancel call omits one or names nobody (""). The shared schema requires the
+// actor, so the default is applied before admission rather than after it.
+func withDefaultCancelActor(raw json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return raw
 	}
-	var requested time.Duration = 30 * time.Second
-	if args.Timeout != "" {
-		seconds, err := parseTimeoutSeconds(args.Timeout)
-		if err != nil {
-			return nil, nil, err
+	if existing, ok := fields["actor"]; ok {
+		var value string
+		if err := json.Unmarshal(existing, &value); err != nil {
+			// A non-string actor is a wire-type violation, not an omission. Leave
+			// it in place so admission refuses it instead of silently defaulting.
+			return raw
 		}
-		requested = time.Duration(seconds) * time.Second
-	}
-	effective, clamped := s.clampWait(requested)
-	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	result, err := cl.WorkflowWait(args.WorkflowID, effective)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow wait: %w", err)
-	}
-	if clamped {
-		timedOut, _ := result["timed_out"].(bool)
-		terminal, _ := result["terminal"].(bool)
-		if timedOut && !terminal {
-			result["wait_clamped"] = true
+		if value != "" {
+			return raw
 		}
 	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowInspect returns the full instance detail for a workflow.
-func (s *Server) handleAvenorWorkflowInspect(ctx context.Context, req *mcp.CallToolRequest, args workflowInspectArgs) (*mcp.CallToolResult, any, error) {
-	if args.WorkflowID == "" {
-		return nil, nil, fmt.Errorf("workflow_id is required")
-	}
-	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
+	fields["actor"] = json.RawMessage(`"mcp"`)
+	out, err := json.Marshal(fields)
 	if err != nil {
-		return nil, nil, err
+		return raw
 	}
-	defer cleanup()
-	result, err := cl.WorkflowInspect(args.WorkflowID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow inspect: %w", err)
-	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowEvents reads log events from a workflow instance's event
-// store with Sequence > afterSeq, capped at limit.
-func (s *Server) handleAvenorWorkflowEvents(ctx context.Context, req *mcp.CallToolRequest, args workflowEventsArgs) (*mcp.CallToolResult, any, error) {
-	if args.WorkflowID == "" {
-		return nil, nil, fmt.Errorf("workflow_id is required")
-	}
-	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	result, err := cl.WorkflowEvents(args.WorkflowID, args.AfterSeq, args.Limit)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow events: %w", err)
-	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowComplete atomically completes a machine/external handoff
-// activation. Inputs are aligned with the Stage 11 complete contract: the
-// lease/owner-token pair, the declared outcome, and optional outputs/artifacts.
-func (s *Server) handleAvenorWorkflowComplete(ctx context.Context, req *mcp.CallToolRequest, args workflowCompleteArgs) (*mcp.CallToolResult, any, error) {
-	if args.WorkflowID == "" {
-		return nil, nil, fmt.Errorf("workflow_id is required")
-	}
-	if args.NodeID == "" {
-		return nil, nil, fmt.Errorf("node_id is required")
-	}
-	if args.ActivationID == "" {
-		return nil, nil, fmt.Errorf("activation_id is required")
-	}
-	if args.AttemptID == "" {
-		return nil, nil, fmt.Errorf("attempt_id is required")
-	}
-	if args.LeaseID == "" {
-		return nil, nil, fmt.Errorf("lease_id is required")
-	}
-	if args.OwnerToken == "" {
-		return nil, nil, fmt.Errorf("owner_token is required")
-	}
-	if args.Outcome == "" {
-		return nil, nil, fmt.Errorf("outcome is required")
-	}
-	fields := map[string]any{
-		"node_id":       args.NodeID,
-		"activation_id": args.ActivationID,
-		"attempt_id":    args.AttemptID,
-		"lease_id":      args.LeaseID,
-		"owner_token":   args.OwnerToken,
-		"outcome":       args.Outcome,
-	}
-	if len(args.Outputs) > 0 {
-		var outputs any
-		if err := json.Unmarshal(args.Outputs, &outputs); err != nil {
-			return nil, nil, fmt.Errorf("outputs must be valid JSON: %w", err)
-		}
-		fields["outputs"] = outputs
-	}
-	if len(args.Artifacts) > 0 {
-		var artifacts any
-		if err := json.Unmarshal(args.Artifacts, &artifacts); err != nil {
-			return nil, nil, fmt.Errorf("artifacts must be valid JSON: %w", err)
-		}
-		fields["artifacts"] = artifacts
-	}
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	result, err := cl.WorkflowComplete(args.WorkflowID, fields)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow complete: %w", err)
-	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowGate records a gate decision on a parked awaiting_gate
-// activation. The operation is validated against the Stage 12 closed enum
-// before any server call so an unknown value fails fast without mutating state.
-func (s *Server) handleAvenorWorkflowGate(ctx context.Context, req *mcp.CallToolRequest, args workflowGateArgs) (*mcp.CallToolResult, any, error) {
-	if args.WorkflowID == "" {
-		return nil, nil, fmt.Errorf("workflow_id is required")
-	}
-	if args.NodeID == "" {
-		return nil, nil, fmt.Errorf("node_id is required")
-	}
-	if args.GateID == "" {
-		return nil, nil, fmt.Errorf("gate_id is required")
-	}
-	if args.ActivationID == "" {
-		return nil, nil, fmt.Errorf("activation_id is required")
-	}
-	switch args.Operation {
-	case "satisfy", "reject", "waive", "external_result":
-	default:
-		return nil, nil, fmt.Errorf("unknown gate operation %q (allowed: satisfy, reject, waive, external_result)", args.Operation)
-	}
-	fields := map[string]any{
-		"node_id":       args.NodeID,
-		"activation_id": args.ActivationID,
-		"gate_id":       args.GateID,
-		"operation":     args.Operation,
-	}
-	for key, value := range map[string]any{
-		"actor":         args.Actor,
-		"reason":        args.Reason,
-		"outcome":       args.Outcome,
-		"poll_id":       args.PollID,
-		"source":        args.Source,
-		"result":        args.Result,
-		"response_hash": args.ResponseHash,
-	} {
-		if value.(string) != "" {
-			fields[key] = value
-		}
-	}
-	if args.ObservedAt != "" {
-		if _, err := time.Parse(time.RFC3339, args.ObservedAt); err != nil {
-			return nil, nil, fmt.Errorf("observed_at must be an RFC3339 timestamp: %w", err)
-		}
-		fields["observed_at"] = args.ObservedAt
-	}
-	if len(args.Subject) > 0 {
-		var subject any
-		if err := json.Unmarshal(args.Subject, &subject); err != nil {
-			return nil, nil, fmt.Errorf("subject must be valid JSON: %w", err)
-		}
-		fields["subject"] = subject
-	}
-	if len(args.EvidenceIDs) > 0 {
-		fields["evidence_ids"] = args.EvidenceIDs
-	}
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	result, err := cl.WorkflowGate(args.WorkflowID, fields)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow gate: %w", err)
-	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowCancel cancels a whole workflow instance. The reason is
-// required: it is the durable audit trail of the workflow.canceled event. The
-// actor is optional and defaults to "cli" at the CLI surface; the manager
-// requires an explicit actor, so the tool supplies the caller's value or "mcp".
-func (s *Server) handleAvenorWorkflowCancel(ctx context.Context, req *mcp.CallToolRequest, args workflowCancelArgs) (*mcp.CallToolResult, any, error) {
-	if args.WorkflowID == "" {
-		return nil, nil, fmt.Errorf("workflow_id is required")
-	}
-	if args.Reason == "" {
-		return nil, nil, fmt.Errorf("reason is required")
-	}
-	actor := args.Actor
-	if actor == "" {
-		actor = "mcp"
-	}
-	cl, cleanup, err := s.getClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	result, err := cl.WorkflowCancel(args.WorkflowID, actor, args.Reason)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow cancel: %w", err)
-	}
-	return nil, result, nil
-}
-
-// handleAvenorWorkflowControllerStatus mirrors the workflow.controller.status
-// and workflow.controller.list control verbs against the typed
-// WorkflowControllerStatus and WorkflowControllerList client methods. With a
-// controller ID it returns that controller's full status; without one it
-// lists all controllers. The controller ID is passed through unchanged; no
-// identifier is remapped.
-func (s *Server) handleAvenorWorkflowControllerStatus(ctx context.Context, req *mcp.CallToolRequest, args workflowControllerStatusArgs) (*mcp.CallToolResult, any, error) {
-	cl, cleanup, err := s.getReadClientForSupervisor(args.SupervisorID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer cleanup()
-	if args.ControllerID == "" {
-		result, err := cl.WorkflowControllerList()
-		if err != nil {
-			return nil, nil, fmt.Errorf("workflow controller list: %w", err)
-		}
-		return nil, result, nil
-	}
-	result, err := cl.WorkflowControllerStatus(args.ControllerID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("workflow controller status: %w", err)
-	}
-	return nil, result, nil
+	return out
 }
 
 var startSupervisorFunc = startSupervisor

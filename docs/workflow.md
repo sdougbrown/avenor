@@ -514,9 +514,9 @@ Workflow status is one of `active`, `blocked`, `awaiting_gate`, `completed`,
 ### Canceling a workflow
 
 `workflow cancel` (CLI), the `workflow.cancel` control method, and the
-`workflow_cancel` MCP tool cancel a whole instance with one attributed
-decision. `actor` and `reason` are required — the reason is the durable audit
-trail recorded on the `workflow.canceled` event. The kernel transition is
+`workflow` MCP tool with `action: "cancel"` cancel a whole instance with one
+attributed decision. `actor` and `reason` are required — the reason is the
+durable audit trail recorded on the `workflow.canceled` event. The kernel transition is
 deterministic: the instance becomes terminal `canceled`, every live lease is
 released, and every non-terminal activation parks in the `canceled` status so
 no command can ever advance it again. The supervisor surface then terminates

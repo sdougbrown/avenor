@@ -21,7 +21,10 @@
           "description": "Optional supervisor socket path."
         }
       },
-      "required": ["action", "workflow_id"],
+      "required": [
+        "action",
+        "workflow_id"
+      ],
       "additionalProperties": false
     },
     {
@@ -40,7 +43,10 @@
           "description": "Optional supervisor socket path."
         }
       },
-      "required": ["action", "workflow_id"],
+      "required": [
+        "action",
+        "workflow_id"
+      ],
       "additionalProperties": false
     },
     {
@@ -71,7 +77,10 @@
           "description": "Optional supervisor socket path."
         }
       },
-      "required": ["action", "workflow_id"],
+      "required": [
+        "action",
+        "workflow_id"
+      ],
       "additionalProperties": false
     },
     {
@@ -94,7 +103,10 @@
           "description": "Optional supervisor socket path."
         }
       },
-      "required": ["action", "workflow_id"],
+      "required": [
+        "action",
+        "workflow_id"
+      ],
       "additionalProperties": false
     },
     {
@@ -119,7 +131,10 @@
           "description": "Optional supervisor socket path."
         }
       },
-      "required": ["action", "controller_id"],
+      "required": [
+        "action",
+        "controller_id"
+      ],
       "additionalProperties": false
     },
     {
@@ -138,7 +153,9 @@
           "description": "Optional supervisor socket path."
         }
       },
-      "required": ["action"],
+      "required": [
+        "action"
+      ],
       "additionalProperties": false
     },
     {
@@ -166,7 +183,12 @@
         },
         "operation": {
           "type": "string",
-          "enum": ["satisfy", "reject", "waive", "external_result"],
+          "enum": [
+            "satisfy",
+            "reject",
+            "waive",
+            "external_result"
+          ],
           "description": "Gate operation."
         },
         "actor": {
@@ -175,7 +197,8 @@
         },
         "reason": {
           "type": "string",
-          "description": "Reason for human gate operations."
+          "description": "Reason for human gate operations.",
+          "minLength": 1
         },
         "outcome": {
           "type": "string",
@@ -206,7 +229,9 @@
         },
         "evidence_ids": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "description": "Evidence IDs."
         },
         "supervisor_id": {
@@ -214,7 +239,14 @@
           "description": "Optional supervisor socket path."
         }
       },
-      "required": ["action", "workflow_id", "node_id", "gate_id", "activation_id", "operation"],
+      "required": [
+        "action",
+        "workflow_id",
+        "node_id",
+        "gate_id",
+        "activation_id",
+        "operation"
+      ],
       "additionalProperties": false
     },
     {
@@ -263,7 +295,16 @@
           "description": "Optional supervisor socket path."
         }
       },
-      "required": ["action", "workflow_id", "node_id", "activation_id", "attempt_id", "lease_id", "owner_token", "outcome"],
+      "required": [
+        "action",
+        "workflow_id",
+        "node_id",
+        "activation_id",
+        "attempt_id",
+        "lease_id",
+        "owner_token",
+        "outcome"
+      ],
       "additionalProperties": false
     },
     {
@@ -279,7 +320,8 @@
         },
         "reason": {
           "type": "string",
-          "description": "Reason for the cancel; recorded on the workflow.canceled event."
+          "description": "Reason for the cancel; recorded on the workflow.canceled event.",
+          "minLength": 1
         },
         "actor": {
           "type": "string",
@@ -290,7 +332,12 @@
           "description": "Optional supervisor socket path."
         }
       },
-      "required": ["action", "workflow_id", "reason", "actor"],
+      "required": [
+        "action",
+        "workflow_id",
+        "reason",
+        "actor"
+      ],
       "additionalProperties": false
     }
   ]

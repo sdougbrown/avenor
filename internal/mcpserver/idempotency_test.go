@@ -235,6 +235,10 @@ func (f *fakeIdempotentSupervisor) WorkflowControllerList() (map[string]any, err
 	return nil, nil
 }
 
+func (f *fakeIdempotentSupervisor) WorkflowReady(controllerID string, limit int) (map[string]any, error) {
+	return nil, nil
+}
+
 // newIdempotencyServer builds an MCP server against a shared fake supervisor.
 func newIdempotencyServer(t *testing.T, sup *fakeIdempotentSupervisor) *Server {
 	t.Helper()
