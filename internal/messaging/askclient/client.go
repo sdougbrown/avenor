@@ -282,6 +282,21 @@ func RenderReply(res messaging.WaitResult) (string, error) {
 	return "", fmt.Errorf("askclient: cannot render outcome %q", res.Outcome)
 }
 
+// ReplyID reports the route key a reply carries, so an asker can answer the
+// answer. A payload without an id reports empty.
+func ReplyID(reply *messaging.InboundMessage) string {
+	if reply == nil || len(reply.Payload) == 0 {
+		return ""
+	}
+	var payload struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(reply.Payload, &payload) != nil {
+		return ""
+	}
+	return payload.ID
+}
+
 // renderFullReply renders a reply whose payload carries no message text: the
 // correlation id and the replier name the answer, and the payload is passed
 // through untouched. A payload that is not JSON is rendered as it arrived.

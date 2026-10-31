@@ -80,7 +80,10 @@ type Result struct {
 	RuntimeID string // broker/runtime id of the resolved target (peers `last`)
 	Label     string // the resolved target's display name (harness name, else SessionInfo.Label)
 	Reply     string // the reply body, ask/replied only; empty everywhere else
-	Text      string
+	// ReplyID is the reply's own route key (ask/replied only), so the asker can
+	// answer the answer. Empty everywhere else.
+	ReplyID string
+	Text    string
 	// Peers is the peers `list` action's output: one record per visible peer,
 	// already decoded from the broker's peer listing. It is empty for every
 	// other action. `list` sets no text for a complete listing; an incomplete
@@ -339,6 +342,7 @@ func (r *Router) ask(ctx context.Context, input messageInput, res messaging.Reso
 		return Result{}, refused(renderErr)
 	}
 	result.Reply = reply
+	result.ReplyID = askclient.ReplyID(answered.Reply)
 	result.Outcome, result.Text = outcomeText(actionAsk, answered.Outcome, map[string]string{
 		"message_id": quote(result.MessageID),
 		"target":     quote(label),
@@ -929,6 +933,9 @@ func (r Result) Output() map[string]any {
 	}
 	if r.Reply != "" {
 		out["reply"] = r.Reply
+	}
+	if r.ReplyID != "" {
+		out["reply_id"] = r.ReplyID
 	}
 	// The resume paths travel with the result that minted them, so the caller
 	// can assert the sentinel and event log the resumed run actually writes.

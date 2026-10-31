@@ -267,6 +267,16 @@ export function extractReplyMessage(result: Record<string, unknown>): string {
   return JSON.stringify(result)
 }
 
+/** Extract the reply's own route key from a wait result payload, so the asker can answer the answer. */
+export function extractReplyId(result: Record<string, unknown>): string {
+  const payload = result.payload
+  if (payload && typeof payload === 'object') {
+    const id = (payload as Record<string, unknown>).id
+    if (typeof id === 'string') return id
+  }
+  return ''
+}
+
 /**
  * Render the shared ask failure sentence for an ask that failed. The outcome
  * and the sentence both come from the contract, so TS and Go text agree.

@@ -48,6 +48,8 @@ export interface ProviderResult {
   outcome: MessageOutcome
   messageId?: string
   reply?: string
+  /** The reply's own route key, so an asker can answer the answer. */
+  replyId?: string
   text?: string
   runId?: string
   runtimeId?: string
@@ -957,6 +959,7 @@ export function resultOutput(result: ProviderResult): Record<string, unknown> {
   if (result.runId) out.run_id = result.runId
   if (result.label) out.label = result.label
   if (result.reply) out.reply = result.reply
+  if (result.replyId) out.reply_id = result.replyId
   if (result.sentinelFile) out.sentinel_file = result.sentinelFile
   if (result.onEvent) out.on_event = result.onEvent
   return out

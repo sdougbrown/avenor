@@ -1281,6 +1281,69 @@ func TestBrokerAskReplyHappyPath(t *testing.T) {
 	}
 }
 
+// TestBrokerAskReplyCarriesItsOwnRoute pins the ask reply's correlation
+// fields: the reply carries its own route key and the id it answers, so the
+// asker can answer the answer the same way a tell reply is routable.
+func TestBrokerAskReplyCarriesItsOwnRoute(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	addr := b.Addr()
+	askerToken, err := b.CreateRun("asker", "")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	replierToken, err := b.CreateRun("replier", "")
+	if err != nil {
+		t.Fatalf("create replier: %v", err)
+	}
+
+	msgID := "ask-route-1"
+	go func() {
+		for i := 0; i < 50; i++ {
+			if got := pollAgentMessages(t, addr, "replier", replierToken); len(got) > 0 {
+				sendReply(t, addr, replierToken, "replier", "asker", msgID, "here is your answer")
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Error("replier: timed out waiting for ask message")
+	}()
+
+	if st := sendAsk(t, addr, askerToken, "asker", "replier", msgID, "what is the answer?")["status"]; st != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", st)
+	}
+	waited := waitReply(t, addr, askerToken, "asker", msgID)
+	if st := waited["status"]; st != http.StatusOK {
+		t.Fatalf("waitReply status = %d", st)
+	}
+	payloadRaw, err := json.Marshal(waited["payload"])
+	if err != nil {
+		t.Fatalf("encode reply payload: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(payloadRaw, &payload); err != nil {
+		t.Fatalf("decode reply payload %s: %v", payloadRaw, err)
+	}
+	replyID := msgID + ".reply"
+	if payload["id"] != replyID || payload["reply_to"] != msgID || payload["message"] != "here is your answer" {
+		t.Fatalf("reply payload = %v, want the stamped correlation fields", payload)
+	}
+
+	// The asker answers the answer: the reply's own route carries it back to
+	// the replier.
+	counter := sendReplyWithoutTarget(t, addr, askerToken, "asker", replyID, "thanks")
+	if st := counter["status"]; st != http.StatusOK || counter["outcome"] != "sent" {
+		t.Fatalf("counter-reply = %v, want a 200 sent", counter)
+	}
+	got := pollAgentMessages(t, addr, "replier", replierToken)
+	if len(got) != 1 || got[0]["from_run_id"] != "asker" {
+		t.Fatalf("replier poll after counter-reply = %v, want asker's answer", got)
+	}
+}
+
 func TestBrokerAskReplyFireAndForgetRemainsUnchanged(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {

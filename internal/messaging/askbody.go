@@ -51,10 +51,9 @@ func ReplyID(messageID string) string {
 // payload: a relay rewrites the envelope's from_run_id to the id the receiving
 // branch knows, and a payload that named a different run would be refused as a
 // sender mismatch. The caller's own fields are preserved; these two win,
-// because they name the conversation the reply belongs to. The ask path stamps
-// only reply_to (the router does it) and carries no id, so a reply to an ask
-// reply is not routable yet. The payload must be a JSON object or absent; a
-// JSON null is an empty body.
+// because they name the conversation the reply belongs to. Both the ask and
+// tell paths stamp through this function, so a reply to either is routable.
+// The payload must be a JSON object or absent; a JSON null is an empty body.
 func ReplyBody(payload json.RawMessage, replyTo string) (json.RawMessage, error) {
 	fields := map[string]any{}
 	if len(payload) > 0 {

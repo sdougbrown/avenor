@@ -200,6 +200,20 @@ describe('child broker ask', () => {
     })
   })
 
+  it('exposes the reply route key so the asker can answer the answer', async () => {
+    const { fetchImpl } = stubFetch({
+      '/send': () => Response.json({ queued: true, outcome: 'sent' }),
+      '/wait_reply': () => Response.json({
+        outcome: 'replied',
+        from_run_id: 'supervisor',
+        payload: { id: 'av1.m.9.reply', reply_to: 'av1.m.9', message: 'green' },
+      }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'is it green?', 'av1.m.9')
+    expect(result.replyId).toBe('av1.m.9.reply')
+    expect(result.reply).toBe('green')
+  })
+
   it('reports a 200 withdrawn wait as withdrawn without re-cancelling the ask', async () => {
     const { calls, fetchImpl } = stubFetch({
       '/send': () => Response.json({ queued: true }),

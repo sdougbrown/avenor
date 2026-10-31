@@ -70,6 +70,7 @@ export type { InspectResult } from './tools/inspect.js'
 export { shutdownTool } from './tools/shutdown.js'
 
 export {
+  extractReplyId,
   extractReplyMessage,
   renderAskFailure,
   normalizeAskTimeoutMs,

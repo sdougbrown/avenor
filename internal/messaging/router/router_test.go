@@ -28,6 +28,7 @@ type fakeProvider struct {
 
 	outcome         messaging.Outcome
 	reply           string
+	replyID         string
 	fenceFull       bool
 	peers           []messaging.Peer
 	peerErr         error
@@ -77,7 +78,11 @@ func (p *fakeProvider) Wait(_ context.Context, req messaging.WaitRequest) (messa
 	p.waited = req
 	result := messaging.WaitResult{Outcome: p.outcome}
 	if p.outcome == messaging.OutcomeReplied {
-		payload, err := json.Marshal(map[string]string{"message": p.reply})
+		fields := map[string]string{"message": p.reply}
+		if p.replyID != "" {
+			fields["id"] = p.replyID
+		}
+		payload, err := json.Marshal(fields)
 		if err != nil {
 			return result, err
 		}
@@ -1053,4 +1058,47 @@ func TestToolFailure(t *testing.T) {
 			t.Fatalf("ToolFailure(plain error) = %#v, %q, true; want false", object, text)
 		}
 	})
+}
+
+// TestAskResultCarriesTheReplyRouteKey pins that an ask reply exposes the
+// reply's own route key, so the asker can answer the answer instead of reading
+// the raw wait payload.
+func TestAskResultCarriesTheReplyRouteKey(t *testing.T) {
+	provider := &fakeProvider{
+		caller:     messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+		resolution: messaging.Resolution{RunID: "rt_7", Label: "mesh-a", Match: messaging.MatchUnique},
+		runFacts:   messaging.RunFacts{Status: runstate.StatusRunning, Live: true},
+		outcome:    messaging.OutcomeReplied,
+		reply:      "pong",
+		replyID:    "ask-1.reply",
+	}
+	got, err := newTestRouter(t, provider).Execute(t.Context(), json.RawMessage(`{"action": "ask", "target": "rt_7", "message": "ping"}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got.ReplyID != "ask-1.reply" {
+		t.Fatalf("reply_id = %q, want the reply's route key", got.ReplyID)
+	}
+	if out := got.Output(); out["reply_id"] != "ask-1.reply" {
+		t.Fatalf("output reply_id = %v, want the reply's route key", out["reply_id"])
+	}
+}
+
+// TestAskReplyIDIsEmptyWithoutAnID pins the absence rule: a reply payload with
+// no id yields no reply_id, so the result never exposes an empty handle.
+func TestAskReplyIDIsEmptyWithoutAnID(t *testing.T) {
+	provider := &fakeProvider{
+		caller:     messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+		resolution: messaging.Resolution{RunID: "rt_7", Label: "mesh-a", Match: messaging.MatchUnique},
+		runFacts:   messaging.RunFacts{Status: runstate.StatusRunning, Live: true},
+		outcome:    messaging.OutcomeReplied,
+		reply:      "pong",
+	}
+	got, err := newTestRouter(t, provider).Execute(t.Context(), json.RawMessage(`{"action": "ask", "target": "rt_7", "message": "ping"}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if _, ok := got.Output()["reply_id"]; ok {
+		t.Fatal("output carried a reply_id for a reply without an id")
+	}
 }
