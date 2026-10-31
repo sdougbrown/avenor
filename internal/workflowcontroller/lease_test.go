@@ -7,6 +7,7 @@ import (
 )
 
 func TestLeaseExpired(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
 	expired := &LeaderLease{ExpiresAt: now.Add(-time.Nanosecond)}
 	live := &LeaderLease{ExpiresAt: now}
@@ -23,6 +24,7 @@ func TestLeaseExpired(t *testing.T) {
 }
 
 func TestCheckLeaseCAS(t *testing.T) {
+	t.Parallel()
 	rec := ControllerRecord{
 		ControllerID: "alpha",
 		OwnerEpoch:   2,
@@ -52,6 +54,7 @@ func TestCheckLeaseCAS(t *testing.T) {
 }
 
 func TestNewLeaseID(t *testing.T) {
+	t.Parallel()
 	seen := make(map[string]bool)
 	for i := 0; i < 16; i++ {
 		id, err := newLeaseID()
@@ -69,6 +72,7 @@ func TestNewLeaseID(t *testing.T) {
 }
 
 func TestLeaseConstants(t *testing.T) {
+	t.Parallel()
 	if LeaseTTL <= RenewInterval {
 		t.Fatalf("LeaseTTL %s must exceed RenewInterval %s", LeaseTTL, RenewInterval)
 	}

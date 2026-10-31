@@ -13,6 +13,7 @@ import (
 // nodes (whose park path consumes an explicit completion legitimately) are
 // unaffected.
 func TestValidateAutoProviderNodeRejectsExplicitCompletion(t *testing.T) {
+	t.Parallel()
 	explicit := func(node map[string]any) {
 		node["completion"] = map[string]any{"kind": "explicit"}
 	}
@@ -119,6 +120,7 @@ func TestValidateAutoProviderNodeRejectsExplicitCompletion(t *testing.T) {
 // evaluate: no base commit is recorded, so changed_from_base would exhaust
 // every attempt. Manual nodes and other git requirements are unaffected.
 func TestValidateAutoProviderNodeRejectsChangedFromBase(t *testing.T) {
+	t.Parallel()
 	gitContract := func(node map[string]any, req map[string]any) {
 		node["action"] = map[string]any{"type": "run", "prompt": "work"}
 		node["completion"] = map[string]any{"kind": "git", "git": req}

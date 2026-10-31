@@ -54,6 +54,7 @@ func memoryResolver(templates map[string]Template) TemplateResolver {
 }
 
 func TestCompositionRejectsUnresolvablePinnedVersion(t *testing.T) {
+	t.Parallel()
 	// The parent references child@1, which is not stored at all.
 	parent := Template{
 		TemplateID:       "parent",
@@ -72,6 +73,7 @@ func TestCompositionRejectsUnresolvablePinnedVersion(t *testing.T) {
 }
 
 func TestCompositionRejectsMismatchedPinnedVersion(t *testing.T) {
+	t.Parallel()
 	// child is stored at version 1; the parent pins the non-existent version 2.
 	templates := map[string]Template{"child@1": compositionLeaf(t, "child")}
 	parent := Template{
@@ -99,6 +101,7 @@ func TestCompositionRejectsMismatchedPinnedVersion(t *testing.T) {
 }
 
 func TestCompositionRejectsSelfCycle(t *testing.T) {
+	t.Parallel()
 	self := Template{
 		TemplateID:       "a",
 		TemplateVersion:  "1",
@@ -117,6 +120,7 @@ func TestCompositionRejectsSelfCycle(t *testing.T) {
 }
 
 func TestCompositionRejectsTransitiveCycle(t *testing.T) {
+	t.Parallel()
 	a := Template{
 		TemplateID:       "a",
 		TemplateVersion:  "1",
@@ -178,6 +182,7 @@ func TestCompositionDepthBoundEnforced(t *testing.T) {
 }
 
 func TestCompositionDefaultDepthBoundEnforced(t *testing.T) {
+	t.Parallel()
 	// No limits declared: a 9-level chain (depth 9) exceeds the default
 	// bound (8) and must be rejected.
 	ids := make([]TemplateID, 9)
@@ -295,6 +300,7 @@ func TestCompositionGlobalInstanceBoundEnforced(t *testing.T) {
 }
 
 func TestCompositionRejectsUndeclaredOutputBindings(t *testing.T) {
+	t.Parallel()
 	leaf := compositionLeaf(t, "child")
 	leaf.Nodes[0].Outputs = []OutputDefinition{{ID: "co", Name: "co", Type: OutputString}}
 
@@ -346,6 +352,7 @@ func TestCompositionRejectsUndeclaredOutputBindings(t *testing.T) {
 }
 
 func TestCompositionRejectsUndeclaredOutcomeMap(t *testing.T) {
+	t.Parallel()
 	leaf := compositionLeaf(t, "child")
 	// The child can produce "done" (terminal) and "skipped" (node outcome).
 	leaf.Nodes[0].Outcomes = []OutcomeDefinition{{Name: "skipped", Terminal: true}}
@@ -396,6 +403,7 @@ func TestCompositionRejectsUndeclaredOutcomeMap(t *testing.T) {
 }
 
 func TestCompositionBuildsValidManifest(t *testing.T) {
+	t.Parallel()
 	templates := map[string]Template{
 		"a@1": compositionLeaf(t, "a"),
 		"b@1": compositionLeaf(t, "b"),
@@ -494,6 +502,7 @@ func compositionManagerFixture(t *testing.T) (*Manager, *Store, Template) {
 }
 
 func TestCompositionInstantiateMaterializesManifestDurably(t *testing.T) {
+	t.Parallel()
 	m, _, _ := compositionManagerFixture(t)
 	payload, _ := json.Marshal(map[string]string{
 		"template_id": "comp-parent", "template_version": "1",
@@ -526,6 +535,7 @@ func TestCompositionInstantiateMaterializesManifestDurably(t *testing.T) {
 }
 
 func TestCompositionChildCreationIsIdempotent(t *testing.T) {
+	t.Parallel()
 	m, s, parent := compositionManagerFixture(t)
 	payload, _ := json.Marshal(map[string]string{
 		"template_id": "comp-parent", "template_version": "1",
@@ -570,6 +580,7 @@ func TestCompositionChildCreationIsIdempotent(t *testing.T) {
 }
 
 func TestCompositionPartialFailureLeavesOrphans(t *testing.T) {
+	t.Parallel()
 	// Pins the current orphan behavior: when a later child fails to
 	// materialize, the already-created children remain on disk as active,
 	// unparented workflows and only the error is surfaced. Orphan cleanup is
@@ -955,6 +966,7 @@ func TestWorkflowChildUnmappedOutcomeIsSafe(t *testing.T) {
 }
 
 func TestWorkflowChildTypedOutputsMapped(t *testing.T) {
+	t.Parallel()
 	// The child produces a typed output; the parent binds it by identity
 	// only (no value copied).
 	s := newStore(t)
@@ -1051,6 +1063,7 @@ func TestWorkflowChildTypedOutputsMapped(t *testing.T) {
 }
 
 func TestWorkflowChildOutcomeBranchesToTarget(t *testing.T) {
+	t.Parallel()
 	// A non-terminal mapped parent outcome (branch key) creates the target
 	// activation instead of completing the workflow.
 	s := newStore(t)
@@ -1505,6 +1518,7 @@ func TestResumeAwaitingChildrenIsIdempotent(t *testing.T) {
 // rejection: a parent whose workflow action composes a child that declares a
 // required param the action does not bind is rejected.
 func TestCompositionRejectsUnboundRequiredChildParam(t *testing.T) {
+	t.Parallel()
 	child := compositionLeaf(t, "child")
 	child.Params = []TemplateParam{{ID: "worktree", Type: "string", Required: true}}
 
@@ -1544,6 +1558,7 @@ func TestCompositionRejectsUnboundRequiredChildParam(t *testing.T) {
 // instantiation-time rejection: a child whose bound value is invalid fails the
 // composing command with no child (or parent) instance created.
 func TestCompositionInstantiateRejectsInvalidChildParamValue(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -1578,6 +1593,7 @@ func TestCompositionInstantiateRejectsInvalidChildParamValue(t *testing.T) {
 // TestCompositionInstantiateFreezesChildTemplatedKey pins that a correctly
 // bound child freezes its templated concurrency key from the bound value.
 func TestCompositionInstantiateFreezesChildTemplatedKey(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -1631,6 +1647,7 @@ func TestCompositionInstantiateFreezesChildTemplatedKey(t *testing.T) {
 // recorded params, that the child records the resolved value, and that a
 // templated child concurrency key freezes from that value.
 func TestCompositionInstantiateFreezesChildFromInstanceParam(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)

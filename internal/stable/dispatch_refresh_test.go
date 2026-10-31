@@ -10,6 +10,7 @@ import (
 // controllers' back-to-back refreshes cause one rebuild, and a refresh
 // after the window elapses rebuilds again.
 func TestStableRunnerDepsRefreshSharesRebuilds(t *testing.T) {
+	t.Parallel()
 	f := newRunnerFixture(t, "refresh-share", "", 4, 0, false)
 	depsA := &stableRunnerDeps{s: f.sup, controllerID: "c1"}
 	depsB := &stableRunnerDeps{s: f.sup, controllerID: "c2"}

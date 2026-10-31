@@ -311,6 +311,7 @@ func assertSelection(t *testing.T, what string, got, want *workflow.ExecutionSel
 // thinking, and roster digest — on the activation itself, not just on the
 // attempt.
 func TestFactoryDispatchPinsRosterSelection(t *testing.T) {
+	t.Parallel()
 	f := newFactorySelectionFixture(t, "sel-pin", 900)
 	f.completeIntake(t)
 	act := f.activationByNode(t, "assessment")
@@ -341,6 +342,7 @@ func TestFactoryDispatchPinsRosterSelection(t *testing.T) {
 // gone) is a start_failed-class outcome with no reservation held, no attempt
 // recorded, and no workflow event appended: the activation stays pending.
 func TestFactoryDispatchResolutionFailureIsStartFailed(t *testing.T) {
+	t.Parallel()
 	f := newFactorySelectionFixture(t, "sel-fail", 900)
 	f.completeIntake(t)
 	act := f.activationByNode(t, "assessment")
@@ -375,6 +377,7 @@ func TestFactoryDispatchResolutionFailureIsStartFailed(t *testing.T) {
 // activation inherits the pinned selection and a conflicting selection is
 // rejected: the pin survives re-arming without coordinator memory.
 func TestFactoryDispatchRetryInheritsPinnedSelection(t *testing.T) {
+	t.Parallel()
 	f := newFactorySelectionFixture(t, "sel-retry", 900)
 	begin := f.dispatchAssessment(t)
 	// Fail the start pre-provider so the activation re-arms with the pin.
@@ -431,6 +434,7 @@ func TestFactoryDispatchRetryInheritsPinnedSelection(t *testing.T) {
 // (assessment's ready branch) creates a fresh publication activation that
 // pins its own selection while the completed activation's pin is immutable.
 func TestFactoryRerouteCreatesNewActivationSelection(t *testing.T) {
+	t.Parallel()
 	f := newFactorySelectionFixture(t, "sel-reroute", 900)
 	begin := f.dispatchAssessment(t)
 	f.completeAssessment(t, begin)
@@ -481,6 +485,7 @@ func TestFactoryRerouteCreatesNewActivationSelection(t *testing.T) {
 // resolveAssignmentSelection, so a regression that drops the fallback fails
 // the comparison instead of matching an equally empty expectation.
 func TestFactoryDispatchPinsRosterThinkingDefault(t *testing.T) {
+	t.Parallel()
 	f := newFactorySelectionFixtureRoster(t, "sel-roster-thinking", 900,
 		`{"assessor":{"backend":"codex-app-server","agent":"factory-assessor","model":"glm-5.3","thinking":"high"},"publisher":{"backend":"pi","agent":"factory-publisher","model":"claude-opus","thinking":"medium"}}`,
 		"", "")

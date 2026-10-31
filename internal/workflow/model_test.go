@@ -9,6 +9,7 @@ import (
 )
 
 func TestActionJSONRoundTrip(t *testing.T) {
+	t.Parallel()
 	tests := []Action{
 		{Kind: ActionRun, Run: &RunAction{Prompt: "review this"}},
 		{Kind: ActionLoop, Loop: &LoopAction{LoopFile: "loop.json"}},
@@ -41,6 +42,7 @@ func TestActionJSONRoundTrip(t *testing.T) {
 }
 
 func TestActionRejectsCrossVariantAndUnknownFields(t *testing.T) {
+	t.Parallel()
 	for _, input := range []string{
 		`{"type":"manual","loop_file":"loop.json"}`,
 		`{"type":"loop","instructions":"wrong","loop_file":"loop.json"}`,
@@ -57,6 +59,7 @@ func TestActionRejectsCrossVariantAndUnknownFields(t *testing.T) {
 }
 
 func TestActionRejectsMissingRequiredPayloads(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		input   string
@@ -95,6 +98,7 @@ func TestActionRejectsMissingRequiredPayloads(t *testing.T) {
 }
 
 func TestActionMarshalRejectsMismatchedVariants(t *testing.T) {
+	t.Parallel()
 	action := Action{Kind: ActionManual, Manual: &ManualAction{}, Loop: &LoopAction{LoopFile: "loop.json"}}
 	if _, err := json.Marshal(action); err == nil {
 		t.Fatal("Marshal() accepted multiple action variants")
@@ -116,6 +120,7 @@ func TestActionMarshalRejectsMismatchedVariants(t *testing.T) {
 }
 
 func TestTemplateJSONRoundTrip(t *testing.T) {
+	t.Parallel()
 	template := sampleTemplate()
 	data, err := json.Marshal(template)
 	if err != nil {
@@ -134,6 +139,7 @@ func TestTemplateJSONRoundTrip(t *testing.T) {
 }
 
 func TestTemplateJSONRoundTripPreservesLargeMetadataNumbers(t *testing.T) {
+	t.Parallel()
 	template := sampleTemplate()
 	template.Metadata["large"] = json.Number("1e400")
 	data, err := json.Marshal(template)
@@ -166,6 +172,7 @@ func TestTemplateJSONRoundTripPreservesLargeMetadataNumbers(t *testing.T) {
 }
 
 func TestTemplateUnmarshalJSONEnforcesStrictBoundary(t *testing.T) {
+	t.Parallel()
 	data, err := json.Marshal(sampleTemplate())
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
@@ -188,6 +195,7 @@ func TestTemplateUnmarshalJSONEnforcesStrictBoundary(t *testing.T) {
 }
 
 func TestSnapshotJSONRoundTrip(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	ended := now.Add(time.Minute)
 	heartbeat := now.Add(30 * time.Second)
@@ -256,6 +264,7 @@ func TestSnapshotJSONRoundTrip(t *testing.T) {
 }
 
 func TestGeneratedIdentifiersAreDistinctAndPrefixed(t *testing.T) {
+	t.Parallel()
 	ids := []struct {
 		value  string
 		prefix string
@@ -307,6 +316,7 @@ func sampleTemplate() Template {
 // travels with retries like every other selection field, carrying the
 // provider, model, endpoint, and key variable name but never a credential.
 func TestExecutionSelectionPermissionModelDeciderRoundTrip(t *testing.T) {
+	t.Parallel()
 	selection := &ExecutionSelection{
 		Role: "reviewer", Backend: "pi",
 		PermissionModelDecider: &PermissionModelDecider{
@@ -352,6 +362,7 @@ func TestExecutionSelectionPermissionModelDeciderRoundTrip(t *testing.T) {
 // permission-policy combinations: at most one unattended policy may ride on
 // a selection, and the boundary check names each conflict.
 func TestExecutionSelectionValidatePermissionPolicy(t *testing.T) {
+	t.Parallel()
 	harness := &PermissionDecider{Entry: "rm-guard"}
 	model := &PermissionModelDecider{Provider: "groq", Model: "m"}
 	if err := (&ExecutionSelection{PermissionDecider: harness}).ValidatePermissionPolicy(); err != nil {

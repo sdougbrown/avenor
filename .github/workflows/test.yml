@@ -51,6 +51,21 @@ jobs:
         run: mise run go-test
 
   go-race:
+    strategy:
+      # One runner per shard: internal/stable dominates the race step, so
+      # its own runner keeps the other race packages off the same cores.
+      # fail-fast stays off: a failure in one shard must not cancel the other,
+      # or the surviving result hides which package set regressed.
+      #
+      # Every package whose tests declare t.Parallel() belongs to a shard:
+      # the parallel tests are what exercise concurrent production code, so a
+      # package left out of the race job is never race-checked.
+      fail-fast: false
+      matrix:
+        shard:
+          - { name: supervisor, packages: ./internal/stable }
+          - name: control-plane
+            packages: "./client ./internal/control ./internal/cli ./internal/runtime/broker ./internal/messaging/... ./internal/workflow ./internal/workflowcontroller ./internal/runtime/pony"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -63,8 +78,8 @@ jobs:
 
       # Two passes under the race detector on the concurrency-heavy packages,
       # so an intermittent race or ordering bug fails here rather than later.
-      - name: Race-test client, supervisor, control, CLI, broker and parent-link packages
-        run: go test -race -count=2 ./client ./internal/stable ./internal/control ./internal/cli ./internal/runtime/broker ./internal/messaging/...
+      - name: Race-test ${{ matrix.shard.name }} packages
+        run: go test -race -count=2 ${{ matrix.shard.packages }}
 
   python:
     runs-on: ubuntu-latest

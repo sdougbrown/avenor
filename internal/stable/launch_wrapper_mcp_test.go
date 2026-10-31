@@ -34,6 +34,7 @@ func runtimeCount(sup *Supervisor) int {
 // supervisor without an MCP policy rejects every MCP spawn carrying a
 // launch_wrapper, creates no process, and registers no runtime.
 func TestSpawnMCPDeniesWrapperWithoutPolicy(t *testing.T) {
+	t.Parallel()
 	sup, got := mcpTestSupervisor(t, nil)
 	_, err := sup.SpawnMCP([]byte(`{"dir":"` + t.TempDir() + `","launch_wrapper":["nice","-n","5"]}`))
 	if err == nil {
@@ -53,6 +54,7 @@ func TestSpawnMCPDeniesWrapperWithoutPolicy(t *testing.T) {
 // TestSpawnMCPAllowlistEnforcement covers exact-match authorization and the
 // denial of every non-exact variant.
 func TestSpawnMCPAllowlistEnforcement(t *testing.T) {
+	t.Parallel()
 	policy := &MCPLaunchWrapperPolicy{AllowedArgv: [][]string{{"/usr/bin/nice", "-n", "5"}}}
 	cases := []struct {
 		name    string
@@ -105,6 +107,7 @@ func TestSpawnMCPAllowlistEnforcement(t *testing.T) {
 // effective (inherited) wrapper: resuming a wrapped session without supplying
 // a wrapper is still subject to the MCP policy.
 func TestSpawnMCPDeniesInheritedWrapperOnResume(t *testing.T) {
+	t.Parallel()
 	sup, _ := mcpTestSupervisor(t, nil)
 	dir := t.TempDir()
 	if _, err := sup.spawn(SpawnParams{Dir: dir, Prompt: "hi", LaunchWrapper: []string{"nice", "-n", "5"}}); err != nil {
@@ -135,6 +138,7 @@ func TestSpawnMCPDeniesInheritedWrapperOnResume(t *testing.T) {
 // TestSpawnMCPUnwrappedAlwaysAllowed proves an MCP spawn without a wrapper is
 // never gated by the policy.
 func TestSpawnMCPUnwrappedAlwaysAllowed(t *testing.T) {
+	t.Parallel()
 	sup, got := mcpTestSupervisor(t, nil)
 	if _, err := sup.SpawnMCP([]byte(`{"dir":"` + t.TempDir() + `","prompt":"hi"}`)); err != nil {
 		t.Fatalf("SpawnMCP() = %v, want nil", err)

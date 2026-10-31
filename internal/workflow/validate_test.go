@@ -26,6 +26,7 @@ const validTemplateJSON = `{
 }`
 
 func TestValidateTemplateJSON(t *testing.T) {
+	t.Parallel()
 	if err := ValidateTemplateJSON([]byte(validTemplateJSON)); err != nil {
 		t.Fatalf("ValidateTemplateJSON() error = %v", err)
 	}
@@ -42,6 +43,7 @@ func TestValidateTemplateJSON(t *testing.T) {
 // bridge relies on: a required human gate with a declared subject_type on an
 // explicit-completion node.
 func TestValidateEscalationBridgeDemoTemplate(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("../../templates/escalation-bridge/demo.json")
 	if err != nil {
 		t.Fatalf("read demo template: %v", err)
@@ -80,6 +82,7 @@ func TestValidateEscalationBridgeDemoTemplate(t *testing.T) {
 }
 
 func TestValidateTemplateJSONRejectsRequiredFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		mutate  func(map[string]any)
@@ -108,6 +111,7 @@ func TestValidateTemplateJSONRejectsRequiredFields(t *testing.T) {
 }
 
 func TestValidateTemplateJSONRejectsInvalidNodes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		mutate  func(map[string]any)
@@ -197,6 +201,7 @@ func TestValidateTemplateJSONRejectsInvalidNodes(t *testing.T) {
 // discriminator at nested paths, beyond the typed Go checks retained in
 // validateAction.
 func TestGeneratedStructuralValidatorAuthority(t *testing.T) {
+	t.Parallel()
 	t.Run("cross-variant action field rejected", func(t *testing.T) {
 		input := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
 			node["action"] = map[string]any{"type": "run", "loop_file": "extra.json"}
@@ -219,6 +224,7 @@ func TestGeneratedStructuralValidatorAuthority(t *testing.T) {
 // policy field: auto_approve is a declared boolean and misspelled variants are
 // rejected by the generated structural validator.
 func TestValidateTemplateJSONAssignmentAutoApprove(t *testing.T) {
+	t.Parallel()
 	withAutoApprove := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
 		node["assignment"] = map[string]any{"auto_approve": true}
 	}))
@@ -239,6 +245,7 @@ func TestValidateTemplateJSONAssignmentAutoApprove(t *testing.T) {
 // rejected by the generated structural validator, and the semantic validator
 // rejects the auto_approve combination and a policy without a roster file.
 func TestValidateTemplateJSONAssignmentPermissionPolicy(t *testing.T) {
+	t.Parallel()
 	withPolicy := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
 		node["assignment"] = map[string]any{"roster_file": "roster.json", "permission_policy": map[string]any{"decider": "rm-guard"}}
 	}))
@@ -290,6 +297,7 @@ func TestValidateTemplateJSONAssignmentPermissionPolicy(t *testing.T) {
 }
 
 func TestValidateTemplateJSONRejectsIncompleteActionVariants(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		action  map[string]any
@@ -313,6 +321,7 @@ func TestValidateTemplateJSONRejectsIncompleteActionVariants(t *testing.T) {
 }
 
 func TestValidateTemplateJSONRejectsPathTraversalChildPin(t *testing.T) {
+	t.Parallel()
 	// The workflow action's pinned child template ref flows into
 	// Store.LoadTemplate's filepath.Join; it is a path component and must be
 	// safeComponent-validated (rejected at create time) to block traversal.
@@ -337,6 +346,7 @@ func TestValidateTemplateJSONRejectsPathTraversalChildPin(t *testing.T) {
 }
 
 func TestValidateTemplateJSONRejectsAmbiguousOrUnboundedJSON(t *testing.T) {
+	t.Parallel()
 	t.Run("unknown top-level field", func(t *testing.T) {
 		assertTemplateError(t, mutateTemplate(t, setField("misspelled", true)), `additionalProperties at /misspelled`)
 	})
@@ -463,6 +473,7 @@ func TestJSONPreflightAcceptsExactLimits(t *testing.T) {
 }
 
 func TestGeneratedWorkflowSchemaAPI(t *testing.T) {
+	t.Parallel()
 	version := int64(1)
 	templateID := "example"
 	templateVersion := "1"
@@ -575,6 +586,7 @@ const openLeafTemplateJSON = `{
 }`
 
 func TestOpenLeafLeavesAreTypedGoGoverned(t *testing.T) {
+	t.Parallel()
 	if err := ValidateTemplateJSON([]byte(openLeafTemplateJSON)); err != nil {
 		t.Fatalf("ValidateTemplateJSON() rejected valid open-leaf template: %v", err)
 	}
@@ -636,6 +648,7 @@ func workflowActionTemplate(params []ChildParamBinding) Template {
 // action whose params bindings name the same child param twice is rejected,
 // rather than letting the last binding silently win at resolve time.
 func TestValidateTemplateRejectsDuplicateChildParamBindings(t *testing.T) {
+	t.Parallel()
 	tmpl := workflowActionTemplate([]ChildParamBinding{
 		{Param: "worktree", Value: "avenor-issue-1"},
 		{Param: "worktree", FromInstanceParam: "worktree"},
@@ -649,6 +662,7 @@ func TestValidateTemplateRejectsDuplicateChildParamBindings(t *testing.T) {
 // exactly-one guard on a child param binding: a binding that sets both value
 // and from_instance_param, and one that sets neither, are both rejected.
 func TestValidateTemplateChildParamBindingRequiresExactlyOneSource(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		binding ChildParamBinding
@@ -672,6 +686,7 @@ func TestValidateTemplateChildParamBindingRequiresExactlyOneSource(t *testing.T)
 // rejects misspellings, wrong types, and missing model fields, and the typed
 // rules reject combining the two decider variants or auto_approve.
 func TestValidateTemplateJSONAssignmentDeciderModel(t *testing.T) {
+	t.Parallel()
 	withModel := mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
 		node["assignment"] = map[string]any{"permission_policy": map[string]any{
 			"decider_model": map[string]any{"provider": "groq", "model": "llama-3.3-70b"},

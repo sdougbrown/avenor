@@ -234,6 +234,7 @@ func cancelPayload(actor, reason string) json.RawMessage {
 }
 
 func TestManagerWorkflowCancel(t *testing.T) {
+	t.Parallel()
 	m, wf := newCancelFixture(t)
 
 	resultAny, err := m.WorkflowCancel(string(wf), cancelPayload("ops", "operator abandon"))
@@ -261,6 +262,7 @@ func TestManagerWorkflowCancel(t *testing.T) {
 }
 
 func TestManagerWorkflowCancelIdempotent(t *testing.T) {
+	t.Parallel()
 	m, wf := newCancelFixture(t)
 	if _, err := m.WorkflowCancel(string(wf), cancelPayload("ops", "first")); err != nil {
 		t.Fatalf("first cancel: %v", err)
@@ -280,6 +282,7 @@ func TestManagerWorkflowCancelIdempotent(t *testing.T) {
 // read and its apply turns the duplicate-key apply error into the same
 // idempotent response the sequential pre-check returns, never a raw error.
 func TestManagerWorkflowCancelDuplicatesUnderConcurrency(t *testing.T) {
+	t.Parallel()
 	m, wf := newCancelFixture(t)
 	// The first cancel's pre-commit hook issues a second WorkflowCancel for the
 	// same workflow, which commits first; the outer apply then hits the
@@ -303,6 +306,7 @@ func TestManagerWorkflowCancelDuplicatesUnderConcurrency(t *testing.T) {
 }
 
 func TestManagerWorkflowCancelRejectsTerminal(t *testing.T) {
+	t.Parallel()
 	m, wf := newCancelFixture(t)
 	// Drive claim → start → complete through the control-plane command path so
 	// the instance reaches its terminal completed status, then verify a cancel
@@ -330,6 +334,7 @@ func TestManagerWorkflowCancelRejectsTerminal(t *testing.T) {
 }
 
 func TestManagerWorkflowCancelWaitTerminal(t *testing.T) {
+	t.Parallel()
 	m, wf := newCancelFixture(t)
 	if _, err := m.WorkflowCancel(string(wf), cancelPayload("ops", "why")); err != nil {
 		t.Fatalf("WorkflowCancel: %v", err)
@@ -349,6 +354,7 @@ func TestManagerWorkflowCancelWaitTerminal(t *testing.T) {
 // case: applyCanceled's loop must park BOTH activations in ActivationCanceled
 // and release BOTH live leases, not just the first one it visits.
 func TestCancelParksEveryActivationAndReleasesEveryLease(t *testing.T) {
+	t.Parallel()
 	payload, err := json.Marshal(InstanceRecord{
 		TemplateID:       "t2",
 		TemplateVersion:  "1",
@@ -429,6 +435,7 @@ func TestCancelParksEveryActivationAndReleasesEveryLease(t *testing.T) {
 // cancel sits in its read window must not fail the cancel — the bounded retry
 // re-reads and applies.
 func TestManagerWorkflowCancelRetriesRevisionMismatch(t *testing.T) {
+	t.Parallel()
 	m, wf := newCancelFixture(t)
 	// While the cancel sits between its read and its commit, a claim commits
 	// and moves the revision.
@@ -454,6 +461,7 @@ func TestManagerWorkflowCancelRetriesRevisionMismatch(t *testing.T) {
 // terminal-instance rejection: a cancel against an instance whose retry
 // policy exhausted to fail is a clear error, not a silent no-op.
 func TestManagerWorkflowCancelRejectsFailed(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -518,6 +526,7 @@ func TestManagerWorkflowCancelRejectsFailed(t *testing.T) {
 // each fail with their own error before any snapshot is loaded or command
 // applied.
 func TestManagerWorkflowCancelBoundaryValidation(t *testing.T) {
+	t.Parallel()
 	m, wf := newCancelFixture(t)
 
 	if _, err := m.WorkflowCancel(string(wf), []byte(`{not json`)); err == nil || !strings.Contains(err.Error(), "cancel payload") {

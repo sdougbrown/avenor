@@ -47,6 +47,7 @@ func (*thinkingCaptureProvider) Capabilities(context.Context) (runtime.Capabilit
 }
 
 func TestSpawnThinkingValidationPrecedesReservation(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-validation.sock", MaxRuntimes: 1})
 	providerCalled := false
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
@@ -63,6 +64,7 @@ func TestSpawnThinkingValidationPrecedesReservation(t *testing.T) {
 }
 
 func TestSpawnThinkingRawJSONAndExecutionModes(t *testing.T) {
+	t.Parallel()
 	var decoded SpawnParams
 	if err := json.Unmarshal([]byte(`{"prompt":"work","dir":".","backend":"pi","thinking":"high"}`), &decoded); err != nil {
 		t.Fatal(err)
@@ -124,6 +126,7 @@ func TestSpawnThinkingRawJSONAndExecutionModes(t *testing.T) {
 }
 
 func TestAttemptSessionRetainsThinkingOnResume(t *testing.T) {
+	t.Parallel()
 	provider := &thinkingCaptureProvider{}
 	child := &childRuntime{provider: provider, backend: "pi", thinking: "max", agent: "agent", model: "model", dir: "/work"}
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-resume.sock", MaxRuntimes: 1})
@@ -163,6 +166,7 @@ func (*plainResumeProvider) Capabilities(context.Context) (runtime.Capabilities,
 }
 
 func TestAttemptSessionDropsStartOnlyOptionsOnClaudeResume(t *testing.T) {
+	t.Parallel()
 	provider := &plainResumeProvider{}
 	child := &childRuntime{provider: provider, backend: "claude", thinking: "max", agent: "agent", model: "model", dir: "/work"}
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-resume-claude.sock", MaxRuntimes: 1})
@@ -175,6 +179,7 @@ func TestAttemptSessionDropsStartOnlyOptionsOnClaudeResume(t *testing.T) {
 }
 
 func TestAttemptSessionRetainsStartOnlyOptionsOnFreshStart(t *testing.T) {
+	t.Parallel()
 	provider := &plainResumeProvider{}
 	child := &childRuntime{provider: provider, backend: "claude", thinking: "max", agent: "agent", model: "model", dir: "/work"}
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-fresh-claude.sock", MaxRuntimes: 1})

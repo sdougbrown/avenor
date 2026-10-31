@@ -52,6 +52,7 @@ func (hangingProvider) Capabilities(context.Context) (runtime.Capabilities, erro
 // is stopped by the shared wall-clock deadline and the sentinel records the
 // timeout classification.
 func TestRunLoopChildTimeoutProducesTimeoutSentinel(t *testing.T) {
+	t.Parallel()
 	provider := hangingProvider{}
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-loop-timeout.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
@@ -82,6 +83,7 @@ func TestRunLoopChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 // stopped by the shared wall-clock deadline and the sentinel records the
 // timeout classification, including across retry backoffs.
 func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
+	t.Parallel()
 	provider := hangingProvider{}
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-run-timeout.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
@@ -109,6 +111,7 @@ func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 // TestRunTeamChildTimeoutProducesTimeoutSentinel proves SpawnParams.Timeout is
 // an enforceable deadline for stable team children.
 func TestRunTeamChildTimeoutProducesTimeoutSentinel(t *testing.T) {
+	t.Parallel()
 	provider := hangingProvider{}
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-team-timeout.sock", MaxRuntimes: 1})
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }

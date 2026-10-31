@@ -20,6 +20,7 @@ import (
 )
 
 func TestWarmResumeRotatesArtifactsAndRejectsConcurrentAdmission(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	oldPath := filepath.Join(root, "old-events")
 	oldSentinel := filepath.Join(root, "old-sentinel")
@@ -147,6 +148,7 @@ type warmGuardProvider struct {
 // refusal must release the broker admission lock, and a drained queue must
 // admit with a callable unlock.
 func TestWarmResumeRefusesPendingProviderMessage(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	b := broker.New("")
 	b.CreateRun("rt", "")
@@ -197,6 +199,7 @@ func TestWarmResumeRefusesPendingProviderMessage(t *testing.T) {
 // everything the reservation created — the exclusively created event file
 // even on a caller-supplied path, and the turn directory on default paths.
 func TestWarmResumePendingMessageCleansReservedArtifacts(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	b := broker.New("")
 	if _, err := b.CreateRun("rt", ""); err != nil {
@@ -275,6 +278,7 @@ func TestWarmResumePendingMessageCleansReservedArtifacts(t *testing.T) {
 }
 
 func TestWarmResumeWaitsForTurnBoundSend(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	b := broker.New("")
 	b.CreateRun("rt", "")
@@ -318,6 +322,7 @@ func TestWarmResumeWaitsForTurnBoundSend(t *testing.T) {
 }
 
 func TestWarmResumeRejectsClaimedDirectPrompt(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	child := &childRuntime{id: "rt", promptQueue: []string{"direct"}, promptCh: make(chan struct{}, 1), onEvent: filepath.Join(root, "old")}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
@@ -334,6 +339,7 @@ func TestWarmResumeRejectsClaimedDirectPrompt(t *testing.T) {
 }
 
 func TestWarmResumeRejectsDerivedHandlerWithoutChildMutation(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	oldPath := filepath.Join(root, "old-events")
 	oldSentinel := filepath.Join(root, "old-sentinel")
@@ -402,6 +408,7 @@ func containsEvent(data []byte, name string) bool { return bytes.Contains(data, 
 // directory are the same artifact, while genuinely distinct paths and an
 // identical spelling keep their expected verdicts.
 func TestSameArtifactResolvesSymlinkedParent(t *testing.T) {
+	t.Parallel()
 	real := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(real, link); err != nil {
@@ -424,6 +431,7 @@ func TestSameArtifactResolvesSymlinkedParent(t *testing.T) {
 // through a symlinked parent directory are refused instead of reserved, so
 // admission cannot install a writer over the child's current artifact.
 func TestWarmResumeRejectsAliasedArtifactPath(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(root, link); err != nil {
@@ -441,6 +449,7 @@ func TestWarmResumeRejectsAliasedArtifactPath(t *testing.T) {
 }
 
 func TestUnstartedWarmResumeWritesFailureSentinel(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{})
 	path := filepath.Join(t.TempDir(), "sentinel")
 	child := &childRuntime{id: "rt", sentinelFile: path, warmResumePending: true, session: runtime.Session{SessionID: "session"}}
@@ -459,6 +468,7 @@ func TestUnstartedWarmResumeWritesFailureSentinel(t *testing.T) {
 // refused before any artifact is created, so the existing sentinel's content
 // survives and no reserved event file is left behind.
 func TestWarmResumeRejectsExistingSentinelPath(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	sentinel := filepath.Join(root, "sentinel")
 	if err := os.WriteFile(sentinel, []byte("DONE\n"), 0600); err != nil {
@@ -488,6 +498,7 @@ func TestWarmResumeRejectsExistingSentinelPath(t *testing.T) {
 // instance written by shutdown — finishUnstartedWarmResume leaves the file and
 // the child's terminal state alone instead of clobbering it with a failure.
 func TestUnstartedWarmResumeKeepsCompletionSentinel(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{})
 	path := filepath.Join(t.TempDir(), "sentinel")
 	if err := os.WriteFile(path, []byte("SUCCEEDED\n"), 0600); err != nil {
@@ -512,6 +523,7 @@ func TestUnstartedWarmResumeKeepsCompletionSentinel(t *testing.T) {
 // same teardown, leaves an existing sentinel alone — so a host-side sentinel
 // wait cannot hang until timeout.
 func TestShutdownWritesAdmittedWarmResumeSentinel(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:        newStableSocketPath(t, "warm-shutdown-sentinel"),
 		MaxRuntimes:          2,
@@ -577,6 +589,7 @@ func TestShutdownWritesAdmittedWarmResumeSentinel(t *testing.T) {
 }
 
 func TestWarmResumeRejectsOldArtifactsWithoutTruncation(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	path := filepath.Join(root, "events")
 	sink, err := cli.NewEventWriter(path)

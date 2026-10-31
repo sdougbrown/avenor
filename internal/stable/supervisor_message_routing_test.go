@@ -37,6 +37,7 @@ func ownerControlClient(t *testing.T, sup *Supervisor, name string) *client.Clie
 // broker run is queued for the supervisor, drained by message_receive, and
 // answered by message_reply to the child's waiting message id.
 func TestChildAskReachesSupervisorThroughMessageVerbs(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	c := ownerControlClient(t, sup, "s4-child-ask")
 
@@ -130,6 +131,7 @@ func TestChildAskReachesSupervisorThroughMessageVerbs(t *testing.T) {
 // broker run, the child drains the ask, and a broker-side reply resolves the
 // host's wait.
 func TestSupervisorAskReachesChildThroughMessageVerbs(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	c := ownerControlClient(t, sup, "s4-host-ask")
 
@@ -206,6 +208,7 @@ func TestSupervisorAskReachesChildThroughMessageVerbs(t *testing.T) {
 // ask to its rt_N is admitted and queued, and the asker waits out its own
 // bounded timeout instead of being told the target is unavailable.
 func TestAskToCompletedRunChildIsQueuedAndTimesOut(t *testing.T) {
+	t.Parallel()
 	provider := &stableScriptedProvider{
 		attempt: 0,
 		scripts: []stableScriptedAttempt{{

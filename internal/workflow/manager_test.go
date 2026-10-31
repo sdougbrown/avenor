@@ -210,6 +210,7 @@ func mustStoreApply(t *testing.T, s *Store, wf WorkflowID, cmd Command) Snapshot
 }
 
 func TestManagerCreateStoresTemplate(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -233,6 +234,7 @@ func TestManagerCreateStoresTemplate(t *testing.T) {
 }
 
 func TestManagerCreateRejectsInvalidTemplate(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	m := NewManager(s)
 	if _, err := m.WorkflowCreate([]byte(`{"schema_version": 1}`)); err == nil {
@@ -248,6 +250,7 @@ func TestManagerCreateRejectsInvalidTemplate(t *testing.T) {
 // no-op, while different content under the same id+version is rejected with a
 // TemplateConflictError and leaves the original registration intact.
 func TestManagerCreateRecreateIdempotency(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -294,6 +297,7 @@ func TestManagerCreateRecreateIdempotency(t *testing.T) {
 }
 
 func TestManagerInstantiateCreatesActiveInstance(t *testing.T) {
+	t.Parallel()
 	m, _, wf, _ := newManagerFixture(t)
 	st, err := m.WorkflowStatus(string(wf))
 	if err != nil {
@@ -317,6 +321,7 @@ func TestManagerInstantiateCreatesActiveInstance(t *testing.T) {
 }
 
 func TestManagerInstantiateRejectsWorkflowAction(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -348,6 +353,7 @@ func TestManagerInstantiateRejectsWorkflowAction(t *testing.T) {
 }
 
 func TestManagerStatusMissingErrors(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	m := NewManager(s)
 	if _, err := m.WorkflowStatus("wf-missing"); err == nil || !strings.Contains(err.Error(), "workflow not found") {
@@ -359,6 +365,7 @@ func TestManagerStatusMissingErrors(t *testing.T) {
 }
 
 func TestManagerInspectReturnsDetail(t *testing.T) {
+	t.Parallel()
 	m, _, wf, _ := newManagerFixture(t)
 	out, err := m.WorkflowInspect(string(wf))
 	if err != nil {
@@ -384,6 +391,7 @@ func TestManagerInspectReturnsDetail(t *testing.T) {
 }
 
 func TestManagerEventsAfterSeqLimit(t *testing.T) {
+	t.Parallel()
 	m, _, wf, _ := newManagerFixture(t)
 	// After instantiate only sequence 1 exists.
 	out, err := m.WorkflowEvents(string(wf), 0, 0)
@@ -454,6 +462,7 @@ func TestManagerWaitTerminal(t *testing.T) {
 }
 
 func TestManagerWaitTimeout(t *testing.T) {
+	t.Parallel()
 	m, _, wf, _ := newManagerFixture(t)
 	started := time.Now()
 	out, err := m.WorkflowWait(string(wf), 100*time.Millisecond)
@@ -470,6 +479,7 @@ func TestManagerWaitTimeout(t *testing.T) {
 }
 
 func TestManagerCommandStub(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	m := NewManager(s)
 	_, err := m.WorkflowCommand("wf1", json.RawMessage(`{}`))
@@ -479,6 +489,7 @@ func TestManagerCommandStub(t *testing.T) {
 }
 
 func TestManagerCommandUnknownOp(t *testing.T) {
+	t.Parallel()
 	m, _, wf, _ := newManagerFixture(t)
 	_, err := m.WorkflowCommand(string(wf), json.RawMessage(`{"op":"poke","node_id":"start"}`))
 	if err == nil || !strings.Contains(err.Error(), "unsupported until a later stage") {
@@ -487,6 +498,7 @@ func TestManagerCommandUnknownOp(t *testing.T) {
 }
 
 func TestManagerClaimGrantsLease(t *testing.T) {
+	t.Parallel()
 	m, _, wf, node := newManagerFixture(t)
 	snap, _, err := m.store.loadCurrent(wf)
 	if err != nil {
@@ -543,6 +555,7 @@ func TestManagerClaimGrantsLease(t *testing.T) {
 }
 
 func TestManagerClaimRejectsAlreadyLeased(t *testing.T) {
+	t.Parallel()
 	m, _, wf, node := newManagerFixture(t)
 	snap, _, err := m.store.loadCurrent(wf)
 	if err != nil {
@@ -557,6 +570,7 @@ func TestManagerClaimRejectsAlreadyLeased(t *testing.T) {
 }
 
 func TestManagerClaimUnknownActivation(t *testing.T) {
+	t.Parallel()
 	m, _, wf, node := newManagerFixture(t)
 	_, err := m.WorkflowCommand(string(wf), claimCommandPayload(t, node, "act-nope", "alice"))
 	if err == nil || !strings.Contains(err.Error(), "activation not found") {
@@ -565,6 +579,7 @@ func TestManagerClaimUnknownActivation(t *testing.T) {
 }
 
 func TestManagerClaimMissingWorkflow(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	m := NewManager(s)
 	_, err := m.WorkflowCommand("wf-missing", claimCommandPayload(t, "start", "", "alice"))
@@ -574,6 +589,7 @@ func TestManagerClaimMissingWorkflow(t *testing.T) {
 }
 
 func TestManagerStartManualRequiresCompletion(t *testing.T) {
+	t.Parallel()
 	m, _, wf, node := newManagerFixture(t)
 	snap, _, err := m.store.loadCurrent(wf)
 	if err != nil {
@@ -629,6 +645,7 @@ func TestManagerStartManualRequiresCompletion(t *testing.T) {
 }
 
 func TestManagerStartLeaseMismatch(t *testing.T) {
+	t.Parallel()
 	m, _, wf, node := newManagerFixture(t)
 	snap, _, err := m.store.loadCurrent(wf)
 	if err != nil {
@@ -653,6 +670,7 @@ func TestManagerStartLeaseMismatch(t *testing.T) {
 }
 
 func TestManagerStartProviderNoExecutor(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newRunTemplateFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -683,6 +701,7 @@ func TestManagerStartProviderNoExecutor(t *testing.T) {
 }
 
 func TestManagerClaimLeaseSurvivesReplay(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := m.store.loadCurrent(wf)
 	if err != nil {
@@ -719,6 +738,7 @@ func TestManagerClaimLeaseSurvivesReplay(t *testing.T) {
 // TestManagerInstantiateRejectsUnsafeTemplateID covers the safeComponent
 // rejection path in WorkflowInstantiate (path separators, NUL, absolute/..).
 func TestManagerInstantiateRejectsUnsafeTemplateID(t *testing.T) {
+	t.Parallel()
 	m, _, _, _ := newManagerFixture(t)
 	for _, tid := range []string{"../evil", "a/b", `a\b`, "x\x00y"} {
 		payload, err := json.Marshal(map[string]string{"template_id": tid, "template_version": "1"})
@@ -733,6 +753,7 @@ func TestManagerInstantiateRejectsUnsafeTemplateID(t *testing.T) {
 
 // TestManagerStartRequiresFields covers commandStart's empty-field validation.
 func TestManagerStartRequiresFields(t *testing.T) {
+	t.Parallel()
 	m, _, wf, _ := newManagerFixture(t)
 	cases := []struct {
 		payload map[string]string
@@ -753,6 +774,7 @@ func TestManagerStartRequiresFields(t *testing.T) {
 // TestManagerStartRejectsUnclaimedActivation covers the not-in-ActivationLeased
 // error path for a freshly instantiated (never claimed) activation.
 func TestManagerStartRejectsUnclaimedActivation(t *testing.T) {
+	t.Parallel()
 	m, s, wf, _ := newManagerFixture(t)
 	snap, exists, err := s.loadSnapshot(wf)
 	if err != nil || !exists {
@@ -770,6 +792,7 @@ func TestManagerStartRejectsUnclaimedActivation(t *testing.T) {
 
 // TestManagerWaitUnknownWorkflow covers the not-found error path in WorkflowWait.
 func TestManagerWaitUnknownWorkflow(t *testing.T) {
+	t.Parallel()
 	m, _, _, _ := newManagerFixture(t)
 	if _, err := m.WorkflowWait("doesnotexist", 10*time.Millisecond); err == nil || !strings.Contains(err.Error(), "workflow not found") {
 		t.Fatalf("err=%v, want workflow not found", err)
@@ -782,6 +805,7 @@ func TestManagerWaitUnknownWorkflow(t *testing.T) {
 // fact but is inert on activation/lease state (acceptance requires completion,
 // Stage 11).
 func TestRecordAttemptTerminatedRecordsTerminalFact(t *testing.T) {
+	t.Parallel()
 	findAttemptByID := func(inst *WorkflowInstance, id AttemptID) *Attempt {
 		for i := range inst.Attempts {
 			if inst.Attempts[i].ID == id {
@@ -878,6 +902,7 @@ func TestRecordAttemptTerminatedRecordsTerminalFact(t *testing.T) {
 // the optional trailing marker args on RecordAttemptTerminated are recorded on
 // the attempt as inert evidence, and a no-marker call leaves them empty.
 func TestRecordAttemptTerminatedRecordsMarker(t *testing.T) {
+	t.Parallel()
 	findAttemptByID := func(inst *WorkflowInstance, id AttemptID) *Attempt {
 		for i := range inst.Attempts {
 			if inst.Attempts[i].ID == id {
@@ -954,6 +979,7 @@ func TestRecordAttemptTerminatedRecordsMarker(t *testing.T) {
 // idempotent per attempt (a duplicate terminate returns success, not an error),
 // and the attempt's status is durably recorded.
 func TestManagerRecordAttemptTerminatedRecordsAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, ok, err := s.loadSnapshot(wf)
 	if err != nil || !ok {

@@ -71,6 +71,7 @@ func effectsEqual(a, b []lifecycleEffect) bool {
 }
 
 func TestRuntimeLifecyclePredicateTruthTables(t *testing.T) {
+	t.Parallel()
 	// isCompleted: true for both admissionClosed and published (the park
 	// timeout sets completed before done closes).
 	for completion, want := range map[completionStage]bool{
@@ -142,6 +143,7 @@ func TestRuntimeLifecyclePredicateTruthTables(t *testing.T) {
 }
 
 func TestRuntimeLifecycleMatrixRows(t *testing.T) {
+	t.Parallel()
 	successSentinel := lifecycleEffect{kind: effectWriteSentinel, exitCode: 0, reason: "end_turn", sessionID: "s1"}
 	cases := []struct {
 		name    string
@@ -688,6 +690,7 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 }
 
 func TestRuntimeLifecycleRepeats(t *testing.T) {
+	t.Parallel()
 	t.Run("allowed repeats", func(t *testing.T) {
 		// preparing: repeat allowed, clears presentation each time.
 		st := workflowState(execRunning, 1)
@@ -881,6 +884,7 @@ func TestRuntimeLifecycleRepeats(t *testing.T) {
 }
 
 func TestRuntimeLifecycleInvalidSources(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		start  lifecycleState
@@ -990,6 +994,7 @@ func TestRuntimeLifecycleInvalidSources(t *testing.T) {
 }
 
 func TestRuntimeLifecycleCrossDimensionInvariants(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		state lifecycleState
@@ -1045,6 +1050,7 @@ func TestRuntimeLifecycleCrossDimensionInvariants(t *testing.T) {
 // times out (admission closed before done), the wait ends, and teardown
 // publishes completion.
 func TestRuntimeLifecycleDirectParkResume(t *testing.T) {
+	t.Parallel()
 	st := lifecycleState{}
 	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalPublished})
 
@@ -1127,6 +1133,7 @@ func TestRuntimeLifecycleDirectParkResume(t *testing.T) {
 // timeout opens: admission is closed (prompt admission must reject) while done
 // is still open (no completionPublished yet, so no closeDone effect).
 func TestRuntimeLifecycleAdmissionClosedBeforeDone(t *testing.T) {
+	t.Parallel()
 	st := lifecycleState{exec: execParked, class: directAttemptClass}
 	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalParkTimedOut})
 	if !st.isCompleted() {
@@ -1155,6 +1162,7 @@ func TestRuntimeLifecycleAdmissionClosedBeforeDone(t *testing.T) {
 // empty), the retried attempt starts and settles, and an exhausted retry
 // budget ends with the terminal sentinel.
 func TestRuntimeLifecycleRetryExhaustionBackoff(t *testing.T) {
+	t.Parallel()
 	st := lifecycleState{exec: execStarting, class: directAttemptClass}
 	// Startup failure before any activity: preparing cleared, startFailed
 	// returns to idle with no settle.
@@ -1231,6 +1239,7 @@ func TestRuntimeLifecycleRetryExhaustionBackoff(t *testing.T) {
 // exit was recorded; a dead context ends without dequeuing, and the sentinel
 // is written regardless of consumed status.
 func TestRuntimeLifecycleTerminalProbeContextTiming(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		consumed bool
@@ -1271,6 +1280,7 @@ func TestRuntimeLifecycleTerminalProbeContextTiming(t *testing.T) {
 // idle-context end runs immediately, and an empty queue with a live context
 // backs off.
 func TestRuntimeLifecycleRetryProbeContextTiming(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		consumed  bool
@@ -1323,6 +1333,7 @@ func TestRuntimeLifecycleRetryProbeContextTiming(t *testing.T) {
 // continuation without a pending probe is rejected, and a second attemptOutcome
 // while a probe is pending is rejected.
 func TestRuntimeLifecycleTwoStepContinuationProtocol(t *testing.T) {
+	t.Parallel()
 	retryOutcome := lifecycleSignal{
 		kind: signalAttemptOutcome, class: directAttemptClass,
 		runKind: runKindOrdinaryDirect, exitCode: 1,
@@ -1414,6 +1425,7 @@ func TestRuntimeLifecycleTwoStepContinuationProtocol(t *testing.T) {
 // new attempt are rejected with unchanged state, and validateLifecycleState
 // enforces the pending-probe invariant (S/I with open completion).
 func TestRuntimeLifecyclePendingProbeGuard(t *testing.T) {
+	t.Parallel()
 	probes := []struct {
 		name  string
 		probe probeKind
@@ -1476,6 +1488,7 @@ func TestRuntimeLifecyclePendingProbeGuard(t *testing.T) {
 // checks only the supervisor's shutdown (acquireLocalRuntimeSlot), so the
 // park/slot path moves parked→idle with shutdown requested.
 func TestRuntimeLifecycleShutdownSlotAcquisition(t *testing.T) {
+	t.Parallel()
 	st := idleDirect()
 	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested})
 	if !st.isShuttingDown() {
@@ -1499,6 +1512,7 @@ func TestRuntimeLifecycleShutdownSlotAcquisition(t *testing.T) {
 // decider run is terminal on every path (including decider+workflow
 // classification, where decider wins), and none of them parks.
 func TestRuntimeLifecycleConflictAndDeciderExclusions(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		runKind  runKind
@@ -1564,6 +1578,7 @@ func TestRuntimeLifecycleConflictAndDeciderExclusions(t *testing.T) {
 // gap between the settled first phase and the next start, asserting settles
 // happen only on →0 and finalization settles unconditionally.
 func TestRuntimeLifecycleParallelPreparation(t *testing.T) {
+	t.Parallel()
 	st := workflowState(execStarting, 0)
 	// First phase.
 	st, _, eff := applyOK(t, st, lifecycleSignal{kind: signalAttemptPreparing, class: workflowAttemptClass})
@@ -1623,6 +1638,7 @@ func TestRuntimeLifecycleParallelPreparation(t *testing.T) {
 // rejected-admission path, which ends the started attempt without an extra
 // startFailed/settled pair beyond the single settle.
 func TestRuntimeLifecycleAdmissionRejectionAfterShutdown(t *testing.T) {
+	t.Parallel()
 	st := workflowState(execStarting, 0)
 	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalShutdownRequested, class: workflowAttemptClass})
 	// A closing writer does not block attempt bookkeeping either.
@@ -1650,6 +1666,7 @@ func TestRuntimeLifecycleAdmissionRejectionAfterShutdown(t *testing.T) {
 // only, stays closing, no finished signal), repeated begun after closed, and
 // the open→closed jump rejection.
 func TestRuntimeLifecycleWriterCloseStages(t *testing.T) {
+	t.Parallel()
 	t.Run("nil sink stays closing", func(t *testing.T) {
 		st := idleDirect()
 		st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalWriterCloseBegun})
@@ -1693,6 +1710,7 @@ func TestRuntimeLifecycleWriterCloseStages(t *testing.T) {
 // with writer open and no shutdown — is what ends the child
 // (spawnReserved's reservation rollback).
 func TestRuntimeLifecycleRollback(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		start lifecycleState
@@ -1727,6 +1745,7 @@ func TestRuntimeLifecycleRollback(t *testing.T) {
 // ends overwrite the exit/phase/reason payload each time and never clear
 // parked.
 func TestRuntimeLifecycleIdleEndOverwrites(t *testing.T) {
+	t.Parallel()
 	st := lifecycleState{exec: execParked, class: directAttemptClass}
 	for i, want := range []struct {
 		exit   int
@@ -1760,6 +1779,7 @@ func TestRuntimeLifecycleIdleEndOverwrites(t *testing.T) {
 // must be preserved exactly until final publication, and the effective
 // capacity exclusion (completed || parked) must hold at every step.
 func TestRuntimeLifecycleLocalSlotFailure(t *testing.T) {
+	t.Parallel()
 	st := lifecycleState{exec: execStarting, class: directAttemptClass}
 	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalAttemptPreparing, class: directAttemptClass})
 	st, _, _ = applyOK(t, st, lifecycleSignal{kind: signalAttemptStarted, class: directAttemptClass})
@@ -1827,6 +1847,7 @@ func TestRuntimeLifecycleLocalSlotFailure(t *testing.T) {
 // record-exit then sentinel, and the success presentation is emitted only by
 // the separate successPresented signal at the old post-sentinel site.
 func TestRuntimeLifecycleSentinelBeforeSuccessPresentation(t *testing.T) {
+	t.Parallel()
 	st := idleDirect()
 	st, _, eff := applyOK(t, st, lifecycleSignal{
 		kind: signalAttemptOutcome, class: directAttemptClass,
@@ -1854,6 +1875,7 @@ func TestRuntimeLifecycleSentinelBeforeSuccessPresentation(t *testing.T) {
 // success (ends instead of parking, direct attempt class) and a loop child
 // trace (workflow class, phases, finalization) through publication.
 func TestRuntimeLifecycleWorkflowDirectAndLoopTraces(t *testing.T) {
+	t.Parallel()
 	t.Run("workflow direct success ends", func(t *testing.T) {
 		// A workflow-direct run still uses the direct attempt class.
 		st := lifecycleState{exec: execStarting, class: directAttemptClass}
@@ -1899,6 +1921,7 @@ func TestRuntimeLifecycleWorkflowDirectAndLoopTraces(t *testing.T) {
 // TestRuntimeLifecycleErrorCarriesSignalContext asserts errors are
 // descriptive: they identify the signal and never reconstruct or recover.
 func TestRuntimeLifecycleErrorCarriesSignalContext(t *testing.T) {
+	t.Parallel()
 	_, _, _, err := next(lifecycleState{}, lifecycleSignal{kind: signalPromptDequeued})
 	if err == nil {
 		t.Fatal("expected error for promptDequeued outside parked")
@@ -1918,6 +1941,7 @@ func TestRuntimeLifecycleErrorCarriesSignalContext(t *testing.T) {
 // attempts, settles the waiters, and leaves completion, shutdown and writer
 // untouched so the teardown sequence still validates.
 func TestRuntimeLifecycleFaultSignal(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		start    lifecycleState

@@ -48,6 +48,7 @@ func workingDirTemplateJSON(t *testing.T, templateID string, templateLevel, node
 }
 
 func TestValidateWorkingDirectoryDeclarations(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		templateLevel any
@@ -124,6 +125,7 @@ func TestValidateWorkingDirectoryDeclarations(t *testing.T) {
 // the node declares none, and an unset declaration resolves to empty — the
 // supervisor's working directory.
 func TestResolveNodeWorkingDirectory(t *testing.T) {
+	t.Parallel()
 	template := Template{
 		Params:           []TemplateParam{{ID: "default_dir", Type: "string"}, {ID: "node_dir", Type: "string"}},
 		WorkingDirectory: &WorkingDirectoryRef{FromInstanceParam: "default_dir"},
@@ -157,6 +159,7 @@ func TestResolveNodeWorkingDirectory(t *testing.T) {
 // path; existence is deliberately NOT checked here (a worktree may be
 // created after instantiation).
 func TestInstantiateWorkingDirectoryParamPathRules(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -206,6 +209,7 @@ func TestInstantiateWorkingDirectoryParamPathRules(t *testing.T) {
 // would otherwise resolve to unset and fall back to the supervisor's
 // working directory.
 func TestValidateWorkingDirectoryRequiresRequiredParam(t *testing.T) {
+	t.Parallel()
 	var tmpl map[string]any
 	if err := json.Unmarshal(workingDirTemplateJSON(t, "wd-optional", map[string]any{"from_instance_param": "worktree_path"}, nil), &tmpl); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -225,6 +229,7 @@ func TestValidateWorkingDirectoryRequiresRequiredParam(t *testing.T) {
 // regular file, and a path whose parent is a regular file (a stat error other
 // than not-exist) are each rejected with their own reason.
 func TestCheckWorkingDirectory(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	file := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {

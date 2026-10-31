@@ -65,6 +65,7 @@ func factoryNodeByID(tmpl Template) map[NodeID]*NodeDefinition {
 // provider-backed checkpoint, and that the human nodes (intake, merge-auth,
 // advisor) never request automatic dispatch.
 func TestSoftwareFactoryTemplateAutoDispatchIsExplicit(t *testing.T) {
+	t.Parallel()
 	tmpl := loadFactoryTemplate(t, factoryWorkTemplatePath)
 
 	// The template declares exactly two required instance params: the
@@ -138,6 +139,7 @@ func TestSoftwareFactoryTemplateAutoDispatchIsExplicit(t *testing.T) {
 // controller with limited in-flight budget finishes published work before
 // starting new assessments.
 func TestSoftwareFactoryTemplateLaterPipelineOutranksIntake(t *testing.T) {
+	t.Parallel()
 	tmpl := loadFactoryTemplate(t, factoryWorkTemplatePath)
 	nodes := factoryNodeByID(tmpl)
 	priority := func(id NodeID) int {
@@ -161,6 +163,7 @@ func TestSoftwareFactoryTemplateLaterPipelineOutranksIntake(t *testing.T) {
 // declares the repository/pr_number/pr_head outputs the review gates and the
 // merge-authorization gate bind to.
 func TestSoftwareFactoryTemplatePublicationOutputsPinSubject(t *testing.T) {
+	t.Parallel()
 	tmpl := loadFactoryTemplate(t, factoryWorkTemplatePath)
 	nodes := factoryNodeByID(tmpl)
 	want := map[OutputID]OutputType{
@@ -197,6 +200,7 @@ func TestSoftwareFactoryTemplatePublicationOutputsPinSubject(t *testing.T) {
 // publication's outputs, and result_outcomes routing every advisory result
 // onto a declared branch.
 func TestSoftwareFactoryTemplateExternalReviewIsAutoParkableAndBound(t *testing.T) {
+	t.Parallel()
 	tmpl := loadFactoryTemplate(t, factoryWorkTemplatePath)
 	review := factoryNodeByID(tmpl)["review"]
 
@@ -260,6 +264,7 @@ func TestSoftwareFactoryTemplateExternalReviewIsAutoParkableAndBound(t *testing.
 // exact published subject — the remote-human bridge path must never become
 // automatic.
 func TestSoftwareFactoryTemplateMergeAuthStaysManualAndBound(t *testing.T) {
+	t.Parallel()
 	tmpl := loadFactoryTemplate(t, factoryWorkTemplatePath)
 	mergeAuth := factoryNodeByID(tmpl)["merge-auth"]
 

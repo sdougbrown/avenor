@@ -29,6 +29,7 @@ func writeSentinel(t *testing.T, path, status, sessionID string) {
 }
 
 func TestColdResumeRefusesUntilPriorTeardownFinishes(t *testing.T) {
+	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 4)
 	for _, state := range []lifecycleState{
 		{completion: completionAdmissionClosed},
@@ -47,12 +48,14 @@ func TestColdResumeRefusesUntilPriorTeardownFinishes(t *testing.T) {
 }
 
 func TestResumeRefusesNonOwner(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	_, err := sup.Resume(messaging.Caller{Kind: messaging.CallerBroker, RunID: "rt_a"}, messaging.ResumeRequest{Target: "rt_a", Message: "again"})
 	assertToolCode(t, err, "not_permitted")
 }
 
 func TestResumeResolution(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	owner := messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}
 
@@ -100,6 +103,7 @@ func TestResumePiDenialStatuses(t *testing.T) {
 }
 
 func TestResumeRefusesNonResumableSentinel(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "sentinel.env")
@@ -144,6 +148,7 @@ func TestResumeRefusesNonResumableSentinel(t *testing.T) {
 // resume is a typed not_resumable denial instead of a fresh session behind a
 // run the caller was told was resumed.
 func TestResumeRefusesWithoutResolvableSession(t *testing.T) {
+	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 4)
 	dir := t.TempDir()
 	prior, err := sup.spawn(SpawnParams{
@@ -214,6 +219,7 @@ func finishResumeFixture(t *testing.T, sup *Supervisor, prior SpawnResult, senti
 }
 
 func TestResumeCarriesIdentityAndSession(t *testing.T) {
+	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "sentinel.env")
@@ -280,6 +286,7 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 }
 
 func TestResumeColdArmKeepsHarnessLabelsUnambiguous(t *testing.T) {
+	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "sentinel.env")
@@ -334,6 +341,7 @@ func TestResumeColdArmKeepsHarnessLabelsUnambiguous(t *testing.T) {
 }
 
 func TestResumeKeyedReplayAdoptsFirstRun(t *testing.T) {
+	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "sentinel.env")
@@ -387,6 +395,7 @@ func TestResumeKeyedReplayAdoptsFirstRun(t *testing.T) {
 }
 
 func TestResumeRejectsLiveLabel(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
 	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: dir, Label: "prior"})
@@ -406,6 +415,7 @@ func TestResumeRejectsLiveLabel(t *testing.T) {
 }
 
 func TestResumeRefusesActiveRuntimeEvenWithDoneSentinel(t *testing.T) {
+	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 4)
 	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: t.TempDir(), Label: "prior"})
 	if err != nil {
@@ -427,6 +437,7 @@ func TestResumeRefusesActiveRuntimeEvenWithDoneSentinel(t *testing.T) {
 // progress one refuses — must surface as a refused ToolError carrying the
 // original message, not as the raw error.
 func TestResumeKeyedBusyRefusalIsToolError(t *testing.T) {
+	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 4)
 	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: t.TempDir(), Label: "prior"})
 	if err != nil {
@@ -446,6 +457,7 @@ func TestResumeKeyedBusyRefusalIsToolError(t *testing.T) {
 }
 
 func TestResumeReportsSpawnedPaths(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: t.TempDir(), Label: "prior"})
 	if err != nil {
@@ -475,6 +487,7 @@ func TestResumeReportsSpawnedPaths(t *testing.T) {
 }
 
 func TestResumeRefusesSupervisorTarget(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	owner := messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}
 	if _, err := sup.SessionRename(owner, "", "main"); err != nil {
@@ -490,6 +503,7 @@ func TestResumeRefusesSupervisorTarget(t *testing.T) {
 }
 
 func TestResumeRefusesUnownedRuntime(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	if _, err := sup.broker.CreateRun("rt_orphan", "orphan-label"); err != nil {
 		t.Fatalf("create broker-only run: %v", err)
@@ -504,6 +518,7 @@ func TestResumeRefusesUnownedRuntime(t *testing.T) {
 }
 
 func TestResumeConcurrentKeyedSpawnsOneRuntime(t *testing.T) {
+	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
 	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: dir, Label: "prior"})
@@ -546,6 +561,7 @@ func TestResumeConcurrentKeyedSpawnsOneRuntime(t *testing.T) {
 // and a resume may both use key "k" without the resume being rejected as the
 // same key reused with different parameters.
 func TestResumeKeySpaceIsolatedFromSpawn(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "sentinel.env")
@@ -584,6 +600,7 @@ func TestResumeKeySpaceIsolatedFromSpawn(t *testing.T) {
 }
 
 func TestResumeDropsStartOnlyOptionsForClaudeResume(t *testing.T) {
+	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 8)
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "sentinel.env")

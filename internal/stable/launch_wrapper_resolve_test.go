@@ -35,6 +35,7 @@ func wellKnownPolicyPath(configHome string) string {
 }
 
 func TestResolveMCPLaunchWrapperPolicyPriority(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	flagPath := writePolicyAt(t, dir, "flag.json", "/flag/exec")
 	envPath := writePolicyAt(t, dir, "env.json", "/env/exec")
@@ -82,6 +83,7 @@ func TestResolveMCPLaunchWrapperPolicyPriority(t *testing.T) {
 }
 
 func TestResolveMCPLaunchWrapperPolicyAbsentWellKnownFileDisables(t *testing.T) {
+	t.Parallel()
 	policy, path, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), fixedConfigHome(t.TempDir()))
 	if err != nil {
 		t.Fatalf("ResolveMCPLaunchWrapperPolicy() error = %v, want nil", err)
@@ -92,6 +94,7 @@ func TestResolveMCPLaunchWrapperPolicyAbsentWellKnownFileDisables(t *testing.T) 
 }
 
 func TestResolveMCPLaunchWrapperPolicyWhitespaceOnlyEnvDisables(t *testing.T) {
+	t.Parallel()
 	env := fixedGetenv(map[string]string{EnvMCPLaunchWrapperPolicy: "  "})
 	policy, path, err := ResolveMCPLaunchWrapperPolicy("", env, fixedConfigHome(t.TempDir()))
 	if err != nil {
@@ -103,6 +106,7 @@ func TestResolveMCPLaunchWrapperPolicyWhitespaceOnlyEnvDisables(t *testing.T) {
 }
 
 func TestResolveMCPLaunchWrapperPolicyEmptyConfigHomeDisables(t *testing.T) {
+	t.Parallel()
 	policy, path, err := ResolveMCPLaunchWrapperPolicy("", fixedGetenv(nil), func() string { return "" })
 	if err != nil {
 		t.Fatalf("ResolveMCPLaunchWrapperPolicy() error = %v, want nil", err)
@@ -113,6 +117,7 @@ func TestResolveMCPLaunchWrapperPolicyEmptyConfigHomeDisables(t *testing.T) {
 }
 
 func TestResolveMCPLaunchWrapperPolicyInvalidWellKnownFileErrors(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	path := wellKnownPolicyPath(home)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -138,6 +143,7 @@ func TestResolveMCPLaunchWrapperPolicyInvalidWellKnownFileErrors(t *testing.T) {
 }
 
 func TestResolveMCPLaunchWrapperPolicyMissingNamedFileErrors(t *testing.T) {
+	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "absent.json")
 	home := t.TempDir()
 	writePolicyAt(t, home, "launch-wrapper-policy.json", "/well-known/exec")
@@ -166,6 +172,7 @@ func TestResolveMCPLaunchWrapperPolicyMissingNamedFileErrors(t *testing.T) {
 }
 
 func TestResolveMCPLaunchWrapperPolicyWellKnownStatErrorFails(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	notADir := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {

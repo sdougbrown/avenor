@@ -45,6 +45,7 @@ func loadSoftwareFactoryTemplate(t *testing.T) Template {
 // TestSoftwareFactoryTemplateIsValid asserts the shipped template passes the
 // full validation boundary (Profile structure, strict decode, graph rules).
 func TestSoftwareFactoryTemplateIsValid(t *testing.T) {
+	t.Parallel()
 	tmpl := loadSoftwareFactoryTemplate(t)
 	if tmpl.TemplateID != "software-factory-work" {
 		t.Fatalf("template_id = %q, want software-factory-work", tmpl.TemplateID)
@@ -58,6 +59,7 @@ func TestSoftwareFactoryTemplateIsValid(t *testing.T) {
 // and non-terminal outcome targets an existing node. A branch to a missing
 // node would create a dangling activation at runtime.
 func TestSoftwareFactoryTemplateBranchTargetsExist(t *testing.T) {
+	t.Parallel()
 	tmpl := loadSoftwareFactoryTemplate(t)
 	nodeIDs := make(map[NodeID]struct{}, len(tmpl.Nodes))
 	for _, node := range tmpl.Nodes {
@@ -122,6 +124,7 @@ func TestSoftwareFactoryTemplateReviewBranches(t *testing.T) {
 // binding is what keeps CI, review, and merge authorization tied to one
 // immutable revision.
 func TestSoftwareFactoryTemplateExactHeadGates(t *testing.T) {
+	t.Parallel()
 	tmpl := loadSoftwareFactoryTemplate(t)
 	nodeByID := make(map[NodeID]*NodeDefinition, len(tmpl.Nodes))
 	for i := range tmpl.Nodes {
@@ -178,6 +181,7 @@ func TestSoftwareFactoryTemplateExactHeadGates(t *testing.T) {
 // branch-target existence is covered separately by
 // TestSoftwareFactoryTemplateBranchTargetsExist and runtime graph validation.
 func TestSoftwareFactoryTemplateNoUndeclaredOutcome(t *testing.T) {
+	t.Parallel()
 	tmpl := loadSoftwareFactoryTemplate(t)
 	terminal := make(map[OutcomeName]struct{}, len(tmpl.TerminalOutcomes))
 	for _, name := range tmpl.TerminalOutcomes {
@@ -205,6 +209,7 @@ func TestSoftwareFactoryTemplateNoUndeclaredOutcome(t *testing.T) {
 // accepting a clean absolute path that does not exist yet (existence is a
 // dispatch-time check).
 func TestSoftwareFactoryTemplateWorkingDirectoryResolves(t *testing.T) {
+	t.Parallel()
 	tmpl := loadSoftwareFactoryTemplate(t)
 	if tmpl.WorkingDirectory == nil || tmpl.WorkingDirectory.FromInstanceParam != "worktree_path" {
 		t.Fatalf("working_directory = %+v, want from_instance_param worktree_path", tmpl.WorkingDirectory)

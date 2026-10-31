@@ -155,6 +155,7 @@ func (f *fakeExecutor) SendToParent(ctx context.Context, runtimeID, message stri
 // ── RunLoop tests ────────────────────────────────────────────────────────────
 
 func TestRunLoop_textOnly_stop(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -188,6 +189,7 @@ func TestRunLoop_textOnly_stop(t *testing.T) {
 }
 
 func TestRunLoop_textOnly_length(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -214,6 +216,7 @@ func TestRunLoop_textOnly_length(t *testing.T) {
 }
 
 func TestRunLoop_textToolCalls_stop(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry([]tools.Tool{tools.NewFileReadTool()})
 	ch := make(chan events.Event, 64)
@@ -275,6 +278,7 @@ func TestRunLoop_textToolCalls_stop(t *testing.T) {
 }
 
 func TestRunLoop_toolExecuteError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry([]tools.Tool{tools.NewFileReadTool()})
 	ch := make(chan events.Event, 64)
@@ -321,6 +325,7 @@ func TestRunLoop_toolExecuteError(t *testing.T) {
 }
 
 func TestRunLoop_streamEndedUnexpectedly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -343,6 +348,7 @@ func TestRunLoop_streamEndedUnexpectedly(t *testing.T) {
 }
 
 func TestRunLoop_errorChunk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -363,6 +369,7 @@ func TestRunLoop_errorChunk(t *testing.T) {
 }
 
 func TestRunLoop_cancellation(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	started := make(chan struct{})
@@ -395,6 +402,7 @@ func TestRunLoop_cancellation(t *testing.T) {
 }
 
 func TestRunLoop_reasoningChunk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 
@@ -452,6 +460,7 @@ func TestRunLoop_reasoningChunk(t *testing.T) {
 }
 
 func TestRunLoop_reasoningContent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -510,6 +519,7 @@ func TestRunLoop_reasoningContent(t *testing.T) {
 }
 
 func TestRunLoop_customFinishReason(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -536,6 +546,7 @@ func TestRunLoop_customFinishReason(t *testing.T) {
 }
 
 func TestRunLoop_multipleToolCalls(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry([]tools.Tool{tools.NewFileReadTool()})
 	ch := make(chan events.Event, 64)
@@ -582,6 +593,7 @@ func TestRunLoop_multipleToolCalls(t *testing.T) {
 }
 
 func TestRunLoop_stopConditionOnToolCalls(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry([]tools.Tool{tools.NewFileReadTool()})
 	ch := make(chan events.Event, 64)
@@ -614,6 +626,7 @@ func TestRunLoop_stopConditionOnToolCalls(t *testing.T) {
 // ── LoopWithRetry tests ──────────────────────────────────────────────────────
 
 func TestLoopWithRetry_succeedsFirstAttempt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -644,6 +657,7 @@ func TestLoopWithRetry_succeedsFirstAttempt(t *testing.T) {
 }
 
 func TestLoopWithRetry_retriesOnError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -664,6 +678,7 @@ func TestLoopWithRetry_retriesOnError(t *testing.T) {
 }
 
 func TestLoopWithRetry_noRetryAfterToolCalls(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry([]tools.Tool{tools.NewFileReadTool()})
 	ch := make(chan events.Event, 64)
@@ -696,6 +711,7 @@ func TestLoopWithRetry_noRetryAfterToolCalls(t *testing.T) {
 }
 
 func TestLoopWithRetry_exhaustsRetries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -718,6 +734,7 @@ func TestLoopWithRetry_exhaustsRetries(t *testing.T) {
 }
 
 func TestLoopWithRetry_contextCancelledDuringBackoff(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan events.Event, 64)
 	defer close(ch)
@@ -744,6 +761,7 @@ func TestLoopWithRetry_contextCancelledDuringBackoff(t *testing.T) {
 // ── Provider tests ───────────────────────────────────────────────────────────
 
 func TestProvider_Capabilities(t *testing.T) {
+	t.Parallel()
 	p := New(Config{Model: "test"})
 	caps, err := p.Capabilities(context.Background())
 	if err != nil {
@@ -764,6 +782,7 @@ func TestProvider_Capabilities(t *testing.T) {
 }
 
 func TestSystemPromptWithToolInstructions(t *testing.T) {
+	t.Parallel()
 	t.Run("no tools keeps base prompt unchanged", func(t *testing.T) {
 		got := systemPromptWithToolInstructions("You are helpful.", false, false)
 		if got != "You are helpful." {
@@ -808,6 +827,7 @@ func TestSystemPromptWithToolInstructions(t *testing.T) {
 }
 
 func TestProvider_Start(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := New(Config{
 		Model:         "test-model",
@@ -832,6 +852,7 @@ func TestProvider_Start(t *testing.T) {
 }
 
 func TestProvider_Start_multipleSessions(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := New(Config{Model: "test-model"})
 
@@ -993,6 +1014,7 @@ func cleanGlobalSessions(t *testing.T) {
 }
 
 func TestProvider_Prompt_unknownSession(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := New(Config{Model: "test-model"})
 
@@ -1003,6 +1025,7 @@ func TestProvider_Prompt_unknownSession(t *testing.T) {
 }
 
 func TestProvider_Cancel_unknownSession(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := New(Config{Model: "test-model"})
 
@@ -1013,6 +1036,7 @@ func TestProvider_Cancel_unknownSession(t *testing.T) {
 }
 
 func TestProvider_Prompt_cancel(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	started := make(chan struct{})
@@ -1043,6 +1067,7 @@ func TestProvider_Prompt_cancel(t *testing.T) {
 }
 
 func TestProvider_Events_returnsChannel(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := New(Config{Model: "test-model"})
 	session, _ := p.Start(ctx, runtime.StartOptions{})
@@ -1057,6 +1082,7 @@ func TestProvider_Events_returnsChannel(t *testing.T) {
 }
 
 func TestProvider_Events_unknownSession(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := New(Config{Model: "test-model"})
 
@@ -1067,6 +1093,7 @@ func TestProvider_Events_unknownSession(t *testing.T) {
 }
 
 func TestProvider_Start_withAgentsMD(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 
@@ -1110,6 +1137,7 @@ func TestProvider_Start_withAgentsMD(t *testing.T) {
 }
 
 func TestProvider_Start_withInitialPrompt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	p := New(Config{
 		Model:         "test-model",
@@ -1248,6 +1276,7 @@ func TestProvider_NewWithOptions_profileUnknownAgentFailsClosed(t *testing.T) {
 // ── Orchestration tools tests ────────────────────────────────────────────────
 
 func TestOrchestrationTools_spawn(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{spawnID: "child_1"}))
 
@@ -1262,6 +1291,7 @@ func TestOrchestrationTools_spawn(t *testing.T) {
 }
 
 func TestOrchestrationTools_sendPrompt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fake := &fakeExecutor{}
 	reg := tools.NewRegistry(newOrchestrationTools(fake))
@@ -1284,6 +1314,7 @@ func TestOrchestrationTools_sendPrompt(t *testing.T) {
 }
 
 func TestOrchestrationTools_getStatus(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{getStatusResp: map[string]any{"phase": "completed"}}))
 
@@ -1297,6 +1328,7 @@ func TestOrchestrationTools_getStatus(t *testing.T) {
 }
 
 func TestOrchestrationTools_waitForDone_immediate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{waitDone: true}))
 
@@ -1311,6 +1343,7 @@ func TestOrchestrationTools_waitForDone_immediate(t *testing.T) {
 }
 
 func TestOrchestrationTools_waitForDone_cancelled(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{waitDone: false}))
 
@@ -1334,6 +1367,7 @@ func TestOrchestrationTools_waitForDone_cancelled(t *testing.T) {
 }
 
 func TestOrchestrationTools_spawnMissingPrompt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
 
@@ -1344,6 +1378,7 @@ func TestOrchestrationTools_spawnMissingPrompt(t *testing.T) {
 }
 
 func TestOrchestrationTools_spawnAgents(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	fe := &fakeExecutor{}
 	reg := tools.NewRegistry(newOrchestrationTools(fe))
@@ -1362,6 +1397,7 @@ func TestOrchestrationTools_spawnAgents(t *testing.T) {
 }
 
 func TestOrchestrationTools_spawnAgreesEmpty(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
 
@@ -1372,6 +1408,7 @@ func TestOrchestrationTools_spawnAgreesEmpty(t *testing.T) {
 }
 
 func TestOrchestrationTools_spawnAgentsMissingPrompt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
 
@@ -1382,6 +1419,7 @@ func TestOrchestrationTools_spawnAgentsMissingPrompt(t *testing.T) {
 }
 
 func TestOrchestrationTools_spawnAgentsDirsOutsideWorkDir(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
 
@@ -1392,6 +1430,7 @@ func TestOrchestrationTools_spawnAgentsDirsOutsideWorkDir(t *testing.T) {
 }
 
 func TestOrchestrationTools_sendToParent(t *testing.T) {
+	t.Parallel()
 	ctx := context.WithValue(context.Background(), RuntimeIDKey, "rt_child")
 	fe := &fakeExecutor{}
 	reg := tools.NewRegistry(newOrchestrationTools(fe))
@@ -1409,6 +1448,7 @@ func TestOrchestrationTools_sendToParent(t *testing.T) {
 }
 
 func TestOrchestrationTools_sendToParentMissingRuntimeContext(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
 
@@ -1419,6 +1459,7 @@ func TestOrchestrationTools_sendToParentMissingRuntimeContext(t *testing.T) {
 }
 
 func TestOrchestrationTools_sendToParentMissingMessage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry(newOrchestrationTools(&fakeExecutor{}))
 
@@ -1431,6 +1472,7 @@ func TestOrchestrationTools_sendToParentMissingMessage(t *testing.T) {
 // ── e2e tool with real file read ─────────────────────────────────────────────
 
 func TestRunLoop_e2e_fileRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	reg := tools.NewRegistry([]tools.Tool{tools.NewFileReadTool()})
 	ch := make(chan events.Event, 64)
@@ -1487,6 +1529,7 @@ func TestRunLoop_e2e_fileRead(t *testing.T) {
 // ── sessionState tests ───────────────────────────────────────────────────────
 
 func TestSessionState_emit(t *testing.T) {
+	t.Parallel()
 	s := newSessionState()
 	ch1 := make(chan events.Event, 8)
 	ch2 := make(chan events.Event, 8)
@@ -1511,6 +1554,7 @@ func TestSessionState_emit(t *testing.T) {
 }
 
 func TestSessionState_removeSubscriber(t *testing.T) {
+	t.Parallel()
 	s := newSessionState()
 	ch := make(chan events.Event, 8)
 	s.addSubscriber(ch)
@@ -1527,6 +1571,7 @@ func TestSessionState_removeSubscriber(t *testing.T) {
 }
 
 func TestSessionState_removeSubscriber_nonExistent(t *testing.T) {
+	t.Parallel()
 	s := newSessionState()
 	ch1 := make(chan events.Event, 8)
 	ch2 := make(chan events.Event, 8)

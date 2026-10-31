@@ -185,6 +185,7 @@ func waitTreeActive(t *testing.T, sup *Supervisor, want int) {
 }
 
 func TestSpawnTreeBudgetAcquiresAndReleasesOnPark(t *testing.T) {
+	t.Parallel()
 	sup, _, releaseDone := newBlockingScriptedSupervisor(t, 4, 8)
 	defer releaseDone()
 
@@ -209,6 +210,7 @@ func TestSpawnTreeBudgetAcquiresAndReleasesOnPark(t *testing.T) {
 }
 
 func TestSpawnReleaseOnStartupFailure(t *testing.T) {
+	t.Parallel()
 	socket := newStableSocketPath(t, "admission-fail")
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: socket,
@@ -237,6 +239,7 @@ func TestSpawnReleaseOnStartupFailure(t *testing.T) {
 }
 
 func TestSpawnReleaseOnLoopFileFailure(t *testing.T) {
+	t.Parallel()
 	socket := newStableSocketPath(t, "admission-loop-fail")
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: socket,
@@ -259,6 +262,7 @@ func TestSpawnReleaseOnLoopFileFailure(t *testing.T) {
 }
 
 func TestSpawnTreeExhaustionReturnsTreeCapacityError(t *testing.T) {
+	t.Parallel()
 	sup, _, releaseDone := newBlockingScriptedSupervisor(t, 8, 3)
 	defer releaseDone()
 
@@ -289,6 +293,7 @@ func TestSpawnTreeExhaustionReturnsTreeCapacityError(t *testing.T) {
 }
 
 func TestSpawnLocalExhaustionReturnsLocalCapacityError(t *testing.T) {
+	t.Parallel()
 	sup, _, releaseDone := newBlockingScriptedSupervisor(t, 2, 16)
 	defer releaseDone()
 
@@ -318,6 +323,7 @@ func TestSpawnLocalExhaustionReturnsLocalCapacityError(t *testing.T) {
 }
 
 func TestFanOutAboveLocalDefaultEight(t *testing.T) {
+	t.Parallel()
 	// The pre-#143 default was 8. Verify a tree budget of 16 allows a fan-out
 	// above 8 when the local limit is also raised.
 	sup, _, releaseDone := newBlockingScriptedSupervisor(t, 16, 16)
@@ -333,6 +339,7 @@ func TestFanOutAboveLocalDefaultEight(t *testing.T) {
 }
 
 func TestConcurrentSiblingSpawnsNoOversubscribeTree(t *testing.T) {
+	t.Parallel()
 	sup, _, releaseDone := newBlockingScriptedSupervisor(t, 64, 20)
 	defer releaseDone()
 
@@ -378,6 +385,7 @@ func TestConcurrentSiblingSpawnsNoOversubscribeTree(t *testing.T) {
 }
 
 func TestNestedSupervisorSharesTreeBudget(t *testing.T) {
+	t.Parallel()
 	// Simulate a nested supervisor opening the same budget file. The nested
 	// supervisor's spawns consume from the shared tree capacity.
 	root, _, releaseDone := newBlockingScriptedSupervisor(t, 8, 4)
@@ -430,6 +438,7 @@ func TestNestedSupervisorSharesTreeBudget(t *testing.T) {
 }
 
 func TestIndependentRootsDoNotShareBudget(t *testing.T) {
+	t.Parallel()
 	rootA, _, releaseADone := newBlockingScriptedSupervisor(t, 8, 2)
 	defer releaseADone()
 	rootB, _, releaseBDone := newBlockingScriptedSupervisor(t, 8, 2)
@@ -457,6 +466,7 @@ func TestIndependentRootsDoNotShareBudget(t *testing.T) {
 }
 
 func TestReleaseReleasesAfterCancellation(t *testing.T) {
+	t.Parallel()
 	sup, _, releaseDone := newBlockingScriptedSupervisor(t, 4, 8)
 	defer releaseDone()
 
@@ -473,6 +483,7 @@ func TestReleaseReleasesAfterCancellation(t *testing.T) {
 }
 
 func TestTreeBudgetStatusViaHandler(t *testing.T) {
+	t.Parallel()
 	sup, _, releaseDone := newBlockingScriptedSupervisor(t, 4, 8)
 	defer releaseDone()
 
@@ -493,6 +504,7 @@ func TestTreeBudgetStatusViaHandler(t *testing.T) {
 }
 
 func TestWaitForCapacityWakesOnRelease(t *testing.T) {
+	t.Parallel()
 	sup, _, releaseDone := newBlockingScriptedSupervisor(t, 4, 1)
 	defer releaseDone()
 
@@ -584,6 +596,7 @@ func TestDegradedModeNoBudgetStillEnforcesLocal(t *testing.T) {
 }
 
 func TestInheritedBudgetFailureReportsDegradedMode(t *testing.T) {
+	t.Parallel()
 	socket := newStableSocketPath(t, "degraded-tree-budget")
 	var sup *Supervisor
 	stderr := captureStderr(t, func(stderr io.Writer) {
@@ -627,6 +640,7 @@ func TestInheritedBudgetFailureReportsDegradedMode(t *testing.T) {
 }
 
 func TestParkedRuntimeReacquiresOnResume(t *testing.T) {
+	t.Parallel()
 	releaseSecondTurn := make(chan struct{})
 
 	r1Provider := &stableScriptedProvider{
@@ -730,6 +744,7 @@ func TestParkedRuntimeReacquiresOnResume(t *testing.T) {
 	WaitForChildDone(t, sup, r1.RuntimeID)
 }
 func TestSupervisorReaperReclaimsStaleDescendant(t *testing.T) {
+	t.Parallel()
 	sup, _, _ := newBlockingScriptedSupervisor(t, 8, 4)
 	sup.reaperInterval = 10 * time.Millisecond
 	sup.startReaper()
@@ -766,10 +781,15 @@ func TestSupervisorReaperReclaimsStaleDescendant(t *testing.T) {
 // This is a test-only helper to simulate a crashed supervisor.
 func injectDeadPID(t *testing.T, b *admission.Budget, pid int) {
 	t.Helper()
-	raw := b.RawFile()
-	if raw == nil {
-		t.Fatal("budget has no raw file")
+	// Open a second descriptor rather than locking the budget's own *os.File:
+	// flock is per open file description, so a lock taken on the budget's
+	// descriptor would not exclude the budget's own lock(b.f) calls in this
+	// process, and the rewrite would race the reaper's Reap.
+	raw, err := os.OpenFile(b.Path(), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open budget file: %v", err)
 	}
+	defer raw.Close()
 	if err := flock(raw); err != nil {
 		t.Fatalf("flock: %v", err)
 	}

@@ -25,6 +25,7 @@ func sha256Hex(s string) string {
 }
 
 func TestStageEvidence_CopiesIntoItsOwnFile(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	src := writeTestFile(t, "same fs content")
 
@@ -51,6 +52,7 @@ func TestStageEvidence_CopiesIntoItsOwnFile(t *testing.T) {
 }
 
 func TestStageEvidence_MissingSource(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	_, err := s.StageEvidence("wf1", filepath.Join(t.TempDir(), "nope.txt"), "out.txt", false, "")
 	if err == nil {
@@ -67,6 +69,7 @@ func TestStageEvidence_MissingSource(t *testing.T) {
 }
 
 func TestStageEvidence_EmptyRequiredEmptyFile(t *testing.T) {
+	t.Parallel()
 	src := writeTestFile(t, "")
 	s := newStore(t)
 	// required=true should error
@@ -92,6 +95,7 @@ func TestStageEvidence_EmptyRequiredEmptyFile(t *testing.T) {
 }
 
 func TestStageEvidence_Sha256Mismatch(t *testing.T) {
+	t.Parallel()
 	src := writeTestFile(t, "abc")
 	wrong := strings.Repeat("0", 64)
 	s := newStore(t)
@@ -132,6 +136,7 @@ func TestStageEvidence_Sha256Mismatch(t *testing.T) {
 }
 
 func TestStageEvidence_Copies(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	src := writeTestFile(t, "fallback content")
 
@@ -157,6 +162,7 @@ func TestStageEvidence_Copies(t *testing.T) {
 }
 
 func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
+	t.Parallel()
 	destDir := filepath.Join(t.TempDir(), "evidence")
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatalf("mkdir destDir: %v", err)
@@ -208,6 +214,7 @@ func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
 }
 
 func TestStageEvidence_PathEscape(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	src := writeTestFile(t, "x")
 	badNames := []string{"../escape.txt", "/abs", "a/../b", "..\\evil"}
@@ -236,6 +243,7 @@ func TestStageEvidence_PathEscape(t *testing.T) {
 }
 
 func TestStageEvidence_DistinctDirs(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	src := writeTestFile(t, "x")
 	g1, err := s.StageEvidence("wf1", src, "a.txt", false, "")
@@ -265,6 +273,7 @@ func TestStageEvidence_DistinctDirs(t *testing.T) {
 }
 
 func TestStageEvidence_LeavesStoreUnchanged(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	src := writeTestFile(t, "x")
 	_, err := s.StageEvidence("wf1", src, "out.txt", false, "")
@@ -287,6 +296,7 @@ func TestStageEvidence_LeavesStoreUnchanged(t *testing.T) {
 }
 
 func TestStageEvidence_NestedPath(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	src := writeTestFile(t, "nested payload")
 	got, err := s.StageEvidence("wf1", src, "logs/out.txt", false, "")
@@ -307,6 +317,7 @@ func TestStageEvidence_NestedPath(t *testing.T) {
 }
 
 func TestStageEvidence_CopyFailure(t *testing.T) {
+	t.Parallel()
 	blocker := filepath.Join(t.TempDir(), "notadir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write blocker: %v", err)
@@ -324,6 +335,7 @@ func TestStageEvidence_CopyFailure(t *testing.T) {
 // place after staging (as a later activation in the same working directory
 // does) never changes the staged bytes or invalidates the recorded digest.
 func TestStageEvidence_SourceRewriteLeavesEvidenceIntact(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	src := writeTestFile(t, "first activation's findings")
 

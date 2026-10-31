@@ -11,6 +11,7 @@ import (
 // claimable again, no retry budget is consumed, and a late termination
 // report for the already-timed-out attempt is an idempotent no-op.
 func TestLeaseExpiryTimesOutNonTerminalAttempts(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -119,6 +120,7 @@ func TestLeaseExpiryTimesOutNonTerminalAttempts(t *testing.T) {
 // TestLeaseExpiryTimedOutAttemptsReplay proves replaying the event log
 // reproduces the sweep's timed_out attempts deterministically.
 func TestLeaseExpiryTimedOutAttemptsReplay(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {

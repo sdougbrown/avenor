@@ -112,6 +112,7 @@ func mustWfReplaceCommand(t *testing.T, m *workflow.Manager, wfID string, payloa
 // lands on the SAME activation with the prior attempt preserved, and the
 // stable manager reports the activation running for A2.
 func TestWorkflowReplacementClaimAfterExpiry(t *testing.T) {
+	t.Parallel()
 	_, mgr, store, wfID := newWfReplaceSupervisor(t, "wf-replace")
 
 	act, _ := wfReplaceActivation(t, mgr, wfID)
@@ -207,6 +208,7 @@ func TestWorkflowReplacementClaimAfterExpiry(t *testing.T) {
 // LastHeartbeatAt stamped). A compile-time assertion ties the seam to the
 // executor context field the start now carries.
 func TestWorkflowOwnerTokenHeartbeatSeam(t *testing.T) {
+	t.Parallel()
 	sup, mgr, _, wfID := newWfReplaceSupervisor(t, "wf-hb-seam")
 	_ = sup
 

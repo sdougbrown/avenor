@@ -92,6 +92,7 @@ func waitHeartbeatEvents(t *testing.T, f *dispatchFixture, n int) {
 // sweeps never expire the activation, and no second attempt can be claimed
 // while the first is live.
 func TestHeartbeatKeepsLeaseAliveWhileRuntimeLive(t *testing.T) {
+	t.Parallel()
 	actions := []struct {
 		name     string
 		writeCfg func(t *testing.T, dir string) string
@@ -221,6 +222,7 @@ func workflowAttempt(t *testing.T, f *dispatchFixture, act workflow.Activation) 
 // lease, the next renewal gets ErrLeaseNotHeld, and the goroutine leaves
 // sup.heartbeats while the runtime is still live.
 func TestHeartbeatExitsWhenLeaseSweptWhileRuntimeLive(t *testing.T) {
+	t.Parallel()
 	template := dispatchActionTemplateJSONTTL(t, "tmpl-dispatch-heartbeat-stale-lease", "c1", "run", "", 1)
 	f := newDispatchFixtureTemplate(t, "heartbeat-stale-lease", 4, 4, template)
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
@@ -297,6 +299,7 @@ func TestHeartbeatExitsWhenLeaseSweptWhileRuntimeLive(t *testing.T) {
 // stops once the runtime reaches a terminal state: no heartbeat events land
 // after termination and the heartbeat leaves the supervisor's registry.
 func TestHeartbeatStopsWhenRuntimeTerminates(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixtureTTL(t, "heartbeat-stop-terminal", 4, 4, "", 1)
 	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
 	if err != nil {
@@ -336,6 +339,7 @@ func TestHeartbeatStopsWhenRuntimeTerminates(t *testing.T) {
 // TestHeartbeatStopsOnSupervisorShutdown proves a registered heartbeat
 // goroutine exits on supervisor shutdown.
 func TestHeartbeatStopsOnSupervisorShutdown(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixtureTTL(t, "heartbeat-stop-shutdown", 4, 4, "", 1)
 	begin, err := f.mgr.BeginDispatch(workflow.BeginDispatchRequest{
 		WorkflowID:       workflow.WorkflowID(f.wf),
@@ -382,6 +386,7 @@ func TestHeartbeatStopsOnSupervisorShutdown(t *testing.T) {
 // is no longer held, and both a replacement dispatch on the same activation
 // and a sibling activation on the same key can dispatch.
 func TestLeaseExpiryReleasesKeyAndAllowsReplacement(t *testing.T) {
+	t.Parallel()
 	f := newDispatchFixtureTTL(t, "dispatch-expiry-key", 4, 4, "deploys", 1)
 	begin, err := f.mgr.BeginDispatch(workflow.BeginDispatchRequest{
 		WorkflowID:       workflow.WorkflowID(f.wf),

@@ -84,6 +84,7 @@ func leasedEvent(t *testing.T, base Snapshot) Event {
 }
 
 func TestReplay_MissingLog(t *testing.T) {
+	t.Parallel()
 	base := baseSnap(t)
 	path := t.TempDir() + "/missing.ndjson"
 
@@ -103,6 +104,7 @@ func TestReplay_MissingLog(t *testing.T) {
 }
 
 func TestReplay_EmptyLog(t *testing.T) {
+	t.Parallel()
 	base := baseSnap(t)
 	path := t.TempDir() + "/empty.ndjson"
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
@@ -125,6 +127,7 @@ func TestReplay_EmptyLog(t *testing.T) {
 }
 
 func TestReplay_ReplayBeyondSnapshot(t *testing.T) {
+	t.Parallel()
 	base := baseSnap(t)
 	path := t.TempDir() + "/events.ndjson"
 	ev := leasedEvent(t, base)
@@ -153,6 +156,7 @@ func TestReplay_ReplayBeyondSnapshot(t *testing.T) {
 }
 
 func TestReplay_IdempotentAlreadyApplied(t *testing.T) {
+	t.Parallel()
 	base := baseSnap(t)
 	ev := leasedEvent(t, base)
 
@@ -188,6 +192,7 @@ func TestReplay_IdempotentAlreadyApplied(t *testing.T) {
 }
 
 func TestReplay_TruncatedFinalLine(t *testing.T) {
+	t.Parallel()
 	base := baseSnap(t)
 	ev := leasedEvent(t, base)
 	path := t.TempDir() + "/events.ndjson"
@@ -234,6 +239,7 @@ func TestReplay_TruncatedFinalLine(t *testing.T) {
 }
 
 func TestReplay_MalformedInteriorLine(t *testing.T) {
+	t.Parallel()
 	base := baseSnap(t)
 	ev := leasedEvent(t, base)
 	path := t.TempDir() + "/events.ndjson"
@@ -280,6 +286,7 @@ func TestReplay_MalformedInteriorLine(t *testing.T) {
 }
 
 func TestReplay_ReduceErrorPropagates(t *testing.T) {
+	t.Parallel()
 	base := baseSnap(t)
 	if base.Instance.Activations[0].ActiveLease != nil {
 		t.Fatal("base activation unexpectedly has a lease")

@@ -19,6 +19,7 @@ import (
 // the local ask intact: the ask is queued once, the child answers it over HTTP
 // and the owner's wait receives that reply.
 func TestOwnerMessagingEntersTheBrokerSeam(t *testing.T) {
+	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
 	c := ownerControlClient(t, sup, "seam-owner")
 

@@ -191,14 +191,6 @@ func Open(path string) (*Budget, error) {
 // Path returns the budget file path.
 func (b *Budget) Path() string { return b.path }
 
-// RawFile returns the underlying file handle for test-only manipulation.
-// Production code must use Acquire/Release/Reap/Status.
-func (b *Budget) RawFile() *os.File {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.f
-}
-
 // RootID returns the tree budget root identity.
 func (b *Budget) RootID() string { return b.rootID }
 

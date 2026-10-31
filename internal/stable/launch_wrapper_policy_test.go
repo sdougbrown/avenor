@@ -17,6 +17,7 @@ func writePolicyFile(t *testing.T, content string) string {
 }
 
 func TestLoadMCPLaunchWrapperPolicyAcceptsValidAllowlist(t *testing.T) {
+	t.Parallel()
 	path := writePolicyFile(t, `{"allowed_argv": [["/usr/bin/nice", "-n", "5"]]}`)
 	policy, err := LoadMCPLaunchWrapperPolicy(path)
 	if err != nil {
@@ -31,6 +32,7 @@ func TestLoadMCPLaunchWrapperPolicyAcceptsValidAllowlist(t *testing.T) {
 }
 
 func TestLoadMCPLaunchWrapperPolicyRejects(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		content string
@@ -62,12 +64,14 @@ func TestLoadMCPLaunchWrapperPolicyRejects(t *testing.T) {
 }
 
 func TestLoadMCPLaunchWrapperPolicyMissingFile(t *testing.T) {
+	t.Parallel()
 	if _, err := LoadMCPLaunchWrapperPolicy(filepath.Join(t.TempDir(), "absent.json")); err == nil {
 		t.Fatal("missing file accepted")
 	}
 }
 
 func TestLoadMCPLaunchWrapperPolicyAcceptsRelativeNonExecutableArgs(t *testing.T) {
+	t.Parallel()
 	path := writePolicyFile(t, `{"allowed_argv": [["/usr/bin/nice", "relative-arg"], ["/bin/sh"]]}`)
 	policy, err := LoadMCPLaunchWrapperPolicy(path)
 	if err != nil {
@@ -85,6 +89,7 @@ func TestLoadMCPLaunchWrapperPolicyAcceptsRelativeNonExecutableArgs(t *testing.T
 }
 
 func TestMcpLaunchWrapperAllowedRequiresExactMatch(t *testing.T) {
+	t.Parallel()
 	policy := &MCPLaunchWrapperPolicy{AllowedArgv: [][]string{{"/usr/bin/nice", "-n", "5"}}}
 	cases := []struct {
 		name    string

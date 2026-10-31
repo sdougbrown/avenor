@@ -18,6 +18,7 @@ import (
 // ── reasoningStreamGuard unit tests ──────────────────────────────────────────
 
 func TestGuard_normalReasoningNeverAborts(t *testing.T) {
+	t.Parallel()
 	g := &reasoningStreamGuard{}
 	// A normal reasoning stream: long-form prose broken into small
 	// deltas, including single-letter "I" and "a" tokens that look
@@ -37,6 +38,7 @@ func TestGuard_normalReasoningNeverAborts(t *testing.T) {
 }
 
 func TestGuard_shortHexBurstIsTolerated(t *testing.T) {
+	t.Parallel()
 	g := &reasoningStreamGuard{}
 	// A short numeric reasoning burst — e.g. "step 1, then 2, then 3" —
 	// should not trip the detector as long as it stays well below the
@@ -53,6 +55,7 @@ func TestGuard_shortHexBurstIsTolerated(t *testing.T) {
 }
 
 func TestGuard_controlTokenAbortsImmediately(t *testing.T) {
+	t.Parallel()
 	g := &reasoningStreamGuard{}
 	r := g.Observe("<|channel|>")
 	if r == "" {
@@ -68,6 +71,7 @@ func TestGuard_controlTokenAbortsImmediately(t *testing.T) {
 }
 
 func TestGuard_allControlTokensAreRecognised(t *testing.T) {
+	t.Parallel()
 	tokens := []string{
 		"<|channel|>", "<|constrain|>", "<|message|>",
 		"<|end|>", "<|start|>", "<|endoftext|>",
@@ -87,6 +91,7 @@ func TestGuard_allControlTokensAreRecognised(t *testing.T) {
 // across multiple deltas. The first delta is the truncated head
 // ("<|channel" with no closing |>) and the loop must still trip.
 func TestGuard_truncatedControlTokensAreRecognised(t *testing.T) {
+	t.Parallel()
 	tokens := []string{
 		"<|channel",   // observed in /tmp/pony/failed-run-18.ndjson
 		"<|channel|",  // partial close
@@ -106,6 +111,7 @@ func TestGuard_truncatedControlTokensAreRecognised(t *testing.T) {
 }
 
 func TestGuard_benignAngleBracketsDoNotTripSignalA(t *testing.T) {
+	t.Parallel()
 	// A permissive "<|...|>" pattern would over-trigger on legitimate
 	// prose. Verify the precise allowlist is in place: "<a|href>" is
 	// normal text, not a control token.
@@ -116,6 +122,7 @@ func TestGuard_benignAngleBracketsDoNotTripSignalA(t *testing.T) {
 }
 
 func TestGuard_longHexRunAbortsAt256(t *testing.T) {
+	t.Parallel()
 	g := &reasoningStreamGuard{}
 	// 255 hex chars: should still be tolerated.
 	for i := 0; i < 255; i++ {
@@ -132,6 +139,7 @@ func TestGuard_longHexRunAbortsAt256(t *testing.T) {
 }
 
 func TestGuard_hexRunResetsOnProgress(t *testing.T) {
+	t.Parallel()
 	g := &reasoningStreamGuard{}
 	for i := 0; i < 200; i++ {
 		g.Observe("a")
@@ -156,6 +164,7 @@ func TestGuard_hexRunResetsOnProgress(t *testing.T) {
 }
 
 func TestGuard_windowHexDominanceAborts(t *testing.T) {
+	t.Parallel()
 	// Signal C is a safety net for streams where the model emits
 	// single-character hex deltas with no other content, but with
 	// occasional deltas that look like progress but are too short to
@@ -206,6 +215,7 @@ func TestGuard_windowHexDominanceAborts(t *testing.T) {
 // unreachable from a single-turn stream. We keep the logic in place
 // for defence-in-depth and to make the diagnostics map complete.
 func TestGuard_signalCUnreachableFromRealisticStream(t *testing.T) {
+	t.Parallel()
 	g := &reasoningStreamGuard{}
 	// Even with maximum "good" alternation (200 hex, 1 non-hex), the
 	// consecutive-hex run never reaches 256, so signal B is silent.
@@ -225,6 +235,7 @@ func TestGuard_signalCUnreachableFromRealisticStream(t *testing.T) {
 }
 
 func TestGuard_observabilityFields(t *testing.T) {
+	t.Parallel()
 	// Smoke test that Diagnostics() returns a sensible map for a normal
 	// stream. The downstream avenor.error event surfaces this map to
 	// operators, so we want to make sure the keys are stable.
@@ -302,6 +313,7 @@ func findEvent(events []events.Event, name string, pred func(events.Event) bool)
 }
 
 func TestRunLoop_reasoningStreamGuard_normalPassesThrough(t *testing.T) {
+	t.Parallel()
 	// Sanity: a normal multi-reasoning-chunk turn continues to emit
 	// agent.thought_chunk events and ends cleanly with end_turn.
 	ctx := context.Background()
@@ -346,6 +358,7 @@ func TestRunLoop_reasoningStreamGuard_normalPassesThrough(t *testing.T) {
 }
 
 func TestRunLoop_reasoningStreamGuard_controlTokenAborts(t *testing.T) {
+	t.Parallel()
 	// Reproduce the exact pattern from the failed run-18 log: the first
 	// reasoning delta is a leaked control token, then the model
 	// continues emitting the channel format. The session must abort on
@@ -444,6 +457,7 @@ func TestRunLoop_reasoningStreamGuard_controlTokenAborts(t *testing.T) {
 }
 
 func TestRunLoop_reasoningStreamGuard_hexRunAborts(t *testing.T) {
+	t.Parallel()
 	// A stream that never emits a control token but produces a long run
 	// of single-character hex deltas must abort on signal B.
 	ctx := context.Background()
@@ -505,6 +519,7 @@ func TestRunLoop_reasoningStreamGuard_hexRunAborts(t *testing.T) {
 }
 
 func TestLoopWithRetry_doesNotRetryDegenerateStream(t *testing.T) {
+	t.Parallel()
 	// Contract: a degenerate reasoning stream is not retryable. The
 	// provider will produce the same bad output on every retry, so
 	// burning 4 attempts of exponential backoff (1+2+4 = 7s) before
@@ -552,6 +567,7 @@ func TestLoopWithRetry_doesNotRetryDegenerateStream(t *testing.T) {
 }
 
 func TestRunLoop_reasoningStreamGuard_doesNotAffectToolStreaming(t *testing.T) {
+	t.Parallel()
 	// A normal turn that includes reasoning AND tool calls must not
 	// be aborted by the guard. This guards against the detector
 	// breaking the working path.

@@ -10,6 +10,7 @@ import (
 // candidate. Existing unblock tests only assert the status flip to ready; a
 // missing ready_at refresh on unblock would go undetected.
 func TestCommandUnblockRefreshesReadyAt(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "dispatch-unblock", "ctl-a", -1)
 	node := NodeID("start")
 

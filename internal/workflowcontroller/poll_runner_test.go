@@ -122,6 +122,7 @@ func pollSeed() workflow.ParkedGateRef {
 }
 
 func TestRunnerParkSeedsCursorCommitsBeforeInvoke(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -174,6 +175,7 @@ func TestRunnerParkSeedsCursorCommitsBeforeInvoke(t *testing.T) {
 // between the park commit and cursor creation) is re-seeded on the pass that
 // refreshes and then polled, and later passes never reset the live cursor.
 func TestRunnerReseedsMissingPollCursor(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	// No candidate and no cursor: the activation is parked awaiting_gate and
@@ -229,6 +231,7 @@ func pollSeedCursor() PollCursor {
 }
 
 func TestRunnerCrashAfterCommitReusesPollID(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -289,6 +292,7 @@ func waitRetryCount(t *testing.T, store *ControllerStore, want int) {
 }
 
 func TestRunnerBackoffDoublesAndClearsCursorOnApplied(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -335,6 +339,7 @@ func TestRunnerBackoffDoublesAndClearsCursorOnApplied(t *testing.T) {
 }
 
 func TestRunnerJitterBoundsNextPoll(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -377,6 +382,7 @@ func TestRunnerJitterBoundsNextPoll(t *testing.T) {
 // re-acquired, and only then does the crash-recovery re-offer reuse the
 // committed count and poll ID.
 func TestRunnerStaleApplyDropsLeadership(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -441,6 +447,7 @@ func TestRunnerStaleApplyDropsLeadership(t *testing.T) {
 }
 
 func TestRunnerAdapterUnavailableDiagnosticDeduped(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -495,6 +502,7 @@ func TestRunnerAdapterUnavailableDiagnosticDeduped(t *testing.T) {
 // dispatch records a deduplicated diagnostic keyed by workflow, node, and
 // activation.
 func TestRunnerUnresolvedBindingDiagnosticDeduped(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -533,6 +541,7 @@ func TestRunnerUnresolvedBindingDiagnosticDeduped(t *testing.T) {
 // longer parked on this activation) clears the cursor and records a
 // deduplicated poll_obsolete diagnostic.
 func TestRunnerObsoleteApplyDropsCursor(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -598,6 +607,7 @@ func TestRunnerObsoleteApplyDropsCursor(t *testing.T) {
 // resolving the gate: the cursor is kept (never cleared), a deduplicated
 // poll_subject_mismatch diagnostic is recorded, and the cursor polls again.
 func TestRunnerSubjectMismatchKeepsCursorAndRepolls(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -645,6 +655,7 @@ func TestRunnerSubjectMismatchKeepsCursorAndRepolls(t *testing.T) {
 // a mismatched apply records it, and the next applied result on the same
 // cursor clears it.
 func TestRunnerSubjectMismatchDiagnosticClearsOnApply(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}
@@ -686,6 +697,7 @@ func TestRunnerSubjectMismatchDiagnosticClearsOnApply(t *testing.T) {
 }
 
 func TestRunnerDisableCancelsInFlightPoll(t *testing.T) {
+	t.Parallel()
 	store, clock := newManualRunnerStore(t)
 	deps := newFakeDeps(store, "c1")
 	deps.cands = []Candidate{runnerCand("wf-1", "review", "act-1")}

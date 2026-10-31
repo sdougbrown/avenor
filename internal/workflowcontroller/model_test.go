@@ -8,6 +8,7 @@ import (
 )
 
 func TestValidateControllerID(t *testing.T) {
+	t.Parallel()
 	valid := []string{"a", "controller-1", "Main_Controller.2", "A9_-."}
 	for _, id := range valid {
 		if err := validateControllerID(id); err != nil {
@@ -23,6 +24,7 @@ func TestValidateControllerID(t *testing.T) {
 }
 
 func TestControllerRecordJSONRoundTrip(t *testing.T) {
+	t.Parallel()
 	acquired := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
 	rec := ControllerRecord{
 		SchemaVersion: SchemaVersion,
@@ -80,6 +82,7 @@ func TestControllerRecordJSONRoundTrip(t *testing.T) {
 }
 
 func TestApplyEventSequences(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)
 	rec := ControllerRecord{SchemaVersion: SchemaVersion, ControllerID: "alpha"}
 

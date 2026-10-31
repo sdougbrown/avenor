@@ -44,6 +44,7 @@ func paramsTemplateJSON(templateID string, concurrencyKey any) []byte {
 }
 
 func TestValidateTemplateParamsDeclarations(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		params  []map[string]any
@@ -107,6 +108,7 @@ func TestValidateTemplateParamsDeclarations(t *testing.T) {
 }
 
 func TestValidateTemplateTemplatedKeyRequiresDeclaredParam(t *testing.T) {
+	t.Parallel()
 	// The object form naming an undeclared param is rejected.
 	data := paramsTemplateJSON("key-undecl", map[string]any{"prefix": "worktree:", "from_instance_param": "nope"})
 	if err := ValidateTemplateJSON(data); err == nil || !strings.Contains(err.Error(), "undeclared instance param") {
@@ -135,6 +137,7 @@ func TestValidateTemplateTemplatedKeyRequiresDeclaredParam(t *testing.T) {
 }
 
 func TestWorkflowInstantiateEnforcesParams(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -179,6 +182,7 @@ func TestWorkflowInstantiateEnforcesParams(t *testing.T) {
 // with different params resolve different keys, two with the same param share
 // one, and recovery replays the identical key from the recorded params.
 func TestTemplatedKeyFreezesFromInstanceParams(t *testing.T) {
+	t.Parallel()
 	keyJSON := map[string]any{"prefix": "worktree:", "from_instance_param": "worktree"}
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
@@ -253,6 +257,7 @@ func TestTemplatedKeyFreezesFromInstanceParams(t *testing.T) {
 // string key and no params instantiates exactly as before: no params are
 // recorded and the activation carries the literal key.
 func TestLegacyTemplateWithoutParamsUnchanged(t *testing.T) {
+	t.Parallel()
 	data, err := json.Marshal(map[string]any{
 		"schema_version":   1,
 		"template_id":      "legacy-key",

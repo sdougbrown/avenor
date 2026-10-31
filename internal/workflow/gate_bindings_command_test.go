@@ -214,6 +214,7 @@ func TestBoundGateSubjectUnresolvedRefusesDecision(t *testing.T) {
 }
 
 func TestBoundHumanGateSubjectValidation(t *testing.T) {
+	t.Parallel()
 	fixture := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
 		review := boundGateNode(template, "review")
 		review["action"] = map[string]any{"type": "manual"}
@@ -322,6 +323,7 @@ func TestBoundPollReplayIdempotency(t *testing.T) {
 }
 
 func TestUnmappedAdvisoryResultParksWithDiagnostic(t *testing.T) {
+	t.Parallel()
 	fixture := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
 		gate := boundGateNode(template, "review")["gates"].([]any)[0].(map[string]any)
 		delete(gate, "result_outcomes")
@@ -396,6 +398,7 @@ func TestMappedChangesRequestedTransitionsToDeclaredBranch(t *testing.T) {
 // parked review onto that branch — the activation is rejected and a fresh
 // publication activation is created.
 func TestMappedFailedTransitionsToDeclaredBranch(t *testing.T) {
+	t.Parallel()
 	fixture := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
 		gate := boundGateNode(template, "review")["gates"].([]any)[0].(map[string]any)
 		gate["result_outcomes"] = map[string]any{"failed": "failed"}
@@ -485,6 +488,7 @@ func TestSuccessOutcomeRequiresAllGatesPassed(t *testing.T) {
 // activation, and its own gate pins resolve through the review's causal
 // chain to the publication's outputs (subject values and input references).
 func TestChangesRequestedRoutesOntoBoundGateTarget(t *testing.T) {
+	t.Parallel()
 	fixture := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
 		review := boundGateNode(template, "review")
 		review["branches"] = map[string]any{"clean": "merge", "failed": "rework"}

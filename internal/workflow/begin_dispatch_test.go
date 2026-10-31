@@ -9,6 +9,7 @@ import (
 // records the claim lease and starting attempt in one command, pins the
 // selection, and stores dispatch diagnostics without the raw owner token.
 func TestBeginDispatchRecordsClaimAndAttemptAtomically(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "begin-atomic", "ctl-a", -1)
 	if err := m.RebuildCandidateIndex("test"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)
@@ -71,6 +72,7 @@ func TestBeginDispatchRecordsClaimAndAttemptAtomically(t *testing.T) {
 // TestBeginDispatchStaleCandidate appends no event and returns a typed error
 // for a stale revision or foreign controller.
 func TestBeginDispatchStaleCandidate(t *testing.T) {
+	t.Parallel()
 	m, _, wf := newAutoDispatchFixture(t, "begin-stale", "ctl-a", -1)
 	if err := m.RebuildCandidateIndex("test"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)
@@ -108,6 +110,7 @@ func TestBeginDispatchStaleCandidate(t *testing.T) {
 // TestFinalizeDispatchIdempotent proves repeated finalization with the same
 // attempt is safe and records runtime identity exactly once.
 func TestFinalizeDispatchIdempotent(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "begin-finalize", "ctl-a", -1)
 	if err := m.RebuildCandidateIndex("test"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)
@@ -171,6 +174,7 @@ func TestFinalizeDispatchIdempotent(t *testing.T) {
 // attempt with the same concurrency key is rejected with no event, while a
 // re-dispatch of the same activation after recovery is allowed.
 func TestBeginDispatchKeyHeldRejectsSecondLiveAttempt(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "begin-key", "ctl-a", -1)
 	if err := m.RebuildCandidateIndex("test"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)
@@ -307,6 +311,7 @@ func mustTerminateRetryably(t *testing.T, m *Manager, s *Store, wf WorkflowID, c
 // pin unchanged, and (b) a manual claim + start with the same selection
 // succeeds and the new attempt runs under the pinned selection.
 func TestBeginDispatchAcceptsIdenticalSelectionAfterRearm(t *testing.T) {
+	t.Parallel()
 	sel := &ExecutionSelection{Backend: "codex", Agent: "agent-a", Model: "m1"}
 
 	// (a) BeginDispatch re-run with exactly the pinned selection.
@@ -390,6 +395,7 @@ func TestBeginDispatchAcceptsIdenticalSelectionAfterRearm(t *testing.T) {
 // identify commit hits a revision mismatch, and the retry records the runtime
 // identity exactly once.
 func TestFinalizeDispatchRetriesRevisionMismatch(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -470,6 +476,7 @@ func TestFinalizeDispatchRetriesRevisionMismatch(t *testing.T) {
 // dispatch attempt must return ErrStaleCandidate and leave no claim or
 // attempt behind.
 func TestBeginDispatchStaleAfterCancel(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "begin-cancelled", "ctl-a", -1)
 	if err := m.RebuildCandidateIndex("test"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)

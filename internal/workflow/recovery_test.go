@@ -20,6 +20,7 @@ import (
 // explicitly heartbeated (renewing ExpiresAt far into the future and stamping
 // LastHeartbeatAt) survives a restart Catalog untouched.
 func TestRecoveryRetainsHeartbeatedLease(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -79,6 +80,7 @@ func TestRecoveryRetainsHeartbeatedLease(t *testing.T) {
 // whose ExpiresAt has passed and which was never heartbeated is expired with
 // reason "recovery" and released, making the activation re-claimable.
 func TestRecoverySweepsUnheartbeatedExpiredLease(t *testing.T) {
+	t.Parallel()
 	_, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -180,6 +182,7 @@ func TestRecoveryExemptsAwaitingChildFromSweep(t *testing.T) {
 // lease preserved — and an awaiting_child parent whose child is NOT terminal
 // stays awaiting_child (no scheduler, no re-attach, no re-await).
 func TestStartupResumeDoesNotTransitionFreshlyRecoveredLeases(t *testing.T) {
+	t.Parallel()
 	m, s, wfRun, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wfRun)
 	if err != nil {

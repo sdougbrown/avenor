@@ -416,6 +416,7 @@ func TestArtifactRootRefusal(t *testing.T) {
 // and one denied directory fails identically on every pass, while any other
 // error is reported every time.
 func TestReportArtifactError(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name      string
 		err       error
@@ -459,6 +460,7 @@ func writeArtifactRun(t *testing.T, dir string, modTime time.Time) {
 }
 
 func TestRootTreeBudgetUsesAvenorRuntimeStateAndCleansUp(t *testing.T) {
+	t.Parallel()
 	socketPath := newStableSocketPath(t, "root-tree-budget")
 	sup := newTestSupervisor(t, Config{
 		ControlSocket: socketPath,

@@ -7,6 +7,7 @@ import (
 )
 
 func TestHeldKeys(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		inflight []InFlightAttempt
@@ -63,6 +64,7 @@ func TestHeldKeys(t *testing.T) {
 }
 
 func TestActiveCount(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		inflight     []InFlightAttempt
@@ -97,6 +99,7 @@ func TestActiveCount(t *testing.T) {
 }
 
 func TestActiveActivations(t *testing.T) {
+	t.Parallel()
 	inflight := []InFlightAttempt{
 		{Identity: ident("wf1", "n1", "a1", "t1"), ControllerID: "ctrl"},
 		{Identity: ident("wf2", "n2", "a2", "t2"), Terminal: true},

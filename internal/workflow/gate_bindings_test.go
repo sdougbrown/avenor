@@ -106,6 +106,7 @@ func boundGateFixtureWithoutRequiredHead() []byte {
 }
 
 func TestBoundGateTemplateValidation(t *testing.T) {
+	t.Parallel()
 	if err := ValidateTemplateJSON([]byte(boundGateTemplateJSON)); err != nil {
 		t.Fatalf("ValidateTemplateJSON() error = %v", err)
 	}
@@ -317,6 +318,7 @@ func entryBoundGateMutation(mutate func(template map[string]any)) []byte {
 }
 
 func TestBoundGateEntryNodeValidation(t *testing.T) {
+	t.Parallel()
 	invalid := []struct {
 		name   string
 		mutate func(map[string]any)
@@ -350,6 +352,7 @@ func TestBoundGateEntryNodeValidation(t *testing.T) {
 }
 
 func TestAutoExternalDispatchEligibility(t *testing.T) {
+	t.Parallel()
 	valid := []struct {
 		name   string
 		mutate func(map[string]any)

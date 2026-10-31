@@ -136,6 +136,7 @@ func assertOneRuntime(t *testing.T, sup *Supervisor) {
 // same key and identical parameters returns the stored result and starts no
 // second runtime.
 func TestIdempotencySequentialIdenticalSpawnsOneRuntime(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -174,6 +175,7 @@ func TestIdempotencySequentialIdenticalSpawnsOneRuntime(t *testing.T) {
 // in-flight wait, so each duplicate exercises the waiter path rather than
 // serializing into a completed-cache hit.
 func TestIdempotencyConcurrentIdenticalSpawnsOneRuntime(t *testing.T) {
+	t.Parallel()
 	const n = 8
 	provider := &idempotencyGatedProvider{gate: make(chan struct{}), started: make(chan struct{})}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
@@ -236,6 +238,7 @@ func TestIdempotencyConcurrentIdenticalSpawnsOneRuntime(t *testing.T) {
 // TestIdempotencyHashMismatchConflict: reusing a key with different semantic
 // parameters is a conflict and starts no second runtime.
 func TestIdempotencyHashMismatchConflict(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -263,6 +266,7 @@ func TestIdempotencyHashMismatchConflict(t *testing.T) {
 // in-flight (provider blocked) takes the in-flight hash-mismatch branch and
 // conflicts without starting a second runtime.
 func TestIdempotencyInFlightHashMismatchConflict(t *testing.T) {
+	t.Parallel()
 	gate := make(chan struct{})
 	provider := &idempotencyGatedProvider{gate: gate, started: make(chan struct{})}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
@@ -314,6 +318,7 @@ func TestIdempotencyInFlightHashMismatchConflict(t *testing.T) {
 // passed, a retry starts a fresh runtime instead of returning the stale
 // result.
 func TestIdempotencyExpiredTLRetrySpawnsFresh(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -374,6 +379,7 @@ func TestIdempotencyExpiredTLRetrySpawnsFresh(t *testing.T) {
 // slot and caches nothing, so a later valid spawn under the same key starts
 // fresh.
 func TestIdempotencyFailedSpawnNotCached(t *testing.T) {
+	t.Parallel()
 	sup := newIdempotencySupervisor(t, Config{}, &idempotencyFailingProvider{})
 	defer func() { _ = sup.broker.Stop() }()
 	dir := t.TempDir()
@@ -432,6 +438,7 @@ func TestIdempotencyFailedSpawnNotCached(t *testing.T) {
 // by a later healthy spawn instead of leaking a flight that blocks every
 // retry on the key forever.
 func TestIdempotencyPanicReleasesInflightSlot(t *testing.T) {
+	t.Parallel()
 	sup := newIdempotencySupervisor(t, Config{}, &idempotencyPanicProvider{})
 	defer func() { _ = sup.broker.Stop() }()
 	dir := t.TempDir()
@@ -488,6 +495,7 @@ func TestIdempotencyPanicReleasesInflightSlot(t *testing.T) {
 // stored result without going through admission, even when the local runtime
 // capacity is full.
 func TestIdempotencyHitAtFullRuntimeCapacity(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{MaxRuntimes: 1}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -528,6 +536,7 @@ func TestIdempotencyHitAtFullRuntimeCapacity(t *testing.T) {
 // TestIdempotencyStoreFullCapacityError: a full store rejects a new key with a
 // capacity error; once the occupying entry expires, the new key fits.
 func TestIdempotencyStoreFullCapacityError(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{IdempotencyCapacity: 1}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -570,6 +579,7 @@ func TestIdempotencyStoreFullCapacityError(t *testing.T) {
 // concurrent distinct keys admit exactly one holder; the other gets a
 // capacity error.
 func TestIdempotencyCapacityOneConcurrentDistinctKeys(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{IdempotencyCapacity: 1}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -617,6 +627,7 @@ func TestIdempotencyCapacityOneConcurrentDistinctKeys(t *testing.T) {
 // excluded from the parameter hash, so a retry with a different derived label
 // is a hit, not a conflict.
 func TestIdempotencyDerivedLabelsMatchAcrossRetries(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -659,6 +670,7 @@ func TestIdempotencyDerivedLabelsMatchAcrossRetries(t *testing.T) {
 // TestIdempotencyExplicitLabelMismatchConflicts: an explicit (non-derived)
 // Label is a semantic parameter, so a retry with a different one conflicts.
 func TestIdempotencyExplicitLabelMismatchConflicts(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -692,6 +704,7 @@ func TestIdempotencyExplicitLabelMismatchConflicts(t *testing.T) {
 // whose resolved identity differs but whose caller intent is equal is a
 // stored hit; a retry with different caller intent still conflicts.
 func TestIdempotencyResolvedProvenanceRetryHits(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -763,6 +776,7 @@ func TestIdempotencyResolvedProvenanceRetryHits(t *testing.T) {
 // first-use spawns with the same label but different keys must not both
 // register a runtime holding the label.
 func TestIdempotencyConcurrentSameLabelDifferentKeysOneRuntime(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -830,6 +844,7 @@ func TestIdempotencyConcurrentSameLabelDifferentKeysOneRuntime(t *testing.T) {
 // test provider's sessions never end, so a spawned runtime cannot be driven
 // to completion; the holder therefore accounts for no provider Start call.
 func TestIdempotencyKeyedSpawnAllowedWhenLabelHolderCompleted(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -874,6 +889,7 @@ func TestIdempotencyKeyedSpawnAllowedWhenLabelHolderCompleted(t *testing.T) {
 // holder releases, and the commit path leaves a stored entry with no
 // in-flight reservation.
 func TestIdempotencyWaiterReleaseOnFailure(t *testing.T) {
+	t.Parallel()
 	store := newIdempotencyStore(4)
 	// One token per waiter, sent by the store just before the waiter blocks
 	// on the holder's flight, so the release is ordered after the park.
@@ -957,6 +973,7 @@ func TestIdempotencyWaiterReleaseOnFailure(t *testing.T) {
 // guards against the MCP test's mirrored hash drifting from the real
 // exclusion set, in both directions.
 func TestIdempotencyHashExclusionSet(t *testing.T) {
+	t.Parallel()
 	base := SpawnParams{
 		Prompt:         "hello",
 		Dir:            "/tmp",
@@ -1074,6 +1091,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 // whose label is held by a live runtime is rejected before the provider is
 // called; the reservation is released so the key is reusable.
 func TestIdempotencyKeyedFirstUseLabelHeldByLiveRuntime(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()
@@ -1134,6 +1152,7 @@ func TestIdempotencyKeyedFirstUseLabelHeldByLiveRuntime(t *testing.T) {
 // returns the stored result without the label check interfering, even though
 // the first run still holds the label.
 func TestIdempotencyKeyedRetryHitWithHeldLabel(t *testing.T) {
+	t.Parallel()
 	provider := &idempotencyTestProvider{}
 	sup := newIdempotencySupervisor(t, Config{}, provider)
 	defer func() { _ = sup.broker.Stop() }()

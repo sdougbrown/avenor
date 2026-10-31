@@ -17,6 +17,7 @@ import (
 // and that the activation re-surfaces as a dispatch candidate after a
 // candidate-index rebuild.
 func TestRecoveryLeaseExpiryStampsReadyAt(t *testing.T) {
+	t.Parallel()
 	_, s, wf := newAutoDispatchFixture(t, "dispatch-recovery", "ctl-a", -1)
 	node := NodeID("start")
 

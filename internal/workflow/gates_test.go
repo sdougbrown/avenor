@@ -64,6 +64,7 @@ func humanGateCmd(state Snapshot, idem string, actID ActivationID, gateID GateID
 }
 
 func TestGateOperationValidation(t *testing.T) {
+	t.Parallel()
 	// Each case mutates a valid satisfy command; the reducer must reject it
 	// before any event is emitted and the state must be untouched.
 	valid := func(actID ActivationID) Command {
@@ -115,6 +116,7 @@ func TestGateOperationValidation(t *testing.T) {
 }
 
 func TestGateExternalResultValidation(t *testing.T) {
+	t.Parallel()
 	ts := time.Now().UTC()
 	observed := func() *time.Time { t := ts; return &t }
 	external := func() Command {

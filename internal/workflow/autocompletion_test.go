@@ -44,6 +44,7 @@ func stringOutput(id string, required bool, source *OutputSource) OutputDefiniti
 }
 
 func TestEvaluateAutoCompletionSingleCandidateOutcome(t *testing.T) {
+	t.Parallel()
 	tmpl := evalTemplate(autoEvalNode(nil, nil, map[OutcomeName]NodeID{"done": "next"}), "done")
 	plan, err := EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), "")
 	if err != nil {
@@ -58,6 +59,7 @@ func TestEvaluateAutoCompletionSingleCandidateOutcome(t *testing.T) {
 }
 
 func TestEvaluateAutoCompletionTerminalOutcomeVocabulary(t *testing.T) {
+	t.Parallel()
 	// No branches: the template's terminal outcomes are the vocabulary.
 	tmpl := evalTemplate(autoEvalNode(nil, nil, nil), "done")
 	plan, err := EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), "")
@@ -103,6 +105,7 @@ func TestEvaluateAutoCompletionTerminalOutcomeVocabulary(t *testing.T) {
 }
 
 func TestEvaluateAutoCompletionFilesContract(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "result.md"), []byte("the summary\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -148,6 +151,7 @@ func TestEvaluateAutoCompletionFilesContract(t *testing.T) {
 }
 
 func TestEvaluateAutoCompletionFilesContractSHA256(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "result.md"), []byte("content"), 0o600); err != nil {
 		t.Fatal(err)
@@ -176,6 +180,7 @@ func TestEvaluateAutoCompletionFilesContractSHA256(t *testing.T) {
 }
 
 func TestEvaluateAutoCompletionGitContract(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
@@ -234,6 +239,7 @@ func TestEvaluateAutoCompletionGitContract(t *testing.T) {
 }
 
 func TestEvaluateAutoCompletionOutputSources(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "pr-info.json"), []byte(`{"repository":"org/repo","pr":{"number":3}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -275,6 +281,7 @@ func TestEvaluateAutoCompletionOutputSources(t *testing.T) {
 }
 
 func TestEvaluateAutoCompletionGitHeadSource(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
@@ -319,6 +326,7 @@ func TestEvaluateAutoCompletionGitHeadSource(t *testing.T) {
 // rejects the contract naming the git failure, and an optional one is
 // omitted rather than recorded as the error text.
 func TestEvaluateAutoCompletionGitHeadSourceOutsideRepo(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	required := autoEvalNode([]OutputDefinition{
 		stringOutput("head", true, &OutputSource{Git: "head"}),
@@ -341,6 +349,7 @@ func TestEvaluateAutoCompletionGitHeadSourceOutsideRepo(t *testing.T) {
 }
 
 func TestEvaluateAutoCompletionRequiredOutputUnresolvable(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// The contract artifact exists; the required string output has no source
 	// and no default binding, so it cannot resolve.
@@ -360,6 +369,7 @@ func TestEvaluateAutoCompletionRequiredOutputUnresolvable(t *testing.T) {
 }
 
 func TestEvaluateAutoCompletionDefaultFileBinding(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "result.md"), []byte("content\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -387,6 +397,7 @@ func TestEvaluateAutoCompletionDefaultFileBinding(t *testing.T) {
 }
 
 func TestEvaluateAutoCompletionPointerTypeMismatch(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "data.json"), []byte(`{"n":3}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -404,6 +415,7 @@ func TestEvaluateAutoCompletionPointerTypeMismatch(t *testing.T) {
 }
 
 func TestResolveJSONPointer(t *testing.T) {
+	t.Parallel()
 	data := []byte(`{"a": {"b": [10, {"c": "deep"}]}, "s": "x", "n": 1.5, "t": true, "sl/ash": "esc", "ti~lde": "til"}`)
 	tests := []struct {
 		pointer string
@@ -440,6 +452,7 @@ func TestResolveJSONPointer(t *testing.T) {
 // working-directory containment of declared artifact and output-source
 // paths: a traversal and an absolute path are both rejected.
 func TestEvaluateAutoCompletionRejectsPathsOutsideWorkingDir(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "work")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -471,6 +484,7 @@ func TestEvaluateAutoCompletionRejectsPathsOutsideWorkingDir(t *testing.T) {
 // behind the validation rule: a pointer source on a file output and a
 // whole-artifact source on a non-file output never resolve.
 func TestResolveAutoOutputRejectsMismatchedSourceShape(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "data.json"), []byte(`{"n":"x"}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -493,6 +507,7 @@ func TestResolveAutoOutputRejectsMismatchedSourceShape(t *testing.T) {
 // supervisor never records a successful run as contract_unmet and burns a
 // retry because the store could not be read.
 func TestDecideAutoCompletionReportsUnreadableTemplateAsError(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "auto-decide-unreadable", "ctl-a", 50)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {

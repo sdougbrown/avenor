@@ -174,6 +174,7 @@ func findForwardedSessionStart(t *testing.T, sink *checkingSink) events.Event {
 }
 
 func TestRunChildAttemptAdoptsExternalConversationID(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-direct-adopt.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-direct", "conv-direct-real"
 	child, _ := newDeferredChild(t, sup, provisionalID, realID, deferredStartEndEvents(realID, nil))
@@ -210,6 +211,7 @@ func TestRunChildAttemptAdoptsExternalConversationID(t *testing.T) {
 }
 
 func TestRuntimeStatusAndListUseAdoptedSessionID(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-status-list-adopt.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-status", "conv-status-real"
 	child, _ := newDeferredChild(t, sup, provisionalID, realID, deferredStartEndEvents(realID, nil))
@@ -241,6 +243,7 @@ func TestRuntimeStatusAndListUseAdoptedSessionID(t *testing.T) {
 }
 
 func TestAdoptChildSessionIDIgnoresStaleAttempt(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-adopt-stale.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-stale", "conv-stale-real"
 	child, provider := newDeferredChild(t, sup, provisionalID, realID, deferredStartEndEvents(realID, nil))
@@ -279,6 +282,7 @@ func TestAdoptChildSessionIDIgnoresStaleAttempt(t *testing.T) {
 }
 
 func TestSessionStartUpdatesChildBeforeEventForwarding(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-adopt-before-forward.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-forward", "conv-forward-real"
 	release := make(chan struct{})
@@ -324,6 +328,7 @@ func TestSessionStartUpdatesChildBeforeEventForwarding(t *testing.T) {
 }
 
 func TestRunChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-direct-conflict-fatal.sock", MaxRuntimes: 1})
 	sup.rememberSessionIdentity("occupied", effectiveIdentity{Backend: "agy", Agent: "owner"}, nil)
 	provider := &stableDeferredProvider{
@@ -361,6 +366,7 @@ func TestRunChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
 }
 
 func TestRunLoopChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-loop-conflict-fatal.sock", MaxRuntimes: 1})
 	sup.rememberSessionIdentity("occupied", effectiveIdentity{Backend: "agy", Agent: "owner"}, nil)
 	provider := &stableDeferredProvider{
@@ -396,6 +402,7 @@ func TestRunLoopChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
 }
 
 func TestRunTeamChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-team-conflict-fatal.sock", MaxRuntimes: 1})
 	sup.rememberSessionIdentity("occupied", effectiveIdentity{Backend: "agy", Agent: "owner"}, nil)
 	provider := &stableDeferredProvider{
@@ -431,6 +438,7 @@ func TestRunTeamChildSessionIDConflictIsFatalWithRetriesEnabled(t *testing.T) {
 }
 
 func TestRunLoopChildAdoptsExternalConversationID(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-loop-adopt.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-loop", "conv-loop-real"
 	startRelease := make(chan struct{})
@@ -493,6 +501,7 @@ func TestRunLoopChildAdoptsExternalConversationID(t *testing.T) {
 }
 
 func TestRunTeamChildAdoptsExternalConversationID(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-team-adopt.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-team", "conv-team-real"
 	startRelease := make(chan struct{})
@@ -551,6 +560,7 @@ func TestRunTeamChildAdoptsExternalConversationID(t *testing.T) {
 }
 
 func TestStableAdoptionDoesNotOverwriteNewerConcurrentAttempt(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-adopt-concurrent.sock", MaxRuntimes: 1})
 	child := &childRuntime{
 		id:       "rt_concurrent",
@@ -622,6 +632,7 @@ func assertSentinelHasSession(t *testing.T, content, banner, sessionID string) {
 // PhaseAttempt cleanup preserves the authoritative conversation ID in the
 // aggregate child record after the phase terminates.
 func TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-loop-keep-session.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-loop-keep", "conv-loop-keep"
 	startRelease := make(chan struct{})
@@ -669,6 +680,7 @@ func TestRunLoopChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 // TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup is the team analogue
 // of the loop cleanup-preservation test.
 func TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-team-keep-session.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-team-keep", "conv-team-keep"
 	startRelease := make(chan struct{})
@@ -715,6 +727,7 @@ func TestRunTeamChildPreservesAdoptedSessionAfterPhaseCleanup(t *testing.T) {
 // normal successful loop writes the adopted conversation ID to its terminal
 // sentinel. The aggregate RunResult has no SessionID on the max_iterations path.
 func TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-loop-sentinel.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-loop-sent", "conv-loop-sent"
 	provider := &stableDeferredProvider{
@@ -751,6 +764,7 @@ func TestRunLoopChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) 
 // TestRunTeamChildSentinelCarriesAdoptedSessionOnNormalSuccess is the team
 // analogue of the loop sentinel test.
 func TestRunTeamChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-team-sentinel.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-team-sent", "conv-team-sent"
 	provider := &stableDeferredProvider{
@@ -790,6 +804,7 @@ func TestRunTeamChildSentinelCarriesAdoptedSessionOnNormalSuccess(t *testing.T) 
 // The cleanup guard compares runtime.Provider values. A mismatch leaves the
 // newer provider and session untouched.
 func TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-team-stale-cleanup.sock", MaxRuntimes: 1})
 	const provisionalID, realID = "agy-pending-team-stale", "conv-team-stale"
 	startRelease := make(chan struct{})
@@ -861,6 +876,7 @@ func TestRunTeamChildStaleAttemptCleanupDoesNotEraseNewerSession(t *testing.T) {
 // child's event metadata threads workflow ExecutionIdentity onto runtime
 // events (used by events, notifications, and host metadata).
 func TestWorkflowChildEventCarriesExecutionIdentity(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-wf-meta.sock", MaxRuntimes: 1})
 	defer func() { _ = sup.broker.Stop() }()
 	child := &childRuntime{

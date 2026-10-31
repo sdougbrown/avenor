@@ -147,6 +147,7 @@ func TestParkExternalParksEligibleActivation(t *testing.T) {
 // workflows' parked gates are still returned and only the broken workflow is
 // skipped.
 func TestParkedExternalGatesSkipsUnloadableTemplate(t *testing.T) {
+	t.Parallel()
 	m, s, wf1 := parkFixture(t, boundGateTemplateJSON)
 	second := mutateBoundTemplate(boundGateTemplateJSON, func(template map[string]any) {
 		template["template_id"] = "bound-gates-two"
@@ -287,6 +288,7 @@ func TestParkExternalStaleCandidate(t *testing.T) {
 // read→commit window, each attempt hits a revision mismatch, and after
 // maxParkAttempts the park gives up with an error and persists nothing.
 func TestParkExternalRevisionKeptMovingExhausts(t *testing.T) {
+	t.Parallel()
 	// The park fixture has no sibling activation to race on, so add a pending
 	// manual entry node whose claims and heartbeats bump the workflow revision
 	// without touching the parkable review activation.

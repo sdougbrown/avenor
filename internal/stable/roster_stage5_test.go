@@ -48,6 +48,7 @@ func waitStage5Done(t *testing.T, child *childRuntime) {
 }
 
 func TestStableWorkflowBackendPropagationAtProviderBoundary(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"loop", "team"} {
 		for _, supplied := range []string{"", "agy"} {
 			t.Run(mode+"/"+supplied, func(t *testing.T) {
@@ -96,6 +97,7 @@ func TestStableWorkflowBackendPropagationAtProviderBoundary(t *testing.T) {
 }
 
 func TestStableDirectRosterIdentityAndStatus(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-direct-roster.sock", MaxRuntimes: 1})
 	provider := scriptedStage5Provider("ses_roster", "end_turn")
 	var gotOpts runtime.StartOptions
@@ -148,6 +150,7 @@ func TestStableDirectRosterIdentityAndStatus(t *testing.T) {
 }
 
 func TestStableRosterPhasesReachProviderBoundary(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{
 		"plan":{"backend":"pi","agent":"planner","model":"planner-model"},
@@ -204,6 +207,7 @@ func TestStableRosterPhasesReachProviderBoundary(t *testing.T) {
 }
 
 func TestStableTeamRosterMembersUseDifferentBackends(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{
 		"security":{"backend":"pi","agent":"security","model":"security-model"},
@@ -252,6 +256,7 @@ func TestStableTeamRosterMembersUseDifferentBackends(t *testing.T) {
 }
 
 func TestStableRosterMigratesInlineTeamIdentity(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{"review":{"backend":"pi","agent":"roster-agent","model":"roster-model"}}`)
 	teamPath := filepath.Join(dir, "team.json")
@@ -284,6 +289,7 @@ func TestStableRosterMigratesInlineTeamIdentity(t *testing.T) {
 }
 
 func TestStableRosterThinkingValidatesBeforeProviderCreation(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{"slow":{"backend":"agy","agent":"executor"}}`)
 	loopPath := filepath.Join(dir, "loop.json")
@@ -313,6 +319,7 @@ func TestStableRosterThinkingValidatesBeforeProviderCreation(t *testing.T) {
 }
 
 func TestStableRosterRetryRetainsResolvedIdentity(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{"retry":{"backend":"pi","agent":"retry-agent","model":"retry-model"}}`)
 	loopPath := filepath.Join(dir, "loop.json")
@@ -356,6 +363,7 @@ func TestStableRosterRetryRetainsResolvedIdentity(t *testing.T) {
 }
 
 func TestStableSessionIdentityAdoptionDoesNotStaleOverwrite(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-adoption-map.sock", MaxRuntimes: 1})
 	child := &childRuntime{
 		id:               "rt_map",
@@ -394,6 +402,7 @@ func TestStableSessionIdentityAdoptionDoesNotStaleOverwrite(t *testing.T) {
 }
 
 func TestStableFollowUpUsesAuthoritativeEffectiveIdentity(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/stage5-followup-map.sock", MaxRuntimes: 1})
 	provider := &thinkingCaptureProvider{}
 	child := &childRuntime{
@@ -419,6 +428,7 @@ func TestStableFollowUpUsesAuthoritativeEffectiveIdentity(t *testing.T) {
 }
 
 func TestSpawnParamsRosterFieldsRoundTrip(t *testing.T) {
+	t.Parallel()
 	var params SpawnParams
 	if err := json.Unmarshal([]byte(`{"prompt":"work","roster_file":"roster.json","roster_entry":"planner"}`), &params); err != nil {
 		t.Fatal(err)

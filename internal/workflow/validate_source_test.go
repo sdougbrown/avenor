@@ -12,6 +12,7 @@ import (
 // declared in the node's files completion contract, and the source shape
 // must fit the output type.
 func TestValidateOutputSourceShape(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		outputType OutputType
@@ -140,6 +141,7 @@ func decodeOutputSource(t *testing.T, raw map[string]any) *OutputSource {
 // an output source: an unknown key inside source is rejected at template
 // validation rather than dropped by the decoder.
 func TestValidateOutputSourceRejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
 	template := map[string]any{
 		"schema_version":    1,
 		"template_id":       "source-unknown-key",

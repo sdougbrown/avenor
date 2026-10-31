@@ -9,6 +9,7 @@ import (
 )
 
 func TestStableSpawnThreadsLaunchWrapperToProvider(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sentinelPath := filepath.Join(dir, "wrap.done")
 	provider := &stableDeferredProvider{
@@ -30,6 +31,7 @@ func TestStableSpawnThreadsLaunchWrapperToProvider(t *testing.T) {
 }
 
 func TestStableSpawnRejectsEmptyLaunchWrapperElement(t *testing.T) {
+	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/launch-wrapper-empty.sock", MaxRuntimes: 1})
 	_, err := sup.spawn(SpawnParams{Prompt: "work", Dir: ".", LaunchWrapper: []string{"nice", ""}})
 	if err == nil {

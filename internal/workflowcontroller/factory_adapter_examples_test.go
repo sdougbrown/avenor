@@ -22,6 +22,7 @@ import (
 const factoryAdapterExampleDir = "../../templates/software-factory/adapters"
 
 func TestFactoryAdapterExamplesMatchWorkTemplateGates(t *testing.T) {
+	t.Parallel()
 	// The work template's bound external gates pin these adapter IDs and
 	// input schemas; the example manifests must declare exactly the same
 	// contract.

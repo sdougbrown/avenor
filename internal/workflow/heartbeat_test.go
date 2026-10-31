@@ -124,6 +124,7 @@ func startWithToken(t *testing.T, m *Manager, wf WorkflowID, nodeID, activationI
 // heartbeat never transitions the activation status and never touches
 // LastActivityAt.
 func TestHeartbeatExtendsLeaseLiveness(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -228,6 +229,7 @@ func TestHeartbeatExtendsLeaseLiveness(t *testing.T) {
 // liveness. A lease whose ExpiresAt has passed is swept by the detector even
 // though activity was observed moments before.
 func TestActivityDoesNotExtendLeaseLiveness(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -274,6 +276,7 @@ func TestActivityDoesNotExtendLeaseLiveness(t *testing.T) {
 // lease is expired, a fresh lease is retained, and an awaiting_child
 // kernel-held claim is exempted even though its lease is stale.
 func TestExpireStaleLeasesSweepsStaleRetainsFreshExemptsAwaitingChild(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -398,6 +401,7 @@ func TestExpireStaleLeasesSweepsStaleRetainsFreshExemptsAwaitingChild(t *testing
 // directly: a stale lease is expired under the lock with the detector's
 // "stale" reason, while the recovery path keeps using "recovery".
 func TestSweepStaleLeasesRecordsStaleReason(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	wf := WorkflowID("wf-stale")
 	mustInstantiate(t, s, wf)
@@ -466,6 +470,7 @@ func TestSweepStaleLeasesRecordsStaleReason(t *testing.T) {
 // repeated heartbeat is safe, and a duplicate idempotency key is treated as
 // already-applied success.
 func TestHeartbeatValidatesLeaseAndToken(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -562,6 +567,7 @@ func TestHeartbeatValidatesLeaseAndToken(t *testing.T) {
 // node/activation (lease_expired -> leased) and a commandStart records a new
 // attempt on the SAME activation with the prior attempt preserved.
 func TestReplacementClaimAfterLeaseExpiry(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -767,6 +773,7 @@ func TestApplyHeartbeatDurableRenewalIsReplayStable(t *testing.T) {
 // survives (retained), while an un-heartbeated expired lease is swept with
 // reason "recovery".
 func TestRecoveryRetainsHeartbeatedLeaseSweepsUnheartbeated(t *testing.T) {
+	t.Parallel()
 	const twoNodeTemplateJSON = `{
   "schema_version": 1,
   "template_id": "hb-two",
@@ -875,6 +882,7 @@ func TestRecoveryRetainsHeartbeatedLeaseSweepsUnheartbeated(t *testing.T) {
 // survives a subsequent live sweep. A wrong owner token is rejected through
 // the same seam.
 func TestManagerHeartbeatRenewsExpiringLease(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -943,6 +951,7 @@ func ptrTime(t time.Time) *time.Time { return &t }
 // ErrLeaseNotHeld before anything is written, the event log carries no
 // heartbeat event, and the instance keeps replaying cleanly.
 func TestHeartbeatAfterSweepExpiryIsRejectedBeforeAppend(t *testing.T) {
+	t.Parallel()
 	m, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -1004,6 +1013,7 @@ func TestHeartbeatAfterSweepExpiryIsRejectedBeforeAppend(t *testing.T) {
 // synchronous non-blocking send, so an empty channel right after the sweep
 // returns means none was sent.
 func TestExpireStaleLeasesWithoutExpiryDoesNotNotify(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "sweep-quiet", "ctl-a", 50)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {
@@ -1043,6 +1053,7 @@ func TestExpireStaleLeasesWithoutExpiryDoesNotNotify(t *testing.T) {
 // anti-entropy wait) and a candidate-index query taken right after the wake
 // already observes the re-armed node — no rebuild required.
 func TestExpireStaleLeasesNotifiesSubscribersAndIndex(t *testing.T) {
+	t.Parallel()
 	m, s, wf := newAutoDispatchFixture(t, "sweep-notify", "ctl-a", 50)
 	if err := m.RebuildCandidateIndex("sup-1"); err != nil {
 		t.Fatalf("RebuildCandidateIndex: %v", err)
@@ -1108,6 +1119,7 @@ func TestExpireStaleLeasesNotifiesSubscribersAndIndex(t *testing.T) {
 // the activation does not have passes Apply but fails Reduce, and the command
 // is refused with the event log untouched and the instance still replayable.
 func TestApplyCommandRejectsUnreducibleEventBeforeAppend(t *testing.T) {
+	t.Parallel()
 	_, s, wf, node := newManagerFixture(t)
 	snap, _, err := s.loadCurrent(wf)
 	if err != nil {

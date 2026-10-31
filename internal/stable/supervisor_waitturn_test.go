@@ -170,6 +170,7 @@ func waitForControlStatus(t *testing.T, c *client.Client, runtimeID, want string
 // pre-existing idle state. It covers the next prompted turn and reports that
 // turn's stop_reason, complete final_output, and session_id.
 func TestControlWaitTurnCoversQueuedPromptTurn(t *testing.T) {
+	t.Parallel()
 	c, _ := startWaitTurnSupervisor(t, &waitTurnTestProvider{gates: []chan struct{}{nil, nil}})
 	runtimeID := spawnWaitTurnRuntime(t, c)
 	waitForControlStatus(t, c, runtimeID, "idle")
@@ -217,6 +218,7 @@ func TestControlWaitTurnCoversQueuedPromptTurn(t *testing.T) {
 // Acceptance: wait_turn called while the runtime is executing must cover the
 // in-flight turn, not skip ahead to a later one.
 func TestControlWaitTurnCoversInFlightTurn(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	c, sup := startWaitTurnSupervisor(t, &waitTurnTestProvider{gates: []chan struct{}{release}})
 	runtimeID := spawnWaitTurnRuntime(t, c)
@@ -258,6 +260,7 @@ func TestControlWaitTurnCoversInFlightTurn(t *testing.T) {
 // Acceptance: timeout_ms bounds the wait and a timeout surfaces as a typed
 // error, not a stuck call.
 func TestControlWaitTurnTimesOutWithTypedError(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{}) // never closed: the turn never settles
 	c, _ := startWaitTurnSupervisor(t, &waitTurnTestProvider{gates: []chan struct{}{release}})
 	runtimeID := spawnWaitTurnRuntime(t, c)
@@ -276,6 +279,7 @@ func TestControlWaitTurnTimesOutWithTypedError(t *testing.T) {
 // Acceptance: wait_turn on a nonexistent runtime must fail fast with a
 // non-timeout error, never the typed timeout error.
 func TestControlWaitTurnRuntimeNotFound(t *testing.T) {
+	t.Parallel()
 	c, _ := startWaitTurnSupervisor(t, &waitTurnTestProvider{})
 
 	_, err := c.WaitTurn("nonexistent", 100*time.Millisecond)

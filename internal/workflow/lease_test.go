@@ -6,6 +6,7 @@ import (
 )
 
 func TestLeaseTTLResolution(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		node            *NodeDefinition
@@ -28,6 +29,7 @@ func TestLeaseTTLResolution(t *testing.T) {
 }
 
 func TestOwnerTokenDigest(t *testing.T) {
+	t.Parallel()
 	token1 := "token-12345"
 	digest := ownerTokenDigest(token1)
 	if got := digest[:7]; got != "sha256:" {
@@ -56,6 +58,7 @@ func TestOwnerTokenDigest(t *testing.T) {
 }
 
 func TestNewOwnerTokenUnique(t *testing.T) {
+	t.Parallel()
 	token1 := newOwnerToken()
 	if token1 == "" {
 		t.Fatalf("newOwnerToken returned empty string")

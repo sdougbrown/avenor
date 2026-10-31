@@ -9,6 +9,7 @@ import (
 )
 
 func TestWarmResumeImplicitLabelWithHarnessName(t *testing.T) {
+	t.Parallel()
 	gate := newItestGate()
 	defer gate.open()
 	provider := newItestProvider(
@@ -40,6 +41,7 @@ func TestWarmResumeImplicitLabelWithHarnessName(t *testing.T) {
 }
 
 func TestWarmResumeConcurrentLabelReservation(t *testing.T) {
+	t.Parallel()
 	gate := newItestGate()
 	defer gate.open()
 	provider := newItestProvider(

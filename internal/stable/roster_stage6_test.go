@@ -12,6 +12,7 @@ import (
 )
 
 func TestStableRosterSameBackendResume(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{
 		"first":{"backend":"gemini-acp","agent":"planner","model":"planner-model"},
@@ -58,6 +59,7 @@ func TestStableRosterSameBackendResume(t *testing.T) {
 }
 
 func TestStableRosterRejectsCrossBackendResumeBeforeProvider(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeStage5Roster(t, dir, `{
 		"first":{"backend":"gemini-acp","agent":"planner","model":"planner-model"},
