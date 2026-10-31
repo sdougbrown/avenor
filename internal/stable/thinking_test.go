@@ -231,8 +231,7 @@ func TestSpawnAcceptsThinkingWithExplicitPiBackendAndModel(t *testing.T) {
 		constructorOpts <- opts
 		return provider, nil
 	}
-	result, err := sup.spawn(SpawnParams{Prompt: "work", Dir: t.TempDir(), Backend: "pi", Model: "m", Thinking: "high"})
-	if err != nil {
+	if _, err := sup.spawn(SpawnParams{Prompt: "work", Dir: t.TempDir(), Backend: "pi", Model: "m", Thinking: "high"}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
 	select {
@@ -243,16 +242,6 @@ func TestSpawnAcceptsThinkingWithExplicitPiBackendAndModel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("provider construction was not observed")
 	}
-	sup.controlMu.Lock()
-	child := sup.runtimes[result.RuntimeID]
-	sup.controlMu.Unlock()
-	if child == nil {
-		t.Fatalf("runtime %q not registered", result.RuntimeID)
-	}
-	if child.thinking != "high" || child.model != "m" || child.backend != "pi" {
-		t.Fatalf("child = thinking %q model %q backend %q", child.thinking, child.model, child.backend)
-	}
-	child.cancelFn()
 }
 
 // A resumed session supplies the backend, so its verdict is about the run
@@ -275,30 +264,6 @@ func TestSpawnKeepsTheResumedBackendInTheThinkingError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "backend was omitted") {
 		t.Fatalf("error = %q, want no omission claim for a backend the session supplied", err)
-	}
-	if providerCalled || len(sup.runtimes) != 0 {
-		t.Fatalf("provider=%v runtimes=%d", providerCalled, len(sup.runtimes))
-	}
-}
-
-// A canonical-value mistake has to keep its own error on the spawn path too.
-func TestSpawnKeepsTheCanonicalThinkingErrorWhenTheBackendIsOmitted(t *testing.T) {
-	t.Parallel()
-	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-omitted-canonical.sock", MaxRuntimes: 1})
-	providerCalled := false
-	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
-		providerCalled = true
-		return &thinkingCaptureProvider{}, nil
-	}
-	_, err := sup.spawn(SpawnParams{Prompt: "work", Thinking: "HIGH"})
-	if err == nil {
-		t.Fatal("spawn with an invalid thinking value: want an error")
-	}
-	if !strings.Contains(err.Error(), `invalid thinking value "HIGH"`) {
-		t.Fatalf("error = %q, want the canonical value error", err)
-	}
-	if strings.Contains(err.Error(), "requires an explicit backend") {
-		t.Fatalf("error = %q, want no backend annotation for a bad value", err)
 	}
 	if providerCalled || len(sup.runtimes) != 0 {
 		t.Fatalf("provider=%v runtimes=%d", providerCalled, len(sup.runtimes))

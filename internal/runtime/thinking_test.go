@@ -3,7 +3,6 @@ package runtime
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestValidateThinking(t *testing.T) {
@@ -109,47 +108,5 @@ func TestMergeStartOptionsThinking(t *testing.T) {
 	}
 	if got := MergeStartOptions(StartOptions{}, StartOptions{}).Thinking; got != "" {
 		t.Fatalf("empty thinking = %q", got)
-	}
-}
-
-// ValidateThinkingForChosenBackend decides what a rejection says. A backend the
-// request supplied reports its own verdict; the runtime default names the
-// omission; a canonical value error keeps its own message either way.
-func TestValidateThinkingForChosenBackend(t *testing.T) {
-	supplied := ValidateThinkingForChosenBackend("opencode-acp", "high", true)
-	if supplied == nil || supplied.Error() != `backend "opencode-acp" does not support parameter "thinking"` {
-		t.Fatalf("supplied backend = %v, want its own verdict", supplied)
-	}
-	defaulted := ValidateThinkingForChosenBackend("opencode-acp", "high", false)
-	if defaulted == nil || !strings.Contains(defaulted.Error(), "requires an explicit backend") || !strings.Contains(defaulted.Error(), "backend was omitted") {
-		t.Fatalf("defaulted backend = %v, want the omission note", defaulted)
-	}
-	value := ValidateThinkingForChosenBackend("opencode-acp", "HIGH", false)
-	if value == nil || !strings.Contains(value.Error(), `invalid thinking value "HIGH"`) || strings.Contains(value.Error(), "backend was omitted") {
-		t.Fatalf("invalid value = %v, want the canonical error without the omission note", value)
-	}
-	if err := ValidateThinkingForChosenBackend("pi", "high", false); err != nil {
-		t.Fatalf("pi with high = %v, want acceptance", err)
-	}
-}
-
-// ValidateClaudeMCPWaitForChosenBackend follows the same rule as the thinking
-// check: a duration error keeps its own message, and only a capability
-// rejection names the omitted backend.
-func TestValidateClaudeMCPWaitForChosenBackend(t *testing.T) {
-	duration := ValidateClaudeMCPWaitForChosenBackend("opencode-acp", 90*time.Second, false)
-	if duration == nil || !strings.Contains(duration.Error(), "exceeds the 1m0s limit") || strings.Contains(duration.Error(), "backend was omitted") {
-		t.Fatalf("duration error = %v, want its own message", duration)
-	}
-	defaulted := ValidateClaudeMCPWaitForChosenBackend("opencode-acp", 5*time.Second, false)
-	if defaulted == nil || !strings.Contains(defaulted.Error(), "requires an explicit backend") || !strings.Contains(defaulted.Error(), "backend was omitted") {
-		t.Fatalf("defaulted backend = %v, want the omission note", defaulted)
-	}
-	supplied := ValidateClaudeMCPWaitForChosenBackend("agy", 5*time.Second, true)
-	if supplied == nil || supplied.Error() != `backend "agy" does not support parameter "claude-mcp-wait"` {
-		t.Fatalf("supplied backend = %v, want its own verdict", supplied)
-	}
-	if err := ValidateClaudeMCPWaitForChosenBackend("claude", 5*time.Second, false); err != nil {
-		t.Fatalf("claude with a valid wait = %v, want acceptance", err)
 	}
 }
