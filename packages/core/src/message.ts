@@ -571,14 +571,15 @@ function stateDenial(
   return null
 }
 
-function refused(err: unknown): ToolError {
+export function refused(err: unknown, ioMessage: string = repair('refused_io')): ToolError {
   if (err instanceof ToolError) return err
   const error = err as { code?: unknown; message?: unknown }
   const message = typeof error?.message === 'string' ? error.message : String(err)
   // A filesystem error names an absolute path that must not reach a model or a
-  // peer, so it is classified to the shared sentence instead of passed through.
+  // peer, so it is classified to the caller's shared sentence instead of passed
+  // through.
   if (error?.code === 'ENOENT' || error?.code === 'EACCES' || error?.code === 'EPERM') {
-    return new ToolError('refused', repair('refused_io'))
+    return new ToolError('refused', ioMessage)
   }
   return new ToolError('refused', message)
 }

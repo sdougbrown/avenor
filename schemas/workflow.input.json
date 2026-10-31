@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://avenor.dev/schemas/workflow.input.json",
   "title": "avenor_workflow input",
-  "description": "Discriminated-union input for the avenor_workflow tool. One complete object per action: every variant enumerates all the properties it permits and refuses the rest, so a field that belongs to another action is a schema error rather than a silently ignored key. The same admission rules are published as ApplicabilityTable in internal/workflowtool; TestSchemaMatchesRouteTable proves the schema and the table agree.",
+  "description": "Discriminated-union input for the avenor_workflow tool. One complete object per action: every variant enumerates all the properties it permits and refuses the rest, so a field that belongs to another action is a schema error rather than a silently ignored key. The same admission rules are published as ApplicabilityTable in internal/workflowtool (Go) and assertWorkflowInput in packages/core/src/workflow.ts (TypeScript); TestSchemaMatchesRouteTable proves the schema and the Go table agree.",
   "type": "object",
   "oneOf": [
     {
