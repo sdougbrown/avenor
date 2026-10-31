@@ -211,11 +211,15 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 	discovery := DiscoverServer(*serverURL, getenv)
 	if !workflowMode {
-		if err := validateCLISelection(*backend, discovery, *thinking, backendExplicit || *rosterEntry != "" || *resume != ""); err != nil {
+		backendSupplied := backendExplicit || *rosterEntry != "" || *resume != ""
+		if err := validateCLISelection(*backend, discovery, *thinking, backendSupplied); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
 		if err := runtime.ValidateClaudeMCPWait(*backend, *claudeMCPWait); err != nil {
+			if !backendSupplied {
+				err = runtime.NewOmittedBackendError("claude-mcp-wait", *backend, err)
+			}
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}

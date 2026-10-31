@@ -96,9 +96,16 @@ func ValidateThinkingForChosenBackend(backend, value string, backendSupplied boo
 		return ValidateThinkingForBackend(backend, value)
 	}
 	if err := ValidateThinkingForBackend(backend, value); err != nil {
-		return fmt.Errorf("thinking requires an explicit backend: %w (backend was omitted, so it defaulted to %q)", err, backend)
+		return NewOmittedBackendError("thinking", backend, err)
 	}
 	return nil
+}
+
+// NewOmittedBackendError annotates a backend-capability rejection when the
+// caller supplied no backend, so the runtime default decided. The parameter is
+// named so every option's rejection reads the same way.
+func NewOmittedBackendError(parameter, backend string, err error) error {
+	return fmt.Errorf("%s requires an explicit backend: %w (backend was omitted, so it defaulted to %q)", parameter, err, backend)
 }
 
 // NewStartOnlyThinkingError reports that a backend supports the value only on

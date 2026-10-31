@@ -110,3 +110,24 @@ func TestMergeStartOptionsThinking(t *testing.T) {
 		t.Fatalf("empty thinking = %q", got)
 	}
 }
+
+// ValidateThinkingForChosenBackend decides what a rejection says. A backend the
+// request supplied reports its own verdict; the runtime default names the
+// omission; a canonical value error keeps its own message either way.
+func TestValidateThinkingForChosenBackend(t *testing.T) {
+	supplied := ValidateThinkingForChosenBackend("opencode-acp", "high", true)
+	if supplied == nil || supplied.Error() != `backend "opencode-acp" does not support parameter "thinking"` {
+		t.Fatalf("supplied backend = %v, want its own verdict", supplied)
+	}
+	defaulted := ValidateThinkingForChosenBackend("opencode-acp", "high", false)
+	if defaulted == nil || !strings.Contains(defaulted.Error(), "requires an explicit backend") || !strings.Contains(defaulted.Error(), "backend was omitted") {
+		t.Fatalf("defaulted backend = %v, want the omission note", defaulted)
+	}
+	value := ValidateThinkingForChosenBackend("opencode-acp", "HIGH", false)
+	if value == nil || !strings.Contains(value.Error(), `invalid thinking value "HIGH"`) || strings.Contains(value.Error(), "backend was omitted") {
+		t.Fatalf("invalid value = %v, want the canonical error without the omission note", value)
+	}
+	if err := ValidateThinkingForChosenBackend("pi", "high", false); err != nil {
+		t.Fatalf("pi with high = %v, want acceptance", err)
+	}
+}

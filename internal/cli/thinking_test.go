@@ -296,3 +296,21 @@ func TestDirectCLIResumeKeepsThePlainThinkingError(t *testing.T) {
 		t.Fatal("attempt started for a rejected thinking level")
 	}
 }
+
+// The claude-mcp-wait check names the same default, so an omitted --backend
+// needs the same note there.
+func TestDirectCLINamesTheOmittedBackendForMCPWait(t *testing.T) {
+	called := stubRunAttempt(t)
+	var stderr strings.Builder
+	if code := run([]string{"--claude-mcp-wait", "5s", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{"claude-mcp-wait", "requires an explicit backend", "backend was omitted"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), want)
+		}
+	}
+	if called() {
+		t.Fatal("attempt started for a rejected claude-mcp-wait")
+	}
+}
