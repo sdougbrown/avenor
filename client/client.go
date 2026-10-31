@@ -849,10 +849,13 @@ func (c *Client) WorkflowStatus(workflowID string) (map[string]any, error) {
 // A timeout <= 0 returns after the first poll; the server defaults to 5s.
 func (c *Client) WorkflowWait(workflowID string, timeout time.Duration) (map[string]any, error) {
 	var result map[string]any
-	err := c.Call("workflow.wait", map[string]any{
+	// The server polls for the whole requested budget, so the response wait must
+	// outlast it. The default 30s budget would time out a longer wait while the
+	// server kept polling.
+	err := c.call(context.Background(), "workflow.wait", map[string]any{
 		"workflow_id": workflowID,
 		"timeout_ms":  int64(timeout.Milliseconds()),
-	}, &result)
+	}, &result, responseWait(timeout, 30*time.Second))
 	return result, err
 }
 
@@ -1009,15 +1012,21 @@ func (c *Client) SendToParent(runtimeID, message string) error {
 	return c.Call("send_to_parent", params, nil)
 }
 
-// messageResponseWait bounds how long the client waits for a blocking message
-// verb's response. The server answers a zero timeout after up to
-// messaging.MaxWait, so a client-side timer shorter than that would abandon a
-// request the server can still satisfy.
-func messageResponseWait(timeout time.Duration) time.Duration {
+// responseWait bounds how long the client waits for a blocking verb's response:
+// the requested budget plus a margin, or the caller's fallback when no budget
+// was given. A client-side timer shorter than the server's polling budget would
+// abandon a request the server can still satisfy.
+func responseWait(timeout, fallback time.Duration) time.Duration {
 	if timeout <= 0 {
-		timeout = messaging.MaxWait
+		timeout = fallback
 	}
 	return timeout + 10*time.Second
+}
+
+// messageResponseWait bounds a blocking message verb's response wait. The server
+// answers a zero timeout after up to messaging.MaxWait.
+func messageResponseWait(timeout time.Duration) time.Duration {
+	return responseWait(timeout, messaging.MaxWait)
 }
 
 // MessageSend sends one message over the supervisor's own transport.

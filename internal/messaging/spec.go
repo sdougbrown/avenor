@@ -3,7 +3,8 @@ package messaging
 import (
 	"encoding/json"
 	"os"
-	"strings"
+
+	"github.com/sdougbrown/avenor/internal/toolerr"
 )
 
 // ActionApplicability is the per-action input contract. It is the one table
@@ -204,40 +205,18 @@ func decodeFixture(path string, fixture any) error {
 // facts. A placeholder with no fact is left intact so a missing fact fails the
 // fixture comparison loudly instead of rendering half a sentence.
 func Repair(code string, facts map[string]string) string {
-	return substitute(repairsTemplates[code], facts)
+	return toolerr.Substitute(repairsTemplates[code], facts)
 }
 
 // RenderOutcome renders the (action, outcome) template with the supplied
 // pre-quoted facts. It is the only producer of a result's text, so a missing
 // template is a generated-artifact error, caught by TestOutcomeRenderTotal.
 func RenderOutcome(action string, outcome Outcome, facts map[string]string) string {
-	return substitute(outcomeRenderTemplates[action+":"+string(outcome)], facts)
+	return toolerr.Substitute(outcomeRenderTemplates[action+":"+string(outcome)], facts)
 }
 
 // LastRender renders one of the peers `last` templates with the supplied
 // pre-quoted facts.
 func LastRender(key string, facts map[string]string) string {
-	return substitute(peersLastTemplates[key], facts)
-}
-
-func substitute(template string, facts map[string]string) string {
-	if template == "" || len(facts) == 0 {
-		return template
-	}
-	var out strings.Builder
-	for i := 0; i < len(template); {
-		if template[i] == '{' {
-			if end := strings.IndexByte(template[i:], '}'); end > 0 {
-				name := template[i+1 : i+end]
-				if value, ok := facts[name]; ok {
-					out.WriteString(value)
-					i += end + 1
-					continue
-				}
-			}
-		}
-		out.WriteByte(template[i])
-		i++
-	}
-	return out.String()
+	return toolerr.Substitute(peersLastTemplates[key], facts)
 }

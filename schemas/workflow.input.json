@@ -1,0 +1,297 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avenor.dev/schemas/workflow.input.json",
+  "title": "avenor_workflow input",
+  "description": "Discriminated-union input for the avenor_workflow tool. One complete object per action: every variant enumerates all the properties it permits and refuses the rest, so a field that belongs to another action is a schema error rather than a silently ignored key. The same admission rules are published as ApplicabilityTable in internal/workflowtool; TestSchemaMatchesRouteTable proves the schema and the table agree.",
+  "type": "object",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "status",
+          "description": "Get lightweight status for a workflow instance."
+        },
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow ID."
+        },
+        "supervisor_id": {
+          "type": "string",
+          "description": "Optional supervisor socket path."
+        }
+      },
+      "required": ["action", "workflow_id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "inspect",
+          "description": "Return the full instance detail for a workflow."
+        },
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow ID."
+        },
+        "supervisor_id": {
+          "type": "string",
+          "description": "Optional supervisor socket path."
+        }
+      },
+      "required": ["action", "workflow_id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "events",
+          "description": "Read log events from a workflow instance's event log."
+        },
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow ID."
+        },
+        "after_seq": {
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807,
+          "description": "Only include events with sequence greater than this value."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807,
+          "description": "Max events to return (0 for the server default)."
+        },
+        "supervisor_id": {
+          "type": "string",
+          "description": "Optional supervisor socket path."
+        }
+      },
+      "required": ["action", "workflow_id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "wait",
+          "description": "Wait for a workflow to reach a terminal state or until timeout."
+        },
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow ID."
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Maximum wait time, such as 30s, 5m, or 1h (default 30s)."
+        },
+        "supervisor_id": {
+          "type": "string",
+          "description": "Optional supervisor socket path."
+        }
+      },
+      "required": ["action", "workflow_id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "ready",
+          "description": "Report claimable auto-dispatch candidates for a workflow controller; grants no lease."
+        },
+        "controller_id": {
+          "type": "string",
+          "description": "Controller ID."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 9223372036854775807,
+          "description": "Max candidates to report (0 for the server default)."
+        },
+        "supervisor_id": {
+          "type": "string",
+          "description": "Optional supervisor socket path."
+        }
+      },
+      "required": ["action", "controller_id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "controller_status",
+          "description": "Show workflow controller status: one controller with controller_id, or a summary list without it."
+        },
+        "controller_id": {
+          "type": "string",
+          "description": "Controller ID; omit to list all controllers."
+        },
+        "supervisor_id": {
+          "type": "string",
+          "description": "Optional supervisor socket path."
+        }
+      },
+      "required": ["action"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "gate",
+          "description": "Record a gate decision on a parked awaiting_gate activation."
+        },
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow ID."
+        },
+        "node_id": {
+          "type": "string",
+          "description": "Node ID."
+        },
+        "gate_id": {
+          "type": "string",
+          "description": "Gate ID."
+        },
+        "activation_id": {
+          "type": "string",
+          "description": "Activation ID."
+        },
+        "operation": {
+          "type": "string",
+          "enum": ["satisfy", "reject", "waive", "external_result"],
+          "description": "Gate operation."
+        },
+        "actor": {
+          "type": "string",
+          "description": "Actor id for human gate operations."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason for human gate operations."
+        },
+        "outcome": {
+          "type": "string",
+          "description": "Outcome for the gate decision (used to branch reject/fail cases)."
+        },
+        "subject": {
+          "description": "Bound exact subject as JSON, for example {\"type\":\"pr\",\"repository\":\"org/repo\",\"pull_request\":12,\"revision\":\"abc\"}."
+        },
+        "poll_id": {
+          "type": "string",
+          "description": "External poll id (external_result)."
+        },
+        "source": {
+          "type": "string",
+          "description": "External result source (external_result)."
+        },
+        "result": {
+          "type": "string",
+          "description": "External result status (external_result)."
+        },
+        "response_hash": {
+          "type": "string",
+          "description": "Response hash (external_result)."
+        },
+        "observed_at": {
+          "type": "string",
+          "description": "Observed-at RFC3339 timestamp (external_result)."
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Evidence IDs."
+        },
+        "supervisor_id": {
+          "type": "string",
+          "description": "Optional supervisor socket path."
+        }
+      },
+      "required": ["action", "workflow_id", "node_id", "gate_id", "activation_id", "operation"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "complete",
+          "description": "Atomically complete a machine/external handoff activation."
+        },
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow ID."
+        },
+        "node_id": {
+          "type": "string",
+          "description": "Node ID."
+        },
+        "activation_id": {
+          "type": "string",
+          "description": "Activation ID."
+        },
+        "attempt_id": {
+          "type": "string",
+          "description": "Attempt ID."
+        },
+        "lease_id": {
+          "type": "string",
+          "description": "Lease ID."
+        },
+        "owner_token": {
+          "type": "string",
+          "description": "Lease owner token."
+        },
+        "outcome": {
+          "type": "string",
+          "description": "Declared outcome."
+        },
+        "outputs": {
+          "description": "Declared outputs as JSON, for example [{\"definition_id\":\"o1\",\"value\":...}]."
+        },
+        "artifacts": {
+          "description": "Staged evidence artifacts as JSON, for example [{\"src_path\":\"...\",\"stored_path\":\"...\"}]."
+        },
+        "supervisor_id": {
+          "type": "string",
+          "description": "Optional supervisor socket path."
+        }
+      },
+      "required": ["action", "workflow_id", "node_id", "activation_id", "attempt_id", "lease_id", "owner_token", "outcome"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "cancel",
+          "description": "Cancel a workflow instance: records the attributed cancel event, releases leases, parks non-terminal activations, and terminates in-flight attempt runtimes."
+        },
+        "workflow_id": {
+          "type": "string",
+          "description": "Workflow ID."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason for the cancel; recorded on the workflow.canceled event."
+        },
+        "actor": {
+          "type": "string",
+          "description": "Actor id recorded as the canceling operator."
+        },
+        "supervisor_id": {
+          "type": "string",
+          "description": "Optional supervisor socket path."
+        }
+      },
+      "required": ["action", "workflow_id", "reason", "actor"],
+      "additionalProperties": false
+    }
+  ]
+}
