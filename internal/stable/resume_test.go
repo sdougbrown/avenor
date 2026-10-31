@@ -102,6 +102,37 @@ func TestResumePiDenialStatuses(t *testing.T) {
 	}
 }
 
+// A roster run whose entry backend is pi must meet the same cross-process
+// denial a direct pi resume does. The resume carries no direct backend, so the
+// gate reads the backend the prior run launched with.
+func TestResumePiRosterRunDeniesColdResume(t *testing.T) {
+	t.Setenv(pi.SessionsEnv, "")
+	sup, provider := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	rosterPath := writeStage5Roster(t, dir, `{"planner":{"backend":"pi","agent":"planner","model":"planner-model"}}`)
+	sentinel := filepath.Join(dir, "sentinel.env")
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		RosterFile: rosterPath, RosterEntry: "planner",
+		SentinelFile: sentinel, OnEvent: filepath.Join(dir, "events.log"),
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	finishResumeFixture(t, sup, prior, sentinel, true)
+
+	_, err = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+	})
+	assertToolCode(t, err, "not_resumable")
+	if !strings.Contains(err.Error(), "(status: ") {
+		t.Fatalf("not-resumable text = %q, want the typed denial", err)
+	}
+	if resumes := provider.resumesRecorded(); len(resumes) != 0 {
+		t.Fatalf("provider resumes = %v, want none", resumes)
+	}
+}
+
 func TestResumeRefusesNonResumableSentinel(t *testing.T) {
 	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
@@ -204,18 +235,28 @@ func TestResumeRefusesWithoutResolvableSession(t *testing.T) {
 	}
 }
 
-func finishResumeFixture(t *testing.T, sup *Supervisor, prior SpawnResult, sentinel string) {
+// finishResumeFixture drives a prior runtime to a terminal state and writes the
+// sentinel a resume reads. With liveSession the sentinel names the session the
+// launch registered, so the resume continues that session. Otherwise it names a
+// fixed session. It returns the session the sentinel carries.
+func finishResumeFixture(t *testing.T, sup *Supervisor, prior SpawnResult, sentinel string, liveSession bool) string {
 	t.Helper()
+	child := sup.runtimeByID(prior.RuntimeID)
+	sessionID := "ses_resumed"
+	if liveSession {
+		waitForStableChild(t, child, func(active, _ bool, _, _ string) bool { return active })
+		sessionID = child.sessionID()
+	}
 	if err := sup.RuntimeCancel(prior.RuntimeID); err != nil {
 		t.Fatalf("cancel prior: %v", err)
 	}
-	child := sup.runtimeByID(prior.RuntimeID)
 	select {
 	case <-child.runDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("prior runtime did not stop")
 	}
-	writeSentinel(t, sentinel, "DONE", "ses_resumed")
+	writeSentinel(t, sentinel, "DONE", sessionID)
+	return sessionID
 }
 
 func TestResumeCarriesIdentityAndSession(t *testing.T) {
@@ -232,7 +273,7 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 	// The default follow-up label comes from the current display name, so a
 	// rename before the resume is honoured.
 	if _, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: prior.RuntimeID}, "", "renamed-prior"); err != nil {
@@ -285,6 +326,93 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	}
 }
 
+// A roster-created run resumes through its roster selector alone: the entry
+// supplies agent, model and backend, and a resume that also carried the
+// inherited direct identity would be refused as "direct identity fields are
+// disabled in roster mode".
+func TestResumeRosterRunCarriesOnlyTheRosterSelector(t *testing.T) {
+	t.Parallel()
+	sup, provider := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	rosterPath := writeStage5Roster(t, dir, `{"planner":{"backend":"claude","agent":"planner","model":"planner-model"}}`)
+	sentinel := filepath.Join(dir, "sentinel.env")
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		RosterFile: rosterPath, RosterEntry: "planner", AutoApprove: true,
+		SentinelFile: sentinel, OnEvent: filepath.Join(dir, "events.log"),
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	sessionID := finishResumeFixture(t, sup, prior, sentinel, true)
+
+	newSentinel := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
+	newEventLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")
+	result, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+		SentinelFile: newSentinel, EventLog: newEventLog,
+	})
+	if err != nil {
+		t.Fatalf("resume roster run: %v", err)
+	}
+	if resumes := provider.resumesRecorded(); len(resumes) != 1 || resumes[0] != sessionID {
+		t.Fatalf("provider resumes = %v, want [%s]", resumes, sessionID)
+	}
+	resumed := sup.runtimeByID(result.RuntimeID)
+	if resumed == nil {
+		t.Fatalf("resumed runtime %q is not registered", result.RuntimeID)
+	}
+	resumed.mu.Lock()
+	got := struct {
+		agent, model, backend   string
+		rosterFile, rosterEntry string
+	}{
+		resumed.effectiveAgent, resumed.effectiveModel, resumed.effectiveBackend,
+		resumed.rosterFile, resumed.rosterEntry,
+	}
+	resumed.mu.Unlock()
+	if got.backend != "claude" || got.agent != "planner" || got.model != "planner-model" {
+		t.Fatalf("resumed identity = %s/%s/%s, want claude/planner/planner-model", got.backend, got.agent, got.model)
+	}
+	if got.rosterFile != rosterPath || got.rosterEntry != "planner" {
+		t.Fatalf("resumed roster selector = %q/%q, want %q/planner", got.rosterFile, got.rosterEntry, rosterPath)
+	}
+}
+
+// Carrying the selector alone must not let a roster that changed under the run
+// hand the session to a new identity: the registered mapping still decides.
+func TestResumeRosterRunConflictsWhenTheRosterChanged(t *testing.T) {
+	t.Parallel()
+	sup, provider := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	rosterPath := writeStage5Roster(t, dir, `{"planner":{"backend":"claude","agent":"planner","model":"planner-model"}}`)
+	sentinel := filepath.Join(dir, "sentinel.env")
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		RosterFile: rosterPath, RosterEntry: "planner", AutoApprove: true,
+		SentinelFile: sentinel, OnEvent: filepath.Join(dir, "events.log"),
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	sessionID := finishResumeFixture(t, sup, prior, sentinel, true)
+	writeStage5Roster(t, dir, `{"planner":{"backend":"claude","agent":"planner","model":"changed-model"}}`)
+
+	_, err = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+	})
+	assertToolCode(t, err, "refused")
+	if !strings.Contains(err.Error(), "roster identity conflicts with the authoritative session identity") {
+		t.Fatalf("resume error = %q, want a roster identity conflict", err)
+	}
+	if resumes := provider.resumesRecorded(); len(resumes) != 0 {
+		t.Fatalf("provider resumes = %v, want none", resumes)
+	}
+	if got, ok := sup.sessionIdentity(sessionID); !ok || got.Model != "planner-model" {
+		t.Fatalf("authoritative mapping = %#v, ok=%v; want the launch identity", got, ok)
+	}
+}
+
 func TestResumeColdArmKeepsHarnessLabelsUnambiguous(t *testing.T) {
 	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 8)
@@ -298,7 +426,7 @@ func TestResumeColdArmKeepsHarnessLabelsUnambiguous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 	if err := sup.broker.SetHarnessName(prior.RuntimeID, "harness-name"); err != nil {
 		t.Fatalf("set harness name: %v", err)
 	}
@@ -353,7 +481,7 @@ func TestResumeKeyedReplayAdoptsFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 
 	// The TS host mints <home>/runs/<run_id>/sentinel.done, which no sentinel
 	// basename parser can recover the run id from: the run id must round-trip
@@ -463,7 +591,7 @@ func TestResumeReportsSpawnedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, prior.SentinelFile)
+	finishResumeFixture(t, sup, prior, prior.SentinelFile, false)
 
 	result, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
 		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
@@ -525,7 +653,7 @@ func TestResumeConcurrentKeyedSpawnsOneRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, prior.SentinelFile)
+	finishResumeFixture(t, sup, prior, prior.SentinelFile, false)
 
 	const n = 8
 	results := make([]messaging.ResumeResult, n)
@@ -573,7 +701,7 @@ func TestResumeKeySpaceIsolatedFromSpawn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 
 	raw, err := json.Marshal(SpawnParams{Prompt: "keyed", Dir: dir, Agent: "claude", IdempotencyKey: "k"})
 	if err != nil {
@@ -613,7 +741,7 @@ func TestResumeDropsStartOnlyOptionsForClaudeResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 
 	newSentinel := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
 	newEventLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")
