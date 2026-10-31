@@ -99,6 +99,7 @@ A backend that starts a harness process exports Avenor's launch identity in that
 | `pi` | ✓ RPC subprocess |
 | `opencode-acp`, `gemini-acp`, `cursor-acp` | ✓ ACP subprocess |
 | `codex-app-server` | ✓ app-server subprocess |
+| `poo` | ✓ stdio subprocess |
 | `agy` | ✓ headless print process, and RPC host when the RPC transport is active |
 | `claude` | ✓ PTY or tmux pane |
 | `opencode-http` | ✗ no child process |
@@ -143,9 +144,9 @@ Thinking control is native for Codex and Pi. Claude supports five startup values
 
 Session resume for `claude` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by this backend.
 
-## poo (Stage 1: resolution only)
+## poo
 
-`poo` drives a poo binary over its public stdio protocol. Stage 1 registers the backend and resolves the binary a roster entry selects; the protocol client and provider land in Stage 2, so a run on this backend still stops at start with `the poo backend is not implemented yet`.
+`poo` drives a poo binary over its public stdio protocol. Each avenor session owns one poo process: the provider spawns the resolved binary, performs `poo/initialize` with a protocol-version check, opens the session with `session/create`, routes its events and tears the process down. Permission answers and resume are not implemented yet; a poo entry that needs either reports an error instead of pretending to work.
 
 A poo roster entry is the only place `command`, `args` and `settings` are accepted:
 
@@ -162,6 +163,29 @@ A poo roster entry is the only place `command`, `args` and `settings` are accept
 ```
 
 `command` is used as given and recorded as an absolute path; a relative `command` resolves against Avenor's working directory, not the roster file's directory. Without `command` Avenor runs `poo` from `PATH`. `args` defaults to `["serve"]`. The launch argv is `<bin> <args...> --settings <path>`, with `--settings` only when the entry names a settings file. The resolved binary, args and settings path are part of the session's ownership record, so a resume that resolves differently is rejected before a provider exists. A backend that does not own these fields rejects them. A poo entry cannot carry `thinking`; the shared thinking policy refuses it like any backend without thinking support.
+
+A poo run is a **blocking prompt** over a run that starts in the background. `Prompt` sends `run/prompt`, then waits on `run/inspect{wait: {until: "settled"}}` and re-asks when a wait runs out. A prompt that arrives while a run is active is sent as `run/message{mode: "steer"}` for that run instead of starting a second one, and a `busy` refusal from `run/prompt` falls back the same way. While the session is alive, `Cancel` sends `run/cancel` with the run id the prompt started or the session reports. Incoming events are routed by the notification's own `session_id`; events that arrive before the `session/create` response are buffered until the caller subscribes, so nothing is dropped.
+
+poo's settle reason is classified into avenor's closed stop-reason set, and the exit code follows from the avenor reason:
+
+| poo settle reason | avenor `stop_reason` | exit |
+|---|---|---|
+| `end_turn`, `finished`, `stop_requested` | `end_turn` | 0 |
+| `output_truncated` | `max_tokens` | 3 |
+| `max_turns` | `max_turn_requests` | 4 |
+| `cancelled` | `cancelled` | 130 |
+| `provider_limit` with `detail.provider.kind: rate_limited` | `rate_limited` (plus `retry_after`) | 7 |
+| `provider_limit` with `usage_limit` or `plan_inactive` | `quota_exhausted` | 6 |
+| `provider_limit` with any other kind | generic failure, the kind in `error_message` | 1 |
+| any other reason, including `provider_error`, `context_exhausted` and `invalid_turns` | generic failure, the reason in `classified_from` | 1 |
+
+A denial is not a failed run on this backend: poo hands the denied call back to the model as a tool result and the run continues, so the backend declares through `runtime.DenialRecovery` that a clean `end_turn` after a denied tool call is a completion. Backends that do not declare it keep the `tool_denied` reclassification.
+
+A permission ask is not relayed yet. The answer path (`AnswerPermission`) lands in Stage 3, so the handshake declares no `permission_answers` capability. poo's wire asker is then unavailable, and its chain moves straight to the next asker, or to its fallback when the wire asker was the only one. poo's own `permission.asked` and `permission.answered` records are delivered as `avenor.permission.asked` and `avenor.permission.answered`, the prefix every backend-specific record passes through.
+
+`Prompt` returns `nil` for every settle that is not a failure, like `pi`: `end_turn`, `max_tokens`, `max_turn_requests`, `rate_limited` and `quota_exhausted` all confirm the terminal event rather than reporting an error. Only `cancelled` and a generic failure (`error`) return one; the terminal event carries the reason and the exit code either way.
+
+Teardown sends `session/close`, closes stdin, and gives the process 30 s to exit before `SIGTERM` and another 5 s before `SIGKILL`. `session/create`'s `session_dir` and `mode` are kept on the backend's own per-session state for Stage 3's `Resume`; neither is part of the shared session identity, which nothing reads yet.
 
 ---
 

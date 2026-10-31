@@ -1320,8 +1320,20 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			stopProvider()
 		}
 	}()
+	// recoveredDenial reports that this backend hands a denial back to the model
+	// as a tool result and lets the run continue, so a clean end_turn after one
+	// is a completion. The backend declares it; the loop never names one.
+	recoveredDenial := false
+	if recovery, ok := provider.(runtime.DenialRecovery); ok {
+		recoveredDenial = recovery.RecoveredDenialIsCompletion()
+	}
 	settleStopReason := func() {
 		if finalStopReason != "end_turn" || (!interruptedToolFailure && !deniedPermission) {
+			return
+		}
+		if recoveredDenial {
+			// The backend recovered from the denial inside the run, so the
+			// model's own end_turn is the turn's outcome.
 			return
 		}
 		// A backend aborted a tool call (configured deny, or an explicitly
