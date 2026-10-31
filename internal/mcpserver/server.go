@@ -1293,21 +1293,18 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		}
 	}
 
-	var result map[string]any
-	if len(args.LaunchWrapper) > 0 {
-		// Wrapped requests must use the gated spawn_mcp verb so the
-		// supervisor-side launch-wrapper allowlist applies.
-		result, err = cl.SpawnMCP(params)
-	} else {
-		// Unwrapped requests use the plain spawn verb, which also works on
-		// supervisors predating spawn_mcp.
-		result, err = cl.Spawn(params)
-	}
+	// Every MCP spawn goes through the gated spawn_mcp verb: the launch-field
+	// gate and the wrapper allowlist live there, so a request that took the plain
+	// spawn verb would skip both. There is no fallback to the plain verb — a
+	// supervisor that predates spawn_mcp cannot gate the request at all, so it
+	// fails closed below, as a wrapped request already does.
+	result, err := cl.SpawnMCP(params)
 	if err != nil {
-		// Fail closed for older supervisors without the spawn_mcp verb: a
-		// wrapped MCP request must never fall back to the ungated spawn path.
-		if isMethodNotFound(err) && len(args.LaunchWrapper) > 0 {
-			return nil, nil, errors.New("launch_wrapper: disabled for MCP on this supervisor")
+		if isMethodNotFound(err) {
+			if len(args.LaunchWrapper) > 0 {
+				return nil, nil, errors.New("launch_wrapper: disabled for MCP on this supervisor")
+			}
+			return nil, nil, errors.New("spawn: this supervisor predates the MCP-gated spawn_mcp verb")
 		}
 		return nil, nil, fmt.Errorf("spawn: %w", err)
 	}

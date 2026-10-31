@@ -51,7 +51,17 @@ The policy file is strict JSON:
 {"allowed_argv": [["/usr/bin/nice", "-n", "5"]]}
 ```
 
-Unknown fields, trailing data, an empty allowlist, empty entries, empty elements, NUL bytes, and non-absolute executables are rejected at supervisor startup (`mcp launch wrapper policy: <reason>`). An MCP spawn carrying a wrapper must **exactly match** one `allowed_argv` entry — same executable (absolute path), same flags, same order, no extra or missing arguments. A wrapper that is not allowed is rejected with `launch_wrapper: argv is not allowed by this supervisor` before any process is created; a supervisor with no policy rejects every wrapped MCP spawn with `launch_wrapper: disabled for MCP on this supervisor`. MCP servers also fail closed against older supervisors that predate the gated `spawn_mcp` verb.
+Unknown fields, trailing data, an empty allowlist, empty entries, empty elements, NUL bytes, and non-absolute executables are rejected at supervisor startup (`mcp launch wrapper policy: <reason>`). An MCP spawn carrying a wrapper must **exactly match** one `allowed_argv` entry — same executable (absolute path), same flags, same order, no extra or missing arguments. A wrapper that is not allowed is rejected with `launch_wrapper: argv is not allowed by this supervisor` before any process is created; a supervisor with no policy rejects every wrapped MCP spawn with `launch_wrapper: disabled for MCP on this supervisor`. Every MCP spawn goes through the gated `spawn_mcp` verb; the spawn tool has no route to the plain `spawn` verb, so omitting a field cannot skip the gate. MCP servers fail closed against older supervisors that predate `spawn_mcp`, wrapped or not.
+
+What `spawn_mcp` gates:
+
+- **A caller-chosen launch.** `spawn_mcp` refuses a spawn whose effective launch the caller chose — a selected roster entry that declares `command`, `args` or `settings`, or a resume whose recorded session launch is not the one its backend resolves for itself — with `roster entry "<name>": launch fields are disabled for MCP spawns (<field>)`, before any reservation, idempotency record or process. An entry that declares no launch field still spawns over MCP with the identity its backend resolves, so a roster of plain backend/agent/model entries keeps working. The gate resolves the roster once and the spawn it hands the request to starts with that same identity, so rewriting the roster between the check and the exec cannot change the launch.
+- **Workflow mode.** `loop_file` or `team_file` set is refused with `spawn_mcp: loop_file and team_file are not accepted; workflow spawns use the spawn verb`. A workflow template names the roster its phases select, and on this verb both paths come from the caller. Workflow spawns keep running through the trusted `spawn` verb.
+- **The launch wrapper**, as described above.
+
+The message tool's `resume` is the other MCP path into a spawn, and its cold arm is gated the same way: continuing a run whose launch is not the backend's own default is refused, because the resume re-execs the run's inherited launch. A resume on the default launch continues.
+
+The launch fields are not allowlist-gated: there is no MCP equivalent of `allowed_argv` for them, so the refusal is unconditional.
 
 The policy path is picked up in this order, for both `avenor stable` and `avenor mcp`:
 
@@ -66,7 +76,7 @@ Approved wrappers are **trusted code with supervisor privileges**: a wrapper pro
 
 The `avenor mcp` command accepts `--mcp-launch-wrapper-policy` only to forward the policy to a supervisor it autostarts; it resolves the same flag → environment → `<config home>/launch-wrapper-policy.json` chain and forwards the path it picked. Attaching to an already-running supervisor never changes that supervisor's policy — that supervisor's own pickup chain decided it.
 
-The CLI (`avenor control spawn`) and ordinary control-socket `spawn` calls are operator-trusted surfaces: they are **not** allowlist-gated and keep the pre-existing behavior above.
+The CLI (`avenor control spawn`) and ordinary control-socket `spawn` calls are operator-trusted surfaces: they are **not** allowlist-gated, they keep accepting a roster entry's launch fields, and they keep the pre-existing behavior above.
 
 ### agy RPC host
 
@@ -132,6 +142,26 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 Thinking control is native for Codex and Pi. Claude supports five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
 
 Session resume for `claude` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by this backend.
+
+## poo (Stage 1: resolution only)
+
+`poo` drives a poo binary over its public stdio protocol. Stage 1 registers the backend and resolves the binary a roster entry selects; the protocol client and provider land in Stage 2, so a run on this backend still stops at start with `the poo backend is not implemented yet`.
+
+A poo roster entry is the only place `command`, `args` and `settings` are accepted:
+
+```json
+{
+  "umpire-reviewer": {
+    "backend": "poo",
+    "command": "/opt/umpire-bot/bin/umpire-poo",
+    "args": ["serve"],
+    "settings": "/etc/umpire-bot/poo-settings.yaml",
+    "agent": "search"
+  }
+}
+```
+
+`command` is used as given and recorded as an absolute path; a relative `command` resolves against Avenor's working directory, not the roster file's directory. Without `command` Avenor runs `poo` from `PATH`. `args` defaults to `["serve"]`. The launch argv is `<bin> <args...> --settings <path>`, with `--settings` only when the entry names a settings file. The resolved binary, args and settings path are part of the session's ownership record, so a resume that resolves differently is rejected before a provider exists. A backend that does not own these fields rejects them. A poo entry cannot carry `thinking`; the shared thinking policy refuses it like any backend without thinking support.
 
 ---
 

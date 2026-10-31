@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/backendlaunch"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/digest"
 	"github.com/sdougbrown/avenor/internal/events"
@@ -24,22 +25,16 @@ import (
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/factory"
 	"github.com/sdougbrown/avenor/internal/runtime/pony"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model/openai"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
 )
 
 const (
-	DefaultBackend        = "opencode-acp"
-	backendOpenCodeACP    = "opencode-acp"
-	backendOpenCodeHTTP   = "opencode-http"
-	backendCodexAppServer = "codex-app-server"
-	backendGeminiACP      = "gemini-acp"
-	backendAgy            = "agy"
-	backendCursorACP      = "cursor-acp"
-	backendPony           = "pony"
-	backendClaude         = "claude"
-	backendPi             = "pi"
+	DefaultBackend      = "opencode-acp"
+	backendOpenCodeHTTP = "opencode-http"
+	backendPony         = "pony"
 )
 
 // DefaultPermissionClaimTimeout is the zero value, meaning "no timeout":
@@ -161,6 +156,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		return code
 	}
 
+	// launch is the executable identity the selected backend resolved before
+	// a provider exists. A backend that starts no configured binary leaves it
+	// zero.
+	var launch backendlaunch.Spec
+
 	if workflowMode {
 		if *claudeMCPWait != 0 {
 			fmt.Fprintln(stderr, "avenor: --claude-mcp-wait is not valid with --loop-file or --team-file")
@@ -207,27 +207,36 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 				*model = resolved
 			}
 		}
+		launch, err = roster.ResolveLaunch(*rosterEntry)
+		if err != nil {
+			fmt.Fprintf(stderr, "avenor: %v\n", err)
+			return exitWithSentinel(1)
+		}
 	}
 
 	discovery := DiscoverServer(*serverURL, getenv)
 	if !workflowMode {
 		switch *backend {
-		case backendPony:
-		case backendOpenCodeACP:
-		case backendGeminiACP:
-		case backendAgy:
-		case backendCursorACP:
 		case backendOpenCodeHTTP:
 			if discovery.URL == "" {
 				fmt.Fprintf(stderr, "avenor: --server-url is required for backend opencode-http\n")
 				return exitWithSentinel(1)
 			}
-		case backendCodexAppServer:
-		case backendClaude:
-		case backendPi:
 		default:
-			fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)
-			return exitWithSentinel(1)
+			if !factory.IsKnown(*backend) {
+				fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)
+				return exitWithSentinel(1)
+			}
+		}
+		if *rosterEntry == "" {
+			// No roster entry selects a launch: a backend that starts a
+			// configured binary still resolves its default here.
+			resolved, resolveErr := backendlaunch.Resolve(*backend, "", backendlaunch.Input{})
+			if resolveErr != nil {
+				fmt.Fprintf(stderr, "avenor: %v\n", resolveErr)
+				return exitWithSentinel(1)
+			}
+			launch = resolved
 		}
 		if err := runtime.ValidateThinkingForBackend(*backend, *thinking); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
@@ -475,6 +484,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		ServerURL: discovery.URL,
 		Model:     *model,
 		Thinking:  *thinking,
+		Launch:    launch,
 
 		ClaudeMCPWait: *claudeMCPWait,
 	}
@@ -503,7 +513,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
-		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Provenance: provenance}
+		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Launch: selection.Launch, Provenance: provenance}
 		return runAttempt(ctx, attemptConfig{
 			startOptions:           startOptions,
 			backend:                selection.Backend,
@@ -565,11 +575,12 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 				}
 				var err error
 				selection, err = rosterconfig.Resolve(rosterconfig.ResolveInput{
-					Backend: *backend,
-					Agent:   *agent,
-					Model:   *model,
-					Roster:  entry,
-					Loop:    true,
+					Backend:     *backend,
+					Agent:       *agent,
+					Model:       *model,
+					Roster:      entry,
+					RosterEntry: phase.RosterEntry,
+					Loop:        true,
 				})
 				if err != nil {
 					return looprunner.PhaseAttemptResult{ExitCode: 1}, err
@@ -626,6 +637,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 					InlineAgent: phase.Agent,
 					InlineModel: phase.Model,
 					Roster:      entry,
+					RosterEntry: phase.RosterEntry,
 				})
 				if err != nil {
 					return teamrunner.PhaseAttemptResult{ExitCode: 1}, err
@@ -1044,14 +1056,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 func validateCLISelection(backend string, discovery ServerDiscovery, thinking string) error {
 	switch backend {
-	case backendPony, backendOpenCodeACP, backendGeminiACP, backendAgy, backendCursorACP,
-		backendCodexAppServer, backendClaude, backendPi:
 	case backendOpenCodeHTTP:
 		if discovery.URL == "" {
 			return fmt.Errorf("--server-url is required for backend opencode-http")
 		}
 	default:
-		return fmt.Errorf("unknown backend %q", backend)
+		if !factory.IsKnown(backend) {
+			return fmt.Errorf("unknown backend %q", backend)
+		}
 	}
 	return runtime.ValidateThinkingForBackend(backend, thinking)
 }

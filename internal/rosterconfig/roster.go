@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sdougbrown/avenor/internal/backendlaunch"
 	"github.com/sdougbrown/avenor/internal/configfile"
 	"github.com/sdougbrown/avenor/internal/thinkingpolicy"
 )
@@ -19,11 +20,17 @@ import (
 // wins, so a roster only supplies the level when the caller did not. Keeping
 // it here lets the level travel with the backend it was chosen for, which is
 // the pair that thinking validity actually depends on.
+//
+// Command, Args and Settings are launch fields owned by the backend that reads
+// them; they travel in the embedded Input. A backend declares them through
+// backendlaunch.Register; every other backend rejects an entry that sets them,
+// so a roster can never attach a launch configuration the backend ignores.
 type Entry struct {
 	Backend  string `json:"backend"`
 	Agent    string `json:"agent,omitempty"`
 	Model    string `json:"model,omitempty"`
 	Thinking string `json:"thinking,omitempty"`
+	backendlaunch.Input
 }
 
 // Config is the top-level roster map, keyed by roster entry name.
@@ -89,6 +96,9 @@ func (e Entry) Validate() error {
 	if strings.TrimSpace(e.Agent) == "" && strings.TrimSpace(e.Model) == "" {
 		return fmt.Errorf("at least one of agent or model must be set")
 	}
+	if err := backendlaunch.Validate(e.Backend, e.Input); err != nil {
+		return err
+	}
 	// Canonical form only. The backend policy check stays downstream, where
 	// the resolved backend and the run's start-versus-resume mode are both
 	// known; catching a misspelled level here names the offending entry
@@ -115,6 +125,17 @@ func (c Config) Lookup(entryName string) (Entry, error) {
 	return entry, nil
 }
 
+// ResolveLaunch resolves the executable identity the named entry's backend
+// owns. It is the direct-selection counterpart of the launch field Resolve
+// carries on a resolved selection.
+func (c Config) ResolveLaunch(entryName string) (backendlaunch.Spec, error) {
+	entry, err := c.Lookup(entryName)
+	if err != nil {
+		return backendlaunch.Spec{}, err
+	}
+	return backendlaunch.Resolve(entry.Backend, entryName, entry.Input)
+}
+
 // ResolveInput contains the run-level identity context and any phase-local
 // inline overrides. AgentProfile and Thinking are deliberately context only:
 // neither is part of the resolved identity and Resolve does not read or
@@ -129,8 +150,11 @@ type ResolveInput struct {
 	InlineAgent string
 	InlineModel string
 
-	// Roster selects a complete identity when non-nil.
-	Roster *Entry
+	// Roster selects a complete identity when non-nil. RosterEntry is its key in
+	// the roster map, used only to name the entry in a launch error; it is empty
+	// when the selection did not come from a roster entry.
+	Roster      *Entry
+	RosterEntry string
 	// Loop rejects inline phase agent/model overrides. A roster entry remains
 	// valid for a loop phase.
 	Loop bool
@@ -149,6 +173,9 @@ type ResolvedSelection struct {
 	Agent    string
 	Model    string
 	Thinking string
+	// Launch is the executable identity the selected backend resolves from its
+	// roster entry. It is zero for backends that start no configured binary.
+	Launch backendlaunch.Spec
 }
 
 // Resolve applies roster and phase selection precedence without mutating any
@@ -167,11 +194,16 @@ func Resolve(input ResolveInput) (ResolvedSelection, error) {
 		if err := input.Roster.Validate(); err != nil {
 			return ResolvedSelection{}, fmt.Errorf("roster entry: %w", err)
 		}
+		launch, err := backendlaunch.Resolve(input.Roster.Backend, input.RosterEntry, input.Roster.Input)
+		if err != nil {
+			return ResolvedSelection{}, err
+		}
 		return ResolvedSelection{
 			Backend:  input.Roster.Backend,
 			Agent:    input.Roster.Agent,
 			Model:    input.Roster.Model,
 			Thinking: input.Roster.Thinking,
+			Launch:   launch,
 		}, nil
 	}
 
@@ -190,6 +222,11 @@ func Resolve(input ResolveInput) (ResolvedSelection, error) {
 	if hasValue(input.InlineModel) {
 		selection.Model = input.InlineModel
 	}
+	launch, err := backendlaunch.Resolve(selection.Backend, "", backendlaunch.Input{})
+	if err != nil {
+		return ResolvedSelection{}, err
+	}
+	selection.Launch = launch
 	return selection, nil
 }
 

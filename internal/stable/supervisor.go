@@ -20,6 +20,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/appdir"
+	"github.com/sdougbrown/avenor/internal/backendlaunch"
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/diagnote"
@@ -217,6 +218,21 @@ type SpawnParams struct {
 	// so teardown releases the run's own slot even if another runtime wears
 	// the same label.
 	permissionDeciderSlotKey string
+	// launch is the executable identity the selected backend resolved from its
+	// roster entry before any provider existed. It carries no JSON tag: it is
+	// derived, never caller-supplied, and must not enter the spawn wire shape or
+	// the idempotency parameter hash.
+	launch backendlaunch.Spec
+	// launchInput is the launch fields the selected roster entry declares, also
+	// derived rather than caller-supplied: it lets a caller-gated surface tell a
+	// configured launch from the one a backend resolves for itself.
+	launchInput backendlaunch.Input
+	// gated is the identity an MCP gate resolved and approved for this spawn. A
+	// spawn carrying it starts with that identity instead of loading the roster
+	// file a second time, so a rewrite between the gate and the exec cannot
+	// change the launch. Derived rather than caller-supplied, and without a JSON
+	// tag, so it never enters the spawn wire shape or the idempotency hash.
+	gated *mcpLaunchDecision
 	// resume carries the parameters only the resume path sets (resume.go).
 	// The nested struct carries no JSON tag and json.Marshal skips unexported
 	// fields, so none of it affects the idempotency parameter hash; each field
@@ -242,6 +258,10 @@ type resumeSpawn struct {
 	// A cold continuation uses its own follow-up label to avoid ambiguity
 	// with the completed runtime's broker record.
 	implicitLabel bool
+	// mcpOrigin marks a resume an MCP surface drove. The cold arm gates the
+	// inherited launch such a resume re-execs; a trusted caller's resume does
+	// not pay for the extra read.
+	mcpOrigin bool
 }
 
 type SpawnResult struct {
@@ -318,6 +338,7 @@ type childRuntime struct {
 	thinking           string
 	backend            string
 	launchWrapper      []string
+	launch             backendlaunch.Spec
 	rosterFile         string
 	rosterEntry        string
 	effectiveBackend   string
@@ -491,6 +512,10 @@ type effectiveIdentity struct {
 	// behind. It is part of the ownership record so a resume cannot hand a
 	// session to a differently wrapped backend.
 	LaunchWrapper []string
+	// Launch is the executable identity the backend resolved from its roster
+	// entry. It is part of the ownership record so a resume that resolves to a
+	// different binary, args or settings path is rejected.
+	Launch backendlaunch.Spec
 }
 
 type sessionIdentityEntry struct {
@@ -1725,9 +1750,18 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		}
 	}
 
-	params, backend, err := s.resolveDirectSpawnIdentity(params)
-	if err != nil {
-		return SpawnResult{}, err
+	backend := ""
+	if gated := params.gated; gated != nil {
+		// The gate already resolved and approved this identity, and reading the
+		// roster again here is the time-of-check/time-of-use window the gate's
+		// verdict must not have: use the identity it approved.
+		params, backend = gated.params, gated.backend
+	} else {
+		var err error
+		params, backend, err = s.resolveDirectSpawnIdentity(params)
+		if err != nil {
+			return SpawnResult{}, err
+		}
 	}
 	if params.Dir == "" {
 		params.Dir = "."
@@ -1812,6 +1846,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		task:                     params.Prompt,
 		taskFile:                 params.PromptFile,
 		launchWrapper:            params.LaunchWrapper,
+		launch:                   params.launch,
 		workflowID:               params.WorkflowID,
 		nodeID:                   params.NodeID,
 		activationID:             params.ActivationID,
@@ -2056,6 +2091,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		Model:         params.Model,
 		Thinking:      params.Thinking,
 		LaunchWrapper: params.LaunchWrapper,
+		Launch:        params.launch,
 		RuntimeID:     rtID,
 		Broker:        s.broker,
 		BrokerToken:   child.brokerToken,
@@ -2104,6 +2140,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		RosterFile:    params.RosterFile,
 		RosterEntry:   params.RosterEntry,
 		LaunchWrapper: params.LaunchWrapper,
+		Launch:        params.launch,
 	}, provider, params.SessionID)
 	if err != nil {
 		s.closeChildProvider(child, providerLifecycle)
@@ -2845,7 +2882,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			identity := effectiveIdentity{
 				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
 				AgentProfile: agentProfile, RosterFile: phaseRosterFile, RosterEntry: phase.RosterEntry,
-				LaunchWrapper: child.launchWrapper,
+				LaunchWrapper: child.launchWrapper, Launch: selection.Launch,
 			}
 			var resumeErr error
 			identity, resumeErr = s.resolveWorkflowResumeIdentity(prevSessionID, identity)
@@ -2865,6 +2902,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
 				LaunchWrapper: child.launchWrapper,
+				Launch:        identity.Launch,
 				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindLoop, phase.Name, child.label, &iteration, attemptNum),
 			}
 
@@ -3132,7 +3170,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			identity := effectiveIdentity{
 				Backend: selection.Backend, Agent: selection.Agent, Model: selection.Model,
 				AgentProfile: agentProfile, RosterFile: phaseRosterFile, RosterEntry: phase.RosterEntry,
-				LaunchWrapper: child.launchWrapper,
+				LaunchWrapper: child.launchWrapper, Launch: selection.Launch,
 			}
 			var resumeErr error
 			identity, resumeErr = s.resolveWorkflowResumeIdentity(prevSessionID, identity)
@@ -3151,6 +3189,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 				Broker:        s.broker,
 				BrokerToken:   child.brokerToken,
 				LaunchWrapper: child.launchWrapper,
+				Launch:        identity.Launch,
 				Provenance:    runtime.PhaseLaunchProvenance(child.id, runtime.LaunchKindTeam, phase.Name, child.label, nil, attemptNum),
 			}
 
@@ -3422,7 +3461,8 @@ func (c *childRuntime) sessionID() string {
 // is optional on direct resumes (omission inherits), so equality semantics
 // differ per path.
 func authoritativeIdentityEqual(left, right effectiveIdentity) bool {
-	return left.Backend == right.Backend && left.Agent == right.Agent && left.Model == right.Model && left.AgentProfile == right.AgentProfile
+	return left.Backend == right.Backend && left.Agent == right.Agent && left.Model == right.Model &&
+		left.AgentProfile == right.AgentProfile && left.Launch.Equal(right.Launch)
 }
 
 // launchWrapperSupplied reports whether a resume request carries an explicit
@@ -3462,6 +3502,13 @@ func (s *Supervisor) resolveDirectResumeIdentity(sessionID string, supplied, res
 		return effectiveIdentity{}, resumeIdentityConflict(sessionID, "launch_wrapper",
 			launchWrapperDisplay(supplied.LaunchWrapper), launchWrapperDisplay(mapped.LaunchWrapper))
 	}
+	// The launch spec is always resolved before a provider exists, for a
+	// backend that owns one even when no roster entry is selected, so a
+	// difference here is a real change of executable, args or settings.
+	if field := backendlaunch.Diff(resolved.Launch, mapped.Launch); field != "" {
+		return effectiveIdentity{}, resumeIdentityConflict(sessionID, field,
+			resolved.Launch.Value(field), mapped.Launch.Value(field))
+	}
 	if supplied.RosterFile != "" || supplied.RosterEntry != "" {
 		if supplied.RosterFile != mapped.RosterFile || supplied.RosterEntry != mapped.RosterEntry {
 			return effectiveIdentity{}, fmt.Errorf("cannot resume session %q with a different roster selector", sessionID)
@@ -3498,12 +3545,16 @@ func (s *Supervisor) resolveWorkflowResumeIdentity(sessionID string, resolved ef
 	if !ok {
 		return resolved, nil
 	}
-	if !authoritativeIdentityEqual(resolved, mapped) {
-		return effectiveIdentity{}, fmt.Errorf("cannot resume session %q: phase identity conflicts with the authoritative session identity", sessionID)
-	}
 	if !slices.Equal(resolved.LaunchWrapper, mapped.LaunchWrapper) {
 		return effectiveIdentity{}, resumeIdentityConflict(sessionID, "launch_wrapper",
 			launchWrapperDisplay(resolved.LaunchWrapper), launchWrapperDisplay(mapped.LaunchWrapper))
+	}
+	if field := backendlaunch.Diff(resolved.Launch, mapped.Launch); field != "" {
+		return effectiveIdentity{}, resumeIdentityConflict(sessionID, field,
+			resolved.Launch.Value(field), mapped.Launch.Value(field))
+	}
+	if !authoritativeIdentityEqual(resolved, mapped) {
+		return effectiveIdentity{}, fmt.Errorf("cannot resume session %q: phase identity conflicts with the authoritative session identity", sessionID)
 	}
 	return mapped, nil
 }
@@ -3587,6 +3638,7 @@ func (s *Supervisor) adoptSessionAttempt(child *childRuntime, attempt *sessionAt
 		child.agentProfile = attempt.identity.AgentProfile
 		child.rosterFile = attempt.identity.RosterFile
 		child.rosterEntry = attempt.identity.RosterEntry
+		child.launch = attempt.identity.Launch
 	}
 	child.mu.Unlock()
 	return true
@@ -3629,6 +3681,7 @@ func resolveStablePhaseSelection(roster *rosterconfig.Config, backend, agent, mo
 		InlineAgent: phase.Agent,
 		InlineModel: phase.Model,
 		Roster:      entry,
+		RosterEntry: phase.RosterEntry,
 		Loop:        loop,
 	})
 }
@@ -3694,6 +3747,7 @@ func (s *Supervisor) beginWorkflowAttempt(child *childRuntime, provider runtime.
 	child.agentProfile = identity.AgentProfile
 	child.rosterFile = identity.RosterFile
 	child.rosterEntry = identity.RosterEntry
+	child.launch = identity.Launch
 	child.mu.Unlock()
 	child.writeMu.Unlock()
 	if deferredStartErr != nil {
@@ -3742,6 +3796,7 @@ func (s *Supervisor) finalizeWorkflowChild(child *childRuntime, final workflowSe
 	child.agentProfile = final.Identity.AgentProfile
 	child.rosterFile = final.Identity.RosterFile
 	child.rosterEntry = final.Identity.RosterEntry
+	child.launch = final.Identity.Launch
 	child.mu.Unlock()
 	if finErr != nil {
 		s.reportLifecycleError(child, finErr)
@@ -3760,6 +3815,7 @@ func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effec
 		RosterFile:    child.rosterFile,
 		RosterEntry:   child.rosterEntry,
 		LaunchWrapper: child.launchWrapper,
+		Launch:        child.launch,
 	}
 	if identity.Backend == "" {
 		identity.Backend = child.backend
@@ -3832,7 +3888,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	identity := effectiveIdentity{
 		Backend: child.effectiveBackend, Agent: child.effectiveAgent, Model: child.effectiveModel,
 		AgentProfile: child.agentProfile, RosterFile: child.rosterFile, RosterEntry: child.rosterEntry,
-		LaunchWrapper: child.launchWrapper,
+		LaunchWrapper: child.launchWrapper, Launch: child.launch,
 	}
 	child.mu.Unlock()
 	if mapped, ok := s.sessionIdentity(session.SessionID); ok {
@@ -3932,6 +3988,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		Model:         child.effectiveModel,
 		AgentProfile:  child.agentProfile,
 		LaunchWrapper: child.launchWrapper,
+		Launch:        child.launch,
 	}
 	provider := child.provider
 	fallbackBackend := child.backend
@@ -3967,6 +4024,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		Broker:        s.broker,
 		BrokerToken:   brokerToken,
 		LaunchWrapper: identity.LaunchWrapper,
+		Launch:        identity.Launch,
 		Provenance:    runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
 	}, resumeID)
 }
@@ -5172,6 +5230,7 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 		AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
 		LaunchWrapper: params.LaunchWrapper,
 	}
+	var launch backendlaunch.Spec
 	if params.RosterFile != "" {
 		roster, err := rosterconfig.Load(params.RosterFile)
 		if err != nil {
@@ -5187,11 +5246,24 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 		if params.Thinking == "" {
 			params.Thinking = entry.Thinking
 		}
+		launch, err = roster.ResolveLaunch(params.RosterEntry)
+		if err != nil {
+			return params, backend, err
+		}
+		params.launchInput = entry.Input
+	} else {
+		// No roster entry selects a launch: a backend that starts a configured
+		// binary still resolves its default here.
+		var err error
+		launch, err = backendlaunch.Resolve(backend, "", backendlaunch.Input{})
+		if err != nil {
+			return params, backend, err
+		}
 	}
 	resolved, err := s.resolveDirectResumeIdentity(params.SessionID, directSupplied, effectiveIdentity{
 		Backend: backend, Agent: params.Agent, Model: params.Model,
 		AgentProfile: params.AgentProfile, RosterFile: params.RosterFile, RosterEntry: params.RosterEntry,
-		LaunchWrapper: params.LaunchWrapper,
+		LaunchWrapper: params.LaunchWrapper, Launch: launch,
 	})
 	if err != nil {
 		return params, backend, err
@@ -5199,6 +5271,7 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 	backend, params.Agent, params.Model, params.AgentProfile = resolved.Backend, resolved.Agent, resolved.Model, resolved.AgentProfile
 	params.LaunchWrapper = resolved.LaunchWrapper
 	params.RosterFile, params.RosterEntry = resolved.RosterFile, resolved.RosterEntry
+	params.launch = resolved.Launch
 	if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
 		return params, backend, err
 	}
@@ -5209,49 +5282,122 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 // the supervisor has no launch wrapper policy configured.
 var errMCPLaunchWrapperDisabled = errors.New("launch_wrapper: disabled for MCP on this supervisor")
 
-// authorizeMCPLaunchWrapper enforces the supervisor's MCP launch wrapper
-// policy for a spawn_mcp request. It resolves the effective wrapper argv —
-// the final argv that will be exec'd, after roster and resume identity
-// resolution — and requires an exact allowlist match. It must be called
-// before reservations, idempotency, or any process creation.
-func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) error {
+// authorizeMCPLaunchFields refuses a spawn_mcp request whose effective launch
+// identity the caller chose. The roster file and entry name an MCP caller
+// passes are caller-authored, and command, args and settings select the
+// executable, its arguments and its settings file: a caller that can set them
+// runs arbitrary code with the supervisor's privileges. Only a launch the
+// backend resolves for itself is allowed here, so an entry that declares none
+// of the fields still spawns. The refusal names the entry and the field, or the
+// backend when no entry is selected.
+func (s *Supervisor) authorizeMCPLaunchFields(backend string, p SpawnParams) error {
+	field := backendlaunch.Declared(p.launchInput)
+	if field == "" {
+		// A resume carries no roster entry of its own and inherits the session's
+		// recorded launch, so compare the effective launch with the one this
+		// backend resolves without any entry: anything else was configured.
+		selfLaunch, err := backendlaunch.Resolve(backend, "", backendlaunch.Input{})
+		if err != nil {
+			return err
+		}
+		field = backendlaunch.Diff(p.launch, selfLaunch)
+	}
+	if field == "" {
+		return nil
+	}
+	subject := fmt.Sprintf("backend %q", backend)
+	if p.RosterEntry != "" {
+		subject = fmt.Sprintf("roster entry %q", p.RosterEntry)
+	}
+	return fmt.Errorf("%s: launch fields are disabled for MCP spawns (%s)", subject, field)
+}
+
+// mcpLaunchDecision is one MCP gate's verdict on a spawn: the effective
+// identity it resolved and the backend that resolution settled on. A spawn
+// carrying it starts with that identity instead of resolving the roster file a
+// second time.
+type mcpLaunchDecision struct {
+	params  SpawnParams
+	backend string
+}
+
+// decideMCPLaunch resolves one MCP-originated spawn's effective identity and
+// refuses a launch the caller chose. Every surface that can re-exec an
+// inherited launch shares it — the spawn_mcp verb and the message tool's
+// resume — so the check and the error it renders exist once. It must run before
+// reservations, idempotency, or any process creation.
+func (s *Supervisor) decideMCPLaunch(params SpawnParams) (mcpLaunchDecision, error) {
+	resolved, backend, err := s.resolveDirectSpawnIdentity(params)
+	if err != nil {
+		return mcpLaunchDecision{}, err
+	}
+	if err := s.authorizeMCPLaunchFields(backend, resolved); err != nil {
+		return mcpLaunchDecision{}, err
+	}
+	return mcpLaunchDecision{params: resolved, backend: backend}, nil
+}
+
+// carried hands the decision to the spawn: the params it returns carry the
+// identity the gate approved instead of resolving the roster file again.
+func (d mcpLaunchDecision) carried(params SpawnParams) SpawnParams {
+	params.gated = &d
+	return params
+}
+
+// authorizeMCPLaunchWrapper enforces the supervisor's MCP launch policy for a
+// spawn_mcp request: the launch fields a selected roster entry sets and the
+// launch wrapper argv. Both are taken from the effective identity — the argv and
+// executable that will actually be used, after roster and resume resolution —
+// so an inherited wrapper or an inherited launch is gated too. It must be called
+// before reservations, idempotency, or any process creation, and the params it
+// returns carry the identity it approved.
+func (s *Supervisor) authorizeMCPLaunchWrapper(params SpawnParams) (SpawnParams, error) {
 	if len(params.LaunchWrapper) > 0 {
 		if err := runtime.ValidateLaunchWrapper(params.LaunchWrapper); err != nil {
-			return fmt.Errorf("launch_wrapper: %w", err)
+			return params, fmt.Errorf("launch_wrapper: %w", err)
 		}
 	}
 	// Resolve even when the request omits the wrapper: a resume inherits the
 	// session's authoritative wrapper, and the inherited argv is the argv that
 	// will be exec'd — it needs the same gate.
-	resolved, _, err := s.resolveDirectSpawnIdentity(params)
+	decision, err := s.decideMCPLaunch(params)
 	if err != nil {
-		return err
+		return params, err
 	}
-	if len(resolved.LaunchWrapper) == 0 {
-		return nil
+	if len(decision.params.LaunchWrapper) == 0 {
+		return decision.carried(params), nil
 	}
 	if s.config.MCPLaunchWrapperPolicy == nil {
-		return errMCPLaunchWrapperDisabled
+		return params, errMCPLaunchWrapperDisabled
 	}
-	if !mcpLaunchWrapperAllowed(s.config.MCPLaunchWrapperPolicy, resolved.LaunchWrapper) {
-		return errors.New("launch_wrapper: argv is not allowed by this supervisor")
+	if !mcpLaunchWrapperAllowed(s.config.MCPLaunchWrapperPolicy, decision.params.LaunchWrapper) {
+		return params, errors.New("launch_wrapper: argv is not allowed by this supervisor")
 	}
-	return nil
+	return decision.carried(params), nil
 }
 
 // SpawnMCP implements control.StableHandler for the spawn_mcp verb: an
-// MCP-driven spawn whose launch_wrapper is subject to the supervisor's
-// operator allowlist. Everything else about the spawn is identical to Spawn.
+// MCP-driven spawn whose launch fields and launch_wrapper are subject to the
+// supervisor's policy. Everything else about the spawn is identical to Spawn.
 func (s *Supervisor) SpawnMCP(raw json.RawMessage) (any, error) {
 	p, err := parseStableSpawn(raw)
 	if err != nil {
 		return nil, err
 	}
+	// A workflow's phases resolve their own launch from the template, and a
+	// template names the roster its phases select. The operator authors that on
+	// the trusted spawn verb; here the caller supplies the paths, so a workflow
+	// would hand the launch-field gate a pair of files the caller wrote. Workflow
+	// spawns stay on the trusted verb, where the exemption was written for them.
+	if spawnIsWorkflow(p) {
+		return nil, errors.New("spawn_mcp: loop_file and team_file are not accepted; workflow spawns use the spawn verb")
+	}
 	s.applySpawnCallerParent(raw, &p)
-	if err := s.authorizeMCPLaunchWrapper(p); err != nil {
+	gated, err := s.authorizeMCPLaunchWrapper(p)
+	if err != nil {
 		return nil, err
 	}
-	return s.finishSpawn(p)
+	return s.finishSpawn(gated)
 }
 
 // parseStableSpawn parses and sanitizes a control-socket spawn payload: it
