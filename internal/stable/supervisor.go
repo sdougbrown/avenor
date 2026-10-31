@@ -5199,15 +5199,17 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 	backend, params.Agent, params.Model, params.AgentProfile = resolved.Backend, resolved.Agent, resolved.Model, resolved.AgentProfile
 	params.LaunchWrapper = resolved.LaunchWrapper
 	params.RosterFile, params.RosterEntry = resolved.RosterFile, resolved.RosterEntry
-	if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
-		// Only the runtime default chose this backend: no direct selector, no
-		// roster entry, and no resumed session supplied one. Its verdict then
-		// reads as the caller's own choice, so name the omission.
-		if params.Backend == "" && params.RosterEntry == "" {
-			if _, mapped := s.sessionIdentity(params.SessionID); !mapped {
-				return params, backend, runtime.NewBackendOmittedThinkingError(backend, err)
-			}
+	// Only the runtime default chose this backend when the caller named no
+	// direct backend or roster entry and no resumed session supplied one. That
+	// case names the omission; every other case reports the backend's own
+	// verdict.
+	validateThinking := runtime.ValidateThinkingForBackend
+	if params.Backend == "" && params.RosterEntry == "" {
+		if _, mapped := s.sessionIdentity(params.SessionID); !mapped {
+			validateThinking = runtime.ValidateThinkingForBackendOmitted
 		}
+	}
+	if err := validateThinking(backend, params.Thinking); err != nil {
 		return params, backend, err
 	}
 	return params, backend, nil

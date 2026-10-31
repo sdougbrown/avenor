@@ -12,6 +12,20 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
+// stubRunAttempt replaces runAttempt for one test and reports whether an
+// attempt started.
+func stubRunAttempt(t *testing.T) func() bool {
+	t.Helper()
+	oldRunAttempt := runAttempt
+	t.Cleanup(func() { runAttempt = oldRunAttempt })
+	called := false
+	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
+		called = true
+		return attemptResult{}
+	}
+	return func() bool { return called }
+}
+
 type thinkingProvider struct {
 	startCalls       int
 	resumeCalls      int
@@ -171,19 +185,13 @@ func TestDirectCLIThinkingPropagation(t *testing.T) {
 }
 
 func TestDirectCLIRejectsUnsupportedThinkingBeforeAttempt(t *testing.T) {
-	oldRunAttempt := runAttempt
-	t.Cleanup(func() { runAttempt = oldRunAttempt })
-	called := false
-	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
-		called = true
-		return attemptResult{}
-	}
+	called := stubRunAttempt(t)
 	var stderr strings.Builder
 	if code := run([]string{"--backend", "agy", "--thinking", "low", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
 		t.Fatalf("run = %d", code)
 	}
-	if called || !strings.Contains(stderr.String(), "agy") || !strings.Contains(stderr.String(), "thinking") {
-		t.Fatalf("called=%v stderr=%q", called, stderr.String())
+	if called() || !strings.Contains(stderr.String(), "agy") || !strings.Contains(stderr.String(), "thinking") {
+		t.Fatalf("called=%v stderr=%q", called(), stderr.String())
 	}
 }
 
@@ -191,13 +199,7 @@ func TestDirectCLIRejectsUnsupportedThinkingBeforeAttempt(t *testing.T) {
 // the rejection must say the backend was omitted instead of presenting the
 // default's verdict as the caller's choice.
 func TestDirectCLINamesTheOmittedBackendWhenThinkingIsRejected(t *testing.T) {
-	oldRunAttempt := runAttempt
-	t.Cleanup(func() { runAttempt = oldRunAttempt })
-	called := false
-	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
-		called = true
-		return attemptResult{}
-	}
+	called := stubRunAttempt(t)
 	var stderr strings.Builder
 	if code := run([]string{"--thinking", "high", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
 		t.Fatalf("run = %d", code)
@@ -207,7 +209,7 @@ func TestDirectCLINamesTheOmittedBackendWhenThinkingIsRejected(t *testing.T) {
 			t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), want)
 		}
 	}
-	if called {
+	if called() {
 		t.Fatal("attempt started for a rejected thinking level")
 	}
 }
@@ -215,13 +217,7 @@ func TestDirectCLINamesTheOmittedBackendWhenThinkingIsRejected(t *testing.T) {
 // A roster entry supplies the backend, so its verdict is about the entry the
 // caller chose, not about a default they never named.
 func TestDirectCLIKeepsTheRosterBackendInTheThinkingError(t *testing.T) {
-	oldRunAttempt := runAttempt
-	t.Cleanup(func() { runAttempt = oldRunAttempt })
-	called := false
-	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
-		called = true
-		return attemptResult{}
-	}
+	called := stubRunAttempt(t)
 	dir := t.TempDir()
 	rosterPath := filepath.Join(dir, "roster.json")
 	if err := os.WriteFile(rosterPath, []byte(`{"slow":{"backend":"agy","agent":"executor"}}`), 0o600); err != nil {
@@ -237,7 +233,26 @@ func TestDirectCLIKeepsTheRosterBackendInTheThinkingError(t *testing.T) {
 	if strings.Contains(stderr.String(), "backend was omitted") {
 		t.Fatalf("stderr = %q, want no omission claim for a roster-supplied backend", stderr.String())
 	}
-	if called {
+	if called() {
 		t.Fatal("attempt started for a rejected thinking level")
+	}
+}
+
+// A canonical-value mistake has to keep its own error. Annotating it with the
+// omitted backend would send the caller to fix a field that is not the problem.
+func TestDirectCLIKeepsTheCanonicalThinkingErrorWhenTheBackendIsOmitted(t *testing.T) {
+	called := stubRunAttempt(t)
+	var stderr strings.Builder
+	if code := run([]string{"--thinking", "HIGH", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d", code)
+	}
+	if !strings.Contains(stderr.String(), `invalid thinking value "HIGH"`) {
+		t.Fatalf("stderr = %q, want the canonical value error", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "requires an explicit backend") {
+		t.Fatalf("stderr = %q, want no backend annotation for a bad value", stderr.String())
+	}
+	if called() {
+		t.Fatal("attempt started for an invalid thinking value")
 	}
 }

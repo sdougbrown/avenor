@@ -229,10 +229,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)
 			return exitWithSentinel(1)
 		}
-		if err := runtime.ValidateThinkingForBackend(*backend, *thinking); err != nil {
-			if !backendExplicit && *rosterEntry == "" {
-				err = runtime.NewBackendOmittedThinkingError(*backend, err)
-			}
+		validateThinking := runtime.ValidateThinkingForBackend
+		if !backendExplicit && *rosterEntry == "" {
+			validateThinking = runtime.ValidateThinkingForBackendOmitted
+		}
+		if err := validateThinking(*backend, *thinking); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}

@@ -285,3 +285,27 @@ func TestSpawnKeepsTheResumedBackendInTheThinkingError(t *testing.T) {
 		t.Fatalf("provider=%v runtimes=%d", providerCalled, len(sup.runtimes))
 	}
 }
+
+// A canonical-value mistake has to keep its own error on the spawn path too.
+func TestSpawnKeepsTheCanonicalThinkingErrorWhenTheBackendIsOmitted(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-omitted-canonical.sock", MaxRuntimes: 1})
+	providerCalled := false
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		providerCalled = true
+		return &thinkingCaptureProvider{}, nil
+	}
+	_, err := sup.spawn(SpawnParams{Prompt: "work", Thinking: "HIGH"})
+	if err == nil {
+		t.Fatal("spawn with an invalid thinking value: want an error")
+	}
+	if !strings.Contains(err.Error(), `invalid thinking value "HIGH"`) {
+		t.Fatalf("error = %q, want the canonical value error", err)
+	}
+	if strings.Contains(err.Error(), "requires an explicit backend") {
+		t.Fatalf("error = %q, want no backend annotation for a bad value", err)
+	}
+	if providerCalled || len(sup.runtimes) != 0 {
+		t.Fatalf("provider=%v runtimes=%d", providerCalled, len(sup.runtimes))
+	}
+}
