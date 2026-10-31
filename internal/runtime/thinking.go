@@ -82,6 +82,14 @@ func NewUnsupportedThinkingValueError(backend, value string) error {
 	return fmt.Errorf("backend %q does not support thinking value %q (allowed: %s)", backend, value, joinThinkingValues(allowed))
 }
 
+// NewBackendOmittedThinkingError annotates a thinking rejection when the
+// caller supplied no backend, so the runtime default decided. Naming only that
+// default's verdict reads as a choice the caller made, so the message names the
+// omission.
+func NewBackendOmittedThinkingError(backend string, cause error) error {
+	return fmt.Errorf("thinking requires an explicit backend: %w (backend was omitted, so it defaulted to %q)", cause, backend)
+}
+
 // NewStartOnlyThinkingError reports that a backend supports the value only on
 // a new session, not an explicit resume.
 func NewStartOnlyThinkingError(backend, value string) error {

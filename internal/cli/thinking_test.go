@@ -186,3 +186,58 @@ func TestDirectCLIRejectsUnsupportedThinkingBeforeAttempt(t *testing.T) {
 		t.Fatalf("called=%v stderr=%q", called, stderr.String())
 	}
 }
+
+// A direct run that never named a backend is judged against the default, so
+// the rejection must say the backend was omitted instead of presenting the
+// default's verdict as the caller's choice.
+func TestDirectCLINamesTheOmittedBackendWhenThinkingIsRejected(t *testing.T) {
+	oldRunAttempt := runAttempt
+	t.Cleanup(func() { runAttempt = oldRunAttempt })
+	called := false
+	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
+		called = true
+		return attemptResult{}
+	}
+	var stderr strings.Builder
+	if code := run([]string{"--thinking", "high", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d", code)
+	}
+	for _, want := range []string{"requires an explicit backend", "backend was omitted", `"opencode-acp"`} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), want)
+		}
+	}
+	if called {
+		t.Fatal("attempt started for a rejected thinking level")
+	}
+}
+
+// A roster entry supplies the backend, so its verdict is about the entry the
+// caller chose, not about a default they never named.
+func TestDirectCLIKeepsTheRosterBackendInTheThinkingError(t *testing.T) {
+	oldRunAttempt := runAttempt
+	t.Cleanup(func() { runAttempt = oldRunAttempt })
+	called := false
+	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
+		called = true
+		return attemptResult{}
+	}
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.json")
+	if err := os.WriteFile(rosterPath, []byte(`{"slow":{"backend":"agy","agent":"executor"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	if code := run([]string{"--dir", dir, "--roster-file", rosterPath, "--roster-entry", "slow", "--thinking", "low", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d", code)
+	}
+	if !strings.Contains(stderr.String(), `backend "agy" does not support parameter "thinking"`) {
+		t.Fatalf("stderr = %q, want the roster backend's own verdict", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "backend was omitted") {
+		t.Fatalf("stderr = %q, want no omission claim for a roster-supplied backend", stderr.String())
+	}
+	if called {
+		t.Fatal("attempt started for a rejected thinking level")
+	}
+}

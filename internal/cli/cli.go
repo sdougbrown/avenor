@@ -230,6 +230,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			return exitWithSentinel(1)
 		}
 		if err := runtime.ValidateThinkingForBackend(*backend, *thinking); err != nil {
+			if !backendExplicit && *rosterEntry == "" {
+				err = runtime.NewBackendOmittedThinkingError(*backend, err)
+			}
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
