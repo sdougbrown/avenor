@@ -38,6 +38,11 @@ func TestMCPResultUsesRealSupervisorTurnOwnership(t *testing.T) {
 	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
 	rt := h.spawn(map[string]any{"sentinel_file": sentinel, "on_event": eventPath, "label": "mcp-result"})
 	h.waitTurn(rt)
+	// waitTurn returns when the turn settles, which is before the success
+	// presentation sets the terminal phase: the settle clears the phase and
+	// the presentation sets it again. Wait for the settled status so the
+	// result tool reads a completed run rather than a mid-transition one.
+	h.awaitSettledStatus(rt)
 	if err := os.Remove(eventPath); err != nil {
 		t.Fatal(err)
 	}
