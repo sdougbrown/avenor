@@ -204,18 +204,28 @@ func TestResumeRefusesWithoutResolvableSession(t *testing.T) {
 	}
 }
 
-func finishResumeFixture(t *testing.T, sup *Supervisor, prior SpawnResult, sentinel string) {
+// finishResumeFixture drives a prior runtime to a terminal state and writes the
+// sentinel a resume reads. With liveSession the sentinel names the session the
+// launch registered, so the resume continues that session. Otherwise it names a
+// fixed session. It returns the session the sentinel carries.
+func finishResumeFixture(t *testing.T, sup *Supervisor, prior SpawnResult, sentinel string, liveSession bool) string {
 	t.Helper()
+	child := sup.runtimeByID(prior.RuntimeID)
+	sessionID := "ses_resumed"
+	if liveSession {
+		waitForStableChild(t, child, func(active, _ bool, _, _ string) bool { return active })
+		sessionID = child.sessionID()
+	}
 	if err := sup.RuntimeCancel(prior.RuntimeID); err != nil {
 		t.Fatalf("cancel prior: %v", err)
 	}
-	child := sup.runtimeByID(prior.RuntimeID)
 	select {
 	case <-child.runDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("prior runtime did not stop")
 	}
-	writeSentinel(t, sentinel, "DONE", "ses_resumed")
+	writeSentinel(t, sentinel, "DONE", sessionID)
+	return sessionID
 }
 
 func TestResumeCarriesIdentityAndSession(t *testing.T) {
@@ -232,7 +242,7 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 	// The default follow-up label comes from the current display name, so a
 	// rename before the resume is honoured.
 	if _, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: prior.RuntimeID}, "", "renamed-prior"); err != nil {
@@ -285,27 +295,6 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	}
 }
 
-// finishResumeFixtureLiveSession drives a prior runtime to a terminal state and
-// writes the DONE sentinel naming the session that launch registered. A resume
-// then continues that session, so its identity mapping is the authority the
-// resume has to match.
-func finishResumeFixtureLiveSession(t *testing.T, sup *Supervisor, prior SpawnResult, sentinel string) string {
-	t.Helper()
-	child := sup.runtimeByID(prior.RuntimeID)
-	waitForStableChild(t, child, func(active, _ bool, _, _ string) bool { return active })
-	sessionID := child.sessionID()
-	if err := sup.RuntimeCancel(prior.RuntimeID); err != nil {
-		t.Fatalf("cancel prior: %v", err)
-	}
-	select {
-	case <-child.runDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("prior runtime did not stop")
-	}
-	writeSentinel(t, sentinel, "DONE", sessionID)
-	return sessionID
-}
-
 // A roster-created run resumes through its roster selector alone: the entry
 // supplies agent, model and backend, and a resume that also carried the
 // inherited direct identity would be refused as "direct identity fields are
@@ -324,7 +313,7 @@ func TestResumeRosterRunCarriesOnlyTheRosterSelector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	sessionID := finishResumeFixtureLiveSession(t, sup, prior, sentinel)
+	sessionID := finishResumeFixture(t, sup, prior, sentinel, true)
 
 	newSentinel := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
 	newEventLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")
@@ -375,7 +364,7 @@ func TestResumeRosterRunConflictsWhenTheRosterChanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	sessionID := finishResumeFixtureLiveSession(t, sup, prior, sentinel)
+	sessionID := finishResumeFixture(t, sup, prior, sentinel, true)
 	writeStage5Roster(t, dir, `{"planner":{"backend":"claude","agent":"planner","model":"changed-model"}}`)
 
 	_, err = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
@@ -406,7 +395,7 @@ func TestResumeColdArmKeepsHarnessLabelsUnambiguous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 	if err := sup.broker.SetHarnessName(prior.RuntimeID, "harness-name"); err != nil {
 		t.Fatalf("set harness name: %v", err)
 	}
@@ -461,7 +450,7 @@ func TestResumeKeyedReplayAdoptsFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 
 	// The TS host mints <home>/runs/<run_id>/sentinel.done, which no sentinel
 	// basename parser can recover the run id from: the run id must round-trip
@@ -571,7 +560,7 @@ func TestResumeReportsSpawnedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, prior.SentinelFile)
+	finishResumeFixture(t, sup, prior, prior.SentinelFile, false)
 
 	result, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
 		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
@@ -633,7 +622,7 @@ func TestResumeConcurrentKeyedSpawnsOneRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, prior.SentinelFile)
+	finishResumeFixture(t, sup, prior, prior.SentinelFile, false)
 
 	const n = 8
 	results := make([]messaging.ResumeResult, n)
@@ -681,7 +670,7 @@ func TestResumeKeySpaceIsolatedFromSpawn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 
 	raw, err := json.Marshal(SpawnParams{Prompt: "keyed", Dir: dir, Agent: "claude", IdempotencyKey: "k"})
 	if err != nil {
@@ -721,7 +710,7 @@ func TestResumeDropsStartOnlyOptionsForClaudeResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn prior: %v", err)
 	}
-	finishResumeFixture(t, sup, prior, sentinel)
+	finishResumeFixture(t, sup, prior, sentinel, false)
 
 	newSentinel := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
 	newEventLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")
