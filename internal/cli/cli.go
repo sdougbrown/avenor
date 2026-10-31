@@ -211,7 +211,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 	discovery := DiscoverServer(*serverURL, getenv)
 	if !workflowMode {
-		if err := validateCLISelection(*backend, discovery, *thinking, backendExplicit || *rosterEntry != ""); err != nil {
+		if err := validateCLISelection(*backend, discovery, *thinking, backendExplicit || *rosterEntry != "" || *resume != ""); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
@@ -482,7 +482,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 	execAttempt := func(ctx context.Context, phase phaseSelection, resumeID, prompt string, provenance *runtime.LaunchProvenance) attemptResult {
 		selection := phase.selection
-		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking, phase.backendSupplied); err != nil {
+		// A resume restores the backend from the session, so this attempt may
+		// not be running on the default at all.
+		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking, phase.backendSupplied || resumeID != ""); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
@@ -1047,10 +1049,7 @@ func validateCLISelection(backend string, discovery ServerDiscovery, thinking st
 	default:
 		return fmt.Errorf("unknown backend %q", backend)
 	}
-	if !backendSupplied {
-		return runtime.ValidateThinkingForBackendOmitted(backend, thinking)
-	}
-	return runtime.ValidateThinkingForBackend(backend, thinking)
+	return runtime.ValidateThinkingForChosenBackend(backend, thinking, backendSupplied)
 }
 
 type resumeWithOptionser interface {

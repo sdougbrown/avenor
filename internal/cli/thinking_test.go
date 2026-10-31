@@ -277,3 +277,22 @@ func TestDirectCLILoopPhaseNamesTheOmittedBackend(t *testing.T) {
 		t.Fatal("attempt started for a rejected thinking level")
 	}
 }
+
+// A resume can restore the backend from the session, so the note must not
+// claim the runtime default chose a backend the session may already own.
+func TestDirectCLIResumeKeepsThePlainThinkingError(t *testing.T) {
+	called := stubRunAttempt(t)
+	var stderr strings.Builder
+	if code := run([]string{"--resume", "ses_x", "--thinking", "high", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `backend "opencode-acp" does not support parameter "thinking"`) {
+		t.Fatalf("stderr = %q, want the backend's own verdict", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "backend was omitted") {
+		t.Fatalf("stderr = %q, want no omission claim for a session that may own the backend", stderr.String())
+	}
+	if called() {
+		t.Fatal("attempt started for a rejected thinking level")
+	}
+}

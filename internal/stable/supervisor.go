@@ -5203,13 +5203,12 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 	// direct backend or roster entry and no resumed session supplied one. That
 	// case names the omission; every other case reports the backend's own
 	// verdict.
-	validateThinking := runtime.ValidateThinkingForBackend
-	if params.Backend == "" && params.RosterEntry == "" {
-		if _, mapped := s.sessionIdentity(params.SessionID); !mapped {
-			validateThinking = runtime.ValidateThinkingForBackendOmitted
-		}
+	backendSupplied := params.Backend != "" || params.RosterEntry != ""
+	if !backendSupplied {
+		_, mapped := s.sessionIdentity(params.SessionID)
+		backendSupplied = mapped
 	}
-	if err := validateThinking(backend, params.Thinking); err != nil {
+	if err := runtime.ValidateThinkingForChosenBackend(backend, params.Thinking, backendSupplied); err != nil {
 		return params, backend, err
 	}
 	return params, backend, nil

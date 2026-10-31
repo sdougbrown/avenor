@@ -260,12 +260,7 @@ func TestSpawnAcceptsThinkingWithExplicitPiBackendAndModel(t *testing.T) {
 func TestSpawnKeepsTheResumedBackendInTheThinkingError(t *testing.T) {
 	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-resumed-backend.sock", MaxRuntimes: 1})
-	sup.sessionIdentityMu.Lock()
-	if sup.sessionIdentities == nil {
-		sup.sessionIdentities = map[string]sessionIdentityEntry{}
-	}
-	sup.sessionIdentities["ses_resumed"] = sessionIdentityEntry{identity: effectiveIdentity{Backend: "agy"}}
-	sup.sessionIdentityMu.Unlock()
+	sup.rememberSessionIdentity("ses_resumed", effectiveIdentity{Backend: "agy"}, nil)
 	providerCalled := false
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		providerCalled = true
