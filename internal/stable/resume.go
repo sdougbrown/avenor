@@ -93,6 +93,15 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 	rosterEntry := prior.rosterEntry
 	prior.mu.Unlock()
 
+	// A roster-selected run resumes through its selector alone: the entry
+	// supplies agent, model and backend. A spawn carrying both is refused as
+	// "direct identity fields are disabled in roster mode". The session mapping
+	// still pins the resolved identity, so a roster that changed under the run
+	// conflicts instead of launching a new identity.
+	if rosterEntry != "" {
+		agent, model, backend = "", "", ""
+	}
+
 	// The prior label is the current display name, so a rename is honoured
 	// here rather than the stale launch label.
 	if s.broker != nil {

@@ -285,6 +285,72 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 	}
 }
 
+// A roster-created run resumes through its roster selector alone: the entry
+// supplies agent, model and backend, and a resume that also carried the
+// inherited direct identity would be refused as "direct identity fields are
+// disabled in roster mode".
+func TestResumeRosterRunCarriesOnlyTheRosterSelector(t *testing.T) {
+	t.Parallel()
+	sup, provider := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	rosterPath := writeStage5Roster(t, dir, `{"planner":{"backend":"claude","agent":"planner","model":"planner-model"}}`)
+	sentinel := filepath.Join(dir, "sentinel.env")
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		RosterFile: rosterPath, RosterEntry: "planner", AutoApprove: true,
+		SentinelFile: sentinel, OnEvent: filepath.Join(dir, "events.log"),
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	priorChild := sup.runtimeByID(prior.RuntimeID)
+	waitForStableChild(t, priorChild, func(active, _ bool, _, _ string) bool { return active })
+	// A cold resume continues the session the sentinel names, which for a
+	// live runtime is the session this roster launch registered.
+	sessionID := priorChild.sessionID()
+	if err := sup.RuntimeCancel(prior.RuntimeID); err != nil {
+		t.Fatalf("cancel prior: %v", err)
+	}
+	select {
+	case <-priorChild.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prior runtime did not stop")
+	}
+	writeSentinel(t, sentinel, "DONE", sessionID)
+
+	newSentinel := filepath.Join(dir, "avenor-run-"+resumeUUID1+".done")
+	newEventLog := filepath.Join(dir, "avenor-run-"+resumeUUID1+".log")
+	result, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+		SentinelFile: newSentinel, EventLog: newEventLog,
+	})
+	if err != nil {
+		t.Fatalf("resume roster run: %v", err)
+	}
+	if resumes := provider.resumesRecorded(); len(resumes) != 1 || resumes[0] != sessionID {
+		t.Fatalf("provider resumes = %v, want [%s]", resumes, sessionID)
+	}
+	resumed := sup.runtimeByID(result.RuntimeID)
+	if resumed == nil {
+		t.Fatalf("resumed runtime %q is not registered", result.RuntimeID)
+	}
+	resumed.mu.Lock()
+	got := struct {
+		agent, model, backend   string
+		rosterFile, rosterEntry string
+	}{
+		resumed.effectiveAgent, resumed.effectiveModel, resumed.effectiveBackend,
+		resumed.rosterFile, resumed.rosterEntry,
+	}
+	resumed.mu.Unlock()
+	if got.backend != "claude" || got.agent != "planner" || got.model != "planner-model" {
+		t.Fatalf("resumed identity = %s/%s/%s, want claude/planner/planner-model", got.backend, got.agent, got.model)
+	}
+	if got.rosterFile != rosterPath || got.rosterEntry != "planner" {
+		t.Fatalf("resumed roster selector = %q/%q, want %q/planner", got.rosterFile, got.rosterEntry, rosterPath)
+	}
+}
+
 func TestResumeColdArmKeepsHarnessLabelsUnambiguous(t *testing.T) {
 	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 8)
