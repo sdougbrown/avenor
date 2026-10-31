@@ -134,7 +134,7 @@ func assertFlatSchemas(t *testing.T, tools []any) {
 	}
 }
 
-func TestChildReplyIsEdgeAbsentWithoutASend(t *testing.T) {
+func TestChildReplyWithoutAnInboundAskReportsEdgeAbsent(t *testing.T) {
 	var mu sync.Mutex
 	var paths []string
 	brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,6 +144,10 @@ func TestChildReplyIsEdgeAbsentWithoutASend(t *testing.T) {
 		switch r.URL.Path {
 		case "/sessions":
 			_ = json.NewEncoder(w).Encode(map[string]any{"messaging_protocol": 1, "generation": "gen-1"})
+		case "/send":
+			// The broker resolves the reply's sender from the message id and
+			// finds no route, so it reports the edge absent.
+			_ = json.NewEncoder(w).Encode(map[string]any{"queued": false, "outcome": "edge-absent"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -165,10 +169,14 @@ func TestChildReplyIsEdgeAbsentWithoutASend(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	sends := 0
 	for _, path := range paths {
 		if path == "/send" {
-			t.Fatalf("a reply with no inbound delivery reached /send: %v", paths)
+			sends++
 		}
+	}
+	if sends != 1 {
+		t.Fatalf("reply reached /send %d times, want 1", sends)
 	}
 }
 

@@ -172,7 +172,7 @@ Send a message to another run, withdraw a pending ask, resume a completed run, o
 |---|---|---|
 | `tell` | `target`, `message` | Deliver a message without creating an ask edge |
 | `ask` | `target`, `message`, optional `timeout_ms` | Deliver a message and wait for a reply |
-| `reply` | `reply_to`, `message` | Answer an inbound ask. This server receives no inbound delivery, so the result is always `edge-absent` and nothing is sent |
+| `reply` | `reply_to`, `message` | Answer an inbound message. An ask this surface received is answered through its claim; a tell is routed back to its sender by the broker. A message id with no route reports `edge-absent` |
 | `resume` | `target`, `message`, optional `label`, `idempotency_key` | Resume a completed run from its persisted session |
 | `withdraw` | `message_id` | Withdraw a pending ask |
 | `control_reply` | `target`, optional `payload` | Deliver a control reply where the provider supports it |

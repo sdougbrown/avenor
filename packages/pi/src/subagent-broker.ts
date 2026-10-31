@@ -127,7 +127,8 @@ export class BrokerHttpError extends Error {
 
 export interface AgentMessageFields {
   fromRunId: string
-  toRunId: string
+  /** Absent on a reply to a tell, whose sender the broker resolves from the message id. */
+  toRunId?: string
   messageId: string
   message: string
   role: string
@@ -144,13 +145,13 @@ export function buildAgentMessage(fields: AgentMessageFields): Record<string, un
   return {
     ...(fields.generation !== undefined ? { generation: fields.generation } : {}),
     from_run_id: fields.fromRunId,
-    to_run_id: fields.toRunId,
+    ...(fields.toRunId !== undefined ? { to_run_id: fields.toRunId } : {}),
     type: 'agent_message',
     payload: {
       id: fields.messageId,
       from: fields.fromRunId,
       from_run_id: fields.fromRunId,
-      to_run_id: fields.toRunId,
+      ...(fields.toRunId !== undefined ? { to_run_id: fields.toRunId } : {}),
       message: fields.message,
       role: fields.role,
       ...(fields.expectsReply ? { expects_reply: true } : {}),

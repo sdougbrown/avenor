@@ -9,10 +9,12 @@ interface HostAsk {
   role?: string
 }
 
-/** Record every provider reply and answer it as delivered. */
+/** Record every provider reply and answer it as delivered, or edge-absent when
+ * the surface held no claim for the message. */
 function replyingProvider(replySpy: (args: Record<string, unknown>) => Promise<unknown>) {
   return makeMessageProvider({
-    reply: async (inboundAskId: string, message: string, askerRunId: string) => {
+    reply: async (inboundAskId: string, message: string, askerRunId?: string) => {
+      if (askerRunId === undefined) return { outcome: 'edge-absent', messageId: inboundAskId }
       await replySpy({ askerRunId, inboundAskId, message })
       return { outcome: 'replied', messageId: inboundAskId }
     },
@@ -203,9 +205,15 @@ describe('host inbound ask delivery', () => {
     }
   })
 
-  it('rejects a reply to an ask this surface never received', async () => {
+  it('reports edge-absent for a reply to a message this surface never received', async () => {
     const replySpy = mock(async (_args: Record<string, unknown>) => {})
-    const harness = await startHostExtension(mock(async () => ({ asks: [] })), replySpy)
+    const provider = makeMessageProvider({
+      reply: async (inboundAskId: string, message: string, askerRunId?: string) => {
+        await replySpy({ askerRunId, inboundAskId, message })
+        return { outcome: 'edge-absent', messageId: inboundAskId }
+      },
+    })
+    const harness = await startHostExtension(mock(async () => ({ asks: [] })), replySpy, {}, provider)
     try {
       const result = await harness.registeredTools.avenor_message.execute('t1', {
         action: 'reply',
@@ -213,7 +221,8 @@ describe('host inbound ask delivery', () => {
         message: 'host answer',
       })
       expect(result.details.outcome).toBe('edge-absent')
-      expect(replySpy).not.toHaveBeenCalled()
+      expect(replySpy).toHaveBeenCalledTimes(1)
+      expect(replySpy.mock.calls[0][0]).toMatchObject({ askerRunId: undefined, inboundAskId: 'ask-host-i' })
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
     }

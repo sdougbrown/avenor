@@ -294,12 +294,14 @@ func TestStorePruneFencesUnconsumedReply(t *testing.T) {
 type recordingBackend struct {
 	mu        sync.Mutex
 	published []messaging.InboundMessage
+	targets   []string
 }
 
 func (r *recordingBackend) Publish(target string, msg messaging.InboundMessage) (func(), error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.published = append(r.published, msg)
+	r.targets = append(r.targets, target)
 	return func() {}, nil
 }
 
@@ -309,6 +311,228 @@ func (r *recordingBackend) Receive(sender string, limit int) ([]messaging.Inboun
 
 func (r *recordingBackend) Peers() ([]messaging.Peer, error) { return nil, nil }
 
+// TestStoreTellRouteLookupLeavesDeliveryToTheCaller pins what the store owns
+// for a reply to a tell: the route lookup and the replier check. The store
+// performs no delivery itself, which is what keeps a cross-branch reply
+// routable.
+func TestStoreTellRouteLookupLeavesDeliveryToTheCaller(t *testing.T) {
+	store := New(Options{})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	now := time.Now()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+		Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	sender, target, ok := store.TellRoute(msgID)
+	if !ok || sender != "alice" || target != "bob" {
+		t.Fatalf("TellRoute = (%q, %q, %v), want alice -> bob", sender, target, ok)
+	}
+	// The store's Reply answers edge-absent for a tell: the delivery is the
+	// caller's, which is what keeps a cross-branch reply routable.
+	key := messaging.FenceKey{Sender: "bob", MessageID: msgID, Generation: store.Generation()}
+	if outcome, err := store.Reply(key, "bob", json.RawMessage(`{"message":"ack"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Reply = (%q, %v), want edge-absent (delivery belongs to the caller)", outcome, err)
+	}
+	if len(backend.published) != 1 {
+		t.Fatalf("published %d messages, want only the tell", len(backend.published))
+	}
+}
+
+// TestStoreReplyToTellExpiresWithItsRoute pins the retention bound: a tell
+// route is pruned at its deadline, so a late reply reports edge-absent rather
+// than delivering to a sender the store no longer tracks.
+func TestStoreReplyToTellExpiresWithItsRoute(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	clk := &clock{now: base}
+	store := New(Options{Clock: clk.Now})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	msgID, err := messaging.NewMsgID(base, base.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+		Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	clk.Advance(2 * time.Minute)
+	// The lookup enforces the deadline itself, so an expired route is absent
+	// even before the prune tick reclaims it.
+	if _, _, ok := store.TellRoute(msgID); ok {
+		t.Fatal("an expired route was reachable before the prune tick")
+	}
+	store.Prune(clk.Now())
+	if _, _, ok := store.TellRoute(msgID); ok {
+		t.Fatal("expired route survived prune")
+	}
+}
+
+// TestStoreTellRouteRefusesASecondSender pins the route-ownership rule: a
+// record for an id already routed is refused for a different sender, so the
+// route cannot be moved and the first sender's answers cannot be misrouted.
+// The same-id check covers an ask edge holding the id, in both directions.
+func TestStoreTellRouteRefusesASecondSender(t *testing.T) {
+	store := New(Options{})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	now := time.Now()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+		Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	// Any id that already carries a route is refused — a retried relay would
+	// queue the tell twice, whatever the sender is.
+	if err := store.RecordTellRoute(msgID, "carol", "bob", false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+		t.Fatalf("RecordTellRoute over another sender's route = %v, want a duplicate refusal", err)
+	}
+	if err := store.RecordTellRoute(msgID, "alice", "bob", false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+		t.Fatalf("the sender's own re-record = %v, want a duplicate refusal", err)
+	}
+	// An ask whose id carries a tell route is refused too.
+	res, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "carol"}, Target: "bob", MessageID: msgID,
+		Generation: store.Generation(), Body: `{"message":"ask"}`,
+	})
+	if !errors.Is(err, messaging.ErrDuplicateMessageID) || res.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("ask over a tell route = (%+v, %v), want a duplicate refusal", res, err)
+	}
+
+	// The reverse: a tell whose id an ask edge holds is refused.
+	now2 := time.Now()
+	askID, err := messaging.NewMsgID(now2, now2.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "carol"}, Target: "bob", MessageID: askID,
+		Generation: store.Generation(), Body: `{"message":"question"}`,
+	}); err != nil {
+		t.Fatalf("ask Admit: %v", err)
+	}
+	if err := store.RecordTellRoute(askID, "alice", "bob", false); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+		t.Fatalf("RecordTellRoute over an ask edge = %v, want a duplicate refusal", err)
+	}
+	res, err = store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "alice"}, Target: "carol", MessageID: askID,
+		Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
+	})
+	if !errors.Is(err, messaging.ErrDuplicateMessageID) || res.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("tell over an ask edge = (%+v, %v), want a duplicate refusal", res, err)
+	}
+}
+
+// TestStoreTellRoutesCountAgainstFenceCapacity pins the bound: tell routes are
+// charged to the shared fence capacity. A versioned tell costs two slots — its
+// dedup fence and its route — so two fills a capacity of four.
+func TestStoreTellRoutesCountAgainstFenceCapacity(t *testing.T) {
+	store := New(Options{FenceCapacity: 4})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	for i := 0; i < 2; i++ {
+		now := time.Now()
+		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("NewMsgID: %v", err)
+		}
+		if _, err := store.Admit(t.Context(), AdmitRequest{
+			Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+			Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
+		}); err != nil {
+			t.Fatalf("Admit %d: %v", i, err)
+		}
+	}
+	now := time.Now()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	res, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+		Generation: store.Generation(), Body: `{"message":"third"}`, NoReply: true,
+	})
+	if !errors.Is(err, messaging.ErrFenceCapacity) || res.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("third Admit = (%+v, %v), want a capacity refusal", res, err)
+	}
+	// A relayed route charges the same capacity.
+	capStore := New(Options{FenceCapacity: 1})
+	if err := capStore.RecordTellRoute("legacy-id", "alice", "bob", true); err != nil {
+		t.Fatalf("RecordTellRoute: %v", err)
+	}
+	if err := capStore.RecordTellRoute("legacy-id-2", "carol", "bob", true); !errors.Is(err, messaging.ErrFenceCapacity) {
+		t.Fatalf("second RecordTellRoute = %v, want a capacity refusal", err)
+	}
+}
+
+// TestStoreRemoveRunAndResetDropTellRoutes pins the lifecycle: routes leave
+// with their sender, target or the whole store, so a reply cannot outlive the
+// run it answers.
+func TestStoreRemoveRunAndResetDropTellRoutes(t *testing.T) {
+	store := New(Options{})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	admitTell := func(sender string) string {
+		now := time.Now()
+		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("NewMsgID: %v", err)
+		}
+		if _, err := store.Admit(t.Context(), AdmitRequest{
+			Sender: messaging.Identity{RunID: sender}, Target: "bob", MessageID: msgID,
+			Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
+		}); err != nil {
+			t.Fatalf("Admit: %v", err)
+		}
+		return msgID
+	}
+
+	aliceMsg := admitTell("alice")
+	carolMsg := admitTell("carol")
+	store.RemoveRun("alice")
+	if _, _, ok := store.TellRoute(aliceMsg); ok {
+		t.Fatal("a removed run's route survived RemoveRun")
+	}
+	if _, _, ok := store.TellRoute(carolMsg); !ok {
+		t.Fatal("a surviving route was dropped by RemoveRun")
+	}
+
+	// The target arm: a route leaves with its target too, so a reply cannot
+	// report sent into a queue the run's removal deleted.
+	store.RemoveRun("carol")
+	if _, _, ok := store.TellRoute(carolMsg); ok {
+		t.Fatal("a removed target's route survived RemoveRun")
+	}
+
+	store.Reset()
+	if _, _, ok := store.TellRoute(carolMsg); ok {
+		t.Fatal("a route survived Reset")
+	}
+}
+
+// TestStoreNoReplyCreatesNoEdge pins the no-reply admission against the
+// delivery ordering: a tell whose id is already routed is refused before the
+// message is published, so a refused tell is never delivered.
 func TestStoreNoReplyCreatesNoEdge(t *testing.T) {
 	store := New(Options{})
 	backend := &recordingBackend{}

@@ -164,6 +164,22 @@ test('reply claims restore through their original provider', async () => {
   expect((await p.reply('ask', 'answer', 'sender')).reply).toBe('ask:sender:answer')
 })
 
+// A reply with no local claim — a tell this surface never received an ask for
+// — forwards to the central broker, which routes it back to the tell's sender.
+test('an unclaimed reply forwards to the central broker instead of throwing', async () => {
+  const centralReplies: Array<{ id: string; message: string; asker?: string }> = []
+  const local = provider('local', [], [])
+  const central = provider('central', [], [])
+  central.reply = async (id, message, asker) => {
+    centralReplies.push({ id, message, asker })
+    return { outcome: 'sent', messageId: id }
+  }
+  const p = combinePeerProviders(local, central)
+  const result = await p.reply('tell-x', 'ack', undefined)
+  expect(result.outcome).toBe('sent')
+  expect(centralReplies).toEqual([{ id: 'tell-x', message: 'ack', asker: undefined }])
+})
+
 test('colliding inbound claims are restored without selecting an identity', () => {
   const local = provider('local', [], [])
   const central = provider('central', [], [])

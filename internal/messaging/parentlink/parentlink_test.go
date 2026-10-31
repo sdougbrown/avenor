@@ -329,3 +329,213 @@ func TestLocalAskNeverCrossesTheParentLink(t *testing.T) {
 		t.Fatalf("local wait payload = %v, want the reply", body["payload"])
 	}
 }
+
+// tell posts one fire-and-forget message with a message id, the way the merged
+// message tool sends a tell.
+func tell(t *testing.T, from *branch, fromRunID, toRunID, msgID, text string) (int, map[string]any) {
+	t.Helper()
+	return postJSON(t, from.broker.Addr(), "/send", fromRunID, from.token(t, fromRunID), map[string]any{
+		"from_run_id": fromRunID,
+		"to_run_id":   toRunID,
+		"type":        "agent_message",
+		"message_id":  msgID,
+		"payload":     map[string]any{"message": text},
+	})
+}
+
+// replyWithoutTarget answers a queued message the way the router does when the
+// surface held no claim for it: reply_to set, no to_run_id, so the broker
+// resolves the sender from the message id.
+func replyWithoutTarget(t *testing.T, from *branch, fromRunID, msgID, text string) (int, map[string]any) {
+	t.Helper()
+	return postJSON(t, from.broker.Addr(), "/send", fromRunID, from.token(t, fromRunID), map[string]any{
+		"from_run_id": fromRunID,
+		"type":        "agent_message",
+		"reply_to":    msgID,
+		"payload":     map[string]any{"message": text},
+	})
+}
+
+// TestReplyToTellCrossesBranches pins the cross-branch reply route: a tell from
+// one branch's run to another branch's run is relayed through the parent, the
+// receiving branch records the route at relay time, and the target's reply with
+// no to_run_id climbs back into the sender's queue.
+func TestReplyToTellCrossesBranches(t *testing.T) {
+	parent := startBranch(t, "", "supervisor")
+	bob := startBranch(t, parent.url(), "bob")
+	awaitRegistered(t, parent, bob.key("bob"))
+	// Alice lives in her own branch so the reply's delivery leg crosses one too.
+	alice := startBranch(t, parent.url(), "alice")
+	awaitRegistered(t, parent, alice.key("alice"))
+
+	msgID := newMsgID(t)
+	status, body := tell(t, alice, "alice", bob.key("bob"), msgID, "hello bob")
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("cross-branch tell = (%d, %v), want 200 sent", status, body)
+	}
+	deadline := time.Now().Add(awaitDeadline)
+	for len(queuedAgentMessages(t, bob.broker, "bob")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("bob never received the relayed tell")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	status, body = replyWithoutTarget(t, bob, "bob", msgID, "hi alice")
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("cross-branch reply = (%d, %v), want 200 sent", status, body)
+	}
+	deadline = time.Now().Add(awaitDeadline)
+	var queued []*broker.ControlMessage
+	for {
+		queued = queuedAgentMessages(t, alice.broker, "alice")
+		if len(queued) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("alice never received the reply")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	var payload map[string]any
+	raw, err := json.Marshal(queued[0].Payload)
+	if err != nil {
+		t.Fatalf("encode reply payload: %v", err)
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode reply payload %s: %v", raw, err)
+	}
+	if payload["reply_to"] != msgID || payload["message"] != "hi alice" {
+		t.Fatalf("reply payload = %v, want bob's answer to %s", payload, msgID)
+	}
+	if queued[0].FromRunID != bob.key("bob") {
+		t.Fatalf("reply sender = %q, want bob's adopted key", queued[0].FromRunID)
+	}
+
+	// A reply from a run that is not the tell's target is refused with no
+	// delivery anywhere.
+	status, body = replyWithoutTarget(t, alice, "alice", msgID, "not mine")
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeEdgeAbsent) {
+		t.Fatalf("stranger reply = (%d, %v), want edge-absent", status, body)
+	}
+}
+
+// TestRelayRecordsTheTellRoute pins the NoReply relay branch: the relayed tell
+// records its reply route before the message is exposed, a relay whose route
+// is refused does not queue the message, and a versioned id is fenced so a
+// retried relay cannot queue it twice.
+func TestRelayRecordsTheTellRoute(t *testing.T) {
+	parent := startBranch(t, "", "supervisor")
+	_ = parent
+	bob := startBranch(t, parent.url(), "bob")
+	_ = bob
+	// The relay authenticates as the target run with the branch-local
+	// credential the branch created it with.
+	relay := func(fromKey, msgID string) (int, map[string]any) {
+		return postJSON(t, bob.broker.Addr(), "/relay", "bob", bob.token(t, "bob"), map[string]any{
+			"from_run_id": fromKey,
+			"to_run_id":   "bob",
+			"type":        "agent_message",
+			"message_id":  msgID,
+			"generation":  bob.broker.Store().Generation(),
+			"payload":     map[string]any{"message": "hello"},
+		})
+	}
+
+	// The relay carries a versioned id, so the retried relay below is refused
+	// by the delivered fence RecordTellRoute records, not only by the
+	// route-uniqueness check.
+	tellID := newMsgID(t)
+	status, body := relay(parent.key("supervisor"), tellID)
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("relayed tell = (%d, %v), want 200 sent", status, body)
+	}
+	if queued := queuedAgentMessages(t, bob.broker, "bob"); len(queued) != 1 {
+		t.Fatalf("bob queue = %d messages, want the relayed tell", len(queued))
+	}
+	sender, target, ok := bob.broker.Store().TellRoute(tellID)
+	if !ok || sender != parent.key("supervisor") || target != "bob" {
+		t.Fatalf("TellRoute = (%q, %q, %v), want supervisor -> bob", sender, target, ok)
+	}
+
+	// A different sender's tell with the same id is refused and queues nothing.
+	status, _ = relay(parent.key("other"), tellID)
+	if status != http.StatusConflict {
+		t.Fatalf("conflicting relay = %d, want 409", status)
+	}
+	if queued := queuedAgentMessages(t, bob.broker, "bob"); len(queued) != 1 {
+		t.Fatalf("bob queue after the refusal = %d messages, want the original only", len(queued))
+	}
+
+	// A retried relay is refused by the delivered fence a versioned id records.
+	status, _ = relay(parent.key("supervisor"), tellID)
+	if status != http.StatusConflict {
+		t.Fatalf("retried relay = %d, want 409", status)
+	}
+	if queued := queuedAgentMessages(t, bob.broker, "bob"); len(queued) != 1 {
+		t.Fatalf("bob queue after the retry = %d messages, want the original only", len(queued))
+	}
+}
+
+// TestBrokerReplyRetractsItsRouteWhenDeliveryFails pins the retraction: a reply
+// whose delivery fails — the sender's branch broker is gone — retracts the
+// reply's route (and the tell's route survives), so a retry after the branch
+// returns is accepted instead of being refused as a duplicate id.
+func TestBrokerReplyRetractsItsRouteWhenDeliveryFails(t *testing.T) {
+	parent := startBranch(t, "", "supervisor")
+	childID := newTestChildID()
+	alice := newBranchWith(t, parent.url(), childID, DefaultRefreshInterval, true, []string{"alice"})
+	bob := startBranch(t, parent.url(), "bob")
+	awaitRegistered(t, parent, alice.key("alice"), bob.key("bob"))
+
+	msgID := newMsgID(t)
+	status, body := tell(t, alice, "alice", bob.key("bob"), msgID, "hello bob")
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("tell = (%d, %v), want 200 sent", status, body)
+	}
+	deadline := time.Now().Add(awaitDeadline)
+	for len(queuedAgentMessages(t, bob.broker, "bob")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("bob never received the relayed tell")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// The sender's branch broker stops: the reply's relay fails at the parent.
+	if err := alice.broker.Stop(); err != nil {
+		t.Fatalf("stop alice's branch: %v", err)
+	}
+	status, _ = replyWithoutTarget(t, bob, "bob", msgID, "hi alice")
+	if status == http.StatusOK {
+		t.Fatalf("failed reply = %d, want a delivery error", status)
+	}
+	if _, _, ok := bob.broker.Store().TellRoute(messaging.ReplyID(msgID)); ok {
+		t.Fatal("the failed reply's route survived the delivery failure")
+	}
+	if _, _, ok := bob.broker.Store().TellRoute(msgID); !ok {
+		t.Fatal("the tell's route was retracted with the reply")
+	}
+
+	// The branch returns (the same durable identity reclaims its runs) and the
+	// retry is accepted.
+	alice2 := newBranchWith(t, parent.url(), childID, DefaultRefreshInterval, true, []string{"alice"})
+	awaitRegistered(t, parent, alice2.key("alice"))
+	status, body = replyWithoutTarget(t, bob, "bob", msgID, "hi alice")
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("retry = (%d, %v), want 200 sent", status, body)
+	}
+	deadline = time.Now().Add(awaitDeadline)
+	for {
+		queued := queuedAgentMessages(t, alice2.broker, "alice")
+		if len(queued) > 0 {
+			if queued[0].FromRunID != bob.key("bob") {
+				t.Fatalf("reply sender = %q, want bob's adopted key", queued[0].FromRunID)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("alice never received the retried reply")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}

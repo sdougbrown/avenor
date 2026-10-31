@@ -996,6 +996,210 @@ func waitReply(t *testing.T, addr, token, runID, waitingFor string) map[string]a
 	return result
 }
 
+// sendTellWithID sends a fire-and-forget message that carries a message id
+// (no expects_reply, no reply_to), so the broker records a reply route.
+func sendTellWithID(t *testing.T, addr, fromToken, fromRunID, toRunID, msgID, message string) map[string]any {
+	t.Helper()
+	payload := fmt.Sprintf(`{"id":%q,"from":%q,"from_run_id":%q,"to_run_id":%q,"message":%q}`,
+		msgID, fromRunID, fromRunID, toRunID, message)
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": %q,
+		"token": %q,
+		"from_run_id": %q,
+		"to_run_id": %q,
+		"type": "agent_message",
+		"message_id": %q,
+		"payload": %s
+	}`, fromRunID, fromToken, fromRunID, toRunID, msgID, payload)))
+	return postSend(t, addr, body)
+}
+
+// sendReplyWithoutTarget sends a reply with reply_to set and no to_run_id, the
+// shape the router sends when the surface held no claim for the message.
+func sendReplyWithoutTarget(t *testing.T, addr, fromToken, fromRunID, replyTo, message string) map[string]any {
+	t.Helper()
+	payload := fmt.Sprintf(`{"id":%q,"from":%q,"from_run_id":%q,"message":%q,"reply_to":%q}`,
+		replyTo+".reply", fromRunID, fromRunID, message, replyTo)
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": %q,
+		"token": %q,
+		"from_run_id": %q,
+		"type": "agent_message",
+		"reply_to": %q,
+		"payload": %s
+	}`, fromRunID, fromToken, fromRunID, replyTo, payload)))
+	return postSend(t, addr, body)
+}
+
+func postSend(t *testing.T, addr string, body *bytes.Reader) map[string]any {
+	t.Helper()
+	resp, err := http.Post(fmt.Sprintf("http://%s/send", addr), "application/json", body)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("send decode: %v", err)
+	}
+	result["status"] = resp.StatusCode
+	return result
+}
+
+// TestBrokerReplyToTellReachesTheSender pins the reply-to-tell path end to
+// end: a tell with a message id is admitted, the target's reply with no
+// to_run_id is routed back to the tell's sender, and a reply from another run
+// or to an unknown id is refused with no delivery.
+func TestBrokerReplyToTellReachesTheSender(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	addr := b.Addr()
+	aliceToken, err := b.CreateRun("alice", "")
+	if err != nil {
+		t.Fatalf("create alice: %v", err)
+	}
+	bobToken, err := b.CreateRun("bob", "")
+	if err != nil {
+		t.Fatalf("create bob: %v", err)
+	}
+	carolToken, err := b.CreateRun("carol", "")
+	if err != nil {
+		t.Fatalf("create carol: %v", err)
+	}
+
+	tell := sendTellWithID(t, addr, aliceToken, "alice", "bob", "tell-1", "hello bob")
+	if st := tell["status"]; st != http.StatusOK || tell["outcome"] != "sent" {
+		t.Fatalf("tell = %v, want a 200 sent", tell)
+	}
+	if got := pollAgentMessages(t, addr, "bob", bobToken); len(got) != 1 || got[0]["from_run_id"] != "alice" {
+		t.Fatalf("bob poll = %v, want the tell", got)
+	}
+
+	// A tell whose id is already routed is refused for a second sender: the
+	// route must not move, or the first sender's answers follow it.
+	hijack := sendTellWithID(t, addr, carolToken, "carol", "bob", "tell-1", "route steal")
+	if st := hijack["status"]; st != http.StatusConflict {
+		t.Fatalf("hijacking tell = %v, want a conflict refusal", hijack)
+	}
+
+	reply := sendReplyWithoutTarget(t, addr, bobToken, "bob", "tell-1", "hi alice")
+	if st := reply["status"]; st != http.StatusOK || reply["outcome"] != "sent" {
+		t.Fatalf("reply = %v, want a 200 sent", reply)
+	}
+	got := pollAgentMessages(t, addr, "alice", aliceToken)
+	if len(got) != 1 {
+		t.Fatalf("alice poll = %v, want one reply", got)
+	}
+	payloadRaw, err := json.Marshal(got[0]["payload"])
+	if err != nil {
+		t.Fatalf("encode reply payload: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(payloadRaw, &payload); err != nil {
+		t.Fatalf("reply payload %s: %v", payloadRaw, err)
+	}
+	if payload["reply_to"] != "tell-1" || payload["message"] != "hi alice" || got[0]["from_run_id"] != "bob" {
+		t.Fatalf("reply = %v (%v), want bob's answer to tell-1", got[0], payload)
+	}
+
+	// A repeat reply to the same tell is idempotent: the route already names
+	// bob and alice, so the answer is already delivered and nothing new is
+	// queued.
+	repeat := sendReplyWithoutTarget(t, addr, bobToken, "bob", "tell-1", "hi alice again")
+	if st := repeat["status"]; st != http.StatusOK || repeat["outcome"] != "sent" {
+		t.Fatalf("repeat reply = %v, want a 200 sent", repeat)
+	}
+	if got := pollAgentMessages(t, addr, "alice", aliceToken); len(got) != 0 {
+		t.Fatalf("alice poll after repeat reply = %v, want no duplicate", got)
+	}
+
+	stranger := sendReplyWithoutTarget(t, addr, carolToken, "carol", "tell-1", "not mine")
+	if st := stranger["status"]; st != http.StatusOK || stranger["outcome"] != "edge-absent" {
+		t.Fatalf("stranger reply = %v, want edge-absent", stranger)
+	}
+	unknown := sendReplyWithoutTarget(t, addr, bobToken, "bob", "no-such-message", "nowhere")
+	if st := unknown["status"]; st != http.StatusOK || unknown["outcome"] != "edge-absent" {
+		t.Fatalf("unknown reply = %v, want edge-absent", unknown)
+	}
+	if got := pollAgentMessages(t, addr, "alice", aliceToken); len(got) != 0 {
+		t.Fatalf("alice poll after refusals = %v, want none", got)
+	}
+
+	// Neither to_run_id nor reply_to is a malformed request.
+	nothing := postSend(t, addr, bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "bob", "token": %q, "from_run_id": "bob", "type": "agent_message",
+		"payload": {"id":"x","from":"bob","from_run_id":"bob","message":"hi"}
+	}`, bobToken))))
+	if st := nothing["status"]; st != http.StatusBadRequest {
+		t.Fatalf("send with no target and no reply_to = %v, want 400", nothing)
+	}
+	// A non-object reply payload is client input, refused with 400.
+	nonObject := postSend(t, addr, bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "bob", "token": %q, "from_run_id": "bob", "type": "agent_message",
+		"reply_to": "tell-1", "payload": [1,2]
+	}`, bobToken))))
+	if st := nonObject["status"]; st != http.StatusBadRequest {
+		t.Fatalf("non-object reply payload = %v, want 400", nonObject)
+	}
+	// A JSON null reply payload must not take the broker down, and the
+	// delivered message still carries the stamped correlation fields. The null
+	// reply answers its own tell so the reply id is fresh.
+	secondTell := sendTellWithID(t, addr, aliceToken, "alice", "bob", "tell-2", "again")
+	if st := secondTell["status"]; st != http.StatusOK || secondTell["outcome"] != "sent" {
+		t.Fatalf("second tell = %v, want a 200 sent", secondTell)
+	}
+	if got := pollAgentMessages(t, addr, "bob", bobToken); len(got) != 1 {
+		t.Fatalf("bob poll after the second tell = %v, want the tell", got)
+	}
+	nullPayload := postSend(t, addr, bytes.NewReader([]byte(fmt.Sprintf(`{
+		"run_id": "bob", "token": %q, "from_run_id": "bob", "type": "agent_message",
+		"reply_to": "tell-2", "payload": null
+	}`, bobToken))))
+	if st := nullPayload["status"]; st != http.StatusOK {
+		t.Fatalf("null reply payload = %v, want 200", nullPayload)
+	}
+	got = pollAgentMessages(t, addr, "alice", aliceToken)
+	if len(got) != 1 {
+		t.Fatalf("alice poll after null reply = %v, want the routed answer", got)
+	}
+	nullRaw, err := json.Marshal(got[0]["payload"])
+	if err != nil {
+		t.Fatalf("encode null-reply payload: %v", err)
+	}
+	var nullBody map[string]any
+	if err := json.Unmarshal(nullRaw, &nullBody); err != nil {
+		t.Fatalf("decode null-reply payload %s: %v", nullRaw, err)
+	}
+	if nullBody["id"] != "tell-2.reply" || nullBody["reply_to"] != "tell-2" {
+		t.Fatalf("null reply payload = %v, want the stamped correlation fields", nullBody)
+	}
+
+	// The reply chain: alice answers the reply (its own id, no to_run_id) and
+	// bob's queue receives it.
+	counter := sendReplyWithoutTarget(t, addr, aliceToken, "alice", "tell-1.reply", "and hi bob")
+	if st := counter["status"]; st != http.StatusOK || counter["outcome"] != "sent" {
+		t.Fatalf("counter-reply = %v, want a 200 sent", counter)
+	}
+	got = pollAgentMessages(t, addr, "bob", bobToken)
+	if len(got) != 1 {
+		t.Fatalf("bob poll after counter-reply = %v, want the routed answer", got)
+	}
+	counterRaw, err := json.Marshal(got[0]["payload"])
+	if err != nil {
+		t.Fatalf("encode counter-reply payload: %v", err)
+	}
+	var counterBody map[string]any
+	if err := json.Unmarshal(counterRaw, &counterBody); err != nil {
+		t.Fatalf("decode counter-reply payload %s: %v", counterRaw, err)
+	}
+	if counterBody["reply_to"] != "tell-1.reply" || counterBody["message"] != "and hi bob" || got[0]["from_run_id"] != "alice" {
+		t.Fatalf("counter-reply = %v (%v), want alice's answer to tell-1.reply", got[0], counterBody)
+	}
+}
+
 func TestBrokerAskReplyHappyPath(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
@@ -1630,12 +1834,29 @@ func TestBrokerReplyAfterRotationFallsBackToDelivery(t *testing.T) {
 	if reply["status"] != http.StatusOK || reply["note"] == nil {
 		t.Fatalf("reply = %+v, want the fire-and-forget fallback", reply)
 	}
-	sender := b.GetRun("rotated_asker")
-	sender.Mu.Lock()
-	queued := len(sender.ControlQueue)
-	sender.Mu.Unlock()
-	if queued != 1 {
-		t.Fatalf("asker queue = %d, want the reply delivered", queued)
+	got := pollAgentMessages(t, addr, "rotated_asker", senderToken)
+	if len(got) != 1 {
+		t.Fatalf("asker poll = %v, want the reply delivered", got)
+	}
+	payload, ok := got[0]["payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("reply payload = %v, want an object", got[0]["payload"])
+	}
+	replyID := msgID + ".reply"
+	if payload["id"] != replyID || payload["reply_to"] != msgID {
+		t.Fatalf("reply payload = %v, want the stamped correlation fields", payload)
+	}
+
+	// The fallback records the reply's own route, so the asker can answer the
+	// answer even though the edge did not survive the rotation.
+	pollAgentMessages(t, addr, "rotated_replier", targetToken) // drain the original ask
+	counter := sendReplyWithoutTarget(t, addr, senderToken, "rotated_asker", replyID, "back after the rotation")
+	if counter["status"] != http.StatusOK || counter["outcome"] != "sent" {
+		t.Fatalf("counter-reply = %+v, want a 200 sent", counter)
+	}
+	got = pollAgentMessages(t, addr, "rotated_replier", targetToken)
+	if len(got) != 1 || got[0]["from_run_id"] != "rotated_asker" {
+		t.Fatalf("replier poll after counter-reply = %v, want the asker's answer", got)
 	}
 }
 

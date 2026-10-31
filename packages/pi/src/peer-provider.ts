@@ -137,7 +137,11 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
     releaseAsk(id) { claims.get(id)?.releaseAsk?.(id); claims.delete(id) },
     reply(id, message, asker) {
       const owner = claims.get(id)
-      if (!owner) throw new ToolError('not_permitted', 'this session does not own that inbound message')
+      if (!owner) {
+        // No local claim: the central broker routes a reply to a tell back to
+        // its sender, and reports edge-absent when no route exists.
+        return central.reply(id, message, asker)
+      }
       return owner.reply(id, message, asker)
     },
   }

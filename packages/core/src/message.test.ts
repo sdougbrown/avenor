@@ -76,7 +76,7 @@ function fakeProvider(testCase: FixtureCase) {
     resolveRef?: string
     tell?: { targetRunId: string; message: string }
     ask?: { targetRunId: string; message: string; timeoutMs?: number }
-    reply?: { inboundAskId: string; message: string; askerRunId: string }
+    reply?: { inboundAskId: string; message: string; askerRunId?: string }
     withdraw?: { messageId: string }
     resume?: { target: string; message: string; label?: string; idempotencyKey?: string }
     rename?: { sessionId?: string; name: string }
@@ -130,7 +130,7 @@ function fakeProvider(testCase: FixtureCase) {
       if (outcome === 'replied') result.reply = stringOf(spec.reply)
       return result
     },
-    async reply(inboundAskId: string, message: string, askerRunId: string): Promise<ProviderResult> {
+    async reply(inboundAskId: string, message: string, askerRunId?: string): Promise<ProviderResult> {
       calls.reply = { inboundAskId, message, askerRunId }
       return { outcome: stringOf(spec.outcome) as MessageOutcome, messageId: inboundAskId }
     },
@@ -338,7 +338,7 @@ function assertMessageRequest(
         expect(provider.calls.reply?.message, testCase.name).toBe(stringOf(request.message))
       }
       if (request?.to_run_id !== undefined) {
-        expect(provider.calls.reply?.askerRunId, testCase.name).toBe(stringOf(request.to_run_id))
+        expect(provider.calls.reply?.askerRunId ?? '', testCase.name).toBe(stringOf(request.to_run_id))
       }
       break
     case 'withdraw':
@@ -871,7 +871,7 @@ describe('the shared surface result objects', () => {
       state: async () => ({ live: true, resumable: true, status: 'running' }),
       tell: async () => ({ outcome: 'sent', messageId: 'm-1' }),
       ask: async () => ({ outcome: 'sent' }),
-      reply: async () => ({ outcome: 'replied' }),
+      reply: async () => ({ outcome: 'edge-absent' }),
       withdraw: async () => ({ outcome: 'withdrawn' }),
       resume: async () => ({
         outcome: 'resumed',

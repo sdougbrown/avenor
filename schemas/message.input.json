@@ -54,11 +54,11 @@
       "properties": {
         "action": {
           "const": "reply",
-          "description": "Answer an ask this surface received."
+          "description": "Answer an inbound message: an ask through its claim, a tell through the broker's route."
         },
         "reply_to": {
           "type": "string",
-          "description": "Message id of the inbound ask, as an opaque handle."
+          "description": "Message id of the inbound message, as an opaque handle."
         },
         "message": {
           "type": "string",

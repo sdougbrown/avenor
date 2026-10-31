@@ -15,6 +15,11 @@ func (s *Store) Prune(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reclaimLocked(now)
+	for id, route := range s.tellRoutes {
+		if !now.Before(route.deadline) {
+			delete(s.tellRoutes, id)
+		}
+	}
 	for _, e := range s.active {
 		if now.Before(e.deadline) {
 			continue

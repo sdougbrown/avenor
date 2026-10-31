@@ -87,7 +87,7 @@ export interface ChildBroker {
     timeoutMs?: number,
     signal?: AbortSignal,
   ): Promise<ProviderResult>
-  reply(askerRunId: string, inboundAskId: string, message: string): Promise<ProviderResult>
+  reply(askerRunId: string | undefined, inboundAskId: string, message: string): Promise<ProviderResult>
   withdraw(messageId: string): Promise<ProviderResult>
   peers(): Promise<PeersProviderResult>
   rename(req: { sessionId?: string; name: string }): Promise<ProviderResult>
@@ -639,12 +639,12 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       return result
     },
 
-    async reply(inboundAskId: string, message: string, askerRunId: string): Promise<ProviderResult> {
+    async reply(inboundAskId: string, message: string, askerRunId?: string): Promise<ProviderResult> {
       const body = JSON.stringify({ message, role: 'host' })
       let sent: MessageSendResult
       try {
         sent = await client.messageReply({
-          to_run_id: askerRunId,
+          to_run_id: askerRunId ?? '',
           message_id: inboundAskId,
           correlation_id: inboundAskId,
           body,

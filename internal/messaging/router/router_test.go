@@ -40,6 +40,7 @@ type fakeProvider struct {
 	control         json.RawMessage
 	controlErr      error
 	withdrawErr     error
+	replyErr        error
 	generation      string
 	emptyGeneration bool
 	preflightCall   int
@@ -87,6 +88,9 @@ func (p *fakeProvider) Wait(_ context.Context, req messaging.WaitRequest) (messa
 
 func (p *fakeProvider) Reply(_ context.Context, req messaging.ReplyRequest) (messaging.SendResult, error) {
 	p.replied = req
+	if p.replyErr != nil {
+		return messaging.SendResult{MessageID: req.MessageID}, p.replyErr
+	}
 	return messaging.SendResult{Outcome: p.outcome, MessageID: req.MessageID}, nil
 }
 
@@ -526,8 +530,8 @@ func assertRequest(t *testing.T, c messaging.ConformanceCase, provider *fakeProv
 			t.Fatalf("timeout_ms = %d, want %v", provider.waited.Timeout.Milliseconds(), want)
 		}
 	case "reply":
-		if got, want := provider.replied.ToRunID, substitute(stringOf(request["to_run_id"])); want != "" && got != want {
-			t.Fatalf("reply target = %q, want %q", got, want)
+		if want, ok := request["to_run_id"]; ok && provider.replied.ToRunID != substitute(stringOf(want)) {
+			t.Fatalf("reply target = %q, want %q", provider.replied.ToRunID, stringOf(want))
 		}
 		if want := stringOf(request["message_id"]); want != "" && provider.replied.MessageID != want {
 			t.Fatalf("reply message_id = %q, want %q", provider.replied.MessageID, want)
@@ -743,6 +747,46 @@ func TestReplyClaimRestoredUnlessDelivered(t *testing.T) {
 			_, restored := claimed["av1.reply.1"]
 			if restored != tc.restored {
 				t.Fatalf("claim restored = %v, want %v", restored, tc.restored)
+			}
+		})
+	}
+}
+
+// TestReplyTransportFailureIsRefusedOnBothPaths pins the unified failure
+// rule: a Reply call whose provider returns an error with no outcome is a
+// refusal on the claim path and the tell path alike, and a claimed ask stays
+// answerable after the refusal.
+func TestReplyTransportFailureIsRefusedOnBothPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		claimed bool
+	}{
+		{"a claimed ask", true},
+		{"a tell with no claim", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &fakeProvider{
+				caller:   messaging.Caller{Kind: messaging.CallerBroker, RunID: "run-caller"},
+				outcome:  messaging.OutcomePossiblyPending,
+				replyErr: errors.New("broker down"),
+			}
+			claimed := map[string]string{}
+			if tc.claimed {
+				claimed["av1.reply.1"] = "run-asker"
+			}
+			router := newTestRouter(t, claimProvider{fakeProvider: provider, claimed: claimed})
+			_, err := router.Execute(t.Context(), json.RawMessage(`{"action": "reply", "reply_to": "av1.reply.1", "message": "OK"}`))
+			var toolErr *ToolError
+			if !errors.As(err, &toolErr) {
+				t.Fatalf("error = %v, want a tool error", err)
+			}
+			if toolErr.Code != "refused" {
+				t.Fatalf("code = %q, want refused", toolErr.Code)
+			}
+			if tc.claimed {
+				if _, ok := claimed["av1.reply.1"]; !ok {
+					t.Fatal("the claimed ask was consumed by a refused reply")
+				}
 			}
 		})
 	}

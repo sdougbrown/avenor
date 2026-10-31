@@ -633,7 +633,7 @@ describe('Pi surface result objects', () => {
     )
     expect(resume.details).toEqual(expected.message.resume)
 
-    provider = makeMessageProvider()
+    provider = makeMessageProvider({ reply: async () => ({ outcome: 'edge-absent', messageId: 'a-1' }) })
     const reply = await harness.registeredTools.avenor_message.execute(
       't3', { action: 'reply', reply_to: 'a-1', message: 'pong' },
     )

@@ -69,6 +69,11 @@ type Store struct {
 	paused   map[messaging.FenceKey]*gate
 	reached  map[messaging.FenceKey]bool
 
+	// tellRoutes records who sent each no-reply message, keyed by message id
+	// because a replier knows only the id it received. A reply to a tell is
+	// routed back to the sender instead of reporting edge-absent.
+	tellRoutes map[string]*tellRoute
+
 	// absentBySender counts each sender's edge-absent withdrawal fences and
 	// absentFences their total, so neither check scans s.terminal.
 	absentBySender map[string]int
@@ -101,6 +106,15 @@ type fence struct {
 	// remove retracts a queued delivery whose waiter gave up. It is set for a
 	// timed-out or abandoned ask, so a later withdrawal can still unqueue it.
 	remove func()
+}
+
+// tellRoute records a no-reply message's sender and target so a reply to it
+// can be routed back. It is keyed by message id because the replier knows only
+// the id it received.
+type tellRoute struct {
+	sender   string
+	target   string
+	deadline time.Time
 }
 
 // gate pauses admission for one key until it is resumed.
@@ -146,6 +160,7 @@ func New(opts Options) *Store {
 		terminal:      make(map[messaging.FenceKey]*fence),
 		paused:        make(map[messaging.FenceKey]*gate),
 		reached:       make(map[messaging.FenceKey]bool),
+		tellRoutes:    make(map[string]*tellRoute),
 
 		absentBySender: make(map[string]int),
 	}
@@ -240,6 +255,13 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 		result.Outcome = messaging.OutcomeNotSent
 		return result, messaging.ErrDuplicateMessageID
 	}
+	// Tell and ask share one message-id namespace: a reply to an id must
+	// resolve to one record, so an ask whose id carries a tell route is a
+	// duplicate whatever the sender is.
+	if err := s.checkTellRouteLocked(req.MessageID); err != nil {
+		result.Outcome = messaging.OutcomeNotSent
+		return result, err
+	}
 	if !req.NoReply {
 		for _, e := range s.active {
 			if e.key.Sender == req.Target && e.target == req.Sender.RunID {
@@ -260,9 +282,7 @@ func (s *Store) Admit(ctx context.Context, req AdmitRequest) (AdmitResult, error
 				return result, err
 			}
 		}
-		if versionedID(req.MessageID, now) {
-			s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeSent, delivered: true})
-		}
+		s.recordTellRouteLocked(key, req.MessageID, req.Sender.RunID, req.Target, deadline, now)
 		result.Outcome = messaging.OutcomeSent
 		return result, nil
 	}
@@ -360,6 +380,9 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 		e = s.findActiveLocked(key)
 	}
 	if e == nil {
+		// No ask edge. A reply to a tell is routed by the caller, which asks for
+		// the route and delivers through its own seam; the delivery may cross a
+		// branch boundary, which the store performs no network I/O to do.
 		return messaging.OutcomeEdgeAbsent, nil
 	}
 	if e.target != fromRunID {
@@ -388,6 +411,106 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 	e.reply = reply
 	s.completeLocked(e, messaging.OutcomeReplied)
 	return messaging.OutcomeReplied, nil
+}
+
+// TellRoute reports the recorded route for a no-reply message: the sender the
+// reply must reach, and the target the replier must be. It is the one lookup
+// a caller needs to deliver a reply to a tell, including across a branch
+// boundary through its own transport.
+func (s *Store) TellRoute(messageID string) (sender, target string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	route, ok := s.tellRoutes[messageID]
+	if !ok || !s.now().Before(route.deadline) {
+		return "", "", false
+	}
+	return route.sender, route.target, true
+}
+
+// checkTellRouteLocked refuses a message id another tell route or ask edge
+// holds. Both tell admissions — a local NoReply admit and a relayed tell's
+// route record — call it, so the namespace rules live in one place. The ask
+// path's own terminal-fence handling (a withdrawn ask reports withdrawn to
+// its caller) runs before it; a relayed tell refuses instead, because a
+// withdrawn id must never be delivered over and the relay caller classifies
+// only through the wire table.
+func (s *Store) checkTellRouteLocked(messageID string) error {
+	if _, ok := s.tellRoutes[messageID]; ok {
+		return messaging.ErrDuplicateMessageID
+	}
+	for _, e := range s.active {
+		if e.key.MessageID == messageID {
+			return messaging.ErrDuplicateMessageID
+		}
+	}
+	return nil
+}
+
+// RecordTellRoute records the reply route for a no-reply message this store's
+// queues hold without an admission of its own — a tell an ancestor broker
+// relayed in. The sender and target are the ids this broker addresses them by.
+// The same uniqueness rules as a NoReply admission apply, through
+// checkTellRouteLocked: the message id is shared with asks, so an id an ask
+// edge or another route holds is refused. A versioned id also records the
+// delivered dedup fence a local admission would have set, so a retried relay
+// is refused instead of queueing the tell twice.
+func (s *Store) RecordTellRoute(messageID, sender, target string, legacy bool) error {
+	if messageID == "" || sender == "" || target == "" {
+		return fmt.Errorf("%w: message id, sender and target are required", messaging.ErrInvalidRequest)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	key := messaging.FenceKey{Sender: sender, MessageID: messageID, Generation: s.generation}
+	if err := s.generationErrorLocked(s.generation, messageID, now, legacy); err != nil {
+		return err
+	}
+	deadline, err := s.deadlineLocked(now, AdmitRequest{MessageID: messageID, Legacy: legacy})
+	if err != nil {
+		return err
+	}
+	s.reclaimLocked(now)
+	if _, ok := s.terminal[key]; ok {
+		// A versioned id's delivered fence is spent, and a withdrawn ask's fence
+		// must never be delivered over: either way the id is not free.
+		return messaging.ErrDuplicateMessageID
+	}
+	if err := s.checkTellRouteLocked(messageID); err != nil {
+		return err
+	}
+	if s.fenceCountLocked() >= s.fenceCapacity {
+		return messaging.ErrFenceCapacity
+	}
+	s.recordTellRouteLocked(key, messageID, sender, target, deadline, now)
+	return nil
+}
+
+// recordTellRouteLocked records a no-reply message's reply route and, for a
+// versioned id, the delivered dedup fence a local admission sets. Callers hold
+// s.mu and have already checked uniqueness and capacity.
+func (s *Store) recordTellRouteLocked(key messaging.FenceKey, messageID, sender, target string, deadline, now time.Time) {
+	if versionedID(messageID, now) {
+		s.setFenceLocked(key, &fence{deadline: deadline, outcome: messaging.OutcomeSent, delivered: true})
+	}
+	s.tellRoutes[messageID] = &tellRoute{sender: sender, target: target, deadline: deadline}
+}
+
+// DeleteTellRoute retracts the route a failed delivery left behind, with the
+// delivered fence a versioned record set, so a retried relay can be admitted.
+// The route must have been recorded for this generation; a route the store no
+// longer holds is a no-op.
+func (s *Store) DeleteTellRoute(messageID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	route, ok := s.tellRoutes[messageID]
+	if !ok {
+		return
+	}
+	delete(s.tellRoutes, messageID)
+	key := messaging.FenceKey{Sender: route.sender, MessageID: messageID, Generation: s.generation}
+	if f, ok := s.terminal[key]; ok && f.delivered {
+		s.dropFenceLocked(key)
+	}
 }
 
 // Withdraw installs a terminal fence for the key. A withdrawal with no live
@@ -462,6 +585,11 @@ func (s *Store) RemoveRun(runID string) {
 			s.completeLocked(e, messaging.OutcomeLost)
 		}
 	}
+	for id, route := range s.tellRoutes {
+		if route.sender == runID || route.target == runID {
+			delete(s.tellRoutes, id)
+		}
+	}
 }
 
 // Reset terminates all waits, clears ask state and rotates the generation.
@@ -475,6 +603,7 @@ func (s *Store) Reset() {
 	s.terminal = make(map[messaging.FenceKey]*fence)
 	s.paused = make(map[messaging.FenceKey]*gate)
 	s.reached = make(map[messaging.FenceKey]bool)
+	s.tellRoutes = make(map[string]*tellRoute)
 	s.absentBySender = make(map[string]int)
 	s.absentFences = 0
 	s.generation = messaging.NewGeneration()
@@ -661,7 +790,7 @@ func (s *Store) findActiveLocked(key messaging.FenceKey) *edge {
 // fenceCountLocked counts the records charged to the shared capacity. Fences
 // from edge-absent withdrawals are bounded per sender instead.
 func (s *Store) fenceCountLocked() int {
-	n := len(s.active)
+	n := len(s.active) + len(s.tellRoutes)
 	for _, f := range s.terminal {
 		if !f.absent {
 			n++

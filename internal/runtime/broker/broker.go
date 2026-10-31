@@ -1193,7 +1193,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if fullBody.FromRunID == "" || fullBody.ToRunID == "" || fullBody.Type == "" {
+	if fullBody.FromRunID == "" || fullBody.Type == "" {
 		writeCodedError(w, http.StatusBadRequest, "missing fields", "invalid-request")
 		return
 	}
@@ -1252,12 +1252,24 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		expectsReply = expectsReply || am.ExpectsReply
 	}
 
-	if expectsReply {
-		if msgID == "" {
-			writeCodedError(w, http.StatusBadRequest, "expects_reply requires a message id", "invalid-request")
-			return
-		}
+	// A reply to a tell names no target: the broker resolves the tell's sender
+	// from the message id. Every other message needs one.
+	if fullBody.ToRunID == "" && replyTo == "" {
+		writeCodedError(w, http.StatusBadRequest, "missing fields", "invalid-request")
+		return
+	}
 
+	// An expects_reply send without an id has nothing to wait on.
+	if expectsReply && msgID == "" {
+		writeCodedError(w, http.StatusBadRequest, "expects_reply requires a message id", "invalid-request")
+		return
+	}
+
+	// A message with an id is admitted through the store — the ask edge an
+	// expects_reply send allocates, the tell route a fire-and-forget message
+	// records — so one send dance serves both. A reply takes the reply path
+	// below; a message without an id is published directly.
+	if msgID != "" && replyTo == "" {
 		target := fullBody.ToRunID
 
 		if !b.seam().Reachable(target) {
@@ -1271,6 +1283,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			MessageID:  msgID,
 			Generation: fullBody.Generation,
 			Body:       string(fullBody.Payload),
+			NoReply:    !expectsReply,
 			Legacy:     true,
 		})
 		if err != nil {
@@ -1284,12 +1297,15 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		writeJSONBody(w, http.StatusOK, map[string]any{
-			"queued":        true,
-			"message_id":    msgID,
-			"expects_reply": true,
-			"outcome":       messaging.OutcomeSent,
-		})
+		response := map[string]any{
+			"queued":     true,
+			"message_id": msgID,
+			"outcome":    messaging.OutcomeSent,
+		}
+		if expectsReply {
+			response["expects_reply"] = true
+		}
+		writeJSONBody(w, http.StatusOK, response)
 		return
 	}
 
@@ -1318,20 +1334,49 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			// Every other failure is a client input or store-capacity class the
+			// wire table already classifies: duplicate ids, capacity, expiry.
+			writeSendError(w, err)
 			return
 		}
 		outcome := replied.Outcome
 		if outcome == messaging.OutcomeEdgeAbsent {
+			// A reply to a tell names no target: the broker resolved the sender
+			// from the message id and found no route, so there is nowhere to
+			// deliver it. Report the absence instead of a failed tell.
+			if fullBody.ToRunID == "" {
+				writeJSONBody(w, http.StatusOK, map[string]any{
+					"queued":  false,
+					"outcome": messaging.OutcomeEdgeAbsent,
+				})
+				return
+			}
 			// No live edge owns this ID, so the reply degrades to a delivery
-			// rather than completing an edge the store already retired.
+			// rather than completing an edge the store already retired. The reply
+			// carries its own id — the id it answers with .reply — and its route
+			// is recorded before the delivery, so the recipient's answer finds a
+			// route whether or not this broker relayed the original message.
+			stamped, err := messaging.ReplyBody(fullBody.Payload, replyTo)
+			if err != nil {
+				writeSendError(w, err)
+				return
+			}
+			if err := b.store.RecordTellRoute(messaging.ReplyID(replyTo), fullBody.FromRunID, fullBody.ToRunID, true); err != nil {
+				writeSendError(w, err)
+				return
+			}
 			err = b.seam().Tell(r.Context(), messaging.TellRequest{
-				FromRunID: fullBody.FromRunID,
-				ToRunID:   fullBody.ToRunID,
-				Kind:      fullBody.Type,
-				Payload:   fullBody.Payload,
+				FromRunID:     fullBody.FromRunID,
+				ToRunID:       fullBody.ToRunID,
+				Kind:          fullBody.Type,
+				Payload:       stamped,
+				CorrelationID: messaging.ReplyID(replyTo),
 			})
 			if err != nil {
+				// The delivery failed, so the route is retracted: a retried
+				// reply is admitted instead of being refused for a message
+				// that was never exposed.
+				b.store.DeleteTellRoute(messaging.ReplyID(replyTo))
 				writeCodedError(w, http.StatusNotFound, err.Error(), "invalid-request")
 				return
 			}
@@ -1351,7 +1396,9 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fire-and-forget: deliver to the target's control queue.
+	// Fire-and-forget without an id: deliver to the target's control queue. A
+	// tell with a message id took the store branch above, where its reply
+	// route was recorded.
 	err = b.seam().Tell(r.Context(), messaging.TellRequest{
 		FromRunID: fullBody.FromRunID,
 		ToRunID:   fullBody.ToRunID,
@@ -1827,6 +1874,13 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 			writeCodedError(w, http.StatusConflict, err.Error(), "invalid-request")
 			return
 		}
+	} else if err := b.store.RecordTellRoute(body.MessageID, body.FromRunID, body.ToRunID, true); err != nil {
+		// A relayed tell records the reply route before the message is exposed,
+		// so a consumer can never answer a message whose route is not bound
+		// yet. A refused route refuses the relay: the ancestor's sender then
+		// sees not-sent instead of an answerable tell that cannot be answered.
+		writeSendError(w, err)
+		return
 	}
 	// The branch that owns the asker is the one that knows its display name,
 	// so the relay carries the name it resolved; the receiving branch cannot
@@ -1837,11 +1891,11 @@ func (b *Broker) handleRelay(w http.ResponseWriter, r *http.Request) {
 		sender = b.DisplayName(body.FromRunID)
 	}
 	if err := b.sendToAs(body.FromRunID, body.ToRunID, body.Type, body.Payload, body.MessageID, sender); err != nil {
-		if errors.Is(err, messaging.ErrTargetUnavailable) {
-			writeCodedError(w, http.StatusNotFound, "to run not found", "target-unavailable")
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// The delivery failed, so the route is retracted: a retried relay is
+		// admitted instead of being refused for a message that was never
+		// exposed.
+		b.store.DeleteTellRoute(body.MessageID)
+		writeSendError(w, err)
 		return
 	}
 	writeJSONBody(w, http.StatusOK, map[string]any{
@@ -2820,7 +2874,52 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	}
 	key := m.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, m.broker.store.Generation())
 	outcome, err := m.broker.store.Reply(key, req.From.RunID, payload)
-	return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	if outcome != messaging.OutcomeEdgeAbsent || err != nil {
+		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	}
+	// No ask edge. A reply to a tell is delivered to the tell's sender through
+	// the seam, which relays across a branch boundary the way a tell does. The
+	// reply carries its own route key — the original id with .reply — whose
+	// route names the previous replier as its sender, which is what makes a
+	// reply chain work. Only the tell's target may answer it.
+	sender, target, ok := m.broker.store.TellRoute(req.MessageID)
+	if !ok || target != req.From.RunID {
+		return messaging.SendResult{Outcome: messaging.OutcomeEdgeAbsent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
+	}
+	replyID := messaging.ReplyID(req.MessageID)
+	body, err := messaging.ReplyBody(payload, req.MessageID)
+	if err != nil {
+		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	}
+	// The reply's own route is recorded before the reply is exposed — the same
+	// rule a relayed ask follows — so the recipient's answer always finds a
+	// route. A repeat reply to the same tell resolves to the same route, so it
+	// is idempotent: the answer is already delivered.
+	if err := m.broker.store.RecordTellRoute(replyID, req.From.RunID, sender, true); err != nil {
+		if errors.Is(err, messaging.ErrDuplicateMessageID) {
+			if existingSender, existingTarget, ok := m.broker.store.TellRoute(replyID); ok &&
+				existingSender == req.From.RunID && existingTarget == sender {
+				return messaging.SendResult{Outcome: messaging.OutcomeSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
+			}
+		}
+		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	}
+	if err := m.broker.seam().Tell(ctx, messaging.TellRequest{
+		FromRunID: req.From.RunID,
+		ToRunID:   sender,
+		Kind:      "agent_message",
+		Payload:   body,
+		// The correlation id is the reply's own id, so the recipient's surface
+		// renders a reply_to that names a message a route exists for.
+		CorrelationID: replyID,
+	}); err != nil {
+		// The delivery failed, so the route is retracted: a retried reply is
+		// admitted instead of being refused for a message that was never
+		// exposed.
+		m.broker.store.DeleteTellRoute(replyID)
+		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
+	}
+	return messaging.SendResult{Outcome: messaging.OutcomeSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
 }
 
 func (m localMessenger) Tell(ctx context.Context, req messaging.TellRequest) error {
