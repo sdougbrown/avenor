@@ -7,7 +7,7 @@ description: Select an available backend, then delegate and supervise independen
 
 Use the Avenor MCP tools for the full run lifecycle. Do not replace them with shell commands while the tools are available.
 
-These are the MCP server's tool names — `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown` and `workflow_*` — because that server registers them without a prefix. Agent extensions register the same tools with an `avenor_` prefix (`avenor_spawn`, `avenor_message`, and so on), and `avenor_inspect` exists only on Pi and OpenCode.
+These are the MCP server's tool names — `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown` and `workflow` — because that server registers them without a prefix. Agent extensions register the same tools with an `avenor_` prefix (`avenor_spawn`, `avenor_message`, and so on), and `avenor_inspect` exists only on Pi and OpenCode.
 
 ## Start a run
 

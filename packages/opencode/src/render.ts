@@ -609,7 +609,7 @@ function controllerStatusLines(details: unknown, args: WorkflowControllerStatusA
   lines.push(
     desiredState === 'disabled'
       ? `Guidance: Run \`avenor workflow controller enable ${controllerId}\` to start dispatch and polling.`
-      : `Guidance: Call avenor_workflow_controller_status without controller_id to review all controllers.`,
+      : `Guidance: Call avenor_workflow with action "controller_status" and no controller_id to review all controllers.`,
   )
   return lines
 }

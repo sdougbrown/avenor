@@ -6,22 +6,24 @@ import { validateSpawnSelection } from '@dougbots/avenor-core'
 import { z } from 'zod'
 import { spawnInputShape } from './spawn-schema'
 import { ToolError, renderPeerList } from '../../core/src/message.js'
+import { WorkflowToolError as RealWorkflowToolError } from '../../core/src/workflow.js'
 import { renderLast, renderOutcome } from '../../core/src/messaging-text.js'
 import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
 import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
 import type { MessageProvider } from '../../core/src/tools/message.js'
 import messageFlatContract from '../../../schemas/message.input.flat.json'
 import peersFlatContract from '../../../schemas/peers.input.flat.json'
+import workflowFlatContract from '../../../schemas/workflow.input.flat.json'
 import resultFixture from '../../../schemas/message_route.result.json'
 
-// Stub the core controller tools so the production registrations never dial a
-// real supervisor; the stubs record the camelCase args the registrations
-// forward.
-const controllerCalls: {
-  status: Array<Record<string, unknown>>
-} = { status: [] }
+// Stub the core tools so the production registrations never dial a real
+// supervisor; the stubs record the args the registrations forward.
 const killCalls: Array<Record<string, unknown>> = []
-const workflowCancelCalls: Array<Record<string, unknown>> = []
+const workflowCalls: Array<Record<string, unknown>> = []
+const runWorkflowToolMock = mock(async (args: Record<string, unknown>) => {
+  workflowCalls.push(args)
+  return { action: args.action, value: { routed: true } }
+})
 
 function makeProvider(overrides: Partial<MessageProvider> = {}): MessageProvider {
   return {
@@ -79,8 +81,7 @@ beforeEach(() => {
   providerCalls = 0
   providerDials.length = 0
   killCalls.length = 0
-  controllerCalls.status.length = 0
-  workflowCancelCalls.length = 0
+  workflowCalls.length = 0
 })
 
 mock.module('@dougbots/avenor-core', () => ({
@@ -113,20 +114,8 @@ mock.module('@dougbots/avenor-core', () => ({
     return { killed: true }
   }),
   shutdownTool: mock(async () => ({})),
-  workflowStatusTool: mock(async () => ({})),
-  workflowWaitTool: mock(async () => ({})),
-  workflowInspectTool: mock(async () => ({})),
-  workflowEventsTool: mock(async () => ({})),
-  workflowCompleteTool: mock(async () => ({})),
-  workflowGateTool: mock(async () => ({})),
-  workflowControllerStatusTool: mock(async (args: Record<string, unknown>) => {
-    controllerCalls.status.push(args)
-    return args.controllerId ? { state: 'enabled' } : { controllers: [] }
-  }),
-  workflowCancelTool: mock(async (args: Record<string, unknown>) => {
-    workflowCancelCalls.push(args)
-    return { cancelled: true }
-  }),
+  runWorkflowTool: runWorkflowToolMock,
+  WorkflowToolError: RealWorkflowToolError,
   validateSpawnSelection,
 }))
 
@@ -148,24 +137,35 @@ describe('avenor MCP server', () => {
     await server.close()
   })
 
-  it('registers the controller status tool on the production server and maps snake_case to camelCase', async () => {
+  it('routes the merged workflow tool and forwards snake_case args', async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     const client = new Client({ name: 'test-client', version: '0.1.0' })
     await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
 
-    const status = await client.callTool({
-      name: 'workflow_controller_status',
-      arguments: { controller_id: 'ctl-1', supervisor_id: 'sup-1' },
+    const result = await client.callTool({
+      name: 'workflow',
+      arguments: { action: 'controller_status', controller_id: 'ctl-1', supervisor_id: 'sup-1' },
     })
-    expect(status).toMatchObject({ state: 'enabled' })
-    expect(controllerCalls.status.at(-1)).toEqual({ controllerId: 'ctl-1', supervisorId: 'sup-1' })
+    expect(result).toMatchObject({ routed: true })
+    expect(workflowCalls.at(-1)).toEqual({ action: 'controller_status', controller_id: 'ctl-1', supervisor_id: 'sup-1' })
+    await client.close()
+    await server.close()
+  })
 
-    const list = await client.callTool({
-      name: 'workflow_controller_status',
-      arguments: { supervisor_id: 'sup-1' },
+  it('renders a workflow router denial as a tool error', async () => {
+    runWorkflowToolMock.mockImplementationOnce(async () => {
+      throw new RealWorkflowToolError('invalid_request', 'invalid input for action "status": missing required property "workflow_id"')
     })
-    expect(list).toMatchObject({ controllers: [] })
-    expect(controllerCalls.status.at(-1)).toEqual({ controllerId: undefined, supervisorId: 'sup-1' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    const client = new Client({ name: 'test-client', version: '0.1.0' })
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
+
+    const result = await client.callTool({ name: 'workflow', arguments: { action: 'status' } })
+    expect(result.isError).toBe(true)
+    expect(result.structuredContent).toEqual({
+      code: 'invalid_request',
+      text: 'invalid input for action "status": missing required property "workflow_id"',
+    })
     await client.close()
     await server.close()
   })
@@ -352,7 +352,7 @@ function listedTool(tools: Array<{ name: string; inputSchema: any }>, name: stri
 }
 
 describe('avenor MCP messaging tools', () => {
-  it('registers message, peers, and workflow_cancel without the avenor_ prefix', async () => {
+  it('registers the exact merged tool set without the avenor_ prefix', async () => {
     await withClient(async (client) => {
       const { tools } = await client.listTools()
       const names = tools.map(tool => tool.name).sort()
@@ -366,14 +366,7 @@ describe('avenor MCP messaging tools', () => {
         'shutdown',
         'spawn',
         'status',
-        'workflow_cancel',
-        'workflow_complete',
-        'workflow_controller_status',
-        'workflow_events',
-        'workflow_gate',
-        'workflow_inspect',
-        'workflow_status',
-        'workflow_wait',
+        'workflow',
       ])
     })
   })
@@ -383,6 +376,7 @@ describe('avenor MCP messaging tools', () => {
       const { tools } = await client.listTools()
       expect(listedTool(tools, 'message').inputSchema).toEqual(messageFlatContract)
       expect(listedTool(tools, 'peers').inputSchema).toEqual(peersFlatContract)
+      expect(listedTool(tools, 'workflow').inputSchema).toEqual(workflowFlatContract)
     })
   })
 
@@ -706,19 +700,4 @@ describe('avenor MCP messaging tools', () => {
     })
   })
 
-  it('forwards the workflow cancel actor and reason', async () => {
-    await withClient(async (client) => {
-      const result: any = await client.callTool({
-        name: 'workflow_cancel',
-        arguments: { workflow_id: 'w-1', actor: 'operator', reason: 'superseded', supervisor_id: 'sup-a' },
-      })
-      expect(result).toMatchObject({ cancelled: true })
-    })
-    expect(workflowCancelCalls.at(-1)).toEqual({
-      workflow_id: 'w-1',
-      actor: 'operator',
-      reason: 'superseded',
-      supervisorId: 'sup-a',
-    })
-  })
 })

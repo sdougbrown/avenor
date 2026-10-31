@@ -13,6 +13,7 @@ import { messageTool as realMessageTool } from '../../core/src/tools/message.js'
 import { peersTool as realPeersTool } from '../../core/src/tools/peers.js'
 import type { MessageProvider } from '../../core/src/tools/message.js'
 import conformance from '../../../schemas/message_route.conformance.json'
+import workflowConformance from '../../../schemas/workflow_route.conformance.json'
 import resultFixture from '../../../schemas/message_route.result.json'
 import { peersDetails, resultOutput } from '../../core/src/message.js'
 
@@ -39,7 +40,7 @@ const statusToolMock = mock(async (_args: ToolArgs): Promise<ToolOutput> => ({
 }))
 const eventsToolMock = mock(async () => ({ events: [] }))
 const answerPermissionToolMock = mock(async () => ({ ok: true }))
-const workflowCancelToolMock = mock(async () => ({ cancelled: true }))
+const runWorkflowToolMock = mock(async (args: Record<string, unknown>) => ({ action: args.action, value: {} }))
 let providerFactory: () => MessageProvider = () => makeProvider()
 const defaultSupervisorClient = async () => ({
   client: { messagePreflight: async () => ({ generation: 'gen-1' }) },
@@ -107,8 +108,6 @@ const inspectToolMock = mock(async () => {
     final_output: 'final answer',
   }
 })
-const workflowControllerStatusToolMock = mock(async (_args: ToolArgs): Promise<ToolOutput> => ({ controller_id: 'ctl', desired_state: 'enabled' }))
-const workflowReadyToolMock = mock(async () => ({}))
 
 function makeEventClient(events: unknown[], options: { hangAfterExhausted?: boolean; errorAfterExhausted?: Error } = {}) {
   let index = 0
@@ -204,19 +203,11 @@ mock.module('@dougbots/avenor-core', () => ({
   boundFinalOutput,
   extractTurnText,
   normalizeTurnStopReason,
-  workflowCancelTool: workflowCancelToolMock,
+  runWorkflowTool: runWorkflowToolMock,
   resultTool: resultToolMock,
   shutdownTool: shutdownToolMock,
   killTool: killToolMock,
   inspectTool: inspectToolMock,
-  workflowStatusTool: mock(async () => ({})),
-  workflowWaitTool: mock(async () => ({})),
-  workflowInspectTool: mock(async () => ({})),
-  workflowEventsTool: mock(async () => ({})),
-  workflowCompleteTool: mock(async () => ({})),
-  workflowGateTool: mock(async () => ({})),
-  workflowControllerStatusTool: workflowControllerStatusToolMock,
-  workflowReadyTool: workflowReadyToolMock,
   createRunSnapshot,
   extractEventText,
   observeRun,
@@ -308,7 +299,7 @@ describe('AvenorPlugin', () => {
     statusToolMock.mockClear()
     eventsToolMock.mockClear()
     answerPermissionToolMock.mockClear()
-    workflowCancelToolMock.mockClear()
+    runWorkflowToolMock.mockClear()
     getSupervisorClientMock.mockClear()
     getSupervisorClientMock.mockImplementation(defaultSupervisorClient)
     providerFactory = () => makeProvider()
@@ -423,14 +414,7 @@ describe('AvenorPlugin', () => {
       'avenor_shutdown',
       'avenor_spawn',
       'avenor_status',
-      'avenor_workflow_cancel',
-      'avenor_workflow_complete',
-      'avenor_workflow_controller_status',
-      'avenor_workflow_events',
-      'avenor_workflow_gate',
-      'avenor_workflow_inspect',
-      'avenor_workflow_status',
-      'avenor_workflow_wait',
+      'avenor_workflow',
     ])
 
     const message = {
@@ -1087,57 +1071,35 @@ describe('AvenorPlugin', () => {
     }))
   })
 
-  it('enriches controller status details with an advisory candidate count', async () => {
-    workflowControllerStatusToolMock.mockImplementation(async () => ({ controller_id: 'ctl', desired_state: 'enabled', inflight: 1 }))
-    workflowReadyToolMock.mockImplementation(async () => ({ advisory: true, controller_id: 'ctl', candidates: [{}, {}] }))
+  it('forwards the merged workflow call to the shared runner unchanged', async () => {
+    runWorkflowToolMock.mockImplementation(async () => ({ action: 'controller_status', value: { controllers: [] } }))
 
     const hooks = await AvenorPlugin(makeCtx() as any)
     const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
-    const output = await (hooks.tool?.avenor_workflow_controller_status as any).execute({ controller_id: 'ctl' }, context)
+    const output = await (hooks.tool?.avenor_workflow as any).execute(
+      { action: 'controller_status', controller_id: 'ctl', supervisor_id: 'sup-a' },
+      context,
+    )
 
-    expect(output.metadata.candidate_count).toBe(2)
+    expect(runWorkflowToolMock).toHaveBeenCalledWith({ action: 'controller_status', controller_id: 'ctl', supervisor_id: 'sup-a' })
+    expect(output.output).toBe('No workflow controllers configured.')
   })
 
-  it('omits the candidate count when the ready query fails', async () => {
-    workflowControllerStatusToolMock.mockImplementation(async () => ({ controller_id: 'ctl', desired_state: 'enabled' }))
-    workflowReadyToolMock.mockImplementation(async () => {
-      throw new Error('-32601 method not found')
-    })
+  it('renders a non-controller workflow result as its JSON output', async () => {
+    runWorkflowToolMock.mockImplementation(async () => ({ action: 'status', value: { workflow_id: 'wf-1', status: 'active' } }))
 
     const hooks = await AvenorPlugin(makeCtx() as any)
-    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
-    const output = await (hooks.tool?.avenor_workflow_controller_status as any).execute({ controller_id: 'ctl' }, context)
+    const output = await (hooks.tool?.avenor_workflow as any).execute({ action: 'status', workflow_id: 'wf-1' }, toolContext('session-1'))
 
-    expect(output.metadata.candidate_count).toBeUndefined()
-    expect(output.metadata.controller_id).toBe('ctl')
+    expect(output.title).toBe('workflow')
+    expect(JSON.parse(output.output)).toEqual({ workflow_id: 'wf-1', status: 'active' })
   })
 
-  it('forwards controller status to the supervisor client with the requested supervisor', async () => {
-    workflowControllerStatusToolMock.mockClear()
-    workflowControllerStatusToolMock.mockImplementation(async () => ({ controller_id: 'ctl', desired_state: 'enabled' }))
-    workflowReadyToolMock.mockImplementation(async () => ({}))
-
-    const hooks = await AvenorPlugin(makeCtx() as any)
-    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
-    await (hooks.tool?.avenor_workflow_controller_status as any).execute({ controller_id: 'ctl', supervisor_id: 'sup-a' }, context)
-
-    expect(workflowControllerStatusToolMock).toHaveBeenCalledWith({ controllerId: 'ctl', supervisorId: 'sup-a' })
-  })
-
-  it('lists all controllers and skips the advisory ready query when controller_id is omitted', async () => {
-    workflowControllerStatusToolMock.mockClear()
-    workflowReadyToolMock.mockClear()
-    workflowControllerStatusToolMock.mockImplementation(async () => ({ controllers: [] }))
-
-    const hooks = await AvenorPlugin(makeCtx() as any)
-    const context = { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal }
-    const output = await (hooks.tool?.avenor_workflow_controller_status as any).execute({ supervisor_id: 'sup-a' }, context)
-
-    expect(workflowControllerStatusToolMock).toHaveBeenCalledWith({ controllerId: undefined, supervisorId: 'sup-a' })
-    expect(workflowReadyToolMock).not.toHaveBeenCalled()
-    expect(output.title).toBe('Avenor workflow controllers — 0')
-  })
 })
+
+const workflowContractFixture = workflowConformance as unknown as {
+  applicability: Record<string, { permitted: string[], types: Record<string, string> }>
+}
 
 const contractFixture = conformance as unknown as {
   applicability: Record<string, { permitted: string[], types: Record<string, string> }>
@@ -1394,17 +1356,18 @@ describe('OpenCode message tool parity', () => {
     expect(prompt?.body.parts[0].text).toContain('run-2')
   })
 
-  it('forwards the workflow cancel actor, reason and supervisor', async () => {
+  it('forwards the merged workflow cancel actor, reason and supervisor', async () => {
     const hooks = await AvenorPlugin(makeCtx() as any)
-    await (hooks.tool?.avenor_workflow_cancel as any).execute(
-      { workflow_id: 'w-1', actor: 'operator', reason: 'superseded', supervisor_id: 'sup-a' },
+    await (hooks.tool?.avenor_workflow as any).execute(
+      { action: 'cancel', workflow_id: 'w-1', actor: 'operator', reason: 'superseded', supervisor_id: 'sup-a' },
       toolContext('session-1'),
     )
-    expect(workflowCancelToolMock).toHaveBeenCalledWith({
+    expect(runWorkflowToolMock).toHaveBeenCalledWith({
+      action: 'cancel',
       workflow_id: 'w-1',
       actor: 'operator',
       reason: 'superseded',
-      supervisorId: 'sup-a',
+      supervisor_id: 'sup-a',
     })
   })
 })
@@ -1948,5 +1911,19 @@ describe('OpenCode host turn producer', () => {
     expect(recorded).toEqual(['one', 'two'])
     await turn(hooks, assistant('msg-3', { time: { created: 3, completed: 4 }, finish: 'stop' }))
     expect(recorded).toEqual(['one', 'two', 'three'])
+  })
+})
+
+describe('OpenCode workflow tool parity', () => {
+  it('registers avenor_workflow with the contract field set', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const workflow = toolArgs(hooks, 'avenor_workflow')
+    expect(Object.keys(workflow).sort()).toEqual(fieldSet(workflowContractFixture.applicability))
+    expect(enumValues(workflow.action)).toEqual(['cancel', 'complete', 'controller_status', 'events', 'gate', 'inspect', 'ready', 'status', 'wait'])
+  })
+
+  it('keeps the contract JSON type for every shared workflow parameter', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    expect(typeMismatches('avenor_workflow', toolArgs(hooks, 'avenor_workflow'), workflowContractFixture.applicability)).toEqual([])
   })
 })

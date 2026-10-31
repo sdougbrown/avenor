@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { Supervisor, messageTool as realMessageTool, type StatusResult } from '@dougbots/avenor-core'
+import { Supervisor, messageTool as realMessageTool, type StatusResult, type WorkflowResult } from '@dougbots/avenor-core'
 import extensionFactory, {
   type ExtensionDeps,
   buildCompletionText,
@@ -192,63 +192,17 @@ describe('Avenor Pi extension', () => {
     ).rejects.toThrow('no pending ask')
   })
 
-  it('enriches controller status details with an advisory candidate count', async () => {
-    const statusPayload = { controller_id: 'ctl', desired_state: 'enabled', inflight: 1 }
-    const harness = await startExtensionHarness({
-      deps: {
-        workflowControllerStatusTool: mock(async () => statusPayload),
-        workflowReadyTool: mock(async () => ({ advisory: true, controller_id: 'ctl', candidates: [{}, {}] })),
-      },
-    })
-    const tool = harness.registeredTools.avenor_workflow_controller_status
-    const outcome = await tool.execute('tool-1', { controller_id: 'ctl' })
-    expect(JSON.parse(outcome.content[0].text)).toEqual(statusPayload)
-    expect(outcome.details.candidate_count).toBe(2)
+  it('forwards the merged workflow call to the shared runner unchanged', async () => {
+    const runTool = mock(async () => ({ action: 'status', value: { status: 'active' } }) as WorkflowResult)
+    const harness = await startExtensionHarness({ deps: { runWorkflowTool: runTool } })
+    const tool = harness.registeredTools.avenor_workflow
+    const outcome = await tool.execute('tool-1', { action: 'status', workflow_id: 'wf-1', supervisor_id: 'sup-a' })
+    expect(runTool).toHaveBeenCalledWith({ action: 'status', workflow_id: 'wf-1', supervisor_id: 'sup-a' })
+    expect(JSON.parse(outcome.content[0].text)).toEqual({ status: 'active' })
+    expect(outcome.details).toEqual({ status: 'active' })
   })
 
-  it('omits the candidate count when the ready query fails', async () => {
-    const harness = await startExtensionHarness({
-      deps: {
-        workflowControllerStatusTool: mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' })),
-        workflowReadyTool: mock(async () => {
-          throw new Error('-32601 method not found')
-        }),
-      },
-    })
-    const tool = harness.registeredTools.avenor_workflow_controller_status
-    const outcome = await tool.execute('tool-1', { controller_id: 'ctl' })
-    expect(outcome.details.candidate_count).toBeUndefined()
-    expect(outcome.details.controller_id).toBe('ctl')
-  })
 
-  it('forwards controller status to the supervisor client with the requested supervisor', async () => {
-    const statusTool = mock(async () => ({ controller_id: 'ctl', desired_state: 'enabled' }))
-    const harness = await startExtensionHarness({
-      deps: {
-        workflowControllerStatusTool: statusTool,
-        workflowReadyTool: mock(async () => ({})),
-      },
-    })
-    const tool = harness.registeredTools.avenor_workflow_controller_status
-    await tool.execute('tool-1', { controller_id: 'ctl', supervisor_id: 'sup-a' })
-    expect(statusTool).toHaveBeenCalledWith({ controllerId: 'ctl', supervisorId: 'sup-a' })
-  })
-
-  it('lists all controllers and skips the advisory ready query when controller_id is omitted', async () => {
-    const statusTool = mock(async () => ({ controllers: [] }))
-    const readyTool = mock(async () => ({}))
-    const harness = await startExtensionHarness({
-      deps: {
-        workflowControllerStatusTool: statusTool,
-        workflowReadyTool: readyTool,
-      },
-    })
-    const tool = harness.registeredTools.avenor_workflow_controller_status
-    const outcome = await tool.execute('tool-1', { supervisor_id: 'sup-a' })
-    expect(statusTool).toHaveBeenCalledWith({ controllerId: undefined, supervisorId: 'sup-a' })
-    expect(readyTool).not.toHaveBeenCalled()
-    expect(outcome.details).toEqual({ controllers: [] })
-  })
 
   it('only reuses a supervisor socket when the caller supplied one', () => {
     expect(statusSupervisorId(undefined, '/tmp/spawned.sock')).toBeUndefined()
@@ -1038,15 +992,7 @@ describe('Avenor Pi extension', () => {
       resultTool: resultToolMock,
       brokerReceiveTool: mock(async () => ({ asks: [] })),
       killTool: mock(async () => ({ killed: true, run_id: 'run-1' })),
-      workflowStatusTool: mock(async () => ({})),
-      workflowWaitTool: mock(async () => ({})),
-      workflowInspectTool: mock(async () => ({})),
-      workflowEventsTool: mock(async () => ({})),
-      workflowCompleteTool: mock(async () => ({})),
-      workflowGateTool: mock(async () => ({})),
-      workflowControllerStatusTool: mock(async () => ({})),
-      workflowReadyTool: mock(async () => ({})),
-      workflowCancelTool: mock(async () => ({})),
+      runWorkflowTool: mock(async (args: unknown) => ({ action: 'status', value: {} } as WorkflowResult)),
       shutdownTool: mock(async () => ({ ok: true, cleaned_up: [] })),
       observeRun: mock(() => null),
       dial: mock(async () => dialClient) as unknown as ExtensionDeps['dial'],
@@ -1069,21 +1015,17 @@ describe('Avenor Pi extension', () => {
     expect(Object.keys(registeredTools)).toContain('avenor_answer_permission')
     expect(Object.keys(registeredTools)).toContain('avenor_message')
     expect(Object.keys(registeredTools)).toContain('avenor_peers')
-    expect(Object.keys(registeredTools)).toContain('avenor_workflow_cancel')
+    expect(Object.keys(registeredTools)).toContain('avenor_workflow')
     expect(Object.keys(registeredTools)).not.toContain('avenor_follow_up')
     expect(Object.keys(registeredTools)).not.toContain('avenor_ask')
     expect(Object.keys(registeredTools)).not.toContain('avenor_reply')
     expect(Object.keys(registeredTools)).not.toContain('avenor_cancel')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_cancel')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_status')
+    expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_controller_status')
     expect(Object.keys(registeredTools)).toContain('avenor_events')
     expect(Object.keys(registeredTools)).toContain('avenor_shutdown')
     expect(Object.keys(registeredTools)).toContain('avenor_kill')
-    expect(Object.keys(registeredTools)).toContain('avenor_workflow_status')
-    expect(Object.keys(registeredTools)).toContain('avenor_workflow_wait')
-    expect(Object.keys(registeredTools)).toContain('avenor_workflow_inspect')
-    expect(Object.keys(registeredTools)).toContain('avenor_workflow_events')
-    expect(Object.keys(registeredTools)).toContain('avenor_workflow_complete')
-    expect(Object.keys(registeredTools)).toContain('avenor_workflow_gate')
-    expect(Object.keys(registeredTools)).toContain('avenor_workflow_controller_status')
     expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_controller_list')
     expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_controller_create')
     expect(Object.keys(registeredTools)).not.toContain('avenor_workflow_controller_enable')
@@ -1096,7 +1038,7 @@ describe('Avenor Pi extension', () => {
       'avenor_message',
       'avenor_events',
       'avenor_shutdown',
-      'avenor_workflow_controller_status',
+      'avenor_workflow',
     ]) {
       expect(typeof registeredTools[name]?.renderCall).toBe('function')
       expect(typeof registeredTools[name]?.renderResult).toBe('function')
@@ -1353,15 +1295,7 @@ describe('Avenor Pi extension', () => {
         return killPayload
       }),
       brokerReceiveTool: mock(async () => ({ asks: [] })),
-      workflowStatusTool: mock(async () => ({})),
-      workflowWaitTool: mock(async () => ({})),
-      workflowInspectTool: mock(async () => ({})),
-      workflowEventsTool: mock(async () => ({})),
-      workflowCompleteTool: mock(async () => ({})),
-      workflowGateTool: mock(async () => ({})),
-      workflowControllerStatusTool: mock(async () => ({})),
-      workflowReadyTool: mock(async () => ({})),
-      workflowCancelTool: mock(async () => ({})),
+      runWorkflowTool: mock(async (args: unknown) => ({ action: 'status', value: {} } as WorkflowResult)),
       observeRun: mock(() => null),
       dial: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })) as unknown as ExtensionDeps['dial'],
       attachOwner: mock(async () => ({ close() {}, cancel: async () => {}, interruptAndPrompt: async () => {}, events() { throw new Error('unused') } })) as unknown as ExtensionDeps['attachOwner'],

@@ -66,9 +66,12 @@ describe('avenor_workflow conformance', () => {
       }
       const result = await executeWorkflow(provider, testCase.input)
       expect(result.action).toBe(testCase.expect.action!)
-      expect(calls).toHaveLength(1)
-      expect(calls[0].method).toBe(testCase.expect.call!)
-      expect(calls[0].args).toEqual(testCase.expect.args!)
+      const primary = calls.find(call => call.method === testCase.expect.call)
+      expect(primary).toBeDefined()
+      expect(primary!.args).toEqual(testCase.expect.args!)
+      // A controller_status with a controller_id adds an advisory `ready` call
+      // on the same client; nothing else may be dispatched.
+      expect(calls.filter(call => call !== primary).every(call => call.method === 'ready')).toBe(true)
     })
   }
 })
@@ -271,5 +274,59 @@ describe('avenor_workflow surface wiring', () => {
       }),
     ).rejects.toMatchObject({ code: 'invalid_request' })
     expect(dialed).toBe(false)
+  })
+})
+
+describe('avenor_workflow advisory candidate count', () => {
+  function providerWith(ready: WorkflowProvider['ready']): WorkflowProvider {
+    return { ...fakeProvider().provider, ready }
+  }
+
+  it('attaches the count to a controller_status result', async () => {
+    const provider = providerWith(async () => ({ candidates: [{}, {}] }))
+    const result = await executeWorkflow(provider, { action: 'controller_status', controller_id: 'ctl' })
+    expect(result.value.candidate_count).toBe(2)
+  })
+
+  it('leaves the count absent when ready returns no candidates array', async () => {
+    const provider = providerWith(async () => ({}))
+    const result = await executeWorkflow(provider, { action: 'controller_status', controller_id: 'ctl' })
+    expect(result.value.candidate_count).toBeUndefined()
+  })
+
+  it('leaves the count absent when the ready query fails', async () => {
+    const provider = providerWith(async () => {
+      throw new Error('-32601 method not found')
+    })
+    const result = await executeWorkflow(provider, { action: 'controller_status', controller_id: 'ctl' })
+    expect(result.value.candidate_count).toBeUndefined()
+  })
+
+  it('does not query ready for the controller list', async () => {
+    let queried = false
+    const provider = providerWith(async () => {
+      queried = true
+      return {}
+    })
+    await executeWorkflow(provider, { action: 'controller_status' })
+    expect(queried).toBe(false)
+  })
+
+  it('asks ready on the same dispatched client, not a second dial', async () => {
+    const calls: string[] = []
+    const provider: WorkflowProvider = {
+      ...fakeProvider().provider,
+      controllerStatus: async (id: string) => {
+        calls.push(`status:${id}`)
+        return { controller_id: id }
+      },
+      ready: async (id: string) => {
+        calls.push(`ready:${id}`)
+        return { candidates: [{}] }
+      },
+    }
+    const result = await executeWorkflow(provider, { action: 'controller_status', controller_id: 'ctl' })
+    expect(calls).toEqual(['status:ctl', 'ready:ctl'])
+    expect(result.value.candidate_count).toBe(1)
   })
 })

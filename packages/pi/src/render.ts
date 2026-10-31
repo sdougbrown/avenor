@@ -36,6 +36,7 @@ type MessageResumeArgs = {
 type EventsArgs = { run_id?: string; types?: string[]; limit?: number; supervisor_id?: string }
 type ShutdownArgs = { supervisor_id?: string; force?: boolean }
 type WorkflowControllerStatusArgs = { controller_id?: string; supervisor_id?: string }
+type WorkflowArgs = { action?: string; workflow_id?: string; controller_id?: string; supervisor_id?: string; gate_id?: string; node_id?: string; activation_id?: string; operation?: string }
 
 function asRecord(value: unknown): RecordValue | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -510,7 +511,7 @@ function controllerStatusLines(details: unknown, args: WorkflowControllerStatusA
   lines.push(
     desiredState === 'disabled'
       ? `Guidance: Run \`avenor workflow controller enable ${controllerId}\` to start dispatch and polling.`
-      : `Guidance: Call avenor_workflow_controller_status without controller_id to review all controllers.`,
+      : `Guidance: Call avenor_workflow with action "controller_status" and no controller_id to review all controllers.`,
   )
   if (!expanded) return lines
   const supervisor = stringValue(args.supervisor_id) ? scalar(args.supervisor_id) : 'singleton'
@@ -680,16 +681,39 @@ export function renderShutdownResult(result: ToolResult, options: ToolRenderResu
   return render('shutdown', result, options, theme, () => shutdownLines(result.details, args, options.expanded))
 }
 
-export function renderWorkflowControllerStatusCall(args: WorkflowControllerStatusArgs, theme: Theme): Text {
-  const pieces = stringValue(args.controller_id)
-    ? [`avenor_workflow_controller_status controller_id ${quoted(args.controller_id)}`]
-    : ['avenor_workflow_controller_status (all controllers)']
+export function renderWorkflowCall(args: WorkflowArgs, theme: Theme): Text {
+  const pieces = [`avenor_workflow action ${quoted(args.action)}`]
+  // The action's identifying fields, so two gate decisions or completions in
+  // one transcript are distinguishable.
+  for (const name of ['workflow_id', 'controller_id', 'node_id', 'gate_id', 'activation_id', 'operation'] as const) {
+    const value = stringValue(args[name])
+    if (value) pieces.push(`${name} ${quoted(value)}`)
+  }
   const supervisor = optionalQuoted(args.supervisor_id)
   if (supervisor) pieces.push(`supervisor_id ${supervisor}`)
   return linesText([pieces.join(' ')], theme)
 }
 
-export function renderWorkflowControllerStatusResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: WorkflowControllerStatusArgs): Text {
-  return render('workflow controller status', result, options, theme, () =>
-    controllerStatusLines(result.details, args, options.expanded) ?? controllerListLines(result.details, args, options.expanded))
+/**
+ * The workflow actions other than controller_status return the control
+ * method's result object unchanged, and their shapes differ per action. The
+ * renderer shows that object as JSON: a preview when collapsed, the whole
+ * object when expanded.
+ */
+function workflowLines(details: unknown, expanded: boolean): string[] | undefined {
+  if (details === undefined || details === null) return undefined
+  const json = JSON.stringify(details, null, 2)
+  if (!json) return undefined
+  const lines = json.split('\n')
+  if (expanded || lines.length <= STATUS_ROWS) return lines
+  return [...lines.slice(0, STATUS_ROWS), lineMarker(lines.length - STATUS_ROWS)]
 }
+
+export function renderWorkflowResult(result: ToolResult, options: ToolRenderResultOptions, theme: Theme, args: WorkflowArgs): Text {
+  if (args.action === 'controller_status') {
+    return render('workflow controller status', result, options, theme, () =>
+      controllerStatusLines(result.details, args, options.expanded) ?? controllerListLines(result.details, args, options.expanded))
+  }
+  return render('workflow', result, options, theme, () => workflowLines(result.details, options.expanded))
+}
+

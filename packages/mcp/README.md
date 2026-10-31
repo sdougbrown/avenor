@@ -86,7 +86,7 @@ SSE mode restricts incoming requests to `localhost` / `127.0.0.1` / `[::1]` orig
 
 ## Tools
 
-This surface registers tool names **without** the `avenor_` prefix — `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown`, and the `workflow_*` set. MCP clients namespace their own servers (Claude Code shows them as `mcp__avenor__spawn`, for example), so the prefix would only repeat itself. The `avenor` binary's own MCP server uses the same names.
+This surface registers tool names **without** the `avenor_` prefix — `spawn`, `status`, `result`, `answer_permission`, `message`, `peers`, `events`, `kill`, `shutdown`, and `workflow`. MCP clients namespace their own servers (Claude Code shows them as `mcp__avenor__spawn`, for example), so the prefix would only repeat itself. The `avenor` binary's own MCP server uses the same names.
 
 ### `spawn`
 
@@ -226,30 +226,23 @@ Stop the avenor supervisor and clean up sentinel files.
 
 Returns `{ ok: true, cleaned_up: [...] }`. Use this when you're done with avenor in your session or when the supervisor crashes and needs to be restarted.
 
-### `workflow_cancel`
+### `workflow`
 
-Cancel a workflow instance. Both `actor` and `reason` are required; the manager rejects a missing actor before it looks at the reason.
+Drive a durable workflow instance. One `action` selects the verb; every action takes an optional `supervisor_id` for multi-supervisor setups. Read-only actions need no permission; `gate`, `complete` and `cancel` keep their authority checks.
 
-| Parameter | Required | Description |
+| Action | Arguments | Purpose |
 |---|---|---|
-| `workflow_id` | yes | Workflow ID |
-| `actor` | yes | Who is cancelling |
-| `reason` | yes | Why the workflow is being cancelled |
-| `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
+| `status` | `workflow_id` | Lightweight instance status |
+| `inspect` | `workflow_id` | Full instance detail |
+| `events` | `workflow_id`, `after_seq`, `limit` | The instance's log events |
+| `wait` | `workflow_id`, `timeout` | Wait for a terminal state or a timeout |
+| `ready` | `controller_id`, `limit` | Claimable auto-dispatch candidates; grants no lease |
+| `controller_status` | `controller_id` | One controller's status, or a summary list without it |
+| `gate` | `workflow_id`, `node_id`, `gate_id`, `activation_id`, `operation`, and the operation's fields | Record a gate decision on a parked `awaiting_gate` activation |
+| `complete` | `workflow_id`, `node_id`, `activation_id`, `attempt_id`, `lease_id`, `owner_token`, `outcome`, `outputs`, `artifacts` | Complete a machine/external handoff activation |
+| `cancel` | `workflow_id`, `actor`, `reason` | Cancel the whole instance (terminal `canceled`) |
 
-### Workflow tools
-
-The remaining workflow tools read or drive workflow instances. Their argument lists are in [`docs/control-protocol.md`](../../docs/control-protocol.md).
-
-| Tool | Purpose |
-|---|---|
-| `workflow_status` | Lightweight instance status |
-| `workflow_wait` | Wait for a terminal state or a timeout |
-| `workflow_inspect` | Full instance detail |
-| `workflow_events` | The instance's log events |
-| `workflow_complete` | Complete a machine/external handoff activation |
-| `workflow_gate` | Record a gate decision on a parked awaiting_gate activation |
-| `workflow_controller_status` | Controller status, with summary state |
+The underlying control methods are in [`docs/control-protocol.md`](../../docs/control-protocol.md).
 
 ## Typical workflow
 

@@ -195,8 +195,7 @@ Available tools for LLM sub-agent management:
 | `avenor_peers` | One peers tool with an explicit `action`: `list` (the default), `rename` or `last`. `last` returns the target's last agent message with its stop reason, or the empty result when the target has no completed turn yet. |
 | `avenor_events` | Read events from a run |
 | `avenor_kill` | Kill a run |
-| `avenor_workflow_status`, `avenor_workflow_wait`, `avenor_workflow_inspect`, `avenor_workflow_events`, `avenor_workflow_complete`, `avenor_workflow_gate`, `avenor_workflow_controller_status` | Inspect and drive workflow instances |
-| `avenor_workflow_cancel` | Cancel a workflow instance (`workflow_id`, `actor`, `reason`) |
+| `avenor_workflow` | One workflow tool with an explicit `action`: `status`, `inspect`, `events`, `wait`, `ready`, `controller_status`, `gate`, `complete` or `cancel`. Read-only actions need no permission; `gate`, `complete` and `cancel` keep their authority checks. |
 | `avenor_shutdown` | Shut down the avenor supervisor |
 
 ### Direct and roster spawns

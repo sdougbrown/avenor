@@ -1,7 +1,7 @@
 // Shared test fixtures for the pi extension test suites. Kept out of the
 // *.test.ts files so every suite builds its ExtensionDeps mock from one set.
 import { mock } from 'bun:test'
-import { getSupervisorClient, type InspectResult, type MessageProvider, type RunPermissionSummary, type RunSnapshot, type StatusResult } from '@dougbots/avenor-core'
+import { getSupervisorClient, type InspectResult, type MessageProvider, type RunPermissionSummary, type RunSnapshot, type StatusResult, type WorkflowResult } from '@dougbots/avenor-core'
 import { RunReducer } from '@dougbots/avenor-core'
 import type { ExtensionDeps, ExtensionOptions } from './index.js'
 import { createExtension } from './index.js'
@@ -62,15 +62,7 @@ export async function startExtensionHarness(options: {
     brokerReceiveTool: mock(async () => ({ asks: [] })),
     shutdownTool: mock(async () => ({ ok: true, cleaned_up: [] })),
     killTool: mock(async () => ({ killed: true, run_id: 'run-1' })),
-    workflowStatusTool: mock(async () => ({})),
-    workflowWaitTool: mock(async () => ({})),
-    workflowInspectTool: mock(async () => ({})),
-    workflowEventsTool: mock(async () => ({})),
-    workflowCompleteTool: mock(async () => ({})),
-    workflowGateTool: mock(async () => ({})),
-    workflowControllerStatusTool: mock(async () => ({})),
-    workflowReadyTool: mock(async () => ({})),
-    workflowCancelTool: mock(async () => ({})),
+    runWorkflowTool: mock(async (args: unknown) => ({ action: 'status', value: {} } as WorkflowResult)),
     hostProviderFor: mock(async () => makeMessageProvider()),
     getSupervisorClient: getSupervisorClient as any,
     observeRun: mock(() => null),

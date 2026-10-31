@@ -43,15 +43,7 @@ import {
   type StatusResult,
   THINKING_LEVELS,
   validateSpawnSelection,
-  workflowCancelTool,
-  workflowStatusTool,
-  workflowWaitTool,
-  workflowInspectTool,
-  workflowEventsTool,
-  workflowCompleteTool,
-  workflowGateTool,
-  workflowControllerStatusTool,
-  workflowReadyTool,
+  runWorkflowTool,
 } from '@dougbots/avenor-core'
 
 type TrackedRun = {
@@ -1272,21 +1264,6 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
         },
       }),
 
-      avenor_workflow_cancel: tool({
-        description: 'Cancel a workflow instance. The actor and reason are required.',
-        args: {
-          workflow_id: tool.schema.string().describe('Workflow ID'),
-          actor: tool.schema.string().describe('Who is cancelling'),
-          reason: tool.schema.string().describe('Why the workflow is being cancelled'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const { supervisor_id, ...rest } = args
-          const result = await workflowCancelTool({ ...rest, supervisorId: supervisor_id })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
-        },
-      }),
-
       avenor_events: tool({
         description: 'Read events from a run. Filter by type. Returns last N events.',
         args: {
@@ -1353,152 +1330,44 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
         },
       }),
 
-      avenor_workflow_status: tool({
-        description: 'Get lightweight status for a workflow instance',
+      // The merged workflow tool: one registration whose `action` selects the
+      // verb, routed through the shared core router.
+      avenor_workflow: tool({
+        description: "Drive a durable workflow instance: read its status, detail, events or wait for it; report controller readiness or status; or record a gate decision, complete a handoff activation, or cancel the instance. One `action` selects the verb. Read-only actions need no permission; gate, complete and cancel keep their authority checks.",
         args: {
-          workflow_id: tool.schema.string().describe('Workflow ID'),
+          action: tool.schema.enum(['status', 'inspect', 'events', 'wait', 'ready', 'controller_status', 'gate', 'complete', 'cancel']).describe('Action to perform'),
+          workflow_id: tool.schema.string().optional().describe('Workflow ID'),
+          controller_id: tool.schema.string().optional().describe('Controller ID; omit for controller_status to list all controllers'),
+          after_seq: tool.schema.number().int().optional().describe('Only include events with sequence greater than this value (events)'),
+          limit: tool.schema.number().int().optional().describe('Max events or candidates to return (0 for the server default)'),
+          timeout: tool.schema.string().optional().describe('Maximum wait time, such as 30s, 5m, or 1h (default 30s; wait)'),
+          node_id: tool.schema.string().optional().describe('Node ID (gate, complete)'),
+          gate_id: tool.schema.string().optional().describe('Gate ID (gate)'),
+          activation_id: tool.schema.string().optional().describe('Activation ID (gate, complete)'),
+          attempt_id: tool.schema.string().optional().describe('Attempt ID (complete)'),
+          lease_id: tool.schema.string().optional().describe('Lease ID (complete)'),
+          owner_token: tool.schema.string().optional().describe('Lease owner token (complete)'),
+          operation: tool.schema.enum(['satisfy', 'reject', 'waive', 'external_result']).optional().describe('Gate operation (gate)'),
+          actor: tool.schema.string().optional().describe('Actor id (gate, cancel)'),
+          reason: tool.schema.string().min(1).optional().describe('Reason (gate, cancel)'),
+          outcome: tool.schema.string().optional().describe('Outcome (gate, complete)'),
+          subject: tool.schema.unknown().optional().describe('Bound exact subject as JSON (gate)'),
+          poll_id: tool.schema.string().optional().describe('External poll id (gate external_result)'),
+          source: tool.schema.string().optional().describe('External result source (gate external_result)'),
+          result: tool.schema.string().optional().describe('External result status (gate external_result)'),
+          response_hash: tool.schema.string().optional().describe('Response hash (gate external_result)'),
+          observed_at: tool.schema.string().optional().describe('Observed-at RFC3339 timestamp (gate external_result)'),
+          evidence_ids: tool.schema.array(tool.schema.string()).optional().describe('Evidence IDs (gate)'),
+          outputs: tool.schema.unknown().optional().describe('Declared outputs as JSON (complete)'),
+          artifacts: tool.schema.unknown().optional().describe('Staged evidence artifacts as JSON (complete)'),
           supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
         },
         async execute(args, _context) {
-          const result = await workflowStatusTool({
-            workflowId: args.workflow_id,
-            supervisorId: args.supervisor_id,
-          })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
-        },
-      }),
-
-      avenor_workflow_wait: tool({
-        description: 'Wait for a workflow to reach a terminal state or until timeout',
-        args: {
-          workflow_id: tool.schema.string().describe('Workflow ID'),
-          timeout: tool.schema.string().optional().describe('Timeout (e.g. 30s, 5m)'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const result = await workflowWaitTool({
-            workflowId: args.workflow_id,
-            timeout: args.timeout,
-            supervisorId: args.supervisor_id,
-          })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
-        },
-      }),
-
-      avenor_workflow_inspect: tool({
-        description: 'Return the full instance detail for a workflow',
-        args: {
-          workflow_id: tool.schema.string().describe('Workflow ID'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const result = await workflowInspectTool({
-            workflowId: args.workflow_id,
-            supervisorId: args.supervisor_id,
-          })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
-        },
-      }),
-
-      avenor_workflow_events: tool({
-        description: 'Read log events from a workflow instance\'s event log',
-        args: {
-          workflow_id: tool.schema.string().describe('Workflow ID'),
-          after_seq: tool.schema.number().optional().describe('Only include events after this sequence number'),
-          limit: tool.schema.number().optional().describe('Max events to return (default 50)'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const result = await workflowEventsTool({
-            workflowId: args.workflow_id,
-            afterSeq: args.after_seq,
-            limit: args.limit,
-            supervisorId: args.supervisor_id,
-          })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
-        },
-      }),
-
-      avenor_workflow_complete: tool({
-        description: 'Atomically complete a machine/external handoff activation',
-        args: {
-          workflow_id: tool.schema.string().describe('Workflow ID'),
-          node_id: tool.schema.string().describe('Node ID'),
-          activation_id: tool.schema.string().describe('Activation ID'),
-          attempt_id: tool.schema.string().describe('Attempt ID'),
-          lease_id: tool.schema.string().describe('Lease ID'),
-          owner_token: tool.schema.string().describe('Owner token'),
-          outcome: tool.schema.string().describe('Outcome'),
-          outputs: tool.schema.unknown().optional().describe('Outputs'),
-          artifacts: tool.schema.unknown().optional().describe('Artifacts'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const { supervisor_id, ...rest } = args
-          const result = await workflowCompleteTool({
-            ...rest,
-            supervisorId: supervisor_id,
-          })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
-        },
-      }),
-
-      avenor_workflow_gate: tool({
-        description: 'Record a gate decision on a parked awaiting_gate activation',
-        args: {
-          workflow_id: tool.schema.string().describe('Workflow ID'),
-          node_id: tool.schema.string().describe('Node ID'),
-          gate_id: tool.schema.string().describe('Gate ID'),
-          activation_id: tool.schema.string().describe('Activation ID'),
-          operation: tool.schema.enum(['satisfy','reject','waive','external_result']).describe('Gate operation'),
-          actor: tool.schema.string().optional().describe('Actor'),
-          reason: tool.schema.string().optional().describe('Reason'),
-          outcome: tool.schema.string().optional().describe('Outcome'),
-          subject: tool.schema.unknown().optional().describe('Subject'),
-          poll_id: tool.schema.string().optional().describe('Poll ID'),
-          source: tool.schema.string().optional().describe('Source'),
-          result: tool.schema.string().optional().describe('Result'),
-          response_hash: tool.schema.string().optional().describe('Response hash'),
-          observed_at: tool.schema.string().optional().describe('Observed at'),
-          evidence_ids: tool.schema.array(tool.schema.string()).optional().describe('Evidence IDs'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const { supervisor_id, ...rest } = args
-          const result = await workflowGateTool({
-            ...rest,
-            supervisorId: supervisor_id,
-          })
-          return { title: 'workflow', output: JSON.stringify(result, null, 2) }
-        },
-      }),
-
-      avenor_workflow_controller_status: tool({
-        description: 'Show workflow controller status. With controller_id, returns that controller\'s full status; without it, lists all controllers with summary state. Create, enable, and disable are CLI-only (avenor workflow controller ...).',
-        args: {
-          controller_id: tool.schema.string().optional().describe('Controller ID; omit to list all controllers'),
-          supervisor_id: tool.schema.string().optional().describe('Supervisor ID for multi-supervisor mode'),
-        },
-        async execute(args, _context) {
-          const result = await workflowControllerStatusTool({
-            controllerId: args.controller_id,
-            supervisorId: args.supervisor_id,
-          })
-          const details = { ...result }
-          if (args.controller_id) {
-            try {
-              // Advisory candidate count; absent when the supervisor has no
-              // workflow.ready support or the query fails.
-              const ready = await workflowReadyTool({
-                controllerId: args.controller_id,
-                supervisorId: args.supervisor_id,
-              })
-              if (Array.isArray(ready.candidates)) details.candidate_count = ready.candidates.length
-            } catch {
-              // Advisory only — the status view renders without it.
-            }
+          const result = await runWorkflowTool(args)
+          if (args.action === 'controller_status') {
+            return formatWorkflowControllerStatusOutput(args, result.value)
           }
-          return formatWorkflowControllerStatusOutput(args, details)
+          return { title: 'workflow', output: JSON.stringify(result.value, null, 2) }
         },
       }),
     },

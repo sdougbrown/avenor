@@ -9,7 +9,7 @@ run = "bun run build"
 description = "Build @dougbots/avenor-mcp"
 dir = "packages/mcp"
 depends = ["js-core-build"]
-sources = ["src/**/*.ts", "../../schemas/message.input.flat.json", "../../schemas/peers.input.flat.json", "tsdown.config.ts", "package.json"]
+sources = ["src/**/*.ts", "../../schemas/message.input.flat.json", "../../schemas/peers.input.flat.json", "../../schemas/workflow.input.flat.json", "tsdown.config.ts", "package.json"]
 outputs = ["dist/index.js"]
 run = "bun run build"
 

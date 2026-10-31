@@ -330,10 +330,13 @@ async function dispatchWorkflow(provider: WorkflowProvider, fields: WorkflowInpu
     }
     case 'ready':
       return { action: 'ready', value: await provider.ready(fields.controller_id!, fields.limit) }
-    case 'controller_status':
-      return fields.controller_id
-        ? { action: 'controller_status', value: await provider.controllerStatus(fields.controller_id) }
-        : { action: 'controller_status', value: await provider.controllerList() }
+    case 'controller_status': {
+      const value = fields.controller_id
+        ? await provider.controllerStatus(fields.controller_id)
+        : await provider.controllerList()
+      if (fields.controller_id) await attachCandidateCount(provider, fields.controller_id, value)
+      return { action: 'controller_status', value }
+    }
     case 'gate':
       return { action: 'gate', value: await provider.gate(gateParams(fields)) }
     case 'complete':
@@ -350,6 +353,23 @@ async function dispatchWorkflow(provider: WorkflowProvider, fields: WorkflowInpu
  * conversion and dispatch a negative budget.
  */
 const MAX_WAIT_SECONDS = 9_223_372_036
+
+/**
+ * The controller-status view reports how many candidates are claimable. `ready`
+ * is advisory: a supervisor without workflow support, or a failed query, leaves
+ * the count absent and the status view renders without it. It runs on the same
+ * acquired client, so a surface does not dial the supervisor twice.
+ */
+async function attachCandidateCount(provider: WorkflowProvider, controllerId: string, value: Record<string, unknown>): Promise<void> {
+  try {
+    const ready = await provider.ready(controllerId)
+    if (Array.isArray(ready.candidates)) {
+      value.candidate_count = ready.candidates.length
+    }
+  } catch {
+    // Advisory only — the status view renders without it.
+  }
+}
 
 function parseTimeout(value: string): number {
   let seconds: number

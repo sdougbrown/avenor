@@ -819,7 +819,7 @@ driving, and reconciling it.
 
 - [CLI reference](cli.md) — `avenor workflow` subcommands
 - [Control protocol](control-protocol.md) — `workflow.*` control methods
-- [MCP](mcp.md) — `workflow_*` tools
+- [MCP](mcp.md) — the `workflow` tool
 - [Loop](loop.md) — `loop` action configs
 - [Team](team.md) — `team` action configs
 - [Stable](stable.md) — the supervisor that hosts the workflow manager

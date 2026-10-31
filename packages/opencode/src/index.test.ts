@@ -108,10 +108,7 @@ describe('setupAvenor', () => {
     expect(added.map((tool) => tool.name).sort()).toEqual([
       'avenor_answer_permission', 'avenor_events', 'avenor_inspect', 'avenor_kill',
       'avenor_message', 'avenor_peers', 'avenor_result', 'avenor_shutdown',
-      'avenor_spawn', 'avenor_status', 'avenor_workflow_cancel',
-      'avenor_workflow_complete', 'avenor_workflow_controller_status',
-      'avenor_workflow_events', 'avenor_workflow_gate', 'avenor_workflow_inspect',
-      'avenor_workflow_status', 'avenor_workflow_wait',
+      'avenor_spawn', 'avenor_status', 'avenor_workflow',
     ])
     const spawn = added.find((tool) => tool.name === 'avenor_spawn')!
     expect(spawn.input.type).toBe('object')
