@@ -314,3 +314,22 @@ func TestDirectCLINamesTheOmittedBackendForMCPWait(t *testing.T) {
 		t.Fatal("attempt started for a rejected claude-mcp-wait")
 	}
 }
+
+// A wait outside the limit is a duration mistake, so naming the backend would
+// send the caller to the wrong flag.
+func TestDirectCLIKeeepsTheDurationErrorForMCPWait(t *testing.T) {
+	called := stubRunAttempt(t)
+	var stderr strings.Builder
+	if code := run([]string{"--claude-mcp-wait", "90s", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "exceeds the 1m0s limit") {
+		t.Fatalf("stderr = %q, want the duration error", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "requires an explicit backend") {
+		t.Fatalf("stderr = %q, want no backend note for a bad duration", stderr.String())
+	}
+	if called() {
+		t.Fatal("attempt started for an invalid claude-mcp-wait")
+	}
+}

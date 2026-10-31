@@ -216,10 +216,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
-		if err := runtime.ValidateClaudeMCPWait(*backend, *claudeMCPWait); err != nil {
-			if !backendSupplied {
-				err = runtime.NewOmittedBackendError("claude-mcp-wait", *backend, err)
-			}
+		if err := runtime.ValidateClaudeMCPWaitForChosenBackend(*backend, *claudeMCPWait, backendSupplied); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
