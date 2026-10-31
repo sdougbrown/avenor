@@ -10,7 +10,7 @@
 
 import { randomUUID } from 'node:crypto'
 
-import { extractReplyMessage, normalizeAskTimeoutMs, type MessageOutcome } from '@dougbots/avenor-core'
+import { extractReplyId, extractReplyMessage, normalizeAskTimeoutMs, type MessageOutcome } from '@dougbots/avenor-core'
 import type { ChildBroker, PeerRecord, ProviderResult } from '@dougbots/avenor-core'
 
 /** Deadline for a cleanup call whose caller's own deadline has already expired. */
@@ -542,6 +542,8 @@ async function brokerAsk(
   const result: ProviderResult = { outcome, messageId }
   if (outcome === 'replied') {
     result.reply = extractReplyMessage(record)
+    const replyId = extractReplyId(record)
+    if (replyId) result.replyId = replyId
   }
   return result
 }

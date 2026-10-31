@@ -635,7 +635,11 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         outcome: waited.outcome as MessageOutcome,
         messageId: firstNonEmpty(waited.message_id, messageId),
       }
-      if (waited.outcome === 'replied') result.reply = renderReply(waited.reply)
+      if (waited.outcome === 'replied') {
+        result.reply = renderReply(waited.reply)
+        const replyId = replyIdOf(waited.reply)
+        if (replyId) result.replyId = replyId
+      }
       return result
     },
 
@@ -839,6 +843,24 @@ function renderReply(reply: MessageInbound | undefined): string {
     message_id: reply.message_id,
     payload,
   })
+}
+
+/** The reply's own route key, so an asker can answer the answer. */
+function replyIdOf(reply: MessageInbound | undefined): string {
+  if (!reply) return ''
+  let payload = reply.payload
+  if (typeof payload === 'string') {
+    try {
+      payload = JSON.parse(payload)
+    } catch {
+      return ''
+    }
+  }
+  if (payload && typeof payload === 'object') {
+    const id = (payload as Record<string, unknown>).id
+    if (typeof id === 'string') return id
+  }
+  return ''
 }
 
 export interface ChildProviderOptions {

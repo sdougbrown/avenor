@@ -388,3 +388,18 @@ func TestRenderReply(t *testing.T) {
 		}
 	}
 }
+
+// TestReplyIDExtractsTheRouteKey pins the handle an asker needs to answer the
+// answer: the reply payload's own id, and empty when the payload has none.
+func TestReplyIDExtractsTheRouteKey(t *testing.T) {
+	reply := &messaging.InboundMessage{Payload: []byte(`{"id":"ask-1.reply","message":"pong"}`)}
+	if got := ReplyID(reply); got != "ask-1.reply" {
+		t.Fatalf("ReplyID = %q, want ask-1.reply", got)
+	}
+	if got := ReplyID(&messaging.InboundMessage{Payload: []byte(`{"message":"pong"}`)}); got != "" {
+		t.Fatalf("ReplyID without an id = %q, want empty", got)
+	}
+	if got := ReplyID(nil); got != "" {
+		t.Fatalf("ReplyID(nil) = %q, want empty", got)
+	}
+}

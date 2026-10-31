@@ -257,6 +257,26 @@ describe('host message provider', () => {
     expect(client.wait.mock.calls[0][0]).toMatchObject({ timeout_ms: 1000, generation: 'gen-1' })
   })
 
+  it('exposes the reply route key so the asker can answer the answer', async () => {
+    const client = fakeClient({
+      messageWait: mock(async () => ({
+        outcome: 'replied',
+        reply: {
+          message_id: 'm',
+          from_run_id: 'rt_7',
+          payload: { id: 'm.reply', reply_to: 'm', message: 'OK' },
+        },
+      })),
+    })
+    const result = await executeMessage(provider(client), {
+      action: 'ask',
+      target: 'supervisor',
+      message: 'question',
+    })
+    expect(result.replyId).toBe('m.reply')
+    expect(result.reply).toBe('OK')
+  })
+
   it('mints the resume id and paths and forwards the idempotency key verbatim', async () => {
     const client = fakeClient()
     const result = await executeMessage(provider(client), {

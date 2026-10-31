@@ -5,6 +5,7 @@ import {
   MAX_FINAL_OUTPUT_RUNES,
   MAX_WAIT_MS,
   boundFinalOutput,
+  extractReplyId,
   extractReplyMessage,
   extractTurnText,
   newMsgID,
@@ -115,6 +116,12 @@ describe('reply helpers', () => {
     expect(extractReplyMessage({ payload: { message: 'OK' } })).toBe('OK')
     expect(extractReplyMessage({ timeout: true })).toBe('(timeout: no reply received)')
     expect(extractReplyMessage({ payload: { other: 1 } })).toBe('{"payload":{"other":1}}')
+  })
+
+  it('extracts the reply route key so the asker can answer the answer', () => {
+    expect(extractReplyId({ payload: { id: 'm.reply', message: 'OK' } })).toBe('m.reply')
+    expect(extractReplyId({ payload: { message: 'OK' } })).toBe('')
+    expect(extractReplyId({})).toBe('')
   })
 
   it('renders the shared ask failure sentence instead of composing guidance', () => {
