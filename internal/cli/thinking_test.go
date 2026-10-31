@@ -256,3 +256,24 @@ func TestDirectCLIKeepsTheCanonicalThinkingErrorWhenTheBackendIsOmitted(t *testi
 		t.Fatal("attempt started for an invalid thinking value")
 	}
 }
+
+// A loop phase that has no roster entry runs on the run-level backend, so an
+// omitted --backend reaches the same default and needs the same note.
+func TestDirectCLILoopPhaseNamesTheOmittedBackend(t *testing.T) {
+	called := stubRunAttempt(t)
+	dir := t.TempDir()
+	loopPath := filepath.Join(dir, "loop.json")
+	if err := os.WriteFile(loopPath, []byte(`{"pre":[{"name":"work","prompt":"work"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	if code := run([]string{"--dir", dir, "--loop-file", loopPath, "--thinking", "high"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires an explicit backend") {
+		t.Fatalf("stderr = %q, want the omitted-backend note", stderr.String())
+	}
+	if called() {
+		t.Fatal("attempt started for a rejected thinking level")
+	}
+}
