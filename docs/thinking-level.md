@@ -48,6 +48,8 @@ backend "agy" does not support parameter "thinking"
 
 The rejection occurs before Avenor starts a provider, reserves a stable runtime, creates session artifacts, or sends a prompt. The MCP and control clients validate the enum for early feedback. The stable supervisor and direct CLI apply the authoritative backend policy.
 
+A direct spawn or direct run that omits `backend` is judged against the runtime default, `opencode-acp`, which supports no thinking level. Name a backend that supports the level, such as `pi` or `codex-app-server`. The rejection names the omission as well as the default, so it is not mistaken for a backend the caller chose. A roster entry, a workflow phase's own roster entry, or a session the stable supervisor can restore supplies the backend instead, and those report its own verdict. A CLI resume validates the `--backend` it was given, because the session's identity lives in the process that started it.
+
 ## Native behavior
 
 ### Codex app-server

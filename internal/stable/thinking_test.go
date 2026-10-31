@@ -190,3 +190,82 @@ func TestAttemptSessionRetainsStartOnlyOptionsOnFreshStart(t *testing.T) {
 		t.Fatalf("fresh start options = %+v, want thinking retained", provider.startOpts)
 	}
 }
+
+// An omitted backend falls back to the runtime default. When that default
+// cannot apply the caller's thinking level, the error must say the backend was
+// never named, because the default is not something the caller chose.
+func TestSpawnNamesTheOmittedBackendWhenThinkingIsRejected(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-omitted-backend.sock", MaxRuntimes: 1})
+	providerCalled := false
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		providerCalled = true
+		return &thinkingCaptureProvider{}, nil
+	}
+	_, err := sup.spawn(SpawnParams{Prompt: "work", Thinking: "high"})
+	if err == nil {
+		t.Fatal("spawn with thinking and no backend: want an error naming the defaulted backend")
+	}
+	for _, want := range []string{"requires an explicit backend", "backend was omitted", `"opencode-acp"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to mention %q", err, want)
+		}
+	}
+	if providerCalled || len(sup.runtimes) != 0 {
+		t.Fatalf("provider=%v runtimes=%d", providerCalled, len(sup.runtimes))
+	}
+}
+
+// The reported combination: a model and a thinking level on an explicitly
+// supplied pi backend. Pi applies every canonical level, so this must start a
+// runtime rather than reject the pair.
+func TestSpawnAcceptsThinkingWithExplicitPiBackendAndModel(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-pi-model.sock", MaxRuntimes: 1})
+	provider := &thinkingCaptureProvider{}
+	constructorOpts := make(chan runtime.StartOptions, 1)
+	sup.newProviderFunc = func(opts runtime.StartOptions, backend string) (runtime.Provider, error) {
+		if backend != "pi" {
+			t.Errorf("backend = %q, want pi", backend)
+		}
+		constructorOpts <- opts
+		return provider, nil
+	}
+	if _, err := sup.spawn(SpawnParams{Prompt: "work", Dir: t.TempDir(), Backend: "pi", Model: "m", Thinking: "high"}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	select {
+	case opts := <-constructorOpts:
+		if opts.Thinking != "high" || opts.Model != "m" {
+			t.Fatalf("start options = %+v, want thinking high and model m", opts)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider construction was not observed")
+	}
+}
+
+// A resumed session supplies the backend, so its verdict is about the run
+// the caller is continuing, not about a runtime default they never chose.
+func TestSpawnKeepsTheResumedBackendInTheThinkingError(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-resumed-backend.sock", MaxRuntimes: 1})
+	sup.rememberSessionIdentity("ses_resumed", effectiveIdentity{Backend: "agy"}, nil)
+	providerCalled := false
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		providerCalled = true
+		return &thinkingCaptureProvider{}, nil
+	}
+	_, err := sup.spawn(SpawnParams{Prompt: "work", SessionID: "ses_resumed", Thinking: "low"})
+	if err == nil {
+		t.Fatal("resume with thinking on a backend that rejects it: want an error")
+	}
+	if !strings.Contains(err.Error(), `backend "agy" does not support parameter "thinking"`) {
+		t.Fatalf("error = %q, want the resumed backend's own verdict", err)
+	}
+	if strings.Contains(err.Error(), "backend was omitted") {
+		t.Fatalf("error = %q, want no omission claim for a backend the session supplied", err)
+	}
+	if providerCalled || len(sup.runtimes) != 0 {
+		t.Fatalf("provider=%v runtimes=%d", providerCalled, len(sup.runtimes))
+	}
+}

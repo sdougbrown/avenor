@@ -211,29 +211,12 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 	discovery := DiscoverServer(*serverURL, getenv)
 	if !workflowMode {
-		switch *backend {
-		case backendPony:
-		case backendOpenCodeACP:
-		case backendGeminiACP:
-		case backendAgy:
-		case backendCursorACP:
-		case backendOpenCodeHTTP:
-			if discovery.URL == "" {
-				fmt.Fprintf(stderr, "avenor: --server-url is required for backend opencode-http\n")
-				return exitWithSentinel(1)
-			}
-		case backendCodexAppServer:
-		case backendClaude:
-		case backendPi:
-		default:
-			fmt.Fprintf(stderr, "avenor: unknown backend %q\n", *backend)
-			return exitWithSentinel(1)
-		}
-		if err := runtime.ValidateThinkingForBackend(*backend, *thinking); err != nil {
+		backendSupplied := backendExplicit || *rosterEntry != "" || *resume != ""
+		if err := validateCLISelection(*backend, discovery, *thinking, backendSupplied); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
-		if err := runtime.ValidateClaudeMCPWait(*backend, *claudeMCPWait); err != nil {
+		if err := runtime.ValidateClaudeMCPWaitForChosenBackend(*backend, *claudeMCPWait, backendSupplied); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
@@ -498,8 +481,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	// the authoritative session/backend relationship local to this CLI run.
 	sessionBackends := newSessionBackendMap()
 
-	execAttempt := func(ctx context.Context, selection rosterconfig.ResolvedSelection, resumeID, prompt string, provenance *runtime.LaunchProvenance) attemptResult {
-		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking); err != nil {
+	execAttempt := func(ctx context.Context, phase phaseSelection, resumeID, prompt string, provenance *runtime.LaunchProvenance) attemptResult {
+		selection := phase.selection
+		// A resume restores the backend from the session, so this attempt may
+		// not be running on the default at all.
+		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking, phase.backendSupplied || resumeID != ""); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
@@ -523,7 +509,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		})
 	}
 
-	preparePhaseSelection := func(selection rosterconfig.ResolvedSelection) (rosterconfig.ResolvedSelection, error) {
+	preparePhaseSelection := func(selection rosterconfig.ResolvedSelection, backendSupplied bool) (rosterconfig.ResolvedSelection, error) {
 		if selection.Agent != "" && selection.Model == "" {
 			resolved, err := resolveAgentModel(selection.Agent, selection.Backend, getenv)
 			if err != nil {
@@ -538,7 +524,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		if *thinking != "" {
 			selection.Thinking = *thinking
 		}
-		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking); err != nil {
+		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking, backendSupplied); err != nil {
 			return rosterconfig.ResolvedSelection{}, err
 		}
 		return selection, nil
@@ -546,10 +532,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 	makePhaseAttemptForLoop := func(roster *rosterconfig.Config) func(context.Context, phaseconfig.Phase, int, int, string) (looprunner.PhaseAttemptResult, error) {
 		var selectionMu sync.Mutex
-		resolvedSelections := make(map[string]rosterconfig.ResolvedSelection)
+		resolvedSelections := make(map[string]phaseSelection)
 		return func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, iteration int, prevSessionID string) (looprunner.PhaseAttemptResult, error) {
 			selectionMu.Lock()
-			selection, cached := resolvedSelections[phase.Name]
+			resolved, cached := resolvedSelections[phase.Name]
 			selectionMu.Unlock()
 			if !cached {
 				var entry *rosterconfig.Entry
@@ -564,7 +550,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 					entry = &loaded
 				}
 				var err error
-				selection, err = rosterconfig.Resolve(rosterconfig.ResolveInput{
+				selection, err := rosterconfig.Resolve(rosterconfig.ResolveInput{
 					Backend: *backend,
 					Agent:   *agent,
 					Model:   *model,
@@ -574,15 +560,17 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 				if err != nil {
 					return looprunner.PhaseAttemptResult{ExitCode: 1}, err
 				}
-				selection, err = preparePhaseSelection(selection)
+				backendSupplied := entry != nil || backendExplicit
+				selection, err = preparePhaseSelection(selection, backendSupplied)
 				if err != nil {
 					return looprunner.PhaseAttemptResult{ExitCode: 1}, err
 				}
+				resolved = phaseSelection{selection: selection, backendSupplied: backendSupplied}
 				selectionMu.Lock()
-				resolvedSelections[phase.Name] = selection
+				resolvedSelections[phase.Name] = resolved
 				selectionMu.Unlock()
 			}
-			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
+			r := execAttempt(ctx, resolved, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
 				runID, runtime.LaunchKindLoop, phase.Name, *label, &iteration, attemptNum))
 			if r.err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, r.err
@@ -601,10 +589,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 	makePhaseAttemptForTeam := func(roster *rosterconfig.Config) func(context.Context, phaseconfig.Phase, int, string) (teamrunner.PhaseAttemptResult, error) {
 		var selectionMu sync.Mutex
-		resolvedSelections := make(map[string]rosterconfig.ResolvedSelection)
+		resolvedSelections := make(map[string]phaseSelection)
 		return func(ctx context.Context, phase phaseconfig.Phase, attemptNum int, prevSessionID string) (teamrunner.PhaseAttemptResult, error) {
 			selectionMu.Lock()
-			selection, cached := resolvedSelections[phase.Name]
+			resolved, cached := resolvedSelections[phase.Name]
 			selectionMu.Unlock()
 			if !cached {
 				var entry *rosterconfig.Entry
@@ -619,7 +607,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 					entry = &loaded
 				}
 				var err error
-				selection, err = rosterconfig.Resolve(rosterconfig.ResolveInput{
+				selection, err := rosterconfig.Resolve(rosterconfig.ResolveInput{
 					Backend:     *backend,
 					Agent:       *agent,
 					Model:       *model,
@@ -639,15 +627,17 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 						selection.Model = resolved
 					}
 				}
-				selection, err = preparePhaseSelection(selection)
+				backendSupplied := entry != nil || backendExplicit
+				selection, err = preparePhaseSelection(selection, backendSupplied)
 				if err != nil {
 					return teamrunner.PhaseAttemptResult{ExitCode: 1}, err
 				}
+				resolved = phaseSelection{selection: selection, backendSupplied: backendSupplied}
 				selectionMu.Lock()
-				resolvedSelections[phase.Name] = selection
+				resolvedSelections[phase.Name] = resolved
 				selectionMu.Unlock()
 			}
-			r := execAttempt(ctx, selection, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
+			r := execAttempt(ctx, resolved, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
 				runID, runtime.LaunchKindTeam, phase.Name, *label, nil, attemptNum))
 			if r.err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, r.err
@@ -1042,7 +1032,14 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	return exitWithSentinel(result.exitCode)
 }
 
-func validateCLISelection(backend string, discovery ServerDiscovery, thinking string) error {
+// phaseSelection pairs a resolved phase identity with whether configuration the
+// caller named chose its backend, rather than the CLI default.
+type phaseSelection struct {
+	selection       rosterconfig.ResolvedSelection
+	backendSupplied bool
+}
+
+func validateCLISelection(backend string, discovery ServerDiscovery, thinking string, backendSupplied bool) error {
 	switch backend {
 	case backendPony, backendOpenCodeACP, backendGeminiACP, backendAgy, backendCursorACP,
 		backendCodexAppServer, backendClaude, backendPi:
@@ -1053,7 +1050,7 @@ func validateCLISelection(backend string, discovery ServerDiscovery, thinking st
 	default:
 		return fmt.Errorf("unknown backend %q", backend)
 	}
-	return runtime.ValidateThinkingForBackend(backend, thinking)
+	return runtime.ValidateThinkingForChosenBackend(backend, thinking, backendSupplied)
 }
 
 type resumeWithOptionser interface {

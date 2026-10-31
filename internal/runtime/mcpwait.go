@@ -26,14 +26,40 @@ func ValidateClaudeMCPWait(backend string, wait time.Duration) error {
 	if wait == 0 {
 		return nil
 	}
+	if err := validateClaudeMCPWaitDuration(wait); err != nil {
+		return err
+	}
+	if !IsClaudeFamily(backend) {
+		return fmt.Errorf("backend %q does not support parameter %q", backend, "claude-mcp-wait")
+	}
+	return nil
+}
+
+// ValidateClaudeMCPWaitForChosenBackend applies the wait policy and decides what
+// a rejection says. A duration error keeps its own message, because naming a
+// backend cannot fix a duration. When nothing supplied a backend and the
+// runtime default rejected the wait, the message names the omission too.
+func ValidateClaudeMCPWaitForChosenBackend(backend string, wait time.Duration, backendSupplied bool) error {
+	if err := validateClaudeMCPWaitDuration(wait); err != nil {
+		return err
+	}
+	if err := ValidateClaudeMCPWait(backend, wait); err != nil {
+		if backendSupplied {
+			return err
+		}
+		return NewOmittedBackendError("claude-mcp-wait", backend, err)
+	}
+	return nil
+}
+
+// validateClaudeMCPWaitDuration checks the wait's own bounds, independently of
+// the backend.
+func validateClaudeMCPWaitDuration(wait time.Duration) error {
 	if wait < 0 {
 		return fmt.Errorf("--claude-mcp-wait must not be negative")
 	}
 	if wait > MaxClaudeMCPWait {
 		return fmt.Errorf("--claude-mcp-wait %s exceeds the %s limit", wait, MaxClaudeMCPWait)
-	}
-	if !IsClaudeFamily(backend) {
-		return fmt.Errorf("backend %q does not support parameter %q", backend, "claude-mcp-wait")
 	}
 	return nil
 }

@@ -3650,6 +3650,17 @@ func (s *Supervisor) rememberSessionIdentity(sessionID string, identity effectiv
 	s.sessionIdentityMu.Unlock()
 }
 
+// backendSuppliedByConfig reports whether the spawn's own configuration named
+// the backend: a direct selector, a roster entry, or the authoritative
+// identity of the session it resumes. False means the runtime default decided.
+func (s *Supervisor) backendSuppliedByConfig(params SpawnParams) bool {
+	if params.Backend != "" || params.RosterEntry != "" {
+		return true
+	}
+	_, mapped := s.sessionIdentity(params.SessionID)
+	return mapped
+}
+
 func (s *Supervisor) sessionIdentity(sessionID string) (effectiveIdentity, bool) {
 	entry, ok := s.sessionIdentityEntry(sessionID)
 	if !ok {
@@ -5199,7 +5210,11 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 	backend, params.Agent, params.Model, params.AgentProfile = resolved.Backend, resolved.Agent, resolved.Model, resolved.AgentProfile
 	params.LaunchWrapper = resolved.LaunchWrapper
 	params.RosterFile, params.RosterEntry = resolved.RosterFile, resolved.RosterEntry
-	if err := runtime.ValidateThinkingForBackend(backend, params.Thinking); err != nil {
+	// Only the runtime default chose this backend when the caller named no
+	// direct backend or roster entry and no resumed session supplied one. That
+	// case names the omission; every other case reports the backend's own
+	// verdict.
+	if err := runtime.ValidateThinkingForChosenBackend(backend, params.Thinking, s.backendSuppliedByConfig(params)); err != nil {
 		return params, backend, err
 	}
 	return params, backend, nil
