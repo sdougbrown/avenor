@@ -102,6 +102,37 @@ func TestResumePiDenialStatuses(t *testing.T) {
 	}
 }
 
+// A roster run whose entry backend is pi must meet the same cross-process
+// denial a direct pi resume does. The resume carries no direct backend, so the
+// gate reads the backend the prior run launched with.
+func TestResumePiRosterRunDeniesColdResume(t *testing.T) {
+	t.Setenv(pi.SessionsEnv, "")
+	sup, provider := newStage2Supervisor(t, 8)
+	dir := t.TempDir()
+	rosterPath := writeStage5Roster(t, dir, `{"planner":{"backend":"pi","agent":"planner","model":"planner-model"}}`)
+	sentinel := filepath.Join(dir, "sentinel.env")
+	prior, err := sup.spawn(SpawnParams{
+		Prompt: "start", Dir: dir, Label: "prior",
+		RosterFile: rosterPath, RosterEntry: "planner",
+		SentinelFile: sentinel, OnEvent: filepath.Join(dir, "events.log"),
+	})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	finishResumeFixture(t, sup, prior, sentinel, true)
+
+	_, err = sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+	})
+	assertToolCode(t, err, "not_resumable")
+	if !strings.Contains(err.Error(), "(status: ") {
+		t.Fatalf("not-resumable text = %q, want the typed denial", err)
+	}
+	if resumes := provider.resumesRecorded(); len(resumes) != 0 {
+		t.Fatalf("provider resumes = %v, want none", resumes)
+	}
+}
+
 func TestResumeRefusesNonResumableSentinel(t *testing.T) {
 	t.Parallel()
 	sup, _ := newStage2Supervisor(t, 4)
