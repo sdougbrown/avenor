@@ -726,6 +726,41 @@ func TestPermissionRelayRejectsAnUnknownAsk(t *testing.T) {
 	}
 }
 
+// TestPermissionRelayRejectsAnAskAnsweredUnderAnotherSession proves an answer
+// sent under a session id that does not own the ask writes nothing: the ask
+// stays pending for the session that owns it, and the run completes once that
+// session answers.
+func TestPermissionRelayRejectsAnAskAnsweredUnderAnotherSession(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "echo relay-foreign"}}}},
+		scriptedTurn{Text: "carried on"},
+	)
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": permissionRelaySettings(60)})
+	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
+
+	done := startPrompt(provider, session.SessionID, "run it")
+	id := askRequestID(t, log.waitFor(t, "permission.request", 30*time.Second))
+
+	err := provider.AnswerPermission(context.Background(), session.SessionID+"-other", id, avruntime.PermissionResponse{Allow: true})
+	if err == nil {
+		t.Fatal("AnswerPermission under a foreign session id returned no error")
+	}
+	if !strings.Contains(err.Error(), "not pending") {
+		t.Fatalf("AnswerPermission error = %q, want the ask reported as not pending", err)
+	}
+	if err := provider.AnswerPermission(context.Background(), session.SessionID, id, avruntime.PermissionResponse{Allow: true}); err != nil {
+		t.Fatalf("AnswerPermission for the owning session: %v", err)
+	}
+	awaitPrompt(t, done)
+	end := log.waitFor(t, "session.end", 30*time.Second)
+	if reason, _ := end.Fields["stop_reason"].(string); reason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: the run did not carry on", reason)
+	}
+	if !endpoint.sawToolText("relay-foreign") {
+		t.Fatalf("the model never read the allowed call's output; tool messages were %#v", endpoint.toolTexts())
+	}
+}
+
 // rewriteSettings replaces the fixture's settings document, so a test can
 // change what the next process reads without moving the launch.
 func (f pooFixture) rewriteSettings(t *testing.T, mutate func(map[string]any)) {
@@ -1006,6 +1041,102 @@ func TestResumeRefusesASessionWithNoRecords(t *testing.T) {
 		}
 		awaitNoPooProcesses(t, fixture.settings)
 	})
+}
+
+// TestResumeReturnsTheLiveSessionItAlreadyServes proves the supervisor's retry
+// path works: Resume on a provider that already serves the session hands that
+// live session back instead of refusing it, with no second process. A process
+// that has died falls through to the cross-process resume a fresh provider
+// would take, and the session continues in a new process.
+func TestResumeReturnsTheLiveSessionItAlreadyServes(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{Text: "hello from poo"},
+		scriptedTurn{Text: "carried on"},
+	)
+	fixture := newPooFixture(t, endpoint)
+	provider := NewWithOptions(fixture.startOptions(t))
+	t.Cleanup(func() { _ = provider.Close() })
+	session, err := provider.Start(context.Background(), avruntime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "say hello"))
+
+	resumed, err := provider.Resume(context.Background(), session.SessionID)
+	if err != nil {
+		t.Fatalf("Resume of the live session: %v", err)
+	}
+	if resumed.SessionID != session.SessionID {
+		t.Fatalf("Resume returned session %q, want %q", resumed.SessionID, session.SessionID)
+	}
+	if resumed.PID != session.PID {
+		t.Fatalf("Resume reported pid %d, want the live session's %d", resumed.PID, session.PID)
+	}
+	if live := livePooProcesses(t, fixture.settings); len(live) != 1 || live[0] != session.PID {
+		t.Fatalf("running poo processes = %v, want only the original %d", live, session.PID)
+	}
+
+	// The live session still serves prompts after the resume.
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "again"))
+
+	proc, err := os.FindProcess(session.PID)
+	if err != nil {
+		t.Fatalf("find poo process: %v", err)
+	}
+	if err := proc.Kill(); err != nil {
+		t.Fatalf("kill poo process: %v", err)
+	}
+	// The dead process is reaped before the resume, so the provider sees the
+	// death instead of racing the reap.
+	awaitNoPooProcesses(t, fixture.settings)
+	resumed, err = provider.Resume(context.Background(), session.SessionID)
+	if err != nil {
+		t.Fatalf("Resume after the process died: %v", err)
+	}
+	if resumed.SessionID != session.SessionID {
+		t.Fatalf("the resumed session is %q, want %q", resumed.SessionID, session.SessionID)
+	}
+	if resumed.PID == 0 || resumed.PID == session.PID {
+		t.Fatalf("Resume reported pid %d, want a fresh live process", resumed.PID)
+	}
+	if live := livePooProcesses(t, fixture.settings); len(live) != 1 || live[0] != resumed.PID {
+		t.Fatalf("running poo processes = %v, want only the resumed %d", live, resumed.PID)
+	}
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "carry on"))
+	texts := endpoint.promptTexts()
+	carried := texts[len(texts)-1]
+	if !strings.Contains(carried, "say hello") || !strings.Contains(carried, "carry on") {
+		t.Fatalf("the resumed request carried %q, want the earlier turn and the new prompt", carried)
+	}
+
+	if err := provider.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	awaitNoPooProcesses(t, fixture.settings)
+}
+
+// TestResumeRefusesADifferentSessionWhileOneIsLive proves the one-session
+// refusal keeps its meaning: a resume naming a session this provider does not
+// serve is refused, and the live session keeps its process.
+func TestResumeRefusesADifferentSessionWhileOneIsLive(t *testing.T) {
+	endpoint := newFakeEndpoint(t, scriptedTurn{Text: "hello from poo"})
+	fixture := newPooFixture(t, endpoint)
+	provider, session, _, _ := startProvider(t, fixture.startOptions(t))
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "say hello"))
+
+	resumed, err := provider.Resume(context.Background(), "ses-01J0000000000000000000000")
+	if err == nil {
+		t.Fatal("Resume of a different session returned no error")
+	}
+	if !strings.Contains(err.Error(), "poo runs one session per process") {
+		t.Fatalf("Resume error = %q, want the one-session refusal", err)
+	}
+	if resumed.SessionID != "" {
+		t.Fatalf("the refused resume returned session %q, want none", resumed.SessionID)
+	}
+	if live := livePooProcesses(t, fixture.settings); len(live) != 1 || live[0] != session.PID {
+		t.Fatalf("running poo processes = %v, want only the original %d", live, session.PID)
+	}
 }
 
 // assertSessionNotFound checks the failure is the unresumable-session class,
