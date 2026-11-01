@@ -524,9 +524,12 @@ func TestRunnerUnresolvedBindingDiagnosticDeduped(t *testing.T) {
 	if !open || detail != deps.unresolvedDetail {
 		t.Fatalf("diagnostic unresolved_binding/wf-1/review/act-1 = %q open=%v, want detail %q", detail, open, deps.unresolvedDetail)
 	}
-	if got := r.Status().LastOutcome; got != string(ResultUnresolvedBinding) {
-		t.Fatalf("last outcome = %q, want %q", got, string(ResultUnresolvedBinding))
-	}
+	// The leader commits the diagnostic, then sets its in-memory status. The
+	// event log being visible does not mean the outcome is published yet, so
+	// wait for the outcome instead of reading it once.
+	waitUntil(t, "unresolved_binding last outcome", func() bool {
+		return r.Status().LastOutcome == string(ResultUnresolvedBinding)
+	})
 
 	// Further dispatches of the same unresolved binding append no events.
 	waitUntil(t, "second dispatch", func() bool { return deps.dispatchCount() > 1 })
