@@ -37,7 +37,7 @@ type Provider struct {
 
 // sessionState is one opened session and the run it currently owns.
 type sessionState struct {
-	id string
+	id        string
 	mu        sync.Mutex
 	activeRun string
 }

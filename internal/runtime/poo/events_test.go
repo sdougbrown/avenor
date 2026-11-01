@@ -163,6 +163,35 @@ func TestToolResultEventMapsOutcomeToStatus(t *testing.T) {
 	}
 }
 
+// TestToolCallEventPinsTheRunningStatus pins what a consumer reads off a tool
+// call before its result lands: the kind, the title naming the tool, the
+// running status, and its own fields intact.
+func TestToolCallEventPinsTheRunningStatus(t *testing.T) {
+	got := translateEvent(sessionEvent{
+		SessionID: "ses_1",
+		Type:      "tool.call",
+		Fields:    map[string]any{"tool": "shell", "call_id": "call_1"},
+	})
+	if len(got) != 1 {
+		t.Fatalf("tool.call produced %d events, want one", len(got))
+	}
+	if got[0].Event != "tool.call" {
+		t.Fatalf("event = %q, want tool.call", got[0].Event)
+	}
+	if kind, _ := got[0].Fields["kind"].(string); kind != "tool" {
+		t.Fatalf("kind = %q, want tool", kind)
+	}
+	if title, _ := got[0].Fields["title"].(string); title != "shell" {
+		t.Fatalf("title = %q, want the tool name", title)
+	}
+	if status, _ := got[0].Fields["status"].(string); status != "running" {
+		t.Fatalf("status = %q, want running", status)
+	}
+	if got[0].Fields["call_id"] != "call_1" {
+		t.Fatalf("the record lost its own fields: %v", got[0].Fields)
+	}
+}
+
 // TestUsageEventPinsTheFieldMapping pins what a consumer reads off a usage
 // record: avenor's own token names, the total derived from the two it counts,
 // the cached read only when the backend reported one, and the identifiers of

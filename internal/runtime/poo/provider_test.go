@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -594,7 +595,6 @@ func TestCloseAnswersWhileARunIsLive(t *testing.T) {
 	go func() { promptDone <- provider.Prompt(context.Background(), session.SessionID, "run it") }()
 	log.waitFor(t, "tool.call", 60*time.Second)
 
-	start := time.Now()
 	closed := make(chan error, 1)
 	go func() { closed <- provider.Close() }()
 	select {
@@ -604,9 +604,6 @@ func TestCloseAnswersWhileARunIsLive(t *testing.T) {
 		}
 	case <-time.After(25 * time.Second):
 		t.Fatal("Close did not answer while a run was live")
-	}
-	if elapsed := time.Since(start); elapsed > 25*time.Second {
-		t.Fatalf("Close took %s", elapsed)
 	}
 	select {
 	case <-promptDone:
@@ -698,6 +695,44 @@ func TestEventsBeforeTheCreateResponseAreKept(t *testing.T) {
 	log := collect(ctx, ch)
 	log.waitFor(t, "avenor.turn.start", 10*time.Second)
 	log.waitFor(t, "agent.message_chunk", 10*time.Second)
+}
+
+// TestPromptReturnsWhenThePromptContextIsCanceled proves a prompt parked in a
+// run/inspect wait ends when its own context does: Prompt returns the
+// cancellation quickly, and teardown leaves no process behind.
+func TestPromptReturnsWhenThePromptContextIsCanceled(t *testing.T) {
+	t.Setenv(helperEnv, "noinspect")
+	provider := NewWithOptions(avruntime.StartOptions{})
+	t.Cleanup(func() { _ = provider.Close() })
+
+	session, err := provider.Start(context.Background(), helperStartOptions())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- provider.Prompt(ctx, session.SessionID, "go") }()
+	// The run/prompt answer lands at once and the inspect wait never does, so
+	// a prompt that is still running after this has to be parked in the wait.
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-promptDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Prompt error = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Prompt did not return after its context was canceled")
+	}
+
+	if err := provider.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := syscall.Kill(session.PID, 0); err == nil {
+		t.Fatalf("poo process %d survived Close", session.PID)
+	}
 }
 
 // TestPromptReAsksWhenTheInspectWaitTimesOut proves a wait that runs out is
@@ -903,6 +938,23 @@ func TestSettledEventCarriesTheLoopRunnerFields(t *testing.T) {
 	if result, ok := finished.Fields["result"].(json.RawMessage); !ok || !strings.Contains(string(result), "verdict") {
 		t.Fatalf("result = %#v, want the finish payload", finished.Fields["result"])
 	}
+
+	rateLimited := settledEvent(sessionEvent{
+		SessionID: "ses_1",
+		Type:      "run.settled",
+		Fields: map[string]any{
+			"reason": "provider_limit",
+			"detail": map[string]any{
+				"provider": map[string]any{"kind": "rate_limited", "retry_after_s": 12},
+			},
+		},
+	})
+	if reason, _ := rateLimited.Fields["stop_reason"].(string); reason != avruntime.RateLimitedStopReason {
+		t.Fatalf("rate limited stop_reason = %q, want %q", reason, avruntime.RateLimitedStopReason)
+	}
+	if retry, _ := events.Int64(rateLimited.Fields["retry_after"]); retry != 12 {
+		t.Fatalf("retry_after = %#v, want 12", rateLimited.Fields["retry_after"])
+	}
 }
 
 // helperStartOptions is the launch identity that starts the test binary as a
@@ -975,6 +1027,11 @@ func runHelperServer(mode string) int {
 			runPrompts++
 			write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": protocol.PromptResult{RunID: "run-busy"}})
 		case protocol.MethodRunInspect:
+			if mode == "noinspect" {
+				// The wait is never answered, so only the prompt's own
+				// context can end a prompt parked here.
+				continue
+			}
 			if mode == "inspecttimeout" {
 				// The first wait runs out, which is not a failure: the client has
 				// to ask again and read the outcome off the second answer.
