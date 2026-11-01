@@ -106,15 +106,22 @@ test('parseControlMessage: reply rows and control rows are kept apart', () => {
 })
 
 test('frameInboundAsk: the sender is broker-stamped, the reply target is the run id', () => {
-  const ask = { fromRunId: 'rt_7', sender: 'Probe Peer', messageId: 'a1', message: 'why?' }
+  const ask = { fromRunId: 'rt_7', sender: 'Probe Peer', messageId: 'a1', message: 'why?', expectsReply: true }
   const text = frameInboundAsk(ask)
   assert.match(text, /peer `Probe Peer`\*\*/)
   assert.match(text, /broker run `rt_7`/)
   assert.match(text, /message id `a1`/)
   assert.match(text, /SendMessage to `avenor:rt_7`/)
-  // An unnamed peer falls back to its run id, and tells name no edge.
-  const bare = frameInboundAsk({ fromRunId: 'rt_8', sender: '', messageId: '', message: 'm' })
-  assert.match(bare, /peer `rt_8`\*\*/)
+  // A tell opens no edge, so its frame invites no reply even when it carries a
+  // message id: the tool accepts a reply to that id, but this surface has no
+  // edge to ride, and an answer is a new message.
+  const tell = frameInboundAsk({ fromRunId: 'rt_8', sender: '', messageId: 'a2', message: 'm' })
+  assert.match(tell, /peer `rt_8`\*\*/)
+  assert.match(tell, /message id `a2`/)
+  assert.doesNotMatch(tell, /Reply with SendMessage/)
+  // An unnamed peer falls back to its run id, and a message with no id names none.
+  const bare = frameInboundAsk({ fromRunId: 'rt_9', sender: '', messageId: '', message: 'm' })
+  assert.match(bare, /peer `rt_9`\*\*/)
   assert.doesNotMatch(bare, /message id/)
 })
 
@@ -125,7 +132,7 @@ test('parseControlMessage: sender fallbacks keep the peer addressable', () => {
   // either way, because the reply instruction is built from it.
   const fromOnly = parseControlMessage({
     type: 'agent_message', sender: 'Probe',
-    payload: { id: 'a3', from: 'peer', message: 'hi from the payload' },
+    payload: { id: 'a3', from: 'peer', message: 'hi from the payload', expects_reply: true },
   })
   assert.equal(fromOnly.fromRunId, 'peer')
   assert.equal(fromOnly.sender, 'Probe')

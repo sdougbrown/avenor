@@ -87,11 +87,11 @@ export function buildAgentMessage(fields) {
 
 /**
  * A queued control row parsed to the peer-message facts. `message_id` is
- * empty for a tell (SendBody carries none), which still frames a reply
- * instruction but cannot complete an edge; `expectsReply` mirrors the
- * payload's expects_reply, the caller's signal that the edge is real and
- * worth correlating a reply against. Null when the row is not a readable
- * peer message: control rows (continue, cancel, …) are not.
+ * empty for a tell without one (SendBody carries none); `expectsReply` mirrors
+ * the payload's expects_reply, and it alone decides whether the frame invites
+ * a reply, because only an ask has an edge this surface answers on. Null when
+ * the row is not a readable peer message: control rows (continue, cancel, …)
+ * are not.
  */
 export function parseControlMessage(msg) {
   const entry = msg === null || typeof msg !== "object" ? {} : msg
@@ -125,17 +125,23 @@ export function parseControlMessage(msg) {
 /**
  * The text an inbound peer frame carries. The sender is the broker's own
  * display name for the run (server-stamped), never a field of the message
- * text; the reply instruction points at the broker run id. No role is rendered:
- * nothing on the wire is stamped with one, so printing it would print the
- * sender's own claim about its authority.
+ * text. No role is rendered: nothing on the wire is stamped with one, so
+ * printing it would print the sender's own claim about its authority.
+ *
+ * Only an ask opens an edge this layer answers on: a SendMessage to the peer
+ * rides that edge. A tell has no edge, so its frame carries no reply
+ * instruction, and the peer's run id and message id stay in the header for a
+ * reader that chooses to send a new message.
  */
 export function frameInboundAsk(ask) {
   const sender = ask.sender !== "" ? ask.sender : ask.fromRunId
   let frame = "**📨 Message from avenor peer `" + sender + "`** (broker run `" + ask.fromRunId + "`"
   frame += ask.messageId === "" ? "" : ", message id `" + ask.messageId + "`"
   frame += ")\n\n"
-  frame += ask.message + "\n\n"
-  frame += "Reply with SendMessage to `avenor:" + ask.fromRunId + "` to answer this peer."
+  frame += ask.message
+  if (ask.expectsReply === true) {
+    frame += "\n\nReply with SendMessage to `avenor:" + ask.fromRunId + "` to answer this peer."
+  }
   return frame
 }
 

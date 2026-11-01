@@ -50,9 +50,11 @@ broker URL in their environment; the supervisor is the harness's own
    nothing else was sent."}` and the recipient session's transcript showing
    the broker-framed peer message (sender = the broker's display name for the
    run, never message text).
-2. Let the recipient reply with `SendMessage` to `avenor:claude-parent`: the
-   reply lands on the parent as a prompt the plugin submits between turns
-   ("The avenor plugin sent a message: ... Address the message above.").
+2. Let the recipient answer with `SendMessage` to `avenor:claude-parent`: the
+   answer lands on the parent as a prompt the plugin submits between turns
+   ("The avenor plugin sent a message: ... Address the message above."). A
+   tell's frame carries no reply instruction — only an ask's does — so this
+   answer is a new message, not a reply to the first.
 3. In one session: call the avenor message tool with `action: "ask"` against
    the other's `avenor:` address while that session idles. Proof: the idle
    session starts a plugin-submitted turn on the ask; the asker's tool result

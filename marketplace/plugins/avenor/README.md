@@ -69,8 +69,11 @@ avenor runs become addressable like teammates:
   ask is submitted as a prompt when the session is idle — it starts its own
   turn — and appended into the conversation as the user-role row the turn
   reads like a steer while a turn is running. The sender is the broker's
-  own display name for the run, never a field of the message text, and the
-  frame tells the model to answer with `SendMessage` to `avenor:<run id>`.
+  own display name for the run, never a field of the message text. An ask's
+  frame tells the model to answer with `SendMessage` to `avenor:<run id>`,
+  which rides that ask's edge. A tell opens no edge, so its frame carries no
+  reply instruction; the peer's run id and message id stay in the header for a
+  reader that answers with a new message.
 
 The `message` tool's `ask` target accepts a plain run ID, label, or `self`;
 `avenor:<run id or label>` remains an alias. `SendMessage` still requires the
