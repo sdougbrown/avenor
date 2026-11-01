@@ -203,6 +203,39 @@ func (e *fakeEndpoint) promptTexts() []string {
 	return texts
 }
 
+// toolTexts returns the text of every tool-role message the endpoint was sent:
+// what the model read as a tool's result.
+func (e *fakeEndpoint) toolTexts() []string {
+	var texts []string
+	for _, body := range e.requestBodies() {
+		messages, _ := body["messages"].([]any)
+		for _, message := range messages {
+			entry, _ := message.(map[string]any)
+			if entry == nil {
+				continue
+			}
+			if role, _ := entry["role"].(string); role != "tool" {
+				continue
+			}
+			if text, _ := entry["content"].(string); text != "" {
+				texts = append(texts, text)
+			}
+		}
+	}
+	return texts
+}
+
+// sawToolText reports whether a tool's result reached the model with the text
+// in it.
+func (e *fakeEndpoint) sawToolText(text string) bool {
+	for _, got := range e.toolTexts() {
+		if strings.Contains(got, text) {
+			return true
+		}
+	}
+	return false
+}
+
 // pooFixture is one running binary with its settings, working directory and
 // session directory.
 type pooFixture struct {
@@ -330,6 +363,30 @@ func (l *eventLog) names() []string {
 	return names
 }
 
+// count returns how many events with the name the log has seen.
+func (l *eventLog) count(name string) int {
+	seen := 0
+	for _, ev := range l.snapshot() {
+		if ev.Event == name {
+			seen++
+		}
+	}
+	return seen
+}
+
+// waitForCount waits until the log has seen want events with the name.
+func (l *eventLog) waitForCount(t *testing.T, name string, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if l.count(name) >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("saw %d %q events within %s, want %d; saw %v", l.count(name), name, timeout, want, l.names())
+}
+
 // startProvider starts one provider, subscribes to its events and returns all
 // three. The provider is closed when the test ends.
 func startProvider(t *testing.T, opts avruntime.StartOptions) (*Provider, avruntime.Session, *eventLog, context.CancelFunc) {
@@ -434,48 +491,237 @@ func TestPromptSteersAnActiveRun(t *testing.T) {
 	}
 }
 
-// TestAnAskSkipsTheWireAskerAndTheRunCarriesOn proves the boundary for poo's
-// permission asks: the handshake declares no permission answers, so poo's wire
-// asker is unavailable and the chain falls back at once instead of waiting out
-// the ask budget. Nothing is published as a permission.request.
-func TestAnAskSkipsTheWireAskerAndTheRunCarriesOn(t *testing.T) {
-	endpoint := newFakeEndpoint(t,
-		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "true"}}}},
-		scriptedTurn{Text: "carried on"},
-	)
-	fixture := newPooFixtureWith(t, endpoint, map[string]any{
-		"permission": map[string]any{
-			"unmatched": "ask",
-			"askers":    []string{"wire"},
-		},
-	})
-	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
-
-	start := time.Now()
-	if err := provider.Prompt(context.Background(), session.SessionID, "run it"); err != nil {
-		t.Fatalf("Prompt: %v", err)
+// permissionRelaySettings is the permission block a relay test runs under:
+// every side-effecting call is asked about, the wire asker is the whole chain,
+// and the chain's own budget is the timeout the test wants.
+func permissionRelaySettings(chainTimeoutS int) map[string]any {
+	return map[string]any{
+		"unmatched":       "ask",
+		"fallback":        "deny",
+		"askers":          []string{"wire"},
+		"chain_timeout_s": chainTimeoutS,
 	}
-	// The wire asker's own budget is 60 s; a run that waited on it would
-	// take at least that long.
-	if elapsed := time.Since(start); elapsed > 30*time.Second {
-		t.Fatalf("Prompt took %s, want the chain to skip the wire asker", elapsed)
-	}
+}
 
-	for _, ev := range log.snapshot() {
-		if ev.Event == "permission.request" {
-			t.Fatal("the ask was relayed as a permission.request, which this backend cannot answer")
+// startPrompt runs one prompt in the background and returns its result
+// channel.
+func startPrompt(provider *Provider, sessionID, text string) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- provider.Prompt(context.Background(), sessionID, text) }()
+	return done
+}
+
+// awaitPrompt waits for a prompt's result and fails on an error.
+func awaitPrompt(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("the prompt did not return")
+	}
+}
+
+// askRequestID returns the ask id a permission.request event carries.
+func askRequestID(t *testing.T, ask events.Event) string {
+	t.Helper()
+	id, _ := ask.Fields["request_id"].(string)
+	if id == "" {
+		t.Fatalf("the permission request has no request_id: %#v", ask.Fields)
+	}
+	return id
+}
+
+// hasOptionKind reports whether the request offers an option of the kind.
+func hasOptionKind(options []any, kind string) bool {
+	for _, raw := range options {
+		option, _ := raw.(map[string]any)
+		if option == nil {
+			continue
+		}
+		if got, _ := option["kind"].(string); got == kind {
+			return true
 		}
 	}
-	end := log.waitFor(t, "session.end", 10*time.Second)
+	return false
+}
+
+// TestPermissionRelayAllowsTheCall proves an allow answer reaches poo: the
+// allowed call runs, the model reads its output, and the run settles end_turn.
+func TestPermissionRelayAllowsTheCall(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "echo relay-allowed"}}}},
+		scriptedTurn{Text: "carried on"},
+	)
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": permissionRelaySettings(60)})
+	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
+
+	done := startPrompt(provider, session.SessionID, "run it")
+	ask := log.waitFor(t, "permission.request", 30*time.Second)
+	id := askRequestID(t, ask)
+	if tool, _ := ask.Fields["tool"].(string); tool != "bash" {
+		t.Fatalf("the permission request names tool %q, want bash", tool)
+	}
+	if kind, _ := ask.Fields["kind"].(string); kind != "confirm" {
+		t.Fatalf("the permission request kind is %q, want confirm", kind)
+	}
+	options, _ := ask.Fields["options"].([]any)
+	if !hasOptionKind(options, "allow") || !hasOptionKind(options, "reject") {
+		t.Fatalf("the permission request offers %#v, want an allow and a reject option", options)
+	}
+
+	if err := provider.AnswerPermission(context.Background(), session.SessionID, id, avruntime.PermissionResponse{Allow: true, OptionID: "allow"}); err != nil {
+		t.Fatalf("AnswerPermission: %v", err)
+	}
+	awaitPrompt(t, done)
+	end := log.waitFor(t, "session.end", 30*time.Second)
 	if reason, _ := end.Fields["stop_reason"].(string); reason != "end_turn" {
 		t.Fatalf("stop_reason = %q, want end_turn: the run did not carry on", reason)
 	}
 	if code, _ := events.Int64(end.Fields["exit_code"]); code != 0 {
 		t.Fatalf("exit_code = %d, want 0", code)
 	}
-	// The model saw the fallback's denial as a tool result and answered again.
-	if requests := endpoint.requestBodies(); len(requests) < 2 {
-		t.Fatalf("the model sent %d requests, want a second turn after the denial", len(requests))
+	answered := log.waitFor(t, "avenor.permission.answered", 30*time.Second)
+	if by, _ := answered.Fields["answered_by"].(string); by != "wire" {
+		t.Fatalf("the ask was answered by %q, want wire", by)
+	}
+	if decision, _ := answered.Fields["decision"].(string); decision != "allow" {
+		t.Fatalf("the ask was answered %q, want allow", decision)
+	}
+	if !endpoint.sawToolText("relay-allowed") {
+		t.Fatalf("the model never read the allowed call's output; tool messages were %#v", endpoint.toolTexts())
+	}
+}
+
+// TestPermissionRelayDeniesTheCall proves a deny answer reaches the model as a
+// tool result and the run still settles cleanly. A denial is not a failed run:
+// the backend reports end_turn, and its DenialRecovery declaration keeps the
+// run loop from downgrading that to tool_denied.
+func TestPermissionRelayDeniesTheCall(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "echo relay-denied"}}}},
+		scriptedTurn{Text: "the call was refused"},
+	)
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": permissionRelaySettings(60)})
+	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
+
+	done := startPrompt(provider, session.SessionID, "run it")
+	id := askRequestID(t, log.waitFor(t, "permission.request", 30*time.Second))
+	if err := provider.AnswerPermission(context.Background(), session.SessionID, id, avruntime.PermissionResponse{OptionID: "deny"}); err != nil {
+		t.Fatalf("AnswerPermission: %v", err)
+	}
+	awaitPrompt(t, done)
+	end := log.waitFor(t, "session.end", 30*time.Second)
+	if reason, _ := end.Fields["stop_reason"].(string); reason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: a refused call is not a failed run", reason)
+	}
+	answered := log.waitFor(t, "avenor.permission.answered", 30*time.Second)
+	if by, _ := answered.Fields["answered_by"].(string); by != "wire" {
+		t.Fatalf("the ask was answered by %q, want wire", by)
+	}
+	if decision, _ := answered.Fields["decision"].(string); decision != "deny" {
+		t.Fatalf("the ask was answered %q, want deny", decision)
+	}
+	if !endpoint.sawToolText("denied by wire") {
+		t.Fatalf("the model never read the denial; tool messages were %#v", endpoint.toolTexts())
+	}
+}
+
+// TestPermissionRelayFallsBackWhenNoAnswerArrives proves the backend does not
+// hold a run hostage to an unanswered ask: poo's own chain budget runs out, the
+// fallback decides, and the run continues.
+func TestPermissionRelayFallsBackWhenNoAnswerArrives(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "echo relay-unanswered"}}}},
+		scriptedTurn{Text: "carried on"},
+	)
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": permissionRelaySettings(2)})
+	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
+
+	done := startPrompt(provider, session.SessionID, "run it")
+	askRequestID(t, log.waitFor(t, "permission.request", 30*time.Second))
+	answered := log.waitFor(t, "avenor.permission.answered", 60*time.Second)
+	if provenance, _ := answered.Fields["provenance"].(string); provenance != "timeout" {
+		t.Fatalf("the ask was resolved with provenance %q, want timeout", provenance)
+	}
+	if by, _ := answered.Fields["answered_by"].(string); by != "fallback" {
+		t.Fatalf("the ask was answered by %q, want fallback", by)
+	}
+	if decision, _ := answered.Fields["decision"].(string); decision != "deny" {
+		t.Fatalf("the fallback answered %q, want deny", decision)
+	}
+	awaitPrompt(t, done)
+	end := log.waitFor(t, "session.end", 30*time.Second)
+	if reason, _ := end.Fields["stop_reason"].(string); reason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: the run did not carry on", reason)
+	}
+	if !endpoint.sawToolText("denied by fallback") {
+		t.Fatalf("the model never read the fallback's denial; tool messages were %#v", endpoint.toolTexts())
+	}
+}
+
+// TestPermissionRelayRejectsALateAnswer proves an answer for an ask poo already
+// resolved writes nothing, and that the session takes another prompt.
+func TestPermissionRelayRejectsALateAnswer(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "echo relay-late"}}}},
+		scriptedTurn{Text: "carried on"},
+	)
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": permissionRelaySettings(2)})
+	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
+
+	done := startPrompt(provider, session.SessionID, "run it")
+	id := askRequestID(t, log.waitFor(t, "permission.request", 30*time.Second))
+	log.waitFor(t, "avenor.permission.answered", 60*time.Second)
+
+	err := provider.AnswerPermission(context.Background(), session.SessionID, id, avruntime.PermissionResponse{Allow: true})
+	if err == nil {
+		t.Fatal("AnswerPermission for an ask poo already resolved returned no error")
+	}
+	if !strings.Contains(err.Error(), "not pending") {
+		t.Fatalf("AnswerPermission error = %q, want the ask reported as not pending", err)
+	}
+	awaitPrompt(t, done)
+	if reason := log.waitFor(t, "session.end", 30*time.Second).Fields["stop_reason"]; reason != "end_turn" {
+		t.Fatalf("stop_reason = %#v, want end_turn", reason)
+	}
+
+	// A late answer must not wedge the session: the next prompt runs.
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "again"))
+	log.waitForCount(t, "session.end", 2, 60*time.Second)
+}
+
+// TestPermissionRelayRejectsAnUnknownAsk proves an answer for an ask that never
+// existed writes nothing and leaves the real ask answerable.
+func TestPermissionRelayRejectsAnUnknownAsk(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "echo relay-known"}}}},
+		scriptedTurn{Text: "carried on"},
+	)
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": permissionRelaySettings(60)})
+	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
+
+	done := startPrompt(provider, session.SessionID, "run it")
+	id := askRequestID(t, log.waitFor(t, "permission.request", 30*time.Second))
+
+	err := provider.AnswerPermission(context.Background(), session.SessionID, "ask-that-never-existed", avruntime.PermissionResponse{Allow: true})
+	if err == nil {
+		t.Fatal("AnswerPermission for an unknown ask returned no error")
+	}
+	if !strings.Contains(err.Error(), "ask-that-never-existed") {
+		t.Fatalf("AnswerPermission error = %q, want the unknown ask named", err)
+	}
+	if err := provider.AnswerPermission(context.Background(), session.SessionID, id, avruntime.PermissionResponse{Allow: true}); err != nil {
+		t.Fatalf("AnswerPermission for the pending ask: %v", err)
+	}
+	awaitPrompt(t, done)
+	if reason := log.waitFor(t, "session.end", 30*time.Second).Fields["stop_reason"]; reason != "end_turn" {
+		t.Fatalf("stop_reason = %#v, want end_turn", reason)
+	}
+	if !endpoint.sawToolText("relay-known") {
+		t.Fatalf("the model never read the allowed call's output; tool messages were %#v", endpoint.toolTexts())
 	}
 }
 

@@ -190,14 +190,9 @@ func TestProviderStartWithoutAResolvedLaunchFails(t *testing.T) {
 	}
 }
 
-// AnswerPermission and Resume are Stage 3: they report the boundary instead of
-// pretending to work.
-func TestProviderStageThreeCallsReportTheBoundary(t *testing.T) {
+func TestProviderResumeReportsTheBoundary(t *testing.T) {
 	provider := NewWithOptions(runtime.StartOptions{})
 	if _, err := provider.Resume(context.Background(), "session"); !errors.Is(err, ErrNotImplemented) {
 		t.Fatalf("Resume() error = %v, want ErrNotImplemented", err)
-	}
-	if err := provider.AnswerPermission(context.Background(), "session", "ask", runtime.PermissionResponse{}); !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("AnswerPermission() error = %v, want ErrNotImplemented", err)
 	}
 }

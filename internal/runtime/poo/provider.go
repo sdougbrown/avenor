@@ -346,16 +346,21 @@ func (p *Provider) Events(ctx context.Context, sessionID string) (<-chan events.
 	return out, nil
 }
 
-func (p *Provider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
-	return ErrNotImplemented
+func (p *Provider) AnswerPermission(_ context.Context, sessionID, requestID string, response runtime.PermissionResponse) error {
+	c, err := p.getClient()
+	if err != nil {
+		return err
+	}
+	return c.answerPermission(sessionID, requestID, response)
 }
 
-// Capabilities describes what this backend can do now. Permission answers and
-// resume land in Stage 3.
+// Capabilities describes what this backend can do now. A permission ask is
+// relayed and answered; resume is not implemented, so a resume reports the
+// boundary instead of pretending to work.
 func (p *Provider) Capabilities(context.Context) (runtime.Capabilities, error) {
 	return runtime.Capabilities{
 		Backend:             backendID,
-		Permissions:         false,
+		Permissions:         true,
 		Resume:              false,
 		ExternalServerURL:   false,
 		SubprocessDiscovery: false,
