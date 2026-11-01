@@ -1368,6 +1368,68 @@ func TestCloseAnswersWhileARunIsLive(t *testing.T) {
 	}
 }
 
+// killRecordedDescendant kills the descendant whose pid the helper wrote,
+// so a test that leaves it holding the pipes leaves no process behind.
+func killRecordedDescendant(pidFile string) {
+	if raw, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(string(raw)); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+}
+
+func TestStartReapsWhenDescendantHoldsPipes(t *testing.T) {
+	t.Setenv(helperEnv, "exit-with-descendant")
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	t.Setenv("AVENOR_POO_HELPER_PID_FILE", pidFile)
+	provider := NewWithOptions(avruntime.StartOptions{})
+	t.Cleanup(func() {
+		killRecordedDescendant(pidFile)
+		_ = provider.Close()
+	})
+
+	start := time.Now()
+	_, err := provider.Start(context.Background(), helperStartOptions())
+	if err == nil || !strings.Contains(err.Error(), "final initialize refusal") {
+		t.Fatalf("Start error = %v, want final initialize refusal", err)
+	}
+	if elapsed := time.Since(start); elapsed > readDrain+5*time.Second {
+		t.Fatalf("Start took %s with inherited pipes", elapsed)
+	}
+}
+
+func TestExitCauseOmitsForcedPipeClose(t *testing.T) {
+	t.Setenv(helperEnv, "exit-with-descendant")
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	t.Setenv("AVENOR_POO_HELPER_PID_FILE", pidFile)
+	c, err := startClient(context.Background(), helperStartOptions(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		killRecordedDescendant(pidFile)
+		_ = c.shutdown()
+	})
+	_, _ = c.initialize(context.Background(), []int{1})
+	<-c.waitDone
+	<-c.stdoutDone
+	<-c.stderrDone
+	if cause := c.exitCause(); cause != "the process exited" {
+		t.Fatalf("exitCause = %q, want process exit without close noise", cause)
+	}
+}
+
+func TestStartReadsFinalInitializeError(t *testing.T) {
+	t.Setenv(helperEnv, "exit-after-initialize")
+	provider := NewWithOptions(avruntime.StartOptions{})
+	t.Cleanup(func() { _ = provider.Close() })
+
+	_, err := provider.Start(context.Background(), helperStartOptions())
+	if err == nil || !strings.Contains(err.Error(), "final initialize refusal") {
+		t.Fatalf("Start error = %v, want final initialize refusal", err)
+	}
+}
+
 // TestStartRefusesAnUnsupportedProtocolVersion proves the handshake checks the
 // agreed version instead of assuming the one it offered.
 func TestStartRefusesAnUnsupportedProtocolVersion(t *testing.T) {
@@ -1818,6 +1880,24 @@ func runHelperServer(mode string) int {
 				"result":  protocol.InspectResult{Settled: &protocol.Settled{RunID: "run-busy", Reason: "end_turn"}},
 			})
 		case protocol.MethodInitialize:
+			if mode == "exit-after-initialize" || mode == "exit-with-descendant" {
+				if mode == "exit-with-descendant" {
+					child := exec.Command("sleep", "30")
+					child.Stdout, child.Stderr = os.Stdout, os.Stderr
+					if err := child.Start(); err != nil {
+						return 1
+					}
+					if err := os.WriteFile(os.Getenv("AVENOR_POO_HELPER_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+						_ = child.Process.Kill()
+						return 1
+					}
+				}
+				write(map[string]any{
+					"jsonrpc": "2.0", "id": request.ID,
+					"error": map[string]any{"code": protocol.CodeServerError, "message": "final initialize refusal"},
+				})
+				return 0
+			}
 			if mode == "version" {
 				write(map[string]any{
 					"jsonrpc": "2.0",

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -35,7 +36,7 @@ const (
 	// server's own close path budgets four 5 s steps, so this is a ceiling,
 	// not the expected time.
 	closeAnswerTimeout = 30 * time.Second
-	// readDrain is how long teardown waits for the stdout reader to reach EOF.
+	// readDrain bounds the wait for both output readers after the process exits.
 	readDrain = 2 * time.Second
 	// inspectWaitMS is one run/inspect wait. A wait that runs out is not a
 	// failure: the client asks again.
@@ -74,10 +75,13 @@ type client struct {
 
 	stderr *rollingBuffer
 
-	stdoutDone chan struct{}
-	waitDone   chan struct{}
-	waitErr    error
-	closeOnce  sync.Once
+	stdoutDone  chan struct{}
+	stderrDone  chan struct{}
+	readersDone chan struct{}
+	forcedClose atomic.Bool
+	waitDone    chan struct{}
+	waitErr     error
+	closeOnce   sync.Once
 }
 
 // permissionAsk is one ask poo is waiting on: the session it belongs to and
@@ -105,15 +109,27 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 	if err != nil {
 		return nil, fmt.Errorf("poo stdin pipe: %w", err)
 	}
-	stdout, err := proc.StdoutPipe()
+	// The client owns these read ends, so Wait can reap without closing them.
+	stdout, stdoutWrite, err := os.Pipe()
 	if err != nil {
+		_ = stdin.Close()
 		return nil, fmt.Errorf("poo stdout pipe: %w", err)
 	}
-	stderr, err := proc.StderrPipe()
+	stderr, stderrWrite, err := os.Pipe()
 	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stdoutWrite.Close()
 		return nil, fmt.Errorf("poo stderr pipe: %w", err)
 	}
-	if err := proc.Start(); err != nil {
+	proc.Stdout, proc.Stderr = stdoutWrite, stderrWrite
+	err = proc.Start()
+	_ = stdoutWrite.Close()
+	_ = stderrWrite.Close()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
 		return nil, fmt.Errorf("start poo: %w", err)
 	}
 
@@ -129,21 +145,43 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 		submissions: map[string][]events.Event{},
 		stderr:      newRollingBuffer(stderrLines),
 		stdoutDone:  make(chan struct{}),
+		stderrDone:  make(chan struct{}),
+		readersDone: make(chan struct{}),
 		waitDone:    make(chan struct{}),
 		observe:     observe,
 	}
-	go c.wait()
+	go c.wait(stderr)
 	go c.drainStderr(stderr)
 	go c.readLoop()
 	return c, nil
 }
 
-func (c *client) wait() {
+func (c *client) wait(stderr io.ReadCloser) {
+	defer close(c.readersDone)
 	err := c.proc.Wait()
 	c.mu.Lock()
 	c.waitErr = err
 	c.mu.Unlock()
 	close(c.waitDone)
+
+	timer := time.NewTimer(readDrain)
+	defer timer.Stop()
+	for stdoutDone, stderrDone := c.stdoutDone, c.stderrDone; stdoutDone != nil || stderrDone != nil; {
+		select {
+		case <-stdoutDone:
+			stdoutDone = nil
+		case <-stderrDone:
+			stderrDone = nil
+		case <-timer.C:
+			c.forcedClose.Store(true)
+			_ = c.stdout.Close()
+			_ = stderr.Close()
+			<-c.stdoutDone
+			<-c.stderrDone
+			return
+		}
+	}
+	_ = c.stdout.Close()
 }
 
 func (c *client) pid() int {
@@ -369,12 +407,7 @@ func (c *client) shutdown() error {
 				<-c.waitDone
 			}
 		}
-		timer := time.NewTimer(readDrain)
-		defer timer.Stop()
-		select {
-		case <-c.stdoutDone:
-		case <-timer.C:
-		}
+		<-c.readersDone
 		c.mu.Lock()
 		c.pending = nil
 		c.subs = nil
@@ -422,7 +455,7 @@ func (c *client) readLoop() {
 		}
 		c.dispatchLine(line)
 	}
-	if err := scanner.Err(); err != nil {
+	if err := scanner.Err(); err != nil && !(c.forcedClose.Load() && errors.Is(err, os.ErrClosed)) {
 		c.stderr.Append(fmt.Sprintf("read loop error: %v", err))
 	}
 }
@@ -735,12 +768,13 @@ func (c *client) pauseEvents(sessionID string) func(*events.Event) {
 }
 
 func (c *client) drainStderr(r io.ReadCloser) {
+	defer close(c.stderrDone)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		c.stderr.Append(scanner.Text())
 	}
-	if err := scanner.Err(); err != nil {
+	if err := scanner.Err(); err != nil && !(c.forcedClose.Load() && errors.Is(err, os.ErrClosed)) {
 		c.stderr.Append(fmt.Sprintf("stderr drain error: %v", err))
 	}
 	_ = r.Close()
