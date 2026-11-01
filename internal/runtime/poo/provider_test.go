@@ -630,6 +630,77 @@ func TestPermissionRelayDeniesTheCall(t *testing.T) {
 	}
 }
 
+// TestPermissionRelayCarriesTheDenialMessageToTheModel proves the resolver's
+// message reaches the model: poo puts it in the refused call's tool result, and
+// the call does not run.
+func TestPermissionRelayCarriesTheDenialMessageToTheModel(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "echo relay-message-deny"}}}},
+		scriptedTurn{Text: "the call was refused"},
+	)
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": permissionRelaySettings(60)})
+	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
+
+	done := startPrompt(provider, session.SessionID, "run it")
+	id := askRequestID(t, log.waitFor(t, "permission.request", 30*time.Second))
+	const message = "RELAY-DENIAL-MESSAGE: ask your operator first"
+	if err := provider.AnswerPermission(context.Background(), session.SessionID, id, avruntime.PermissionResponse{OptionID: "deny", Message: message}); err != nil {
+		t.Fatalf("AnswerPermission: %v", err)
+	}
+	awaitPrompt(t, done)
+	end := log.waitFor(t, "session.end", 30*time.Second)
+	if reason, _ := end.Fields["stop_reason"].(string); reason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: a refused call is not a failed run", reason)
+	}
+	if !endpoint.sawToolText("RELAY-DENIAL-MESSAGE") {
+		t.Fatalf("the model never read the denial's message; tool messages were %#v", endpoint.toolTexts())
+	}
+	if endpoint.sawToolText("relay-message-deny") {
+		t.Fatalf("the denied call ran; tool messages were %#v", endpoint.toolTexts())
+	}
+	answered := log.waitFor(t, "avenor.permission.answered", 30*time.Second)
+	if decision, _ := answered.Fields["decision"].(string); decision != "deny" {
+		t.Fatalf("the ask was answered %q, want deny", decision)
+	}
+	if got, _ := answered.Fields["message"].(string); got != message {
+		t.Fatalf("the answered record carries message %q, want %q", got, message)
+	}
+}
+
+// TestPermissionRelayCarriesTheAllowMessage proves an allow answer with a
+// message still runs the call: the message annotates the decision, it does not
+// change it.
+func TestPermissionRelayCarriesTheAllowMessage(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "echo relay-message-allow"}}}},
+		scriptedTurn{Text: "carried on"},
+	)
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": permissionRelaySettings(60)})
+	provider, session, log, _ := startProvider(t, fixture.startOptions(t))
+
+	done := startPrompt(provider, session.SessionID, "run it")
+	id := askRequestID(t, log.waitFor(t, "permission.request", 30*time.Second))
+	const message = "RELAY-ALLOW-MESSAGE"
+	if err := provider.AnswerPermission(context.Background(), session.SessionID, id, avruntime.PermissionResponse{Allow: true, OptionID: "allow", Message: message}); err != nil {
+		t.Fatalf("AnswerPermission: %v", err)
+	}
+	awaitPrompt(t, done)
+	end := log.waitFor(t, "session.end", 30*time.Second)
+	if reason, _ := end.Fields["stop_reason"].(string); reason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: the run did not carry on", reason)
+	}
+	if !endpoint.sawToolText("relay-message-allow") {
+		t.Fatalf("the allowed call did not run; tool messages were %#v", endpoint.toolTexts())
+	}
+	answered := log.waitFor(t, "avenor.permission.answered", 30*time.Second)
+	if decision, _ := answered.Fields["decision"].(string); decision != "allow" {
+		t.Fatalf("the ask was answered %q, want allow", decision)
+	}
+	if got, _ := answered.Fields["message"].(string); got != message {
+		t.Fatalf("the answered record carries message %q, want %q", got, message)
+	}
+}
+
 // TestPermissionRelayFallsBackWhenNoAnswerArrives proves the backend does not
 // hold a run hostage to an unanswered ask: poo's own chain budget runs out, the
 // fallback decides, and the run continues.
