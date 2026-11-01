@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -75,6 +76,7 @@ type client struct {
 	stderr *rollingBuffer
 
 	stdoutDone chan struct{}
+	stderrDone chan struct{}
 	waitDone   chan struct{}
 	waitErr    error
 	closeOnce  sync.Once
@@ -105,15 +107,27 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 	if err != nil {
 		return nil, fmt.Errorf("poo stdin pipe: %w", err)
 	}
-	stdout, err := proc.StdoutPipe()
+	// The client owns these read ends, so Wait can reap without closing them.
+	stdout, stdoutWrite, err := os.Pipe()
 	if err != nil {
+		_ = stdin.Close()
 		return nil, fmt.Errorf("poo stdout pipe: %w", err)
 	}
-	stderr, err := proc.StderrPipe()
+	stderr, stderrWrite, err := os.Pipe()
 	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stdoutWrite.Close()
 		return nil, fmt.Errorf("poo stderr pipe: %w", err)
 	}
-	if err := proc.Start(); err != nil {
+	proc.Stdout, proc.Stderr = stdoutWrite, stderrWrite
+	err = proc.Start()
+	_ = stdoutWrite.Close()
+	_ = stderrWrite.Close()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
 		return nil, fmt.Errorf("start poo: %w", err)
 	}
 
@@ -129,21 +143,38 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 		submissions: map[string][]events.Event{},
 		stderr:      newRollingBuffer(stderrLines),
 		stdoutDone:  make(chan struct{}),
+		stderrDone:  make(chan struct{}),
 		waitDone:    make(chan struct{}),
 		observe:     observe,
 	}
-	go c.wait()
+	go c.wait(stderr)
 	go c.drainStderr(stderr)
 	go c.readLoop()
 	return c, nil
 }
 
-func (c *client) wait() {
+func (c *client) wait(stderr io.ReadCloser) {
 	err := c.proc.Wait()
 	c.mu.Lock()
 	c.waitErr = err
 	c.mu.Unlock()
 	close(c.waitDone)
+
+	timer := time.NewTimer(readDrain)
+	defer timer.Stop()
+	for stdoutDone, stderrDone := c.stdoutDone, c.stderrDone; stdoutDone != nil || stderrDone != nil; {
+		select {
+		case <-stdoutDone:
+			stdoutDone = nil
+		case <-stderrDone:
+			stderrDone = nil
+		case <-timer.C:
+			_ = c.stdout.Close()
+			_ = stderr.Close()
+			return
+		}
+	}
+	_ = c.stdout.Close()
 }
 
 func (c *client) pid() int {
@@ -732,6 +763,7 @@ func (c *client) pauseEvents(sessionID string) func(*events.Event) {
 }
 
 func (c *client) drainStderr(r io.ReadCloser) {
+	defer close(c.stderrDone)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {

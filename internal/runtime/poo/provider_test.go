@@ -1297,6 +1297,30 @@ func TestCloseAnswersWhileARunIsLive(t *testing.T) {
 	}
 }
 
+func TestStartReapsWhenDescendantHoldsPipes(t *testing.T) {
+	t.Setenv(helperEnv, "exit-with-descendant")
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	t.Setenv("AVENOR_POO_HELPER_PID_FILE", pidFile)
+	provider := NewWithOptions(avruntime.StartOptions{})
+	t.Cleanup(func() {
+		if raw, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(string(raw)); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+		_ = provider.Close()
+	})
+
+	start := time.Now()
+	_, err := provider.Start(context.Background(), helperStartOptions())
+	if err == nil || !strings.Contains(err.Error(), "final initialize refusal") {
+		t.Fatalf("Start error = %v, want final initialize refusal", err)
+	}
+	if elapsed := time.Since(start); elapsed > readDrain+5*time.Second {
+		t.Fatalf("Start took %s with inherited pipes", elapsed)
+	}
+}
+
 func TestStartReadsFinalInitializeError(t *testing.T) {
 	t.Setenv(helperEnv, "exit-after-initialize")
 	provider := NewWithOptions(avruntime.StartOptions{})
@@ -1758,7 +1782,18 @@ func runHelperServer(mode string) int {
 				"result":  protocol.InspectResult{Settled: &protocol.Settled{RunID: "run-busy", Reason: "end_turn"}},
 			})
 		case protocol.MethodInitialize:
-			if mode == "exit-after-initialize" {
+			if mode == "exit-after-initialize" || mode == "exit-with-descendant" {
+				if mode == "exit-with-descendant" {
+					child := exec.Command("sleep", "30")
+					child.Stdout, child.Stderr = os.Stdout, os.Stderr
+					if err := child.Start(); err != nil {
+						return 1
+					}
+					if err := os.WriteFile(os.Getenv("AVENOR_POO_HELPER_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+						_ = child.Process.Kill()
+						return 1
+					}
+				}
 				write(map[string]any{
 					"jsonrpc": "2.0", "id": request.ID,
 					"error": map[string]any{"code": protocol.CodeServerError, "message": "final initialize refusal"},
