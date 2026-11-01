@@ -65,8 +65,36 @@ func TestHostReplyRouting(t *testing.T) {
 				t.Fatalf("legacy Admit: %v", err)
 			}
 		},
-		Rotate: func(t *testing.T) { fx.Store().Reset() },
 	})
+}
+
+// TestHostReplyAfterRotationFindsNoEdge pins this transport's side of the case
+// the shared suite cannot pin: the host control plane owns no queues, so a
+// reply that arrives after a rotation has nowhere to degrade to and reports
+// the absence.
+func TestHostReplyAfterRotationFindsNoEdge(t *testing.T) {
+	fx := hostfixture.New(t)
+	at := newTransport(t, fx, alice)
+	bt := newTransport(t, fx, bob)
+
+	pre, err := at.Preflight(t.Context())
+	if err != nil {
+		t.Fatalf("Preflight: %v", err)
+	}
+	msgID := mintID(t, time.Minute)
+	if _, err := at.Send(t.Context(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: pre.Generation, Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	fx.Store().Reset()
+
+	replied, err := bt.Reply(t.Context(), messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeEdgeAbsent {
+		t.Fatalf("Reply after rotation = (%+v, %v), want edge-absent", replied, err)
+	}
 }
 
 // TestHostFixturePausesSendAdmission runs the paused-send fence regression

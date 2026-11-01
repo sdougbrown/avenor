@@ -267,8 +267,6 @@ type ReplyRoutingHooks struct {
 	// AdmitLegacy admits an unversioned ask, which the store keys without a
 	// generation.
 	AdmitLegacy func(t *testing.T, sender messaging.Identity, messageID, target string)
-	// Rotate retires the generation that holds live ask state.
-	Rotate func(t *testing.T)
 }
 
 // RunReplyRoutingSuite pins reply routing for the keys a transport cannot

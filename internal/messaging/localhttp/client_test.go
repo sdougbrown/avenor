@@ -95,7 +95,6 @@ func TestLocalReplyRouting(t *testing.T) {
 				t.Fatalf("legacy Admit: %v", err)
 			}
 		},
-		Rotate: func(t *testing.T) { b.Store().Reset() },
 	})
 }
 
