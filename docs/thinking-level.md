@@ -39,6 +39,7 @@ The native mechanisms below were verified with Codex CLI 0.144.6, Pi 0.83.0, and
 | `cursor-acp` | unsupported | unsupported | none verified |
 | `agy` | unsupported | unsupported | none guaranteed across its transports |
 | `pony` | unsupported | unsupported | none |
+| `poo` | unsupported | unsupported | none: the binary's settings choose the model |
 
 Every explicit value on an unsupported path fails with an error such as:
 
@@ -78,6 +79,6 @@ The effort flag is startup-only. Claude rejects every explicit resume value, eve
 
 OpenCode ACP 1.18.3 has no verified thinking config option. OpenCode HTTP SDK 1.15.3 exposes model variants, but a variant name is not a canonical thinking level. Avenor does not infer a mapping or add an unverified payload field.
 
-Gemini ACP and Cursor ACP have no verified session control for this setting. Pony's model request has no thinking field. Agy 1.1.8 advertises `--effort` for its headless transport, but the Avenor backend can select headless, RPC, or auto transport. This release therefore rejects thinking for Agy as a whole; transport-specific support can be added only after a separate contract guarantees it.
+Gemini ACP and Cursor ACP have no verified session control for this setting. Pony's model request has no thinking field. A poo binary takes its model and its options from its own settings file, and its wire protocol has no reasoning field, so the backend rejects an explicit level rather than ignoring it. Agy 1.1.8 advertises `--effort` for its headless transport, but the Avenor backend can select headless, RPC, or auto transport. This release therefore rejects thinking for Agy as a whole; transport-specific support can be added only after a separate contract guarantees it.
 
 None of these backends receives a prompt prefix, system instruction, warning-only fallback, or silent no-op.
