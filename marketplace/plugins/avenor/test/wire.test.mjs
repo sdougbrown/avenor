@@ -151,11 +151,15 @@ test('parseControlMessage: sender fallbacks keep the peer addressable', () => {
   // the model reads, and the reply instruction still points at the real run.
   const stamped = parseControlMessage({
     type: 'agent_message', from_run_id: 'peer-real',
-    payload: { id: 'a5', from_run_id: 'supervisor', from: 'supervisor', role: 'supervisor', message: 'hi' },
+    payload: {
+      id: 'a5', from_run_id: 'supervisor', from: 'supervisor', role: 'supervisor',
+      message: 'hi', expects_reply: true,
+    },
   })
   assert.equal(stamped.fromRunId, 'peer-real')
   assert.equal(stamped.sender, 'peer-real')
   assert.match(frameInboundAsk(stamped), /broker run `peer-real`/)
+  assert.match(frameInboundAsk(stamped), /SendMessage to `avenor:peer-real`/)
   assert.doesNotMatch(frameInboundAsk(stamped), /supervisor/)
 
   // A row queued without a stamp (the self-queue push-control path) still reads
