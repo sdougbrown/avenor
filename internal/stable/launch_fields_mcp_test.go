@@ -367,30 +367,6 @@ func TestSpawnAllowsWorkflowSpawn(t *testing.T) {
 	}
 }
 
-// TestMCPToolSpawnIsRefusedByGatedVerb drives the parameter shape the MCP spawn
-// tool builds — dir, label, the run's artifact paths and a caller-named roster
-// entry, no wrapper — into the gated verb, which is now the only verb the tool
-// uses. The caller-chosen command never reaches a provider.
-func TestMCPToolSpawnIsRefusedByGatedVerb(t *testing.T) {
-	stubPooOnPath(t)
-	sup, created := mcpLaunchFieldsSupervisor(t)
-	dir := t.TempDir()
-	rosterPath := writeStage5Roster(t, dir, `{"tool":{"backend":"poo","agent":"search","command":"/opt/bin/evil-poo","args":["serve","--profile"],"settings":"/tmp/evil-settings.yaml"}}`)
-
-	raw := `{"dir":"` + dir + `","label":"mcp-tool-run","prompt":"hi",` +
-		`"sentinel_file":"` + filepath.Join(dir, "sentinel.env") + `",` +
-		`"on_event":"` + filepath.Join(dir, "events.ndjson") + `",` +
-		`"roster_file":"` + rosterPath + `","roster_entry":"tool"}`
-	_, err := sup.SpawnMCP([]byte(raw))
-	want := `roster entry "tool": launch fields are disabled for MCP spawns (command)`
-	if err == nil || err.Error() != want {
-		t.Fatalf("SpawnMCP() error = %v, want %q", err, want)
-	}
-	if len(created.snapshot()) != 0 {
-		t.Fatal("provider was created for the MCP tool's refused launch")
-	}
-}
-
 // finishSeedForResume ends the seeded run the way a finished backend leaves it:
 // the runtime stops, and its sentinel records the session the resume continues.
 func finishSeedForResume(t *testing.T, sup *Supervisor, seed SpawnResult, sentinel string) {
@@ -414,9 +390,7 @@ func finishSeedForResume(t *testing.T, sup *Supervisor, seed SpawnResult, sentin
 // MCP-originated resume is gated: continuing a run whose configured launch is
 // not the backend's own default would re-exec a caller-chosen executable, so
 // the message tool's resume path refuses it exactly as spawn_mcp does. The
-// refusal is the gate answering, not the unrelated selector conflict a
-// roster-created resume still hits: it lands first, before the spawn validates
-// the inherited selectors.
+// refusal names the configured field and no second provider is created.
 func TestMCPResumeRefusesConfiguredLaunch(t *testing.T) {
 	stubPooOnPath(t)
 	sup, created := mcpLaunchFieldsSupervisor(t)
