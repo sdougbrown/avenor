@@ -1297,6 +1297,17 @@ func TestCloseAnswersWhileARunIsLive(t *testing.T) {
 	}
 }
 
+func TestStartReadsFinalInitializeError(t *testing.T) {
+	t.Setenv(helperEnv, "exit-after-initialize")
+	provider := NewWithOptions(avruntime.StartOptions{})
+	t.Cleanup(func() { _ = provider.Close() })
+
+	_, err := provider.Start(context.Background(), helperStartOptions())
+	if err == nil || !strings.Contains(err.Error(), "final initialize refusal") {
+		t.Fatalf("Start error = %v, want final initialize refusal", err)
+	}
+}
+
 // TestStartRefusesAnUnsupportedProtocolVersion proves the handshake checks the
 // agreed version instead of assuming the one it offered.
 func TestStartRefusesAnUnsupportedProtocolVersion(t *testing.T) {
@@ -1747,6 +1758,13 @@ func runHelperServer(mode string) int {
 				"result":  protocol.InspectResult{Settled: &protocol.Settled{RunID: "run-busy", Reason: "end_turn"}},
 			})
 		case protocol.MethodInitialize:
+			if mode == "exit-after-initialize" {
+				write(map[string]any{
+					"jsonrpc": "2.0", "id": request.ID,
+					"error": map[string]any{"code": protocol.CodeServerError, "message": "final initialize refusal"},
+				})
+				return 0
+			}
 			if mode == "version" {
 				write(map[string]any{
 					"jsonrpc": "2.0",
