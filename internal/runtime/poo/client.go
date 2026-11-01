@@ -599,9 +599,20 @@ func (c *client) pauseEvents(sessionID string) func(*events.Event) {
 			delete(c.holds, sessionID)
 			submissions := c.submissions[sessionID]
 			delete(c.submissions, sessionID)
+			subs := c.subs[sessionID]
+			if len(subs) == 0 {
+				// Nobody is listening yet, so publishing would drop both
+				// lists: keep the submitted events ahead of the held ones in
+				// the hold buffer, where the next subscriber's flush reads
+				// them in order.
+				held := c.held[sessionID]
+				delete(c.held, sessionID)
+				c.held[sessionID] = append(submissions, held...)
+				c.mu.Unlock()
+				return
+			}
 			// Both lists are published before the lock is released, so no
 			// concurrent deliver slips a newer event in front of them.
-			subs := c.subs[sessionID]
 			for _, ev := range submissions {
 				publish(subs, ev, c)
 			}

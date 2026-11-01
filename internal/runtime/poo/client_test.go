@@ -110,6 +110,50 @@ func TestSubscribeLogsHeldEventDrops(t *testing.T) {
 	}
 }
 
+// TestReleaseKeepsTheSubmittedEventsAheadOfTheHeldOnes proves a release that
+// ends a pause orders the submitted records before everything the backend
+// emitted while the pause held the session, whether or not a subscriber has
+// attached: with one attached both are published now, and without one both
+// stay buffered for the subscriber that attaches next.
+func TestReleaseKeepsTheSubmittedEventsAheadOfTheHeldOnes(t *testing.T) {
+	cases := []struct {
+		name     string
+		attached bool
+	}{
+		{name: "no subscriber yet", attached: false},
+		{name: "a subscriber attached", attached: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newBareClient()
+			var ch chan events.Event
+			if tc.attached {
+				ch = make(chan events.Event, 2)
+				c.subscribe("ses_1", ch)
+			}
+			release := c.pauseEvents("ses_1")
+			c.deliver(namedEvent("held"))
+			submitted := events.Event{Event: "agent.prompt_submitted", SessionID: "ses_1"}
+			release(&submitted)
+			if !tc.attached {
+				ch = make(chan events.Event, 2)
+				c.subscribe("ses_1", ch)
+			}
+
+			if got := len(ch); got != 2 {
+				t.Fatalf("%d events arrived for the subscriber, want the submitted one and the held one", got)
+			}
+			if ev := <-ch; ev.Event != "agent.prompt_submitted" {
+				t.Fatalf("first event = %q, want the submitted one first", ev.Event)
+			}
+			if ev := <-ch; ev.Event != "held" {
+				t.Fatalf("second event = %q, want the held one", ev.Event)
+			}
+		})
+	}
+}
+
 // TestHeldEventsKeepOnlyTheNewest proves the hold buffer a session queues
 // through is bounded: past heldEventLimit the oldest event is dropped, so a
 // session whose subscriber never attaches cannot grow the buffer without limit
