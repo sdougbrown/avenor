@@ -778,3 +778,38 @@ func TestStoreLateReplyToAbandonedEdgeRecordsTheAskersAnswerRoute(t *testing.T) 
 		}
 	})
 }
+// TestStoreLateReplySurfacesADeliveryFailure pins the error path: a
+// RemoteDeliver that fails after the edge was resolved surfaces the failure to
+// the replier, so a lost cross-branch delivery is not reported as clean.
+func TestStoreLateReplySurfacesADeliveryFailure(t *testing.T) {
+	deliverErr := errors.New("relay down")
+	store := New(Options{})
+	store.SetBackend(&recordingBackend{})
+	store.SetRemoteDeliver(func(ctx context.Context, target string, msg messaging.InboundMessage) (func(), error) {
+		return func() {}, deliverErr
+	})
+
+	now := time.Now()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+		Generation: store.Generation(), Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	key := messaging.FenceKey{Sender: "alice", MessageID: msgID, Generation: store.Generation()}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if waited, err := store.Wait(ctx, key, time.Minute); waited.Outcome != messaging.OutcomePossiblyPending || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait = (%q, %v), want possibly-pending with the cancel surfaced", waited.Outcome, err)
+	}
+
+	outcome, err := store.Reply(t.Context(), key, "bob", json.RawMessage(`{"message":"late pong"}`))
+	if outcome != messaging.OutcomeReplied || !errors.Is(err, deliverErr) {
+		t.Fatalf("Reply = (%q, %v), want replied with the delivery failure surfaced", outcome, err)
+	}
+}

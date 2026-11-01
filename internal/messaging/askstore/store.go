@@ -40,11 +40,6 @@ type Options struct {
 	Clock         func() time.Time
 	PruneInterval time.Duration
 	FenceCapacity int
-	// RemoteDeliver, when set, delivers a late answer to an abandoned ask's
-	// asker — including across a branch boundary — after the store's lock is
-	// released. When nil, the answer goes through the backend's Publish like
-	// any queued message, which only reaches askers this store queues for.
-	RemoteDeliver func(ctx context.Context, target string, msg messaging.InboundMessage) (func(), error)
 }
 
 // Backend supplies the queue and peer state the store does not own. The broker
@@ -167,7 +162,6 @@ func New(opts Options) *Store {
 		pruneInterval: opts.PruneInterval,
 		fenceCapacity: opts.FenceCapacity,
 		generation:    messaging.NewGeneration(),
-		remoteDeliver: opts.RemoteDeliver,
 		active:        make(map[messaging.FenceKey]*edge),
 		terminal:      make(map[messaging.FenceKey]*fence),
 		paused:        make(map[messaging.FenceKey]*gate),
@@ -521,6 +515,14 @@ func (s *Store) recordReplyRouteLocked(e *edge, fromRunID string, now time.Time)
 	replyID := messaging.ReplyID(e.key.MessageID)
 	if _, ok := s.tellRoutes[replyID]; ok {
 		return
+	}
+	// A live edge holding the reply id owns it: a legacy unversioned tell
+	// admitted with that id shares the namespace, and duplicate refusal and
+	// TellRoute routing must agree about who owns it.
+	for key := range s.active {
+		if key.MessageID == replyID {
+			return
+		}
 	}
 	if s.fenceCountLocked() >= s.fenceCapacity {
 		return
