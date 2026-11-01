@@ -103,6 +103,48 @@ func TestWaitForSessionDeniedToolCallIsNotCleanEndTurn(t *testing.T) {
 	}
 }
 
+// denyingDenialRecoveryProvider is a backend that declares it recovers from a
+// denial inside the run: the same event stream that another backend reports as
+// tool_denied is a completion for it.
+type denyingDenialRecoveryProvider struct {
+	cliFakeProvider
+}
+
+func (p *denyingDenialRecoveryProvider) RecoveredDenialIsCompletion() bool { return true }
+
+// TestWaitForSessionRecoveredDenialStaysComplete proves the override is read
+// from the backend: a backend that declares denial recovery keeps its own
+// clean end_turn instead of being downgraded to tool_denied.
+func TestWaitForSessionRecoveredDenialStaysComplete(t *testing.T) {
+	sink := &recordingSink{}
+	eventCh := make(chan events.Event, 8)
+	for _, ev := range deniedToolEvents("ses_recovered") {
+		eventCh <- ev
+	}
+	close(eventCh)
+	promptDone := make(chan error, 1)
+	promptDone <- nil
+
+	result := WaitForSession(context.Background(), &denyingDenialRecoveryProvider{}, SessionWaitConfig{
+		EventCh:    eventCh,
+		PromptDone: promptDone,
+		SessionID:  "ses_recovered",
+		RunID:      "run_recovered",
+	}, SessionWaitDeps{Writer: sink, Stderr: io.Discard})
+
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if result.StopReason != "end_turn" {
+		t.Fatalf("StopReason = %q, want end_turn", result.StopReason)
+	}
+	for _, ev := range sink.snapshot() {
+		if ev.Event == "avenor.error" {
+			t.Fatalf("a recovered denial left a diagnostic: %#v", ev.Fields)
+		}
+	}
+}
+
 // TestWaitForSessionOrdinaryToolFailureStaysRecoverable proves the denial
 // containment does not make ordinary failed tool calls fatal: a failed tool
 // call without an abort, followed by a clean end_turn, still completes the
