@@ -82,6 +82,32 @@ func NewUnsupportedThinkingValueError(backend, value string) error {
 	return fmt.Errorf("backend %q does not support thinking value %q (allowed: %s)", backend, value, joinThinkingValues(allowed))
 }
 
+// ValidateThinkingForChosenBackend applies the backend policy and decides what a
+// rejection says. A backend the request or its configuration chose is reported
+// by name. When nothing supplied one and the runtime default decided, a
+// capability or value rejection names the omission, because the default is not
+// a choice the caller made. A canonical value error keeps its own message
+// either way: naming a backend cannot fix a value.
+func ValidateThinkingForChosenBackend(backend, value string, backendSupplied bool) error {
+	if err := ValidateThinking(value); err != nil {
+		return err
+	}
+	if backendSupplied {
+		return ValidateThinkingForBackend(backend, value)
+	}
+	if err := ValidateThinkingForBackend(backend, value); err != nil {
+		return NewOmittedBackendError("thinking", backend, err)
+	}
+	return nil
+}
+
+// NewOmittedBackendError annotates a backend-capability rejection when the
+// caller supplied no backend, so the runtime default decided. The parameter is
+// named so every option's rejection reads the same way.
+func NewOmittedBackendError(parameter, backend string, err error) error {
+	return fmt.Errorf("%s requires an explicit backend: %w (backend was omitted, so it defaulted to %q)", parameter, err, backend)
+}
+
 // NewStartOnlyThinkingError reports that a backend supports the value only on
 // a new session, not an explicit resume.
 func NewStartOnlyThinkingError(backend, value string) error {

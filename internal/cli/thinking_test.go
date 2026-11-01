@@ -12,6 +12,20 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
+// stubRunAttempt replaces runAttempt for one test and reports whether an
+// attempt started.
+func stubRunAttempt(t *testing.T) func() bool {
+	t.Helper()
+	oldRunAttempt := runAttempt
+	t.Cleanup(func() { runAttempt = oldRunAttempt })
+	called := false
+	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
+		called = true
+		return attemptResult{}
+	}
+	return func() bool { return called }
+}
+
 type thinkingProvider struct {
 	startCalls       int
 	resumeCalls      int
@@ -171,18 +185,151 @@ func TestDirectCLIThinkingPropagation(t *testing.T) {
 }
 
 func TestDirectCLIRejectsUnsupportedThinkingBeforeAttempt(t *testing.T) {
-	oldRunAttempt := runAttempt
-	t.Cleanup(func() { runAttempt = oldRunAttempt })
-	called := false
-	runAttempt = func(context.Context, attemptConfig, attemptDeps) attemptResult {
-		called = true
-		return attemptResult{}
-	}
+	called := stubRunAttempt(t)
 	var stderr strings.Builder
 	if code := run([]string{"--backend", "agy", "--thinking", "low", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
 		t.Fatalf("run = %d", code)
 	}
-	if called || !strings.Contains(stderr.String(), "agy") || !strings.Contains(stderr.String(), "thinking") {
-		t.Fatalf("called=%v stderr=%q", called, stderr.String())
+	if called() || !strings.Contains(stderr.String(), "agy") || !strings.Contains(stderr.String(), "thinking") {
+		t.Fatalf("called=%v stderr=%q", called(), stderr.String())
+	}
+}
+
+// A direct run that never named a backend is judged against the default, so
+// the rejection must say the backend was omitted instead of presenting the
+// default's verdict as the caller's choice.
+func TestDirectCLINamesTheOmittedBackendWhenThinkingIsRejected(t *testing.T) {
+	called := stubRunAttempt(t)
+	var stderr strings.Builder
+	if code := run([]string{"--thinking", "high", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d", code)
+	}
+	for _, want := range []string{"requires an explicit backend", "backend was omitted", `"opencode-acp"`} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), want)
+		}
+	}
+	if called() {
+		t.Fatal("attempt started for a rejected thinking level")
+	}
+}
+
+// A roster entry supplies the backend, so its verdict is about the entry the
+// caller chose, not about a default they never named.
+func TestDirectCLIKeepsTheRosterBackendInTheThinkingError(t *testing.T) {
+	called := stubRunAttempt(t)
+	dir := t.TempDir()
+	rosterPath := filepath.Join(dir, "roster.json")
+	if err := os.WriteFile(rosterPath, []byte(`{"slow":{"backend":"agy","agent":"executor"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	if code := run([]string{"--dir", dir, "--roster-file", rosterPath, "--roster-entry", "slow", "--thinking", "low", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d", code)
+	}
+	if !strings.Contains(stderr.String(), `backend "agy" does not support parameter "thinking"`) {
+		t.Fatalf("stderr = %q, want the roster backend's own verdict", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "backend was omitted") {
+		t.Fatalf("stderr = %q, want no omission claim for a roster-supplied backend", stderr.String())
+	}
+	if called() {
+		t.Fatal("attempt started for a rejected thinking level")
+	}
+}
+
+// A canonical-value mistake has to keep its own error. Annotating it with the
+// omitted backend would send the caller to fix a field that is not the problem.
+func TestDirectCLIKeepsTheCanonicalThinkingErrorWhenTheBackendIsOmitted(t *testing.T) {
+	called := stubRunAttempt(t)
+	var stderr strings.Builder
+	if code := run([]string{"--thinking", "HIGH", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d", code)
+	}
+	if !strings.Contains(stderr.String(), `invalid thinking value "HIGH"`) {
+		t.Fatalf("stderr = %q, want the canonical value error", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "requires an explicit backend") {
+		t.Fatalf("stderr = %q, want no backend annotation for a bad value", stderr.String())
+	}
+	if called() {
+		t.Fatal("attempt started for an invalid thinking value")
+	}
+}
+
+// A loop phase that has no roster entry runs on the run-level backend, so an
+// omitted --backend reaches the same default and needs the same note.
+func TestDirectCLILoopPhaseNamesTheOmittedBackend(t *testing.T) {
+	called := stubRunAttempt(t)
+	dir := t.TempDir()
+	loopPath := filepath.Join(dir, "loop.json")
+	if err := os.WriteFile(loopPath, []byte(`{"pre":[{"name":"work","prompt":"work"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	if code := run([]string{"--dir", dir, "--loop-file", loopPath, "--thinking", "high"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "requires an explicit backend") {
+		t.Fatalf("stderr = %q, want the omitted-backend note", stderr.String())
+	}
+	if called() {
+		t.Fatal("attempt started for a rejected thinking level")
+	}
+}
+
+// A resume can restore the backend from the session, so the note must not
+// claim the runtime default chose a backend the session may already own.
+func TestDirectCLIResumeKeepsThePlainThinkingError(t *testing.T) {
+	called := stubRunAttempt(t)
+	var stderr strings.Builder
+	if code := run([]string{"--resume", "ses_x", "--thinking", "high", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `backend "opencode-acp" does not support parameter "thinking"`) {
+		t.Fatalf("stderr = %q, want the backend's own verdict", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "backend was omitted") {
+		t.Fatalf("stderr = %q, want no omission claim for a session that may own the backend", stderr.String())
+	}
+	if called() {
+		t.Fatal("attempt started for a rejected thinking level")
+	}
+}
+
+// The claude-mcp-wait check names the same default, so an omitted --backend
+// needs the same note there.
+func TestDirectCLINamesTheOmittedBackendForMCPWait(t *testing.T) {
+	called := stubRunAttempt(t)
+	var stderr strings.Builder
+	if code := run([]string{"--claude-mcp-wait", "5s", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{"claude-mcp-wait", "requires an explicit backend", "backend was omitted"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to mention %q", stderr.String(), want)
+		}
+	}
+	if called() {
+		t.Fatal("attempt started for a rejected claude-mcp-wait")
+	}
+}
+
+// A wait outside the limit is a duration mistake, so naming the backend would
+// send the caller to the wrong flag.
+func TestDirectCLIKeepsTheDurationErrorForMCPWait(t *testing.T) {
+	called := stubRunAttempt(t)
+	var stderr strings.Builder
+	if code := run([]string{"--claude-mcp-wait", "90s", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+		t.Fatalf("run = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "exceeds the 1m0s limit") {
+		t.Fatalf("stderr = %q, want the duration error", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "requires an explicit backend") {
+		t.Fatalf("stderr = %q, want no backend note for a bad duration", stderr.String())
+	}
+	if called() {
+		t.Fatal("attempt started for an invalid claude-mcp-wait")
 	}
 }
