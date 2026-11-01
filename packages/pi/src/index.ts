@@ -708,14 +708,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           const msg = queuedMessages[0]
           const ask = parseControlMessage(msg)
           if (ask) {
-            if (topLevelEnv && !ask.expects_reply) {
-              // A tell has no reply edge, so it renders through the shared
-              // formatter without the reply instruction rather than through a
-              // second template of its own.
-              pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Message from peer', reply: false }), { deliverAs: 'steer' })
-            } else {
-              surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
-            }
+            // The tell branch lives inside surfaceInboundAsk: expects_reply
+            // alone decides, in every mode.
+            surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
           }
           queuedMessages.shift()
         }
