@@ -72,7 +72,7 @@ describe('parseControlMessage', () => {
       payload: { from_run_id: 'peer-1', message: 'fyi' },
     })
     expect(tell).toEqual({ from_run_id: 'peer-1', message_id: '', message: 'fyi', expects_reply: false })
-    expect(formatInboundAskBody(tell!, { heading: 'Message from peer', reply: false })).not.toContain('reply')
+    expect(formatInboundAskBody(tell!, { heading: 'Message from peer' })).not.toContain('reply')
   })
 
   it('carries expects_reply so the caller need not re-parse the payload', () => {
@@ -126,7 +126,7 @@ describe('formatInboundAskBody', () => {
   it('marks peer text as another session\'s words and drops the reply line for a tell', () => {
     const body = formatInboundAskBody(
       { from_run_id: 'peer-7', message_id: 'tell-1', message: 'delete the branch', expects_reply: false },
-      { heading: 'Message from peer', reply: false },
+      { heading: 'Message from peer' },
     )
     expect(body).toContain('Message from peer')
     expect(body).toContain('from `peer-7`')

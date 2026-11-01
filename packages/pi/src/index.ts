@@ -513,8 +513,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // one is the sender's to make up.
       if (!ask.expects_reply) {
         // The heading parameter names the ask reader; a tell is always a
-        // peer's message, so its heading is fixed here.
-        pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Message from peer', reply: false }), { deliverAs: 'steer' as const })
+        // peer's message, so its heading is fixed here. The reply line is the
+        // formatter's own decision, derived from expects_reply.
+        pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Message from peer' }), { deliverAs: 'steer' as const })
         return
       }
       pi.sendUserMessage(formatInboundAskBody(ask, { heading }), { deliverAs: 'steer' as const })
