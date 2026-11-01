@@ -1321,6 +1321,31 @@ func TestStartReapsWhenDescendantHoldsPipes(t *testing.T) {
 	}
 }
 
+func TestExitCauseOmitsForcedPipeClose(t *testing.T) {
+	t.Setenv(helperEnv, "exit-with-descendant")
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	t.Setenv("AVENOR_POO_HELPER_PID_FILE", pidFile)
+	c, err := startClient(context.Background(), helperStartOptions(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if raw, err := os.ReadFile(pidFile); err == nil {
+			if pid, err := strconv.Atoi(string(raw)); err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+		_ = c.shutdown()
+	})
+	_, _ = c.initialize(context.Background(), []int{1})
+	<-c.waitDone
+	<-c.stdoutDone
+	<-c.stderrDone
+	if cause := c.exitCause(); cause != "the process exited" {
+		t.Fatalf("exitCause = %q, want process exit without close noise", cause)
+	}
+}
+
 func TestStartReadsFinalInitializeError(t *testing.T) {
 	t.Setenv(helperEnv, "exit-after-initialize")
 	provider := NewWithOptions(avruntime.StartOptions{})

@@ -36,7 +36,7 @@ const (
 	// server's own close path budgets four 5 s steps, so this is a ceiling,
 	// not the expected time.
 	closeAnswerTimeout = 30 * time.Second
-	// readDrain is how long teardown waits for the stdout reader to reach EOF.
+	// readDrain bounds the wait for both output readers after the process exits.
 	readDrain = 2 * time.Second
 	// inspectWaitMS is one run/inspect wait. A wait that runs out is not a
 	// failure: the client asks again.
@@ -75,11 +75,13 @@ type client struct {
 
 	stderr *rollingBuffer
 
-	stdoutDone chan struct{}
-	stderrDone chan struct{}
-	waitDone   chan struct{}
-	waitErr    error
-	closeOnce  sync.Once
+	stdoutDone  chan struct{}
+	stderrDone  chan struct{}
+	readersDone chan struct{}
+	forcedClose atomic.Bool
+	waitDone    chan struct{}
+	waitErr     error
+	closeOnce   sync.Once
 }
 
 // permissionAsk is one ask poo is waiting on: the session it belongs to and
@@ -144,6 +146,7 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 		stderr:      newRollingBuffer(stderrLines),
 		stdoutDone:  make(chan struct{}),
 		stderrDone:  make(chan struct{}),
+		readersDone: make(chan struct{}),
 		waitDone:    make(chan struct{}),
 		observe:     observe,
 	}
@@ -154,6 +157,7 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 }
 
 func (c *client) wait(stderr io.ReadCloser) {
+	defer close(c.readersDone)
 	err := c.proc.Wait()
 	c.mu.Lock()
 	c.waitErr = err
@@ -169,8 +173,11 @@ func (c *client) wait(stderr io.ReadCloser) {
 		case <-stderrDone:
 			stderrDone = nil
 		case <-timer.C:
+			c.forcedClose.Store(true)
 			_ = c.stdout.Close()
 			_ = stderr.Close()
+			<-c.stdoutDone
+			<-c.stderrDone
 			return
 		}
 	}
@@ -400,12 +407,7 @@ func (c *client) shutdown() error {
 				<-c.waitDone
 			}
 		}
-		timer := time.NewTimer(readDrain)
-		defer timer.Stop()
-		select {
-		case <-c.stdoutDone:
-		case <-timer.C:
-		}
+		<-c.readersDone
 		c.mu.Lock()
 		c.pending = nil
 		c.subs = nil
@@ -453,7 +455,7 @@ func (c *client) readLoop() {
 		}
 		c.dispatchLine(line)
 	}
-	if err := scanner.Err(); err != nil {
+	if err := scanner.Err(); err != nil && !(c.forcedClose.Load() && errors.Is(err, os.ErrClosed)) {
 		c.stderr.Append(fmt.Sprintf("read loop error: %v", err))
 	}
 }
@@ -769,7 +771,7 @@ func (c *client) drainStderr(r io.ReadCloser) {
 	for scanner.Scan() {
 		c.stderr.Append(scanner.Text())
 	}
-	if err := scanner.Err(); err != nil {
+	if err := scanner.Err(); err != nil && !(c.forcedClose.Load() && errors.Is(err, os.ErrClosed)) {
 		c.stderr.Append(fmt.Sprintf("stderr drain error: %v", err))
 	}
 	_ = r.Close()
