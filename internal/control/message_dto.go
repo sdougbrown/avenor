@@ -134,6 +134,9 @@ type ResumeParams struct {
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	SentinelFile   string `json:"sentinel_file,omitempty"`
 	OnEvent        string `json:"on_event,omitempty"`
+	// MCP marks a resume an MCP surface originated, so the supervisor gates the
+	// launch it re-execs. Only the MCP message provider sets it.
+	MCP bool `json:"mcp,omitempty"`
 }
 
 // ResumeResult is the resume response.
@@ -310,6 +313,7 @@ func NewResumeParams(req messaging.ResumeRequest) ResumeParams {
 		IdempotencyKey: req.IdempotencyKey,
 		SentinelFile:   req.SentinelFile,
 		OnEvent:        req.EventLog,
+		MCP:            req.MCP,
 	}
 }
 
@@ -322,6 +326,7 @@ func (p ResumeParams) request() messaging.ResumeRequest {
 		IdempotencyKey: p.IdempotencyKey,
 		SentinelFile:   p.SentinelFile,
 		EventLog:       p.OnEvent,
+		MCP:            p.MCP,
 	}
 }
 

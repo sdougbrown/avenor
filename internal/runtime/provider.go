@@ -7,6 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sdougbrown/avenor/internal/backendlaunch"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
@@ -50,9 +51,13 @@ type StartOptions struct {
 	// the backend is launched unwrapped. Probes and helper processes are
 	// never wrapped.
 	LaunchWrapper []string
-	RuntimeID     string         // supervisor-assigned runtime ID (rt_N), for parent-child routing
-	Broker        *broker.Broker // optional shared broker instance; backends may create their own if nil
-	BrokerToken   string         // broker token for RuntimeID, so the child can poll/reply as itself
+	// Launch is the executable identity a backend resolved from its roster
+	// entry (or from the backend's default) before this provider existed. It
+	// is zero for backends that start no configured binary.
+	Launch      backendlaunch.Spec
+	RuntimeID   string         // supervisor-assigned runtime ID (rt_N), for parent-child routing
+	Broker      *broker.Broker // optional shared broker instance; backends may create their own if nil
+	BrokerToken string         // broker token for RuntimeID, so the child can poll/reply as itself
 	// Provenance is the informational launch identity exported to the child
 	// process. It never carries broker routing or credential meaning.
 	Provenance *LaunchProvenance
@@ -219,6 +224,9 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	}
 	if len(override.LaunchWrapper) > 0 {
 		merged.LaunchWrapper = override.LaunchWrapper
+	}
+	if !override.Launch.IsZero() {
+		merged.Launch = override.Launch
 	}
 	if override.RuntimeID != "" {
 		merged.RuntimeID = override.RuntimeID

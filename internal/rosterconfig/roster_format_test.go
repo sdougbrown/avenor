@@ -3,6 +3,7 @@ package rosterconfig
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -47,7 +48,7 @@ agent = "windsurf-swe"
 				t.Fatalf("Lookup(planner) error = %v", err)
 			}
 			want := Entry{Backend: "opencode-acp", Agent: "planner", Model: "provider/planner"}
-			if planner != want {
+			if !reflect.DeepEqual(planner, want) {
 				t.Fatalf("planner = %+v, want %+v", planner, want)
 			}
 
