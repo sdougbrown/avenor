@@ -569,9 +569,10 @@ func permissionRequestEvent(params protocol.AskParams) events.Event {
 	}
 }
 
-// answerPermission replies to the ask poo is waiting on. The ask leaves the
-// table before the reply is written, so a second answer for it is refused
-// instead of written twice.
+// answerPermission replies to the ask poo is waiting on, carrying the
+// resolver's message so the model reads it in the decided call's result. The
+// ask leaves the table before the reply is written, so a second answer for it
+// is refused instead of written twice.
 func (c *client) answerPermission(sessionID, requestID string, response runtime.PermissionResponse) error {
 	c.mu.Lock()
 	ask, pending := c.asks[requestID]
@@ -586,11 +587,13 @@ func (c *client) answerPermission(sessionID, requestID string, response runtime.
 	if response.Allow {
 		decision = protocol.DecisionAllow
 	}
+	// The resolver's message goes on as it is: poo applies its own bound to
+	// what the model reads.
 	line, err := json.Marshal(struct {
 		JSONRPC string             `json:"jsonrpc"`
 		ID      json.RawMessage    `json:"id"`
 		Result  protocol.AskResult `json:"result"`
-	}{"2.0", ask.id, protocol.AskResult{Decision: decision}})
+	}{"2.0", ask.id, protocol.AskResult{Decision: decision, Message: response.Message}})
 	if err != nil {
 		return err
 	}
