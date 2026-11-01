@@ -21,13 +21,13 @@ type scriptedTransport struct {
 	withdrawErr    error
 	preflightErr   error
 
-	sendCalls           int
-	waitCalls           int
-	withdrawCalls       int
-	generation          string
-	lastSend            messaging.SendRequest
-	lastWait            messaging.WaitRequest
-	lastWithdraw messaging.WithdrawRequest
+	sendCalls     int
+	waitCalls     int
+	withdrawCalls int
+	generation    string
+	lastSend      messaging.SendRequest
+	lastWait      messaging.WaitRequest
+	lastWithdraw  messaging.WithdrawRequest
 }
 
 func (s *scriptedTransport) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
@@ -188,6 +188,7 @@ func TestAskClassifications(t *testing.T) {
 		{name: "invalid request", send: messaging.SendResult{Outcome: messaging.OutcomeNotSent}, sendErr: messaging.ErrInvalidRequest, outcome: messaging.OutcomeNotSent},
 		{name: "untyped send failure is uncertain", send: messaging.SendResult{}, sendErr: errors.New("connection reset"), outcome: messaging.OutcomePossiblyPending, pending: true},
 		{name: "uncertain wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, withdraw: messaging.WithdrawResult{Outcome: messaging.OutcomePossiblyPending}, outcome: messaging.OutcomePossiblyPending, pending: true},
+		{name: "timed-out wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomeTimedOut}, outcome: messaging.OutcomeTimedOut, pending: true},
 		{name: "withdrawn wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomeWithdrawn}, outcome: messaging.OutcomeWithdrawn},
 		{name: "lost wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomeLost}, outcome: messaging.OutcomeLost},
 	}

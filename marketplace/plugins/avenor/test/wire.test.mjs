@@ -19,7 +19,7 @@ import {
   askFailureOutcome,
 } from '../hooks/wire.js'
 
-test('mintMessageID: versioned shape with an encoded ten-minute horizon', () => {
+test('mintMessageID: versioned shape with an encoded twenty-minute horizon', () => {
   const now = 1_700_000_000_000
   const id = mintMessageID(now)
   const parts = id.split('.')

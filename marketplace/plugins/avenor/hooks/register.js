@@ -500,36 +500,11 @@ async function runAsk(d, target, ref, message, rawTimeout) {
   } catch (err) {
     const outcome = askFailureOutcome(httpStatus(err), httpBody(err))
     await logLayer(d, "ask " + messageId + " wait reported " + outcome + ": " + errorText(err))
-    await retractAsk(d, messageId, target.generation)
     return askOutcome(outcome, messageId, renderAskFailure(messageId, ref, outcome))
   }
   return askOutcome("replied", messageId, extractReplyMessage(result))
 }
 
-/**
- * Retract an ask whose wait failed, the way the pi and core ask paths do: an
- * edge nothing waits on again costs the asker a full timeout and lands its
- * reply where no reader will look. Best effort — a retraction that fails is
- * logged, never allowed to replace the ask's own outcome.
- */
-async function retractAsk(d, messageId, generation) {
-  try {
-    await brokerPost(d, "/cancel_message", {
-      cancel_message_id: messageId,
-      generation: generation,
-    })
-  } catch (err) {
-    await logLayer(d, "ask " + messageId + " could not be retracted: " + errorText(err))
-  }
-}
-
-/**
- * Answer a peer ask this session received. The correlation table, not the
- * broker's edge store, is where those asks live, so the hook sends the reply
- * itself along the same reply-edge send `session.send` uses. A `reply_to` the
- * table does not hold passes through to the MCP server, whose own refusal is
- * then the honest answer.
- */
 async function serveReply(d, e) {
   const replyTo = typeof e.reply_to === "string" ? e.reply_to : ""
   const peer = peerOwingAsk(replyTo)

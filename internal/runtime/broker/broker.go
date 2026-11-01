@@ -444,8 +444,26 @@ func New(globalToken string) *Broker {
 		attachConsumed: make(map[string]string),
 	}
 	b.store.SetBackend(brokerBackend{broker: b})
+	b.store.SetRemoteDeliver(b.lateReplyDeliver)
 	b.messenger = localMessenger{broker: b}
 	return b
+}
+
+// lateReplyDeliver delivers a late answer to an abandoned ask's asker. A run
+// a child branch owns has no queue here, so the answer relays the way a tell
+// does — the reply's own route, already recorded, is what makes the asker's
+// answer routable. Everything else queues through the broker backend.
+func (b *Broker) lateReplyDeliver(target string, msg messaging.InboundMessage) (func(), error) {
+	if link, _ := b.parentSeam(); link != nil && link.Owns(target) {
+		return func() {}, b.seam().Tell(context.Background(), messaging.TellRequest{
+			FromRunID:     msg.FromRunID,
+			ToRunID:       target,
+			Kind:          msg.Kind,
+			Payload:       msg.Payload,
+			CorrelationID: msg.MessageID,
+		})
+	}
+	return brokerBackend{broker: b}.Publish(target, msg)
 }
 
 // SetIdentity sets the supervisor identity this broker mints run records under.
