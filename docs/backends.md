@@ -125,18 +125,18 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | pony |
-|---|---|---|---|---|---|---|---|---|---|
-| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ✗ |
-| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠ |
-| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ |
-| Thinking control | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ |
-| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
+| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | pony | poo |
+|---|---|---|---|---|---|---|---|---|---|---|
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ✗ | ✗ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
+| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
+| Thinking control | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental. `agy` permission relay requires the explicit RPC transport.
 
@@ -146,7 +146,7 @@ Session resume for `claude` is in-memory only: a long-lived avenor process (stab
 
 ## poo
 
-`poo` drives a poo binary over its public stdio protocol. Each avenor session owns one poo process: the provider spawns the resolved binary, performs `poo/initialize` with a protocol-version check, opens the session with `session/create`, routes its events and tears the process down. Permission answers and resume are not implemented yet; a poo entry that needs either reports an error instead of pretending to work.
+`poo` drives a poo binary over its public stdio protocol. Each avenor session owns one poo process: the provider spawns the resolved binary, performs `poo/initialize` with a protocol-version check, opens the session with `session/create`, routes its events and tears the process down. Resume is not implemented yet; a poo entry that needs it reports an error instead of pretending to work.
 
 A poo roster entry is the only place `command`, `args` and `settings` are accepted:
 
@@ -181,7 +181,9 @@ poo's settle reason is classified into avenor's closed stop-reason set, and the 
 
 A denial is not a failed run on this backend: poo hands the denied call back to the model as a tool result and the run continues, so the backend declares through `runtime.DenialRecovery` that a clean `end_turn` after a denied tool call is a completion. Backends that do not declare it keep the `tool_denied` reclassification.
 
-A permission ask is not relayed yet. The answer path (`AnswerPermission`) lands in Stage 3, so the handshake declares no `permission_answers` capability. poo's wire asker is then unavailable, and its chain moves straight to the next asker, or to its fallback when the wire asker was the only one. poo's own `permission.asked` and `permission.answered` records are delivered as `avenor.permission.asked` and `avenor.permission.answered`, the prefix every backend-specific record passes through.
+A permission ask is relayed as avenor's `permission.request`. poo asks only a client that declared `permission_answers`, so the handshake declares it; each `permission/ask` request becomes one event whose `request_id` is poo's ask id, whose `tool`, `question` and `description` come from the ask's tool and summary, and whose `options` offer `allow` and `reject`. `AnswerPermission` replies to the pending request with poo's own `{decision: allow|deny}` result, poo hands the decision to the model as the call's outcome, and the run continues either way: a refused call reaches the model as a failed tool result, not a failed run. The resolver's message is dropped, because poo's `AskResult` has a decision field and nothing else.
+
+An answer for an ask that is not pending returns an error and writes nothing: never asked, already answered, or already resolved by poo's own chain timeout. poo's ask budget and the backend's own view of pending asks are separate, so an answer that lands exactly as poo times the ask out is written and then ignored by poo. The backend does not predict that boundary. A run never waits on an unanswered ask forever: when poo's chain budget (`permission.chain_timeout_s`) runs out, the configured fallback decides and the run continues. poo's own `permission.asked` and `permission.answered` records are delivered as `avenor.permission.asked` and `avenor.permission.answered`, the prefix every backend-specific record passes through.
 
 `Prompt` returns `nil` for every settle that is not a failure, like `pi`: `end_turn`, `max_tokens`, `max_turn_requests`, `rate_limited` and `quota_exhausted` all confirm the terminal event rather than reporting an error. Only `cancelled` and a generic failure (`error`) return one; the terminal event carries the reason and the exit code either way.
 
