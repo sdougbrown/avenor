@@ -137,10 +137,32 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	// the process that resumes is the one the session belongs to.
 	merged := runtime.MergeStartOptions(p.opts, runtime.StartOptions{})
 	p.mu.Lock()
-	open := len(p.sessions)
+	st := p.sessions[sessionID]
+	c := p.client
+	other := len(p.sessions) > 0 && st == nil
 	p.mu.Unlock()
-	if open > 0 {
+	if other {
 		return runtime.Session{}, errOneSession
+	}
+	// The supervisor resumes on the provider it already holds for every
+	// attempt after the first, so a retry or a parked run's follow-up names
+	// the session this provider serves: that live session comes back as
+	// itself instead of a refusal.
+	if st != nil {
+		if c != nil && c.live() {
+			return runtime.Session{
+				SessionID: sessionID,
+				Backend:   backendID,
+				Dir:       merged.Dir,
+				PID:       c.pid(),
+			}, nil
+		}
+		// The process behind the known session is gone: reap it, so the
+		// fresh process the cross-process resume below starts is not blocked
+		// by the dead one.
+		if c != nil {
+			p.discardProcess(c)
+		}
 	}
 	c, err := p.openProcess(ctx, merged)
 	if err != nil {

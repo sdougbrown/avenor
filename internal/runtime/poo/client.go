@@ -153,6 +153,17 @@ func (c *client) pid() int {
 	return 0
 }
 
+// live reports whether the process has not exited yet: a client whose process
+// died cannot serve its session, so the caller falls back to a fresh one.
+func (c *client) live() bool {
+	select {
+	case <-c.waitDone:
+		return false
+	default:
+		return true
+	}
+}
+
 // initialize performs the handshake and checks the agreed protocol version.
 func (c *client) initialize(ctx context.Context, versions []int) (protocol.InitializeResult, error) {
 	params := protocol.InitializeParams{
