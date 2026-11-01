@@ -7,7 +7,7 @@
 //   - gemini-acp: spawns gemini --acp subprocess, owns lifecycle.
 //   - cursor-acp: spawns agent acp subprocess, owns lifecycle.
 //   - pi: spawns pi --mode rpc subprocess, owns lifecycle.
-//   - poo: spawns a poo binary subprocess (protocol client lands in Stage 2).
+//   - poo: spawns a poo binary subprocess and drives it over its stdio protocol.
 //   - pony: test/stub backend.
 //   - claude: Claude Code backend; PTY by default, AVENOR_CLAUDE_TERMINAL=tmux for tmux.
 package factory

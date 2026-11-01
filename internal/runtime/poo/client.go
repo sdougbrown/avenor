@@ -379,6 +379,7 @@ func (c *client) shutdown() error {
 		c.pending = nil
 		c.subs = nil
 		c.held = nil
+		c.asks = nil
 		c.mu.Unlock()
 	})
 	return nil
@@ -537,6 +538,11 @@ func (c *client) routeServerRequest(msg envelope) {
 		return
 	}
 	c.mu.Lock()
+	if c.asks == nil {
+		// The client has shut down: nothing can answer the ask.
+		c.mu.Unlock()
+		return
+	}
 	c.asks[params.AskID] = permissionAsk{sessionID: params.SessionID, id: append(json.RawMessage(nil), msg.ID...)}
 	c.mu.Unlock()
 	c.deliver(permissionRequestEvent(params))
