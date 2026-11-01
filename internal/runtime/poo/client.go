@@ -65,6 +65,7 @@ type client struct {
 
 	mu          sync.Mutex
 	pending     map[string]chan rpcReply
+	asks        map[string]permissionAsk
 	subs        map[string][]chan events.Event
 	held        map[string][]events.Event
 	holds       map[string]int
@@ -77,6 +78,13 @@ type client struct {
 	waitDone   chan struct{}
 	waitErr    error
 	closeOnce  sync.Once
+}
+
+// permissionAsk is one ask poo is waiting on: the session it belongs to and
+// the request id an answer must reply to.
+type permissionAsk struct {
+	sessionID string
+	id        json.RawMessage
 }
 
 // startClient spawns the resolved binary and returns the connected client. The
@@ -114,6 +122,7 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 		stdin:       stdin,
 		stdout:      stdout,
 		pending:     map[string]chan rpcReply{},
+		asks:        map[string]permissionAsk{},
 		subs:        map[string][]chan events.Event{},
 		held:        map[string][]events.Event{},
 		holds:       map[string]int{},
@@ -144,6 +153,17 @@ func (c *client) pid() int {
 	return 0
 }
 
+// live reports whether the process has not exited yet: a client whose process
+// died cannot serve its session, so the caller falls back to a fresh one.
+func (c *client) live() bool {
+	select {
+	case <-c.waitDone:
+		return false
+	default:
+		return true
+	}
+}
+
 // initialize performs the handshake and checks the agreed protocol version.
 func (c *client) initialize(ctx context.Context, versions []int) (protocol.InitializeResult, error) {
 	params := protocol.InitializeParams{
@@ -151,12 +171,10 @@ func (c *client) initialize(ctx context.Context, versions []int) (protocol.Initi
 		Client: protocol.Client{
 			Name:    "avenor",
 			Version: "1",
-			// The backend cannot answer a permission ask (AnswerPermission
-			// is not implemented). Declaring the capability would make poo's
-			// wire asker wait out its ask budget on every ask; without it the
-			// chain skips the wire asker at once.
+			// poo asks only a client that declared this capability, so it is
+			// what makes permission/ask reach the relay.
 			Capabilities: protocol.ClientCapabilities{
-				PermissionAnswers: false,
+				PermissionAnswers: true,
 			},
 		},
 	}
@@ -211,6 +229,27 @@ func (c *client) createSession(ctx context.Context, params protocol.CreateParams
 	}
 	if info.SessionID == "" {
 		return protocol.SessionInfo{}, errors.New("session/create returned no session id")
+	}
+	return info, nil
+}
+
+// loadSession opens a session the store already holds. The session id is the
+// whole request: poo reads the records from the settings file's session
+// directory, which is where a logged session wrote them.
+func (c *client) loadSession(ctx context.Context, params protocol.LoadParams) (protocol.SessionInfo, error) {
+	raw, rpcErr, err := c.call(ctx, protocol.MethodSessionLoad, params)
+	if err != nil {
+		return protocol.SessionInfo{}, err
+	}
+	if rpcErr != nil {
+		return protocol.SessionInfo{}, &refusedError{method: protocol.MethodSessionLoad, rpc: rpcErr}
+	}
+	var info protocol.SessionInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return protocol.SessionInfo{}, fmt.Errorf("decode session/load result: %w", err)
+	}
+	if info.SessionID == "" {
+		return protocol.SessionInfo{}, errors.New("session/load returned no session id")
 	}
 	return info, nil
 }
@@ -340,6 +379,7 @@ func (c *client) shutdown() error {
 		c.pending = nil
 		c.subs = nil
 		c.held = nil
+		c.asks = nil
 		c.mu.Unlock()
 	})
 	return nil
@@ -440,6 +480,16 @@ func (c *client) routeNotification(msg envelope) {
 		c.stderr.Append(fmt.Sprintf("dropped a malformed event: %v", err))
 		return
 	}
+	if ev.Type == "permission.answered" {
+		// poo resolved the ask itself, by an answer or by its own chain
+		// timeout, so a late answer has nothing left to reply to.
+		c.mu.Lock()
+		id := stringField(ev.Fields, "ask_id")
+		if ask, ok := c.asks[id]; ok && ask.sessionID == ev.SessionID {
+			delete(c.asks, id)
+		}
+		c.mu.Unlock()
+	}
 	for _, translated := range translateEvent(ev) {
 		c.deliver(translated)
 	}
@@ -471,11 +521,8 @@ func decodeSessionEvent(raw json.RawMessage) (sessionEvent, error) {
 	return ev, nil
 }
 
-// routeServerRequest records a server request. poo's only server request is a
-// permission ask, which it does not send to a client that declared no
-// permission answers. An ask that arrives anyway is left unanswered: publishing
-// it as a permission.request would start a resolver whose answer this backend
-// refuses, and the run would abort.
+// routeServerRequest turns poo's permission ask into the backend's
+// permission.request event and keeps the request id the answer replies to.
 func (c *client) routeServerRequest(msg envelope) {
 	if msg.Method != protocol.MethodPermissionAsk {
 		c.stderr.Append(fmt.Sprintf("ignored unknown server request %q", msg.Method))
@@ -486,9 +533,71 @@ func (c *client) routeServerRequest(msg envelope) {
 		c.stderr.Append(fmt.Sprintf("dropped a malformed permission ask: %v", err))
 		return
 	}
-	c.stderr.Append(fmt.Sprintf(
-		"left permission ask %q for tool %q in session %q unanswered: this backend cannot answer it yet",
-		params.AskID, params.Tool, params.SessionID))
+	if params.AskID == "" || params.SessionID == "" {
+		c.stderr.Append("dropped a permission ask without an id or session")
+		return
+	}
+	c.mu.Lock()
+	if c.asks == nil {
+		// The client has shut down: nothing can answer the ask.
+		c.mu.Unlock()
+		return
+	}
+	c.asks[params.AskID] = permissionAsk{sessionID: params.SessionID, id: append(json.RawMessage(nil), msg.ID...)}
+	c.mu.Unlock()
+	c.deliver(permissionRequestEvent(params))
+}
+
+// permissionRequestEvent is the backend's permission.request for one ask: the
+// ask id is the request id an answer names, and the ask's summary is the
+// question a resolver shows.
+func permissionRequestEvent(params protocol.AskParams) events.Event {
+	return events.Event{
+		Event:     "permission.request",
+		SessionID: params.SessionID,
+		Fields: map[string]any{
+			"request_id":  params.AskID,
+			"kind":        "confirm",
+			"question":    params.Summary,
+			"description": params.Summary,
+			"tool":        params.Tool,
+			"options": []any{
+				map[string]any{"optionId": "allow", "kind": "allow"},
+				map[string]any{"optionId": "deny", "kind": "reject"},
+			},
+		},
+	}
+}
+
+// answerPermission replies to the ask poo is waiting on. The ask leaves the
+// table before the reply is written, so a second answer for it is refused
+// instead of written twice.
+func (c *client) answerPermission(sessionID, requestID string, response runtime.PermissionResponse) error {
+	c.mu.Lock()
+	ask, pending := c.asks[requestID]
+	if pending && ask.sessionID == sessionID {
+		delete(c.asks, requestID)
+	}
+	c.mu.Unlock()
+	if !pending || ask.sessionID != sessionID {
+		return fmt.Errorf("permission ask %q is not pending for session %q", requestID, sessionID)
+	}
+	decision := protocol.DecisionDeny
+	if response.Allow {
+		decision = protocol.DecisionAllow
+	}
+	line, err := json.Marshal(struct {
+		JSONRPC string             `json:"jsonrpc"`
+		ID      json.RawMessage    `json:"id"`
+		Result  protocol.AskResult `json:"result"`
+	}{"2.0", ask.id, protocol.AskResult{Decision: decision}})
+	if err != nil {
+		return err
+	}
+	if err := c.writeLine(append(line, '\n')); err != nil {
+		return fmt.Errorf("answer permission ask %q: %w", requestID, err)
+	}
+	return nil
 }
 
 // deliver fans an event out to the session's subscribers, or holds it until a

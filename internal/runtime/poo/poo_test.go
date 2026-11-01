@@ -2,7 +2,6 @@ package poo
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -190,14 +189,15 @@ func TestProviderStartWithoutAResolvedLaunchFails(t *testing.T) {
 	}
 }
 
-// AnswerPermission and Resume are Stage 3: they report the boundary instead of
-// pretending to work.
-func TestProviderStageThreeCallsReportTheBoundary(t *testing.T) {
+// A resume needs the session id it continues: without one there is nothing to
+// load, and no process is started for the attempt.
+func TestProviderResumeNeedsASessionID(t *testing.T) {
 	provider := NewWithOptions(runtime.StartOptions{})
-	if _, err := provider.Resume(context.Background(), "session"); !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("Resume() error = %v, want ErrNotImplemented", err)
+	defer func() { _ = provider.Close() }()
+	if _, err := provider.Resume(context.Background(), ""); err == nil {
+		t.Fatal("Resume() with no session id returned no error")
 	}
-	if err := provider.AnswerPermission(context.Background(), "session", "ask", runtime.PermissionResponse{}); !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("AnswerPermission() error = %v, want ErrNotImplemented", err)
+	if _, err := provider.getClient(); err == nil {
+		t.Fatal("Resume() with no session id started a process")
 	}
 }
