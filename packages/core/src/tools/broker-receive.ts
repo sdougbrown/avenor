@@ -12,6 +12,8 @@ export interface InboundAsk {
   from_run_id: string
   message_id: string
   message: string
+  /** Mirrors the payload's expects_reply: true only for an ask, the sole decider for the reply instruction. */
+  expects_reply: boolean
 }
 
 export interface BrokerReceiveResult {
@@ -51,6 +53,7 @@ async function executeBrokerReceive(
         from_run_id: message.from_run_id,
         message_id: message.message_id,
         message: typeof payload?.message === 'string' ? payload.message : '',
+        expects_reply: payload?.expects_reply === true,
       }
     })
     return { asks, generation: received.generation || generation }

@@ -163,6 +163,17 @@ test("an inbound frame names the sender, the ask id and the reply action", () =>
   assert.doesNotMatch(tell, /reply_to/);
 });
 
+test("a tell that carries a message id still gets no reply instruction", () => {
+  // The reply instruction tracks expectsReply alone, matching frameInboundAsk:
+  // a tell with an id is a new message, not an answerable ask.
+  const tell = framePeerMessage({
+    fromRunId: "rt_peer", sender: "claude-parent", messageId: "av1.tell", message: "fyi", role: "", expectsReply: false,
+  });
+  assert.match(tell, /av1\.tell/);
+  assert.match(tell, /No reply is required/);
+  assert.doesNotMatch(tell, /reply_to/);
+});
+
 test("thread-gone classification separates a dead thread from a transient failure", () => {
   assert.equal(threadGone("thread not found: 01a1"), true);
   assert.equal(threadGone("unknown session"), true);

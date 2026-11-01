@@ -701,12 +701,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           const msg = queuedMessages[0]
           const ask = parseControlMessage(msg)
           if (ask) {
-            let payload = msg.payload
-            if (typeof payload === 'string') {
-              try { payload = JSON.parse(payload) } catch { payload = undefined }
-            }
-            const expectsReply = (payload as Record<string, unknown> | undefined)?.expects_reply === true
-            if (topLevelEnv && !expectsReply) {
+            if (topLevelEnv && !ask.expects_reply) {
               // A tell has no reply edge, so it renders through the shared
               // formatter without the reply instruction rather than through a
               // second template of its own.

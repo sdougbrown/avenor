@@ -348,7 +348,7 @@ describe('sub-agent broker mode (integration)', () => {
   it('routes a reply through the host provider outside sub-agent mode', async () => {
     const fetchStub = stubBrokerFetch([])
     const brokerReceiveTool = mock(async () => ({
-      asks: [{ message_id: 'ask-h', from_run_id: 'rt_sub', message: 'host question', role: 'agent' }],
+      asks: [{ message_id: 'ask-h', from_run_id: 'rt_sub', message: 'host question', role: 'agent', expects_reply: true }],
     }))
     const reply = mock(async (_asker: string, _id: string, _message: string) => ({
       outcome: 'replied' as const,

@@ -106,11 +106,11 @@ describe('read-only control clients', () => {
 
     expect(await brokerReceiveTool({ supervisorId: socketPath, generation: 'gen-1' })).toEqual({
       asks: [
-        { from_run_id: 'rt-object', message_id: 'msg-object', message: 'object payload' },
-        { from_run_id: 'rt-string', message_id: 'msg-string', message: 'string payload' },
-        { from_run_id: 'rt-null', message_id: 'msg-null', message: '' },
-        { from_run_id: 'rt-bare', message_id: 'msg-bare', message: '' },
-        { from_run_id: 'rt-malformed', message_id: 'msg-malformed', message: '' },
+        { from_run_id: 'rt-object', message_id: 'msg-object', message: 'object payload', expects_reply: false },
+        { from_run_id: 'rt-string', message_id: 'msg-string', message: 'string payload', expects_reply: false },
+        { from_run_id: 'rt-null', message_id: 'msg-null', message: '', expects_reply: false },
+        { from_run_id: 'rt-bare', message_id: 'msg-bare', message: '', expects_reply: false },
+        { from_run_id: 'rt-malformed', message_id: 'msg-malformed', message: '', expects_reply: false },
       ],
       generation: 'gen-1',
     })

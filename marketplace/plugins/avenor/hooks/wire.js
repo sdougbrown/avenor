@@ -4,7 +4,9 @@
 // The shapes mirror packages/core/src/messaging-text.ts (newMsgID,
 // extractReplyMessage, renderAskFailure, quote) and
 // packages/pi/src/subagent-broker.ts (buildAgentMessage, parseControlMessage),
-// so a mod, a pi child and a Go child all put the same bytes on the wire.
+// so a mod, a pi child and a Go child all put the same bytes on the wire. The
+// parsed row's `expectsReply` field mirrors pi's `InboundAsk.expects_reply`,
+// and it alone decides whether a frame invites a reply.
 // A hooks module imports its own files and "claude-code", nothing else, so the
 // ask and reply templates and their escaping are copied from the schemas rather
 // than imported; change schemas/message.outcome.json and messaging-text.ts

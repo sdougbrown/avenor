@@ -50,6 +50,8 @@ export interface InboundAsk {
   from_run_id: string
   message_id: string
   message: string
+  /** Mirrors the payload's expects_reply: true only for an ask, which is the sole decider for the reply instruction. */
+  expects_reply: boolean
 }
 
 /** Parse a broker control message that is an agent_message into an InboundAsk. */
@@ -77,7 +79,8 @@ export function parseControlMessage(msg: Record<string, unknown>): InboundAsk | 
   // An ask with no asker could never be answered; drop it instead of
   // surfacing a reply target that routes to an empty run id.
   if (!fromRunId) return null
-  return { from_run_id: fromRunId, message_id: messageId, message: p.message }
+  const expects_reply = p.expects_reply === true
+  return { from_run_id: fromRunId, message_id: messageId, message: p.message, expects_reply }
 }
 
 export interface InboundAskBodyOptions {

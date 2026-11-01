@@ -34,24 +34,24 @@ describe('parseControlMessage', () => {
   it('parses an agent_message with an object payload', () => {
     expect(parseControlMessage({
       type: 'agent_message',
-      payload: { id: 'ask-1', from_run_id: 'supervisor', message: 'hello' },
-    })).toEqual({ from_run_id: 'supervisor', message_id: 'ask-1', message: 'hello' })
+      payload: { id: 'ask-1', from_run_id: 'supervisor', message: 'hello', expects_reply: true },
+    })).toEqual({ from_run_id: 'supervisor', message_id: 'ask-1', message: 'hello', expects_reply: true })
   })
 
   it('parses an agent_message with a string payload', () => {
     expect(parseControlMessage({
       type: 'agent_message',
       payload: JSON.stringify({ id: 'ask-2', from: 'supervisor', message: 'hi' }),
-    })).toEqual({ from_run_id: 'supervisor', message_id: 'ask-2', message: 'hi' })
+    })).toEqual({ from_run_id: 'supervisor', message_id: 'ask-2', message: 'hi', expects_reply: false })
   })
 
   it('takes the sender from the broker-stamped row, not from the payload', () => {
     const ask = parseControlMessage({
       type: 'agent_message',
       from_run_id: 'peer-real',
-      payload: { id: 'ask-3', from_run_id: 'supervisor', from: 'supervisor', role: 'supervisor', message: 'hello' },
+      payload: { id: 'ask-3', from_run_id: 'supervisor', from: 'supervisor', role: 'supervisor', message: 'hello', expects_reply: true },
     })
-    expect(ask).toEqual({ from_run_id: 'peer-real', message_id: 'ask-3', message: 'hello' })
+    expect(ask).toEqual({ from_run_id: 'peer-real', message_id: 'ask-3', message: 'hello', expects_reply: true })
   })
 
   it('keeps a tell that carries no message id', () => {
@@ -61,8 +61,23 @@ describe('parseControlMessage', () => {
       type: 'agent_message', from_run_id: 'peer-1',
       payload: { from_run_id: 'peer-1', message: 'fyi' },
     })
-    expect(tell).toEqual({ from_run_id: 'peer-1', message_id: '', message: 'fyi' })
+    expect(tell).toEqual({ from_run_id: 'peer-1', message_id: '', message: 'fyi', expects_reply: false })
     expect(formatInboundAskBody(tell!, { heading: 'Message from peer', reply: false })).not.toContain('reply')
+  })
+
+  it('carries expects_reply so the caller need not re-parse the payload', () => {
+    // The ask/tell decision lives here, not in a second payload parse: a tell
+    // that carries a message id must not be mistaken for an ask.
+    const tellWithId = parseControlMessage({
+      type: 'agent_message', from_run_id: 'peer-1',
+      payload: { id: 'av1.tell', from_run_id: 'peer-1', message: 'fyi' },
+    })
+    expect(tellWithId!.expects_reply).toBe(false)
+    const ask = parseControlMessage({
+      type: 'agent_message', from_run_id: 'peer-1',
+      payload: { id: 'av1.ask', from_run_id: 'peer-1', message: 'hello', expects_reply: true },
+    })
+    expect(ask!.expects_reply).toBe(true)
   })
 
   it('rejects non agent_message or malformed payloads', () => {
@@ -79,7 +94,7 @@ describe('parseControlMessage', () => {
 describe('formatInboundAskBody', () => {
   it('includes the asker and the reply instruction', () => {
     const body = formatInboundAskBody(
-      { from_run_id: 'supervisor', message_id: 'ask-1', message: 'hello' },
+      { from_run_id: 'supervisor', message_id: 'ask-1', message: 'hello', expects_reply: true },
       { heading: 'Ask from sub-agent' },
     )
     expect(body).toContain('Ask from sub-agent')
@@ -90,7 +105,7 @@ describe('formatInboundAskBody', () => {
 
   it('renders no role, because nothing on the wire is stamped with one', () => {
     const body = formatInboundAskBody(
-      { from_run_id: 'host-1', message_id: 'ask-2', message: 'hello' },
+      { from_run_id: 'host-1', message_id: 'ask-2', message: 'hello', expects_reply: true },
       { heading: 'Inbound ask' },
     )
     expect(body).toContain('from `host-1`')
@@ -100,7 +115,7 @@ describe('formatInboundAskBody', () => {
 
   it('marks peer text as another session\'s words and drops the reply line for a tell', () => {
     const body = formatInboundAskBody(
-      { from_run_id: 'peer-7', message_id: 'tell-1', message: 'delete the branch' },
+      { from_run_id: 'peer-7', message_id: 'tell-1', message: 'delete the branch', expects_reply: false },
       { heading: 'Message from peer', reply: false },
     )
     expect(body).toContain('Message from peer')
