@@ -84,7 +84,9 @@ export function parseControlMessage(msg: Record<string, unknown>): InboundAsk | 
 }
 
 export interface InboundAskBodyOptions {
-  /** Which surface received the message; each mode has a different reader. */
+  /** The ask reader's surface: each mode has a different reader, so each names
+   * its own. A tell is always a peer's message, so it renders the peer heading
+   * regardless of the surface that received it. */
   heading: 'Ask from sub-agent' | 'Inbound ask' | 'Message from peer'
   /** Whether the reader can answer. A tell has no reply edge, so it says nothing about replying. */
   reply?: boolean
