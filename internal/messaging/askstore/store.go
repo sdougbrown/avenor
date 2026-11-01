@@ -443,8 +443,12 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 			}
 		}
 		s.recordReplyRouteLocked(e, fromRunID, now)
-		e.completed = true
-		e.outcome = messaging.OutcomeReplied
+		e.reply = reply
+		// Complete through the one path: a waiter still blocked on this edge from
+		// before the abandonment wakes now and reads the payload, instead of
+		// hanging until its own timer reports a timed-out the answer already
+		// resolved.
+		s.completeLocked(e, messaging.OutcomeReplied)
 		s.consumeLocked(e)
 		return messaging.OutcomeReplied, nil
 	}
@@ -703,12 +707,7 @@ func (s *Store) Peers() ([]messaging.Peer, error) {
 func (s *Store) Pending(sender, messageID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for key := range s.active {
-		if key.Sender == sender && key.MessageID == messageID {
-			return true
-		}
-	}
-	return false
+	return s.findSenderEdgeLocked(sender, messageID) != nil
 }
 
 // Abandoned reports whether the asker stopped waiting on an edge that is still
@@ -717,12 +716,20 @@ func (s *Store) Pending(sender, messageID string) bool {
 func (s *Store) Abandoned(sender, messageID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	e := s.findSenderEdgeLocked(sender, messageID)
+	return e != nil && e.abandoned
+}
+
+// findSenderEdgeLocked returns the live edge a sender holds for one message
+// ID, in any generation. The one scan both accessors share, so a change to how
+// live edges are looked up or keyed lands here alone.
+func (s *Store) findSenderEdgeLocked(sender, messageID string) *edge {
 	for key, e := range s.active {
 		if key.Sender == sender && key.MessageID == messageID {
-			return e.abandoned
+			return e
 		}
 	}
-	return false
+	return nil
 }
 
 // PendingCount reports the number of live edges owned by sender.

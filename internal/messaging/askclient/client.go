@@ -72,9 +72,10 @@ func (e *Error) Error() string {
 func (e *Error) Unwrap() error { return e.Err }
 
 // Pending reports whether the ask may still be outstanding. A wait that ended
-// without a reply leaves the edge open, so its answer can still arrive.
+// without a reply leaves the edge open, so its answer can still arrive — after
+// a timeout the same way as after an aborted wait.
 func (e *Error) Pending() bool {
-	return e.Outcome == messaging.OutcomePossiblyPending
+	return e.Outcome == messaging.OutcomePossiblyPending || e.Outcome == messaging.OutcomeTimedOut
 }
 
 // Ask sends one ask and waits for its terminal state. A caller-supplied
