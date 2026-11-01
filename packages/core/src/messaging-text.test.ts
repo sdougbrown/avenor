@@ -28,7 +28,7 @@ describe('newMsgID', () => {
     const now = 1_700_000_000_000
     const [version, deadline, nonce] = newMsgID(now).split('.')
     expect(version).toBe('av1')
-    expect(Number.parseInt(deadline, 36)).toBe(now + MAX_WAIT_MS)
+    expect(Number.parseInt(deadline, 36)).toBe(now + 2 * MAX_WAIT_MS)
     expect(nonce).toMatch(/^[0-9a-f]{32}$/)
   })
 

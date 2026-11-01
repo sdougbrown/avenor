@@ -580,18 +580,17 @@ describe('sub-agent broker mode (integration)', () => {
         message: 'is the build green?',
       })
       expect(result.details.outcome).toBe('timed-out')
-      expect(result.content[0].text).toContain('withdraw it with avenor_message action="withdraw"')
+      expect(result.content[0].text).toContain('the ask stays open for a later answer')
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()
     }
   })
 
-  it('withdraws a child ask when the tool call aborts', async () => {
+  it('keeps a child ask open when the tool call aborts', async () => {
     const fetchStub = stubBrokerFetch([], 0, 0, 0, {
       '/sessions': supervisorSessions,
       '/wait_reply': waitUntilAborted,
-      '/cancel_message': () => Response.json({ outcome: 'withdrawn' }),
     })
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     const controller = new AbortController()
@@ -603,15 +602,8 @@ describe('sub-agent broker mode (integration)', () => {
       controller.abort()
 
       const result = await pending
-      expect(result.details.outcome).toBe('withdrawn')
-      const messageId = String(
-        (fetchStub.calls.find(call => call.path === '/send')?.body.payload as Record<string, unknown>).id,
-      )
-      expect(fetchStub.calls.find(call => call.path === '/cancel_message')?.body).toMatchObject({
-        run_id: 'rt_child',
-        token: 'tok',
-        cancel_message_id: messageId,
-      })
+      expect(result.details.outcome).toBe('possibly-pending')
+      expect(fetchStub.calls.some(call => call.path === '/cancel_message')).toBe(false)
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()

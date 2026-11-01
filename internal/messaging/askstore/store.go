@@ -91,6 +91,11 @@ type edge struct {
 	outcome   messaging.Outcome
 	reply     *messaging.InboundMessage
 	remove    func()
+	// abandoned records that the asker stopped waiting. The edge stays live so
+	// a reply that arrives later still reaches the asker, and abandonedOutcome
+	// is what a later wait on the same id reports.
+	abandoned        bool
+	abandonedOutcome messaging.Outcome
 }
 
 // fence is a terminal record retained until its deadline.
@@ -103,8 +108,8 @@ type fence struct {
 	// delivered marks the dedup record for a delivered no-reply message: the ID
 	// is spent, but there is no ask edge and no terminal ask state.
 	delivered bool
-	// remove retracts a queued delivery whose waiter gave up. It is set for a
-	// timed-out or abandoned ask, so a later withdrawal can still unqueue it.
+	// remove retracts a queued delivery whose edge expired unanswered. It is set
+	// when an edge is pruned, so a later withdrawal can still unqueue it.
 	remove func()
 }
 
@@ -325,6 +330,13 @@ func (s *Store) Wait(ctx context.Context, key messaging.FenceKey, timeout time.D
 			s.mu.Unlock()
 			return messaging.WaitResult{Outcome: outcome, Reply: reply}, nil
 		}
+		if e.abandoned {
+			// A wait that already ended leaves the edge open for a late reply;
+			// a second wait reads that outcome instead of blocking on it.
+			outcome := e.abandonedOutcome
+			s.mu.Unlock()
+			return messaging.WaitResult{Outcome: outcome}, nil
+		}
 		s.mu.Unlock()
 		return s.waitOnEdge(ctx, e, timeout)
 	}
@@ -356,15 +368,27 @@ func (s *Store) waitOnEdge(ctx context.Context, e *edge, timeout time.Duration) 
 		return messaging.WaitResult{Outcome: outcome, Reply: reply}, nil
 	case <-timer.C:
 		s.mu.Lock()
-		s.completeLocked(e, messaging.OutcomeTimedOut)
+		s.abandonLocked(e, messaging.OutcomeTimedOut)
 		s.mu.Unlock()
 		return messaging.WaitResult{Outcome: messaging.OutcomeTimedOut}, nil
 	case <-ctx.Done():
 		s.mu.Lock()
-		s.completeLocked(e, messaging.OutcomePossiblyPending)
+		s.abandonLocked(e, messaging.OutcomePossiblyPending)
 		s.mu.Unlock()
 		return messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, ctx.Err()
 	}
+}
+
+// abandonLocked records that the asker stopped waiting. The ask keeps its edge
+// and its queued delivery until it is answered, withdrawn, or expires, so a
+// reply that arrives after the wait ended is delivered to the asker instead of
+// being refused.
+func (s *Store) abandonLocked(e *edge, outcome messaging.Outcome) {
+	if e.completed || e.abandoned {
+		return
+	}
+	e.abandoned = true
+	e.abandonedOutcome = outcome
 }
 
 // Reply routes a reply to the waiting sender and reports whether a live edge
@@ -401,6 +425,29 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 	} else if !json.Valid(payload) {
 		return messaging.OutcomeNotSent, fmt.Errorf("%w: reply body is not JSON", messaging.ErrInvalidRequest)
 	}
+	now := s.now()
+	if e.abandoned {
+		// The asker stopped waiting, so the answer is an ordinary inbound
+		// message now: it carries the id it answers and its own route key, which
+		// is what lets the asker answer the answer.
+		reply := &messaging.InboundMessage{
+			MessageID: messaging.ReplyID(e.key.MessageID),
+			FromRunID: fromRunID,
+			Sender:    fromRunID,
+			Kind:      "agent_message",
+			Payload:   payload,
+		}
+		if s.backend != nil {
+			if _, err := s.backend.Publish(e.key.Sender, *reply); err != nil {
+				return messaging.OutcomeNotSent, err
+			}
+		}
+		s.recordReplyRouteLocked(e, fromRunID, now)
+		e.completed = true
+		e.outcome = messaging.OutcomeReplied
+		s.consumeLocked(e)
+		return messaging.OutcomeReplied, nil
+	}
 	reply := &messaging.InboundMessage{
 		MessageID: e.key.MessageID,
 		FromRunID: fromRunID,
@@ -408,9 +455,29 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 		Kind:      "agent_message",
 		Payload:   payload,
 	}
+	s.recordReplyRouteLocked(e, fromRunID, now)
 	e.reply = reply
 	s.completeLocked(e, messaging.OutcomeReplied)
 	return messaging.OutcomeReplied, nil
+}
+
+// recordReplyRouteLocked gives the answer its own route, so the asker can
+// answer the answer. The route is keyed by the reply id and retained for the
+// ask window from the reply, matching a tell's route. The edge paid for its
+// slot already, so a route that cannot be charged costs only the chain and
+// never the delivery.
+func (s *Store) recordReplyRouteLocked(e *edge, fromRunID string, now time.Time) {
+	replyID := messaging.ReplyID(e.key.MessageID)
+	if _, ok := s.tellRoutes[replyID]; ok {
+		return
+	}
+	if s.fenceCountLocked() >= s.fenceCapacity {
+		return
+	}
+	s.recordTellRouteLocked(
+		messaging.FenceKey{Sender: fromRunID, MessageID: replyID, Generation: s.generation},
+		replyID, fromRunID, e.key.Sender, now.Add(DefaultAskTimeout), now,
+	)
 }
 
 // TellRoute reports the recorded route for a no-reply message: the sender the
@@ -542,9 +609,9 @@ func (s *Store) Withdraw(key messaging.FenceKey) (messaging.WithdrawResult, erro
 			return messaging.WithdrawResult{Outcome: messaging.OutcomeEdgeAbsent, Fence: s.ackLocked(key, f.deadline)}, nil
 		}
 		if f.remove != nil {
-			// The waiter gave up before its ask was answered; retracting the
-			// delivery now is what keeps the withdrawal from leaving a stale ask
-			// in the target's queue. An abandoned ask becomes withdrawn; a
+			// The ask expired unanswered and its delivery may still be queued;
+			// retracting it now is what keeps the withdrawal from leaving a stale
+			// ask in the target's queue. An abandoned ask becomes withdrawn; a
 			// timed-out one keeps its terminal outcome.
 			f.remove()
 			f.remove = nil
@@ -639,6 +706,20 @@ func (s *Store) Pending(sender, messageID string) bool {
 	for key := range s.active {
 		if key.Sender == sender && key.MessageID == messageID {
 			return true
+		}
+	}
+	return false
+}
+
+// Abandoned reports whether the asker stopped waiting on an edge that is still
+// open for a late reply. It is the shared test seam for the disconnect
+// regressions, the way PauseAdmission is the seam for the send-fence ones.
+func (s *Store) Abandoned(sender, messageID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, e := range s.active {
+		if key.Sender == sender && key.MessageID == messageID {
+			return e.abandoned
 		}
 	}
 	return false
@@ -742,11 +823,12 @@ func (s *Store) deadlineLocked(now time.Time, req AdmitRequest) (time.Time, erro
 
 // completeLocked terminally completes an edge exactly once. A replied edge
 // stays active until its waiter consumes the reply so a late wait can still
-// read it. A withdrawal retracts the queued ask at once; a timed-out or
-// abandoned ask keeps its retraction handle for a later withdrawal, because
-// its delivery may still be waiting in the target's queue. A lost ask stays
-// deliverable and a later reply falls back to fire-and-forget, as the
-// unextracted broker did.
+// read it. A withdrawal retracts the queued ask at once; an ask that expires
+// unanswered keeps its retraction handle for a later withdrawal, because its
+// delivery may still be waiting in the target's queue. An ask whose wait ended
+// is not completed here: the edge stays open for a reply that arrives late.
+// A lost ask stays deliverable and a later reply falls back to fire-and-forget,
+// as the unextracted broker did.
 func (s *Store) completeLocked(e *edge, outcome messaging.Outcome) {
 	if e.completed {
 		return

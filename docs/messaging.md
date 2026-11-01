@@ -89,13 +89,14 @@ it matters, the generation it expects. No transport reads ambient credentials or
 infers a sender. `Close` marks the transport closed, ends every in-flight call
 and joins its goroutines; a wait interrupted that way reports
 `possibly-pending` with its message ID retained, and a second `Close` returns
-nil. The ask client's cleanup withdrawal runs on its own five-second budget,
-separate from the wait it retracts.
+nil. A wait that ends — timed out, interrupted, or disconnected — never closes
+the ask: its edge stays open until it is answered, withdrawn, or its acceptance
+deadline passes.
 
 Limits: a wait is capped at ten minutes, a message ID's encoded acceptance
-deadline may not exceed ten minutes beyond the receiver's clock, a transport
-cleanup budget is five seconds, and a receive that names no limit drains 32
-messages.
+deadline may not exceed twenty minutes beyond the receiver's clock (one more
+wait window after the asker's own wait ends), a transport cleanup budget is five
+seconds, and a receive that names no limit drains 32 messages.
 
 ## Outcomes
 
@@ -106,7 +107,7 @@ messages.
 |---|---|
 | `sent` | The receiver accepted the message. For an ask, an edge exists; for a reply, the answer was delivered. |
 | `replied` | A reply was delivered to the waiting sender. |
-| `timed-out` | The bounded wait expired before a reply. |
+| `timed-out` | The bounded wait expired before a reply. The ask stays open for a later one. |
 | `withdrawn` | The sender completed a withdrawal. |
 | `edge-absent` | No edge or waiter matched the request. |
 | `auth-rejected` | The supplied credentials were refused. |

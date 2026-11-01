@@ -802,7 +802,7 @@ describe('host message provider', () => {
     expect(result.text).toBe('ask "av1.w.1" may still be pending; retry avenor_message action="withdraw" message_id="av1.w.1"')
   })
 
-  it('withdraws a wait that ended without a reply', async () => {
+  it('keeps the ask open when the wait ends without a reply', async () => {
     const client = fakeClient({
       messageWait: mock(async () => ({ outcome: 'timed-out', message_id: 'm' })),
     })
@@ -813,10 +813,10 @@ describe('host message provider', () => {
       timeout_ms: 50,
     })
     expect(result.outcome).toBe('timed-out')
-    expect(client.withdraw).toHaveBeenCalled()
+    expect(client.withdraw).not.toHaveBeenCalled()
   })
 
-  it('withdraws an ask when the tool call aborts', async () => {
+  it('keeps the ask open when the tool call aborts', async () => {
     const client = fakeClient({
       messageWait: mock((_params: Parameters<MessageClient['messageWait']>[0]) => new Promise<never>(() => {})),
     })
@@ -830,7 +830,7 @@ describe('host message provider', () => {
     controller.abort(new Error('cancelled'))
     const result = await pending
     expect(result.outcome).toBe('possibly-pending')
-    expect(client.withdraw).toHaveBeenCalledWith({ message_id: result.messageId, generation: 'gen-1' })
+    expect(client.withdraw).not.toHaveBeenCalled()
   })
 
   it('renders a reply payload without message as the full envelope', async () => {

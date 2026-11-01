@@ -2882,10 +2882,8 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 	key := m.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, m.broker.store.Generation())
 	outcome, err := m.broker.store.Reply(key, req.From.RunID, body)
 	if outcome == messaging.OutcomeReplied && err == nil {
-		// The ask is answered. Record the reply's own route so the asker can
-		// answer the answer, the same way a tell reply is routable. A route
-		// failure only costs the chain, not the delivery.
-		_ = m.broker.store.RecordTellRoute(messaging.ReplyID(req.MessageID), req.From.RunID, req.ToRunID, true)
+		// The ask is answered. The store recorded the reply's own route, so the
+		// asker can answer the answer, the same way a tell reply is routable.
 		return messaging.SendResult{Outcome: outcome, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, nil
 	}
 	if outcome != messaging.OutcomeEdgeAbsent || err != nil {

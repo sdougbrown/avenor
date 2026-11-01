@@ -36,8 +36,14 @@ export const MESSAGE_OUTCOMES = outcomeContract.outcomes.map(row => row.outcome)
 
 export type MessageOutcome = (typeof MESSAGE_OUTCOMES)[number]
 
-/** The ask acceptance window the message ids encode, in milliseconds. */
+/** The ask wait cap the message tool accepts, in milliseconds. */
 export const MAX_WAIT_MS = 600_000
+
+/**
+ * The acceptance window a minted message id encodes: two wait windows, so an
+ * ask keeps its edge for one more window after the asker's own wait ends.
+ */
+const MESSAGE_HORIZON_MS = 2 * MAX_WAIT_MS
 
 /** The bound `session_last_set` carries from the producer, in code points. */
 export const MAX_FINAL_OUTPUT_RUNES = 4096
@@ -169,11 +175,11 @@ function escapeNonPrintable(value: string): string {
 
 /**
  * Mint a versioned message id whose acceptance deadline is encoded inside it.
- * The zero-deadline form spans the shared wait window, exactly like
+ * The zero-deadline form spans the acceptance horizon, exactly like
  * messaging.NewMsgID(now, time.Time{}).
  */
 export function newMsgID(now = Date.now()): string {
-  const deadline = Math.trunc(now + MAX_WAIT_MS)
+  const deadline = Math.trunc(now + MESSAGE_HORIZON_MS)
   return `av1.${deadline.toString(36)}.${randomBytes(16).toString('hex')}`
 }
 

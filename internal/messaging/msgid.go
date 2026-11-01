@@ -20,11 +20,11 @@ const (
 )
 
 // NewMsgID mints a versioned message ID whose encoded acceptance deadline is
-// deadline. A zero deadline means now + MaxWait. The deadline must lie in the
-// future and within MaxAcceptanceHorizon of now.
+// deadline. A zero deadline means now + MaxAcceptanceHorizon. The deadline must
+// lie in the future and within MaxAcceptanceHorizon of now.
 func NewMsgID(now, deadline time.Time) (string, error) {
 	if deadline.IsZero() {
-		deadline = now.Add(MaxWait)
+		deadline = now.Add(MaxAcceptanceHorizon)
 	}
 	deadline = deadline.UTC().Truncate(time.Millisecond)
 	span := deadline.Sub(now)

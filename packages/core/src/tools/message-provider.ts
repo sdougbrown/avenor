@@ -373,16 +373,6 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
     return { peers: peerRecords(result), detail: result.peers_error || undefined }
   }
 
-  // A failed wait leaves no reader for the ask, so retract it the way
-  // askclient.withdrawFailedWait does; the cleanup budget is best effort.
-  async function retractAsk(messageId: string): Promise<void> {
-    try {
-      await client.messageWithdraw({ message_id: messageId, generation })
-    } catch {
-      // A failed cleanup must not replace the ask's own outcome.
-    }
-  }
-
   async function publicRunIdFor(runId: string): Promise<string | undefined> {
     const instance = Supervisor.getInstance(supervisorId)
     if (instance && instance.getRunsByRuntimeId(runId).length > 0) {
@@ -616,7 +606,6 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           ...(timeoutMs !== undefined ? { timeout_ms: timeoutMs } : {}),
         }), signal)
       } catch (error) {
-        await retractAsk(messageId)
         if (signal?.aborted) return { outcome: 'possibly-pending', messageId }
         const outcome = controlOutcome(error)
         if (!outcome) throw authorityError(error)
@@ -628,9 +617,9 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
           messageId: typeof carried === 'string' && carried ? carried : messageId,
         }
       }
-      // A wait that ended without a reply leaves the ask unread; retract it the
-      // way askclient does, so a timed-out target does not keep a live edge.
-      if (waited.outcome !== 'replied') await retractAsk(messageId)
+      // A wait that ended without a reply leaves the ask open: its edge lives
+      // until it is answered, withdrawn, or its deadline passes, so a later
+      // answer still arrives as an ordinary inbound message.
       const result: ProviderResult = {
         outcome: waited.outcome as MessageOutcome,
         messageId: firstNonEmpty(waited.message_id, messageId),

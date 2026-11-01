@@ -24,7 +24,7 @@ func TestMsgID(t *testing.T) {
 		}
 	})
 
-	t.Run("zero deadline uses the wait cap", func(t *testing.T) {
+	t.Run("zero deadline spans the acceptance horizon", func(t *testing.T) {
 		id, err := NewMsgID(now, time.Time{})
 		if err != nil {
 			t.Fatalf("NewMsgID: %v", err)
@@ -33,7 +33,7 @@ func TestMsgID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseMsgID: %v", err)
 		}
-		if want := now.Add(MaxWait); !got.Equal(want) {
+		if want := now.Add(MaxAcceptanceHorizon); !got.Equal(want) {
 			t.Fatalf("deadline = %s, want %s", got, want)
 		}
 	})

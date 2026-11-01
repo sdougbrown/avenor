@@ -2531,7 +2531,10 @@ func TestBrokerCancelDropOnFullChannel(t *testing.T) {
 	}
 }
 
-func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
+// TestBrokerWaitReplyDisconnectKeepsTheEdge pins that a wait whose connection
+// drops is not a withdrawal: the ask stays queued and its edge stays open, so a
+// reply that arrives later is delivered to the asker.
+func TestBrokerWaitReplyDisconnectKeepsTheEdge(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -2569,13 +2572,17 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Wait for the handler to process context cancellation.
+	// Wait for the handler to process context cancellation. The ask is not
+	// cleaned up: its edge stays open for a reply that arrives after the wait.
 	deadline := time.Now().Add(2 * time.Second)
-	for b.Store().Pending("disco_sender", msgID) {
+	for !b.Store().Abandoned("disco_sender", msgID) {
 		if time.Now().After(deadline) {
-			t.Fatal("expected the ask edge to be cleaned up on context cancellation")
+			t.Fatal("the cancelled wait never abandoned its edge")
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if !b.Store().Pending("disco_sender", msgID) {
+		t.Fatal("the abandoned ask lost its edge")
 	}
 
 	// The abandoned ask stays queued for the target: an unversioned ID records
@@ -2591,15 +2598,15 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 		t.Errorf("legacy abandonment recorded a fence: %+v", ack)
 	}
 
-	// A later reply cannot answer the abandoned edge and is delivered to the
-	// sender as fire-and-forget, so it reports sent rather than the absence it
-	// used to claim.
+	// The asker stopped waiting but the edge stayed open, so the reply answers
+	// it: the store delivers the answer to the asker's queue as an ordinary
+	// message tagged with the id it answers.
 	late := sendReply(t, b.Addr(), targetToken, "disco_target", "disco_sender", msgID, "late reply")
-	if late["status"] != http.StatusOK || late["note"] == nil {
-		t.Fatalf("late reply = %+v, want the fire-and-forget fallback", late)
+	if late["status"] != http.StatusOK || late["outcome"] != string(messaging.OutcomeReplied) {
+		t.Fatalf("late reply = %+v, want replied", late)
 	}
-	if late["outcome"] != string(messaging.OutcomeSent) {
-		t.Fatalf("late reply outcome = %v, want sent: the delivery happened", late["outcome"])
+	if _, noted := late["note"]; noted {
+		t.Fatalf("late reply = %+v, want the edge to answer it, not the fallback", late)
 	}
 	sender := b.GetRun("disco_sender")
 	sender.Mu.Lock()
@@ -2615,9 +2622,10 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	}
 }
 
-// TestBrokerVersionedWaitDisconnectCleanup pins the versioned counterpart: an
-// abandoned versioned wait keeps the queued ask and leaves a terminal fence.
-func TestBrokerVersionedWaitDisconnectCleanup(t *testing.T) {
+// TestBrokerVersionedWaitDisconnectKeepsTheEdge pins the versioned counterpart:
+// an abandoned versioned wait keeps the queued ask, fences nothing until the
+// reply answers it, and delivers that reply to the asker.
+func TestBrokerVersionedWaitDisconnectKeepsTheEdge(t *testing.T) {
 	b := New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start: %v", err)
@@ -2628,7 +2636,8 @@ func TestBrokerVersionedWaitDisconnectCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create sender: %v", err)
 	}
-	if _, err := b.CreateRun("vdisco_target", ""); err != nil {
+	targetToken, err := b.CreateRun("vdisco_target", "")
+	if err != nil {
 		t.Fatalf("create target: %v", err)
 	}
 	addr := b.Addr()
@@ -2654,11 +2663,14 @@ func TestBrokerVersionedWaitDisconnectCleanup(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for b.Store().Pending("vdisco_sender", msgID) {
+	for !b.Store().Abandoned("vdisco_sender", msgID) {
 		if time.Now().After(deadline) {
-			t.Fatal("expected the ask edge to be cleaned up on context cancellation")
+			t.Fatal("the cancelled wait never abandoned its edge")
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if !b.Store().Pending("vdisco_sender", msgID) {
+		t.Fatal("the abandoned ask lost its edge")
 	}
 
 	target := b.GetRun("vdisco_target")
@@ -2668,9 +2680,26 @@ func TestBrokerVersionedWaitDisconnectCleanup(t *testing.T) {
 	if queued != 1 {
 		t.Fatalf("target queue = %d, want the abandoned ask retained", queued)
 	}
-	ack, ok := b.Store().Fence(messaging.FenceKey{Sender: "vdisco_sender", MessageID: msgID, Generation: gen})
-	if !ok || !ack.Terminal {
-		t.Fatalf("fence = (%+v, %v), want a terminal record for the abandoned ask", ack, ok)
+	if ack, ok := b.Store().Fence(messaging.FenceKey{Sender: "vdisco_sender", MessageID: msgID, Generation: gen}); ok {
+		t.Fatalf("abandoned ask recorded a terminal fence: %+v", ack)
+	}
+
+	// The reply answers the open edge and is delivered to the asker as an
+	// ordinary message tagged with the id it answers.
+	late := sendReply(t, addr, targetToken, "vdisco_target", "vdisco_sender", msgID, "late answer")
+	if late["status"] != http.StatusOK || late["outcome"] != string(messaging.OutcomeReplied) {
+		t.Fatalf("late reply = %+v, want replied", late)
+	}
+	got := pollAgentMessages(t, addr, "vdisco_sender", senderToken)
+	if len(got) != 1 {
+		t.Fatalf("asker poll = %v, want the late reply delivered", got)
+	}
+	payload, ok := got[0]["payload"].(map[string]any)
+	if !ok || payload["reply_to"] != msgID {
+		t.Fatalf("late reply payload = %v, want the id it answers", got[0]["payload"])
+	}
+	if ack, ok := b.Store().Fence(messaging.FenceKey{Sender: "vdisco_sender", MessageID: msgID, Generation: gen}); !ok || !ack.Terminal {
+		t.Fatalf("fence = (%+v, %v), want the answered ask fenced", ack, ok)
 	}
 }
 
@@ -2875,8 +2904,8 @@ func TestLocalRouterOutcomeFieldsAdditive(t *testing.T) {
 	addr := b.Addr()
 	gen := b.Store().Generation()
 
-	// The legacy path keeps its fields and its semantics: an unversioned ask
-	// records no terminal fence, so a later withdrawal reports absence.
+	// The legacy path keeps its fields: an unversioned ask records no fence, so
+	// an id that never carried an ask still reports absence.
 	legacyID := "additive-ask"
 	status, sent := postBroker(t, addr, "send", askBody(senderToken, "additive_sender", "additive_target", legacyID, ""))
 	if status != http.StatusOK {
@@ -2899,10 +2928,19 @@ func TestLocalRouterOutcomeFieldsAdditive(t *testing.T) {
 	if waited["outcome"] != string(messaging.OutcomeTimedOut) {
 		t.Fatalf("wait outcome = %v", waited["outcome"])
 	}
-	status, absent := postBroker(t, addr, "cancel_message", fmt.Sprintf(
+	// The timed-out ask kept its edge, so the legacy withdrawal retracts it and
+	// reports the terminal outcome next to the legacy fields.
+	status, withdrawn := postBroker(t, addr, "cancel_message", fmt.Sprintf(
 		`{"run_id":"additive_sender","token":%q,"cancel_message_id":%q}`, senderToken, legacyID))
+	if status != http.StatusOK || withdrawn["outcome"] != string(messaging.OutcomeWithdrawn) {
+		t.Fatalf("legacy cancel = (%d, %v), want 200 withdrawn", status, withdrawn)
+	}
+	// An unversioned id that never carried an ask records no fence, so its
+	// withdrawal reports absence.
+	status, absent := postBroker(t, addr, "cancel_message", fmt.Sprintf(
+		`{"run_id":"additive_sender","token":%q,"cancel_message_id":"additive-never-sent"}`, senderToken))
 	if status != http.StatusNotFound || absent["outcome"] != string(messaging.OutcomeEdgeAbsent) {
-		t.Fatalf("legacy cancel = (%d, %v), want 404 edge-absent", status, absent)
+		t.Fatalf("absent legacy cancel = (%d, %v), want 404 edge-absent", status, absent)
 	}
 
 	// A versioned ask keeps a terminal fence, so its withdrawal is reported as

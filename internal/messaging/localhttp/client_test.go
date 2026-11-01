@@ -587,6 +587,17 @@ func TestLocalWireFixture(t *testing.T) {
 	}
 	assertFields(t, "wait_timeout", doc.ResponseFields["wait_timeout"], timedOut)
 
+	status, duplicate := rawPost(t, addr, doc.Paths["send"], build("send", map[string]any{
+		"message_id": timeoutID, "payload": map[string]any{"message": "again"},
+	}))
+	if status != http.StatusConflict {
+		t.Fatalf("duplicate send = (%d, %v)", status, duplicate)
+	}
+	assertFields(t, "error", doc.ResponseFields["error"], duplicate)
+	if duplicate["code"] != "duplicate-message-id" {
+		t.Fatalf("duplicate send code = %v", duplicate["code"])
+	}
+
 	status, withdrawn := rawPost(t, addr, doc.Paths["withdraw"], build("withdraw", map[string]any{
 		"cancel_message_id": timeoutID,
 	}))
@@ -607,17 +618,6 @@ func TestLocalWireFixture(t *testing.T) {
 		t.Fatalf("absent withdraw = (%d, %v)", status, absent)
 	}
 	assertFields(t, "withdraw_absent", doc.ResponseFields["withdraw_absent"], absent)
-
-	status, duplicate := rawPost(t, addr, doc.Paths["send"], build("send", map[string]any{
-		"message_id": timeoutID, "payload": map[string]any{"message": "again"},
-	}))
-	if status != http.StatusConflict {
-		t.Fatalf("duplicate send = (%d, %v)", status, duplicate)
-	}
-	assertFields(t, "error", doc.ResponseFields["error"], duplicate)
-	if duplicate["code"] != "duplicate-message-id" {
-		t.Fatalf("duplicate send code = %v", duplicate["code"])
-	}
 
 	status, polled := rawPostList(t, addr, doc.Paths["receive"], build("receive", map[string]any{
 		"run_id": credsB.RunID, "token": credsB.Token,

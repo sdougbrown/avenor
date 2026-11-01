@@ -11,7 +11,10 @@ every surface returns the same snake_case result object
 
 - `tell` — deliver text, no reply edge. Result: `sent` with `message_id`.
 - `ask` — deliver text and wait for one reply. `timeout_ms` is a whole number of
-  milliseconds, `0`–`600000`; absent or zero uses the shared 600 s cap. Results:
+  milliseconds, `0`–`600000`; absent or zero uses the shared 600 s cap. The wait
+  is bounded, but the ask keeps its edge until it is answered, withdrawn, or its
+  acceptance deadline passes (twenty minutes), so an answer that arrives after
+  the wait is delivered to the asker as an ordinary inbound message. Results:
   `replied` (with `reply`), `timed-out`, `withdrawn`, `edge-absent`,
   `possibly-pending`, `lost`, `not-sent`, `auth-rejected`.
 - `reply` — answer an inbound message: `reply_to` is the message id, `message`
@@ -21,9 +24,10 @@ every surface returns the same snake_case result object
   (`<id>.reply`) and the id it answers, so the recipient can answer the answer;
   an `ask` result with outcome `replied` carries that route key as `reply_id`. A
   message id with no route answers `edge-absent`.
-- `withdraw` — retire a pending ask by `message_id`. Only a pending ask is
-  retracted: a terminal one keeps its own outcome, so a timed-out ask answers
-  `timed-out` with `ask "<id>" timed out; nothing was withdrawn`.
+- `withdraw` — retire a pending ask by `message_id`. A timed-out ask keeps its
+  edge, so it is still pending and a withdrawal retracts it; only an ask that
+  already ended (replied, withdrawn, expired) keeps its own outcome, reporting
+  `ask "<id>" timed out; nothing was withdrawn`.
 - `resume` — continue a finished run with a new public run id and distinct
   `sentinel_file`/`on_event` paths. Without an explicit label, warm continuation
   keeps a harness name; otherwise the prior label gains `-followup`.
@@ -121,10 +125,12 @@ The same host session drives an `opencode-acp` child over the Go child surface
 "opencode-acp"` and a prompt that runs: `peers`, `peers rename`, `tell
 supervisor`, `ask` the busy sleeper with `timeout_ms` 1500, `withdraw` that
 `message_id`, `resume target "self"`, `control_reply`, `peers last supervisor`,
-then write its results to `$SCRATCH/child-d.json`. The withdraw in step 5 is a
-`timed-out` ask, which is terminal: it reports `timed-out` with `ask "<id>"
-timed out; nothing was withdrawn`, never `withdrawn` (`withdraw reports a
-timed-out ask` in `schemas/message_route.conformance.json`).
+then write its results to `$SCRATCH/child-d.json`. The withdraw in step 5
+retracts the timed-out ask: the wait ended but the edge stayed open, so the
+withdrawal reports `withdrawn` and unqueues it. Only an ask that already ended
+reports its own outcome with `ask "<id>" timed out; nothing was withdrawn`
+(`withdraw reports a timed-out ask` in `schemas/message_route.conformance.json`
+pins that rendering).
 
 **The acceptance mesh.** Three agents in the one host session: the host plus
 `mesh-a` and `mesh-b` (both `backend "pi"`, spawned with `wait false`). Each

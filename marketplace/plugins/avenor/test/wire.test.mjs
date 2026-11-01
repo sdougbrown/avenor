@@ -24,7 +24,7 @@ test('mintMessageID: versioned shape with an encoded ten-minute horizon', () => 
   const id = mintMessageID(now)
   const parts = id.split('.')
   assert.equal(parts[0], 'av1')
-  assert.equal(parseInt(parts[1], 36), now + 600000)
+  assert.equal(parseInt(parts[1], 36), now + 1200000)
   assert.match(parts[2], /^[0-9a-f]{32}$/)
   // Two mints never collide.
   assert.notEqual(id, mintMessageID(now))
@@ -189,7 +189,7 @@ test('renderAskFailure: the shared sentences, byte-identical to messaging-text',
   )
   assert.equal(
     renderAskFailure('av1.m.1', 'mesh-a', 'timed-out'),
-    'no reply to "av1.m.1" from "mesh-a" before the timeout; withdraw it with avenor_message action="withdraw" message_id="av1.m.1"',
+    'no reply to "av1.m.1" from "mesh-a" before the timeout; the ask stays open for a later answer, and avenor_message action="withdraw" message_id="av1.m.1" drops it',
   )
   assert.equal(
     renderAskFailure('av1.m.1', 'mesh-a', 'not-sent'),

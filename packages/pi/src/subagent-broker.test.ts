@@ -249,26 +249,24 @@ describe('child broker ask', () => {
     expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 
-  it('reports a broker-side wait timeout as timed-out, not withdrawn', async () => {
+  it('reports a broker-side wait timeout as timed-out and keeps the edge', async () => {
     const { calls, fetchImpl } = stubFetch({
       '/send': () => Response.json({ queued: true }),
       '/wait_reply': () => Response.json({ timeout: true, outcome: 'timed-out' }, { status: 504 }),
-      '/cancel_message': () => Response.json({ outcome: 'withdrawn' }),
     })
     const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.9')
     expect(result.outcome).toBe('timed-out')
-    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 
-  it('lets its own deadline time a pending wait out and cancels the ask', async () => {
+  it('lets its own deadline time a pending wait out without cancelling the ask', async () => {
     const { calls, fetchImpl } = stubFetch({
       '/send': () => Response.json({ queued: true }),
       '/wait_reply': init => waitUntilAborted(init),
-      '/cancel_message': () => Response.json({ outcome: 'withdrawn' }),
     })
     const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.10', 5)
     expect(result.outcome).toBe('timed-out')
-    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 
   it('reports a send whose dial never opened as not-sent without spending a cancel', async () => {
@@ -301,28 +299,17 @@ describe('child broker ask', () => {
     expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 
-  it('reports possibly-pending when the cleanup cannot be confirmed', async () => {
+  it('reports possibly-pending when the wait fails without a broker outcome', async () => {
     const { calls, fetchImpl } = stubFetch({
       '/send': () => Response.json({ queued: true, outcome: 'sent' }),
       '/wait_reply': () => Promise.reject(new Error('connection reset')),
-      '/cancel_message': () => new Response('unavailable', { status: 503 }),
     })
     const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.5')
     expect(result.outcome).toBe('possibly-pending')
-    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 
-  it('reports a wait failure whose cleanup confirmed the edge gone as edge-absent', async () => {
-    const { fetchImpl } = stubFetch({
-      '/send': () => Response.json({ queued: true, outcome: 'sent' }),
-      '/wait_reply': () => Promise.reject(new Error('connection reset')),
-      '/cancel_message': () => new Response('no pending ask', { status: 404 }),
-    })
-    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.11')
-    expect(result).toEqual({ outcome: 'edge-absent', messageId: 'av1.m.11' })
-  })
-
-  it('withdraws a child ask when the caller aborts', async () => {
+  it('keeps a child ask open when the caller aborts', async () => {
     const controller = new AbortController()
     const { calls, fetchImpl } = stubFetch({
       '/send': () => Response.json({ queued: true }),
@@ -332,14 +319,13 @@ describe('child broker ask', () => {
         if (signal.aborted) return reject(signal.reason)
         signal.addEventListener('abort', () => reject(signal.reason), { once: true })
       }),
-      '/cancel_message': () => Response.json({ outcome: 'withdrawn' }),
     })
     const pending = createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.6', undefined, controller.signal)
     await new Promise(resolve => setTimeout(resolve, 5))
     controller.abort()
     const result = await pending
-    expect(result.outcome).toBe('withdrawn')
-    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
+    expect(result.outcome).toBe('possibly-pending')
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
 })
 
@@ -598,7 +584,7 @@ describe('child broker generation pin', () => {
       .toEqual([generation, generation])
   })
 
-  it('stamps the generation on a tell and on every ask withdrawal', async () => {
+  it('stamps the generation on a tell and on a withdrawal', async () => {
     const { calls, fetchImpl } = generationBroker({ waitOutcome: 'timed-out' })
     const broker = createBrokerChildBroker(env, fetchImpl)
     expect((await broker.tell('supervisor', 'hi', 'av1.t.20')).outcome).toBe('sent')
@@ -606,8 +592,10 @@ describe('child broker generation pin', () => {
     expect((await broker.withdraw('av1.m.23')).outcome).toBe('withdrawn')
 
     expect(calls.find(call => call.url.endsWith('/send'))?.body.generation).toBe(generation)
+    // The ask keeps its edge after the wait, so only the explicit withdrawal
+    // reaches /cancel_message.
     expect(calls.filter(call => call.url.endsWith('/cancel_message')).map(call => call.body.generation))
-      .toEqual([generation, generation])
+      .toEqual([generation])
   })
 
   it('reports an ask whose generation pin was refused as auth-rejected without sending', async () => {
