@@ -1089,6 +1089,16 @@ func TestResumeReturnsTheLiveSessionItAlreadyServes(t *testing.T) {
 	// The dead process is reaped before the resume, so the provider sees the
 	// death instead of racing the reap.
 	awaitNoPooProcesses(t, fixture.settings)
+	// The kernel can drop the process before the client's own reap is
+	// recorded: wait for the client to see the exit too.
+	provider.mu.Lock()
+	dead := provider.client
+	provider.mu.Unlock()
+	select {
+	case <-dead.waitDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the client never saw its process exit")
+	}
 	resumed, err = provider.Resume(context.Background(), session.SessionID)
 	if err != nil {
 		t.Fatalf("Resume after the process died: %v", err)
