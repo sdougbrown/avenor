@@ -1297,17 +1297,23 @@ func TestCloseAnswersWhileARunIsLive(t *testing.T) {
 	}
 }
 
+// killRecordedDescendant kills the descendant whose pid the helper wrote,
+// so a test that leaves it holding the pipes leaves no process behind.
+func killRecordedDescendant(pidFile string) {
+	if raw, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(string(raw)); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+}
+
 func TestStartReapsWhenDescendantHoldsPipes(t *testing.T) {
 	t.Setenv(helperEnv, "exit-with-descendant")
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	t.Setenv("AVENOR_POO_HELPER_PID_FILE", pidFile)
 	provider := NewWithOptions(avruntime.StartOptions{})
 	t.Cleanup(func() {
-		if raw, err := os.ReadFile(pidFile); err == nil {
-			if pid, err := strconv.Atoi(string(raw)); err == nil {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			}
-		}
+		killRecordedDescendant(pidFile)
 		_ = provider.Close()
 	})
 
@@ -1330,11 +1336,7 @@ func TestExitCauseOmitsForcedPipeClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if raw, err := os.ReadFile(pidFile); err == nil {
-			if pid, err := strconv.Atoi(string(raw)); err == nil {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			}
-		}
+		killRecordedDescendant(pidFile)
 		_ = c.shutdown()
 	})
 	_, _ = c.initialize(context.Background(), []int{1})
