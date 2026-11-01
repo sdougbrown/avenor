@@ -94,12 +94,14 @@ test('parseControlMessage: reply rows and control rows are kept apart', () => {
   assert.equal(replyRow.messageId, 'a1.reply')
   // Control rows are not peer messages at all.
   assert.equal(parseControlMessage({ type: 'continue', payload: { message: 'x' } }), null)
-  // A string payload parses; a broken one does not.
+  // A string payload parses; a broken one does not. The ask flag survives the
+  // parse: a string-payload ask must not degrade into a tell.
   const stringPayload = parseControlMessage({
     type: 'agent_message', sender: 'P',
-    payload: JSON.stringify({ id: 'a2', from_run_id: 'peer', message: 'hi' }),
+    payload: JSON.stringify({ id: 'a2', from_run_id: 'peer', message: 'hi', expects_reply: true }),
   })
   assert.equal(stringPayload.message, 'hi')
+  assert.equal(stringPayload.expectsReply, true)
   assert.equal(parseControlMessage({
     type: 'agent_message', sender: 'P', payload: '{oops',
   }), null)

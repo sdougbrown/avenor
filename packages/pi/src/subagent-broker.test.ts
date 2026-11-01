@@ -45,6 +45,16 @@ describe('parseControlMessage', () => {
     })).toEqual({ from_run_id: 'supervisor', message_id: 'ask-2', message: 'hi', expects_reply: false })
   })
 
+  it('reads expects_reply from a string payload, not from a second parse', () => {
+    // A regression that reads the field from the wrong place after JSON.parse
+    // would turn every string-payload ask into a tell and strand the asker.
+    const ask = parseControlMessage({
+      type: 'agent_message',
+      payload: JSON.stringify({ id: 'ask-str', from_run_id: 'supervisor', message: 'hello', expects_reply: true }),
+    })
+    expect(ask!.expects_reply).toBe(true)
+  })
+
   it('takes the sender from the broker-stamped row, not from the payload', () => {
     const ask = parseControlMessage({
       type: 'agent_message',
