@@ -1334,6 +1334,8 @@ func TestStartRefusesAnUnknownProfileAndModel(t *testing.T) {
 				t.Fatalf("Start error = %q, want %q", err, want)
 			}
 		}
+		// The refused create leaves no process running.
+		awaitNoPooProcesses(t, fixture.settings)
 	})
 
 	t.Run("model", func(t *testing.T) {
@@ -1350,6 +1352,8 @@ func TestStartRefusesAnUnknownProfileAndModel(t *testing.T) {
 				t.Fatalf("Start error = %q, want %q", err, want)
 			}
 		}
+		// The refused create leaves no process running.
+		awaitNoPooProcesses(t, fixture.settings)
 	})
 }
 

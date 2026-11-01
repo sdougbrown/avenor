@@ -100,6 +100,9 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 	info, err := c.createSession(ctx, params)
 	if err != nil {
+		// A refused create leaves nothing running, so a later attempt
+		// starts clean.
+		p.discardProcess(c)
 		return runtime.Session{}, describeCreateFailure(merged, err)
 	}
 
