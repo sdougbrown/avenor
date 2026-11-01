@@ -1,8 +1,8 @@
 // Package poo drives a poo binary over its public stdio protocol.
 //
 // One process serves one avenor session: the provider starts the binary the
-// roster entry resolved, performs the handshake, opens a session, routes its
-// events and owns its teardown. Permission answers and resume are Stage 3.
+// roster entry resolved, performs the handshake, opens or loads a session,
+// routes its events and owns its teardown.
 package poo
 
 import (
@@ -20,8 +20,9 @@ import (
 
 const backendID = "poo"
 
-// ErrNotImplemented is the boundary Stage 2 deliberately leaves in place.
-var ErrNotImplemented = errors.New("the poo backend does not implement this yet")
+// errOneSession is the refusal a provider that already serves a session gives:
+// poo runs one session per process.
+var errOneSession = errors.New("poo runs one session per process")
 
 // Provider is the poo backend: one process, one session.
 type Provider struct {
@@ -79,17 +80,14 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	open := len(p.sessions)
 	p.mu.Unlock()
 	if open > 0 {
-		return runtime.Session{}, errors.New("poo runs one session per process")
+		return runtime.Session{}, errOneSession
 	}
 	workingDir, err := absoluteDir(merged.Dir)
 	if err != nil {
 		return runtime.Session{}, err
 	}
-	c, err := p.ensureClient(ctx, merged)
+	c, err := p.openProcess(ctx, merged)
 	if err != nil {
-		return runtime.Session{}, err
-	}
-	if _, err := c.initialize(ctx, p.versions()); err != nil {
 		return runtime.Session{}, err
 	}
 
@@ -130,8 +128,81 @@ func describeCreateFailure(opts runtime.StartOptions, err error) error {
 	}
 }
 
-func (p *Provider) Resume(context.Context, string) (runtime.Session, error) {
-	return runtime.Session{}, ErrNotImplemented
+func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
+	if sessionID == "" {
+		return runtime.Session{}, errors.New("session id is required")
+	}
+	// The launch is the identity the session was created with: the supervisor
+	// resolves it from the session's own record before this provider exists, so
+	// the process that resumes is the one the session belongs to.
+	merged := runtime.MergeStartOptions(p.opts, runtime.StartOptions{})
+	p.mu.Lock()
+	open := len(p.sessions)
+	p.mu.Unlock()
+	if open > 0 {
+		return runtime.Session{}, errOneSession
+	}
+	c, err := p.openProcess(ctx, merged)
+	if err != nil {
+		return runtime.Session{}, err
+	}
+	info, err := c.loadSession(ctx, protocol.LoadParams{SessionID: sessionID})
+	if err != nil {
+		p.discardProcess(c)
+		return runtime.Session{}, describeLoadFailure(sessionID, err)
+	}
+
+	p.mu.Lock()
+	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
+	p.mu.Unlock()
+
+	return runtime.Session{
+		SessionID: info.SessionID,
+		Backend:   backendID,
+		Dir:       merged.Dir,
+		PID:       c.pid(),
+	}, nil
+}
+
+// describeLoadFailure names why a session could not be continued. A session the
+// store does not hold is the unresumable-session failure the other backends
+// report; a session this build and its settings no longer fit is reported as
+// such, because another attempt with this session id cannot help.
+func describeLoadFailure(sessionID string, err error) error {
+	switch refusedCode(err) {
+	case protocol.DataSessionNotFound:
+		return fmt.Errorf("session not found: %s (poo holds no records for it: an ephemeral session keeps none)", sessionID)
+	case protocol.DataSessionIncompatible, protocol.DataUnknownModel, protocol.DataUnknownProfile:
+		return fmt.Errorf("cannot resume session %q: the session does not fit this build and settings: %w", sessionID, err)
+	default:
+		return fmt.Errorf("resume session %q: %w", sessionID, err)
+	}
+}
+
+// openProcess starts the process and completes the handshake. A process that
+// cannot complete the handshake is torn down, so a refused start or resume
+// leaves nothing running.
+func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (*client, error) {
+	c, err := p.ensureClient(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.initialize(ctx, p.versions()); err != nil {
+		p.discardProcess(c)
+		return nil, err
+	}
+	return c, nil
+}
+
+// discardProcess tears down a process that never opened a session, so a refused
+// start or resume leaves no child behind and a later attempt starts clean.
+func (p *Provider) discardProcess(c *client) {
+	p.mu.Lock()
+	if p.client == c {
+		p.client = nil
+	}
+	p.mu.Unlock()
+	_ = c.shutdown()
 }
 
 func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) error {
@@ -355,13 +426,12 @@ func (p *Provider) AnswerPermission(_ context.Context, sessionID, requestID stri
 }
 
 // Capabilities describes what this backend can do now. A permission ask is
-// relayed and answered; resume is not implemented, so a resume reports the
-// boundary instead of pretending to work.
+// relayed and answered, and a recorded session is resumed in a fresh process.
 func (p *Provider) Capabilities(context.Context) (runtime.Capabilities, error) {
 	return runtime.Capabilities{
 		Backend:             backendID,
 		Permissions:         true,
-		Resume:              false,
+		Resume:              true,
 		ExternalServerURL:   false,
 		SubprocessDiscovery: false,
 		ModelSelection:      true,

@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -722,6 +723,300 @@ func TestPermissionRelayRejectsAnUnknownAsk(t *testing.T) {
 	}
 	if !endpoint.sawToolText("relay-known") {
 		t.Fatalf("the model never read the allowed call's output; tool messages were %#v", endpoint.toolTexts())
+	}
+}
+
+// rewriteSettings replaces the fixture's settings document, so a test can
+// change what the next process reads without moving the launch.
+func (f pooFixture) rewriteSettings(t *testing.T, mutate func(map[string]any)) {
+	t.Helper()
+	raw, err := os.ReadFile(f.settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	mutate(document)
+	encoded, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.settings, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sessionHistory reads a session's recorded history from the provider's own
+// process, so a test can see what a resumed session restored.
+func sessionHistory(t *testing.T, provider *Provider, sessionID string) []protocol.HistoryItem {
+	t.Helper()
+	c, err := provider.getClient()
+	if err != nil {
+		t.Fatalf("the resumed provider has no process: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	raw, rpcErr, err := c.call(ctx, protocol.MethodSessionHistory, protocol.HistoryParams{SessionID: sessionID, Limit: 500})
+	if err != nil {
+		t.Fatalf("session/history: %v", err)
+	}
+	if rpcErr != nil {
+		t.Fatalf("session/history: %s", describeRefusal(rpcErr))
+	}
+	var page protocol.HistoryResult
+	if err := json.Unmarshal(raw, &page); err != nil {
+		t.Fatalf("decode session/history result: %v", err)
+	}
+	return page.Items
+}
+
+// livePooProcesses returns the pids whose command line names a fixture's
+// settings file. The path is unique per fixture, so this finds only the
+// processes the test itself started.
+func livePooProcesses(t *testing.T, settings string) []int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Skipf("cannot read /proc: %v", err)
+	}
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(cmdline), settings) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// awaitNoPooProcesses fails when a poo process the fixture started still runs.
+// Teardown reaps the process before it returns, so the wait only covers the
+// window between the signal and the kernel dropping the entry.
+func awaitNoPooProcesses(t *testing.T, settings string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		pids := livePooProcesses(t, settings)
+		if len(pids) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("poo processes still running for this fixture: %v", pids)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestResumeContinuesAnInterruptedRun proves a resume after a crash continues
+// the session the dead process left: the interrupted call is in the restored
+// history, and a follow-up prompt carries the prior turn to the model.
+func TestResumeContinuesAnInterruptedRun(t *testing.T) {
+	endpoint := newFakeEndpoint(t,
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": "sleep 5"}}}},
+		scriptedTurn{Text: "the answer after the resume"},
+	)
+	fixture := newPooFixture(t, endpoint)
+	opts := fixture.startOptions(t)
+
+	first, session, log, _ := startProvider(t, opts)
+	done := startPrompt(first, session.SessionID, "do the thing")
+	log.waitFor(t, "tool.call", 60*time.Second)
+
+	proc, err := os.FindProcess(session.PID)
+	if err != nil {
+		t.Fatalf("find poo process: %v", err)
+	}
+	if err := proc.Kill(); err != nil {
+		t.Fatalf("kill poo process: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Prompt returned nil after the process was killed")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Prompt did not fail after the process was killed")
+	}
+	// The dead child's stdin is already closed, so teardown reports the write
+	// it could not make; the process itself is gone.
+	_ = first.Close()
+
+	second := NewWithOptions(opts)
+	t.Cleanup(func() { _ = second.Close() })
+	resumed, err := second.Resume(context.Background(), session.SessionID)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if resumed.SessionID != session.SessionID {
+		t.Fatalf("Resume returned session %q, want %q", resumed.SessionID, session.SessionID)
+	}
+	if resumed.Backend != backendID {
+		t.Fatalf("Resume reported backend %q, want %q", resumed.Backend, backendID)
+	}
+	if resumed.PID == 0 {
+		t.Fatal("Resume reported no pid")
+	}
+	// The dead process is gone and the resumed one is the only poo this
+	// fixture runs, which is what makes the teardown check below meaningful.
+	if live := livePooProcesses(t, fixture.settings); len(live) != 1 || live[0] != resumed.PID {
+		t.Fatalf("running poo processes = %v, want only the resumed %d", live, resumed.PID)
+	}
+
+	history := sessionHistory(t, second, session.SessionID)
+	var sawInterrupted, sawPrompt bool
+	for _, item := range history {
+		if item.Type == "tool_result" && item.Outcome == "interrupted" {
+			sawInterrupted = true
+		}
+		if item.Type == "message" && strings.Contains(item.Text, "do the thing") {
+			sawPrompt = true
+		}
+	}
+	if !sawInterrupted {
+		t.Fatalf("the restored history holds no interrupted call: %#v", history)
+	}
+	if !sawPrompt {
+		t.Fatalf("the restored history holds no record of the interrupted run's prompt: %#v", history)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := second.Events(ctx, session.SessionID)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	after := collect(ctx, ch)
+	awaitPrompt(t, startPrompt(second, session.SessionID, "carry on"))
+	end := after.waitFor(t, "session.end", 60*time.Second)
+	if reason, _ := end.Fields["stop_reason"].(string); reason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: the resumed session did not carry on", reason)
+	}
+	if code, _ := events.Int64(end.Fields["exit_code"]); code != 0 {
+		t.Fatalf("exit_code = %d, want 0", code)
+	}
+
+	texts := endpoint.promptTexts()
+	carried := texts[len(texts)-1]
+	if !strings.Contains(carried, "do the thing") || !strings.Contains(carried, "carry on") {
+		t.Fatalf("the resumed request carried %q, want the interrupted prompt and the new one", carried)
+	}
+
+	if err := second.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	awaitNoPooProcesses(t, fixture.settings)
+}
+
+// TestResumeRefusesASessionTheSettingsNoLongerFit proves the session's own
+// model is what decides: when the settings stop naming it, the resume fails as
+// an unfitting session instead of continuing under another model, and the
+// process the attempt started is reaped.
+func TestResumeRefusesASessionTheSettingsNoLongerFit(t *testing.T) {
+	endpoint := newFakeEndpoint(t, scriptedTurn{Text: "hello from poo"})
+	fixture := newPooFixture(t, endpoint)
+
+	first, session, _, _ := startProvider(t, fixture.startOptions(t))
+	awaitPrompt(t, startPrompt(first, session.SessionID, "say hello"))
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	fixture.rewriteSettings(t, func(document map[string]any) {
+		document["models"] = map[string]any{
+			"other-model": map[string]any{
+				"endpoint":      "fake",
+				"model_id":      "other-model",
+				"api":           "chat_completions",
+				"tools_mode":    "native",
+				"ops":           []string{"chat"},
+				"context_limit": 200000,
+			},
+		}
+		document["roles"] = map[string]any{"chat": "other-model"}
+	})
+
+	provider := NewWithOptions(fixture.startOptions(t))
+	t.Cleanup(func() { _ = provider.Close() })
+	_, err := provider.Resume(context.Background(), session.SessionID)
+	if err == nil {
+		t.Fatal("Resume accepted a session whose recorded model the settings no longer name")
+	}
+	for _, want := range []string{"cannot resume session", session.SessionID, "does not fit this build and settings", "unknown_model"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Resume error = %q, want %q", err, want)
+		}
+	}
+	if _, err := provider.getClient(); err == nil {
+		t.Fatal("a refused resume left its process running")
+	}
+	awaitNoPooProcesses(t, fixture.settings)
+}
+
+// TestResumeRefusesASessionWithNoRecords proves both ways a session cannot be
+// continued: one created ephemeral, which keeps no records, and one this poo
+// has never seen. Both are the unresumable-session failure, and neither leaves
+// a process behind.
+func TestResumeRefusesASessionWithNoRecords(t *testing.T) {
+	t.Run("ephemeral", func(t *testing.T) {
+		endpoint := newFakeEndpoint(t, scriptedTurn{Text: "hello from poo"})
+		fixture := newPooFixture(t, endpoint)
+		fixture.rewriteSettings(t, func(document map[string]any) {
+			document["session"].(map[string]any)["mode"] = "ephemeral"
+		})
+
+		first, session, _, _ := startProvider(t, fixture.startOptions(t))
+		awaitPrompt(t, startPrompt(first, session.SessionID, "say hello"))
+		if err := first.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		provider := NewWithOptions(fixture.startOptions(t))
+		t.Cleanup(func() { _ = provider.Close() })
+		_, err := provider.Resume(context.Background(), session.SessionID)
+		assertSessionNotFound(t, err, session.SessionID)
+		if _, err := provider.getClient(); err == nil {
+			t.Fatal("a refused resume left its process running")
+		}
+		awaitNoPooProcesses(t, fixture.settings)
+	})
+
+	t.Run("unknown", func(t *testing.T) {
+		endpoint := newFakeEndpoint(t, scriptedTurn{Text: "unused"})
+		fixture := newPooFixture(t, endpoint)
+
+		provider := NewWithOptions(fixture.startOptions(t))
+		t.Cleanup(func() { _ = provider.Close() })
+		const sessionID = "ses-01J0000000000000000000000"
+		if _, err := provider.Resume(context.Background(), sessionID); err == nil {
+			t.Fatalf("Resume(%q) returned no error", sessionID)
+		} else {
+			assertSessionNotFound(t, err, sessionID)
+		}
+		if _, err := provider.getClient(); err == nil {
+			t.Fatal("a refused resume left its process running")
+		}
+		awaitNoPooProcesses(t, fixture.settings)
+	})
+}
+
+// assertSessionNotFound checks the failure is the unresumable-session class,
+// which names the session it could not continue.
+func assertSessionNotFound(t *testing.T, err error, sessionID string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("resume of %q returned no error", sessionID)
+	}
+	if !strings.Contains(err.Error(), "session not found: "+sessionID) {
+		t.Fatalf("resume error = %q, want the session reported as not found", err)
 	}
 }
 

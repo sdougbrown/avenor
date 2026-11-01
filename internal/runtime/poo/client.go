@@ -222,6 +222,27 @@ func (c *client) createSession(ctx context.Context, params protocol.CreateParams
 	return info, nil
 }
 
+// loadSession opens a session the store already holds. The session id is the
+// whole request: poo reads the records from the settings file's session
+// directory, which is where a logged session wrote them.
+func (c *client) loadSession(ctx context.Context, params protocol.LoadParams) (protocol.SessionInfo, error) {
+	raw, rpcErr, err := c.call(ctx, protocol.MethodSessionLoad, params)
+	if err != nil {
+		return protocol.SessionInfo{}, err
+	}
+	if rpcErr != nil {
+		return protocol.SessionInfo{}, &refusedError{method: protocol.MethodSessionLoad, rpc: rpcErr}
+	}
+	var info protocol.SessionInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return protocol.SessionInfo{}, fmt.Errorf("decode session/load result: %w", err)
+	}
+	if info.SessionID == "" {
+		return protocol.SessionInfo{}, errors.New("session/load returned no session id")
+	}
+	return info, nil
+}
+
 // call sends one request and waits for its answer.
 func (c *client) call(ctx context.Context, method string, params any) (json.RawMessage, *protocol.Error, error) {
 	id := newRequestID()
