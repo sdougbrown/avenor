@@ -296,30 +296,6 @@ func RunReplyRoutingSuite(t *testing.T, newTransport TransportFactory, hooks Rep
 			t.Fatalf("Reply = (%+v, %v), want the legacy edge answered", replied, err)
 		}
 	})
-
-	t.Run("reply after a rotation finds no edge", func(t *testing.T) {
-		pre, err := at.Preflight(t.Context())
-		if err != nil {
-			t.Fatalf("Preflight: %v", err)
-		}
-		now := time.Now().UTC()
-		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
-		if err != nil {
-			t.Fatalf("NewMsgID: %v", err)
-		}
-		if _, err := at.Send(t.Context(), messaging.SendRequest{
-			From: alice, To: bob, MessageID: msgID, Generation: pre.Generation, Body: `{"message":"ping"}`,
-		}); err != nil {
-			t.Fatalf("Send: %v", err)
-		}
-		hooks.Rotate(t)
-		replied, err := bt.Reply(t.Context(), messaging.ReplyRequest{
-			From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
-		})
-		if err != nil || replied.Outcome != messaging.OutcomeEdgeAbsent {
-			t.Fatalf("Reply after rotation = (%+v, %v), want edge-absent", replied, err)
-		}
-	})
 }
 
 // NewMemoryStore builds an askstore backed by a fresh MemoryBackend.

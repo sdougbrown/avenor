@@ -6,7 +6,9 @@ package messaging
 type Outcome string
 
 const (
-	// OutcomeSent means the receiver admitted the ask and an edge exists.
+	// OutcomeSent means the receiver accepted the message: for an ask an edge
+	// exists, for a reply the answer was delivered (including by the fallback
+	// path after the edge was gone).
 	OutcomeSent Outcome = "sent"
 	// OutcomeReplied means a reply was delivered to the waiting sender.
 	OutcomeReplied Outcome = "replied"
