@@ -11,7 +11,7 @@ import (
 // hygiene: a route record older than the acceptance horizon can no longer be
 // reached by any operation, so the prune drops it, and a record from inside
 // the horizon survives for its wait or reply to follow.
-func TestPruneLockedDropsRoutesPastTheWaitHorizon(t *testing.T) {
+func TestPruneLockedDropsRoutesPastTheAcceptanceHorizon(t *testing.T) {
 	now := time.Now()
 	link := &Link{
 		asks: map[askKey]askHop{
