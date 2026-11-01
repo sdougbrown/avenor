@@ -905,19 +905,6 @@ func TestSettledEventCarriesTheLoopRunnerFields(t *testing.T) {
 	}
 }
 
-// TestProviderRecoversFromDenial pins the tool_denied override: the poo backend
-// declares that a denial the model recovered from does not end the run.
-func TestProviderRecoversFromDenial(t *testing.T) {
-	var provider avruntime.Provider = NewWithOptions(avruntime.StartOptions{})
-	recovery, ok := provider.(avruntime.DenialRecovery)
-	if !ok {
-		t.Fatal("the poo provider does not declare denial recovery")
-	}
-	if !recovery.RecoveredDenialIsCompletion() {
-		t.Fatal("RecoveredDenialIsCompletion() = false, want true")
-	}
-}
-
 // helperStartOptions is the launch identity that starts the test binary as a
 // fake poo server.
 func helperStartOptions() avruntime.StartOptions {

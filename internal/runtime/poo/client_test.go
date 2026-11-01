@@ -123,17 +123,14 @@ func TestHeldEventsKeepOnlyTheNewest(t *testing.T) {
 		c.deliver(events.Event{Event: strconv.Itoa(i), SessionID: "ses_1"})
 	}
 
-	c.mu.Lock()
-	held := append([]events.Event(nil), c.held["ses_1"]...)
-	c.mu.Unlock()
-
-	if len(held) != heldEventLimit {
-		t.Fatalf("%d events were held, want the %d limit", len(held), heldEventLimit)
+	ch := make(chan events.Event, heldEventLimit)
+	c.subscribe("ses_1", ch)
+	if len(ch) != heldEventLimit {
+		t.Fatalf("%d events were delivered, want the %d limit", len(ch), heldEventLimit)
 	}
-	if first := held[0].Event; first != strconv.Itoa(extra) {
-		t.Fatalf("the oldest held event = %q, want %q: the first %d were not dropped", first, strconv.Itoa(extra), extra)
-	}
-	if last := held[len(held)-1].Event; last != strconv.Itoa(total-1) {
-		t.Fatalf("the newest held event = %q, want %q", last, strconv.Itoa(total-1))
+	for i := extra; i < total; i++ {
+		if got := (<-ch).Event; got != strconv.Itoa(i) {
+			t.Fatalf("event %d = %q, want %q", i, got, strconv.Itoa(i))
+		}
 	}
 }
