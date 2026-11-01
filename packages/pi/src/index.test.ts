@@ -3110,7 +3110,7 @@ describe('Avenor Pi extension', () => {
     let deliverAsk = false
     const tool = mock(async () => ({
       asks: deliverAsk
-        ? [{ message_id: 'ask-1', from_run_id: 'rt_1', message: 'may I proceed?', role: 'agent' }]
+        ? [{ message_id: 'ask-1', from_run_id: 'rt_1', message: 'may I proceed?', role: 'agent', expects_reply: true }]
         : [],
     }))
     return { tool, deliver: () => { deliverAsk = true } }

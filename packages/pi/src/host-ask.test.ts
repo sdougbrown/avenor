@@ -71,6 +71,30 @@ describe('host inbound ask delivery', () => {
     }
   })
 
+  it('delivers a tell without the reply line and without registering it', async () => {
+    // A tell has no reply edge, so nothing is registered for a reply to
+    // correlate against: a reply to its id reports edge-absent.
+    const brokerReceiveTool = mock(async () => ({
+      asks: [{ message_id: 'tell-1', from_run_id: 'rt_child', message: 'fyi only', role: 'agent', expects_reply: false }],
+    }))
+    const harness = await startHostExtension(brokerReceiveTool, async () => {})
+    try {
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
+      const [body] = harness.sendUserMessage.mock.calls[0] as unknown as [string]
+      expect(body).toContain('Message from peer')
+      expect(body).toContain('fyi only')
+      expect(body).not.toContain('reply_to')
+      const result = await harness.registeredTools.avenor_message.execute('t1', {
+        action: 'reply',
+        reply_to: 'tell-1',
+        message: 'unsolicited answer',
+      })
+      expect(result.details.outcome).toBe('edge-absent')
+    } finally {
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
   it('binds the generation the first receive reports', async () => {
     const brokerReceiveTool = mock(async (args: { generation?: string, timeout_ms?: number }) => ({
       asks: [],

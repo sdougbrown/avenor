@@ -497,10 +497,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       interruptPendingWaits({ runId: ask.from_run_id, status: 'asking' })
     }
 
-    /** Surface one inbound ask: hand the body to the session, remember it so a
-     * reply can reach the asker, then let every blocking wait return. Delivery
-     * comes first so a throw leaves the waits waiting on an ask the agent never
-     * saw, rather than reporting an ask it cannot answer. */
+    /** Surface one inbound peer message: hand the body to the session, and for
+     * an ask remember it so a reply can reach the asker, then let every
+     * blocking wait return. Delivery comes first so a throw leaves the waits
+     * waiting on an ask the agent never saw, rather than reporting an ask it
+     * cannot answer. A tell has no reply edge: expects_reply alone decides, so
+     * a tell is delivered unregistered, uninterrupting, and without the reply
+     * instruction — the same decision the hooks' frames make. */
     function surfaceInboundAsk(
       pending: Map<string, { from_run_id: string; message_id: string }>,
       ask: InboundAsk,
@@ -508,6 +511,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     ): void {
       // No role: the wire carries none the broker stamps, so a payload's claim to
       // one is the sender's to make up.
+      if (!ask.expects_reply) {
+        pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Message from peer', reply: false }), { deliverAs: 'steer' as const })
+        return
+      }
       pi.sendUserMessage(formatInboundAskBody(ask, { heading }), { deliverAs: 'steer' as const })
       pending.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
       interruptWaitsForAsk(ask)
