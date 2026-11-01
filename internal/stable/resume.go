@@ -75,16 +75,14 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 	}
 	prior.mu.Lock()
 	label := prior.label
-	agent, model, backend := prior.effectiveAgent, prior.effectiveModel, prior.effectiveBackend
+	agent, model := prior.effectiveAgent, prior.effectiveModel
 	if agent == "" {
 		agent = prior.agent
 	}
 	if model == "" {
 		model = prior.model
 	}
-	if backend == "" {
-		backend = prior.backend
-	}
+	backend := prior.resumeBackendLocked()
 	thinking := prior.thinking
 	agentProfile := prior.agentProfile
 	dir := prior.dir
@@ -92,6 +90,15 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 	rosterFile := prior.rosterFile
 	rosterEntry := prior.rosterEntry
 	prior.mu.Unlock()
+
+	// A roster-selected run resumes through its selector alone: the entry
+	// supplies agent, model and backend. A spawn carrying both is refused as
+	// "direct identity fields are disabled in roster mode". The session mapping
+	// still pins the resolved identity, so a roster that changed under the run
+	// conflicts instead of launching a new identity.
+	if rosterEntry != "" {
+		agent, model, backend = "", "", ""
+	}
 
 	// The prior label is the current display name, so a rename is honoured
 	// here rather than the stale launch label.
@@ -161,6 +168,16 @@ func resumeResult(result SpawnResult) messaging.ResumeResult {
 	return messaging.ResumeResult{RunID: result.RunID, Label: result.Label, RuntimeID: result.RuntimeID, SessionID: result.SessionID, SentinelFile: result.SentinelFile, OnEvent: result.OnEvent}
 }
 
+// resumeBackendLocked returns the backend the prior run launched with: the
+// resolved value when present, otherwise the requested one. The caller holds
+// c.mu.
+func (c *childRuntime) resumeBackendLocked() string {
+	if c.effectiveBackend != "" {
+		return c.effectiveBackend
+	}
+	return c.backend
+}
+
 // resumeOnce admits a parked turn or starts a cold continuation. The session
 // ladder runs only on the cold arm, just before the spawn that uses it: a warm
 // admission continues child.session, and pi without persisted sessions has no
@@ -179,7 +196,18 @@ func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams
 	if warm {
 		return result, nil
 	}
-	if !factory.ResumesAcrossProcesses(p.Backend) {
+	// The gate asks whether the backend continuing this session resumes across
+	// processes. A roster-selected resume leaves Backend empty for the spawn
+	// validator, because the entry supplies it. The session mapping pins the
+	// entry to the identity the prior run launched with, so the gate reads that
+	// identity instead.
+	gateBackend := p.Backend
+	if gateBackend == "" {
+		prior.mu.Lock()
+		gateBackend = prior.resumeBackendLocked()
+		prior.mu.Unlock()
+	}
+	if !factory.ResumesAcrossProcesses(gateBackend) {
 		return result, notResumableError(runID, s.piResumeDeniedStatus(prior))
 	}
 	// Completion admission closes before provider teardown. Do not open the
