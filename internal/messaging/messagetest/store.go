@@ -156,7 +156,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		if got := store.PendingCount(sender.RunID); got != 1 {
 			t.Fatalf("pending = %d, want 1", got)
 		}
-		outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"hi"}`))
+		outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"hi"}`))
 		if err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("Reply = (%q, %v)", outcome, err)
 		}
@@ -291,7 +291,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		}
 		// The asker stopped waiting, but the edge stayed open: the answer is
 		// delivered to the asker as an ordinary message, tagged with its id.
-		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"late"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		if outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"late"}`)); err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("late Reply = (%q, %v), want replied", outcome, err)
 		}
 		late, err := store.Receive("alice", 8)
@@ -328,7 +328,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		if len(received) != 1 || received[0].MessageID != msgID {
 			t.Fatalf("target received %+v, want the abandoned ask", received)
 		}
-		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"late"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		if outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"late"}`)); err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("late Reply = (%q, %v), want replied", outcome, err)
 		}
 		late, err := store.Receive("alice", 8)
@@ -378,7 +378,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		admitLegacy(t, store, msgID, "bob")
 		// The reply names the current generation; the lookup falls back to the
 		// generation-less key the legacy ask was registered under.
-		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		if outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("Reply = (%q, %v)", outcome, err)
 		}
 		res, err := store.Wait(t.Context(), legacyKey, time.Second)
@@ -397,14 +397,14 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		msgID := id(t, time.Minute)
 		admit(t, store, msgID, "bob")
 		generationless := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID}
-		outcome, err := store.Reply(generationless, "bob", []byte(`{"message":"pong"}`))
+		outcome, err := store.Reply(t.Context(), generationless, "bob", []byte(`{"message":"pong"}`))
 		if err != nil || outcome != messaging.OutcomeEdgeAbsent {
 			t.Fatalf("generation-less Reply = (%q, %v), want edge-absent", outcome, err)
 		}
 		if !store.Pending(sender.RunID, msgID) {
 			t.Fatal("generation-less reply disturbed the live edge")
 		}
-		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		if outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("Reply = (%q, %v)", outcome, err)
 		}
 		res, err := store.Wait(t.Context(), key(store, msgID), time.Second)
@@ -418,7 +418,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		msgID := id(t, time.Minute)
 		admit(t, store, msgID, "bob")
 		k := key(store, msgID)
-		if outcome, err := store.Reply(k, "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		if outcome, err := store.Reply(t.Context(), k, "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("Reply = (%q, %v)", outcome, err)
 		}
 		store.RemoveRun("bob")

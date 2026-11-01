@@ -453,9 +453,9 @@ func New(globalToken string) *Broker {
 // a child branch owns has no queue here, so the answer relays the way a tell
 // does — the reply's own route, already recorded, is what makes the asker's
 // answer routable. Everything else queues through the broker backend.
-func (b *Broker) lateReplyDeliver(target string, msg messaging.InboundMessage) (func(), error) {
+func (b *Broker) lateReplyDeliver(ctx context.Context, target string, msg messaging.InboundMessage) (func(), error) {
 	if link, _ := b.parentSeam(); link != nil && link.Owns(target) {
-		return func() {}, b.seam().Tell(context.Background(), messaging.TellRequest{
+		return func() {}, b.seam().Tell(ctx, messaging.TellRequest{
 			FromRunID:     msg.FromRunID,
 			ToRunID:       target,
 			Kind:          msg.Kind,
@@ -2898,7 +2898,7 @@ func (m localMessenger) Reply(ctx context.Context, req messaging.ReplyRequest) (
 		return messaging.SendResult{Outcome: messaging.OutcomeNotSent, MessageID: req.MessageID, Generation: m.broker.store.Generation()}, err
 	}
 	key := m.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, m.broker.store.Generation())
-	outcome, err := m.broker.store.Reply(key, req.From.RunID, body)
+	outcome, err := m.broker.store.Reply(ctx, key, req.From.RunID, body)
 	if outcome == messaging.OutcomeReplied && err == nil {
 		// The ask is answered. The store recorded the reply's own route, so the
 		// asker can answer the answer, the same way a tell reply is routable.

@@ -8,18 +8,18 @@ import (
 )
 
 // TestPruneLockedDropsRoutesPastTheWaitHorizon pins the route store's
-// hygiene: a route record older than the messaging wait horizon can no
-// longer be reached by any operation, so the prune drops it, and a record
-// from inside the horizon survives for its wait or reply to follow.
+// hygiene: a route record older than the acceptance horizon can no longer be
+// reached by any operation, so the prune drops it, and a record from inside
+// the horizon survives for its wait or reply to follow.
 func TestPruneLockedDropsRoutesPastTheWaitHorizon(t *testing.T) {
 	now := time.Now()
 	link := &Link{
 		asks: map[askKey]askHop{
-			{Sender: "run-a", MessageID: "msg-old"}: {generation: "gen-a", recordedAt: now.Add(-messaging.MaxWait - time.Second)},
+			{Sender: "run-a", MessageID: "msg-old"}: {generation: "gen-a", recordedAt: now.Add(-messaging.MaxAcceptanceHorizon - time.Second)},
 			{Sender: "run-a", MessageID: "msg-new"}: {generation: "gen-a", recordedAt: now.Add(-time.Second)},
 		},
 		relays: map[string]relayRoute{
-			"msg-relay-old": {askerRunID: "run-a", edgeGeneration: "gen-a", recordedAt: now.Add(-messaging.MaxWait - time.Second)},
+			"msg-relay-old": {askerRunID: "run-a", edgeGeneration: "gen-a", recordedAt: now.Add(-messaging.MaxAcceptanceHorizon - time.Second)},
 			"msg-relay-new": {askerRunID: "run-a", edgeGeneration: "gen-a", recordedAt: now.Add(-time.Second)},
 		},
 	}

@@ -3234,3 +3234,86 @@ func getSessions(addr, runID, token string) (*http.Response, error) {
 	req.Header.Set(messaging.HeaderRunToken, token)
 	return http.DefaultClient.Do(req)
 }
+// recordingSeam records the fire-and-forget tells that pass through it and
+// delegates everything else to the seam it wraps.
+type recordingSeam struct {
+	messaging.Seam
+	tells *[]messaging.TellRequest
+}
+
+func (r recordingSeam) Tell(ctx context.Context, req messaging.TellRequest) error {
+	*r.tells = append(*r.tells, req)
+	return r.Seam.Tell(ctx, req)
+}
+
+// TestBrokerLateReplyRelaysToChildOwnedAsker pins the cross-branch delivery of
+// a late answer: the asker's queue lives behind a child branch, so the late
+// reply relays through the seam as a tell instead of vanishing into the local
+// publish no-op.
+func TestBrokerLateReplyRelaysToChildOwnedAsker(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+
+	senderToken, err := b.CreateRun("xa_alice", "")
+	if err != nil {
+		t.Fatalf("create asker: %v", err)
+	}
+	targetToken, err := b.CreateRun("xa_bob", "")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	msgID := "xa-test"
+	if r := sendAsk(t, b.Addr(), senderToken, "xa_alice", "xa_bob", msgID, "hi"); r["status"] != http.StatusOK {
+		t.Fatalf("sendAsk status = %d", r["status"])
+	}
+
+	// The asker stops waiting: the wait is cancelled and the edge is abandoned.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	body := bytes.NewReader([]byte(fmt.Sprintf(`{"run_id":"xa_alice","token":%q,"waiting_for":%q}`, senderToken, msgID)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("http://%s/wait_reply", b.Addr()), body)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !b.Store().Abandoned("xa_alice", msgID) {
+		if time.Now().After(deadline) {
+			t.Fatal("the cancelled wait never abandoned its edge")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// A parent link claims the asker for a child branch, so the local publish
+	// would no-op; the relay seam records the tell it carries instead.
+	var tells []messaging.TellRequest
+	b.SetParentLink(&parentLinkStub{owned: "xa_alice"})
+	b.SetMessenger(recordingSeam{Seam: b.LocalMessenger(), tells: &tells})
+
+	if r := sendReply(t, b.Addr(), targetToken, "xa_bob", "xa_alice", msgID, "late pong"); r["status"] != http.StatusOK {
+		t.Fatalf("late reply = %+v, want delivered", r)
+	}
+	if len(tells) != 1 {
+		t.Fatalf("tells = %+v, want one relayed late answer", tells)
+	}
+	if tells[0].ToRunID != "xa_alice" || tells[0].FromRunID != "xa_bob" || tells[0].CorrelationID != messaging.ReplyID(msgID) {
+		t.Fatalf("tell = %+v, want the reply relayed to the asker", tells[0])
+	}
+
+	// The relayed answer reaches the asker's queue on this broker.
+	got := pollAgentMessages(t, b.Addr(), "xa_alice", senderToken)
+	if len(got) != 1 || !strings.Contains(fmt.Sprint(got[0]), "late pong") {
+		t.Fatalf("asker poll = %v, want the late answer", got)
+	}
+}

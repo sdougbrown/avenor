@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -275,7 +276,7 @@ func TestStorePruneFencesUnconsumedReply(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
-	if outcome, err := store.Reply(key, "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+	if outcome, err := store.Reply(t.Context(), key, "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
 		t.Fatalf("Reply = (%q, %v)", outcome, err)
 	}
 	// Prune sees the edge as expired while the store clock still accepts the ID.
@@ -340,7 +341,7 @@ func TestStoreTellRouteLookupLeavesDeliveryToTheCaller(t *testing.T) {
 	// The store's Reply answers edge-absent for a tell: the delivery is the
 	// caller's, which is what keeps a cross-branch reply routable.
 	key := messaging.FenceKey{Sender: "bob", MessageID: msgID, Generation: store.Generation()}
-	if outcome, err := store.Reply(key, "bob", json.RawMessage(`{"message":"ack"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
+	if outcome, err := store.Reply(t.Context(), key, "bob", json.RawMessage(`{"message":"ack"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
 		t.Fatalf("Reply = (%q, %v), want edge-absent (delivery belongs to the caller)", outcome, err)
 	}
 	if len(backend.published) != 1 {
@@ -634,14 +635,14 @@ func TestStoreReplyRejectsNonJSONWithoutConsumingTheEdge(t *testing.T) {
 		t.Fatalf("Admit: %v", err)
 	}
 
-	outcome, err := store.Reply(key, "bob", json.RawMessage(`{"payload":`))
+	outcome, err := store.Reply(t.Context(), key, "bob", json.RawMessage(`{"payload":`))
 	if outcome != messaging.OutcomeNotSent || !errors.Is(err, messaging.ErrInvalidRequest) {
 		t.Fatalf("Reply(not JSON) = (%q, %v), want not-sent invalid-request", outcome, err)
 	}
 
 	// The refused reply must not have consumed the edge: the same edge still
 	// completes on a reply that parses.
-	outcome, err = store.Reply(key, "bob", json.RawMessage(`{"payload":"pong"}`))
+	outcome, err = store.Reply(t.Context(), key, "bob", json.RawMessage(`{"payload":"pong"}`))
 	if outcome != messaging.OutcomeReplied || err != nil {
 		t.Fatalf("Reply(valid) after the refusal = (%q, %v), want replied", outcome, err)
 	}
@@ -672,7 +673,7 @@ func TestStoreReplyKeepsTheEmptyBodyPolicy(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("Admit: %v", err)
 		}
-		outcome, err := store.Reply(key, "bob", body)
+		outcome, err := store.Reply(t.Context(), key, "bob", body)
 		if outcome != messaging.OutcomeReplied || err != nil {
 			t.Fatalf("Reply(%q) = (%q, %v), want replied with no payload", string(body), outcome, err)
 		}
@@ -701,7 +702,7 @@ func TestStoreReplyRecordsTheAskersAnswerRoute(t *testing.T) {
 	}
 
 	key := messaging.FenceKey{Sender: "alice", MessageID: msgID, Generation: store.Generation()}
-	if outcome, err := store.Reply(key, "bob", json.RawMessage(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+	if outcome, err := store.Reply(t.Context(), key, "bob", json.RawMessage(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
 		t.Fatalf("Reply = (%q, %v), want replied", outcome, err)
 	}
 	sender, target, ok := store.TellRoute(messaging.ReplyID(msgID))
@@ -711,67 +712,69 @@ func TestStoreReplyRecordsTheAskersAnswerRoute(t *testing.T) {
 }
 
 func TestStoreLateReplyToAbandonedEdgeRecordsTheAskersAnswerRoute(t *testing.T) {
-	store := New(Options{})
-	backend := &recordingBackend{}
-	store.SetBackend(backend)
+	synctest.Test(t, func(t *testing.T) {
+		store := New(Options{})
+		backend := &recordingBackend{}
+		store.SetBackend(backend)
 
-	now := time.Now()
-	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
-	if err != nil {
-		t.Fatalf("NewMsgID: %v", err)
-	}
-	if _, err := store.Admit(t.Context(), AdmitRequest{
-		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
-		Generation: store.Generation(), Body: `{"message":"ping"}`,
-	}); err != nil {
-		t.Fatalf("Admit: %v", err)
-	}
-
-	key := messaging.FenceKey{Sender: "alice", MessageID: msgID, Generation: store.Generation()}
-
-	// Waiter B enters before the abandonment is decided and stays blocked on
-	// the edge; the late reply must wake it with the payload, not leave it
-	// hanging until its own timer reports a timed-out the answer already
-	// resolved.
-	waiterDone := make(chan messaging.WaitResult, 1)
-	go func() {
-		res, _ := store.Wait(t.Context(), key, time.Minute)
-		waiterDone <- res
-	}()
-	time.Sleep(20 * time.Millisecond)
-
-	// Waiter A stops waiting: a cancelled wait abandons the edge instead of
-	// completing it.
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	waited, err := store.Wait(ctx, key, time.Minute)
-	if waited.Outcome != messaging.OutcomePossiblyPending || !errors.Is(err, context.Canceled) {
-		t.Fatalf("Wait = (%q, %v), want possibly-pending with the cancel surfaced", waited.Outcome, err)
-	}
-	if !store.Abandoned("alice", msgID) {
-		t.Fatal("the cancelled wait left no abandoned edge")
-	}
-
-	if outcome, err := store.Reply(key, "bob", json.RawMessage(`{"message":"late pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
-		t.Fatalf("late Reply = (%q, %v), want replied", outcome, err)
-	}
-	// The first publish is the ask itself, queued to the target at admission;
-	// the second is the late answer, delivered to the asker's queue.
-	if len(backend.published) != 2 || backend.published[1].MessageID != messaging.ReplyID(msgID) ||
-		string(backend.published[1].Payload) != `{"message":"late pong"}` {
-		t.Fatalf("published = %+v, want the late answer delivered to the asker", backend.published)
-	}
-	sender, target, ok := store.TellRoute(messaging.ReplyID(msgID))
-	if !ok || sender != "bob" || target != "alice" {
-		t.Fatalf("TellRoute = (%q, %q, %v), want bob -> alice", sender, target, ok)
-	}
-
-	select {
-	case res := <-waiterDone:
-		if res.Outcome != messaging.OutcomeReplied || string(res.Reply.Payload) != `{"message":"late pong"}` {
-			t.Fatalf("waiter = (%q, %s), want the late reply delivered", res.Outcome, res.Reply.Payload)
+		now := time.Now()
+		msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("NewMsgID: %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the pre-abandonment waiter was never woken by the late reply")
-	}
+		if _, err := store.Admit(t.Context(), AdmitRequest{
+			Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+			Generation: store.Generation(), Body: `{"message":"ping"}`,
+		}); err != nil {
+			t.Fatalf("Admit: %v", err)
+		}
+
+		key := messaging.FenceKey{Sender: "alice", MessageID: msgID, Generation: store.Generation()}
+
+		// Waiter B enters before the abandonment is decided and stays blocked on
+		// the edge; the late reply must wake it with the payload, not leave it
+		// hanging until its own timer reports a timed-out the answer already
+		// resolved.
+		waiterDone := make(chan messaging.WaitResult, 1)
+		go func() {
+			res, _ := store.Wait(t.Context(), key, time.Minute)
+			waiterDone <- res
+		}()
+		synctest.Wait()
+
+		// Waiter A stops waiting: a cancelled wait abandons the edge instead of
+		// completing it.
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		waited, err := store.Wait(ctx, key, time.Minute)
+		if waited.Outcome != messaging.OutcomePossiblyPending || !errors.Is(err, context.Canceled) {
+			t.Fatalf("Wait = (%q, %v), want possibly-pending with the cancel surfaced", waited.Outcome, err)
+		}
+		if !store.Abandoned("alice", msgID) {
+			t.Fatal("the cancelled wait left no abandoned edge")
+		}
+
+		if outcome, err := store.Reply(t.Context(), key, "bob", json.RawMessage(`{"message":"late pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+			t.Fatalf("late Reply = (%q, %v), want replied", outcome, err)
+		}
+		// The first publish is the ask itself, queued to the target at admission;
+		// the second is the late answer, delivered to the asker's queue.
+		if len(backend.published) != 2 || backend.published[1].MessageID != messaging.ReplyID(msgID) ||
+			string(backend.published[1].Payload) != `{"message":"late pong"}` {
+			t.Fatalf("published = %+v, want the late answer delivered to the asker", backend.published)
+		}
+		sender, target, ok := store.TellRoute(messaging.ReplyID(msgID))
+		if !ok || sender != "bob" || target != "alice" {
+			t.Fatalf("TellRoute = (%q, %q, %v), want bob -> alice", sender, target, ok)
+		}
+
+		select {
+		case res := <-waiterDone:
+			if res.Outcome != messaging.OutcomeReplied || string(res.Reply.Payload) != `{"message":"late pong"}` {
+				t.Fatalf("waiter = (%q, %s), want the late reply delivered", res.Outcome, res.Reply.Payload)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the pre-abandonment waiter was never woken by the late reply")
+		}
+	})
 }

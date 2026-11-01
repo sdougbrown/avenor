@@ -696,10 +696,10 @@ func (l *Link) dropRelay(messageID string) {
 	delete(l.relays, messageID)
 }
 
-// pruneLocked drops route records older than the messaging wait horizon: past it
+// pruneLocked drops route records older than the acceptance horizon: past it
 // no edge or fence can still be live, so no operation can reach them again.
 func (l *Link) pruneLocked(now time.Time) {
-	horizon := now.Add(-messaging.MaxWait)
+	horizon := now.Add(-messaging.MaxAcceptanceHorizon)
 	for key, route := range l.asks {
 		if route.recordedAt.Before(horizon) {
 			delete(l.asks, key)

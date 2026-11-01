@@ -505,6 +505,13 @@ async function runAsk(d, target, ref, message, rawTimeout) {
   return askOutcome("replied", messageId, extractReplyMessage(result))
 }
 
+/**
+ * Answer a peer ask this session received. The correlation table, not the
+ * broker's edge store, is where those asks live, so the hook sends the reply
+ * itself along the same reply-edge send `session.send` uses. A `reply_to` the
+ * table does not hold passes through to the MCP server, whose own refusal is
+ * then the honest answer.
+ */
 async function serveReply(d, e) {
   const replyTo = typeof e.reply_to === "string" ? e.reply_to : ""
   const peer = peerOwingAsk(replyTo)

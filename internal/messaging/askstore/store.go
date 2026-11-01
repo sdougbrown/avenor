@@ -44,7 +44,7 @@ type Options struct {
 	// asker — including across a branch boundary — after the store's lock is
 	// released. When nil, the answer goes through the backend's Publish like
 	// any queued message, which only reaches askers this store queues for.
-	RemoteDeliver func(target string, msg messaging.InboundMessage) (func(), error)
+	RemoteDeliver func(ctx context.Context, target string, msg messaging.InboundMessage) (func(), error)
 }
 
 // Backend supplies the queue and peer state the store does not own. The broker
@@ -68,7 +68,7 @@ type Store struct {
 	fenceCapacity int
 	generation    string
 	backend       Backend
-	remoteDeliver func(target string, msg messaging.InboundMessage) (func(), error)
+	remoteDeliver func(ctx context.Context, target string, msg messaging.InboundMessage) (func(), error)
 
 	active   map[messaging.FenceKey]*edge
 	terminal map[messaging.FenceKey]*fence
@@ -199,7 +199,7 @@ func (s *Store) SetBackend(b Backend) {
 // SetRemoteDeliver installs the late-answer delivery used after the store's
 // lock is released. The broker wires it to a cross-branch-capable seam; a
 // store without one falls back to the backend's Publish.
-func (s *Store) SetRemoteDeliver(fn func(target string, msg messaging.InboundMessage) (func(), error)) {
+func (s *Store) SetRemoteDeliver(fn func(ctx context.Context, target string, msg messaging.InboundMessage) (func(), error)) {
 	s.mu.Lock()
 	s.remoteDeliver = fn
 	s.mu.Unlock()
@@ -411,7 +411,7 @@ func (s *Store) abandonLocked(e *edge, outcome messaging.Outcome) {
 // accepted it. The key names the generation a versioned ask was admitted
 // under; an unversioned ask is admitted without a generation, so a miss falls
 // back to the generation-less key before the edge is reported absent.
-func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.RawMessage) (messaging.Outcome, error) {
+func (s *Store) Reply(ctx context.Context, key messaging.FenceKey, fromRunID string, payload json.RawMessage) (messaging.Outcome, error) {
 	s.mu.Lock()
 	outcome, err, late := s.replyLocked(key, fromRunID, payload)
 	deliver := s.remoteDeliver
@@ -420,7 +420,7 @@ func (s *Store) Reply(key messaging.FenceKey, fromRunID string, payload json.Raw
 		// The asker's queue may live behind a branch boundary: the delivery is
 		// the caller's, and it happens outside the lock because it can perform
 		// network I/O.
-		if _, derr := deliver(late.target, late.msg); derr != nil {
+		if _, derr := deliver(ctx, late.target, late.msg); derr != nil {
 			return outcome, derr
 		}
 	}
