@@ -435,7 +435,7 @@ describe('sub-agent broker mode (integration)', () => {
 
   it('does not restore a sub-agent ask when its failed send outlives the session', async () => {
     const fetchStub = stubBrokerFetch(
-      [[{ type: 'agent_message', payload: { id: 'old-child-reply', from_run_id: 'supervisor', message: 'reply before shutdown' } }]],
+      [[{ type: 'agent_message', payload: { id: 'old-child-reply', from_run_id: 'supervisor', message: 'reply before shutdown', expects_reply: true } }]],
       0, 0, 0, {
         // The first send is intercepted below; the retry reaches this handler
         // and finds no route, so the broker reports the edge absent.
