@@ -563,6 +563,7 @@ describe('router invariants', () => {
   it('restores the ask claim unless the reply was delivered', async () => {
     for (const [outcome, restored] of [
       ['replied', false],
+      ['sent', false],
       ['not-sent', true],
       ['possibly-pending', true],
       ['edge-absent', true],

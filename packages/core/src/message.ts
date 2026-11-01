@@ -740,9 +740,12 @@ async function reply(provider: MessageProvider, input: MessageInput): Promise<Pr
     if (asker !== undefined) provider.restoreAsk?.(messageId, asker)
     throw asToolError(err)
   }
-  // Only a replied outcome proves the asker received the answer, so every other
-  // outcome leaves the ask claimable.
-  if (asker !== undefined && result.outcome !== 'replied') provider.restoreAsk?.(messageId, asker)
+  // A replied outcome proves the asker received the answer. A sent outcome
+  // proves the broker queued it for them through the delivery fallback. Every
+  // other outcome leaves the ask claimable.
+  if (asker !== undefined && result.outcome !== 'replied' && result.outcome !== 'sent') {
+    provider.restoreAsk?.(messageId, asker)
+  }
   result.action = 'reply'
   result.messageId = messageId
   const rendered = outcomeText('reply', result.outcome, facts)

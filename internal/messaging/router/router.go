@@ -385,12 +385,14 @@ func (r *Router) reply(ctx context.Context, input messageInput) (Result, error) 
 		}
 		return Result{}, refused(err)
 	}
-	// The claim is consumed only when the outcome proves delivery. An outcome
-	// that is not replied — including a nil-error not-sent, edge-absent or
-	// possibly-pending — never proves the asker received the answer, and a
+	// The claim is consumed when the outcome proves delivery. A reply that
+	// completes the ask reports replied; one that reaches the asker through the
+	// broker's delivery fallback reports sent, because the message is already
+	// queued for them. Every other outcome — a nil-error not-sent, edge-absent
+	// or possibly-pending — never proves the asker received the answer, and a
 	// possibly-pending reply must leave the ask answerable rather than consume
 	// the claim.
-	if hasClaim && asker != "" && sent.Outcome != messaging.OutcomeReplied {
+	if hasClaim && asker != "" && sent.Outcome != messaging.OutcomeReplied && sent.Outcome != messaging.OutcomeSent {
 		claimer.RestoreAsk(input.ReplyTo, asker)
 	}
 	result.Outcome, result.Text = outcomeText(actionReply, sent.Outcome, facts)
