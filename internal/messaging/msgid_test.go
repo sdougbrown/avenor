@@ -107,3 +107,15 @@ func TestMsgID(t *testing.T) {
 		}
 	})
 }
+// TestAcceptanceHorizonCouplesTheMinters pins the horizon's value and its 2×
+// relation to the wait cap: the Go minter, the core minter and the hook
+// minter each encode the same window, and drift in one makes its ids refused
+// at every other admission.
+func TestAcceptanceHorizonCouplesTheMinters(t *testing.T) {
+	if MaxAcceptanceHorizon != 2*MaxWait {
+		t.Fatalf("MaxAcceptanceHorizon = %s, want 2 * MaxWait (%s)", MaxAcceptanceHorizon, 2*MaxWait)
+	}
+	if MaxAcceptanceHorizon != 20*time.Minute {
+		t.Fatalf("MaxAcceptanceHorizon = %s, want the shared 20-minute horizon", MaxAcceptanceHorizon)
+	}
+}

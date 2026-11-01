@@ -12,13 +12,13 @@
 // than imported; change schemas/message.outcome.json and messaging-text.ts
 // first. Nothing here touches the engine call object.
 
-const MAX_WAIT_MS = 600000
+export const MAX_WAIT_MS = 600000
 
 /**
  * The acceptance window a minted message id encodes: two wait windows, so an
  * ask keeps its edge for one more window after the asker's own wait ends.
  */
-const MESSAGE_HORIZON_MS = 2 * MAX_WAIT_MS
+export const MESSAGE_HORIZON_MS = 2 * MAX_WAIT_MS
 
 /** The id shape mintMessageID produces; ask records use it as a file name. */
 export const MESSAGE_ID = /^av1\.[0-9a-z]+\.[0-9a-f]{32}$/

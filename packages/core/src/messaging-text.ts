@@ -43,7 +43,7 @@ export const MAX_WAIT_MS = 600_000
  * The acceptance window a minted message id encodes: two wait windows, so an
  * ask keeps its edge for one more window after the asker's own wait ends.
  */
-const MESSAGE_HORIZON_MS = 2 * MAX_WAIT_MS
+export const MESSAGE_HORIZON_MS = 2 * MAX_WAIT_MS
 
 /** The bound `session_last_set` carries from the producer, in code points. */
 export const MAX_FINAL_OUTPUT_RUNES = 4096

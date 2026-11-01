@@ -483,6 +483,39 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		}
 	})
 
+	t.Run("prune retracts an abandoned ask past its deadline", func(t *testing.T) {
+		store, backend := NewMemoryStore(t)
+		minted := time.Now().UTC()
+		msgID, err := messaging.NewMsgID(minted, minted.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("NewMsgID: %v", err)
+		}
+		admit(t, store, msgID, "bob")
+
+		// The asker stops waiting: the edge is abandoned, the ask stays queued.
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if waited, err := store.Wait(ctx, key(store, msgID), time.Minute); waited.Outcome != messaging.OutcomePossiblyPending {
+			t.Fatalf("Wait = (%q, %v), want possibly-pending", waited.Outcome, err)
+		}
+
+		// Past the deadline the prune terminates the edge and fences the id, so
+		// nothing can be delivered over it again; the reclamation on the next
+		// tick drops that fence and retracts the queued delivery through its
+		// remove handle.
+		store.Prune(minted.Add(2 * time.Minute))
+		store.Prune(minted.Add(2*time.Minute + time.Second))
+		if removed := backend.Removed(); removed != 1 {
+			t.Fatalf("retracted %d queued deliveries, want the abandoned ask retracted", removed)
+		}
+		if received, err := store.Receive("bob", 8); err != nil || len(received) != 0 {
+			t.Fatalf("Receive = (%+v, %v), want an empty target queue", received, err)
+		}
+		if _, ok := store.Fence(key(store, msgID)); ok {
+			t.Fatal("the expired abandoned ask was still fenceable")
+		}
+	})
+
 	t.Run("prune expires a fenced id after its deadline", func(t *testing.T) {
 		store := newStore(t)
 		minted := time.Now().UTC()

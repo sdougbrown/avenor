@@ -8,6 +8,8 @@ import assert from 'node:assert/strict'
 
 import {
   mintMessageID,
+  MAX_WAIT_MS,
+  MESSAGE_HORIZON_MS,
   normalizeAskTimeoutMs,
   buildAgentMessage,
   parseControlMessage,
@@ -251,4 +253,10 @@ test('extractReplyMessage: reply text, timeout and cancellation', () => {
   assert.equal(extractReplyMessage({ cancelled: true }), '(cancelled)')
   // No message field: the whole row, stringified, so nothing is invented.
   assert.equal(extractReplyMessage({ outcome: 'replied', payload: { other: 1 } }), '{"outcome":"replied","payload":{"other":1}}')
+})
+test('the encoded horizon stays coupled to the shared wait cap', () => {
+  // Three minters encode the same window; drift in one makes its ids refused
+  // at every other admission.
+  assert.equal(MESSAGE_HORIZON_MS, 1_200_000)
+  assert.equal(MESSAGE_HORIZON_MS, 2 * MAX_WAIT_MS)
 })
