@@ -360,17 +360,6 @@ func TestPromptRunsToSettle(t *testing.T) {
 	if session.PID == 0 {
 		t.Fatal("Start reported no pid")
 	}
-	state, err := provider.session(session.SessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.sessionDir == "" {
-		t.Fatal("Start kept no session dir for a logged session")
-	}
-	if state.mode != "logged" {
-		t.Fatalf("kept mode = %q, want logged", state.mode)
-	}
-
 	promptDone := make(chan error, 1)
 	go func() { promptDone <- provider.Prompt(context.Background(), session.SessionID, "say hello") }()
 
@@ -699,13 +688,6 @@ func TestEventsBeforeTheCreateResponseAreKept(t *testing.T) {
 	}
 	if session.SessionID != "poo-early" {
 		t.Fatalf("SessionID = %q, want the id from the create result", session.SessionID)
-	}
-	state, err := provider.session(session.SessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.mode != "ephemeral" {
-		t.Fatalf("kept mode = %q, want the mode the create result reported", state.mode)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

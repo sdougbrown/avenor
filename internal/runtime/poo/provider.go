@@ -38,11 +38,6 @@ type Provider struct {
 // sessionState is one opened session and the run it currently owns.
 type sessionState struct {
 	id string
-	// sessionDir and mode are what session/create reported for the session's
-	// own records: where poo keeps them and whether it keeps any at all.
-	sessionDir string
-	mode       string
-
 	mu        sync.Mutex
 	activeRun string
 }
@@ -111,7 +106,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}
 
 	p.mu.Lock()
-	p.sessions[info.SessionID] = &sessionState{id: info.SessionID, sessionDir: info.SessionDir, mode: info.Mode}
+	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
 	p.mu.Unlock()
 
 	return runtime.Session{
