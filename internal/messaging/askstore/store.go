@@ -902,7 +902,7 @@ func (s *Store) completeLocked(e *edge, outcome messaging.Outcome) {
 	}
 	if versionedID(e.key.MessageID, s.now()) {
 		f := &fence{deadline: e.deadline, outcome: outcome}
-		if outcome == messaging.OutcomeTimedOut || outcome == messaging.OutcomePossiblyPending {
+		if outcome == messaging.OutcomeTimedOut {
 			// The waiter stopped waiting but its delivery may still be queued.
 			f.remove = e.remove
 			e.remove = nil

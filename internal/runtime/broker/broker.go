@@ -455,13 +455,20 @@ func New(globalToken string) *Broker {
 // answer routable. Everything else queues through the broker backend.
 func (b *Broker) lateReplyDeliver(ctx context.Context, target string, msg messaging.InboundMessage) (func(), error) {
 	if link, _ := b.parentSeam(); link != nil && link.Owns(target) {
-		return func() {}, b.seam().Tell(ctx, messaging.TellRequest{
+		err := b.seam().Tell(ctx, messaging.TellRequest{
 			FromRunID:     msg.FromRunID,
 			ToRunID:       target,
 			Kind:          msg.Kind,
 			Payload:       msg.Payload,
 			CorrelationID: msg.MessageID,
 		})
+		if err != nil {
+			// The relay failed, so the recorded route is retracted: a retried
+			// reply is admitted instead of being refused for a message that was
+			// never delivered.
+			b.store.DeleteTellRoute(msg.MessageID)
+		}
+		return func() {}, err
 	}
 	return brokerBackend{broker: b}.Publish(target, msg)
 }
