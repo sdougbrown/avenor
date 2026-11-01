@@ -1743,7 +1743,9 @@ func runHelperServer(mode string) int {
 						"data":    map[string]any{"code": protocol.DataProtocolVersionUnsupported},
 					},
 				})
-				return 0
+				// poo keeps serving after it refuses a version, so the
+				// client reads the refusal rather than the exit.
+				continue
 			}
 			write(map[string]any{
 				"jsonrpc": "2.0",
