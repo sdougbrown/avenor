@@ -599,9 +599,14 @@ func TestAwaitUnrecognizedStatusWarnsOnceAndKeepsWaiting(t *testing.T) {
 	// instead of racing a short wall timeout against event delivery; the
 	// generous timeout only bounds how long await keeps waiting afterwards.
 	exited := make(chan int, 1)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		exited <- awaitRunDeclared([]string{"run_1", "--socket", server.socket(), "--timeout", "2s"}, &stdout, &stderr)
 	}()
+	// awaitRunDeclared swaps the process-wide os.Stdout; a failing test must
+	// not return while the dispatch still holds it.
+	t.Cleanup(func() { <-done })
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		fetched := 0

@@ -13,10 +13,10 @@ import (
 
 // stubPolicyEnv replaces the environment and config home the pickup chain
 // reads, so each test describes its own machine-local config. The parent-link
-// variables are neutralized too: runStable exits before its patched supervisor
-// constructor when a parent URL arrives without a token, which would leave a
-// capture at its zero value and make these tests pass or fail for the wrong
-// reason.
+// variables are neutralized too: the stable command exits before its patched
+// supervisor constructor when a parent URL arrives without a token, which
+// would leave a capture at its zero value and make these tests pass or fail
+// for the wrong reason.
 func stubPolicyEnv(t *testing.T, env map[string]string, configHome string) {
 	t.Helper()
 	t.Setenv(token.EnvBrokerParentURL, "")
@@ -47,9 +47,10 @@ func stableArgs(t *testing.T, args ...string) []string {
 	return append([]string{"--control-socket", filepath.Join(t.TempDir(), "s.sock")}, args...)
 }
 
-// captureStablePolicy runs runStable with a patched supervisor constructor and
-// returns the Config it was handed. The constructor returns nil, so runStable's
-// panic on the nil supervisor is swallowed after the capture.
+// captureStablePolicy runs the stable command with a patched supervisor
+// constructor and returns the Config it was handed. The constructor returns
+// nil, so the command's panic on the nil supervisor is swallowed after the
+// capture.
 func captureStablePolicy(t *testing.T, args ...string) stable.Config {
 	t.Helper()
 	var captured stable.Config

@@ -122,7 +122,7 @@ func TestRunStableIdempotencyCapacityGuard(t *testing.T) {
 	tombstonePath := socketPath + ".dead"
 
 	// The guard rejects non-positive capacity before Run: a pre-existing
-	// tombstone is left untouched (Run would overwrite it, and runStable only
+	// tombstone is left untouched (Run would overwrite it, and the stable command only
 	// removes it after the guard passes).
 	marker := "pre-existing"
 	if err := os.WriteFile(tombstonePath, []byte(marker), 0o600); err != nil {
@@ -457,7 +457,7 @@ func TestRunStableInvalidBrokerAdvertiseURLExits(t *testing.T) {
 		_ = r.Close()
 	}()
 
-	// runStable parks in the supervisor's run loop when it does not exit, so a
+	// The stable command parks in the supervisor's run loop when it does not exit, so a
 	// regression that stops the rejected URL from short-circuiting startup
 	// would hang this test until the package timeout. Bound the wait so the
 	// regression is reported while the suite is still usable.
@@ -469,7 +469,7 @@ func TestRunStableInvalidBrokerAdvertiseURLExits(t *testing.T) {
 	select {
 	case code = <-exited:
 	case <-time.After(30 * time.Second):
-		t.Fatalf("runStable did not exit on the rejected advertise URL within 30s; startup no longer stops on invalid --broker-advertise-url")
+		t.Fatalf("stable did not exit on the rejected advertise URL within 30s; startup no longer stops on invalid --broker-advertise-url")
 	}
 	_ = w.Close()
 	os.Stderr = oldStderr
