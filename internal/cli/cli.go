@@ -79,6 +79,41 @@ func Run(args []string) int {
 	return run(args, os.Getenv, os.Stderr)
 }
 
+// RunOptions carries the parsed CLI flags for one run. A Backend of ""
+// means the flag was not supplied on the command line; runWithOptions then
+// applies DefaultBackend.
+type RunOptions struct {
+	Agent                  string
+	Label                  string
+	PromptFile             string
+	Prompt                 string
+	Dir                    string
+	Resume                 string
+	ServerURL              string
+	OnEvent                string
+	PermissionHandler      string
+	SentinelFile           string
+	ResultFile             string
+	PIDFile                string
+	Timeout                time.Duration
+	ProgressTimeout        time.Duration
+	Model                  string
+	Thinking               string
+	ClaudeMCPWait          time.Duration
+	Backend                string
+	RunID                  string
+	MaxRetries             int
+	AutoApprove            bool
+	ControlSocket          string
+	HTTPDebug              string
+	PermissionClaimTimeout time.Duration
+	LoopFile               string
+	TeamFile               string
+	RosterFile             string
+	RosterEntry            string
+	PonyConfig             string
+}
+
 func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode int) {
 	fs := flag.NewFlagSet("avenor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -117,18 +152,60 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		return 1
 	}
 
-	runID := *runIDFlag
-	if runID == "" {
-		runID = GenerateRunID()
-	}
-
-	workflowMode := *loopFile != "" || *teamFile != ""
-	backendExplicit := false
+	var backendExplicit bool
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "backend" {
 			backendExplicit = true
 		}
 	})
+	opts := RunOptions{
+		Agent:                  *agent,
+		Label:                  *label,
+		PromptFile:             *promptFile,
+		Prompt:                 *prompt,
+		Dir:                    *dir,
+		Resume:                 *resume,
+		ServerURL:              *serverURL,
+		OnEvent:                *onEvent,
+		PermissionHandler:      *permissionHandler,
+		SentinelFile:           *sentinelFile,
+		ResultFile:             *resultFile,
+		PIDFile:                *pidFile,
+		Timeout:                *timeout,
+		ProgressTimeout:        *progressTimeout,
+		Model:                  *model,
+		Thinking:               *thinking,
+		ClaudeMCPWait:          *claudeMCPWait,
+		RunID:                  *runIDFlag,
+		MaxRetries:             *maxRetries,
+		AutoApprove:            *autoApprove,
+		ControlSocket:          *controlSocket,
+		HTTPDebug:              *httpDebug,
+		PermissionClaimTimeout: *permClaimTimeout,
+		LoopFile:               *loopFile,
+		TeamFile:               *teamFile,
+		RosterFile:             *rosterFile,
+		RosterEntry:            *rosterEntry,
+		PonyConfig:             *ponyConfig,
+	}
+	if backendExplicit {
+		opts.Backend = *backend
+	}
+	return runWithOptions(opts, getenv, stderr)
+}
+
+func runWithOptions(opts RunOptions, getenv func(string) string, stderr io.Writer) (exitCode int) {
+	backendExplicit := opts.Backend != ""
+	if !backendExplicit {
+		opts.Backend = DefaultBackend
+	}
+
+	runID := opts.RunID
+	if runID == "" {
+		runID = GenerateRunID()
+	}
+
+	workflowMode := opts.LoopFile != "" || opts.TeamFile != ""
 
 	// finalSessionID is updated after each attempt so exitWithSentinel always
 	// writes the most recent session ID regardless of which return path fires.
@@ -139,19 +216,19 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 	exitWithSentinel := func(code int) int {
 		resultPath := ""
-		if *resultFile != "" && finalResult != "" {
-			if err := writeResultFile(*resultFile, finalResult); err != nil {
+		if opts.ResultFile != "" && finalResult != "" {
+			if err := writeResultFile(opts.ResultFile, finalResult); err != nil {
 				fmt.Fprintf(stderr, "avenor: result-file: %v\n", err)
 			} else {
-				resultPath = *resultFile
+				resultPath = opts.ResultFile
 			}
 		}
-		if *sentinelFile != "" {
+		if opts.SentinelFile != "" {
 			sr := finalStopReason
 			if sr == "" {
 				sr = runtime.StopReasonForExitCode(code)
 			}
-			WriteSentinelResult(*sentinelFile, code, finalSessionID, sr, runID, finalRetryAfter, "", resultPath, stderr)
+			WriteSentinelResult(opts.SentinelFile, code, finalSessionID, sr, runID, finalRetryAfter, "", resultPath, stderr)
 		}
 		return code
 	}
@@ -162,96 +239,96 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	var launch backendlaunch.Spec
 
 	if workflowMode {
-		if *claudeMCPWait != 0 {
+		if opts.ClaudeMCPWait != 0 {
 			fmt.Fprintln(stderr, "avenor: --claude-mcp-wait is not valid with --loop-file or --team-file")
 			return exitWithSentinel(1)
 		}
-		if *rosterEntry != "" {
+		if opts.RosterEntry != "" {
 			fmt.Fprintln(stderr, "avenor: --roster-entry is not valid with --loop-file or --team-file")
 			return exitWithSentinel(1)
 		}
-	} else if *rosterFile != "" || *rosterEntry != "" {
-		if *rosterFile == "" || *rosterEntry == "" {
+	} else if opts.RosterFile != "" || opts.RosterEntry != "" {
+		if opts.RosterFile == "" || opts.RosterEntry == "" {
 			fmt.Fprintln(stderr, "avenor: --roster-file and --roster-entry must be supplied together for direct selection")
 			return exitWithSentinel(1)
 		}
-		if *agent != "" || *model != "" || backendExplicit {
+		if opts.Agent != "" || opts.Model != "" || backendExplicit {
 			fmt.Fprintln(stderr, "avenor: direct identity fields are mutually exclusive with roster selection")
 			return exitWithSentinel(1)
 		}
-		roster, err := rosterconfig.Load(*rosterFile)
+		roster, err := rosterconfig.Load(opts.RosterFile)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
-		entry, err := roster.Lookup(*rosterEntry)
+		entry, err := roster.Lookup(opts.RosterEntry)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
-		*backend = entry.Backend
-		*agent = entry.Agent
-		*model = entry.Model
+		opts.Backend = entry.Backend
+		opts.Agent = entry.Agent
+		opts.Model = entry.Model
 		// Roster supplies a default; an explicit --thinking wins. Validation
 		// against the backend happens below, once the roster has set it.
-		if *thinking == "" {
-			*thinking = entry.Thinking
+		if opts.Thinking == "" {
+			opts.Thinking = entry.Thinking
 		}
-		if *agent != "" && *model == "" {
-			resolved, resolveErr := resolveAgentModel(*agent, *backend, getenv)
+		if opts.Agent != "" && opts.Model == "" {
+			resolved, resolveErr := resolveAgentModel(opts.Agent, opts.Backend, getenv)
 			if resolveErr != nil {
 				fmt.Fprintf(stderr, "avenor: %v\n", resolveErr)
 				return exitWithSentinel(1)
 			}
 			if resolved != "" {
-				*model = resolved
+				opts.Model = resolved
 			}
 		}
-		launch, err = roster.ResolveLaunch(*rosterEntry)
+		launch, err = roster.ResolveLaunch(opts.RosterEntry)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
 	}
 
-	discovery := DiscoverServer(*serverURL, getenv)
+	discovery := DiscoverServer(opts.ServerURL, getenv)
 	if !workflowMode {
-		if *rosterEntry == "" {
-			resolved, resolveErr := backendlaunch.Resolve(*backend, "", backendlaunch.Input{})
+		if opts.RosterEntry == "" {
+			resolved, resolveErr := backendlaunch.Resolve(opts.Backend, "", backendlaunch.Input{})
 			if resolveErr != nil {
 				fmt.Fprintf(stderr, "avenor: %v\n", resolveErr)
 				return exitWithSentinel(1)
 			}
 			launch = resolved
 		}
-		backendSupplied := backendExplicit || *rosterEntry != "" || *resume != ""
-		if err := validateCLISelection(*backend, discovery, *thinking, backendSupplied); err != nil {
+		backendSupplied := backendExplicit || opts.RosterEntry != "" || opts.Resume != ""
+		if err := validateCLISelection(opts.Backend, discovery, opts.Thinking, backendSupplied); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
-		if err := runtime.ValidateClaudeMCPWaitForChosenBackend(*backend, *claudeMCPWait, backendSupplied); err != nil {
+		if err := runtime.ValidateClaudeMCPWaitForChosenBackend(opts.Backend, opts.ClaudeMCPWait, backendSupplied); err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
-		if *claudeMCPWait != 0 && *progressTimeout != 0 && *claudeMCPWait >= *progressTimeout {
-			fmt.Fprintf(stderr, "avenor: --claude-mcp-wait %s must be shorter than --progress-timeout %s, which fires while the first prompt is held\n", *claudeMCPWait, *progressTimeout)
+		if opts.ClaudeMCPWait != 0 && opts.ProgressTimeout != 0 && opts.ClaudeMCPWait >= opts.ProgressTimeout {
+			fmt.Fprintf(stderr, "avenor: --claude-mcp-wait %s must be shorter than --progress-timeout %s, which fires while the first prompt is held\n", opts.ClaudeMCPWait, opts.ProgressTimeout)
 			return exitWithSentinel(1)
 		}
 	}
 
 	// Pony backend setup
-	if *backend == backendPony {
-		if *ponyConfig == "" {
+	if opts.Backend == backendPony {
+		if opts.PonyConfig == "" {
 			fmt.Fprintln(stderr, "avenor: --pony-config is required for backend pony")
 			return exitWithSentinel(1)
 		}
-		ponyCfg, err := pony.LoadPonyConfig(*ponyConfig)
+		ponyCfg, err := pony.LoadPonyConfig(opts.PonyConfig)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return exitWithSentinel(1)
 		}
 		profileConfigs := make(map[string]pony.Config, len(ponyCfg.Profiles))
-		configDir := filepath.Dir(*ponyConfig)
+		configDir := filepath.Dir(opts.PonyConfig)
 		for name, profile := range ponyCfg.Profiles {
 			resolvedBaseURL := ponyCfg.BaseURL
 			resolvedAPIKeyEnv := ponyCfg.APIKeyEnv
@@ -272,8 +349,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			}
 
 			var executor pony.OrchestratorExecutor
-			if profile.Tools.Orchestration && *controlSocket != "" {
-				executor, err = pony.NewControlSocketExecutor(*controlSocket)
+			if profile.Tools.Orchestration && opts.ControlSocket != "" {
+				executor, err = pony.NewControlSocketExecutor(opts.ControlSocket)
 				if err != nil {
 					fmt.Fprintf(stderr, "avenor: %v\n", err)
 					return exitWithSentinel(1)
@@ -308,7 +385,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 				Executor:         executor,
 				LocalTools:       profile.Tools.Local,
 				OrchTools:        profile.Tools.Orchestration,
-				WorkingDir:       *dir,
+				WorkingDir:       opts.Dir,
 				InjectAgentsMD:   profile.InjectAgentsMD,
 				ToolApproval:     profile.ToolApproval,
 				ShellConfig:      profile.ShellConfig,
@@ -320,45 +397,45 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		}
 
 		pony.SetGlobalProfiles(ponyCfg.DefaultAgent, profileConfigs)
-		if *agent != "" {
-			if _, ok := profileConfigs[*agent]; !ok {
-				fmt.Fprintf(stderr, "avenor: pony config: unknown profile %q\n", *agent)
+		if opts.Agent != "" {
+			if _, ok := profileConfigs[opts.Agent]; !ok {
+				fmt.Fprintf(stderr, "avenor: pony config: unknown profile %q\n", opts.Agent)
 				return exitWithSentinel(1)
 			}
 		}
 	}
 
-	if *prompt != "" && *promptFile != "" {
+	if opts.Prompt != "" && opts.PromptFile != "" {
 		fmt.Fprintln(stderr, "avenor: --prompt and --prompt-file are mutually exclusive")
 		return exitWithSentinel(1)
 	}
-	if *loopFile != "" && *teamFile != "" {
+	if opts.LoopFile != "" && opts.TeamFile != "" {
 		fmt.Fprintln(stderr, "avenor: --loop-file and --team-file are mutually exclusive")
 		return exitWithSentinel(1)
 	}
-	if *resultFile != "" && workflowMode {
+	if opts.ResultFile != "" && workflowMode {
 		fmt.Fprintln(stderr, "avenor: --result-file is not supported with --loop-file or --team-file")
 		return exitWithSentinel(1)
 	}
-	if err := validateArtifactPaths(*resultFile, *pidFile, *sentinelFile, *onEvent, *permissionHandler, *autoApprove); err != nil {
+	if err := validateArtifactPaths(opts.ResultFile, opts.PIDFile, opts.SentinelFile, opts.OnEvent, opts.PermissionHandler, opts.AutoApprove); err != nil {
 		fmt.Fprintf(stderr, "avenor: %v\n", err)
 		return exitWithSentinel(1)
 	}
-	if *loopFile != "" && *resume != "" {
+	if opts.LoopFile != "" && opts.Resume != "" {
 		fmt.Fprintln(stderr, "avenor: --loop-file and --resume are mutually exclusive")
 		return exitWithSentinel(1)
 	}
-	if *teamFile != "" && *resume != "" {
+	if opts.TeamFile != "" && opts.Resume != "" {
 		fmt.Fprintln(stderr, "avenor: --team-file and --resume are mutually exclusive")
 		return exitWithSentinel(1)
 	}
-	if *prompt == "" && *promptFile == "" && *loopFile == "" && *teamFile == "" {
+	if opts.Prompt == "" && opts.PromptFile == "" && opts.LoopFile == "" && opts.TeamFile == "" {
 		fmt.Fprintln(stderr, "avenor: --prompt, --prompt-file, --loop-file, or --team-file is required")
 		return exitWithSentinel(1)
 	}
 
-	effectivePermHandler := effectivePermissionHandler(*sentinelFile, *permissionHandler, *autoApprove)
-	cleanupPermBase := permissionCleanupBase(*sentinelFile, *permissionHandler)
+	effectivePermHandler := effectivePermissionHandler(opts.SentinelFile, opts.PermissionHandler, opts.AutoApprove)
+	cleanupPermBase := permissionCleanupBase(opts.SentinelFile, opts.PermissionHandler)
 
 	// The signal trap is installed before the pid file is published, so a
 	// first signal landing during setup still has a cleanup path. Once the
@@ -378,15 +455,15 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	// Only when --sentinel-file is active to avoid changing behavior for callers
 	// that don't use it. The event log is recreated below via newEventWriter.
 	// Use the cleanup permission base (derived or explicit) for cleanup.
-	if *sentinelFile != "" {
-		cleanupSentinelFiles(*sentinelFile, cleanupPermBase, stderr)
+	if opts.SentinelFile != "" {
+		cleanupSentinelFiles(opts.SentinelFile, cleanupPermBase, stderr)
 	}
 
 	var promptText []byte
-	if *prompt != "" {
-		promptText = []byte(*prompt)
-	} else if *promptFile != "" {
-		p, err := os.ReadFile(*promptFile)
+	if opts.Prompt != "" {
+		promptText = []byte(opts.Prompt)
+	} else if opts.PromptFile != "" {
+		p, err := os.ReadFile(opts.PromptFile)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: read prompt file: %v\n", err)
 			return exitWithSentinel(1)
@@ -394,18 +471,18 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		promptText = p
 	}
 
-	baseWriter, err := NewEventWriter(*onEvent)
+	baseWriter, err := NewEventWriter(opts.OnEvent)
 	if err != nil {
 		fmt.Fprintf(stderr, "avenor: open event stream: %v\n", err)
 		return exitWithSentinel(1)
 	}
 	defer baseWriter.Close()
-	metadata := NewEventMetadata(runID, *label, runID)
+	metadata := NewEventMetadata(runID, opts.Label, runID)
 
-	state := control.NewState(runID, *label, *maxRetries)
+	state := control.NewState(runID, opts.Label, opts.MaxRetries)
 	var controlServer *control.ControlServer
 	var httpServer *control.HTTPDebugServer
-	if *controlSocket != "" || *httpDebug != "" {
+	if opts.ControlSocket != "" || opts.HTTPDebug != "" {
 		owner, err := control.GenerateOwnerCapability()
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
@@ -413,8 +490,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		}
 		controlServer = control.NewServer(state, owner)
 	}
-	if *controlSocket != "" {
-		if err := controlServer.Start(*controlSocket); err != nil {
+	if opts.ControlSocket != "" {
+		if err := controlServer.Start(opts.ControlSocket); err != nil {
 			fmt.Fprintf(stderr, "avenor: start control server: %v\n", err)
 			return exitWithSentinel(1)
 		}
@@ -427,8 +504,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			}
 		}()
 	}
-	if *httpDebug != "" {
-		httpServer, err = control.NewHTTPDebugServer(*httpDebug, controlServer)
+	if opts.HTTPDebug != "" {
+		httpServer, err = control.NewHTTPDebugServer(opts.HTTPDebug, controlServer)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: start http debug server: %v\n", err)
 			return exitWithSentinel(1)
@@ -454,26 +531,26 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		}
 	}
 
-	if *agent != "" && *model == "" {
-		resolved, err := resolveAgentModel(*agent, *backend, getenv)
+	if opts.Agent != "" && opts.Model == "" {
+		resolved, err := resolveAgentModel(opts.Agent, opts.Backend, getenv)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 		}
 		if resolved != "" {
-			*model = resolved
+			opts.Model = resolved
 		}
 	}
 
 	startOptions := runtime.StartOptions{
-		Agent:     *agent,
-		Label:     *label,
-		Dir:       *dir,
+		Agent:     opts.Agent,
+		Label:     opts.Label,
+		Dir:       opts.Dir,
 		ServerURL: discovery.URL,
-		Model:     *model,
-		Thinking:  *thinking,
+		Model:     opts.Model,
+		Thinking:  opts.Thinking,
 		Launch:    launch,
 
-		ClaudeMCPWait: *claudeMCPWait,
+		ClaudeMCPWait: opts.ClaudeMCPWait,
 	}
 
 	if controlServer != nil {
@@ -485,9 +562,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 	// timer from the shared deadline, so no waiter can consume another's
 	// only tick and no later attempt can outlive the limit.
 	runCtx := ctx
-	if *timeout > 0 {
+	if opts.Timeout > 0 {
 		var cancelDeadline context.CancelFunc
-		runCtx, cancelDeadline = context.WithDeadline(ctx, time.Now().Add(*timeout))
+		runCtx, cancelDeadline = context.WithDeadline(ctx, time.Now().Add(opts.Timeout))
 		defer cancelDeadline()
 	}
 
@@ -503,7 +580,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
-		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: *label, Dir: *dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Launch: selection.Launch, Provenance: provenance}
+		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: opts.Label, Dir: opts.Dir, ServerURL: discovery.URL, Thinking: selection.Thinking, Launch: selection.Launch, Provenance: provenance}
 		return runAttempt(ctx, attemptConfig{
 			startOptions:           startOptions,
 			backend:                selection.Backend,
@@ -511,10 +588,10 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			sessionBackends:        sessionBackends,
 			initialPrompt:          prompt,
 			runID:                  runID,
-			runLabel:               *label,
-			autoApprove:            *autoApprove,
-			permissionClaimTimeout: *permClaimTimeout,
-			progressTimeout:        *progressTimeout,
+			runLabel:               opts.Label,
+			autoApprove:            opts.AutoApprove,
+			permissionClaimTimeout: opts.PermissionClaimTimeout,
+			progressTimeout:        opts.ProgressTimeout,
 		}, attemptDeps{
 			writer:        writer,
 			fileHandler:   fileHandler,
@@ -535,8 +612,8 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		}
 		// A roster entry supplies a default; an explicit --thinking wins.
 		// The merged level is carried on the selection so execAttempt sees it.
-		if *thinking != "" {
-			selection.Thinking = *thinking
+		if opts.Thinking != "" {
+			selection.Thinking = opts.Thinking
 		}
 		if err := validateCLISelection(selection.Backend, discovery, selection.Thinking, backendSupplied); err != nil {
 			return rosterconfig.ResolvedSelection{}, err
@@ -565,9 +642,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 				}
 				var err error
 				selection, err := rosterconfig.Resolve(rosterconfig.ResolveInput{
-					Backend:     *backend,
-					Agent:       *agent,
-					Model:       *model,
+					Backend:     opts.Backend,
+					Agent:       opts.Agent,
+					Model:       opts.Model,
 					Roster:      entry,
 					RosterEntry: phase.RosterEntry,
 					Loop:        true,
@@ -586,7 +663,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 				selectionMu.Unlock()
 			}
 			r := execAttempt(ctx, resolved, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
-				runID, runtime.LaunchKindLoop, phase.Name, *label, &iteration, attemptNum))
+				runID, runtime.LaunchKindLoop, phase.Name, opts.Label, &iteration, attemptNum))
 			if r.err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, r.err
 			}
@@ -623,9 +700,9 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 				}
 				var err error
 				selection, err := rosterconfig.Resolve(rosterconfig.ResolveInput{
-					Backend:     *backend,
-					Agent:       *agent,
-					Model:       *model,
+					Backend:     opts.Backend,
+					Agent:       opts.Agent,
+					Model:       opts.Model,
 					InlineAgent: phase.Agent,
 					InlineModel: phase.Model,
 					Roster:      entry,
@@ -654,7 +731,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 				selectionMu.Unlock()
 			}
 			r := execAttempt(ctx, resolved, prevSessionID, phase.Prompt, runtime.PhaseLaunchProvenance(
-				runID, runtime.LaunchKindTeam, phase.Name, *label, nil, attemptNum))
+				runID, runtime.LaunchKindTeam, phase.Name, opts.Label, nil, attemptNum))
 			if r.err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, r.err
 			}
@@ -672,16 +749,16 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		}
 	}
 
-	if *loopFile != "" {
-		fallbackRosterPath := *rosterFile
+	if opts.LoopFile != "" {
+		fallbackRosterPath := opts.RosterFile
 		if fallbackRosterPath != "" && !filepath.IsAbs(fallbackRosterPath) {
-			fallbackRosterPath = filepath.Join(*dir, fallbackRosterPath)
+			fallbackRosterPath = filepath.Join(opts.Dir, fallbackRosterPath)
 		}
-		cfg, rootRoster, err := looprunner.LoadLoopConfigWithRoster(*loopFile, nil, fallbackRosterPath)
+		cfg, rootRoster, err := looprunner.LoadLoopConfigWithRoster(opts.LoopFile, nil, fallbackRosterPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: load loop config: %v\n", err)
-			if *sentinelFile != "" {
-				WriteSentinel(*sentinelFile, 1, finalSessionID, "error", runID, stderr)
+			if opts.SentinelFile != "" {
+				WriteSentinel(opts.SentinelFile, 1, finalSessionID, "error", runID, stderr)
 			}
 			return 1
 		}
@@ -699,11 +776,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 						return looprunner.NestedResult{}, fmt.Errorf("load nested loop config: %w", err)
 					}
 					subOpts := looprunner.RunOptions{
-						WorkDir:      *dir,
+						WorkDir:      opts.Dir,
 						RunID:        runID,
 						EventSink:    writer,
 						Config:       subCfg,
-						MaxRetries:   *maxRetries,
+						MaxRetries:   opts.MaxRetries,
 						Broker:       nil,
 						ConfigDir:    filepath.Dir(configPath),
 						Roster:       subRoster,
@@ -738,11 +815,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 						}, err
 					}
 					subOpts := teamrunner.RunOptions{
-						WorkDir:      *dir,
+						WorkDir:      opts.Dir,
 						RunID:        runID,
 						EventSink:    writer,
 						Config:       subCfg,
-						MaxRetries:   *maxRetries,
+						MaxRetries:   opts.MaxRetries,
 						Broker:       nil,
 						ConfigDir:    filepath.Dir(configPath),
 						Roster:       subRoster,
@@ -766,20 +843,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		}
 		nestedRun := makeNestedRun(rootRoster)
 
-		opts := looprunner.RunOptions{
-			WorkDir:      *dir,
+		runOpts := looprunner.RunOptions{
+			WorkDir:      opts.Dir,
 			RunID:        runID,
 			EventSink:    writer,
 			Config:       cfg,
-			MaxRetries:   *maxRetries,
+			MaxRetries:   opts.MaxRetries,
 			Broker:       nil,
-			ConfigDir:    filepath.Dir(*loopFile),
+			ConfigDir:    filepath.Dir(opts.LoopFile),
 			Roster:       rootRoster,
 			PhaseAttempt: makePhaseAttemptForLoop(rootRoster),
 			NestedRun:    nestedRun,
 		}
 
-		stopPID, ok := publishPIDFile(*pidFile, stderr)
+		stopPID, ok := publishPIDFile(opts.PIDFile, stderr)
 		if !ok {
 			return exitWithSentinel(1)
 		}
@@ -788,30 +865,30 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		lrCtx, lrCancel := context.WithCancel(runCtx)
 		defer lrCancel()
 
-		result, err := looprunner.Run(lrCtx, opts)
+		result, err := looprunner.Run(lrCtx, runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: loop run: %v\n", err)
-			if *sentinelFile != "" {
-				WriteSentinel(*sentinelFile, 1, result.SessionID, "error", runID, stderr)
+			if opts.SentinelFile != "" {
+				WriteSentinel(opts.SentinelFile, 1, result.SessionID, "error", runID, stderr)
 			}
 			return 1
 		}
 
-		writeSentinelForResult(result, *sentinelFile, runID, stderr)
+		writeSentinelForResult(result, opts.SentinelFile, runID, stderr)
 
 		return result.ExitCode
 	}
 
-	if *teamFile != "" {
-		fallbackRosterPath := *rosterFile
+	if opts.TeamFile != "" {
+		fallbackRosterPath := opts.RosterFile
 		if fallbackRosterPath != "" && !filepath.IsAbs(fallbackRosterPath) {
-			fallbackRosterPath = filepath.Join(*dir, fallbackRosterPath)
+			fallbackRosterPath = filepath.Join(opts.Dir, fallbackRosterPath)
 		}
-		cfg, rootRoster, err := teamrunner.LoadTeamConfigWithRoster(*teamFile, nil, fallbackRosterPath)
+		cfg, rootRoster, err := teamrunner.LoadTeamConfigWithRoster(opts.TeamFile, nil, fallbackRosterPath)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: load team config: %v\n", err)
-			if *sentinelFile != "" {
-				WriteSentinel(*sentinelFile, 1, finalSessionID, "error", runID, stderr)
+			if opts.SentinelFile != "" {
+				WriteSentinel(opts.SentinelFile, 1, finalSessionID, "error", runID, stderr)
 			}
 			return 1
 		}
@@ -839,11 +916,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 						}, err
 					}
 					subOpts := looprunner.RunOptions{
-						WorkDir:      *dir,
+						WorkDir:      opts.Dir,
 						RunID:        runID,
 						EventSink:    writer,
 						Config:       subCfg,
-						MaxRetries:   *maxRetries,
+						MaxRetries:   opts.MaxRetries,
 						Broker:       nil,
 						ConfigDir:    filepath.Dir(configPath),
 						Roster:       subRoster,
@@ -868,11 +945,11 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 						return teamrunner.NestedResult{}, fmt.Errorf("load nested team config: %w", err)
 					}
 					subOpts := teamrunner.RunOptions{
-						WorkDir:      *dir,
+						WorkDir:      opts.Dir,
 						RunID:        runID,
 						EventSink:    writer,
 						Config:       subCfg,
-						MaxRetries:   *maxRetries,
+						MaxRetries:   opts.MaxRetries,
 						Broker:       nil,
 						ConfigDir:    filepath.Dir(configPath),
 						Roster:       subRoster,
@@ -896,20 +973,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		}
 		nestedRun := makeNestedRun(rootRoster)
 
-		opts := teamrunner.RunOptions{
-			WorkDir:      *dir,
+		runOpts := teamrunner.RunOptions{
+			WorkDir:      opts.Dir,
 			RunID:        runID,
 			EventSink:    writer,
 			Config:       cfg,
-			MaxRetries:   *maxRetries,
+			MaxRetries:   opts.MaxRetries,
 			Broker:       nil,
-			ConfigDir:    filepath.Dir(*teamFile),
+			ConfigDir:    filepath.Dir(opts.TeamFile),
 			Roster:       rootRoster,
 			PhaseAttempt: makePhaseAttemptForTeam(rootRoster),
 			NestedRun:    nestedRun,
 		}
 
-		stopPID, ok := publishPIDFile(*pidFile, stderr)
+		stopPID, ok := publishPIDFile(opts.PIDFile, stderr)
 		if !ok {
 			return exitWithSentinel(1)
 		}
@@ -918,20 +995,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		trCtx, trCancel := context.WithCancel(runCtx)
 		defer trCancel()
 
-		result, err := teamrunner.Run(trCtx, opts)
+		result, err := teamrunner.Run(trCtx, runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: team run: %v\n", err)
-			if *sentinelFile != "" {
-				WriteSentinel(*sentinelFile, 1, result.SessionID, "error", runID, stderr)
+			if opts.SentinelFile != "" {
+				WriteSentinel(opts.SentinelFile, 1, result.SessionID, "error", runID, stderr)
 			}
 			return 1
 		}
 
-		if *sentinelFile != "" {
+		if opts.SentinelFile != "" {
 			if result.Reason != "" {
-				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, "", stderr)
+				WriteSentinelResult(opts.SentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, "", stderr)
 			} else {
-				WriteSentinelResult(*sentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", "", stderr)
+				WriteSentinelResult(opts.SentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, "", "", stderr)
 			}
 		}
 
@@ -940,18 +1017,18 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 
 	// The pid file is published once every setup step that can fail has passed,
 	// so a rejected invocation never touches a pid file another run owns.
-	stopPID, ok := publishPIDFile(*pidFile, stderr)
+	stopPID, ok := publishPIDFile(opts.PIDFile, stderr)
 	if !ok {
 		return exitWithSentinel(1)
 	}
 	defer stopPID()
 
-	resumeID := *resume
+	resumeID := opts.Resume
 	if resumeID != "" {
 		// The notice derives from the drop itself, so the two cannot drift:
 		// anything the resume path will silently ignore is named here.
-		before := runtime.StartOptions{Thinking: *thinking, ClaudeMCPWait: *claudeMCPWait}
-		after := runtime.DropStartOnlyOptions(*backend, before)
+		before := runtime.StartOptions{Thinking: opts.Thinking, ClaudeMCPWait: opts.ClaudeMCPWait}
+		after := runtime.DropStartOnlyOptions(opts.Backend, before)
 		var dropped []string
 		if after.Thinking != before.Thinking {
 			dropped = append(dropped, "--thinking "+before.Thinking)
@@ -980,20 +1057,20 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		if controlServer != nil {
 			state.Update(func(s *control.Snapshot) { s.RetryAttempt = attempt })
 		}
-		opts := startOptions
-		opts.Provenance = runtime.DirectLaunchProvenance(runID, *label, attempt)
+		runOpts := startOptions
+		runOpts.Provenance = runtime.DirectLaunchProvenance(runID, opts.Label, attempt)
 		result = runAttempt(runCtx, attemptConfig{
-			startOptions:           opts,
-			backend:                *backend,
+			startOptions:           runOpts,
+			backend:                opts.Backend,
 			resumeID:               resumeID,
 			sessionBackends:        sessionBackends,
 			initialPrompt:          string(promptText),
-			resultFile:             *resultFile,
+			resultFile:             opts.ResultFile,
 			runID:                  runID,
-			runLabel:               *label,
-			autoApprove:            *autoApprove,
-			permissionClaimTimeout: *permClaimTimeout,
-			progressTimeout:        *progressTimeout,
+			runLabel:               opts.Label,
+			autoApprove:            opts.AutoApprove,
+			permissionClaimTimeout: opts.PermissionClaimTimeout,
+			progressTimeout:        opts.ProgressTimeout,
 		}, attemptDeps{
 			writer:        writer,
 			fileHandler:   fileHandler,
@@ -1013,7 +1090,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 			}
 		}
 
-		if result.err != nil || !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > *maxRetries {
+		if result.err != nil || !runtime.IsRetryableFailure(result.exitCode, result.stopReason) || attempt > opts.MaxRetries {
 			break
 		}
 
@@ -1027,13 +1104,13 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		if !retry {
 			break
 		}
-		if err := writeRetryEvent(writer, result.sessionID, runID, attempt+1, *maxRetries, *label); err != nil {
+		if err := writeRetryEvent(writer, result.sessionID, runID, attempt+1, opts.MaxRetries, opts.Label); err != nil {
 			fmt.Fprintf(stderr, "avenor: write retry event: %v\n", err)
 			result.exitCode = 1
 			break
 		}
-		if *sentinelFile != "" {
-			cleanupSentinelFiles(*sentinelFile, cleanupPermBase, stderr)
+		if opts.SentinelFile != "" {
+			cleanupSentinelFiles(opts.SentinelFile, cleanupPermBase, stderr)
 		}
 
 		select {
