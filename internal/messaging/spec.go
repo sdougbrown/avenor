@@ -9,7 +9,7 @@ import (
 )
 
 // ActionApplicability and PropertyConstraints are the shared contract types
-// from internal/admission, spelled the way this package's tables and tests
+// from internal/tooladmission, spelled the way this package's tables and tests
 // have always named them. The definitions live in one place; the messaging and
 // workflow tables are the same Go type.
 type (

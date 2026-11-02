@@ -122,3 +122,23 @@ func TestExactIntegerConvertsAdmittedValues(t *testing.T) {
 		t.Fatal(`"1" should not convert`)
 	}
 }
+
+// TestValidateFieldsDefaultsAnUndeclaredTypeToString pins the parity with the
+// TypeScript twin: a permitted property absent from Types is a string, so a
+// string value is admitted and any other wire value is a type error.
+func TestValidateFieldsDefaultsAnUndeclaredTypeToString(t *testing.T) {
+	engine := New(testRenderer)
+	entry := ActionApplicability{
+		Permitted: []string{"action", "extra"},
+		Required:  []string{"action"},
+		Types:     map[string]string{"action": "string"},
+	}
+	fields := map[string]json.RawMessage{"action": json.RawMessage(`"x"`), "extra": json.RawMessage(`"y"`)}
+	if detail := engine.ValidateFields(fields, entry); detail != "" {
+		t.Fatalf("detail = %q, want an undeclared string property admitted", detail)
+	}
+	fields["extra"] = json.RawMessage(`7`)
+	if detail := engine.ValidateFields(fields, entry); detail != "wrong_type_string" {
+		t.Fatalf("detail = %q, want wrong_type_string for an undeclared non-string", detail)
+	}
+}

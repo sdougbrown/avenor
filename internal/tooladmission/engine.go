@@ -59,6 +59,11 @@ func (e *Engine) ValidateFields(fields map[string]json.RawMessage, entry ActionA
 			continue
 		}
 		kind := entry.Types[name]
+		if kind == "" {
+			// A permitted property with no declared type is a string, the same
+			// default the TypeScript twin applies.
+			kind = "string"
+		}
 		if !hasWireType(raw, kind) {
 			switch kind {
 			case "integer":
