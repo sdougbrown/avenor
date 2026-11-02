@@ -4,32 +4,18 @@ import (
 	"encoding/json"
 	"os"
 
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/toolerr"
 )
 
-// ActionApplicability is the per-action input contract. It is the one table
-// both the Go and the TypeScript router validate against; the JSON Schema
-// variants are proven equal to it by TestSchemaMatchesRouteTable.
-type ActionApplicability struct {
-	Permitted   []string                       // every property the action accepts, including "action"
-	Required    []string                       // the subset that must be present
-	Types       map[string]string              // declared wire type per permitted property: string, integer or object
-	Constraints map[string]PropertyConstraints // declared limits per property
-}
-
-// PropertyConstraints is one property's declared limits, compiled from the
-// published JSON Schema so the router and the schema enforce the same rule from
-// one declaration. A zero length means no length limit; HasMinimum and
-// HasMaximum keep a declared bound of zero distinct from an absent one.
-type PropertyConstraints struct {
-	MinLength  int
-	MaxLength  int
-	Pattern    string
-	Minimum    int64 // inclusive lower bound for an integer property
-	HasMinimum bool
-	Maximum    int64 // inclusive upper bound for an integer property
-	HasMaximum bool
-}
+// ActionApplicability and PropertyConstraints are the shared contract types
+// from internal/admission, spelled the way this package's tables and tests
+// have always named them. The definitions live in one place; the messaging and
+// workflow tables are the same Go type.
+type (
+	ActionApplicability = admission.ActionApplicability
+	PropertyConstraints = admission.PropertyConstraints
+)
 
 // ConformanceCase is one language-neutral conformance case from
 // schemas/message_route.conformance.json. Input is kept as raw JSON so the
@@ -114,14 +100,20 @@ func cloneApplicability(table map[string]ActionApplicability) map[string]ActionA
 		for name, kind := range entry.Types {
 			types[name] = kind
 		}
+		enums := make(map[string][]string, len(entry.Enums))
+		for name, values := range entry.Enums {
+			enums[name] = append([]string(nil), values...)
+		}
 		constraints := make(map[string]PropertyConstraints, len(entry.Constraints))
 		for name, constraint := range entry.Constraints {
 			constraints[name] = constraint
 		}
 		out[action] = ActionApplicability{
+			Access:      entry.Access,
 			Permitted:   append([]string(nil), entry.Permitted...),
 			Required:    append([]string(nil), entry.Required...),
 			Types:       types,
+			Enums:       enums,
 			Constraints: constraints,
 		}
 	}

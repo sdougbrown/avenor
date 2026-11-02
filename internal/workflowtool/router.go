@@ -1,49 +1,26 @@
 package workflowtool
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/big"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-	"unicode/utf8"
 
-	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/toolerr"
 )
 
-// ActionApplicability is the per-action input contract. It is the one table
-// both the Go and the TypeScript router validate against; the JSON Schema
-// variants are proven equal to it by TestSchemaMatchesRouteTable.
-type ActionApplicability struct {
-	Access      string                         // read (credential-free) or empty (socket owner)
-	Permitted   []string                       // every property the action accepts, including "action"
-	Required    []string                       // the subset that must be present
-	Types       map[string]string              // declared wire type per permitted property: string, integer, object, array or json
-	Enums       map[string][]string            // declared closed value set per property
-	Constraints map[string]PropertyConstraints // declared limits per property
-}
-
-// PropertyConstraints is one property's declared limits, compiled from the
-// published JSON Schema so the router and the schema enforce the same rule from
-// one declaration. A zero length means no length limit; HasMinimum and
-// HasMaximum keep a declared bound of zero distinct from an absent one.
-type PropertyConstraints struct {
-	MinLength  int
-	MaxLength  int
-	Pattern    string
-	Minimum    int64 // inclusive lower bound for an integer property
-	HasMinimum bool
-	Maximum    int64 // inclusive upper bound for an integer property
-	HasMaximum bool
-	ItemType   string // declared wire type of an array property's items
-}
+// ActionApplicability and PropertyConstraints are the shared contract types
+// from internal/admission, spelled the way this package's tables and tests
+// have always named them. The definitions live in one place; the messaging and
+// workflow tables are the same Go type.
+type (
+	ActionApplicability = admission.ActionApplicability
+	PropertyConstraints = admission.PropertyConstraints
+)
 
 // Result is one tool call's outcome: the action that ran and the control
 // method's result object, unchanged. The surface renders Value as its
@@ -91,6 +68,12 @@ type Options struct {
 	ClampWait func(time.Duration) (time.Duration, bool)
 }
 
+// engine is the shared admission engine over the workflow repairs table. The
+// per-action applicability entries, their wire types, enums and limits, and the
+// sentences come from this package; the field-validation order and checks live
+// in internal/admission.
+var engine = admission.New(Repair)
+
 // Admit validates one call against its action's applicability entry and
 // returns the action it names. Execute runs it first, so a surface can
 // classify the call before it acquires a control client without admitting
@@ -100,7 +83,7 @@ func Admit(input json.RawMessage) (string, error) {
 	if err != nil {
 		return "", invalidActionError()
 	}
-	action, ok := fieldString(fields, "action")
+	action, ok := admission.FieldString(fields, "action")
 	if !ok {
 		return "", invalidActionError()
 	}
@@ -108,7 +91,7 @@ func Admit(input json.RawMessage) (string, error) {
 	if !known {
 		return "", invalidActionError()
 	}
-	if detail := validateFields(fields, entry); detail != "" {
+	if detail := engine.ValidateFields(fields, entry); detail != "" {
 		return "", invalidRequest(action, detail)
 	}
 	return action, nil
@@ -318,7 +301,7 @@ func ActionOf(input json.RawMessage) string {
 	if err != nil {
 		return ""
 	}
-	action, _ := fieldString(fields, "action")
+	action, _ := admission.FieldString(fields, "action")
 	return action
 }
 
@@ -392,23 +375,11 @@ func decodeObject(input json.RawMessage) (map[string]json.RawMessage, error) {
 	return fields, nil
 }
 
-func fieldString(fields map[string]json.RawMessage, name string) (string, bool) {
-	raw, ok := fields[name]
-	if !ok {
-		return "", false
-	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", false
-	}
-	return value, true
-}
-
 // afterSeq and limit convert the admitted integers. Admission has already
 // pinned them to the int64 range, so the conversion cannot overflow. An
 // omitted number decodes as the zero value, which is the server default.
 func (in workflowInput) afterSeq() int64 {
-	rational, ok := exactInteger(json.RawMessage(in.AfterSeq))
+	rational, ok := admission.ExactInteger(json.RawMessage(in.AfterSeq))
 	if !ok || !rational.Num().IsInt64() {
 		return 0
 	}
@@ -416,219 +387,11 @@ func (in workflowInput) afterSeq() int64 {
 }
 
 func (in workflowInput) limit() int {
-	rational, ok := exactInteger(json.RawMessage(in.Limit))
+	rational, ok := admission.ExactInteger(json.RawMessage(in.Limit))
 	if !ok || !rational.Num().IsInt64() {
 		return 0
 	}
 	return int(rational.Num().Int64())
-}
-
-// validateFields applies one action's applicability entry in the fixed order:
-// a property outside Permitted, then a missing Required property, then a value
-// whose wire type, enum or declared constraint is not met. The returned
-// sentence is the invalid_request template's {detail} fact, rendered from the
-// shared repairs table so no failure sentence is composed here.
-func validateFields(fields map[string]json.RawMessage, entry ActionApplicability) string {
-	permitted := make(map[string]bool, len(entry.Permitted))
-	for _, name := range entry.Permitted {
-		permitted[name] = true
-	}
-	names := make([]string, 0, len(fields))
-	for name := range fields {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if !permitted[name] {
-			return Repair("unknown_property", map[string]string{"name": quote(name)})
-		}
-	}
-	for _, name := range entry.Required {
-		if _, ok := fields[name]; !ok {
-			return Repair("missing_required_property", map[string]string{"name": quote(name)})
-		}
-	}
-	for _, name := range entry.Permitted {
-		raw, ok := fields[name]
-		if !ok {
-			continue
-		}
-		kind := entry.Types[name]
-		if !hasWireType(raw, kind) {
-			switch kind {
-			case "integer":
-				return Repair("wrong_type_integer", map[string]string{"name": quote(name)})
-			case "object":
-				return Repair("wrong_type_object", map[string]string{"name": quote(name)})
-			case "array":
-				return Repair("wrong_type_array", map[string]string{"name": quote(name)})
-			default:
-				return Repair("wrong_type_string", map[string]string{"name": quote(name)})
-			}
-		}
-		constraint := entry.Constraints[name]
-		if kind == "array" && constraint.ItemType != "" {
-			if detail := validateArrayItems(name, raw, constraint.ItemType); detail != "" {
-				return detail
-			}
-		}
-		if values, ok := entry.Enums[name]; ok {
-			value, _ := fieldString(fields, name)
-			if !contains(values, value) {
-				return Repair("invalid_enum", map[string]string{
-					"name":   quote(name),
-					"values": quoteList(values),
-				})
-			}
-		}
-		switch kind {
-		case "string":
-			value, _ := fieldString(fields, name)
-			if detail := validateStringConstraint(name, value, constraint); detail != "" {
-				return detail
-			}
-		case "integer":
-			if detail := validateIntegerConstraint(name, raw, constraint); detail != "" {
-				return detail
-			}
-		}
-	}
-	return ""
-}
-
-func hasWireType(raw json.RawMessage, kind string) bool {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return false
-	}
-	switch kind {
-	case "json":
-		return true
-	case "string":
-		_, ok := value.(string)
-		return ok
-	case "integer":
-		_, ok := exactInteger(raw)
-		return ok
-	case "object":
-		_, ok := value.(map[string]any)
-		return ok
-	case "array":
-		_, ok := value.([]any)
-		return ok
-	}
-	return false
-}
-
-// exactInteger returns raw's exact rational value when it is a mathematical
-// integer, so an integer-valued exponential such as 1e3 is admitted.
-func exactInteger(raw json.RawMessage) (*big.Rat, bool) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, false
-	}
-	number, ok := value.(json.Number)
-	if !ok {
-		return nil, false
-	}
-	rational, ok := new(big.Rat).SetString(number.String())
-	if !ok || !rational.IsInt() {
-		return nil, false
-	}
-	return rational, true
-}
-
-func validateArrayItems(name string, raw json.RawMessage, itemType string) string {
-	var items []json.RawMessage
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return Repair("wrong_type_array", map[string]string{"name": quote(name)})
-	}
-	for _, item := range items {
-		if !hasWireType(item, itemType) {
-			return Repair("array_item_type", map[string]string{"name": quote(name)})
-		}
-	}
-	return ""
-}
-
-func validateStringConstraint(name, value string, constraint PropertyConstraints) string {
-	length := utf8.RuneCountInString(value)
-	if constraint.MinLength > 0 && length < constraint.MinLength {
-		return Repair("string_too_short", map[string]string{"name": quote(name), "min": fmt.Sprint(constraint.MinLength)})
-	}
-	if constraint.MaxLength > 0 && length > constraint.MaxLength {
-		return Repair("string_too_long", map[string]string{"name": quote(name), "max": fmt.Sprint(constraint.MaxLength)})
-	}
-	if constraint.Pattern != "" {
-		// A pattern that does not compile matches nothing, so every value is
-		// refused rather than the check being skipped.
-		if pattern, ok := compiledPattern(constraint.Pattern); !ok || !pattern.MatchString(value) {
-			return Repair("string_pattern", map[string]string{"name": quote(name)})
-		}
-	}
-	return ""
-}
-
-// constraintPatterns caches every pattern the table declares, compiled once. A
-// pattern that failed to compile is cached as nil so it is not retried per call.
-var constraintPatterns sync.Map
-
-func compiledPattern(pattern string) (*regexp.Regexp, bool) {
-	if cached, ok := constraintPatterns.Load(pattern); ok {
-		compiled, _ := cached.(*regexp.Regexp)
-		return compiled, compiled != nil
-	}
-	compiled, err := regexp.Compile(pattern)
-	if err != nil {
-		constraintPatterns.Store(pattern, (*regexp.Regexp)(nil))
-		return nil, false
-	}
-	constraintPatterns.Store(pattern, compiled)
-	return compiled, true
-}
-
-func validateIntegerConstraint(name string, raw json.RawMessage, constraint PropertyConstraints) string {
-	rational, ok := exactInteger(raw)
-	if !ok {
-		return Repair("wrong_type_integer", map[string]string{"name": quote(name)})
-	}
-	if !rational.Num().IsInt64() {
-		// The declared bound is the int64 limit the schema publishes, so a
-		// value outside it names the same bound the schema rejects with.
-		if rational.Sign() < 0 {
-			return Repair("integer_too_small", map[string]string{"name": quote(name), "min": minIntegerBound(constraint)})
-		}
-		return Repair("integer_too_large", map[string]string{"name": quote(name), "max": maxIntegerBound(constraint)})
-	}
-	value := rational.Num().Int64()
-	if constraint.HasMinimum && value < constraint.Minimum {
-		return Repair("integer_too_small", map[string]string{"name": quote(name), "min": fmt.Sprint(constraint.Minimum)})
-	}
-	if constraint.HasMaximum && value > constraint.Maximum {
-		return Repair("integer_too_large", map[string]string{"name": quote(name), "max": fmt.Sprint(constraint.Maximum)})
-	}
-	return ""
-}
-
-// minIntegerBound and maxIntegerBound render the bound a property declares, or
-// the int64 limit as text when the schema declares none — the wire type's
-// range, written literally because 2^63 does not fit an int64 constant.
-func minIntegerBound(constraint PropertyConstraints) string {
-	if constraint.HasMinimum {
-		return fmt.Sprint(constraint.Minimum)
-	}
-	return "-9223372036854775808"
-}
-
-func maxIntegerBound(constraint PropertyConstraints) string {
-	if constraint.HasMaximum {
-		return fmt.Sprint(constraint.Maximum)
-	}
-	return "9223372036854775807"
 }
 
 // invalidActionError is the typed denial for an input that names no known
@@ -649,18 +412,9 @@ func refused(err error) *ToolError {
 
 // quote and quoteList render template facts through the shared escaping rule,
 // so the two routers cannot disagree on how an id is quoted.
-func quote(value string) string { return messaging.Quote(value) }
+func quote(value string) string { return admission.Quote(value) }
 
-func quoteList(values []string) string { return messaging.QuoteList(values) }
-
-func contains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
+func quoteList(values []string) string { return admission.QuoteList(values) }
 
 var timeoutRE = regexp.MustCompile(`^(\d+)(s|m|h)?$`)
 

@@ -658,7 +658,7 @@ describe('host message provider', () => {
     expect(await provider(client).state(peerRunId)).toMatchObject({ live: true, resumable: false, status: 'running' })
   })
 
-  // Ids a broker permits that Go's %q escapes differently from messaging.Quote.
+  // Ids a broker permits that Go's %q escapes differently from admission.Quote.
   // The wire spelling is what the supervisor's fmt.Errorf("runtime %q not found")
   // produces, character for character.
   const goQuotedIds: Array<[name: string, runId: string, wireMessage: string]> = [
@@ -683,7 +683,7 @@ describe('host message provider', () => {
   }
 
   it('keeps a status failure whose id is escaped some other way than Go renders it', async () => {
-    // The messaging Quote spelling of a C0 control is `\u0001`; Go's %q writes
+    // The admission Quote spelling of a C0 control is `\u0001`; Go's %q writes
     // `\x01`. Only the sentence the supervisor actually produces is the
     // absence answer, so the escaped-any-other-way text stays this call's error.
     const runId = 'rt_\u0001ctl'

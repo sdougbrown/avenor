@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto'
 
 import outcomeSchema from '../../../schemas/message.outcome.json'
 import conformanceSchema from '../../../schemas/message_route.conformance.json'
+import repairsBase from '../../../schemas/repairs.json'
 
 interface OutcomeRow {
   outcome: string
@@ -58,7 +59,12 @@ for (const row of outcomeRows) {
   }
 }
 
-const repairs: Record<string, string> = conformance.repairs
+// The shared repair sentences (schemas/repairs.json) plus the tool's own codes
+// and overrides — the fixture wins, exactly like the Go generators merge them.
+const repairs: Record<string, string> = {
+  ...(repairsBase as { repairs: Record<string, string> }).repairs,
+  ...conformance.repairs,
+}
 const peersLastTemplates: Record<string, string> = outcomeContract.peers_last
 
 /** Substitute `{fact}` placeholders, leaving an unfilled placeholder intact. */
@@ -113,7 +119,7 @@ export function renderLast(key: string, facts: Record<string, string> = {}): str
  * Render a value for a template fact as one JSON string literal. Control,
  * format, line- and paragraph-separator characters are escaped, so a label a
  * producer controls cannot carry a bidi override or a zero-width character into
- * tool text. The rule is byte-identical to internal/messaging.Quote.
+ * tool text. The rule is byte-identical to internal/admission.Quote.
  */
 export function quote(value: string): string {
   return `"${escapeNonPrintable(value)}"`

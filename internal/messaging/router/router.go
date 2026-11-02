@@ -16,16 +16,20 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"regexp"
-	"sort"
 	"sync"
 	"time"
-	"unicode/utf8"
 
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askclient"
 	"github.com/sdougbrown/avenor/internal/toolerr"
 )
+
+// Engine is the shared admission engine over the messaging repairs table. The
+// per-action applicability entries, their wire types and limits, and the
+// sentences come from internal/messaging; the field-validation order and
+// checks live in internal/admission.
+var engine = admission.New(messaging.Repair)
 
 // Provider is what one surface supplies to the router: the shared transport,
 // the caller and surface it speaks as, and the runtime operations only that
@@ -146,7 +150,7 @@ func (r *Router) Execute(ctx context.Context, input json.RawMessage) (Result, er
 	if !known {
 		return Result{}, invalidAction(messaging.MessageRouteFields{Action: &action})
 	}
-	if detail := validateFields(fields, entry); detail != "" {
+	if detail := engine.ValidateFields(fields, entry); detail != "" {
 		return Result{}, invalidRequest(action, detail)
 	}
 
@@ -614,14 +618,14 @@ func asToolError(err error) *ToolError {
 	return refused(err)
 }
 
-// quote renders value for a template fact through the shared escaping rule, so
-// the router and the rename authority cannot disagree on how an id is quoted.
-func quote(value string) string { return messaging.Quote(value) }
+// quote, sanitize and quoteList render template facts through the shared
+// escaping rule in internal/admission, so the routers and the rename authority
+// cannot disagree on how an id is quoted.
+func quote(value string) string { return admission.Quote(value) }
 
-// sanitize renders a bare template fact through the shared escaping rule.
-func sanitize(value string) string { return messaging.Sanitize(value) }
+func sanitize(value string) string { return admission.Sanitize(value) }
 
-func quoteList(values []string) string { return messaging.QuoteList(values) }
+func quoteList(values []string) string { return admission.QuoteList(values) }
 
 // The six message actions, the reserved self alias, and the two tool-level
 // outcomes. The action spellings are the schema's action enum.
@@ -699,148 +703,6 @@ func fieldString(fields map[string]json.RawMessage, name string) (string, bool) 
 	return value, true
 }
 
-// validateFields applies one action's applicability entry in the fixed order
-// phase 1 uses: a property outside Permitted, then a missing Required property,
-// then a value whose wire type or declared constraint is not met. The returned
-// sentence is the invalid_request template's {detail} fact, rendered from the
-// shared repairs table so no failure sentence is composed here.
-func validateFields(fields map[string]json.RawMessage, entry messaging.ActionApplicability) string {
-	permitted := make(map[string]bool, len(entry.Permitted))
-	for _, name := range entry.Permitted {
-		permitted[name] = true
-	}
-	names := make([]string, 0, len(fields))
-	for name := range fields {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if !permitted[name] {
-			return messaging.Repair("unknown_property", map[string]string{"name": quote(name)})
-		}
-	}
-	for _, name := range entry.Required {
-		if _, ok := fields[name]; !ok {
-			return messaging.Repair("missing_required_property", map[string]string{"name": quote(name)})
-		}
-	}
-	for _, name := range entry.Permitted {
-		raw, ok := fields[name]
-		if !ok {
-			continue
-		}
-		kind := entry.Types[name]
-		if !hasWireType(raw, kind) {
-			switch kind {
-			case "integer":
-				return messaging.Repair("wrong_type_integer", map[string]string{"name": quote(name)})
-			case "object":
-				return messaging.Repair("wrong_type_object", map[string]string{"name": quote(name)})
-			default:
-				return messaging.Repair("wrong_type_string", map[string]string{"name": quote(name)})
-			}
-		}
-		constraint := entry.Constraints[name]
-		switch kind {
-		case "string":
-			value, _ := fieldString(fields, name)
-			if detail := validateStringConstraint(name, value, constraint); detail != "" {
-				return detail
-			}
-		case "integer":
-			if detail := validateIntegerConstraint(name, raw, constraint); detail != "" {
-				return detail
-			}
-		}
-	}
-	return ""
-}
-
-// validateStringConstraint applies the string limits the published JSON Schema
-// declares. It reads the compiled constraints, so the schema and the router
-// cannot disagree about length or allowed characters.
-func validateStringConstraint(name, value string, constraint messaging.PropertyConstraints) string {
-	length := utf8.RuneCountInString(value)
-	if constraint.MinLength > 0 && length < constraint.MinLength {
-		return messaging.Repair("string_too_short", map[string]string{
-			"name": quote(name),
-			"min":  fmt.Sprint(constraint.MinLength),
-		})
-	}
-	if constraint.MaxLength > 0 && length > constraint.MaxLength {
-		return messaging.Repair("string_too_long", map[string]string{
-			"name": quote(name),
-			"max":  fmt.Sprint(constraint.MaxLength),
-		})
-	}
-	if constraint.Pattern != "" {
-		if pattern, ok := constraintPatterns()[constraint.Pattern]; !ok || !pattern.MatchString(value) {
-			return messaging.Repair("string_pattern", map[string]string{"name": quote(name)})
-		}
-	}
-	return ""
-}
-
-// constraintPatterns is every pattern the two applicability tables declare,
-// compiled once. The tables are the only source of a constraint's Pattern, so a
-// missing entry means the pattern did not compile and no value can match it.
-var constraintPatterns = sync.OnceValue(func() map[string]*regexp.Regexp {
-	compiled := map[string]*regexp.Regexp{}
-	for _, table := range []map[string]messaging.ActionApplicability{
-		messaging.ApplicabilityTable(),
-		messaging.PeersApplicabilityTable(),
-	} {
-		for _, entry := range table {
-			for _, constraint := range entry.Constraints {
-				if constraint.Pattern == "" {
-					continue
-				}
-				pattern, err := regexp.Compile(constraint.Pattern)
-				if err != nil {
-					continue
-				}
-				compiled[constraint.Pattern] = pattern
-			}
-		}
-	}
-	return compiled
-})
-
-// validateIntegerConstraint applies the integer limits the published JSON
-// Schema declares. timeout_ms has an inclusive floor so a negative wait cannot
-// fall through to the ask store's "absent or zero" maximum, and an inclusive
-// ceiling that keeps the later duration conversion inside its range. Both
-// bounds are read from their declared-presence flags, so a bound of zero is a
-// limit and not an omission.
-func validateIntegerConstraint(name string, raw json.RawMessage, constraint messaging.PropertyConstraints) string {
-	if !constraint.HasMinimum && !constraint.HasMaximum {
-		return ""
-	}
-	value, ok := exactInteger(raw)
-	if !ok {
-		return ""
-	}
-	if constraint.HasMinimum {
-		minimum := new(big.Rat).SetInt64(constraint.Minimum)
-		if value.Cmp(minimum) < 0 {
-			return messaging.Repair("integer_too_small", map[string]string{
-				"name": quote(name),
-				"min":  fmt.Sprint(constraint.Minimum),
-			})
-		}
-	}
-	if constraint.HasMaximum {
-		maximum := new(big.Rat).SetInt64(constraint.Maximum)
-		if value.Cmp(maximum) > 0 {
-			return messaging.Repair("integer_too_large", map[string]string{
-				"name": quote(name),
-				"max":  fmt.Sprint(constraint.Maximum),
-			})
-		}
-	}
-	return ""
-}
-
 // timeoutMS converts the validated integer-valued timeout_ms into whole
 // milliseconds. Validation admits 1.0 and 1e3, which do not unmarshal into an
 // int directly, so the conversion goes through the exact rational value. The
@@ -858,51 +720,6 @@ func (input messageInput) timeoutMS() int {
 		return 0
 	}
 	return int(numerator.Int64())
-}
-
-// hasWireType reports whether raw carries the declared wire type. An integer
-// means a mathematical integer, matching the JSON Schema: 1.0 and 1e3 are
-// accepted and a non-integral value such as 1.5 is rejected by both layers. The
-// value must still fit the router's int field.
-func hasWireType(raw json.RawMessage, kind string) bool {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return false
-	}
-	switch kind {
-	case "string":
-		_, ok := value.(string)
-		return ok
-	case "integer":
-		rational, ok := exactInteger(raw)
-		return ok && rational.Num().IsInt64()
-	case "object":
-		_, ok := value.(map[string]any)
-		return ok
-	}
-	return false
-}
-
-// exactInteger returns raw's exact rational value when it is a mathematical
-// integer.
-func exactInteger(raw json.RawMessage) (*big.Rat, bool) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, false
-	}
-	number, ok := value.(json.Number)
-	if !ok {
-		return nil, false
-	}
-	rational, ok := new(big.Rat).SetString(number.String())
-	if !ok || !rational.IsInt() {
-		return nil, false
-	}
-	return rational, true
 }
 
 func firstNonEmpty(values ...string) string {

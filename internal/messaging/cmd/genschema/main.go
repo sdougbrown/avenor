@@ -44,6 +44,7 @@ func main() {
 		messageFlatOut = flag.String("message-flat-out", "", "path to write the flat message input schema")
 		peersFlatOut   = flag.String("peers-flat-out", "", "path to write the flat peers input schema")
 		conformance    = flag.String("conformance", "", "path to schemas/message_route.conformance.json")
+		repairsBase    = flag.String("repairs-base", "", "path to schemas/repairs.json")
 		outcome        = flag.String("outcome", "", "path to schemas/message.outcome.json")
 		out            = flag.String("out", "schema.gen.go", "output file")
 	)
@@ -54,6 +55,7 @@ func main() {
 		"-message-flat-out": *messageFlatOut,
 		"-peers-flat-out":   *peersFlatOut,
 		"-conformance":      *conformance,
+		"-repairs-base":     *repairsBase,
 		"-outcome":          *outcome,
 		"-out":              *out,
 	} {
@@ -106,6 +108,7 @@ func main() {
 
 	var conformanceDoc genschema.ConformanceFixture
 	genschema.MustDecode(*conformance, &conformanceDoc)
+	genschema.MergeRepairs(&conformanceDoc, genschema.ReadFile(*repairsBase))
 	var outcomeDoc outcomeFixture
 	genschema.MustDecode(*outcome, &outcomeDoc)
 

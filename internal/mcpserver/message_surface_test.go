@@ -14,6 +14,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
@@ -544,8 +545,8 @@ func TestMCPMessageRouterOwnsAdmission(t *testing.T) {
 			args: map[string]any{"action": "tell", "target": "x", "message": "m", "extra": "field"},
 			code: "invalid_request",
 			text: messaging.Repair("invalid_request", map[string]string{
-				"action": messaging.Quote("tell"),
-				"detail": messaging.Repair("unknown_property", map[string]string{"name": messaging.Quote("extra")}),
+				"action": admission.Quote("tell"),
+				"detail": messaging.Repair("unknown_property", map[string]string{"name": admission.Quote("extra")}),
 			}),
 		},
 		{
@@ -553,8 +554,8 @@ func TestMCPMessageRouterOwnsAdmission(t *testing.T) {
 			args: map[string]any{"action": "list", "name": "x"},
 			code: "invalid_request",
 			text: messaging.Repair("invalid_request", map[string]string{
-				"action": messaging.Quote("list"),
-				"detail": messaging.Repair("unknown_property", map[string]string{"name": messaging.Quote("name")}),
+				"action": admission.Quote("list"),
+				"detail": messaging.Repair("unknown_property", map[string]string{"name": admission.Quote("name")}),
 			}),
 		},
 	}
@@ -599,7 +600,7 @@ func TestMCPMessageToolErrorIsAnErrorResult(t *testing.T) {
 		t.Fatalf("tool error IsError = false, want true (result %#v)", res)
 	}
 	object, _ := res.StructuredContent.(map[string]any)
-	wantText := messaging.Repair("unknown_target", map[string]string{"target": messaging.Quote("ghost")})
+	wantText := messaging.Repair("unknown_target", map[string]string{"target": admission.Quote("ghost")})
 	if object["code"] != "unknown_target" || object["text"] != wantText {
 		t.Fatalf("tool error object = %#v, want unknown_target and %q", object, wantText)
 	}

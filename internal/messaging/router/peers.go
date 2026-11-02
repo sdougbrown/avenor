@@ -53,7 +53,7 @@ func ExecutePeers(ctx context.Context, p Provider, input json.RawMessage) (Resul
 	if !known {
 		return Result{}, peersInvalidAction()
 	}
-	if detail := validateFields(fields, entry); detail != "" {
+	if detail := engine.ValidateFields(fields, entry); detail != "" {
 		return Result{}, invalidRequest(action, detail)
 	}
 	var typed peersInput

@@ -996,34 +996,6 @@ func TestQuoteEscapesNonPrintable(t *testing.T) {
 	}
 }
 
-// TestIntegerWireTypeAcceptsMathematicalIntegers pins the integer verdict the
-// schema and the table now share: 1.0 and 1e3 are integers, 1.5 is not.
-func TestIntegerWireTypeAcceptsMathematicalIntegers(t *testing.T) {
-	for _, raw := range []string{"1", "1.0", "1e3", "-2.0"} {
-		if !hasWireType(json.RawMessage(raw), "integer") {
-			t.Fatalf("%s should be an integer", raw)
-		}
-	}
-	for _, raw := range []string{"1.5", "1e-1", `"1"`, "999999999999999999999"} {
-		if hasWireType(json.RawMessage(raw), "integer") {
-			t.Fatalf("%s should not be an integer", raw)
-		}
-	}
-}
-
-// TestValidateIntegerConstraintEnforcesAZeroMaximum pins the declared bound's
-// presence, not its truthiness: a schema may legally cap an integer at zero,
-// and the table must still refuse everything above it.
-func TestValidateIntegerConstraintEnforcesAZeroMaximum(t *testing.T) {
-	constraint := messaging.PropertyConstraints{Maximum: 0, HasMaximum: true}
-	if detail := validateIntegerConstraint("timeout_ms", json.RawMessage(`1`), constraint); detail != `property "timeout_ms" must be at most 0` {
-		t.Fatalf("detail = %q, want the zero maximum to refuse 1", detail)
-	}
-	if detail := validateIntegerConstraint("timeout_ms", json.RawMessage(`0`), constraint); detail != "" {
-		t.Fatalf("detail = %q, want the zero maximum to accept 0", detail)
-	}
-}
-
 // TestToolFailure pins the one mapping a surface uses to render a router
 // refusal, including the unwrapping the child surfaces rely on.
 func TestToolFailure(t *testing.T) {

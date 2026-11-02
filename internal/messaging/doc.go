@@ -42,4 +42,4 @@
 package messaging
 
 //go:generate go run github.com/umpire-tools/umpire-go-gen@v0.1.1 -i ../../schemas/message_route.umpire.json -output-file message_route.gen.go -pkg messaging
-//go:generate go run ./cmd/genschema -message-input ../../schemas/message.input.json -peers-input ../../schemas/peers.input.json -message-flat-out ../../schemas/message.input.flat.json -peers-flat-out ../../schemas/peers.input.flat.json -conformance ../../schemas/message_route.conformance.json -outcome ../../schemas/message.outcome.json -out schema.gen.go
+//go:generate go run ./cmd/genschema -message-input ../../schemas/message.input.json -peers-input ../../schemas/peers.input.json -message-flat-out ../../schemas/message.input.flat.json -peers-flat-out ../../schemas/peers.input.flat.json -conformance ../../schemas/message_route.conformance.json -repairs-base ../../schemas/repairs.json -outcome ../../schemas/message.outcome.json -out schema.gen.go

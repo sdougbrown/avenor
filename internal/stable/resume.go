@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runstate"
@@ -317,8 +318,8 @@ func (s *Supervisor) brokerHarnessName(runID string) string {
 // status produce.
 func notResumableError(runID, status string) *router.ToolError {
 	facts := map[string]string{
-		"run_id": messaging.Quote(runID),
-		"status": messaging.Sanitize(strings.ToLower(status)),
+		"run_id": admission.Quote(runID),
+		"status": admission.Sanitize(strings.ToLower(status)),
 	}
 	return &router.ToolError{
 		Code:    "not_resumable",

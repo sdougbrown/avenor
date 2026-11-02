@@ -11,6 +11,7 @@ import messageInputSchema from '../../../schemas/message.input.json'
 import messageRouteSchema from '../../../schemas/message_route.umpire.json'
 import conformanceFixture from '../../../schemas/message_route.conformance.json'
 import peersInputSchema from '../../../schemas/peers.input.json'
+import { compileConstraints, validateFields, type ApplicabilityEntry } from './admission.js'
 import {
   isVocabularyOutcome,
   quote,
@@ -184,23 +185,6 @@ export interface PeersRouterResult {
   }
 }
 
-interface ApplicabilityEntry {
-  permitted: string[]
-  required?: string[]
-  types?: Record<string, string>
-}
-
-interface StringConstraints {
-  minLength?: number
-  maxLength?: number
-  pattern?: RegExp
-}
-
-interface IntegerConstraints {
-  minimum?: number
-  maximum?: number
-}
-
 interface RouteConditions {
   callerKind: string
   surface: string
@@ -364,114 +348,8 @@ function firstReason(status: FieldStatus | undefined): string {
   return status.reason ?? status.reasons[0] ?? ''
 }
 
-/**
- * Compile the per-property limits the published JSON schemas declare, so the
- * router and the schemas cannot disagree about length, characters or bounds.
- */
-function schemaConstraints(schema: unknown): {
-  strings: Record<string, StringConstraints>
-  integers: Record<string, IntegerConstraints>
-} {
-  const strings: Record<string, StringConstraints> = {}
-  const integers: Record<string, IntegerConstraints> = {}
-  const variants = (schema as { oneOf?: Array<{ properties?: Record<string, Record<string, unknown>> }> }).oneOf ?? []
-  for (const variant of variants) {
-    for (const [name, property] of Object.entries(variant.properties ?? {})) {
-      if (typeof property.pattern === 'string') {
-        strings[name] = {
-          minLength: typeof property.minLength === 'number' ? property.minLength : undefined,
-          maxLength: typeof property.maxLength === 'number' ? property.maxLength : undefined,
-          pattern: new RegExp(property.pattern, 'u'),
-        }
-      }
-      if (property.type === 'integer') {
-        integers[name] = {
-          minimum: typeof property.minimum === 'number' ? property.minimum : undefined,
-          maximum: typeof property.maximum === 'number' ? property.maximum : undefined,
-        }
-      }
-    }
-  }
-  return { strings, integers }
-}
-
-const messageConstraints = schemaConstraints(messageInputSchema)
-const peersConstraints = schemaConstraints(peersInputSchema)
-
-function declaredType(entry: ApplicabilityEntry, name: string): string {
-  return entry.types?.[name] ?? 'string'
-}
-
-function hasWireType(value: unknown, kind: string): boolean {
-  switch (kind) {
-    case 'string':
-      return typeof value === 'string'
-    case 'integer':
-      // Go's wire type requires the exact rational to fit int64; a JSON number
-      // outside that range is a type error, not a violated bound.
-      return typeof value === 'number' && Number.isInteger(value) && value >= -(2 ** 63) && value < 2 ** 63
-    case 'object':
-      return value !== null && typeof value === 'object' && !Array.isArray(value)
-    default:
-      return false
-  }
-}
-
-function wrongTypeRepair(kind: string, name: string): string {
-  switch (kind) {
-    case 'integer':
-      return repair('wrong_type_integer', { name: quote(name) })
-    case 'object':
-      return repair('wrong_type_object', { name: quote(name) })
-    default:
-      return repair('wrong_type_string', { name: quote(name) })
-  }
-}
-
-function validateFields(
-  fields: Record<string, unknown>,
-  entry: ApplicabilityEntry,
-  constraints: { strings: Record<string, StringConstraints>; integers: Record<string, IntegerConstraints> },
-): string | null {
-  const permitted = new Set(entry.permitted)
-  for (const name of Object.keys(fields).sort()) {
-    if (!permitted.has(name)) return repair('unknown_property', { name: quote(name) })
-  }
-  for (const name of entry.required ?? []) {
-    if (!(name in fields)) return repair('missing_required_property', { name: quote(name) })
-  }
-  for (const name of entry.permitted) {
-    if (!(name in fields)) continue
-    const value = fields[name]
-    const kind = declaredType(entry, name)
-    if (!hasWireType(value, kind)) return wrongTypeRepair(kind, name)
-    if (kind === 'string') {
-      const constraint = constraints.strings[name]
-      if (!constraint) continue
-      const length = Array.from(value as string).length
-      if (constraint.minLength !== undefined && length < constraint.minLength) {
-        return repair('string_too_short', { name: quote(name), min: String(constraint.minLength) })
-      }
-      if (constraint.maxLength !== undefined && length > constraint.maxLength) {
-        return repair('string_too_long', { name: quote(name), max: String(constraint.maxLength) })
-      }
-      if (constraint.pattern && !constraint.pattern.test(value as string)) {
-        return repair('string_pattern', { name: quote(name) })
-      }
-    }
-    if (kind === 'integer') {
-      const constraint = constraints.integers[name]
-      if (!constraint) continue
-      if (constraint.minimum !== undefined && (value as number) < constraint.minimum) {
-        return repair('integer_too_small', { name: quote(name), min: String(constraint.minimum) })
-      }
-      if (constraint.maximum !== undefined && (value as number) > constraint.maximum) {
-        return repair('integer_too_large', { name: quote(name), max: String(constraint.maximum) })
-      }
-    }
-  }
-  return null
-}
+const messageConstraints = compileConstraints(messageInputSchema)
+const peersConstraints = compileConstraints(peersInputSchema)
 
 function invalidAction(): ToolError {
   return new ToolError('invalid_action', invalidActionReason)
@@ -500,7 +378,7 @@ export function assertMessageInput(input: unknown): asserts input is MessageInpu
   if (typeof action !== 'string') throw invalidAction()
   const entry = messageApplicability[action]
   if (!entry) throw invalidAction()
-  const detail = validateFields(fields, entry, messageConstraints)
+  const detail = validateFields(fields, entry, messageConstraints, repair)
   if (detail) throw invalidRequest(action, detail)
 }
 
@@ -517,7 +395,7 @@ export function assertPeersInput(input: unknown): asserts input is PeersInput {
   const action = (fields.action as string | undefined) ?? 'list'
   const entry = peersApplicability[action]
   if (!entry) throw peersInvalidAction()
-  const detail = validateFields({ ...fields, action }, entry, peersConstraints)
+  const detail = validateFields({ ...fields, action }, entry, peersConstraints, repair)
   if (detail) throw invalidRequest(action, detail)
 }
 

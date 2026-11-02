@@ -3,6 +3,7 @@ package stable
 import (
 	"fmt"
 
+	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
@@ -30,9 +31,9 @@ func (s *Supervisor) resolveRunReference(ref string) (string, error) {
 		return "", unknownTargetError(ref)
 	}
 	facts := map[string]string{
-		"target":     messaging.Quote(ref),
+		"target":     admission.Quote(ref),
 		"count":      fmt.Sprint(len(matches)),
-		"candidates": messaging.QuoteList(matches),
+		"candidates": admission.QuoteList(matches),
 	}
 	return "", &router.ToolError{
 		Code:    "ambiguous_name",
@@ -44,6 +45,6 @@ func (s *Supervisor) resolveRunReference(ref string) (string, error) {
 func unknownTargetError(ref string) error {
 	return &router.ToolError{
 		Code:    "unknown_target",
-		Message: messaging.Repair("unknown_target", map[string]string{"target": messaging.Quote(ref)}),
+		Message: messaging.Repair("unknown_target", map[string]string{"target": admission.Quote(ref)}),
 	}
 }
