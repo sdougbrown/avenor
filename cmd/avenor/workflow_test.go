@@ -51,7 +51,7 @@ func TestWorkflowCLIEndToEnd(t *testing.T) {
 
 	run := func(args ...string) (string, int) {
 		var out, errBuf bytes.Buffer
-		code := runWorkflowTo(append([]string{"--socket", sock}, args...), &out, &errBuf)
+		code := runDeclared(append([]string{"workflow"}, append([]string{"--socket", sock}, args...)...), &out, &errBuf)
 		if code != 0 {
 			t.Logf("stderr for %v: %s", args, errBuf.String())
 		}
@@ -158,7 +158,7 @@ func cliWorkflowEnv(t *testing.T) (func(args ...string) (string, int), *workflow
 
 	run := func(args ...string) (string, int) {
 		var out, errBuf bytes.Buffer
-		code := runWorkflowTo(append([]string{"--socket", sock}, args...), &out, &errBuf)
+		code := runDeclared(append([]string{"workflow"}, append([]string{"--socket", sock}, args...)...), &out, &errBuf)
 		if code != 0 {
 			t.Logf("stderr for %v: %s", args, errBuf.String())
 		}
@@ -368,7 +368,7 @@ func TestWorkflowCLICancel(t *testing.T) {
 	defer ln.Close()
 	defer os.Remove(sock)
 	var outBuf, errBuf bytes.Buffer
-	code = runWorkflowTo([]string{"--socket", sock, "cancel", wf}, &outBuf, &errBuf)
+	code = runDeclared([]string{"workflow", "--socket", sock, "cancel", wf}, &outBuf, &errBuf)
 	if code != 2 || !strings.Contains(errBuf.String(), "--reason is required") {
 		t.Fatalf("cancel without --reason: want exit 2 with required message, got %d: %s", code, errBuf.String())
 	}
@@ -390,7 +390,7 @@ func TestWorkflowCLIGateUnknownOperation(t *testing.T) {
 	defer ln.Close()
 	defer os.Remove(sock)
 	var out, errBuf bytes.Buffer
-	code := runWorkflowTo([]string{"--socket", sock, "gate", "wf_1", "start", "review", "--activation-id", "act_1", "--operation", "bogus", "--request-file", gateReq}, &out, &errBuf)
+	code := runDeclared([]string{"workflow", "--socket", sock, "gate", "wf_1", "start", "review", "--activation-id", "act_1", "--operation", "bogus", "--request-file", gateReq}, &out, &errBuf)
 	if code != 2 {
 		t.Fatalf("gate with unknown operation: want exit 2, got %d", code)
 	}
@@ -433,7 +433,7 @@ func TestWorkflowCLIGateMissingActorUnchanged(t *testing.T) {
 // missing-workflow-id paths.
 func TestWorkflowCLIArgErrors(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := runWorkflowTo([]string{"create", "--request-file", "x.json"}, &out, &errBuf); code != 2 {
+	if code := runDeclared([]string{"workflow", "create", "--request-file", "x.json"}, &out, &errBuf); code != 2 {
 		t.Fatalf("missing --socket: want exit 2, got %d", code)
 	}
 	if !strings.Contains(errBuf.String(), "--socket is required") {
@@ -441,12 +441,12 @@ func TestWorkflowCLIArgErrors(t *testing.T) {
 	}
 
 	errBuf.Reset()
-	if code := runWorkflowTo([]string{"--socket", "/nonexistent.sock", "bogus"}, &out, &errBuf); code != 2 {
+	if code := runDeclared([]string{"workflow", "--socket", "/nonexistent.sock", "bogus"}, &out, &errBuf); code != 2 {
 		t.Fatalf("bad socket: want exit 2, got %d", code)
 	}
 
 	errBuf.Reset()
-	if code := runWorkflowTo([]string{"--socket", "/nonexistent.sock"}, &out, &errBuf); code != 2 {
+	if code := runDeclared([]string{"workflow", "--socket", "/nonexistent.sock"}, &out, &errBuf); code != 2 {
 		t.Fatalf("no subcommand: want exit 2, got %d", code)
 	}
 	if !strings.Contains(errBuf.String(), "requires a subcommand") {
@@ -492,7 +492,7 @@ func TestWorkflowCLIInstantiateParamsRoundTrip(t *testing.T) {
 
 	run := func(args ...string) (string, int) {
 		var out, errBuf bytes.Buffer
-		code := runWorkflowTo(append([]string{"--socket", sock}, args...), &out, &errBuf)
+		code := runDeclared(append([]string{"workflow"}, append([]string{"--socket", sock}, args...)...), &out, &errBuf)
 		if code != 0 {
 			t.Logf("stderr for %v: %s", args, errBuf.String())
 		}

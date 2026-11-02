@@ -17,10 +17,6 @@ import (
 // patch it to capture the Config without relying on Run's side effects.
 var newSupervisorFn = stable.NewSupervisor
 
-func runStable(args []string) int {
-	return runDeclared(append([]string{"stable"}, args...), os.Stdout, os.Stderr)
-}
-
 // handleStable runs the supervisor until it exits; the supervisor owns
 // signal handling and returns the process exit code.
 func handleStable(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {

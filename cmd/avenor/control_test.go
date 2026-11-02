@@ -2,7 +2,11 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"testing"
+
+	"github.com/sdougbrown/cli-contract"
 )
 
 func TestSpawnParamsFromArgs(t *testing.T) {
@@ -165,4 +169,21 @@ func TestSpawnParamsFromArgsRejectsPromptAndPromptFile(t *testing.T) {
 	if !containsStr(stderr.String(), "mutually exclusive") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
+}
+
+// spawnParamsFromArgs is the test seam for spawnParamsFromInvocation: it
+// parses raw argv the way the declared tree would and returns the exit-code
+// style result the tests assert on.
+func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) {
+	inv, err := clicontract.Parse(app(), append([]string{"control", "spawn"}, args...))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return nil, 2
+	}
+	params, err := spawnParamsFromInvocation(inv)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return nil, 2
+	}
+	return params, 0
 }

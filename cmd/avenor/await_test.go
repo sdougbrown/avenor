@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +14,39 @@ import (
 	"testing"
 	"time"
 )
+
+// awaitRunDeclared dispatches one await invocation through the declared
+// surface the way production does. handleAwait writes transition records to
+// os.Stdout, so it is swapped to a pipe and drained into stdout for capture.
+func awaitRunDeclared(args []string, stdout, stderr io.Writer) int {
+	r, w, err := os.Pipe()
+	if err != nil {
+		panic(err)
+	}
+	// Drain concurrently so output larger than the pipe buffer cannot block
+	// the handler.
+	var captured bytes.Buffer
+	drained := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(&captured, r)
+		drained <- err
+	}()
+	old := os.Stdout
+	os.Stdout = w
+	code := func() int {
+		defer func() {
+			os.Stdout = old
+			w.Close()
+		}()
+		return runDeclared(append([]string{"await"}, args...), stdout, stderr)
+	}()
+	if err := <-drained; err != nil {
+		panic(err)
+	}
+	r.Close()
+	stdout.Write(captured.Bytes())
+	return code
+}
 
 type awaitRPCRequest struct {
 	ID     any            `json:"id"`
@@ -226,7 +260,7 @@ func TestAwaitTerminalBeforeAttachSnapshotExitConditions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := newAwaitSocketServer(t, []map[string]any{tt.status}, nil)
 			var stdout, stderr bytes.Buffer
-			if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != tt.code {
+			if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != tt.code {
 				t.Fatalf("exit code = %d, want %d (stderr %q)", got, tt.code, stderr.String())
 			}
 			if got := stdout.String(); got != tt.want {
@@ -248,7 +282,7 @@ func TestAwaitDoneWaitsThroughPermissionAndAttachesRaceSafely(t *testing.T) {
 		[]map[string]any{awaitEvent("permission.response", "rt_1", 10), awaitEvent("session.end", "rt_1", 11)},
 	)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"label_1", "--socket", server.socket(), "--until", "done"}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"label_1", "--socket", server.socket(), "--until", "done"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	if want := "ATTENTION permission rt_1 Allow write?\nTURN-DONE rt_1\n"; stdout.String() != want {
@@ -269,7 +303,7 @@ func TestAwaitGateBeforeAttachExitsFromSnapshot(t *testing.T) {
 	gate["permission"] = map[string]any{"tool": "exec"}
 	server := newAwaitSocketServer(t, []map[string]any{gate}, nil)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 20 {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 20 {
 		t.Fatalf("exit code = %d, want 20 (stderr %q)", got, stderr.String())
 	}
 	if stdout.String() != "ATTENTION permission rt_1 exec\n" {
@@ -292,7 +326,7 @@ func TestAwaitDefaultUntilAttentionFromReplayedPermission(t *testing.T) {
 		[]map[string]any{awaitEvent("permission.request", "rt_1", 10)},
 	)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitPendingPermission {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitPendingPermission {
 		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitPendingPermission, stderr.String())
 	}
 	if want := "ATTENTION permission rt_1 Allow deployment to staging?\n"; stdout.String() != want {
@@ -311,7 +345,7 @@ func TestAwaitEndReasonUsesStopReason(t *testing.T) {
 	status["stop_reason"] = "process exited"
 	server := newAwaitSocketServer(t, []map[string]any{status}, nil)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitFailed {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitFailed {
 		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitFailed, stderr.String())
 	}
 	if want := "END failed rt_1 process exited\n"; stdout.String() != want {
@@ -325,7 +359,7 @@ func TestAwaitPrintOutputSuppressedOnAttentionExit(t *testing.T) {
 	server := newAwaitSocketServer(t, []map[string]any{gate}, nil)
 	server.result = "should not be printed"
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--print-output"}, &stdout, &stderr); got != awaitExitPendingPermission {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket(), "--print-output"}, &stdout, &stderr); got != awaitExitPendingPermission {
 		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitPendingPermission, stderr.String())
 	}
 	if stdout.String() != "ATTENTION permission rt_1 exec\n" {
@@ -337,7 +371,7 @@ func TestAwaitPrintOutputIsLossless(t *testing.T) {
 	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
 	server.result = "first line\nsecond line\nno newline after this"
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--print-output"}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket(), "--print-output"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	want := "TURN-DONE rt_1\n---\n" + server.result
@@ -350,7 +384,7 @@ func TestAwaitJSONOutput(t *testing.T) {
 	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
 	server.result = "complete\noutput"
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"--format=json", "run_1", "--socket", server.socket(), "--print-output"}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"--format=json", "run_1", "--socket", server.socket(), "--print-output"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	var records []map[string]any
@@ -372,7 +406,7 @@ func TestAwaitJSONAttention(t *testing.T) {
 	gate["permission"] = map[string]any{"summary": "run command"}
 	server := newAwaitSocketServer(t, []map[string]any{gate}, nil)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"--format=json", "run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitPendingPermission {
+	if got := awaitRunDeclared([]string{"--format=json", "run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitPendingPermission {
 		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitPendingPermission, stderr.String())
 	}
 	var records []map[string]any
@@ -397,7 +431,7 @@ func TestAwaitJSONEnd(t *testing.T) {
 	status["stop_reason"] = "process exited"
 	server := newAwaitSocketServer(t, []map[string]any{status}, nil)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"--format=json", "run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitFailed {
+	if got := awaitRunDeclared([]string{"--format=json", "run_1", "--socket", server.socket()}, &stdout, &stderr); got != awaitExitFailed {
 		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitFailed, stderr.String())
 	}
 	var records []map[string]any
@@ -455,7 +489,7 @@ func TestAwaitCleanupRaceSettlesFromReplayWithoutAnotherEvent(t *testing.T) {
 		[]map[string]any{awaitEvent("session.end", "rt_1", 10)},
 	)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	if stdout.String() != "TURN-DONE rt_1\n" {
@@ -483,7 +517,7 @@ func TestAwaitCleanupGapIdleEmptyPhaseSettlesFromPoll(t *testing.T) {
 		nil,
 	)
 	var stdout, stderr bytes.Buffer
-	got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "2s"}, &stdout, &stderr)
+	got := awaitRunDeclared([]string{"run_1", "--socket", server.socket(), "--timeout", "2s"}, &stdout, &stderr)
 	if got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
@@ -501,7 +535,7 @@ func TestAwaitWrongRuntimeEventIsIgnored(t *testing.T) {
 		[]map[string]any{awaitEvent("session.end", "rt_other", 10), awaitEvent("session.end", "rt_1", 11)},
 	)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want completion from matching event (stderr %q, stdout %q)", got, stderr.String(), stdout.String())
 	}
 	calls, _ := server.calls()
@@ -534,7 +568,7 @@ func TestAwaitRejectsMalformedStatusResponse(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := newAwaitSocketServer(t, []map[string]any{tt.status}, nil)
 			var stdout, stderr bytes.Buffer
-			if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 2 {
+			if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 2 {
 				t.Fatalf("exit code = %d, want 2 (stderr %q)", got, stderr.String())
 			}
 			if !bytes.Contains(stderr.Bytes(), []byte("protocol error")) {
@@ -565,9 +599,14 @@ func TestAwaitUnrecognizedStatusWarnsOnceAndKeepsWaiting(t *testing.T) {
 	// instead of racing a short wall timeout against event delivery; the
 	// generous timeout only bounds how long await keeps waiting afterwards.
 	exited := make(chan int, 1)
+	done := make(chan struct{})
 	go func() {
-		exited <- runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "2s"}, &stdout, &stderr)
+		defer close(done)
+		exited <- awaitRunDeclared([]string{"run_1", "--socket", server.socket(), "--timeout", "2s"}, &stdout, &stderr)
 	}()
+	// awaitRunDeclared swaps the process-wide os.Stdout; a failing test must
+	// not return while the dispatch still holds it.
+	t.Cleanup(func() { <-done })
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		fetched := 0
@@ -622,7 +661,7 @@ func TestAwaitRecognizedStatusesNeverWarn(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			server := newAwaitSocketServer(t, []map[string]any{tt.status}, nil)
 			var stdout, stderr bytes.Buffer
-			if got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "200ms"}, &stdout, &stderr); got != tt.exitCode {
+			if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket(), "--timeout", "200ms"}, &stdout, &stderr); got != tt.exitCode {
 				t.Fatalf("exit code = %d, want %d (stderr %q)", got, tt.exitCode, stderr.String())
 			}
 			if bytes.Contains(stderr.Bytes(), []byte("unrecognized")) {
@@ -647,7 +686,7 @@ func TestAwaitRetryAndLaggedEventsKeepWaitingThenResnapshot(t *testing.T) {
 		[]map[string]any{awaitEvent("session.end", "rt_1", 10), awaitEvent("subscriber.lagged", "rt_1", 11)},
 	)
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	if stdout.String() != "TURN-DONE rt_1\n" {
@@ -662,7 +701,7 @@ func TestAwaitTimeoutAndConnectionLoss(t *testing.T) {
 	t.Run("wall timeout", func(t *testing.T) {
 		server := newAwaitSocketServer(t, []map[string]any{awaitStatus("running", "working", false)}, nil)
 		var stdout, stderr bytes.Buffer
-		if got := runAwaitTo([]string{"run_1", "--socket", server.socket(), "--timeout", "10ms"}, &stdout, &stderr); got != awaitExitWallTimeout {
+		if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket(), "--timeout", "10ms"}, &stdout, &stderr); got != awaitExitWallTimeout {
 			t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitWallTimeout, stderr.String())
 		}
 	})
@@ -670,7 +709,7 @@ func TestAwaitTimeoutAndConnectionLoss(t *testing.T) {
 		server := newAwaitSocketServer(t, []map[string]any{awaitStatus("running", "working", false)}, nil)
 		server.closeSub = true
 		var stdout, stderr bytes.Buffer
-		if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 2 {
+		if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 2 {
 			t.Fatalf("exit code = %d, want 2 (stderr %q)", got, stderr.String())
 		}
 		if !bytes.Contains(stderr.Bytes(), []byte("supervisor connection lost")) {
@@ -683,7 +722,7 @@ func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
 	t.Run("usage", func(t *testing.T) {
 		// No target is a genuine parser error, not a discovery miss.
 		var stdout, stderr bytes.Buffer
-		if got := runAwaitTo(nil, &stdout, &stderr); got != 2 {
+		if got := awaitRunDeclared(nil, &stdout, &stderr); got != 2 {
 			t.Fatalf("exit code = %d, want 2", got)
 		}
 	})
@@ -693,7 +732,7 @@ func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
 		server := newAwaitSocketServer(t, nil, nil)
 		server.list = []map[string]any{{"runtime_id": "other", "run_id": "other"}}
 		var stdout, stderr bytes.Buffer
-		if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 2 {
+		if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 2 {
 			t.Fatalf("exit code = %d, want 2", got)
 		}
 	})
@@ -702,7 +741,7 @@ func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		refused := filepath.Join(t.TempDir(), "refused.sock")
 		makeRefusedUnixSocket(t, refused)
-		if got := runAwaitTo([]string{"run_1", "--socket", refused}, &stdout, &stderr); got != 2 {
+		if got := awaitRunDeclared([]string{"run_1", "--socket", refused}, &stdout, &stderr); got != 2 {
 			t.Fatalf("exit code = %d, want 2", got)
 		}
 	})
@@ -713,7 +752,7 @@ func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
 		server.list = []map[string]any{{"runtime_id": "rt_1", "run_id": "other"}}
 		writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "live.sock", server.socket())
 		var stdout, stderr bytes.Buffer
-		if got := runAwaitTo([]string{"missing"}, &stdout, &stderr); got != 2 {
+		if got := awaitRunDeclared([]string{"missing"}, &stdout, &stderr); got != 2 {
 			t.Fatalf("exit code = %d, want 2 (stderr %q)", got, stderr.String())
 		}
 		if !bytes.Contains(stderr.Bytes(), []byte("run \"missing\" not found")) {
@@ -748,7 +787,7 @@ func TestAwaitTimeoutDoesNotWaitForClientCallDeadline(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	if got := runAwaitTo([]string{"run_1", "--socket", path, "--timeout", "20ms"}, &stdout, &stderr); got != awaitExitWallTimeout {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", path, "--timeout", "20ms"}, &stdout, &stderr); got != awaitExitWallTimeout {
 		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitWallTimeout, stderr.String())
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -789,7 +828,7 @@ func TestAwaitDiscoveryTimeout(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	if got := runAwaitTo([]string{"missing", "--timeout", "20ms"}, &stdout, &stderr); got != awaitExitWallTimeout {
+	if got := awaitRunDeclared([]string{"missing", "--timeout", "20ms"}, &stdout, &stderr); got != awaitExitWallTimeout {
 		t.Fatalf("exit code = %d, want %d (stderr %q)", got, awaitExitWallTimeout, stderr.String())
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte("timeout elapsed")) {
@@ -851,7 +890,7 @@ func TestAwaitDiscoveryExplicitSocketBypassesScan(t *testing.T) {
 	competing := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
 	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "competing.sock", competing.socket())
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	if stdout.String() != "TURN-DONE rt_1\n" {
@@ -878,7 +917,7 @@ func TestAwaitDiscoverySkipsDeadSockets(t *testing.T) {
 	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
 	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "live.sock", server.socket())
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1"}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"run_1"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	if calls, _ := server.calls(); !reflect.DeepEqual(calls, []string{"list", "status"}) {
@@ -899,7 +938,7 @@ func TestAwaitDiscoveryExactRunIDPrecedesLabel(t *testing.T) {
 	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "a.sock", label.socket())
 	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "b.sock", exact.socket())
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1"}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"run_1"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	if stderr.Len() != 0 {
@@ -923,7 +962,7 @@ func TestAwaitDiscoveryLabelCollisionChoosesNewestStartedAt(t *testing.T) {
 	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "a.sock", winner.socket())
 	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "b.sock", cross.socket())
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"shared"}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"shared"}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 	if calls, _ := winner.calls(); !reflect.DeepEqual(calls, []string{"list", "status"}) {
@@ -949,7 +988,7 @@ func TestAwaitStaysCredentialFree(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(record) })
 
 	var stdout, stderr bytes.Buffer
-	if got := runAwaitTo([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
+	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
 	}
 }

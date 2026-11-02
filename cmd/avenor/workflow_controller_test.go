@@ -89,7 +89,7 @@ func cliControllerEnv(t *testing.T) (func(args ...string) (string, int), *fakeCo
 
 	run := func(args ...string) (string, int) {
 		var out, errBuf bytes.Buffer
-		code := runWorkflowTo(append([]string{"--socket", sock}, args...), &out, &errBuf)
+		code := runDeclared(append([]string{"workflow"}, append([]string{"--socket", sock}, args...)...), &out, &errBuf)
 		if code != 0 {
 			t.Logf("stderr for %v: %s", args, errBuf.String())
 		}

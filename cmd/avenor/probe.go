@@ -14,10 +14,6 @@ import (
 	clicontract "github.com/sdougbrown/cli-contract"
 )
 
-func runProbe(args []string) int {
-	return runDeclared(append([]string{"probe"}, args...), os.Stdout, os.Stderr)
-}
-
 // handleProbe runs the probe and reports the stop reason's exit code.
 func handleProbe(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	out := inv.Flags["out"]

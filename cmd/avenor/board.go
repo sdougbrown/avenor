@@ -16,10 +16,6 @@ import (
 	"github.com/sdougbrown/cli-contract"
 )
 
-func runBoard(args []string) int {
-	return runDeclared(append([]string{"board"}, args...), os.Stdout, os.Stderr)
-}
-
 // handleBoard serves the board UI until a signal arrives; the handler owns
 // signal handling and shuts down gracefully.
 func handleBoard(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {

@@ -32,12 +32,6 @@ type answerResponse struct {
 	Message  string `json:"message"`
 }
 
-// runAnswer implements the `avenor answer <perm-base>` subcommand.
-// It returns 0 on success, 2 on usage/validation errors, 1 on I/O errors.
-func runAnswer(args []string) int {
-	return runDeclared(append([]string{"answer"}, args...), os.Stdout, os.Stderr)
-}
-
 // answerFlags holds the four answer flags.
 type answerFlags struct {
 	option  string
@@ -56,21 +50,6 @@ func handleAnswer(ctx context.Context, inv clicontract.Invocation, stderr io.Wri
 		return nil, nil
 	}
 	return exitCode(code), nil
-}
-
-// runAnswerTo is the testable form of runAnswer.
-func runAnswerTo(args []string, errOut io.Writer) int {
-	inv, err := parseInvocation(append([]string{"answer"}, args...))
-	if err != nil {
-		fmt.Fprintf(errOut, "%v\n", err)
-		return 2
-	}
-	flags := answerFlagsFromInvocation(inv)
-	if len(inv.Args) != 1 {
-		fmt.Fprintln(errOut, "avenor answer: expected exactly one <perm-base>")
-		return 2
-	}
-	return answerWrite(inv.Args[0], flags, errOut)
 }
 
 // answerFlagsFromInvocation builds the answer flags from the declared

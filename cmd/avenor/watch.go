@@ -49,10 +49,6 @@ func validateCursorAgainstLog(offset int64, info os.FileInfo) error {
 	return nil
 }
 
-func runWatch(args []string) int {
-	return runDeclared(append([]string{"watch"}, args...), os.Stdout, os.Stderr)
-}
-
 // handleWatch digests one log file; follow mode owns its signal handling.
 func handleWatch(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	follow := inv.Bools["follow"]

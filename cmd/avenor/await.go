@@ -36,11 +36,6 @@ type awaitOptions struct {
 	target      string
 }
 
-// runAwait implements the socket-backed `avenor await` command.
-func runAwait(args []string) int {
-	return runDeclared(append([]string{"await"}, args...), os.Stdout, os.Stderr)
-}
-
 // handleAwait waits for the run to reach the requested state; the exit code
 // encodes the terminal state (failed, timeouts, pending permission).
 func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
@@ -72,21 +67,6 @@ func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error
 		return awaitOptions{}, usageErrorf("avenor await: unsupported --format %q", opts.format)
 	}
 	return opts, nil
-}
-
-// runAwaitTo is the testable form of runAwait.
-func runAwaitTo(args []string, stdout, stderr io.Writer) int {
-	inv, err := parseInvocation(append([]string{"await"}, args...))
-	if err != nil {
-		fmt.Fprintf(stderr, "avenor await: %v\n", err)
-		return 2
-	}
-	opts, err := awaitOptionsFromInvocation(inv)
-	if err != nil {
-		fmt.Fprintf(stderr, "%v\n", err)
-		return 2
-	}
-	return awaitRun(context.Background(), opts, stdout, stderr)
 }
 
 // awaitRun attaches to the run and waits for the terminal state, writing

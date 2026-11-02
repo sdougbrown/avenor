@@ -82,8 +82,8 @@ func TestControlReadVerbsNeedNoOwnerRecord(t *testing.T) {
 		t.Fatalf("remove owner record: %v", err)
 	}
 	for _, verb := range []string{"status", "list"} {
-		if code := runControl([]string{"--socket", socket, verb}); code != 0 {
-			t.Fatalf("runControl(%s) = %d, want 0 without an owner record", verb, code)
+		if code := runDeclared([]string{"control", "--socket", socket, verb}, os.Stdout, os.Stderr); code != 0 {
+			t.Fatalf("control %s = %d, want 0 without an owner record", verb, code)
 		}
 	}
 }
@@ -108,8 +108,8 @@ func TestControlCommandsAttachAsOwner(t *testing.T) {
 			handler := &gatedHandler{}
 			socket := startOwnerControlServer(t, handler)
 			args := append([]string{"--socket", socket}, tc.args...)
-			if code := runControl(args); code != 0 {
-				t.Fatalf("runControl(%v) = %d, want 0", tc.args, code)
+			if code := runDeclared(append([]string{"control"}, args...), os.Stdout, os.Stderr); code != 0 {
+				t.Fatalf("control %v = %d, want 0", tc.args, code)
 			}
 			if len(handler.calls) != 1 || handler.calls[0] != tc.want {
 				t.Fatalf("handler calls = %v, want [%s]", handler.calls, tc.want)

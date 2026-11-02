@@ -15,9 +15,10 @@ import (
 type exitCode int
 
 // avenorAdapter routes the library's dispatch through Avenor's conventions:
-// commands write their own output, so Write is a no-op and nothing lands on
-// stdout for errors. Usage-class failures exit 2, operational failures 1,
-// and a handler-decided exitCode wins.
+// handlers that print their own output return nil or an exitCode, other
+// results are written as one JSON value, and nothing lands on stdout for
+// errors. Usage-class failures exit 2, operational failures 1, and a
+// handler-decided exitCode wins.
 type avenorAdapter struct{}
 
 func (avenorAdapter) ErrorResult(command string, err error) any { return nil }
@@ -62,17 +63,12 @@ func (avenorAdapter) ExitCode(inv clicontract.Invocation, result any, handlerErr
 	return 0
 }
 
-// runDeclared dispatches through the same clicontract.Run path production
-// uses, with injected streams for the run* wrappers the tests call. The
-// adapter's Write is a no-op and HandlerOwnedSignals is set, so the only
-// difference from production is the streams.
+// runDeclared is Avenor's one dispatch path: main passes the process streams,
+// and tests inject their own to capture what the adapter writes. Handlers
+// that print their own output, such as await's transition lines, write to
+// os.Stdout directly, because the library's HandleFunc has no stdout.
 func runDeclared(argv []string, stdout, stderr io.Writer) int {
 	return clicontract.Run(app(), avenorAdapter{}, argv, stdout, stderr)
-}
-
-// parseInvocation parses args against the declared surface.
-func parseInvocation(args []string) (clicontract.Invocation, error) {
-	return clicontract.Parse(app(), args)
 }
 
 // usageErrorf builds a caller error with the adapter's usage classification.
