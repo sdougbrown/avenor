@@ -1,15 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
-	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/sdougbrown/avenor/internal/mcpserver"
+	clicontract "github.com/sdougbrown/cli-contract"
 )
 
 type allowedHostList []string
@@ -36,18 +38,6 @@ func (a *allowedHostList) Set(value string) error {
 	return nil
 }
 
-// effectiveMaxWait resolves the configured polling budget: an explicit
-// --max-wait wins; otherwise HTTP gets the 25s default and stdio no clamp.
-func effectiveMaxWait(transport string, explicit bool, value time.Duration) time.Duration {
-	if explicit {
-		return value
-	}
-	if transport == "http" {
-		return 25 * time.Second
-	}
-	return 0
-}
-
 func mcpFlagError(transport string, allowedHosts []string) error {
 	if transport != "stdio" && transport != "http" {
 		return errors.New(`--transport only supports "stdio" or "http"`)
@@ -58,73 +48,84 @@ func mcpFlagError(transport string, allowedHosts []string) error {
 	return nil
 }
 
-// mcpMaxWaitError reports whether an explicit --max-wait is valid for the
-// transport. stdio never clamps, so an explicit nonzero value is rejected;
-// an explicit 0 is a legal no-op.
-func mcpMaxWaitError(transport string, explicit bool, value time.Duration) error {
-	if transport == "stdio" && explicit && value != 0 {
-		return errors.New("--max-wait is only supported with --transport http")
+// mcpMaxWaitError rejects a negative wait budget; the parse-level default is
+// 25s and an explicit 0 disables the clamp on both transports.
+func mcpMaxWaitError(value time.Duration) error {
+	if value < 0 {
+		return errors.New("--max-wait must not be negative")
+	}
+	return nil
+}
+
+// validateAllowedHost applies the per-entry rules the flag.Var binding used
+// to enforce at parse time: non-empty, exact hostname, no whitespace.
+func validateAllowedHost(value string) error {
+	if value == "" {
+		return errors.New("requires a non-empty hostname")
+	}
+	if strings.ContainsAny(value, "*/:<>") {
+		return errors.New("must be an exact hostname")
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			return errors.New("must not contain whitespace")
+		}
 	}
 	return nil
 }
 
 func runMCP(args []string) int {
-	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
-	transport := fs.String("transport", "stdio", "transport for MCP server (\"stdio\" or \"http\")")
-	controlSocket := fs.String("control-socket", "", "unix socket path for the control plane")
-	supervisorSocket := fs.String("supervisor-socket", "", "unix socket path for the supervisor")
-	noAutostart := fs.Bool("no-autostart", false, "disable automatic supervisor start")
-	idleTimeout := fs.Duration("idle-timeout", 30*time.Minute, "idle timeout before server exits")
-	addr := fs.String("addr", "127.0.0.1:3748", "address to listen on for HTTP transport")
-	authToken := fs.String("auth-token", "", "bearer token required for HTTP transport (defaults to MCP_AUTH_TOKEN)")
-	authTokenFile := fs.String("auth-token-file", "", "path to a mode-0600 file containing the bearer token for HTTP transport")
-	maxWait := fs.Duration("max-wait", 0, "approximate polling budget for blocking tools (default 25s over HTTP; 0 disables)")
-	var allowedHosts allowedHostList
-	fs.Var(&allowedHosts, "allowed-host", "exact tailnet hostname accepted on the HTTP transport (repeatable)")
-	mcpLaunchWrapperPolicy := fs.String("mcp-launch-wrapper-policy", "", "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts (default: $AVENOR_MCP_LAUNCH_WRAPPER_POLICY, else launch-wrapper-policy.json under the avenor config home (XDG_CONFIG_HOME/avenor or ~/.config/avenor)); ignored when attaching to an existing supervisor, though a named file that is missing or malformed still fails")
+	return runDeclared(append([]string{"mcp"}, args...), os.Stdout, os.Stderr)
+}
 
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-
-	present := map[string]bool{}
-	maxWaitExplicit := false
-	fs.Visit(func(f *flag.Flag) {
-		present[f.Name] = true
-		if f.Name == "max-wait" {
-			maxWaitExplicit = true
+// handleMCP serves the MCP interface until it exits; the stdio transport
+// writes protocol traffic directly to os.Stdout.
+func handleMCP(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	transport := orDefault(inv.Flags["transport"], "stdio")
+	controlSocket := inv.Flags["control-socket"]
+	supervisorSocket := inv.Flags["supervisor-socket"]
+	noAutostart := inv.Bools["no-autostart"]
+	idleTimeout := orDefault(inv.Durations["idle-timeout"], 30*time.Minute)
+	addr := orDefault(inv.Flags["addr"], "127.0.0.1:3748")
+	authToken := inv.Flags["auth-token"]
+	authTokenFile := inv.Flags["auth-token-file"]
+	maxWait := inv.Durations["max-wait"]
+	allowedHosts := allowedHostList(inv.Events)
+	for _, host := range allowedHosts {
+		if err := validateAllowedHost(host); err != nil {
+			return nil, usageErrorf("avenor mcp: --allowed-host: %v", err)
 		}
-	})
+	}
+	mcpLaunchWrapperPolicy := inv.Flags["mcp-launch-wrapper-policy"]
 
-	if err := mcpFlagError(*transport, allowedHosts); err != nil {
-		fmt.Fprintln(os.Stderr, "avenor mcp:", err)
-		return 1
+	// Presence checks use the parsed values: an explicitly empty token or
+	// file path is indistinguishable from an absent flag.
+	tokenSet := authToken != ""
+	fileSet := authTokenFile != ""
+
+	if err := mcpFlagError(transport, allowedHosts); err != nil {
+		return nil, usageErrorf("avenor mcp: %v", err)
 	}
-	if err := mcpMaxWaitError(*transport, maxWaitExplicit, *maxWait); err != nil {
-		fmt.Fprintln(os.Stderr, "avenor mcp:", err)
-		return 1
+	if err := mcpMaxWaitError(maxWait); err != nil {
+		return nil, usageErrorf("avenor mcp: %v", err)
 	}
-	if *maxWait < 0 {
-		fmt.Fprintln(os.Stderr, "avenor mcp: --max-wait must not be negative")
-		return 1
+	if maxWait < 0 {
+		return nil, usageErrorf("avenor mcp: --max-wait must not be negative")
 	}
-	if present["auth-token"] && present["auth-token-file"] {
-		fmt.Fprintln(os.Stderr, "avenor mcp: --auth-token and --auth-token-file cannot both be set")
-		return 1
+	if tokenSet && fileSet {
+		return nil, usageErrorf("avenor mcp: --auth-token and --auth-token-file cannot both be set")
 	}
-	if *noAutostart && *supervisorSocket == "" {
-		fmt.Fprintln(os.Stderr, "avenor mcp: --no-autostart requires --supervisor-socket")
-		return 1
+	if noAutostart && supervisorSocket == "" {
+		return nil, usageErrorf("avenor mcp: --no-autostart requires --supervisor-socket")
 	}
-	if *transport == "http" {
+	if transport == "http" {
 		// Precedence: explicit --auth-token, then --auth-token-file, then the
 		// MCP_AUTH_TOKEN environment variable.
-		token, err := resolveAuthToken(present["auth-token"], present["auth-token-file"], *authToken, *authTokenFile, os.Getenv("MCP_AUTH_TOKEN"))
+		token, err := resolveAuthToken(tokenSet, fileSet, authToken, authTokenFile, os.Getenv("MCP_AUTH_TOKEN"))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
-			return 1
+			return nil, fmt.Errorf("avenor mcp: %w", err)
 		}
-		*authToken = token
+		authToken = token
 	}
 
 	// Resolve and validate the policy here, then forward only its path: the
@@ -132,43 +133,39 @@ func runMCP(args []string) int {
 	// actually enforces. This eager load is validation-only, so a malformed
 	// named file fails the command before any supervisor starts; do not "fix"
 	// the double load by dropping one side without moving validation with it.
-	_, mcpPolicyPath, err := resolveMCPLaunchWrapperPolicy(*mcpLaunchWrapperPolicy)
+	_, mcpPolicyPath, err := resolveMCPLaunchWrapperPolicy(mcpLaunchWrapperPolicy)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor mcp: mcp launch wrapper policy: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor mcp: mcp launch wrapper policy: %w", err)
 	}
 
 	s, err := newMCPServerFn(mcpserver.Options{
-		Transport:                  *transport,
-		ControlSocket:              *controlSocket,
-		SupervisorSocket:           *supervisorSocket,
-		NoAutostart:                *noAutostart,
-		IdleTimeout:                *idleTimeout,
-		Addr:                       *addr,
-		AuthToken:                  *authToken,
-		MaxWait:                    effectiveMaxWait(*transport, maxWaitExplicit, *maxWait),
+		Transport:                  transport,
+		ControlSocket:              controlSocket,
+		SupervisorSocket:           supervisorSocket,
+		NoAutostart:                noAutostart,
+		IdleTimeout:                idleTimeout,
+		Addr:                       addr,
+		AuthToken:                  authToken,
+		MaxWait:                    maxWait,
 		AllowedHosts:               allowedHosts,
 		ControlClient:              nil,
 		MCPLaunchWrapperPolicyPath: mcpPolicyPath,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor mcp: %w", err)
 	}
 	defer s.Close()
 
-	if *transport == "http" {
-		if err := s.RunHTTP(*addr); err != nil {
-			fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
-			return 1
+	if transport == "http" {
+		if err := s.RunHTTP(addr); err != nil {
+			return nil, fmt.Errorf("avenor mcp: %w", err)
 		}
 	} else {
 		if err := s.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "avenor mcp: %v\n", err)
-			return 1
+			return nil, fmt.Errorf("avenor mcp: %w", err)
 		}
 	}
-	return 0
+	return nil, nil
 }
 
 // resolveAuthToken applies the bearer-token precedence for HTTP transport:

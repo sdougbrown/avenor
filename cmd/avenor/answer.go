@@ -2,15 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
+	clicontract "github.com/sdougbrown/cli-contract"
 )
 
 // answerOption mirrors the per-entry shape from the options array in a .req file.
@@ -34,12 +35,10 @@ type answerResponse struct {
 // runAnswer implements the `avenor answer <perm-base>` subcommand.
 // It returns 0 on success, 2 on usage/validation errors, 1 on I/O errors.
 func runAnswer(args []string) int {
-	return runAnswerTo(args, os.Stderr)
+	return runDeclared(append([]string{"answer"}, args...), os.Stdout, os.Stderr)
 }
 
-// answerFlags holds the four answer flags. Both parse passes bind to the same
-// answerFlags value, so a flag set after <perm-base> overwrites only its own
-// field.
+// answerFlags holds the four answer flags.
 type answerFlags struct {
 	option  string
 	message string
@@ -47,89 +46,45 @@ type answerFlags struct {
 	force   bool
 }
 
-// defineAnswerFlags registers the answer flags on fs, binding to the fields of
-// v. Every FlagSet that parses answer arguments (the main parse, the second
-// pass over tokens after the positional, and the "--" terminator probe) uses
-// this helper so the flag list is declared exactly once.
-func defineAnswerFlags(fs *flag.FlagSet, v *answerFlags) {
-	fs.StringVar(&v.option, "option", "", "option id to select (required)")
-	fs.StringVar(&v.message, "message", "", "free-text message to include in the response")
-	fs.StringVar(&v.outcome, "outcome", "selected", "outcome: selected or cancelled")
-	fs.BoolVar(&v.force, "force", false, "overwrite an existing response file")
-}
-
-// answerConsumedTerminator reports whether the "--" token at args[idx-1] acted
-// as the end-of-flags terminator during the first parse pass rather than as a
-// flag value. Re-parsing the tokens before it on a throwaway FlagSet fails
-// exactly when a flag was left waiting for that "--" as its value.
-func answerConsumedTerminator(args []string, idx int) bool {
-	if idx == 0 || args[idx-1] != "--" {
-		return false
+// handleAnswer writes the response file for one pending permission request;
+// both parse passes' semantics collapse into cobra's native interspersed
+// flag parsing (last flag wins; duplicate detection is dropped).
+func handleAnswer(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	flags := answerFlags{
+		option:  inv.Flags["option"],
+		message: inv.Flags["message"],
+		outcome: orDefault(inv.Flags["outcome"], "selected"),
+		force:   inv.Bools["force"],
 	}
-	probe := flag.NewFlagSet("avenor answer", flag.ContinueOnError)
-	probe.SetOutput(io.Discard)
-	defineAnswerFlags(probe, &answerFlags{})
-	return probe.Parse(args[:idx-1]) == nil
+	code := answerWrite(inv.Args[0], flags, stderr)
+	if code == 0 {
+		return nil, nil
+	}
+	return exitCode(code), nil
 }
 
-// runAnswerTo is the testable entry point that accepts an io.Writer for
-// error output so tests can capture stderr without OS-level redirection.
+// runAnswerTo is the testable form of runAnswer.
 func runAnswerTo(args []string, errOut io.Writer) int {
-	var passOne answerFlags
-	fs := flag.NewFlagSet("avenor answer", flag.ContinueOnError)
-	fs.SetOutput(errOut)
-	defineAnswerFlags(fs, &passOne)
-
-	// Parse once to locate the <perm-base> positional. The flag package stops
-	// at the first positional argument, so any tokens after it stay in
-	// fs.Args() and are handled below.
-	if err := fs.Parse(args); err != nil {
+	inv, err := parseInvocation(append([]string{"answer"}, args...))
+	if err != nil {
+		fmt.Fprintf(errOut, "%v\n", err)
 		return 2
 	}
-	passOneSet := make(map[string]bool)
-	fs.Visit(func(f *flag.Flag) { passOneSet[f.Name] = true })
-
-	// positionalSupplied records that a <perm-base> token was present, even if
-	// that token was the empty string. extraPositional records that more than
-	// one positional was supplied. Both are held until the validations below
-	// run so that error priority matches a plain single-pass parse.
-	positionalSupplied := fs.NArg() > 0
-	permBase := ""
-	extraPositional := false
-	flags := passOne
-	if positionalSupplied {
-		permBase = fs.Arg(0)
-		rest := fs.Args()[1:]
-		if answerConsumedTerminator(args, len(args)-len(fs.Args())) {
-			// The first pass ended at a "--" terminator, so every remaining
-			// token is positional and must not be parsed as flags.
-			extraPositional = len(rest) > 0
-		} else {
-			fs2 := flag.NewFlagSet("avenor answer", flag.ContinueOnError)
-			fs2.SetOutput(errOut)
-			defineAnswerFlags(fs2, &flags)
-			// Registering the flags writes their defaults into flags; put the
-			// pass-one values back so fs2 overwrites only what it parses.
-			flags = passOne
-			if err := fs2.Parse(rest); err != nil {
-				return 2
-			}
-			// A flag set in both passes is a duplicate; within a single pass
-			// the flag package already applies last-wins.
-			duplicateName := ""
-			fs2.Visit(func(f *flag.Flag) {
-				if passOneSet[f.Name] && duplicateName == "" {
-					duplicateName = f.Name
-				}
-			})
-			if duplicateName != "" {
-				fmt.Fprintf(errOut, "avenor answer: flag -%s given more than once\n", duplicateName)
-				return 2
-			}
-			extraPositional = fs2.NArg() > 0
-		}
+	flags := answerFlags{
+		option:  inv.Flags["option"],
+		message: inv.Flags["message"],
+		outcome: orDefault(inv.Flags["outcome"], "selected"),
+		force:   inv.Bools["force"],
 	}
+	if len(inv.Args) != 1 {
+		fmt.Fprintln(errOut, "avenor answer: expected exactly one <perm-base>")
+		return 2
+	}
+	return answerWrite(inv.Args[0], flags, errOut)
+}
 
+// answerRun validates and writes the response file, returning the exit code.
+func answerWrite(permBase string, flags answerFlags, errOut io.Writer) int {
 	// Validate --outcome before anything else.
 	if flags.outcome != "selected" && flags.outcome != "cancelled" {
 		fmt.Fprintf(errOut, "avenor answer: --outcome must be \"selected\" or \"cancelled\", got %q\n", flags.outcome)
@@ -139,16 +94,6 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 	// Validate --option is present.
 	if flags.option == "" {
 		fmt.Fprintln(errOut, "avenor answer: --option <id> is required")
-		return 2
-	}
-
-	if !positionalSupplied {
-		fmt.Fprintln(errOut, "avenor answer: <perm-base> is required")
-		return 2
-	}
-
-	if extraPositional {
-		fmt.Fprintln(errOut, "avenor answer: expected exactly one <perm-base>")
 		return 2
 	}
 
