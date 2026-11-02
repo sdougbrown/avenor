@@ -33,9 +33,13 @@ func awaitRunDeclared(args []string, stdout, stderr io.Writer) int {
 	}()
 	old := os.Stdout
 	os.Stdout = w
-	code := runDeclared(append([]string{"await"}, args...), stdout, stderr)
-	os.Stdout = old
-	w.Close()
+	code := func() int {
+		defer func() {
+			os.Stdout = old
+			w.Close()
+		}()
+		return runDeclared(append([]string{"await"}, args...), stdout, stderr)
+	}()
 	if err := <-drained; err != nil {
 		panic(err)
 	}
