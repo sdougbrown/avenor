@@ -115,7 +115,7 @@ type runOptions struct {
 	PonyConfig             string
 }
 
-// RunCommand declares the run command's flag surface, in RunOptions field
+// RunCommand declares the run command's flag surface, in runOptions field
 // order. Handle is nil here; cmd/avenor attaches the handler, so this
 // package knows nothing of avenor's adapter.
 func RunCommand() *clicontract.Command {
@@ -157,8 +157,7 @@ func RunCommand() *clicontract.Command {
 }
 
 // RunInvocation maps a parsed run invocation to runOptions and executes the
-// run. It is the only invocation-to-options conversion, so the library
-// dispatch and the flag-based path apply the same defaults.
+// run. It is the only invocation-to-options conversion.
 func RunInvocation(inv clicontract.Invocation, getenv func(string) string, stderr io.Writer) int {
 	opts := runOptions{
 		Agent:                  inv.Flags["agent"],
@@ -196,9 +195,6 @@ func RunInvocation(inv clicontract.Invocation, getenv func(string) string, stder
 	}
 	if !opts.BackendSet {
 		opts.Backend = DefaultBackend
-	}
-	if opts.Dir == "" {
-		opts.Dir = "."
 	}
 	return runWithOptions(opts, getenv, stderr)
 }

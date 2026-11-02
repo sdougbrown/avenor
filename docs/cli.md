@@ -53,9 +53,10 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--run-id` | (generated) | Correlation ID for this run; auto-generated if not set |
 | `--permission-claim-timeout` | `0` (disabled) | Optional deadline for a connected control client to answer a permission request. With 0, fallback occurs only after all control clients disconnect |
 
-### Examples
+Flag-syntax errors — an unknown flag, a bad duration or integer value, a missing flag value — exit 2. Validation errors raised after the flags parse (mutually exclusive flags, a missing prompt, an invalid roster or workflow file) exit 1.
 
-Flag-syntax errors — an unknown flag, a bad duration or integer value, a missing flag value — exit 2. Validation errors raised after the flags parse (mutually exclusive flags, a missing prompt, an invalid roster or workflow file) still exit 1.
+
+### Examples
 
 Run a single agent with a prompt file:
 
