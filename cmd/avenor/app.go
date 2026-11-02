@@ -165,6 +165,102 @@ func app() *clicontract.App {
 				Handle: handleMCP,
 			},
 			{
+				Name:  "control",
+				Short: "drive a running supervisor over its control socket",
+				PersistentFlags: []clicontract.Flag{
+					{Name: "socket", Kind: clicontract.String, Usage: "control socket path (required)"},
+				},
+				Subcommands: []*clicontract.Command{
+					{
+						Name:  "status",
+						Short: "print one runtime's snapshot, or every runtime's",
+						Positionals: []clicontract.Positional{
+							{Name: "runtime-id"},
+						},
+						Handle: handleControlStatus,
+					},
+					{
+						Name:   "list",
+						Short:  "print every runtime on the socket",
+						Handle: handleControlList,
+					},
+					{
+						Name:   "tail",
+						Short:  "stream control events as NDJSON",
+						Handle: handleControlTail,
+					},
+					{
+						Name:  "spawn",
+						Short: "spawn one runtime as the socket's owner",
+						Flags: []clicontract.Flag{
+							{Name: "prompt", Kind: clicontract.String, Usage: "inline prompt text"},
+							{Name: "prompt-file", Kind: clicontract.String, Usage: "path to prompt file"},
+							{Name: "dir", Kind: clicontract.String, Usage: "working directory for the runtime"},
+							{Name: "agent", Kind: clicontract.String, Usage: "agent name"},
+							{Name: "label", Kind: clicontract.String, Usage: "free-form label for log correlation"},
+							{Name: "model", Kind: clicontract.String, Usage: "backend-specific model id"},
+							{Name: "thinking", Kind: clicontract.String, Usage: "thinking level (off, minimal, low, medium, high, xhigh, max)"},
+							{Name: "backend", Kind: clicontract.String, Usage: "runtime backend"},
+							{Name: "roster-file", Kind: clicontract.String, Usage: "path to the roster map"},
+							{Name: "roster-entry", Kind: clicontract.String, Usage: "roster entry key"},
+							{Name: "server-url", Kind: clicontract.String, Usage: "long-lived ACP server endpoint"},
+							{Name: "on-event", Kind: clicontract.String, Usage: "path to write NDJSON events"},
+							{Name: "sentinel-file", Kind: clicontract.String, Usage: "path to write a completion sentinel"},
+							{Name: "permission-handler", Kind: clicontract.String, Usage: "permission handler, supports file:<path>"},
+							{Name: "auto-approve", Kind: clicontract.Bool, Usage: "automatically approve all permission requests"},
+							{Name: "timeout", Kind: clicontract.Int, Usage: "overall session timeout in seconds"},
+							{Name: "max-retries", Kind: clicontract.Int, Usage: "maximum retry attempts on transient failure"},
+							{Name: "launch-wrapper", Kind: clicontract.Repeat, Usage: "opaque argv prefix in front of the backend command; repeatable, each use adds one element"},
+						},
+						Handle: handleControlSpawn,
+					},
+					{
+						Name:  "cancel",
+						Short: "cancel one runtime (or the whole session)",
+						Positionals: []clicontract.Positional{
+							{Name: "runtime-id"},
+						},
+						Handle: handleControlCancel,
+					},
+					{
+						Name:  "prompt",
+						Short: "queue one prompt for one runtime",
+						Positionals: []clicontract.Positional{
+							{Name: "text", Required: true},
+							{Name: "runtime-id"},
+						},
+						Handle: handleControlPrompt,
+					},
+					{
+						Name:  "interrupt-and-prompt",
+						Short: "interrupt one runtime and queue a prompt",
+						Positionals: []clicontract.Positional{
+							{Name: "text", Required: true},
+							{Name: "runtime-id"},
+						},
+						Handle: handleControlInterruptAndPrompt,
+					},
+					{
+						Name:  "answer-permission",
+						Short: "answer one pending permission request",
+						Positionals: []clicontract.Positional{
+							{Name: "request-id", Required: true},
+							{Name: "option-id", Required: true},
+							{Name: "runtime-id"},
+						},
+						Handle: handleControlAnswerPermission,
+					},
+					{
+						Name:  "shutdown",
+						Short: "stop the supervisor: graceful by default",
+						Positionals: []clicontract.Positional{
+							{Name: "mode"},
+						},
+						Handle: handleControlShutdown,
+					},
+				},
+			},
+			{
 				Name:  "schema",
 				Short: "print the machine-readable command-surface document",
 				Raw:   handleSchema,

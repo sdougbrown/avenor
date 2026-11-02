@@ -1,99 +1,274 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
+	clicontract "github.com/sdougbrown/cli-contract"
 )
 
-// controlVerb is one control subcommand and the connection it needs: the
-// read-only verbs dial anonymously so they work against a live socket with no
-// published owner record, and the gated verbs attach as the socket's owner.
-type controlVerb struct {
-	dial func(string) (*client.Client, error)
-	run  func(*client.Client, []string) int
-}
-
-var controlVerbs = map[string]controlVerb{
-	"status":               {client.Dial, cmdStatus},
-	"list":                 {client.Dial, func(c *client.Client, _ []string) int { return cmdList(c) }},
-	"tail":                 {client.Dial, func(c *client.Client, _ []string) int { return cmdTail(c) }},
-	"spawn":                {client.AttachOwner, cmdSpawn},
-	"cancel":               {client.AttachOwner, cmdCancel},
-	"prompt":               {client.AttachOwner, cmdPrompt},
-	"interrupt-and-prompt": {client.AttachOwner, cmdInterruptAndPrompt},
-	"answer-permission":    {client.AttachOwner, cmdAnswerPermission},
-	"shutdown":             {client.AttachOwner, cmdShutdown},
-}
-
+// runControl dispatches through the declared surface.
 func runControl(args []string) int {
-	fs := flag.NewFlagSet("control", flag.ContinueOnError)
-	socketFile := fs.String("socket", "", "control socket path (required)")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	if *socketFile == "" {
-		fmt.Fprintln(os.Stderr, "avenor control: --socket is required")
-		return 1
-	}
-	nonFlag := fs.Args()
-	if len(nonFlag) == 0 {
-		fmt.Fprintln(os.Stderr, "avenor control: command required (status, list, tail, spawn, cancel, prompt, interrupt-and-prompt, answer-permission, shutdown)")
-		return 1
-	}
-	verb, ok := controlVerbs[nonFlag[0]]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "avenor control: unknown command %q\n", nonFlag[0])
-		return 1
-	}
+	return runDeclared(append([]string{"control"}, args...), os.Stdout, os.Stderr)
+}
 
-	c, err := verb.dial(*socketFile)
+// controlClient dials the control socket named by the persistent --socket
+// flag; owner verbs attach the parent-owner credential.
+func controlClient(inv clicontract.Invocation, owner bool) (*client.Client, error) {
+	socket := inv.Flags["socket"]
+	if socket == "" {
+		return nil, usageErrorf("avenor control: --socket is required")
+	}
+	if owner {
+		return client.AttachOwner(socket)
+	}
+	return client.Dial(socket)
+}
+
+// handleControlStatus prints one runtime's snapshot, or every runtime's.
+func handleControlStatus(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := controlClient(inv, false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor control: %v\n", err)
-		return 1
+		return nil, err
 	}
 	defer c.Close()
-	return verb.run(c, nonFlag[1:])
-}
-
-func cmdStatus(c *client.Client, args []string) int {
 	rtID := ""
-	if len(args) > 0 {
-		rtID = args[0]
+	if len(inv.Args) > 0 {
+		rtID = inv.Args[0]
 	}
 	snap, err := c.Status(rtID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor control: status: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor control: status: %w", err)
 	}
-	data, _ := json.MarshalIndent(snap, "", "  ")
-	fmt.Println(string(data))
-	return 0
+	return snap, nil
 }
 
-func cmdList(c *client.Client) int {
+// handleControlList prints every runtime on the socket.
+func handleControlList(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := controlClient(inv, false)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
 	runtimes, err := c.List()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor control: list: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor control: list: %w", err)
 	}
-	data, _ := json.MarshalIndent(runtimes, "", "  ")
-	fmt.Println(string(data))
-	return 0
+	return runtimes, nil
 }
 
-func cmdTail(c *client.Client) int {
-	// A subscribe the server refuses because it is shutting down ends the stream
-	// the caller asked to tail, since no event can follow. Any other failure,
-	// including a connection that drops before the answer, is reported.
+// handleControlTail streams events until the server stops them.
+func handleControlTail(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := controlClient(inv, false)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	if code := controlTail(c); code != 0 {
+		return exitCode(code), nil
+	}
+	return nil, nil
+}
+
+// handleControlSpawn spawns one runtime through the owner socket.
+func handleControlSpawn(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := controlClient(inv, true)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	params, err := spawnParamsFromInvocation(inv)
+	if err != nil {
+		return nil, err
+	}
+	result, err := c.Spawn(params)
+	if err != nil {
+		return nil, fmt.Errorf("avenor control: spawn: %w", err)
+	}
+	return result, nil
+}
+
+// handleControlCancel cancels one runtime (or the whole session).
+func handleControlCancel(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := controlClient(inv, true)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	rtID := ""
+	if len(inv.Args) > 0 {
+		rtID = inv.Args[0]
+	}
+	if err := c.Cancel(rtID); err != nil {
+		return nil, fmt.Errorf("avenor control: cancel: %w", err)
+	}
+	fmt.Println("cancelled")
+	return nil, nil
+}
+
+// handleControlPrompt queues one prompt for one runtime.
+func handleControlPrompt(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := controlClient(inv, true)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	rtID := ""
+	if len(inv.Args) >= 2 {
+		rtID = inv.Args[1]
+	}
+	if err := c.Prompt(rtID, inv.Args[0]); err != nil {
+		return nil, fmt.Errorf("avenor control: prompt: %w", err)
+	}
+	fmt.Println("prompt queued")
+	return nil, nil
+}
+
+// handleControlInterruptAndPrompt interrupts and queues one prompt.
+func handleControlInterruptAndPrompt(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := controlClient(inv, true)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	rtID := ""
+	if len(inv.Args) >= 2 {
+		rtID = inv.Args[1]
+	}
+	if err := c.InterruptAndPrompt(rtID, inv.Args[0], false); err != nil {
+		return nil, fmt.Errorf("avenor control: interrupt-and-prompt: %w", err)
+	}
+	fmt.Println("interrupt queued")
+	return nil, nil
+}
+
+// handleControlAnswerPermission answers one pending permission request.
+func handleControlAnswerPermission(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := controlClient(inv, true)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	rtID := ""
+	if len(inv.Args) >= 3 {
+		rtID = inv.Args[2]
+	}
+	if err := c.AnswerPermission(rtID, inv.Args[0], inv.Args[1]); err != nil {
+		return nil, fmt.Errorf("avenor control: answer-permission: %w", err)
+	}
+	fmt.Println("permission answered")
+	return nil, nil
+}
+
+// handleControlShutdown stops the supervisor: graceful by default.
+func handleControlShutdown(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := controlClient(inv, true)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	mode := "graceful"
+	if len(inv.Args) > 0 {
+		mode = inv.Args[0]
+	}
+	if err := c.Shutdown(mode); err != nil {
+		return nil, fmt.Errorf("avenor control: shutdown: %w", err)
+	}
+	fmt.Println("shutting down")
+	return nil, nil
+}
+
+// spawnParamsFromInvocation validates the spawn flags and builds the spawn
+// request: the prompt disjunction, thinking level, and selector rules run
+// before any socket traffic.
+func spawnParamsFromInvocation(inv clicontract.Invocation) (map[string]any, error) {
+	prompt := inv.Flags["prompt"]
+	promptFile := inv.Flags["prompt-file"]
+	thinking := inv.Flags["thinking"]
+
+	if prompt != "" && promptFile != "" {
+		return nil, usageErrorf("avenor control: spawn: --prompt and --prompt-file are mutually exclusive")
+	}
+	if prompt == "" && promptFile == "" {
+		return nil, usageErrorf("avenor control: spawn: --prompt or --prompt-file is required")
+	}
+	if err := runtime.ValidateThinking(thinking); err != nil {
+		return nil, usageErrorf("avenor control: spawn: %v", err)
+	}
+	if err := spawnselection.Validate(spawnselection.Input{
+		Agent:       inv.Flags["agent"],
+		Model:       inv.Flags["model"],
+		Backend:     inv.Flags["backend"],
+		RosterFile:  inv.Flags["roster-file"],
+		RosterEntry: inv.Flags["roster-entry"],
+	}, false); err != nil {
+		return nil, usageErrorf("avenor control: spawn: %v", err)
+	}
+	params := map[string]any{}
+	addString := func(key, value string) {
+		if value != "" {
+			params[key] = value
+		}
+	}
+	addString("prompt", prompt)
+	addString("prompt_file", promptFile)
+	addString("dir", inv.Flags["dir"])
+	addString("agent", inv.Flags["agent"])
+	addString("label", inv.Flags["label"])
+	addString("model", inv.Flags["model"])
+	addString("thinking", thinking)
+	addString("backend", inv.Flags["backend"])
+	addString("roster_file", inv.Flags["roster-file"])
+	addString("roster_entry", inv.Flags["roster-entry"])
+	addString("server_url", inv.Flags["server-url"])
+	addString("on_event", inv.Flags["on-event"])
+	addString("sentinel_file", inv.Flags["sentinel-file"])
+	addString("permission_handler", inv.Flags["permission-handler"])
+	if inv.Bools["auto-approve"] {
+		params["auto_approve"] = true
+	}
+	if launchWrapper := launchWrapperFlag(inv.Events); len(launchWrapper) > 0 {
+		params["launch_wrapper"] = []string(launchWrapper)
+	}
+	if timeout := inv.Ints["timeout"]; timeout > 0 {
+		params["timeout"] = timeout
+	}
+	if maxRetries := inv.Ints["max-retries"]; maxRetries > 0 {
+		params["max_retries"] = maxRetries
+	}
+	return params, nil
+}
+
+// launchWrapperFlag collects the repeatable --launch-wrapper argv prefix.
+type launchWrapperFlag []string
+
+// spawnParamsFromArgs is the test seam for spawnParamsFromInvocation: it
+// parses raw argv the way the declared tree would and returns the exit-code
+// style result the tests assert on.
+func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) {
+	inv, err := parseInvocation(append([]string{"control", "spawn"}, args...))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return nil, 2
+	}
+	params, err := spawnParamsFromInvocation(inv)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return nil, 2
+	}
+	return params, 0
+}
+
+// controlTail is the test seam for handleControlTail: it tails an already
+// dialed client and returns the exit-code style result the tests assert on.
+func controlTail(c *client.Client) int {
 	if err := c.Subscribe(nil); err != nil && !errors.Is(err, client.ErrControlStopped) {
 		fmt.Fprintf(os.Stderr, "avenor control: subscribe: %v\n", err)
 		return 1
@@ -102,190 +277,5 @@ func cmdTail(c *client.Client) int {
 		data, _ := json.Marshal(ev.Raw)
 		fmt.Println(string(data))
 	}
-	return 0
-}
-
-func cmdSpawn(c *client.Client, args []string) int {
-	params, code := spawnParamsFromArgs(args, os.Stderr)
-	if code != 0 {
-		return code
-	}
-	result, err := c.Spawn(params)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor control: spawn: %v\n", err)
-		return 1
-	}
-	data, _ := json.MarshalIndent(result, "", "  ")
-	fmt.Println(string(data))
-	return 0
-}
-
-func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) {
-	fs := flag.NewFlagSet("spawn", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	prompt := fs.String("prompt", "", "inline prompt text")
-	promptFile := fs.String("prompt-file", "", "path to prompt file")
-	dir := fs.String("dir", "", "working directory for the runtime")
-	agent := fs.String("agent", "", "agent name")
-	label := fs.String("label", "", "free-form label for log correlation")
-	model := fs.String("model", "", "backend-specific model id")
-	thinking := fs.String("thinking", "", "thinking level (off, minimal, low, medium, high, xhigh, max)")
-	backend := fs.String("backend", "", "runtime backend")
-	rosterFile := fs.String("roster-file", "", "path to the roster map")
-	rosterEntry := fs.String("roster-entry", "", "roster entry key")
-	serverURL := fs.String("server-url", "", "long-lived ACP server endpoint")
-	onEvent := fs.String("on-event", "", "path to write NDJSON events")
-	sentinelFile := fs.String("sentinel-file", "", "path to write a completion sentinel")
-	permissionHandler := fs.String("permission-handler", "", "permission handler, supports file:<path>")
-	autoApprove := fs.Bool("auto-approve", false, "automatically approve all permission requests")
-	timeout := fs.Int("timeout", 0, "overall session timeout in seconds")
-	maxRetries := fs.Int("max-retries", 0, "maximum retry attempts on transient failure")
-	var launchWrapper launchWrapperFlag
-	fs.Var(&launchWrapper, "launch-wrapper", "opaque argv prefix in front of the backend command; repeatable, each use adds one element")
-	if err := fs.Parse(args); err != nil {
-		return nil, 1
-	}
-	if *prompt != "" && *promptFile != "" {
-		fmt.Fprintln(stderr, "avenor control: spawn: --prompt and --prompt-file are mutually exclusive")
-		return nil, 1
-	}
-	if *prompt == "" && *promptFile == "" {
-		fmt.Fprintln(stderr, "avenor control: spawn: --prompt or --prompt-file is required")
-		return nil, 1
-	}
-	if err := runtime.ValidateThinking(*thinking); err != nil {
-		fmt.Fprintf(stderr, "avenor control: spawn: %v\n", err)
-		return nil, 1
-	}
-	if err := spawnselection.Validate(spawnselection.Input{
-		Agent:       *agent,
-		Model:       *model,
-		Backend:     *backend,
-		RosterFile:  *rosterFile,
-		RosterEntry: *rosterEntry,
-	}, false); err != nil {
-		fmt.Fprintf(stderr, "avenor control: spawn: %v\n", err)
-		return nil, 1
-	}
-	params := map[string]any{}
-	addString := func(key, value string) {
-		if value != "" {
-			params[key] = value
-		}
-	}
-	addString("prompt", *prompt)
-	addString("prompt_file", *promptFile)
-	addString("dir", *dir)
-	addString("agent", *agent)
-	addString("label", *label)
-	addString("model", *model)
-	addString("thinking", *thinking)
-	addString("backend", *backend)
-	addString("roster_file", *rosterFile)
-	addString("roster_entry", *rosterEntry)
-	addString("server_url", *serverURL)
-	addString("on_event", *onEvent)
-	addString("sentinel_file", *sentinelFile)
-	addString("permission_handler", *permissionHandler)
-	if *autoApprove {
-		params["auto_approve"] = true
-	}
-	if len(launchWrapper) > 0 {
-		params["launch_wrapper"] = []string(launchWrapper)
-	}
-	if *timeout > 0 {
-		params["timeout"] = *timeout
-	}
-	if *maxRetries > 0 {
-		params["max_retries"] = *maxRetries
-	}
-	return params, 0
-}
-
-type launchWrapperFlag []string
-
-func (w *launchWrapperFlag) String() string { return strings.Join(*w, " ") }
-
-func (w *launchWrapperFlag) Set(value string) error {
-	*w = append(*w, value)
-	return nil
-}
-
-func cmdCancel(c *client.Client, args []string) int {
-	rtID := ""
-	if len(args) > 0 {
-		rtID = args[0]
-	}
-	if err := c.Cancel(rtID); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor control: cancel: %v\n", err)
-		return 1
-	}
-	fmt.Println("cancelled")
-	return 0
-}
-
-func cmdPrompt(c *client.Client, args []string) int {
-	rtID := ""
-	text := ""
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "avenor control: prompt <text> [runtime-id]")
-		return 1
-	}
-	if len(args) >= 2 {
-		rtID = args[1]
-	}
-	text = args[0]
-	if err := c.Prompt(rtID, text); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor control: prompt: %v\n", err)
-		return 1
-	}
-	fmt.Println("prompt queued")
-	return 0
-}
-
-func cmdInterruptAndPrompt(c *client.Client, args []string) int {
-	rtID := ""
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "avenor control: interrupt-and-prompt <text> [runtime-id]")
-		return 1
-	}
-	if len(args) >= 2 {
-		rtID = args[1]
-	}
-	if err := c.InterruptAndPrompt(rtID, args[0], false); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor control: interrupt-and-prompt: %v\n", err)
-		return 1
-	}
-	fmt.Println("interrupt queued")
-	return 0
-}
-
-func cmdAnswerPermission(c *client.Client, args []string) int {
-	rtID := ""
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "avenor control: answer-permission <request-id> <option-id> [runtime-id]")
-		return 1
-	}
-	if len(args) >= 3 {
-		rtID = args[2]
-	}
-	if err := c.AnswerPermission(rtID, args[0], args[1]); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor control: answer-permission: %v\n", err)
-		return 1
-	}
-	fmt.Println("permission answered")
-	return 0
-}
-
-func cmdShutdown(c *client.Client, args []string) int {
-	mode := "graceful"
-	if len(args) > 0 {
-		mode = args[0]
-	}
-	if err := c.Shutdown(mode); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor control: shutdown: %v\n", err)
-		return 1
-	}
-	fmt.Println("shutting down")
 	return 0
 }

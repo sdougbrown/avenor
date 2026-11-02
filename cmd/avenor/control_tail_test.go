@@ -75,7 +75,7 @@ func TestCmdTailSubscribeFailureRows(t *testing.T) {
 				t.Fatalf("pipe: %v", err)
 			}
 			os.Stderr = w
-			code := cmdTail(c)
+			code := controlTail(c)
 			w.Close()
 			os.Stderr = oldStderr
 
