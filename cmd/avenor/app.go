@@ -12,16 +12,16 @@ import (
 )
 
 // app declares the migrated Avenor command surface. Commands still on the
-// legacy dispatch path (answer, await, watch, control, workflow, mcp, run)
-// are absent until their migration lands; main.go routes them to the legacy
-// switch in the meantime.
+// legacy dispatch path (control, workflow, run) are absent until their
+// migration lands; main.go routes them to the legacy switch in the
+// meantime.
 func app() *clicontract.App {
 	return &clicontract.App{
 		Name:                "avenor",
 		Version:             Version,
 		ErrorPrefix:         "avenor",
 		HandlerOwnedSignals: true,
-		RootLong:            "Avenor orchestrates agent runs. Commands not listed here (answer, await, watch, control, workflow, mcp, run) are still on the pre-library dispatch and work normally during the migration.",
+		RootLong:            "Avenor orchestrates agent runs. Commands not listed here (control, workflow, run) are still on the pre-library dispatch and work normally during the migration.",
 
 		VersionTemplate: "avenor v{{.Version}}\n",
 		Commands: []*clicontract.Command{
@@ -100,6 +100,69 @@ func app() *clicontract.App {
 					{Name: "roster-entry", Kind: clicontract.String, Usage: "roster entry name to look up (requires --roster-file)"},
 				},
 				Handle: handleVerify,
+			},
+			{
+				Name:  "watch",
+				Short: "digest an avenor log into human-readable events",
+				Positionals: []clicontract.Positional{
+					{Name: "log", Required: true},
+				},
+				Flags: []clicontract.Flag{
+					{Name: "follow", Kind: clicontract.Bool, Usage: "poll and tail the log"},
+					{Name: "format", Kind: clicontract.String, Usage: "output format: plain (EVENT lines) or json (pass-through NDJSON)", Default: "plain"},
+					{Name: "classify", Kind: clicontract.Bool, Usage: "prefix each plain-format digest line with MILESTONE | FINDING | ACTIVITY; in json format, adds a top-level \"classify\" field"},
+					{Name: "accumulate", Kind: clicontract.Bool, Usage: "buffer consecutive thought/message chunks with the same session ID and event type, flushing them as a single human-readable line (plain format only)"},
+					{Name: "poll-interval", Kind: clicontract.Duration, Usage: "follow-mode sleep interval", Default: 250 * time.Millisecond},
+					{Name: "since-cursor", Kind: clicontract.String, Usage: "cursor file path: seek to saved offset before reading; rewrite offset on exit"},
+				},
+				Handle: handleWatch,
+			},
+			{
+				Name:  "await",
+				Short: "wait for a run to reach attention or completion",
+				Positionals: []clicontract.Positional{
+					{Name: "target", Required: true},
+				},
+				Flags: []clicontract.Flag{
+					{Name: "socket", Kind: clicontract.String, Usage: "explicit control socket path; omitting scans ~/.avenor/sockets"},
+					{Name: "until", Kind: clicontract.String, Usage: "wait until: attention or done", Default: "attention"},
+					{Name: "timeout", Kind: clicontract.Duration, Usage: "wall-clock timeout"},
+					{Name: "print-output", Kind: clicontract.Bool, Usage: "print complete result output before exiting"},
+					{Name: "format", Kind: clicontract.String, Usage: "output format: plain or json", Default: "plain"},
+				},
+				Handle: handleAwait,
+			},
+			{
+				Name:  "answer",
+				Short: "answer a pending permission request from its request file",
+				Positionals: []clicontract.Positional{
+					{Name: "perm-base", Required: true},
+				},
+				Flags: []clicontract.Flag{
+					{Name: "option", Kind: clicontract.String, Usage: "option id to select", Required: true},
+					{Name: "message", Kind: clicontract.String, Usage: "free-text message to include in the response"},
+					{Name: "outcome", Kind: clicontract.String, Usage: "outcome: selected or cancelled", Default: "selected"},
+					{Name: "force", Kind: clicontract.Bool, Usage: "overwrite an existing response file"},
+				},
+				Handle: handleAnswer,
+			},
+			{
+				Name:  "mcp",
+				Short: "serve the Model Context Protocol interface",
+				Flags: []clicontract.Flag{
+					{Name: "transport", Kind: clicontract.String, Usage: "transport for MCP server (\"stdio\" or \"http\")", Default: "stdio"},
+					{Name: "control-socket", Kind: clicontract.String, Usage: "unix socket path for the control plane"},
+					{Name: "supervisor-socket", Kind: clicontract.String, Usage: "unix socket path for the supervisor"},
+					{Name: "no-autostart", Kind: clicontract.Bool, Usage: "disable automatic supervisor start"},
+					{Name: "idle-timeout", Kind: clicontract.Duration, Usage: "idle timeout before server exits", Default: 30 * time.Minute},
+					{Name: "addr", Kind: clicontract.String, Usage: "address to listen on for HTTP transport", Default: "127.0.0.1:3748"},
+					{Name: "auth-token", Kind: clicontract.String, Usage: "bearer token required for HTTP transport (defaults to MCP_AUTH_TOKEN)"},
+					{Name: "auth-token-file", Kind: clicontract.String, Usage: "path to a mode-0600 file containing the bearer token for HTTP transport"},
+					{Name: "max-wait", Kind: clicontract.Duration, Usage: "approximate polling budget for blocking tools (0 disables)", Default: 25 * time.Second},
+					{Name: "allowed-host", Kind: clicontract.Repeat, Usage: "exact tailnet hostname accepted on the HTTP transport (repeatable)"},
+					{Name: "mcp-launch-wrapper-policy", Kind: clicontract.String, Usage: "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts (default: $AVENOR_MCP_LAUNCH_WRAPPER_POLICY, else launch-wrapper-policy.json under the avenor config home (XDG_CONFIG_HOME/avenor or ~/.config/avenor)); ignored when attaching to an existing supervisor, though a named file that is missing or malformed still fails"},
+				},
+				Handle: handleMCP,
 			},
 			{
 				Name:  "schema",

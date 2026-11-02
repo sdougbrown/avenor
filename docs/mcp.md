@@ -211,7 +211,7 @@ To serve remote MCP clients over a tailnet, run `avenor mcp --transport http` wi
 ### Flags
 
 - `--allowed-host` — exact hostname allowed to connect, case-insensitive. Repeatable. Loopback is always allowed. HTTP-only: stdio has no host check.
-- `--max-wait` — approximate polling budget for blocking tools. Defaults to 25s for HTTP and 0 (unclamped) for stdio; an explicit `0` disables the clamp.
+- `--max-wait` — approximate polling budget for blocking tools. Defaults to 25s on both transports; an explicit `0` disables the clamp.
 - `--auth-token-file` — path to a mode-0600 token file. Precedence: `--auth-token` flag > `--auth-token-file` > `MCP_AUTH_TOKEN`. Conflicts with `--auth-token`.
 
 ### Reconnect behavior

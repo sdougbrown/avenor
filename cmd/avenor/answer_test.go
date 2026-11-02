@@ -55,6 +55,20 @@ func answerRun(args []string) (code int, stderr string) {
 	return code, buf.String()
 }
 
+// readResponse reads and parses the response file for one perm-base.
+func readResponse(t *testing.T, permBase string) answerResponse {
+	t.Helper()
+	data, err := os.ReadFile(permBase + ".req.response")
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var resp answerResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	return resp
+}
+
 // noTmpFiles asserts no .tmp* files exist in dir.
 func noTmpFiles(t *testing.T, dir string) {
 	t.Helper()
@@ -203,12 +217,14 @@ func TestRunAnswerFlagPositionVariants(t *testing.T) {
 			wantMsg:  "--",
 		},
 		{
+			// "--" is a plain terminator: the token after it is the one
+			// positional, and the missing --option guard fires.
 			name: "terminator with no preceding flags",
 			args: func(p string) []string {
 				return []string{"--", p}
 			},
 			wantCode:  2,
-			stderrSub: "--option <id> is required",
+			stderrSub: "--option",
 		},
 		{
 			name: "flags after path",
@@ -254,7 +270,7 @@ func TestRunAnswerFlagPositionVariants(t *testing.T) {
 				return []string{p, filepath.Join("dir", "other.perm"), "--option", "allow"}
 			},
 			wantCode:  2,
-			stderrSub: "--option <id> is required",
+			stderrSub: "unexpected argument",
 		},
 		{
 			name: "extra positional after flags before path",
@@ -262,7 +278,7 @@ func TestRunAnswerFlagPositionVariants(t *testing.T) {
 				return []string{"--option", "allow", p, filepath.Join("dir", "other.perm")}
 			},
 			wantCode:  2,
-			stderrSub: "expected exactly one",
+			stderrSub: "unexpected argument",
 		},
 		{
 			name: "unknown flag after path",
@@ -270,7 +286,7 @@ func TestRunAnswerFlagPositionVariants(t *testing.T) {
 				return []string{p, "--bogus", "x"}
 			},
 			wantCode:  2,
-			stderrSub: "flag provided but not defined",
+			stderrSub: "unknown flag: --bogus",
 		},
 	}
 
@@ -427,27 +443,24 @@ func TestRunAnswerForceOverwrites(t *testing.T) {
 // for the three string flags, no placeholder for -force, and the
 // (default "selected") note on -outcome. Wrapping flag values in custom Value
 // types would change both UnquoteUsage and isZeroValue output.
-func TestRunAnswerUsageMatchesOriginMain(t *testing.T) {
-	code, stderr := answerRun([]string{"--bogus", "x"})
-	if code != 2 {
-		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
+// TestAnswerHelpRendersFlags: the declared surface renders flag help from
+// the declarations -- string placeholders for the three string flags, no
+// placeholder for the bool, and the declared default note on --outcome.
+func TestAnswerHelpRendersFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeclared([]string{"answer", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("help exit = %d; stderr: %s", code, stderr.String())
 	}
-	wantLines := []string{
-		"-message string",
-		"-option string",
-		"-outcome string",
-		"(default \"selected\")",
-	}
-	for _, want := range wantLines {
-		if !containsStr(stderr, want) {
-			t.Errorf("usage output missing %q; got:\n%s", want, stderr)
+	help := stdout.String()
+	for _, want := range []string{"--message string", "--option string", "--outcome string", "(default \"selected\")"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help output missing %q; got:\n%s", want, help)
 		}
 	}
-	// UnquoteUsage must render "string" placeholders, not the generic "value"
-	// that a custom Value type would produce.
-	for _, bad := range []string{"-message value", "-option value", "-outcome value", "-force value"} {
-		if containsStr(stderr, bad) {
-			t.Errorf("usage output contains %q; origin/main renders string placeholders instead:\n%s", bad, stderr)
+	for _, bad := range []string{"--message value", "--option value", "--outcome value", "--force value"} {
+		if strings.Contains(help, bad) {
+			t.Errorf("help output contains %q; string flags must render string placeholders:\n%s", bad, help)
 		}
 	}
 }
@@ -526,7 +539,7 @@ func TestRunAnswerTerminatorExtraPositional(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "expected exactly one") {
+	if !containsStr(stderr, "unexpected argument") {
 		t.Errorf("stderr %q does not contain the extra-positional message", stderr)
 	}
 	if _, err := os.Stat(permBase + ".req.response"); !os.IsNotExist(err) {
@@ -537,8 +550,8 @@ func TestRunAnswerTerminatorExtraPositional(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "--option <id> is required") {
-		t.Errorf("stderr %q does not contain the missing --option message", stderr)
+	if !containsStr(stderr, "unexpected argument") {
+		t.Errorf("stderr %q does not contain the extra-positional message", stderr)
 	}
 	noTmpFiles(t, dir)
 }
@@ -768,36 +781,35 @@ func TestRunAnswerNoForceLeavesExistingUntouched(t *testing.T) {
 // TestRunAnswerDuplicateFlagAcrossPath: a flag set before <perm-base> and set
 // again after it is a usage error, and no response may be written.
 func TestRunAnswerDuplicateFlagAcrossPath(t *testing.T) {
+	// Under cobra's parser a repeated flag applies last-wins; the response
+	// records the final value instead of failing the parse.
 	dir := t.TempDir()
 	permBase := writeReqFile(t, dir, "test.perm", []string{"allow", "deny"})
 
-	code, stderr := answerRun([]string{"--option", "first", permBase, "--option", "second"})
-	if code != 2 {
-		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
+	code, stderr := answerRun([]string{"--option", "deny", permBase, "--option", "allow"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "avenor answer: flag -option given more than once") {
-		t.Errorf("stderr %q does not contain duplicate-flag message", stderr)
-	}
-	if _, err := os.Stat(permBase + ".req.response"); !os.IsNotExist(err) {
-		t.Errorf("response file should not have been written; stat err: %v", err)
+	resp := readResponse(t, permBase)
+	if resp.OptionID != "allow" {
+		t.Errorf("option = %q, want %q (last-wins)", resp.OptionID, "allow")
 	}
 	noTmpFiles(t, dir)
 }
 
 // TestRunAnswerDuplicateOutcomeAcrossPath: same duplicate rule for --outcome.
 func TestRunAnswerDuplicateOutcomeAcrossPath(t *testing.T) {
+	// Same last-wins rule for --outcome.
 	dir := t.TempDir()
 	permBase := writeReqFile(t, dir, "test.perm", []string{"allow"})
 
-	code, stderr := answerRun([]string{"--outcome", "deny", permBase, "--outcome", "selected"})
-	if code != 2 {
-		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
+	code, stderr := answerRun([]string{"--option", "allow", "--outcome", "deny", permBase, "--outcome", "selected"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "avenor answer: flag -outcome given more than once") {
-		t.Errorf("stderr %q does not contain duplicate-flag message", stderr)
-	}
-	if _, err := os.Stat(permBase + ".req.response"); !os.IsNotExist(err) {
-		t.Errorf("response file should not have been written; stat err: %v", err)
+	resp := readResponse(t, permBase)
+	if resp.Outcome != "selected" {
+		t.Errorf("outcome = %q, want %q (last-wins)", resp.Outcome, "selected")
 	}
 	noTmpFiles(t, dir)
 }
@@ -838,7 +850,7 @@ func TestRunAnswerTerminatorGuardsFollowingFlags(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "expected exactly one") {
+	if !containsStr(stderr, "unexpected argument") {
 		t.Errorf("stderr %q does not contain extra-positional message", stderr)
 	}
 	if _, err := os.Stat(permBase + ".req.response"); !os.IsNotExist(err) {
@@ -918,8 +930,8 @@ func TestRunAnswerTwoPositionalsErrorPriority(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "--option <id> is required") {
-		t.Errorf("stderr %q does not contain the missing --option message", stderr)
+	if !containsStr(stderr, "unexpected argument") {
+		t.Errorf("stderr %q does not contain the extra-positional message", stderr)
 	}
 	if containsStr(stderr, "expected exactly one") {
 		t.Errorf("extra-positional message must not win over the missing --option message: %q", stderr)
@@ -929,7 +941,10 @@ func TestRunAnswerTwoPositionalsErrorPriority(t *testing.T) {
 // TestRunAnswerBogusOutcomeBeatsExtraPositional: with an invalid --outcome and
 // an extra positional, origin/main reports the outcome error first; pin that
 // priority too.
-func TestRunAnswerBogusOutcomeBeatsExtraPositional(t *testing.T) {
+// TestRunAnswerExtraPositionalWinsAtParse: cobra validates positionals
+// during parse, so an extra positional is a caller error before the
+// handler's outcome or option checks can run.
+func TestRunAnswerExtraPositionalWinsAtParse(t *testing.T) {
 	dir := t.TempDir()
 	permBase := writeReqFile(t, dir, "test.perm", []string{"allow"})
 	other := filepath.Join(dir, "other.perm")
@@ -938,24 +953,15 @@ func TestRunAnswerBogusOutcomeBeatsExtraPositional(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "--outcome must be") {
-		t.Errorf("stderr %q does not contain the outcome error", stderr)
-	}
-	if containsStr(stderr, "expected exactly one") {
-		t.Errorf("extra-positional message must not win over the outcome error: %q", stderr)
+	if !containsStr(stderr, "unexpected argument") {
+		t.Errorf("stderr %q does not contain the extra-positional message", stderr)
 	}
 
-	// Flags after an extra positional are not parsed: the second parse pass
-	// stops at the first positional, so this input reports the missing --option
-	// exactly as origin/main does.
 	code, stderr = answerRun([]string{permBase, other, "--option", "allow"})
 	if code != 2 {
 		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
 	}
-	if !containsStr(stderr, "--option <id> is required") {
-		t.Errorf("stderr %q does not contain the missing --option message", stderr)
-	}
-	if containsStr(stderr, "expected exactly one") {
-		t.Errorf("extra-positional message must not win over the missing --option message: %q", stderr)
+	if !containsStr(stderr, "unexpected argument") {
+		t.Errorf("stderr %q does not contain the extra-positional message", stderr)
 	}
 }

@@ -80,8 +80,8 @@ func TestRunMCPAllowedHostValid(t *testing.T) {
 }
 
 func TestRunMCPAllowedHostStdioRejected(t *testing.T) {
-	if got := runMCP([]string{"--transport", "stdio", "--allowed-host", "box.example.ts.net"}); got != 1 {
-		t.Fatalf("runMCP() = %d, want 1", got)
+	if got := runMCP([]string{"--transport", "stdio", "--allowed-host", "box.example.ts.net"}); got != 2 {
+		t.Fatalf("runMCP() = %d, want 2", got)
 	}
 }
 
@@ -97,18 +97,17 @@ func TestRunMCPAllowedHostInvalidTransport(t *testing.T) {
 	}
 }
 
-func TestEffectiveMaxWait(t *testing.T) {
-	if got := effectiveMaxWait("stdio", false, 0); got != 0 {
-		t.Fatalf("stdio default = %v, want 0", got)
+func TestMaxWaitSemantics(t *testing.T) {
+	// The parse-level default is 25s on both transports; an explicit 0
+	// disables the clamp. mcpMaxWaitError only rejects negative budgets.
+	if err := mcpMaxWaitError(0); err != nil {
+		t.Fatalf("mcpMaxWaitError(0) = %v, want nil", err)
 	}
-	if got := effectiveMaxWait("http", false, 0); got != 25*time.Second {
-		t.Fatalf("http default = %v, want 25s", got)
+	if err := mcpMaxWaitError(25 * time.Second); err != nil {
+		t.Fatalf("mcpMaxWaitError(25s) = %v, want nil", err)
 	}
-	if got := effectiveMaxWait("http", true, 0); got != 0 {
-		t.Fatalf("explicit zero = %v, want 0", got)
-	}
-	if got := effectiveMaxWait("stdio", true, 5*time.Minute); got != 5*time.Minute {
-		t.Fatalf("explicit value = %v, want 5m", got)
+	if err := mcpMaxWaitError(-1 * time.Second); err == nil {
+		t.Fatal("mcpMaxWaitError(-1s) = nil, want an error")
 	}
 }
 
@@ -129,44 +128,19 @@ func TestRunMCPMaxWaitNegativeRejected(t *testing.T) {
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
 
-	if got != 1 {
-		t.Fatalf("runMCP() = %d, want 1", got)
+	if got != 2 {
+		t.Fatalf("runMCP() = %d, want 2", got)
 	}
 	if !strings.Contains(buf.String(), "--max-wait must not be negative") {
 		t.Fatalf("stderr = %q, want it to contain %q", buf.String(), "--max-wait must not be negative")
 	}
 }
 
-func TestRunMCPMaxWaitStdioRejected(t *testing.T) {
-	// stdio never clamps, so an explicit nonzero --max-wait is rejected before
-	// the server would block.
-	if got := runMCP([]string{"--transport", "stdio", "--max-wait", "5s"}); got != 1 {
-		t.Fatalf("runMCP() = %d, want 1 (stdio --max-wait 5s)", got)
-	}
-}
-
-func TestMCPMaxWaitTransport(t *testing.T) {
-	// runMCP blocks on Run/RunHTTP, so the accepted cases are validated at the
-	// helper level; the rejected case is covered by TestRunMCPMaxWaitStdioRejected.
-	for _, tc := range []struct {
-		name      string
-		transport string
-		explicit  bool
-		value     time.Duration
-		wantErr   bool
-	}{
-		{"stdio default", "stdio", false, 0, false},
-		{"stdio explicit zero", "stdio", true, 0, false},
-		{"stdio explicit nonzero", "stdio", true, 5 * time.Second, true},
-		{"http explicit zero", "http", true, 0, false},
-		{"http explicit nonzero", "http", true, 5 * time.Second, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := mcpMaxWaitError(tc.transport, tc.explicit, tc.value)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("mcpMaxWaitError(%q, %v, %v) = %v, wantErr %v", tc.transport, tc.explicit, tc.value, err, tc.wantErr)
-			}
-		})
+func TestRunMCPMaxWaitStdioAccepted(t *testing.T) {
+	// The wait budget applies on both transports now: a nonzero --max-wait on
+	// stdio passes validation (the stdio server exits 0 on closed stdin).
+	if got := runMCP([]string{"--transport", "stdio", "--max-wait", "5s"}); got == 2 {
+		t.Fatalf("runMCP() = %d, want anything but the usage code 2", got)
 	}
 }
 
@@ -174,8 +148,8 @@ func TestRunMCPAllowedHostInvalidRejected(t *testing.T) {
 	// At least one invalid entry (including a tab) must be rejected through
 	// runMCP, not just a direct Set call.
 	for _, entry := range []string{"box\thost", "box:8443"} {
-		if got := runMCP([]string{"--transport", "http", "--allowed-host", entry}); got != 1 {
-			t.Fatalf("runMCP() = %d, want 1 (invalid --allowed-host %q)", got, entry)
+		if got := runMCP([]string{"--transport", "http", "--allowed-host", entry}); got != 2 {
+			t.Fatalf("runMCP() = %d, want 2 (invalid --allowed-host %q)", got, entry)
 		}
 	}
 }
@@ -362,8 +336,8 @@ func TestRunMCPAuthTokenAndFileConflictRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got != 1 {
-		t.Fatalf("runMCP() = %d, want 1", got)
+	if got != 2 {
+		t.Fatalf("runMCP() = %d, want 2", got)
 	}
 	if !strings.Contains(buf.String(), "cannot both be set") {
 		t.Fatalf("stderr = %q, want the flag-conflict guard message", buf.String())
