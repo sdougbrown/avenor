@@ -12,16 +12,16 @@ import (
 )
 
 // app declares the migrated Avenor command surface. Commands still on the
-// legacy dispatch path (answer, await, watch, control, workflow, mcp, run)
-// are absent until their migration lands; main.go routes them to the legacy
-// switch in the meantime.
+// legacy dispatch path (control, workflow, run) are absent until their
+// migration lands; main.go routes them to the legacy switch in the
+// meantime.
 func app() *clicontract.App {
 	return &clicontract.App{
 		Name:                "avenor",
 		Version:             Version,
 		ErrorPrefix:         "avenor",
 		HandlerOwnedSignals: true,
-		RootLong:            "Avenor orchestrates agent runs. Commands not listed here (answer, await, watch, control, workflow, mcp, run) are still on the pre-library dispatch and work normally during the migration.",
+		RootLong:            "Avenor orchestrates agent runs. Commands not listed here (control, workflow, run) are still on the pre-library dispatch and work normally during the migration.",
 
 		VersionTemplate: "avenor v{{.Version}}\n",
 		Commands: []*clicontract.Command{

@@ -109,9 +109,6 @@ func handleMCP(ctx context.Context, inv clicontract.Invocation, stderr io.Writer
 	if err := mcpMaxWaitError(maxWait); err != nil {
 		return nil, usageErrorf("avenor mcp: %v", err)
 	}
-	if maxWait < 0 {
-		return nil, usageErrorf("avenor mcp: --max-wait must not be negative")
-	}
 	if tokenSet && fileSet {
 		return nil, usageErrorf("avenor mcp: --auth-token and --auth-token-file cannot both be set")
 	}
