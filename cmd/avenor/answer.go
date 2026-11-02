@@ -50,12 +50,7 @@ type answerFlags struct {
 // both parse passes' semantics collapse into cobra's native interspersed
 // flag parsing (last flag wins; duplicate detection is dropped).
 func handleAnswer(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
-	flags := answerFlags{
-		option:  inv.Flags["option"],
-		message: inv.Flags["message"],
-		outcome: orDefault(inv.Flags["outcome"], "selected"),
-		force:   inv.Bools["force"],
-	}
+	flags := answerFlagsFromInvocation(inv)
 	code := answerWrite(inv.Args[0], flags, stderr)
 	if code == 0 {
 		return nil, nil
@@ -70,17 +65,24 @@ func runAnswerTo(args []string, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "%v\n", err)
 		return 2
 	}
-	flags := answerFlags{
-		option:  inv.Flags["option"],
-		message: inv.Flags["message"],
-		outcome: orDefault(inv.Flags["outcome"], "selected"),
-		force:   inv.Bools["force"],
-	}
+	flags := answerFlagsFromInvocation(inv)
 	if len(inv.Args) != 1 {
 		fmt.Fprintln(errOut, "avenor answer: expected exactly one <perm-base>")
 		return 2
 	}
 	return answerWrite(inv.Args[0], flags, errOut)
+}
+
+// answerFlagsFromInvocation builds the answer flags from the declared
+// invocation: the single source both the production handler and the test
+// wrapper read.
+func answerFlagsFromInvocation(inv clicontract.Invocation) answerFlags {
+	return answerFlags{
+		option:  inv.Flags["option"],
+		message: inv.Flags["message"],
+		outcome: orDefault(inv.Flags["outcome"], "selected"),
+		force:   inv.Bools["force"],
+	}
 }
 
 // answerRun validates and writes the response file, returning the exit code.
