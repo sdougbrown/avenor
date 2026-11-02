@@ -22,6 +22,7 @@ func app() *clicontract.App {
 		Version:             Version,
 		ErrorPrefix:         "avenor",
 		HandlerOwnedSignals: true,
+		BareHelp:            true,
 		RootLong:            "Avenor orchestrates agent runs.",
 
 		VersionTemplate: "avenor v{{.Version}}\n",

@@ -22,11 +22,20 @@ func TestVersionFlag(t *testing.T) {
 	}
 }
 
+func TestBareInvocationPrintsHelp(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := runDeclared(nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0 for bare invocation, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "run") {
+		t.Fatalf("expected root help on stdout to list the run command, got: %s", stdout.String())
+	}
+}
+
 func TestRunSubcommandAlias(t *testing.T) {
-	// Before the fix, "avenor run --loop-file X" would stop parsing at the
-	// positional "run" and complain that --prompt/--prompt-file/--loop-file
-	// is required. After the fix, "run" is stripped and flags are parsed
-	// correctly, so we should hit backend validation instead.
+	// Guards that "avenor run --loop-file X" dispatches to the run handler
+	// with --loop-file parsed, rather than failing flag validation.
 	cmd := exec.Command("go", "run", ".", "run", "--loop-file", "nonexistent-loop-file-test.json")
 	output, err := cmd.CombinedOutput()
 	outputStr := string(output)
@@ -34,14 +43,12 @@ func TestRunSubcommandAlias(t *testing.T) {
 		t.Fatal("expected non-zero exit")
 	}
 
-	// If "run" is NOT stripped, we get "--prompt, --prompt-file, or --loop-file is required".
-	// If "run" IS stripped, we either load loop config (if file existed, which it won't)
-	// or hit backend validation. Both prove flags are parsed correctly.
 	if strings.Contains(outputStr, "--prompt, --prompt-file, or --loop-file is required") {
-		t.Fatalf("'run' was not stripped before cli.Run; got flag parsing error: %s", outputStr)
+		t.Fatalf("run handler did not receive --loop-file; got flag parsing error: %s", outputStr)
 	}
-	// Should have reached loop config or backend validation, confirming --loop-file was parsed.
+	// The missing file fails loop-config load, or backend validation fires first;
+	// both prove flags were parsed and the run handler was reached.
 	if !strings.Contains(outputStr, "load loop config") && !strings.Contains(outputStr, "--server-url is required") {
-		t.Fatalf("expected loop-config or backend validation error after strip, got: %s", outputStr)
+		t.Fatalf("expected loop-config or backend validation error, got: %s", outputStr)
 	}
 }
