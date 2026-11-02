@@ -14,12 +14,10 @@ var Version = "dev"
 // legacyCommands dispatch through their pre-library paths until their
 // migration to the declared surface lands.
 var legacyCommands = map[string]func([]string) int{
-	"answer":   runAnswer,
-	"await":    runAwait,
-	"watch":    runWatch,
-	"control":  runControl,
-	"workflow": runWorkflow,
-	"mcp":      runMCP,
+	"answer": runAnswer,
+	"await":  runAwait,
+	"watch":  runWatch,
+	"mcp":    runMCP,
 }
 
 func main() {

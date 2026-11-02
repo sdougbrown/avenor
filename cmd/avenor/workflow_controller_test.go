@@ -191,20 +191,22 @@ func TestWorkflowControllerCLIRoundTrip(t *testing.T) {
 func TestWorkflowControllerCLIArgErrors(t *testing.T) {
 	run, fake := cliControllerEnv(t)
 
-	if _, code := run("controller"); code != 1 {
-		t.Fatalf("controller with no subcommand: want exit 1, got %d", code)
+	if _, code := run("controller"); code != 2 {
+		t.Fatalf("controller with no subcommand: want exit 2, got %d", code)
 	}
-	if _, code := run("controller", "bogus"); code != 1 {
-		t.Fatalf("controller with unknown subcommand: want exit 1, got %d", code)
+	// "bogus" is a positional to the inner node's Args validation now, so it
+	// is an unexpected-argument caller error.
+	if _, code := run("controller", "bogus"); code != 2 {
+		t.Fatalf("controller with unknown subcommand: want exit 2, got %d", code)
 	}
-	if _, code := run("controller", "create"); code != 1 {
-		t.Fatalf("controller create without --request-file: want exit 1, got %d", code)
+	if _, code := run("controller", "create"); code != 2 {
+		t.Fatalf("controller create without --request-file: want exit 2, got %d", code)
 	}
 	if _, code := run("controller", "disable", "c1"); code == 0 {
 		t.Fatal("disable without --reason: want nonzero exit, got 0")
 	}
-	if _, code := run("ready"); code != 1 {
-		t.Fatalf("ready with no controller id: want exit 1, got %d", code)
+	if _, code := run("ready"); code != 2 {
+		t.Fatalf("ready with no controller id: want exit 2, got %d", code)
 	}
 	if fake.disableID != "" {
 		t.Fatalf("disable without --reason should not reach the handler, got %q", fake.disableID)

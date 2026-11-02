@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 
@@ -13,13 +14,39 @@ import (
 // long-running servers return their shutdown status.
 type exitCode int
 
-// avenorAdapter routes the library's dispatch through Avenor's conventions:
-// commands write their own output, so Write is a no-op and nothing lands on
-// stdout for errors. Usage-class failures exit 2, operational failures 1,
-// and a handler-decided exitCode wins.
+// avenorAdapter routes the library's dispatch through Avenor's conventions.
+// Handlers that produce machine-readable results return them and the adapter
+// writes one indented JSON value; commands that print their own output
+// (confirmations, verify's check lines) write directly and return nil.
+// Usage-class failures exit 2, operational failures 1, and a handler-decided
+// exitCode wins.
 type avenorAdapter struct{}
 
 func (avenorAdapter) ErrorResult(command string, err error) any { return nil }
+
+func (avenorAdapter) Write(w io.Writer, result any) error {
+	switch result := result.(type) {
+	case map[string]any:
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return err
+		}
+		w.Write(append(data, '\n'))
+	case []map[string]any:
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return err
+		}
+		w.Write(append(data, '\n'))
+	case []any:
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return err
+		}
+		w.Write(append(data, '\n'))
+	}
+	return nil
+}
 
 func (avenorAdapter) BeforeHandler(inv clicontract.Invocation, stderr io.Writer) {}
 
@@ -29,8 +56,6 @@ func (avenorAdapter) Deadline(ctx context.Context, inv clicontract.Invocation) (
 }
 
 func (avenorAdapter) Validate(inv clicontract.Invocation) error { return nil }
-
-func (avenorAdapter) Write(w io.Writer, result any) error { return nil }
 
 func (avenorAdapter) ExitCode(inv clicontract.Invocation, result any, handlerErr error) int {
 	if ec, ok := result.(exitCode); ok {
@@ -47,9 +72,7 @@ func (avenorAdapter) ExitCode(inv clicontract.Invocation, result any, handlerErr
 }
 
 // runDeclared dispatches through the same clicontract.Run path production
-// uses, with injected streams for the run* wrappers the tests call. The
-// adapter's Write is a no-op and HandlerOwnedSignals is set, so the only
-// difference from production is the streams.
+// uses, with injected streams for the run* wrappers the tests call.
 func runDeclared(argv []string, stdout, stderr io.Writer) int {
 	return clicontract.Run(app(), avenorAdapter{}, argv, stdout, stderr)
 }
