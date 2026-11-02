@@ -34,6 +34,33 @@ func TestRunDirectRosterRejectsExplicitBackend(t *testing.T) {
 	}
 }
 
+// TestRunExplicitEmptyBackendCountsAsSupplied pins that --backend presence,
+// not its value, marks the backend as supplied: an empty value (an unset
+// shell variable) is rejected instead of silently becoming the default.
+func TestRunExplicitEmptyBackendCountsAsSupplied(t *testing.T) {
+	rosterPath := filepath.Join(t.TempDir(), "roster.json")
+	if err := os.WriteFile(rosterPath, []byte(`{"planner":{"backend":"gemini-acp","agent":"planner"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"direct": {[]string{"--prompt", "work", "--backend", ""}, `unknown backend ""`},
+		"roster": {[]string{"--prompt", "work", "--backend", "", "--roster-file", rosterPath, "--roster-entry", "planner"}, "mutually exclusive"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stderr strings.Builder
+			if got := run(tc.args, func(string) string { return "" }, &stderr); got != 1 {
+				t.Fatalf("run() = %d, want 1; stderr=%s", got, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
 func TestRunDirectBackendOnlyRemainsCompatible(t *testing.T) {
 	oldNewProvider := newProvider
 	provider := newScriptedProvider()
