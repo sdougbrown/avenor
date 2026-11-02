@@ -60,6 +60,12 @@ func TestIntegerConstraintNamesTheInt64Bound(t *testing.T) {
 	if detail := engine.validateIntegerConstraint("timeout_ms", raw, declared); detail != `property "timeout_ms" must be at most 600000` {
 		t.Fatalf("detail = %q, want the declared maximum named", detail)
 	}
+	// The declared-minimum mirror: an out-of-int64 negative names the schema's
+	// own floor, not the int64 limit.
+	declaredFloor := PropertyConstraints{Minimum: 0, HasMinimum: true}
+	if detail := engine.validateIntegerConstraint("after_seq", negative, declaredFloor); detail != `property "after_seq" must be at least 0` {
+		t.Fatalf("detail = %q, want the declared minimum named", detail)
+	}
 }
 
 // TestValidateIntegerConstraintEnforcesAZeroMaximum pins the declared bound's
@@ -73,6 +79,12 @@ func TestValidateIntegerConstraintEnforcesAZeroMaximum(t *testing.T) {
 	}
 	if detail := engine.validateIntegerConstraint("timeout_ms", json.RawMessage(`0`), constraint); detail != "" {
 		t.Fatalf("detail = %q, want the zero maximum to accept 0", detail)
+	}
+	// The HasMinimum mirror: a sign error in the minimum check would pass the
+	// maximum-side test alone, so the zero floor is pinned the same way.
+	floor := PropertyConstraints{Minimum: 0, HasMinimum: true}
+	if detail := engine.validateIntegerConstraint("timeout_ms", json.RawMessage(`-1`), floor); detail != `property "timeout_ms" must be at least 0` {
+		t.Fatalf("detail = %q, want the zero minimum to refuse -1", detail)
 	}
 }
 
