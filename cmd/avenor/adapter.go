@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 
@@ -30,7 +31,22 @@ func (avenorAdapter) Deadline(ctx context.Context, inv clicontract.Invocation) (
 
 func (avenorAdapter) Validate(inv clicontract.Invocation) error { return nil }
 
-func (avenorAdapter) Write(w io.Writer, result any) error { return nil }
+// Write emits one indented JSON value for any non-nil machine-readable
+// result a handler returns — maps, slices, or future types — so an
+// unrecognized result can never be silently dropped. Handlers that print
+// their own output return nil or an exitCode, which Write skips.
+func (avenorAdapter) Write(w io.Writer, result any) error {
+	switch result.(type) {
+	case exitCode, nil:
+		return nil
+	}
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+	w.Write(append(data, '\n'))
+	return nil
+}
 
 func (avenorAdapter) ExitCode(inv clicontract.Invocation, result any, handlerErr error) int {
 	if ec, ok := result.(exitCode); ok {

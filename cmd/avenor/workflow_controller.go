@@ -1,166 +1,95 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 
-	"github.com/sdougbrown/avenor/client"
+	clicontract "github.com/sdougbrown/cli-contract"
 )
 
-// cmdWorkflowController dispatches the workflow-controller subcommands.
-func cmdWorkflowController(c *client.Client, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "avenor workflow controller: subcommand required (create, enable, disable, status, list)")
-		return 1
+// handleWorkflowControllerCreate registers a durable controller from a JSON
+// file.
+func handleWorkflowControllerCreate(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	requestFile := inv.Flags["request-file"]
+	if requestFile == "" {
+		return nil, usageErrorf("avenor workflow controller create: --request-file is required")
 	}
-	sub := args[0]
-	subArgs := args[1:]
-	switch sub {
-	case "create":
-		return cmdWorkflowControllerCreate(c, subArgs, stdout, stderr)
-	case "enable":
-		return cmdWorkflowControllerEnable(c, subArgs, stdout, stderr)
-	case "disable":
-		return cmdWorkflowControllerDisable(c, subArgs, stdout, stderr)
-	case "status":
-		return cmdWorkflowControllerStatus(c, subArgs, stdout, stderr)
-	case "list":
-		return cmdWorkflowControllerList(c, subArgs, stdout, stderr)
-	default:
-		fmt.Fprintln(stderr, "avenor workflow controller: unknown subcommand", sub)
-		return 1
-	}
-}
-
-func cmdWorkflowControllerCreate(c *client.Client, args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("controller create", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	requestFile := fs.String("request-file", "", "path to controller JSON file (required)")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	if *requestFile == "" {
-		fmt.Fprintln(stderr, "avenor workflow controller create: --request-file is required")
-		return 1
-	}
-	data, err := os.ReadFile(*requestFile)
+	c, err := workflowClient(inv)
 	if err != nil {
-		fmt.Fprintf(stderr, "avenor workflow controller create: %v\n", err)
-		return 1
+		return nil, err
+	}
+	defer c.Close()
+	data, err := os.ReadFile(requestFile)
+	if err != nil {
+		return nil, fmt.Errorf("avenor workflow controller create: %w", err)
 	}
 	result, err := c.WorkflowControllerCreate(json.RawMessage(data))
 	if err != nil {
-		fmt.Fprintf(stderr, "avenor workflow controller create: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor workflow controller create: %w", err)
 	}
-	printWorkflowResult(stdout, result)
-	return 0
+	return result, nil
 }
 
-func cmdWorkflowControllerEnable(c *client.Client, args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("controller enable", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	id, code := workflowArgID("controller enable", fs, stderr)
-	if code != 0 {
-		return code
-	}
-	result, err := c.WorkflowControllerEnable(id)
+// handleWorkflowControllerEnable enables one controller.
+func handleWorkflowControllerEnable(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := workflowClient(inv)
 	if err != nil {
-		fmt.Fprintf(stderr, "avenor workflow controller enable: %v\n", err)
-		return 1
+		return nil, err
 	}
-	printWorkflowResult(stdout, result)
-	return 0
-}
-
-func cmdWorkflowControllerDisable(c *client.Client, args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("controller disable", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	reason := fs.String("reason", "", "reason for disabling (required)")
-	flagArgs, id, code := splitIDArgs("controller disable", args, []string{"reason"}, stderr)
-	if code != 0 {
-		return code
-	}
-	if err := fs.Parse(flagArgs); err != nil {
-		return 1
-	}
-	if id == "" {
-		fmt.Fprintln(stderr, "usage: avenor workflow controller disable --socket SOCKET <controller-id> --reason TEXT")
-		return 1
-	}
-	if *reason == "" {
-		fmt.Fprintln(stderr, "avenor workflow controller disable: --reason is required")
-		return 1
-	}
-	result, err := c.WorkflowControllerDisable(id, *reason)
+	defer c.Close()
+	result, err := c.WorkflowControllerEnable(inv.Args[0])
 	if err != nil {
-		fmt.Fprintf(stderr, "avenor workflow controller disable: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor workflow controller enable: %w", err)
 	}
-	printWorkflowResult(stdout, result)
-	return 0
+	return result, nil
 }
 
-func cmdWorkflowControllerStatus(c *client.Client, args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("controller status", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	if err := fs.Parse(args); err != nil {
-		return 1
+// handleWorkflowControllerDisable disables one controller; --reason is the
+// durable audit trail.
+func handleWorkflowControllerDisable(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	reason := inv.Flags["reason"]
+	if reason == "" {
+		return nil, usageErrorf("avenor workflow controller disable: --reason is required")
 	}
-	id, code := workflowArgID("controller status", fs, stderr)
-	if code != 0 {
-		return code
-	}
-	result, err := c.WorkflowControllerStatus(id)
+	c, err := workflowClient(inv)
 	if err != nil {
-		fmt.Fprintf(stderr, "avenor workflow controller status: %v\n", err)
-		return 1
+		return nil, err
 	}
-	printWorkflowResult(stdout, result)
-	return 0
+	defer c.Close()
+	result, err := c.WorkflowControllerDisable(inv.Args[0], reason)
+	if err != nil {
+		return nil, fmt.Errorf("avenor workflow controller disable: %w", err)
+	}
+	return result, nil
 }
 
-func cmdWorkflowControllerList(c *client.Client, args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("controller list", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	if err := fs.Parse(args); err != nil {
-		return 1
+// handleWorkflowControllerStatus prints one controller's status.
+func handleWorkflowControllerStatus(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := workflowClient(inv)
+	if err != nil {
+		return nil, err
 	}
+	defer c.Close()
+	result, err := c.WorkflowControllerStatus(inv.Args[0])
+	if err != nil {
+		return nil, fmt.Errorf("avenor workflow controller status: %w", err)
+	}
+	return result, nil
+}
+
+// handleWorkflowControllerList prints every controller on the socket.
+func handleWorkflowControllerList(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	c, err := workflowClient(inv)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
 	result, err := c.WorkflowControllerList()
 	if err != nil {
-		fmt.Fprintf(stderr, "avenor workflow controller list: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor workflow controller list: %w", err)
 	}
-	printWorkflowResult(stdout, result)
-	return 0
-}
-
-func cmdWorkflowReady(c *client.Client, args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("ready", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	limit := fs.Int("limit", 0, "maximum number of ready items (0 for server default)")
-	flagArgs, id, code := splitIDArgs("ready", args, []string{"limit"}, stderr)
-	if code != 0 {
-		return code
-	}
-	if err := fs.Parse(flagArgs); err != nil {
-		return 1
-	}
-	if id == "" {
-		fmt.Fprintln(stderr, "usage: avenor workflow ready --socket SOCKET <controller-id> [--limit N]")
-		return 1
-	}
-	result, err := c.WorkflowReady(id, *limit)
-	if err != nil {
-		fmt.Fprintf(stderr, "avenor workflow ready: %v\n", err)
-		return 1
-	}
-	printWorkflowResult(stdout, result)
-	return 0
+	return result, nil
 }
