@@ -23,15 +23,24 @@ func awaitRunDeclared(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		panic(err)
 	}
+	// Drain concurrently so output larger than the pipe buffer cannot block
+	// the handler.
+	var captured bytes.Buffer
+	drained := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(&captured, r)
+		drained <- err
+	}()
 	old := os.Stdout
 	os.Stdout = w
 	code := runDeclared(append([]string{"await"}, args...), stdout, stderr)
-	w.Close()
 	os.Stdout = old
-	if _, err := io.Copy(stdout, r); err != nil {
+	w.Close()
+	if err := <-drained; err != nil {
 		panic(err)
 	}
 	r.Close()
+	stdout.Write(captured.Bytes())
 	return code
 }
 
