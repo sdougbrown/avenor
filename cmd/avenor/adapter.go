@@ -70,11 +70,6 @@ func runDeclared(argv []string, stdout, stderr io.Writer) int {
 	return clicontract.Run(app(), avenorAdapter{}, argv, stdout, stderr)
 }
 
-// parseInvocation parses args against the declared surface.
-func parseInvocation(args []string) (clicontract.Invocation, error) {
-	return clicontract.Parse(app(), args)
-}
-
 // usageErrorf builds a caller error with the adapter's usage classification.
 func usageErrorf(format string, args ...any) error {
 	return clicontract.UsageErrorf(format, args...)

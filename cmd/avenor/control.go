@@ -244,23 +244,6 @@ func spawnParamsFromInvocation(inv clicontract.Invocation) (map[string]any, erro
 // launchWrapperFlag collects the repeatable --launch-wrapper argv prefix.
 type launchWrapperFlag []string
 
-// spawnParamsFromArgs is the test seam for spawnParamsFromInvocation: it
-// parses raw argv the way the declared tree would and returns the exit-code
-// style result the tests assert on.
-func spawnParamsFromArgs(args []string, stderr io.Writer) (map[string]any, int) {
-	inv, err := parseInvocation(append([]string{"control", "spawn"}, args...))
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return nil, 2
-	}
-	params, err := spawnParamsFromInvocation(inv)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return nil, 2
-	}
-	return params, 0
-}
-
 // controlTail is the test seam for handleControlTail: it tails an already
 // dialed client and returns the exit-code style result the tests assert on.
 func controlTail(c *client.Client) int {

@@ -9,7 +9,7 @@ import (
 
 func TestParentTokenPrintsFreshToken(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := runParentTokenTo(&stdout, &stderr); code != 0 {
+	if code := runDeclared([]string{"parent-token"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("expected exit 0, got %d (stderr: %s)", code, stderr.String())
 	}
 
@@ -25,7 +25,7 @@ func TestParentTokenPrintsFreshToken(t *testing.T) {
 	}
 
 	var second bytes.Buffer
-	if code := runParentTokenTo(&second, &stderr); code != 0 {
+	if code := runDeclared([]string{"parent-token"}, &second, &stderr); code != 0 {
 		t.Fatalf("expected exit 0 on second run, got %d (stderr: %s)", code, stderr.String())
 	}
 	if strings.TrimSpace(second.String()) == out {
@@ -35,8 +35,8 @@ func TestParentTokenPrintsFreshToken(t *testing.T) {
 
 func TestParentTokenRejectsUnknownFlags(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := runParentTokenTo(&stdout, &stderr, "--typo"); code != 2 {
-		t.Fatalf("runParentTokenTo(--typo) = %d, want 2", code)
+	if code := runDeclared([]string{"parent-token", "--typo"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("parent-token --typo = %d, want 2", code)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("expected no token on stdout, got %q", stdout.String())
