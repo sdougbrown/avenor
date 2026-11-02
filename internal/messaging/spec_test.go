@@ -69,6 +69,21 @@ func TestRepairTemplates(t *testing.T) {
 			want:  `property "payload" must be an object`,
 		},
 		{
+			code:  "wrong_type_array",
+			facts: map[string]string{"name": `"evidence_ids"`},
+			want:  `property "evidence_ids" must be an array`,
+		},
+		{
+			code:  "array_item_type",
+			facts: map[string]string{"name": `"evidence_ids"`},
+			want:  `property "evidence_ids" must contain only strings`,
+		},
+		{
+			code:  "invalid_enum",
+			facts: map[string]string{"name": `"operation"`, "values": `"satisfy", "reject"`},
+			want:  `property "operation" must be one of "satisfy", "reject"`,
+		},
+		{
 			code:  "string_too_short",
 			facts: map[string]string{"name": `"name"`, "min": "1"},
 			want:  `property "name" must be at least 1 characters`,

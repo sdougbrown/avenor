@@ -10,6 +10,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
+	"github.com/sdougbrown/avenor/internal/tooladmission"
 )
 
 // Resume continues a prior run in a new one. The target is a resolved broker
@@ -317,8 +318,8 @@ func (s *Supervisor) brokerHarnessName(runID string) string {
 // status produce.
 func notResumableError(runID, status string) *router.ToolError {
 	facts := map[string]string{
-		"run_id": messaging.Quote(runID),
-		"status": messaging.Sanitize(strings.ToLower(status)),
+		"run_id": tooladmission.Quote(runID),
+		"status": tooladmission.Sanitize(strings.ToLower(status)),
 	}
 	return &router.ToolError{
 		Code:    "not_resumable",

@@ -66,6 +66,27 @@ type ConformanceFixture struct {
 	PeersApplicability map[string]ApplicabilityEntry `json:"peers_applicability"`
 }
 
+// MergeRepairs folds the shared repair sentences (schemas/repairs.json) into a
+// fixture's own table, fixture wins. The shared sentences are edited once and
+// every generator compiles the same merged table; a fixture override is a
+// deliberate per-tool sentence.
+func MergeRepairs(fixture *ConformanceFixture, base []byte) {
+	var shared struct {
+		Repairs map[string]string `json:"repairs"`
+	}
+	if err := json.Unmarshal(base, &shared); err != nil {
+		Fail("decode repairs base: %v", err)
+	}
+	merged := make(map[string]string, len(shared.Repairs)+len(fixture.Repairs))
+	for code, template := range shared.Repairs {
+		merged[code] = template
+	}
+	for code, template := range fixture.Repairs {
+		merged[code] = template
+	}
+	fixture.Repairs = merged
+}
+
 // ConstraintsFromSchema reads each variant's string length, pattern, integer
 // bounds, enum and array item type, so the compiled applicability table
 // enforces the published schema's rules instead of restating them.

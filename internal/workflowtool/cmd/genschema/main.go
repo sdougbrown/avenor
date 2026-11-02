@@ -26,14 +26,16 @@ func main() {
 		input       = flag.String("input", "", "path to schemas/workflow.input.json")
 		flatOut     = flag.String("flat-out", "", "path to write the flat workflow input schema")
 		conformance = flag.String("conformance", "", "path to schemas/workflow_route.conformance.json")
+		repairsBase = flag.String("repairs-base", "", "path to schemas/repairs.json")
 		out         = flag.String("out", "schema.gen.go", "output file")
 	)
 	flag.Parse()
 	for name, value := range map[string]string{
-		"-input":       *input,
-		"-flat-out":    *flatOut,
-		"-conformance": *conformance,
-		"-out":         *out,
+		"-input":        *input,
+		"-flat-out":     *flatOut,
+		"-conformance":  *conformance,
+		"-repairs-base": *repairsBase,
+		"-out":          *out,
 	} {
 		if value == "" {
 			genschema.Fail("missing required flag %s", name)
@@ -62,6 +64,7 @@ func main() {
 
 	var conformanceDoc genschema.ConformanceFixture
 	genschema.MustDecode(*conformance, &conformanceDoc)
+	genschema.MergeRepairs(&conformanceDoc, genschema.ReadFile(*repairsBase))
 
 	source, err := generate(schema, flat, conformanceDoc)
 	if err != nil {

@@ -461,9 +461,9 @@ describe('message admission', () => {
     }
   })
 
-  it('rejects an integral timeout outside int64 as a type error, like the Go router', () => {
+  it('refuses an integral timeout outside int64 by naming the declared bound, like the Go engine', () => {
     expect(() => assertMessageInput({ action: 'ask', target: 'rt_7', message: 'hi', timeout_ms: 1e21 }))
-      .toThrow('property "timeout_ms" must be an integer')
+      .toThrow('property "timeout_ms" must be at most 600000')
     // 2^58+1 fits int64, so both routers reject it on the shared maximum bound.
     expect(() => assertMessageInput({ action: 'ask', target: 'rt_7', message: 'hi', timeout_ms: 288230376151711745 }))
       .toThrow('property "timeout_ms" must be at most 600000')

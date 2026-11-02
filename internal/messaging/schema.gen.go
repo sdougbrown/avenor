@@ -19,9 +19,11 @@ const peersInputFlatSchemaJSON = "{\n  \"$id\": \"https://avenor.dev/schemas/pee
 // repairsTemplates is the per-error-code render template table.
 var repairsTemplates = map[string]string{
 	"ambiguous_name":            "{target} matches {count} runs: {candidates}",
+	"array_item_type":           "property {name} must contain only strings",
 	"control_reply_unsupported": "control replies are not available on this surface: its provider cannot deliver them",
 	"integer_too_large":         "property {name} must be at most {max}",
 	"integer_too_small":         "property {name} must be at least {min}",
+	"invalid_enum":              "property {name} must be one of {values}",
 	"invalid_request":           "invalid input for action {action}: {detail}",
 	"missing_required_property": "missing required property {name}",
 	"not_resumable":             "run {run_id} is not resumable (status: {status}); resume only continues done, failed, or blocked runs",
@@ -34,6 +36,7 @@ var repairsTemplates = map[string]string{
 	"unknown_property":          "unknown property {name}",
 	"unknown_target":            "no run matches {target}",
 	"wrong_action_for_state":    "run {run_id} is {status}; {repair}",
+	"wrong_type_array":          "property {name} must be an array",
 	"wrong_type_integer":        "property {name} must be an integer",
 	"wrong_type_object":         "property {name} must be an object",
 	"wrong_type_string":         "property {name} must be a string",

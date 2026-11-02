@@ -1,0 +1,22 @@
+{
+  "$id": "https://avenor.dev/schemas/repairs.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Shared tool repair sentences",
+  "description": "The repair sentences the shared admission engine emits, keyed by error code. Each tool's conformance fixture merges these with its own table (fixture wins), so a shared sentence is edited once and per-tool codes and overrides stay in the per-tool fixture. A code here may be overridden by a fixture deliberately, but today none is.",
+  "repairs": {
+    "invalid_request": "invalid input for action {action}: {detail}",
+    "unknown_property": "unknown property {name}",
+    "missing_required_property": "missing required property {name}",
+    "wrong_type_string": "property {name} must be a string",
+    "wrong_type_integer": "property {name} must be an integer",
+    "wrong_type_object": "property {name} must be an object",
+    "wrong_type_array": "property {name} must be an array",
+    "array_item_type": "property {name} must contain only strings",
+    "invalid_enum": "property {name} must be one of {values}",
+    "string_too_short": "property {name} must be at least {min} characters",
+    "string_too_long": "property {name} must be at most {max} characters",
+    "string_pattern": "property {name} contains characters that are not allowed",
+    "integer_too_small": "property {name} must be at least {min}",
+    "integer_too_large": "property {name} must be at most {max}"
+  }
+}
