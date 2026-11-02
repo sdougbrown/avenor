@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -13,25 +13,22 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/board"
+	"github.com/sdougbrown/cli-contract"
 )
 
 func runBoard(args []string) int {
-	fs := flag.NewFlagSet("board", flag.ExitOnError)
-	addr := fs.String("addr", "127.0.0.1:0", "bind address (:0 = random port)")
-	scan := fs.String("scan", "", "directories to scan for *.sock files (comma-separated, default: ~/.avenor/sockets)")
-	socket := fs.String("socket", "", "single socket path; if set, --scan is ignored")
-	token := fs.String("token", "", "auth token; required for non-loopback unless --no-auth is set")
-	allowMutations := fs.Bool("allow-mutations", false, "enable POST /api/cancel and POST /api/prompt")
-	noAuth := fs.Bool("no-auth", false, "disable auth entirely (allows remote access without token)")
-	noOpen := fs.Bool("no-open", false, "do not open browser after starting")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
+	return runDeclared("board", args, handleBoard)
+}
+
+// handleBoard serves the board UI until a signal arrives; the handler owns
+// signal handling and shuts down gracefully.
+func handleBoard(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	socket := inv.Flags["socket"]
 
 	var scanDirs []string
-	if *socket == "" {
-		if *scan != "" {
-			for _, d := range splitPathList(*scan) {
+	if socket == "" {
+		if scan := inv.Flags["scan"]; scan != "" {
+			for _, d := range splitPathList(scan) {
 				scanDirs = append(scanDirs, board.ResolveHome(d))
 			}
 		}
@@ -43,29 +40,27 @@ func runBoard(args []string) int {
 	}
 
 	cfg := board.Config{
-		Addr:           *addr,
+		Addr:           orDefault(inv.Flags["addr"], "127.0.0.1:0"),
 		ScanDirs:       scanDirs,
-		Socket:         board.ResolveHome(*socket),
-		AllowMutations: *allowMutations,
-		Token:          *token,
-		NoAuth:         *noAuth,
-		NoOpen:         *noOpen,
+		Socket:         board.ResolveHome(socket),
+		AllowMutations: inv.Bools["allow-mutations"],
+		Token:          inv.Flags["token"],
+		NoAuth:         inv.Bools["no-auth"],
+		NoOpen:         inv.Bools["no-open"],
 	}
 
 	srv, err := board.NewServer(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor board: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor board: %w", err)
 	}
 
 	if err := srv.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "avenor board: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor board: %w", err)
 	}
 
 	srv.PrintStartupInfo()
 
-	if !*noOpen && hasDisplay() {
+	if !inv.Bools["no-open"] && hasDisplay() {
 		url := fmt.Sprintf("http://%s/board/", srv.Addr())
 		openBrowser(url)
 	}
@@ -75,12 +70,12 @@ func runBoard(args []string) int {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	fmt.Fprintln(os.Stderr, "\navenor board: shutting down...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Stop(ctx); err != nil {
+	if err := srv.Stop(stopCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "avenor board: server shutdown: %v\n", err)
 	}
-	return 0
+	return exitCode(0), nil
 }
 
 // hasDisplay returns true when a graphical display is available (X11 or

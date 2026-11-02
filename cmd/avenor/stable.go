@@ -1,8 +1,9 @@
 package main
 
 import (
-	"flag"
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -10,57 +11,44 @@ import (
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/stable"
 	"github.com/sdougbrown/avenor/internal/token"
+	"github.com/sdougbrown/cli-contract"
 )
 
-// newSupervisorFn is the supervisor constructor used by runStable. Tests patch
-// it to capture the Config without relying on Run's side effects.
+// newSupervisorFn is the supervisor constructor used by handleStable. Tests
+// patch it to capture the Config without relying on Run's side effects.
 var newSupervisorFn = stable.NewSupervisor
 
 func runStable(args []string) int {
-	fs := flag.NewFlagSet("stable", flag.ContinueOnError)
-	controlSocket := fs.String("control-socket", "", "unix socket path for the control plane (required)")
-	httpDebug := fs.String("http-debug", "", "http debug adapter bind address")
-	maxRuntimes := fs.Int("max-runtimes", 16, "maximum concurrent child runtimes")
-	maxTreeBudget := fs.Int("max-tree-budget", admission.DefaultTreeBudget, "maximum concurrent runtimes across the whole supervisor tree including nested supervisors (0 uses the default)")
-	idempotencyCapacity := fs.Int("idempotency-capacity", 1024, "idempotent-spawn store capacity: completed entries plus in-flight reservations (must be > 0)")
-	idleTimeout := fs.Duration("idle-timeout", 0, "exit after this duration with no live child runtimes (parked runtimes count as live); control connections do not delay it")
-	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout before killing children")
-	parkedTimeout := fs.Duration("parked-timeout", 30*time.Minute, "how long a finished runtime stays parked awaiting a follow-up prompt before it is reaped (0 = park until shutdown)")
-	leaseSweepInterval := fs.Duration("lease-sweep-interval", stable.DefaultLeaseSweepInterval, "how often the supervisor expires workflow leases whose heartbeat stopped (0 = disable; leases then expire only on restart recovery)")
-	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)")
-	mcpLaunchWrapperPolicyPath := fs.String("mcp-launch-wrapper-policy", "", "path to a JSON allowlist of launch_wrapper argv entries permitted for MCP-driven spawns (default: $AVENOR_MCP_LAUNCH_WRAPPER_POLICY, else launch-wrapper-policy.json under the avenor config home (XDG_CONFIG_HOME/avenor or ~/.config/avenor); with none of them present, disabled)")
-	workflowRoot := fs.String("workflow-root", "", "workflow store root (default: $XDG_STATE_HOME/avenor/workflows, else $HOME/.avenor/workflows)")
-	workflowAdapterDir := fs.String("workflow-adapter-dir", "", "host-owned trusted adapter manifest directory (default: $XDG_CONFIG_HOME/avenor/workflow-adapters, else $HOME/.config/avenor/workflow-adapters)")
-	brokerParentURL := fs.String("broker-parent-url", "", "http:// address of the parent broker to join. An empty flag uses $AVENOR_PARENT_BROKER_URL. The credential comes from $AVENOR_PARENT_BROKER_TOKEN (or --broker-parent-token as an explicit override); a credential without a URL runs this broker as the tree's parent broker")
-	brokerParentToken := fs.String("broker-parent-token", "", "parent-link credential overriding $AVENOR_PARENT_BROKER_TOKEN; prefer the env var, since argv is world-readable via /proc/<pid>/cmdline")
-	brokerAddr := fs.String("broker-addr", "", "address the broker binds, published beside the control socket as <socket>.broker.url. Empty binds an ephemeral loopback port; a durable hub names a concrete interface address and fixed port (e.g. 127.0.0.1:8787). A wildcard bind is refused because children on this host are told to reach the bound address, which a wildcard does not name")
-	brokerAdvertiseURL := fs.String("broker-advertise-url", "", "http:// or https:// URL other hosts reach this broker on, used for the <socket>.broker.url record and registration with the parent broker. Empty advertises the bound address. Use it when a TLS terminator or NAT publishes the broker under another host, port or scheme; children on this host keep the bound address")
-	if err := fs.Parse(args); err != nil {
-		return 1
+	return runDeclared("stable", args, handleStable)
+}
+
+// handleStable runs the supervisor until it exits; the supervisor owns
+// signal handling and returns the process exit code.
+func handleStable(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	controlSocket := inv.Flags["control-socket"]
+	if controlSocket == "" {
+		return nil, usageErrorf("avenor stable: --control-socket is required")
 	}
-	if *controlSocket == "" {
-		fmt.Fprintln(os.Stderr, "avenor stable: --control-socket is required")
-		return 1
+	idempotencyCapacity := orDefault(inv.Ints["idempotency-capacity"], 1024)
+	if idempotencyCapacity < 0 {
+		return nil, usageErrorf("avenor stable: --idempotency-capacity must not be negative")
 	}
-	if *idempotencyCapacity <= 0 {
-		fmt.Fprintln(os.Stderr, "avenor stable: --idempotency-capacity must be greater than 0")
-		return 1
-	}
-	credential := *brokerParentToken
+
+	credential := inv.Flags["broker-parent-token"]
 	if credential == "" {
 		credential = os.Getenv(token.EnvBrokerParentToken)
 	}
-	parentURL := *brokerParentURL
+	parentURL := inv.Flags["broker-parent-url"]
 	if parentURL == "" {
 		parentURL = strings.TrimSpace(os.Getenv(token.EnvBrokerParentURL))
 	}
-	advertiseURL := *brokerAdvertiseURL
+	advertiseURL := inv.Flags["broker-advertise-url"]
 	if advertiseURL == "" {
 		advertiseURL = os.Getenv(token.EnvBrokerAdvertiseURL)
 	}
 	if parentURL != "" && credential == "" {
-		fmt.Fprintf(os.Stderr, "avenor stable: %s or --broker-parent-token must be set when %s or --broker-parent-url supplies a parent broker URL\n", token.EnvBrokerParentToken, token.EnvBrokerParentURL)
-		return 1
+		return nil, usageErrorf("avenor stable: %s or --broker-parent-token must be set when %s or --broker-parent-url supplies a parent broker URL",
+			token.EnvBrokerParentToken, token.EnvBrokerParentURL)
 	}
 
 	// A nested supervisor inherits its parent's tree budget via the environment.
@@ -69,36 +57,35 @@ func runStable(args []string) int {
 	// capacity.
 	treeBudgetFile := os.Getenv(admission.EnvTreeBudget)
 
-	tombstoneFile := *controlSocket + ".dead"
+	tombstoneFile := controlSocket + ".dead"
 	if err := os.Remove(tombstoneFile); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "avenor stable: remove stale tombstone: %v\n", err)
+		return nil, fmt.Errorf("avenor stable: remove stale tombstone: %w", err)
 	}
 
-	mcpPolicy, _, err := resolveMCPLaunchWrapperPolicy(*mcpLaunchWrapperPolicyPath)
+	mcpPolicy, _, err := resolveMCPLaunchWrapperPolicy(inv.Flags["mcp-launch-wrapper-policy"])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor stable: mcp launch wrapper policy: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor stable: mcp launch wrapper policy: %w", err)
 	}
 
 	sup := newSupervisorFn(stable.Config{
-		ControlSocket:              *controlSocket,
+		ControlSocket:              controlSocket,
 		TombstoneFile:              tombstoneFile,
-		HTTPDebug:                  *httpDebug,
-		MaxRuntimes:                *maxRuntimes,
-		MaxTreeBudget:              *maxTreeBudget,
-		IdempotencyCapacity:        *idempotencyCapacity,
+		HTTPDebug:                  inv.Flags["http-debug"],
+		MaxRuntimes:                orDefault(inv.Ints["max-runtimes"], 16),
+		MaxTreeBudget:              inv.Ints["max-tree-budget"],
+		IdempotencyCapacity:        idempotencyCapacity,
 		TreeBudgetFile:             treeBudgetFile,
-		IdleTimeout:                *idleTimeout,
-		ShutdownTimeout:            *shutdownTimeout,
-		ParkedRuntimeTimeout:       *parkedTimeout,
-		WorkflowLeaseSweepInterval: *leaseSweepInterval,
-		PermissionClaimTimeout:     *permClaimTimeout,
-		WorkflowRoot:               *workflowRoot,
-		WorkflowAdapterDir:         *workflowAdapterDir,
+		IdleTimeout:                inv.Durations["idle-timeout"],
+		ShutdownTimeout:            orDefault(inv.Durations["shutdown-timeout"], 10*time.Second),
+		ParkedRuntimeTimeout:       orDefault(inv.Durations["parked-timeout"], 30*time.Minute),
+		WorkflowLeaseSweepInterval: orDefault(inv.Durations["lease-sweep-interval"], stable.DefaultLeaseSweepInterval),
+		PermissionClaimTimeout:     inv.Durations["permission-claim-timeout"],
+		WorkflowRoot:               inv.Flags["workflow-root"],
+		WorkflowAdapterDir:         inv.Flags["workflow-adapter-dir"],
 		MCPLaunchWrapperPolicy:     mcpPolicy,
 		BrokerParentURL:            parentURL,
 		BrokerParentToken:          credential,
-		BrokerAddr:                 *brokerAddr,
+		BrokerAddr:                 inv.Flags["broker-addr"],
 		BrokerAdvertiseURL:         advertiseURL,
 	})
 	if treeBudgetFile == "" {
@@ -107,5 +94,15 @@ func runStable(args []string) int {
 			os.Setenv(admission.EnvTreeBudget, p)
 		}
 	}
-	return sup.Run()
+	return exitCode(sup.Run()), nil
+}
+
+// orDefault substitutes the fallback when the flag value is the zero value:
+// declared defaults document intent, handlers apply them.
+func orDefault[T comparable](v, fallback T) T {
+	var zero T
+	if v == zero {
+		return fallback
+	}
+	return v
 }

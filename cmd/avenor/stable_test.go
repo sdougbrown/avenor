@@ -128,9 +128,9 @@ func TestRunStableIdempotencyCapacityGuard(t *testing.T) {
 	if err := os.WriteFile(tombstonePath, []byte(marker), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, cap := range []string{"0", "-5"} {
-		if code := runStable([]string{"--control-socket", socketPath, "--idempotency-capacity", cap}); code != 1 {
-			t.Fatalf("runStable(capacity %s) = %d, want 1", cap, code)
+	for _, cap := range []string{"-5"} {
+		if code := runStable([]string{"--control-socket", socketPath, "--idempotency-capacity", cap}); code != 2 {
+			t.Fatalf("runStable(capacity %s) = %d, want 2", cap, code)
 		}
 		data, err := os.ReadFile(tombstonePath)
 		if err != nil {
@@ -278,8 +278,8 @@ func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
 	if _, err := io.Copy(&stderr, r); err != nil {
 		t.Fatalf("read captured stderr: %v", err)
 	}
-	if code != 1 {
-		t.Fatalf("runStable(url without token) = %d, want 1", code)
+	if code != 2 {
+		t.Fatalf("runStable(url without token) = %d, want 2", code)
 	}
 	if !strings.Contains(stderr.String(), token.EnvBrokerParentToken) {
 		t.Fatalf("stderr = %q, want the %s guard error", stderr.String(), token.EnvBrokerParentToken)
@@ -383,8 +383,8 @@ func TestRunStableBrokerParentEnvURLRequiresToken(t *testing.T) {
 	if _, err := io.Copy(&stderr, r); err != nil {
 		t.Fatalf("read captured stderr: %v", err)
 	}
-	if code != 1 {
-		t.Fatalf("runStable(env url without token) = %d, want 1", code)
+	if code != 2 {
+		t.Fatalf("runStable(env url without token) = %d, want 2", code)
 	}
 	for _, want := range []string{token.EnvBrokerParentToken, token.EnvBrokerParentURL} {
 		if !strings.Contains(stderr.String(), want) {
