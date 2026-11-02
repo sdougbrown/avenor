@@ -12,11 +12,7 @@ var Version = "dev"
 
 func main() {
 	if len(os.Args) > 1 {
-		// run is the one command still on its pre-library dispatch path.
-		if os.Args[1] == "run" {
-			os.Exit(cli.Run(os.Args[2:]))
-		}
-		// The declared surface handles everything else: migrated commands,
+		// The declared surface handles every named invocation: the commands,
 		// help, version, and caller errors for unknown commands.
 		os.Exit(runDeclared(os.Args[1:], os.Stdout, os.Stderr))
 	}

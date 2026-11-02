@@ -55,6 +55,8 @@ avenor [flags]  # equivalent; explicit "run" is optional
 
 ### Examples
 
+Flag-syntax errors — an unknown flag, a bad duration or integer value, a missing flag value — exit 2. Validation errors raised after the flags parse (mutually exclusive flags, a missing prompt, an invalid roster or workflow file) still exit 1.
+
 Run a single agent with a prompt file:
 
 ```sh
@@ -122,7 +124,7 @@ the permission request or response file derived from the sentinel while the file
 handler is active, and the result and pid paths must be single-line. An invocation rejected by flag validation writes
 no result or pid file and leaves an earlier answer untouched. A rejection after
 the flags are parsed still writes its sentinel when `--sentinel-file` is set, so
-a supervisor can wait on it; a command line that does not parse exits 1 before
+a supervisor can wait on it; a command line that does not parse exits 2 before
 the sentinel path is known, so nothing is written. Treat the sentinel path as
 the run's own output rather than a place to keep an answer, since a rejection
 rewrites it like any other exit.

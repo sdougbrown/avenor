@@ -20,6 +20,23 @@ func TestRunRejectsRosterEntryWithWorkflow(t *testing.T) {
 	}
 }
 
+// TestRunDirectRosterRejectsExplicitDefaultBackend proves --backend presence
+// survives parsing: a value equal to the default still counts as supplied, so
+// the roster mutual exclusion rejects it.
+func TestRunDirectRosterRejectsExplicitDefaultBackend(t *testing.T) {
+	rosterPath := filepath.Join(t.TempDir(), "roster.json")
+	if err := os.WriteFile(rosterPath, []byte(`{"planner":{"backend":"gemini-acp","agent":"planner"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	if got := run([]string{"--prompt", "work", "--backend", DefaultBackend, "--roster-file", rosterPath, "--roster-entry", "planner"}, func(string) string { return "" }, &stderr); got != 1 {
+		t.Fatalf("run() = %d, want 1; stderr=%s", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("stderr = %q, want direct selector conflict", stderr.String())
+	}
+}
+
 func TestRunDirectRosterRejectsExplicitBackend(t *testing.T) {
 	rosterPath := filepath.Join(t.TempDir(), "roster.json")
 	if err := os.WriteFile(rosterPath, []byte(`{"planner":{"backend":"gemini-acp","agent":"planner"}}`), 0o600); err != nil {

@@ -3,8 +3,20 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
+
+func TestRunDeclaredHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeclared([]string{"run", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run --help exit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "--prompt-file") {
+		t.Fatalf("run --help stdout missing --prompt-file: %q", stdout.String())
+	}
+}
 
 func TestSchemaCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
