@@ -2,8 +2,9 @@ package main
 
 import (
 	"bufio"
-	"flag"
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/digest"
+	clicontract "github.com/sdougbrown/cli-contract"
 )
 
 // readCursor reads the byte offset stored in the cursor file at path.
@@ -48,67 +50,54 @@ func validateCursorAgainstLog(offset int64, info os.FileInfo) error {
 }
 
 func runWatch(args []string) int {
-	fs := flag.NewFlagSet("avenor watch", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	return runDeclared("watch", args, handleWatch)
+}
 
-	follow := fs.Bool("follow", false, "poll and tail the log")
-	format := fs.String("format", "plain", "output format: plain (EVENT lines) or json (pass-through NDJSON)")
-	classify := fs.Bool("classify", false, "prefix each plain-format digest line with MILESTONE | FINDING | ACTIVITY; in json format, adds a top-level \"classify\" field")
-	accumulate := fs.Bool("accumulate", false, "buffer consecutive thought/message chunks with the same session ID and event type, flushing them as a single human-readable line (plain format only)")
-	pollInterval := fs.Duration("poll-interval", 250*time.Millisecond, "follow-mode sleep interval")
-	sinceCursor := fs.String("since-cursor", "", "cursor file path: seek to saved offset before reading; rewrite offset on exit")
+// handleWatch digests one log file; follow mode owns its signal handling.
+func handleWatch(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	follow := inv.Bools["follow"]
+	format := orDefault(inv.Flags["format"], "plain")
+	classify := inv.Bools["classify"]
+	accumulate := inv.Bools["accumulate"]
+	pollInterval := orDefault(inv.Durations["poll-interval"], 250*time.Millisecond)
+	sinceCursor := inv.Flags["since-cursor"]
 
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if format != "plain" && format != "json" {
+		return nil, usageErrorf("avenor watch: unsupported --format %q", format)
 	}
-	if fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "avenor watch: <log> is required")
-		return 2
+	if len(inv.Args) != 1 {
+		return nil, usageErrorf("avenor watch: expected exactly one <log>")
 	}
-	if fs.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "avenor watch: expected exactly one <log>")
-		return 2
-	}
-	if *format != "plain" && *format != "json" {
-		fmt.Fprintf(os.Stderr, "avenor watch: unsupported --format %q\n", *format)
-		return 2
-	}
-
-	logPath := fs.Arg(0)
+	logPath := inv.Args[0]
 
 	file, err := os.Open(logPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor watch: open %s: %v\n", logPath, err)
-		return 2
+		return nil, usageErrorf("avenor watch: open %s: %v", logPath, err)
 	}
 	defer file.Close()
 
 	// Handle --since-cursor: read the saved offset, validate it against the
 	// current log size, then seek the file to that position.
 	var cursorStartOffset int64
-	if *sinceCursor != "" {
-		offset, cursorErr := readCursor(*sinceCursor)
+	if sinceCursor != "" {
+		offset, cursorErr := readCursor(sinceCursor)
 		if cursorErr != nil {
-			fmt.Fprintf(os.Stderr, "avenor watch: %v\n", cursorErr)
-			return 2
+			return nil, usageErrorf("avenor watch: %v", cursorErr)
 		}
 
 		// Sanity-check: if the log has been rotated/truncated the saved offset
 		// may be beyond the end of the file.
 		info, statErr := file.Stat()
 		if statErr != nil {
-			fmt.Fprintf(os.Stderr, "avenor watch: stat %s: %v\n", logPath, statErr)
-			return 2
+			return nil, usageErrorf("avenor watch: stat %s: %v", logPath, statErr)
 		}
 		if err := validateCursorAgainstLog(offset, info); err != nil {
-			fmt.Fprintf(os.Stderr, "avenor watch: %v (cursor %s)\n", err, *sinceCursor)
-			return 2
+			return nil, usageErrorf("avenor watch: %v (cursor %s)", err, sinceCursor)
 		}
 
 		if offset > 0 {
 			if _, seekErr := file.Seek(offset, 0); seekErr != nil {
-				fmt.Fprintf(os.Stderr, "avenor watch: seek %s: %v\n", logPath, seekErr)
-				return 2
+				return nil, usageErrorf("avenor watch: seek %s: %v", logPath, seekErr)
 			}
 		}
 		cursorStartOffset = offset
@@ -116,26 +105,24 @@ func runWatch(args []string) int {
 
 	out := bufio.NewWriter(os.Stdout)
 	opts := digest.Options{
-		Follow:            *follow,
-		PollInterval:      *pollInterval,
-		Format:            *format,
-		Classify:          *classify,
-		Accumulate:        *accumulate,
-		CursorPath:        *sinceCursor,
+		Follow:            follow,
+		PollInterval:      pollInterval,
+		Format:            format,
+		Classify:          classify,
+		Accumulate:        accumulate,
+		CursorPath:        sinceCursor,
 		CursorStartOffset: cursorStartOffset,
 	}
 
-	if !*follow {
+	if !follow {
 		if err := digest.Stream(file, out, opts); err != nil {
 			_ = out.Flush()
-			fmt.Fprintf(os.Stderr, "avenor watch: %v\n", err)
-			return 1
+			return nil, fmt.Errorf("avenor watch: %w", err)
 		}
 		if err := out.Flush(); err != nil {
-			fmt.Fprintf(os.Stderr, "avenor watch: flush stdout: %v\n", err)
-			return 1
+			return nil, fmt.Errorf("avenor watch: flush stdout: %w", err)
 		}
-		return 0
+		return nil, nil
 	}
 
 	errCh := make(chan error, 1)
@@ -150,14 +137,12 @@ func runWatch(args []string) int {
 	select {
 	case err := <-errCh:
 		if flushErr := out.Flush(); flushErr != nil {
-			fmt.Fprintf(os.Stderr, "avenor watch: flush stdout: %v\n", flushErr)
-			return 1
+			return nil, fmt.Errorf("avenor watch: flush stdout: %w", flushErr)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "avenor watch: %v\n", err)
-			return 1
+			return nil, fmt.Errorf("avenor watch: %w", err)
 		}
-		return 0
+		return nil, nil
 	case <-sigCh:
 		_ = file.Close()
 		var err error
@@ -166,13 +151,11 @@ func runWatch(args []string) int {
 		case <-time.After(time.Second):
 		}
 		if flushErr := out.Flush(); flushErr != nil {
-			fmt.Fprintf(os.Stderr, "avenor watch: flush stdout: %v\n", flushErr)
-			return 1
+			return nil, fmt.Errorf("avenor watch: flush stdout: %w", flushErr)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "avenor watch: %v\n", err)
-			return 1
+			return nil, fmt.Errorf("avenor watch: %w", err)
 		}
-		return 0
+		return nil, nil
 	}
 }

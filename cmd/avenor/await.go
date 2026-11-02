@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +16,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/runstate"
+	clicontract "github.com/sdougbrown/cli-contract"
 )
 
 const (
@@ -38,18 +38,61 @@ type awaitOptions struct {
 
 // runAwait implements the socket-backed `avenor await` command.
 func runAwait(args []string) int {
-	return runAwaitTo(args, os.Stdout, os.Stderr)
+	return runDeclared("await", args, handleAwait)
+}
+
+// handleAwait waits for the run to reach the requested state; the exit code
+// encodes the terminal state (failed, timeouts, pending permission).
+func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	opts, err := awaitOptionsFromInvocation(inv)
+	if err != nil {
+		return nil, err
+	}
+	return exitCode(awaitRun(ctx, opts, os.Stdout, stderr)), nil
+}
+
+// awaitOptionsFromInvocation builds the await options from the declared
+// invocation: the target positional plus the until/timeout/format flags.
+func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error) {
+	opts := awaitOptions{
+		socket:      inv.Flags["socket"],
+		until:       orDefault(inv.Flags["until"], "attention"),
+		timeout:     inv.Durations["timeout"],
+		printOutput: inv.Bools["print-output"],
+		format:      orDefault(inv.Flags["format"], "plain"),
+		target:      inv.Args[0],
+	}
+	if opts.until != "attention" && opts.until != "done" {
+		return awaitOptions{}, usageErrorf("avenor await: unsupported --until %q", opts.until)
+	}
+	if opts.timeout < 0 {
+		return awaitOptions{}, usageErrorf("avenor await: --timeout must not be negative")
+	}
+	if opts.format != "plain" && opts.format != "json" {
+		return awaitOptions{}, usageErrorf("avenor await: unsupported --format %q", opts.format)
+	}
+	return opts, nil
 }
 
 // runAwaitTo is the testable form of runAwait.
 func runAwaitTo(args []string, stdout, stderr io.Writer) int {
-	opts, code := parseAwaitArgs(args, stderr)
-	if code != 0 {
-		return code
+	inv, err := parseInvocation(append([]string{"await"}, args...))
+	if err != nil {
+		fmt.Fprintf(stderr, "avenor await: %v\n", err)
+		return 2
 	}
+	opts, err := awaitOptionsFromInvocation(inv)
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 2
+	}
+	return awaitRun(context.Background(), opts, stdout, stderr)
+}
 
-	var ctx context.Context = context.Background()
-	cancel := func() {}
+// awaitRun attaches to the run and waits for the terminal state, writing
+// transitions to stdout.
+func awaitRun(ctx context.Context, opts awaitOptions, stdout io.Writer, stderr io.Writer) int {
+	var cancel context.CancelFunc = func() {}
 	if opts.timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, opts.timeout)
 	}
@@ -153,62 +196,6 @@ func runAwaitTo(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	}
-}
-
-func parseAwaitArgs(args []string, stderr io.Writer) (awaitOptions, int) {
-	fs := flag.NewFlagSet("avenor await", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	socket := fs.String("socket", "", "explicit control socket path; omitting scans ~/.avenor/sockets")
-	until := fs.String("until", "attention", "wait until: attention or done")
-	timeout := fs.Duration("timeout", 0, "wall-clock timeout")
-	printOutput := fs.Bool("print-output", false, "print complete result output before exiting")
-	format := fs.String("format", "plain", "output format: plain or json")
-
-	// flag.FlagSet stops at a positional argument. The documented command puts
-	// the run target first, so split the one target from known flag arguments.
-	var flagArgs []string
-	var target string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--socket" || arg == "--until" || arg == "--timeout" || arg == "--format" {
-			if i+1 >= len(args) {
-				fmt.Fprintf(stderr, "avenor await: %s requires a value\n", arg)
-				return awaitOptions{}, 2
-			}
-			flagArgs = append(flagArgs, arg, args[i+1])
-			i++
-			continue
-		}
-		if strings.HasPrefix(arg, "--socket=") || strings.HasPrefix(arg, "--until=") || strings.HasPrefix(arg, "--timeout=") || strings.HasPrefix(arg, "--format=") || arg == "--print-output" || strings.HasPrefix(arg, "-") {
-			flagArgs = append(flagArgs, arg)
-			continue
-		}
-		if target != "" {
-			fmt.Fprintln(stderr, "avenor await: expected exactly one <run-id|label>")
-			return awaitOptions{}, 2
-		}
-		target = arg
-	}
-	if err := fs.Parse(flagArgs); err != nil {
-		return awaitOptions{}, 2
-	}
-	if target == "" {
-		fmt.Fprintln(stderr, "avenor await: <run-id|label> is required")
-		return awaitOptions{}, 2
-	}
-	if *until != "attention" && *until != "done" {
-		fmt.Fprintf(stderr, "avenor await: unsupported --until %q\n", *until)
-		return awaitOptions{}, 2
-	}
-	if *timeout < 0 {
-		fmt.Fprintln(stderr, "avenor await: --timeout must not be negative")
-		return awaitOptions{}, 2
-	}
-	if *format != "plain" && *format != "json" {
-		fmt.Fprintf(stderr, "avenor await: unsupported --format %q\n", *format)
-		return awaitOptions{}, 2
-	}
-	return awaitOptions{socket: *socket, until: *until, timeout: *timeout, printOutput: *printOutput, format: *format, target: target}, 0
 }
 
 // awaitHistory is the reply to the one-event history probe whose latest
