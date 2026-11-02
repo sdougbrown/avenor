@@ -66,7 +66,7 @@ func captureStablePolicy(t *testing.T, args ...string) stable.Config {
 	return captured
 }
 
-// captureMCPPolicyPath runs runMCP with a patched server constructor and
+// captureMCPPolicyPath runs the mcp command through the declared surface with
 // returns the policy path forwarded in the MCP server options.
 func captureMCPPolicyPath(t *testing.T, args ...string) string {
 	t.Helper()
@@ -77,8 +77,8 @@ func captureMCPPolicyPath(t *testing.T, args ...string) string {
 		return nil, errors.New("capture only")
 	}
 	t.Cleanup(func() { newMCPServerFn = orig })
-	if exit := runMCP(args); exit != 1 {
-		t.Fatalf("runMCP() = %d, want 1 from the capture constructor", exit)
+	if exit := runDeclared(append([]string{"mcp"}, args...), os.Stdout, os.Stderr); exit != 1 {
+		t.Fatalf("runDeclared() = %d, want 1 from the capture constructor", exit)
 	}
 	return captured.MCPLaunchWrapperPolicyPath
 }
@@ -143,8 +143,8 @@ func TestCommandsFailOnInvalidWellKnownPolicy(t *testing.T) {
 	if exit := runStable(stableArgs(t)); exit != 1 {
 		t.Fatalf("runStable() = %d, want 1 for an invalid well-known policy", exit)
 	}
-	if exit := runMCP(nil); exit != 1 {
-		t.Fatalf("runMCP() = %d, want 1 for an invalid well-known policy", exit)
+	if exit := runDeclared([]string{"mcp"}, os.Stdout, os.Stderr); exit != 1 {
+		t.Fatalf("runDeclared() = %d, want 1 for an invalid well-known policy", exit)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestCommandsFailOnMissingEnvPolicyFile(t *testing.T) {
 	if exit := runStable(stableArgs(t)); exit != 1 {
 		t.Fatalf("runStable() = %d, want 1 for a missing env policy file", exit)
 	}
-	if exit := runMCP(nil); exit != 1 {
-		t.Fatalf("runMCP() = %d, want 1 for a missing env policy file", exit)
+	if exit := runDeclared([]string{"mcp"}, os.Stdout, os.Stderr); exit != 1 {
+		t.Fatalf("runDeclared() = %d, want 1 for a missing env policy file", exit)
 	}
 }

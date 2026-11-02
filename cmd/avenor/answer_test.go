@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,10 +49,11 @@ func writeReqFileRaw(t *testing.T, dir, name string, body []byte) string {
 	return permBase
 }
 
-// answerRun calls runAnswerTo and captures stderr.
+// answerRun dispatches one answer invocation through the declared surface
+// with stderr captured; production passes the same stderr to the handler.
 func answerRun(args []string) (code int, stderr string) {
 	var buf bytes.Buffer
-	code = runAnswerTo(args, &buf)
+	code = runDeclared(append([]string{"answer"}, args...), io.Discard, &buf)
 	return code, buf.String()
 }
 

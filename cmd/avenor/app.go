@@ -11,10 +11,9 @@ import (
 	"github.com/sdougbrown/cli-contract"
 )
 
-// app declares the migrated Avenor command surface. Commands still on the
-// legacy dispatch path (control, workflow, run) are absent until their
-// migration lands; main.go routes them to the legacy switch in the
-// meantime.
+// app declares the migrated Avenor command surface. run is the one command
+// still on its pre-library dispatch path until its migration lands; main.go
+// routes it directly in the meantime.
 func app() *clicontract.App {
 	return &clicontract.App{
 		Name:                "avenor",

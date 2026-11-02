@@ -80,8 +80,8 @@ func TestRunMCPAllowedHostValid(t *testing.T) {
 }
 
 func TestRunMCPAllowedHostStdioRejected(t *testing.T) {
-	if got := runMCP([]string{"--transport", "stdio", "--allowed-host", "box.example.ts.net"}); got != 2 {
-		t.Fatalf("runMCP() = %d, want 2", got)
+	if got := runDeclared([]string{"mcp", "--transport", "stdio", "--allowed-host", "box.example.ts.net"}, os.Stdout, os.Stderr); got != 2 {
+		t.Fatalf("runDeclared() = %d, want 2", got)
 	}
 }
 
@@ -121,7 +121,7 @@ func TestRunMCPMaxWaitNegativeRejected(t *testing.T) {
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
-	got := runMCP([]string{"--transport", "http", "--max-wait", "-5s"})
+	got := runDeclared([]string{"mcp", "--transport", "http", "--max-wait", "-5s"}, os.Stdout, os.Stderr)
 	w.Close()
 	os.Stderr = oldStderr
 
@@ -129,7 +129,7 @@ func TestRunMCPMaxWaitNegativeRejected(t *testing.T) {
 	io.Copy(&buf, r)
 
 	if got != 2 {
-		t.Fatalf("runMCP() = %d, want 2", got)
+		t.Fatalf("runDeclared() = %d, want 2", got)
 	}
 	if !strings.Contains(buf.String(), "--max-wait must not be negative") {
 		t.Fatalf("stderr = %q, want it to contain %q", buf.String(), "--max-wait must not be negative")
@@ -139,17 +139,17 @@ func TestRunMCPMaxWaitNegativeRejected(t *testing.T) {
 func TestRunMCPMaxWaitStdioAccepted(t *testing.T) {
 	// The wait budget applies on both transports now: a nonzero --max-wait on
 	// stdio passes validation (the stdio server exits 0 on closed stdin).
-	if got := runMCP([]string{"--transport", "stdio", "--max-wait", "5s"}); got == 2 {
-		t.Fatalf("runMCP() = %d, want anything but the usage code 2", got)
+	if got := runDeclared([]string{"mcp", "--transport", "stdio", "--max-wait", "5s"}, os.Stdout, os.Stderr); got == 2 {
+		t.Fatalf("runDeclared() = %d, want anything but the usage code 2", got)
 	}
 }
 
 func TestRunMCPAllowedHostInvalidRejected(t *testing.T) {
 	// At least one invalid entry (including a tab) must be rejected through
-	// runMCP, not just a direct Set call.
+	// the declared mcp dispatch, not just a direct Set call.
 	for _, entry := range []string{"box\thost", "box:8443"} {
-		if got := runMCP([]string{"--transport", "http", "--allowed-host", entry}); got != 2 {
-			t.Fatalf("runMCP() = %d, want 2 (invalid --allowed-host %q)", got, entry)
+		if got := runDeclared([]string{"mcp", "--transport", "http", "--allowed-host", entry}, os.Stdout, os.Stderr); got != 2 {
+			t.Fatalf("runDeclared() = %d, want 2 (invalid --allowed-host %q)", got, entry)
 		}
 	}
 }
@@ -320,7 +320,8 @@ func TestMCPAuthTokenFileAccepted(t *testing.T) {
 func TestRunMCPAuthTokenAndFileConflictRejected(t *testing.T) {
 	path := writeTokenFile(t, "file-token\n", 0o600)
 
-	// Capture stderr: runMCP writes the guard message to os.Stderr directly.
+	// Capture stderr: the guard message reaches Run's stderr writer, so the
+	// os.Stderr swap below is what the injected stream picks up.
 	oldStderr := os.Stderr
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -329,7 +330,7 @@ func TestRunMCPAuthTokenAndFileConflictRejected(t *testing.T) {
 	os.Stderr = w
 	defer func() { os.Stderr = oldStderr }()
 
-	got := runMCP([]string{"--transport", "http", "--auth-token", "flag-token", "--auth-token-file", path})
+	got := runDeclared([]string{"mcp", "--transport", "http", "--auth-token", "flag-token", "--auth-token-file", path}, os.Stdout, os.Stderr)
 	w.Close()
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {
@@ -337,7 +338,7 @@ func TestRunMCPAuthTokenAndFileConflictRejected(t *testing.T) {
 	}
 
 	if got != 2 {
-		t.Fatalf("runMCP() = %d, want 2", got)
+		t.Fatalf("runDeclared() = %d, want 2", got)
 	}
 	if !strings.Contains(buf.String(), "cannot both be set") {
 		t.Fatalf("stderr = %q, want the flag-conflict guard message", buf.String())

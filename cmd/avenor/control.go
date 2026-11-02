@@ -14,11 +14,6 @@ import (
 	clicontract "github.com/sdougbrown/cli-contract"
 )
 
-// runControl dispatches through the declared surface.
-func runControl(args []string) int {
-	return runDeclared(append([]string{"control"}, args...), os.Stdout, os.Stderr)
-}
-
 // controlClient dials the control socket named by the persistent --socket
 // flag; owner verbs attach the parent-owner credential.
 func controlClient(inv clicontract.Invocation, owner bool) (*client.Client, error) {

@@ -16,8 +16,8 @@ import (
 
 type allowedHostList []string
 
-// newMCPServerFn is the MCP server constructor used by runMCP. Tests patch it
-// to capture Options without starting a server.
+// newMCPServerFn is the MCP server constructor used by handleMCP. Tests patch
+// it to capture Options without starting a server.
 var newMCPServerFn = mcpserver.NewServer
 
 func (a *allowedHostList) String() string { return strings.Join(*a, ",") }
@@ -72,10 +72,6 @@ func validateAllowedHost(value string) error {
 		}
 	}
 	return nil
-}
-
-func runMCP(args []string) int {
-	return runDeclared(append([]string{"mcp"}, args...), os.Stdout, os.Stderr)
 }
 
 // handleMCP serves the MCP interface until it exits; the stdio transport
