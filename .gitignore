@@ -40,6 +40,7 @@ go.work.sum
 dist/
 
 # Built binaries
+cmd/avenor/avenor
 /avenor
 
 # TS packages

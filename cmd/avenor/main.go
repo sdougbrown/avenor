@@ -1,63 +1,41 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/sdougbrown/avenor/internal/cli"
+	"github.com/sdougbrown/cli-contract"
 )
 
 // Version is the release tag, injected at build time via -ldflags. Unreleased
 // builds default to "dev" so they don't masquerade as a real version.
 var Version = "dev"
 
+// legacyCommands dispatch through their pre-library paths until their
+// migration to the declared surface lands.
+var legacyCommands = map[string]func([]string) int{
+	"answer":   runAnswer,
+	"await":    runAwait,
+	"watch":    runWatch,
+	"control":  runControl,
+	"workflow": runWorkflow,
+	"mcp":      runMCP,
+}
+
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "answer" {
-		os.Exit(runAnswer(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "probe" {
-		os.Exit(runProbe(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "watch" {
-		os.Exit(runWatch(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "stable" {
-		os.Exit(runStable(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "control" {
-		os.Exit(runControl(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "workflow" {
-		os.Exit(runWorkflow(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "await" {
-		os.Exit(runAwait(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "mcp" {
-		os.Exit(runMCP(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "channel-tools" {
-		os.Exit(runChannelTools(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "board" {
-		os.Exit(runBoard(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "parent-token" {
-		os.Exit(runParentToken(os.Args[2:]))
+	if len(os.Args) > 1 {
+		if legacy, ok := legacyCommands[os.Args[1]]; ok {
+			os.Exit(legacy(os.Args[2:]))
+		}
+		if os.Args[1] == "run" {
+			os.Exit(cli.Run(os.Args[2:]))
+		}
+		// The declared surface handles everything else: migrated commands,
+		// help, version, and caller errors for unknown commands.
+		os.Exit(clicontract.Run(app(), avenorAdapter{}, os.Args[1:], os.Stdout, os.Stderr))
 	}
 
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Printf("avenor v%s\n", Version)
-		os.Exit(0)
-	}
-
-	if len(os.Args) > 1 && os.Args[1] == "verify" {
-		os.Exit(runVerify(os.Args[2:]))
-	}
-
-	if len(os.Args) > 1 && (os.Args[1] == "run") {
-		os.Exit(cli.Run(os.Args[2:]))
-	}
-
+	// A bare invocation stays on the legacy path: the declared surface does
+	// not yet cover every command, so bare help remains the legacy usage.
 	os.Exit(cli.Run(os.Args[1:]))
 }

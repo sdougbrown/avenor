@@ -3,49 +3,48 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodeacp"
+	clicontract "github.com/sdougbrown/cli-contract"
 )
 
 func runProbe(args []string) int {
-	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
-	dir := fs.String("dir", ".", "working directory for the probe")
-	out := fs.String("out", "", "path to write the probe transcript")
-	prompt := fs.String("prompt", "", "override the default probe prompt (Stage 1 discovery)")
-	timeout := fs.Duration("timeout", 5*time.Minute, "probe timeout")
-	if err := fs.Parse(args); err != nil {
-		return 1
+	return runDeclared(append([]string{"probe"}, args...), os.Stdout, os.Stderr)
+}
+
+// handleProbe runs the probe and reports the stop reason's exit code.
+func handleProbe(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	out := inv.Flags["out"]
+	if out == "" {
+		return nil, usageErrorf("avenor probe: --out is required")
 	}
-	if *out == "" {
-		fmt.Fprintln(os.Stderr, "avenor probe: --out is required")
-		return 1
+	dir := orDefault(inv.Flags["dir"], ".")
+	timeout := inv.Durations["timeout"]
+	if timeout == 0 {
+		timeout = 5 * time.Minute
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	probePrompt := opencodeacp.ProbePrompt
-	if *prompt != "" {
-		probePrompt = *prompt
+	if prompt := inv.Flags["prompt"]; prompt != "" {
+		probePrompt = prompt
 	}
-	transcript, err := opencodeacp.RunProbeWithPrompt(ctx, *dir, probePrompt)
-	if writeErr := writeTranscript(*out, transcript); writeErr != nil {
-		fmt.Fprintf(os.Stderr, "avenor probe: write transcript: %v\n", writeErr)
-		return 1
+	transcript, err := opencodeacp.RunProbeWithPrompt(ctx, dir, probePrompt)
+	if writeErr := writeTranscript(out, transcript); writeErr != nil {
+		return nil, fmt.Errorf("avenor probe: write transcript: %w", writeErr)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "avenor probe: %v\n", err)
-		return 1
+		return nil, fmt.Errorf("avenor probe: %w", err)
 	}
-
-	stopReason := finalStopReason(transcript)
-	return runtime.ExitCodeForStopReason(stopReason)
+	return exitCode(runtime.ExitCodeForStopReason(finalStopReason(transcript))), nil
 }
 
 func writeTranscript(path string, transcript []events.Event) error {

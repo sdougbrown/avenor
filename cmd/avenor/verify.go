@@ -1,9 +1,9 @@
 package main
 
 import (
-	"errors"
-	"flag"
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -11,6 +11,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
+	"github.com/sdougbrown/cli-contract"
 )
 
 // runVerify loads and validates config files without starting a run. It
@@ -18,34 +19,30 @@ import (
 // prompt presence, roster entry references) and recursively validates nested
 // loop_file/team_file references that are only loaded on demand during a run.
 func runVerify(args []string) int {
-	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	dir := fs.String("dir", ".", "working directory (config file paths are resolved relative to this)")
-	loopFile := fs.String("loop-file", "", "path to loop config to validate")
-	teamFile := fs.String("team-file", "", "path to team config to validate")
-	rosterFile := fs.String("roster-file", "", "path to roster config to validate (standalone or as fallback for loop/team)")
-	rosterEntry := fs.String("roster-entry", "", "roster entry name to look up (requires --roster-file)")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 1
+	return runDeclared(append([]string{"verify"}, args...), os.Stdout, os.Stderr)
+}
+
+// handleVerify validates configs and reports each check's outcome; failures
+// are data, so the handler exits 1 without a handler diagnostic.
+func handleVerify(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	dir := orDefault(inv.Flags["dir"], ".")
+	loopFile := inv.Flags["loop-file"]
+	teamFile := inv.Flags["team-file"]
+	rosterFile := inv.Flags["roster-file"]
+	rosterEntry := inv.Flags["roster-entry"]
+
+	if rosterEntry != "" && rosterFile == "" {
+		return nil, usageErrorf("avenor verify: --roster-entry requires --roster-file")
 	}
 
-	if *rosterEntry != "" && *rosterFile == "" {
-		fmt.Fprintln(os.Stderr, "avenor verify: --roster-entry requires --roster-file")
-		return 1
+	if loopFile == "" && teamFile == "" && rosterFile == "" {
+		return nil, usageErrorf("avenor verify: at least one of --loop-file, --team-file, or --roster-file is required")
 	}
 
-	if *loopFile == "" && *teamFile == "" && *rosterFile == "" {
-		fmt.Fprintln(os.Stderr, "avenor verify: at least one of --loop-file, --team-file, or --roster-file is required")
-		return 1
-	}
-
-	v := newVerifier(*dir)
-	v.addRoster(*rosterFile, *rosterEntry)
-	v.addLoop(*loopFile, *rosterFile)
-	v.addTeam(*teamFile, *rosterFile)
+	v := newVerifier(dir)
+	v.addRoster(rosterFile, rosterEntry)
+	v.addLoop(loopFile, rosterFile)
+	v.addTeam(teamFile, rosterFile)
 
 	// Print errors first so they surface ahead of successes in merged
 	// stdout/stderr (e.g. CI logs). In separate streams the ordering is
@@ -58,9 +55,9 @@ func runVerify(args []string) int {
 	}
 
 	if len(v.errors) > 0 {
-		return 1
+		return exitCode(1), nil
 	}
-	return 0
+	return nil, nil
 }
 
 type verifier struct {
