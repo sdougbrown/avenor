@@ -104,7 +104,13 @@ export function hasWireType(value: unknown, kind: string): boolean {
     case 'string':
       return typeof value === 'string'
     case 'integer':
-      return typeof value === 'number' && Number.isInteger(value)
+      // Go's wire type is any mathematical integer. A JSON numeral too large
+      // for a JS number parses to ±Infinity, which is still a mathematical
+      // integer; the constraint check below refuses it by naming the bound.
+      return (
+        typeof value === 'number' &&
+        (Number.isInteger(value) || value === Infinity || value === -Infinity)
+      )
     case 'object':
       return value !== null && typeof value === 'object' && !Array.isArray(value)
     case 'array':
@@ -180,15 +186,17 @@ export function validateFields(
     }
     if (kind === 'integer') {
       const constraint = constraints.integers[name]
-      // A value beyond the int64 wire range names the declared bound, or the
-      // int64 limit where the schema declares none — the sentence the Go engine
-      // renders for the same input. A bound at the int64 limit does not survive
-      // JSON.parse exactly, so the limit is named literally there.
+      // A value at or beyond the int64 wire range names the declared bound, or
+      // the int64 limit where the schema declares none — the sentence the Go
+      // engine renders for the same input. JSON.parse rounds max int64 up to
+      // 2**63, so the engine cannot distinguish the largest valid int64 from
+      // one past it; matching Go's IsInt64 refusal means refusing both. The
+      // negative side stays strict: -2**63 is exactly min int64, which Go
+      // admits. A bound at the int64 limit does not survive JSON.parse exactly,
+      // so the limit is named literally there.
       const number = value as number
-      // JSON.parse rounds the maximum valid int64 up to 2**63, so only a value
-      // strictly beyond it is out of range.
-      if (number > 2 ** 63 || number < -(2 ** 63)) {
-        const bound = number > 2 ** 63 ? 'integer_too_large' : 'integer_too_small'
+      if (number >= 2 ** 63 || number < -(2 ** 63)) {
+        const bound = number >= 2 ** 63 ? 'integer_too_large' : 'integer_too_small'
         const declaredMax = constraint?.maximum
         const declaredMin = constraint?.minimum
         return repair(bound, {

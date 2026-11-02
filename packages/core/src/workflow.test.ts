@@ -97,13 +97,30 @@ describe('avenor_workflow admission', () => {
 })
 
 describe('avenor_workflow numeric and timestamp bounds', () => {
-  it('accepts the maximum int64 after JSON.parse rounds it up', async () => {
-    const { provider, calls } = fakeProvider()
-    // JSON.parse('9223372036854775807') rounds to 2**63, so the check must not
-    // refuse the largest valid int64 as out of range.
-    const result = await executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: 9223372036854775807 })
-    expect(result.action).toBe('events')
-    expect(calls[0].args.after_seq).toBe(9223372036854775807)
+  it('refuses an integer at the int64 boundary, matching Go exactly', async () => {
+    const { provider } = fakeProvider()
+    // JSON.parse rounds 9223372036854775807 and 9223372036854775808 to the
+    // same 2**63, so the engine cannot distinguish the largest valid int64
+    // from one past it. Matching Go's IsInt64 refusal means refusing both;
+    // the declared maximum parses to 2**63, so the literal limit is named.
+    await expect(
+      executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: 9223372036854775807 }),
+    ).rejects.toThrow('property "after_seq" must be at most 9223372036854775807')
+    await expect(
+      executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: 9223372036854775808 }),
+    ).rejects.toThrow('property "after_seq" must be at most 9223372036854775807')
+  })
+
+  it('refuses a JSON numeral too large for a JS number by naming the bound, like Go', async () => {
+    const { provider } = fakeProvider()
+    // JSON.parse('1e400') is Infinity, still a mathematical integer on the
+    // wire, so the engine names the declared bound instead of a type error.
+    await expect(
+      executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: 1e400 }),
+    ).rejects.toThrow('property "after_seq" must be at most 9223372036854775807')
+    await expect(
+      executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: -1e400 }),
+    ).rejects.toThrow('property "after_seq" must be at least -9223372036854775808')
   })
 
   it('omits a gate field whose value is the empty string', async () => {
