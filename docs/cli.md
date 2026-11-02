@@ -29,6 +29,7 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--prompt` | (none) | Inline prompt text; mutually exclusive with `--prompt-file` |
 | `--prompt-file` | (none) | Path to prompt file; mutually exclusive with `--prompt` |
 | `--loop-file` | (none) | Path to multi-phase loop config (JSON, YAML, or TOML); enables looping mode (incompatible with `--resume`) |
+| `--team-file` | (none) | Path to a parallel-team config; enables team mode. See [team.md](team.md#team-config-file) |
 | `--roster-file` | (none) | Path to a roster map (JSON, YAML, or TOML) for direct selection, or the root workflow fallback |
 | `--roster-entry` | (none) | Entry key within `--roster-file` for a direct spawn; invalid with a workflow file |
 | `--label` | (none) | Free-form label for log correlation; appears in events and sentinel |
@@ -36,6 +37,7 @@ avenor [flags]  # equivalent; explicit "run" is optional
 | `--resume` | (none) | Resume an existing session by ID; incompatible with `--loop-file` |
 | `--server-url` | (none) | Long-lived ACP server endpoint; required for `--backend opencode-http` |
 | `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `pi`, `claude` |
+| `--pony-config` | (none) | Path to the pony backend JSON config; required for `--backend pony` |
 | `--model` | (none) | Backend-specific model ID; if not set, resolved from opencode config via `--agent` |
 | `--thinking` | (none) | Backend-native reasoning level; validated against the effective backend |
 | `--claude-mcp-wait` | `0` (off) | Hold the first prompt of a `claude` run until this long after launch (Go duration, at most `60s`), so MCP servers Claude Code connects in the background are available to the first turn. Direct runs only; rejected with other backends, with `--loop-file`/`--team-file`, and when not shorter than `--progress-timeout`. See [backends.md](backends.md#claude) |

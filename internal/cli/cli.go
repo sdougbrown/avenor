@@ -75,10 +75,6 @@ func OverrideStopReason(stopReason string, cancelled bool, timedOut bool) string
 	}
 }
 
-func Run(args []string) int {
-	return run(args, os.Getenv, os.Stderr)
-}
-
 // runOptions carries the parsed CLI flags for one run. BackendSet records
 // whether --backend appeared on the command line, so an explicit value equal
 // to the default (or empty) still counts as supplied.
@@ -197,21 +193,6 @@ func RunInvocation(inv clicontract.Invocation, getenv func(string) string, stder
 		opts.Backend = DefaultBackend
 	}
 	return runWithOptions(opts, getenv, stderr)
-}
-
-func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode int) {
-	cmd := RunCommand()
-	cmd.Handle = func(context.Context, clicontract.Invocation, io.Writer) (any, error) { return nil, nil }
-	inv, err := clicontract.Parse(&clicontract.App{
-		Name:        "avenor",
-		ErrorPrefix: "avenor",
-		Commands:    []*clicontract.Command{cmd},
-	}, append([]string{"run"}, args...))
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 2
-	}
-	return RunInvocation(inv, getenv, stderr)
 }
 
 func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Writer) (exitCode int) {
