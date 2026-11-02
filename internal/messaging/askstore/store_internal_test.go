@@ -778,13 +778,15 @@ func TestStoreLateReplyToAbandonedEdgeRecordsTheAskersAnswerRoute(t *testing.T) 
 		}
 	})
 }
+
 // TestStoreLateReplySurfacesADeliveryFailure pins the error path: a
 // RemoteDeliver that fails after the edge was resolved surfaces the failure to
 // the replier, so a lost cross-branch delivery is not reported as clean.
 func TestStoreLateReplySurfacesADeliveryFailure(t *testing.T) {
 	deliverErr := errors.New("relay down")
 	store := New(Options{})
-	store.SetBackend(&recordingBackend{})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
 	store.SetRemoteDeliver(func(ctx context.Context, target string, msg messaging.InboundMessage) (func(), error) {
 		return func() {}, deliverErr
 	})
@@ -811,5 +813,49 @@ func TestStoreLateReplySurfacesADeliveryFailure(t *testing.T) {
 	outcome, err := store.Reply(t.Context(), key, "bob", json.RawMessage(`{"message":"late pong"}`))
 	if outcome != messaging.OutcomeReplied || !errors.Is(err, deliverErr) {
 		t.Fatalf("Reply = (%q, %v), want replied with the delivery failure surfaced", outcome, err)
+	}
+	// The two delivery paths are exclusive: with remoteDeliver installed, the
+	// backend saw only the ask, never the late answer.
+	if len(backend.published) != 1 {
+		t.Fatalf("published = %+v, want only the ask", backend.published)
+	}
+}
+
+// TestStoreReplyRouteChargesCapacity pins the reply route's capacity guard: a
+// store at its fence capacity still delivers the reply but records no route,
+// so a busy store's fence count cannot grow without bound.
+func TestStoreReplyRouteChargesCapacity(t *testing.T) {
+	store := New(Options{FenceCapacity: 2})
+	backend := &recordingBackend{}
+	store.SetBackend(backend)
+
+	now := time.Now()
+	msgID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID: %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "alice"}, Target: "bob", MessageID: msgID,
+		Generation: store.Generation(), Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	tellID, err := messaging.NewMsgID(now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewMsgID (tell): %v", err)
+	}
+	if _, err := store.Admit(t.Context(), AdmitRequest{
+		Sender: messaging.Identity{RunID: "carol"}, Target: "dave", MessageID: tellID,
+		Generation: store.Generation(), Body: `{"message":"notice"}`, NoReply: true,
+	}); err != nil {
+		t.Fatalf("tell Admit: %v", err)
+	}
+
+	key := messaging.FenceKey{Sender: "alice", MessageID: msgID, Generation: store.Generation()}
+	if outcome, err := store.Reply(t.Context(), key, "bob", json.RawMessage(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		t.Fatalf("Reply = (%q, %v), want replied", outcome, err)
+	}
+	if _, _, ok := store.TellRoute(messaging.ReplyID(msgID)); ok {
+		t.Fatal("the reply route was recorded at full capacity, want it skipped")
 	}
 }

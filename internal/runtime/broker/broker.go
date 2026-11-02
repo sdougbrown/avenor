@@ -470,7 +470,7 @@ func (b *Broker) lateReplyDeliver(ctx context.Context, target string, msg messag
 		}
 		return func() {}, err
 	}
-	return brokerBackend{broker: b}.Publish(target, msg)
+	return b.store.Backend().Publish(target, msg)
 }
 
 // SetIdentity sets the supervisor identity this broker mints run records under.

@@ -190,6 +190,13 @@ func (s *Store) SetBackend(b Backend) {
 	s.mu.Unlock()
 }
 
+// Backend returns the installed queue and peer source.
+func (s *Store) Backend() Backend {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.backend
+}
+
 // SetRemoteDeliver installs the late-answer delivery used after the store's
 // lock is released. The broker wires it to a cross-branch-capable seam; a
 // store without one falls back to the backend's Publish.
@@ -414,8 +421,18 @@ func (s *Store) Reply(ctx context.Context, key messaging.FenceKey, fromRunID str
 		// The asker's queue may live behind a branch boundary: the delivery is
 		// the caller's, and it happens outside the lock because it can perform
 		// network I/O.
-		if _, derr := deliver(ctx, late.target, late.msg); derr != nil {
+		remove, derr := deliver(ctx, late.target, late.msg)
+		if derr != nil {
 			return outcome, derr
+		}
+		if remove != nil {
+			// The queued late answer keeps its retraction handle on the terminal
+			// fence, the way a timed-out ask's does.
+			s.mu.Lock()
+			if f, ok := s.terminal[late.fenceKey]; ok {
+				f.remove = remove
+			}
+			s.mu.Unlock()
 		}
 	}
 	return outcome, err
@@ -465,14 +482,17 @@ func (s *Store) replyLocked(key messaging.FenceKey, fromRunID string, payload js
 			Kind:      "agent_message",
 			Payload:   payload,
 		}
+		var remove func()
 		var late *pendingDelivery
 		if s.remoteDeliver != nil {
 			// The delivery leaves through the caller after the lock is released:
 			// it may cross a branch boundary, and the store performs no network
 			// I/O under its lock.
-			late = &pendingDelivery{target: e.key.Sender, msg: *reply}
+			late = &pendingDelivery{target: e.key.Sender, msg: *reply, fenceKey: e.key}
 		} else if s.backend != nil {
-			if _, err := s.backend.Publish(e.key.Sender, *reply); err != nil {
+			var err error
+			remove, err = s.backend.Publish(e.key.Sender, *reply)
+			if err != nil {
 				return messaging.OutcomeNotSent, err, nil
 			}
 		}
@@ -484,6 +504,11 @@ func (s *Store) replyLocked(key messaging.FenceKey, fromRunID string, payload js
 		// resolved.
 		s.completeLocked(e, messaging.OutcomeReplied)
 		s.consumeLocked(e)
+		// A queued late answer keeps its retraction handle on the terminal fence
+		// the way a timed-out ask's does, so a later withdrawal can retract it.
+		if f, ok := s.terminal[e.key]; ok && remove != nil {
+			f.remove = remove
+		}
 		return messaging.OutcomeReplied, nil, late
 	}
 	reply := &messaging.InboundMessage{
@@ -502,8 +527,9 @@ func (s *Store) replyLocked(key messaging.FenceKey, fromRunID string, payload js
 // pendingDelivery is a late answer that left through the caller: the asker's
 // queue is the caller's to reach.
 type pendingDelivery struct {
-	target string
-	msg    messaging.InboundMessage
+	target   string
+	msg      messaging.InboundMessage
+	fenceKey messaging.FenceKey
 }
 
 // recordReplyRouteLocked gives the answer its own route, so the asker can

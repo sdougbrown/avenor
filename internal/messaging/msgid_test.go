@@ -107,6 +107,7 @@ func TestMsgID(t *testing.T) {
 		}
 	})
 }
+
 // TestAcceptanceHorizonCouplesTheMinters pins the horizon's value and its 2×
 // relation to the wait cap: the Go minter, the core minter and the hook
 // minter each encode the same window, and drift in one makes its ids refused
