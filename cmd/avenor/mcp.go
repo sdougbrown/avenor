@@ -71,7 +71,7 @@ func mcpMaxWaitError(transport string, explicit bool, value time.Duration) error
 }
 
 func runMCP(args []string) int {
-	return runDeclared("mcp", args, handleMCP)
+	return runDeclared(append([]string{"mcp"}, args...), os.Stdout, os.Stderr)
 }
 
 // handleMCP serves the MCP interface until it exits; the stdio transport

@@ -35,7 +35,7 @@ type answerResponse struct {
 // runAnswer implements the `avenor answer <perm-base>` subcommand.
 // It returns 0 on success, 2 on usage/validation errors, 1 on I/O errors.
 func runAnswer(args []string) int {
-	return runDeclared("answer", args, handleAnswer)
+	return runDeclared(append([]string{"answer"}, args...), os.Stdout, os.Stderr)
 }
 
 // answerFlags holds the four answer flags.
@@ -67,7 +67,7 @@ func handleAnswer(ctx context.Context, inv clicontract.Invocation, stderr io.Wri
 func runAnswerTo(args []string, errOut io.Writer) int {
 	inv, err := parseInvocation(append([]string{"answer"}, args...))
 	if err != nil {
-		fmt.Fprintf(errOut, "avenor answer: %v\n", err)
+		fmt.Fprintf(errOut, "%v\n", err)
 		return 2
 	}
 	flags := answerFlags{

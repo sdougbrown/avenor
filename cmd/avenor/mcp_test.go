@@ -81,7 +81,7 @@ func TestRunMCPAllowedHostValid(t *testing.T) {
 
 func TestRunMCPAllowedHostStdioRejected(t *testing.T) {
 	if got := runMCP([]string{"--transport", "stdio", "--allowed-host", "box.example.ts.net"}); got != 1 {
-		t.Fatalf("runMCP() = %d, want 1", got)
+		t.Fatalf("runMCP() = %d, want 2", got)
 	}
 }
 
@@ -129,8 +129,8 @@ func TestRunMCPMaxWaitNegativeRejected(t *testing.T) {
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
 
-	if got != 1 {
-		t.Fatalf("runMCP() = %d, want 1", got)
+	if got != 2 {
+		t.Fatalf("runMCP() = %d, want 2", got)
 	}
 	if !strings.Contains(buf.String(), "--max-wait must not be negative") {
 		t.Fatalf("stderr = %q, want it to contain %q", buf.String(), "--max-wait must not be negative")
@@ -141,7 +141,7 @@ func TestRunMCPMaxWaitStdioRejected(t *testing.T) {
 	// stdio never clamps, so an explicit nonzero --max-wait is rejected before
 	// the server would block.
 	if got := runMCP([]string{"--transport", "stdio", "--max-wait", "5s"}); got != 1 {
-		t.Fatalf("runMCP() = %d, want 1 (stdio --max-wait 5s)", got)
+		t.Fatalf("runMCP() = %d, want 2 (stdio --max-wait 5s)", got)
 	}
 }
 
@@ -175,7 +175,7 @@ func TestRunMCPAllowedHostInvalidRejected(t *testing.T) {
 	// runMCP, not just a direct Set call.
 	for _, entry := range []string{"box\thost", "box:8443"} {
 		if got := runMCP([]string{"--transport", "http", "--allowed-host", entry}); got != 1 {
-			t.Fatalf("runMCP() = %d, want 1 (invalid --allowed-host %q)", got, entry)
+			t.Fatalf("runMCP() = %d, want 2 (invalid --allowed-host %q)", got, entry)
 		}
 	}
 }
@@ -362,8 +362,8 @@ func TestRunMCPAuthTokenAndFileConflictRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got != 1 {
-		t.Fatalf("runMCP() = %d, want 1", got)
+	if got != 2 {
+		t.Fatalf("runMCP() = %d, want 2", got)
 	}
 	if !strings.Contains(buf.String(), "cannot both be set") {
 		t.Fatalf("stderr = %q, want the flag-conflict guard message", buf.String())

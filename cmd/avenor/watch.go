@@ -50,7 +50,7 @@ func validateCursorAgainstLog(offset int64, info os.FileInfo) error {
 }
 
 func runWatch(args []string) int {
-	return runDeclared("watch", args, handleWatch)
+	return runDeclared(append([]string{"watch"}, args...), os.Stdout, os.Stderr)
 }
 
 // handleWatch digests one log file; follow mode owns its signal handling.

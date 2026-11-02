@@ -38,7 +38,7 @@ type awaitOptions struct {
 
 // runAwait implements the socket-backed `avenor await` command.
 func runAwait(args []string) int {
-	return runDeclared("await", args, handleAwait)
+	return runDeclared(append([]string{"await"}, args...), os.Stdout, os.Stderr)
 }
 
 // handleAwait waits for the run to reach the requested state; the exit code
