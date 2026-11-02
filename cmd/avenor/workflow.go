@@ -11,11 +11,6 @@ import (
 	clicontract "github.com/sdougbrown/cli-contract"
 )
 
-// runWorkflowTo is the testable form of runWorkflow.
-func runWorkflowTo(args []string, stdout, stderr io.Writer) int {
-	return runDeclared(append([]string{"workflow"}, args...), stdout, stderr)
-}
-
 // workflowClient dials the control socket named by the persistent --socket
 // flag.
 func workflowClient(inv clicontract.Invocation) (*client.Client, error) {

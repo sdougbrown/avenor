@@ -41,8 +41,8 @@ func TestRunStableJoinsInheritedTreeBudget(t *testing.T) {
 	// An overlong Unix-socket path fails in Listen without probing an existing
 	// path. A directory at the socket path can make Unix Dial block on Linux.
 	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200))
-	if code := runStable([]string{"--control-socket", socketPath}); code != 1 {
-		t.Fatalf("runStable() = %d, want 1", code)
+	if code := runDeclared([]string{"stable", "--control-socket", socketPath}, os.Stdout, os.Stderr); code != 1 {
+		t.Fatalf("stable() = %d, want 1", code)
 	}
 	if _, err := os.Stat(root.Path()); err != nil {
 		t.Fatalf("inherited root tree budget was removed: %v", err)
@@ -64,9 +64,9 @@ func TestRunStableWritesTombstoneOnStartFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code := runStable([]string{"--control-socket", socketPath})
+	code := runDeclared([]string{"stable", "--control-socket", socketPath}, os.Stdout, os.Stderr)
 	if code != 1 {
-		t.Fatalf("runStable() = %d, want 1", code)
+		t.Fatalf("stable() = %d, want 1", code)
 	}
 
 	data, err := os.ReadFile(tombstonePath)
@@ -94,8 +94,8 @@ func TestRunStableWorkflowRootFlagParses(t *testing.T) {
 	tmpDir := stableTestEnv(t)
 	socketPath := filepath.Join(tmpDir, strings.Repeat("s", 200)) // fails fast in Listen
 	dir := filepath.Join(tmpDir, "wfroot")
-	if code := runStable([]string{"--control-socket", socketPath, "--workflow-root", dir}); code != 1 {
-		t.Fatalf("runStable() = %d, want 1 (start failure on bad socket)", code)
+	if code := runDeclared([]string{"stable", "--control-socket", socketPath, "--workflow-root", dir}, os.Stdout, os.Stderr); code != 1 {
+		t.Fatalf("stable() = %d, want 1 (start failure on bad socket)", code)
 	}
 	// Reaching a start failure is only possible after the flag parsed; the
 	// tombstone confirms Run() executed.
@@ -129,8 +129,8 @@ func TestRunStableIdempotencyCapacityGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, cap := range []string{"0", "-5"} {
-		if code := runStable([]string{"--control-socket", socketPath, "--idempotency-capacity", cap}); code != 2 {
-			t.Fatalf("runStable(capacity %s) = %d, want 2", cap, code)
+		if code := runDeclared([]string{"stable", "--control-socket", socketPath, "--idempotency-capacity", cap}, os.Stdout, os.Stderr); code != 2 {
+			t.Fatalf("stable(capacity %s) = %d, want 2", cap, code)
 		}
 		data, err := os.ReadFile(tombstonePath)
 		if err != nil {
@@ -143,8 +143,8 @@ func TestRunStableIdempotencyCapacityGuard(t *testing.T) {
 
 	// A valid capacity passes flag validation: Run executes and fails at the
 	// control socket, overwriting the tombstone with reason=start_failed.
-	if code := runStable([]string{"--control-socket", socketPath, "--idempotency-capacity", "64"}); code != 1 {
-		t.Fatalf("runStable(capacity 64) = %d, want 1 (start failure)", code)
+	if code := runDeclared([]string{"stable", "--control-socket", socketPath, "--idempotency-capacity", "64"}, os.Stdout, os.Stderr); code != 1 {
+		t.Fatalf("stable(capacity 64) = %d, want 1 (start failure)", code)
 	}
 	data, err := os.ReadFile(tombstonePath)
 	if err != nil {
@@ -173,7 +173,7 @@ func TestRunStableIdempotencyCapacityFlagPropagation(t *testing.T) {
 	}
 	t.Cleanup(func() { newSupervisorFn = orig })
 
-	_ = runStable([]string{"--control-socket", socketPath, "--idempotency-capacity", "7"})
+	_ = runDeclared([]string{"stable", "--control-socket", socketPath, "--idempotency-capacity", "7"}, os.Stdout, os.Stderr)
 	if captured == nil {
 		t.Fatal("config was not captured; the constructor seam was not hit")
 	}
@@ -199,10 +199,11 @@ func TestRunStableBrokerParentFlagPropagation(t *testing.T) {
 	t.Cleanup(func() { newSupervisorFn = orig })
 
 	t.Setenv(token.EnvBrokerParentToken, "tok")
-	_ = runStable([]string{
+	_ = runDeclared([]string{
+		"stable",
 		"--control-socket", socketPath,
 		"--broker-parent-url", "http://127.0.0.1:9",
-	})
+	}, os.Stdout, os.Stderr)
 	if captured == nil {
 		t.Fatal("config was not captured; the constructor seam was not hit")
 	}
@@ -234,7 +235,7 @@ func TestRunStableBrokerParentTokenWithoutURL(t *testing.T) {
 	// Nonempty env credential; no parent URL (the flag stays at its empty
 	// default).
 	t.Setenv(token.EnvBrokerParentToken, "tok")
-	_ = runStable([]string{"--control-socket", socketPath})
+	_ = runDeclared([]string{"stable", "--control-socket", socketPath}, os.Stdout, os.Stderr)
 	if captured == nil {
 		t.Fatal("config was not captured; the constructor seam was not hit (the credential guard must not fire when the URL is empty)")
 	}
@@ -271,7 +272,7 @@ func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
 	}()
 
 	t.Setenv(token.EnvBrokerParentToken, "")
-	code := runStable([]string{"--control-socket", socketPath, "--broker-parent-url", "http://127.0.0.1:9"})
+	code := runDeclared([]string{"stable", "--control-socket", socketPath, "--broker-parent-url", "http://127.0.0.1:9"}, os.Stdout, os.Stderr)
 	_ = w.Close()
 	os.Stderr = oldStderr
 	var stderr bytes.Buffer
@@ -279,7 +280,7 @@ func TestRunStableBrokerParentURLRequiresToken(t *testing.T) {
 		t.Fatalf("read captured stderr: %v", err)
 	}
 	if code != 2 {
-		t.Fatalf("runStable(url without token) = %d, want 2", code)
+		t.Fatalf("stable(url without token) = %d, want 2", code)
 	}
 	if !strings.Contains(stderr.String(), token.EnvBrokerParentToken) {
 		t.Fatalf("stderr = %q, want the %s guard error", stderr.String(), token.EnvBrokerParentToken)
@@ -310,7 +311,7 @@ func TestRunStableBrokerParentURLFromEnv(t *testing.T) {
 
 			t.Setenv(token.EnvBrokerParentURL, tc.env)
 			t.Setenv(token.EnvBrokerParentToken, "env-token")
-			_ = runStable([]string{"--control-socket", socketPath})
+			_ = runDeclared([]string{"stable", "--control-socket", socketPath}, os.Stdout, os.Stderr)
 			if captured == nil {
 				t.Fatal("config was not captured; the constructor seam was not hit")
 			}
@@ -340,10 +341,11 @@ func TestRunStableBrokerParentURLFlagOverridesEnv(t *testing.T) {
 
 	t.Setenv(token.EnvBrokerParentURL, "http://127.0.0.1:8")
 	t.Setenv(token.EnvBrokerParentToken, "tok")
-	_ = runStable([]string{
+	_ = runDeclared([]string{
+		"stable",
 		"--control-socket", socketPath,
 		"--broker-parent-url", "http://127.0.0.1:9",
-	})
+	}, os.Stdout, os.Stderr)
 	if captured == nil {
 		t.Fatal("config was not captured; the constructor seam was not hit")
 	}
@@ -376,7 +378,7 @@ func TestRunStableBrokerParentEnvURLRequiresToken(t *testing.T) {
 	}()
 
 	t.Setenv(token.EnvBrokerParentURL, "http://127.0.0.1:9")
-	code := runStable([]string{"--control-socket", socketPath})
+	code := runDeclared([]string{"stable", "--control-socket", socketPath}, os.Stdout, os.Stderr)
 	_ = w.Close()
 	os.Stderr = oldStderr
 	var stderr bytes.Buffer
@@ -384,7 +386,7 @@ func TestRunStableBrokerParentEnvURLRequiresToken(t *testing.T) {
 		t.Fatalf("read captured stderr: %v", err)
 	}
 	if code != 2 {
-		t.Fatalf("runStable(env url without token) = %d, want 2", code)
+		t.Fatalf("stable(env url without token) = %d, want 2", code)
 	}
 	for _, want := range []string{token.EnvBrokerParentToken, token.EnvBrokerParentURL} {
 		if !strings.Contains(stderr.String(), want) {
@@ -424,7 +426,7 @@ func TestRunStableBrokerAdvertiseURLPropagation(t *testing.T) {
 			if tc.flag != "" {
 				args = append(args, "--broker-advertise-url", tc.flag)
 			}
-			_ = runStable(args)
+			_ = runDeclared(append([]string{"stable"}, args...), os.Stdout, os.Stderr)
 			if captured == nil {
 				t.Fatal("config was not captured; the constructor seam was not hit")
 			}
@@ -461,7 +463,7 @@ func TestRunStableInvalidBrokerAdvertiseURLExits(t *testing.T) {
 	// regression is reported while the suite is still usable.
 	exited := make(chan int, 1)
 	go func() {
-		exited <- runStable([]string{"--control-socket", socketPath, "--broker-advertise-url", "hub.example.com:8787"})
+		exited <- runDeclared([]string{"stable", "--control-socket", socketPath, "--broker-advertise-url", "hub.example.com:8787"}, os.Stdout, os.Stderr)
 	}()
 	var code int
 	select {
@@ -476,7 +478,7 @@ func TestRunStableInvalidBrokerAdvertiseURLExits(t *testing.T) {
 		t.Fatalf("read captured stderr: %v", err)
 	}
 	if code != 1 {
-		t.Fatalf("runStable(invalid advertise url) = %d, want 1", code)
+		t.Fatalf("stable(invalid advertise url) = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "broker advertise URL") {
 		t.Fatalf("stderr = %q, want it to name the rejected advertised URL", stderr.String())
@@ -497,7 +499,7 @@ func TestRunStableBrokerAddrFlagPropagation(t *testing.T) {
 	}
 	t.Cleanup(func() { newSupervisorFn = orig })
 
-	_ = runStable([]string{"--control-socket", socketPath, "--broker-addr", "127.0.0.1:0"})
+	_ = runDeclared([]string{"stable", "--control-socket", socketPath, "--broker-addr", "127.0.0.1:0"}, os.Stdout, os.Stderr)
 	if captured == nil {
 		t.Fatal("config was not captured; the constructor seam was not hit")
 	}
@@ -525,7 +527,7 @@ func TestRunStableWildcardBrokerAddrRejected(t *testing.T) {
 		_ = r.Close()
 	}()
 
-	code := runStable([]string{"--control-socket", socketPath, "--broker-addr", "0.0.0.0:0"})
+	code := runDeclared([]string{"stable", "--control-socket", socketPath, "--broker-addr", "0.0.0.0:0"}, os.Stdout, os.Stderr)
 	_ = w.Close()
 	os.Stderr = oldStderr
 	var stderr bytes.Buffer
@@ -533,7 +535,7 @@ func TestRunStableWildcardBrokerAddrRejected(t *testing.T) {
 		t.Fatalf("read captured stderr: %v", err)
 	}
 	if code != 1 {
-		t.Fatalf("runStable(wildcard broker addr) = %d, want 1", code)
+		t.Fatalf("stable(wildcard broker addr) = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "wildcard") {
 		t.Fatalf("stderr = %q, want the wildcard-bind refusal", stderr.String())
@@ -568,7 +570,7 @@ func TestRunStableOccupiedBrokerAddrFailsStartup(t *testing.T) {
 		_ = r.Close()
 	}()
 
-	code := runStable([]string{"--control-socket", socketPath, "--broker-addr", addr})
+	code := runDeclared([]string{"stable", "--control-socket", socketPath, "--broker-addr", addr}, os.Stdout, os.Stderr)
 	_ = w.Close()
 	os.Stderr = oldStderr
 	var stderr bytes.Buffer
@@ -576,7 +578,7 @@ func TestRunStableOccupiedBrokerAddrFailsStartup(t *testing.T) {
 		t.Fatalf("read captured stderr: %v", err)
 	}
 	if code != 1 {
-		t.Fatalf("runStable(occupied broker addr) = %d, want 1", code)
+		t.Fatalf("stable(occupied broker addr) = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), addr) {
 		t.Fatalf("stderr = %q, want it to name %q", stderr.String(), addr)
@@ -601,11 +603,12 @@ func TestRunStableBrokerParentTokenFlagOverridesEnv(t *testing.T) {
 	t.Cleanup(func() { newSupervisorFn = orig })
 
 	t.Setenv(token.EnvBrokerParentToken, "env-token")
-	_ = runStable([]string{
+	_ = runDeclared([]string{
+		"stable",
 		"--control-socket", socketPath,
 		"--broker-parent-url", "http://127.0.0.1:9",
 		"--broker-parent-token", "flag-token",
-	})
+	}, os.Stdout, os.Stderr)
 	if captured == nil {
 		t.Fatal("config was not captured; the constructor seam was not hit")
 	}

@@ -20,7 +20,7 @@ func app() *clicontract.App {
 		Version:             Version,
 		ErrorPrefix:         "avenor",
 		HandlerOwnedSignals: true,
-		RootLong:            "Avenor orchestrates agent runs. Commands not listed here (control, workflow, run) are still on the pre-library dispatch and work normally during the migration.",
+		RootLong:            "Avenor orchestrates agent runs. The run command is not listed here yet: it is still on its pre-library dispatch and works normally.",
 
 		VersionTemplate: "avenor v{{.Version}}\n",
 		Commands: []*clicontract.Command{

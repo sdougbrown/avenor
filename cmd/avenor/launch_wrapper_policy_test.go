@@ -61,13 +61,14 @@ func captureStablePolicy(t *testing.T, args ...string) stable.Config {
 	t.Cleanup(func() { newSupervisorFn = orig })
 	func() {
 		defer func() { _ = recover() }()
-		_ = runStable(stableArgs(t, args...))
+		_ = runDeclared(append([]string{"stable"}, stableArgs(t, args...)...), os.Stdout, os.Stderr)
 	}()
 	return captured
 }
 
-// captureMCPPolicyPath runs the mcp command through the declared surface with
-// returns the policy path forwarded in the MCP server options.
+// captureMCPPolicyPath runs the mcp command through the declared surface with a
+// patched server constructor and returns the policy path forwarded in the MCP
+// server options.
 func captureMCPPolicyPath(t *testing.T, args ...string) string {
 	t.Helper()
 	var captured mcpserver.Options
@@ -140,8 +141,8 @@ func TestCommandsFailOnInvalidWellKnownPolicy(t *testing.T) {
 	}
 	stubPolicyEnv(t, nil, home)
 
-	if exit := runStable(stableArgs(t)); exit != 1 {
-		t.Fatalf("runStable() = %d, want 1 for an invalid well-known policy", exit)
+	if exit := runDeclared(append([]string{"stable"}, stableArgs(t)...), os.Stdout, os.Stderr); exit != 1 {
+		t.Fatalf("stable() = %d, want 1 for an invalid well-known policy", exit)
 	}
 	if exit := runDeclared([]string{"mcp"}, os.Stdout, os.Stderr); exit != 1 {
 		t.Fatalf("runDeclared() = %d, want 1 for an invalid well-known policy", exit)
@@ -152,8 +153,8 @@ func TestCommandsFailOnMissingEnvPolicyFile(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent.json")
 	stubPolicyEnv(t, map[string]string{stable.EnvMCPLaunchWrapperPolicy: missing}, t.TempDir())
 
-	if exit := runStable(stableArgs(t)); exit != 1 {
-		t.Fatalf("runStable() = %d, want 1 for a missing env policy file", exit)
+	if exit := runDeclared(append([]string{"stable"}, stableArgs(t)...), os.Stdout, os.Stderr); exit != 1 {
+		t.Fatalf("stable() = %d, want 1 for a missing env policy file", exit)
 	}
 	if exit := runDeclared([]string{"mcp"}, os.Stdout, os.Stderr); exit != 1 {
 		t.Fatalf("runDeclared() = %d, want 1 for a missing env policy file", exit)

@@ -4,15 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/sdougbrown/avenor/internal/channeltools"
 	"github.com/sdougbrown/cli-contract"
 )
-
-func runChannelTools(args []string) int {
-	return runDeclared(append([]string{"channel-tools"}, args...), os.Stdout, os.Stderr)
-}
 
 // handleChannelTools runs the channel tools loop; the run-id, token, and
 // broker-url flags are required.

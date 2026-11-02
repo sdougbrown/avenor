@@ -63,7 +63,7 @@ func (avenorAdapter) ExitCode(inv clicontract.Invocation, result any, handlerErr
 }
 
 // runDeclared dispatches through the same clicontract.Run path production
-// uses, with injected streams for the run* wrappers the tests call. The
+// uses, with injected streams so tests can capture command output. The
 // adapter's Write is a no-op and HandlerOwnedSignals is set, so the only
 // difference from production is the streams.
 func runDeclared(argv []string, stdout, stderr io.Writer) int {

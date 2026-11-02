@@ -34,7 +34,7 @@ func TestRunStableForwardsValidPolicyToSupervisorConfig(t *testing.T) {
 	// Run panics or fails on the nil supervisor; capture happens first.
 	func() {
 		defer func() { _ = recover() }()
-		_ = runStable([]string{"--control-socket", filepath.Join(t.TempDir(), "s.sock"), "--mcp-launch-wrapper-policy", path})
+		_ = runDeclared([]string{"stable", "--control-socket", filepath.Join(t.TempDir(), "s.sock"), "--mcp-launch-wrapper-policy", path}, os.Stdout, os.Stderr)
 	}()
 	if captured.MCPLaunchWrapperPolicy == nil {
 		t.Fatal("Config.MCPLaunchWrapperPolicy = nil, want loaded policy")
@@ -55,7 +55,7 @@ func TestRunStableOmitsPolicyByDefault(t *testing.T) {
 	defer func() { newSupervisorFn = orig }()
 	func() {
 		defer func() { _ = recover() }()
-		_ = runStable([]string{"--control-socket", filepath.Join(t.TempDir(), "s.sock")})
+		_ = runDeclared([]string{"stable", "--control-socket", filepath.Join(t.TempDir(), "s.sock")}, os.Stdout, os.Stderr)
 	}()
 	if captured.MCPLaunchWrapperPolicy != nil {
 		t.Fatal("Config.MCPLaunchWrapperPolicy set without the flag, want nil")
@@ -68,15 +68,15 @@ func TestRunStableRejectsMalformedMCPLaunchWrapperPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	// newSupervisorFn is never reached: the malformed policy must fail startup.
-	exit := runStable([]string{"--control-socket", filepath.Join(t.TempDir(), "s.sock"), "--mcp-launch-wrapper-policy", path})
+	exit := runDeclared([]string{"stable", "--control-socket", filepath.Join(t.TempDir(), "s.sock"), "--mcp-launch-wrapper-policy", path}, os.Stdout, os.Stderr)
 	if exit != 1 {
-		t.Fatalf("runStable() = %d, want 1", exit)
+		t.Fatalf("stable() = %d, want 1", exit)
 	}
 }
 
 func TestRunStableMissingPolicyFileFails(t *testing.T) {
-	exit := runStable([]string{"--control-socket", filepath.Join(t.TempDir(), "s.sock"), "--mcp-launch-wrapper-policy", filepath.Join(t.TempDir(), "absent.json")})
+	exit := runDeclared([]string{"stable", "--control-socket", filepath.Join(t.TempDir(), "s.sock"), "--mcp-launch-wrapper-policy", filepath.Join(t.TempDir(), "absent.json")}, os.Stdout, os.Stderr)
 	if exit != 1 {
-		t.Fatalf("runStable() = %d, want 1", exit)
+		t.Fatalf("stable() = %d, want 1", exit)
 	}
 }
