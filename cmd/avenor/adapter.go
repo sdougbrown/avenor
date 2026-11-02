@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
-	"os"
 
 	"github.com/sdougbrown/cli-contract"
 )
@@ -48,28 +46,12 @@ func (avenorAdapter) ExitCode(inv clicontract.Invocation, result any, handlerErr
 	return 0
 }
 
-// runDeclared parses command args (without the command name) through the
-// declared tree and dispatches to one handler with the ambient streams: the
-// shared path for the run* wrappers the tests call directly.
-func runDeclared(command string, args []string, handle func(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error)) int {
-	inv, err := parseInvocation(append([]string{command}, args...))
-	if err != nil {
-		return 2
-	}
-	stderr := os.Stderr
-	result, err := handle(context.Background(), inv, stderr)
-	if ec, ok := result.(exitCode); ok {
-		return int(ec)
-	}
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		var ue *clicontract.UsageError
-		if errors.As(err, &ue) {
-			return 2
-		}
-		return 1
-	}
-	return 0
+// runDeclared dispatches through the same clicontract.Run path production
+// uses, with injected streams for the run* wrappers the tests call. The
+// adapter's Write is a no-op and HandlerOwnedSignals is set, so the only
+// difference from production is the streams.
+func runDeclared(argv []string, stdout, stderr io.Writer) int {
+	return clicontract.Run(app(), avenorAdapter{}, argv, stdout, stderr)
 }
 
 // parseInvocation parses args against the declared surface.

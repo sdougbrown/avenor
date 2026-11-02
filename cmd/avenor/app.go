@@ -21,7 +21,9 @@ func app() *clicontract.App {
 		Version:             Version,
 		ErrorPrefix:         "avenor",
 		HandlerOwnedSignals: true,
-		VersionTemplate:     "avenor v{{.Version}}\n",
+		RootLong:            "Avenor orchestrates agent runs. Commands not listed here (answer, await, watch, control, workflow, mcp, run) are still on the pre-library dispatch and work normally during the migration.",
+
+		VersionTemplate: "avenor v{{.Version}}\n",
 		Commands: []*clicontract.Command{
 			{
 				Name:  "probe",
@@ -42,7 +44,7 @@ func app() *clicontract.App {
 					{Name: "http-debug", Kind: clicontract.String, Usage: "http debug adapter bind address"},
 					{Name: "max-runtimes", Kind: clicontract.Int, Usage: "maximum concurrent child runtimes", Default: 16},
 					{Name: "max-tree-budget", Kind: clicontract.Int, Usage: "maximum concurrent runtimes across the whole supervisor tree including nested supervisors (0 uses the default)", Default: admission.DefaultTreeBudget},
-					{Name: "idempotency-capacity", Kind: clicontract.Int, Usage: "idempotent-spawn store capacity: completed entries plus in-flight reservations (0 uses the default)", Default: 1024},
+					{Name: "idempotency-capacity", Kind: clicontract.Int, Usage: "idempotent-spawn store capacity: completed entries plus in-flight reservations (must be > 0)", Default: 1024},
 					{Name: "idle-timeout", Kind: clicontract.Duration, Usage: "exit after this duration with no live child runtimes (parked runtimes count as live); control connections do not delay it"},
 					{Name: "shutdown-timeout", Kind: clicontract.Duration, Usage: "graceful shutdown timeout before killing children", Default: 10 * time.Second},
 					{Name: "parked-timeout", Kind: clicontract.Duration, Usage: "how long a finished runtime stays parked awaiting a follow-up prompt before it is reaped (0 = park until shutdown)", Default: 30 * time.Minute},

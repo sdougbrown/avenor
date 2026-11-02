@@ -128,7 +128,7 @@ func TestRunStableIdempotencyCapacityGuard(t *testing.T) {
 	if err := os.WriteFile(tombstonePath, []byte(marker), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, cap := range []string{"-5"} {
+	for _, cap := range []string{"0", "-5"} {
 		if code := runStable([]string{"--control-socket", socketPath, "--idempotency-capacity", cap}); code != 2 {
 			t.Fatalf("runStable(capacity %s) = %d, want 2", cap, code)
 		}

@@ -15,7 +15,7 @@ import (
 )
 
 func runProbe(args []string) int {
-	return runDeclared("probe", args, handleProbe)
+	return runDeclared(append([]string{"probe"}, args...), os.Stdout, os.Stderr)
 }
 
 // handleProbe runs the probe and reports the stop reason's exit code.

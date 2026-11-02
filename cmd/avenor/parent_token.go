@@ -4,22 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/sdougbrown/avenor/internal/token"
 	"github.com/sdougbrown/cli-contract"
 )
-
-// runParentToken implements `avenor parent-token`.
-func runParentToken(args []string) int {
-	credential, err := token.NewHexToken()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "avenor parent-token:", err)
-		return 1
-	}
-	fmt.Fprintln(os.Stdout, credential)
-	return 0
-}
 
 // runParentTokenTo is the testable form of runParentToken.
 func runParentTokenTo(stdout, stderr io.Writer, args ...string) int {

@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/stable"
@@ -19,7 +18,7 @@ import (
 var newSupervisorFn = stable.NewSupervisor
 
 func runStable(args []string) int {
-	return runDeclared("stable", args, handleStable)
+	return runDeclared(append([]string{"stable"}, args...), os.Stdout, os.Stderr)
 }
 
 // handleStable runs the supervisor until it exits; the supervisor owns
@@ -29,9 +28,9 @@ func handleStable(ctx context.Context, inv clicontract.Invocation, stderr io.Wri
 	if controlSocket == "" {
 		return nil, usageErrorf("avenor stable: --control-socket is required")
 	}
-	idempotencyCapacity := orDefault(inv.Ints["idempotency-capacity"], 1024)
-	if idempotencyCapacity < 0 {
-		return nil, usageErrorf("avenor stable: --idempotency-capacity must not be negative")
+	idempotencyCapacity := inv.Ints["idempotency-capacity"]
+	if idempotencyCapacity <= 0 {
+		return nil, usageErrorf("avenor stable: --idempotency-capacity must be greater than 0")
 	}
 
 	credential := inv.Flags["broker-parent-token"]
@@ -71,14 +70,14 @@ func handleStable(ctx context.Context, inv clicontract.Invocation, stderr io.Wri
 		ControlSocket:              controlSocket,
 		TombstoneFile:              tombstoneFile,
 		HTTPDebug:                  inv.Flags["http-debug"],
-		MaxRuntimes:                orDefault(inv.Ints["max-runtimes"], 16),
+		MaxRuntimes:                inv.Ints["max-runtimes"],
 		MaxTreeBudget:              inv.Ints["max-tree-budget"],
 		IdempotencyCapacity:        idempotencyCapacity,
 		TreeBudgetFile:             treeBudgetFile,
 		IdleTimeout:                inv.Durations["idle-timeout"],
-		ShutdownTimeout:            orDefault(inv.Durations["shutdown-timeout"], 10*time.Second),
-		ParkedRuntimeTimeout:       orDefault(inv.Durations["parked-timeout"], 30*time.Minute),
-		WorkflowLeaseSweepInterval: orDefault(inv.Durations["lease-sweep-interval"], stable.DefaultLeaseSweepInterval),
+		ShutdownTimeout:            inv.Durations["shutdown-timeout"],
+		ParkedRuntimeTimeout:       inv.Durations["parked-timeout"],
+		WorkflowLeaseSweepInterval: inv.Durations["lease-sweep-interval"],
 		PermissionClaimTimeout:     inv.Durations["permission-claim-timeout"],
 		WorkflowRoot:               inv.Flags["workflow-root"],
 		WorkflowAdapterDir:         inv.Flags["workflow-adapter-dir"],

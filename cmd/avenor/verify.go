@@ -19,7 +19,7 @@ import (
 // prompt presence, roster entry references) and recursively validates nested
 // loop_file/team_file references that are only loaded on demand during a run.
 func runVerify(args []string) int {
-	return runDeclared("verify", args, handleVerify)
+	return runDeclared(append([]string{"verify"}, args...), os.Stdout, os.Stderr)
 }
 
 // handleVerify validates configs and reports each check's outcome; failures

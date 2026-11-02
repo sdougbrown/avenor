@@ -17,7 +17,7 @@ import (
 )
 
 func runBoard(args []string) int {
-	return runDeclared("board", args, handleBoard)
+	return runDeclared(append([]string{"board"}, args...), os.Stdout, os.Stderr)
 }
 
 // handleBoard serves the board UI until a signal arrives; the handler owns
