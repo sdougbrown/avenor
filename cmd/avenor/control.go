@@ -47,9 +47,7 @@ func handleControlStatus(ctx context.Context, inv clicontract.Invocation, stderr
 	if err != nil {
 		return nil, fmt.Errorf("avenor control: status: %w", err)
 	}
-	data, _ := json.MarshalIndent(snap, "", "  ")
-	fmt.Println(string(data))
-	return nil, nil
+	return snap, nil
 }
 
 // handleControlList prints every runtime on the socket.
@@ -63,9 +61,7 @@ func handleControlList(ctx context.Context, inv clicontract.Invocation, stderr i
 	if err != nil {
 		return nil, fmt.Errorf("avenor control: list: %w", err)
 	}
-	data, _ := json.MarshalIndent(runtimes, "", "  ")
-	fmt.Println(string(data))
-	return nil, nil
+	return runtimes, nil
 }
 
 // handleControlTail streams events until the server stops them.
@@ -96,9 +92,7 @@ func handleControlSpawn(ctx context.Context, inv clicontract.Invocation, stderr 
 	if err != nil {
 		return nil, fmt.Errorf("avenor control: spawn: %w", err)
 	}
-	data, _ := json.MarshalIndent(result, "", "  ")
-	fmt.Println(string(data))
-	return nil, nil
+	return result, nil
 }
 
 // handleControlCancel cancels one runtime (or the whole session).
