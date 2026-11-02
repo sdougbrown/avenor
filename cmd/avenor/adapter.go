@@ -64,7 +64,9 @@ func (avenorAdapter) ExitCode(inv clicontract.Invocation, result any, handlerErr
 }
 
 // runDeclared is Avenor's one dispatch path: main passes the process streams,
-// and tests inject their own to capture command output.
+// and tests inject their own to capture what the adapter writes. Handlers
+// that print their own output, such as await's transition lines, write to
+// os.Stdout directly, because the library's HandleFunc has no stdout.
 func runDeclared(argv []string, stdout, stderr io.Writer) int {
 	return clicontract.Run(app(), avenorAdapter{}, argv, stdout, stderr)
 }
