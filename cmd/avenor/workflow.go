@@ -11,10 +11,6 @@ import (
 	clicontract "github.com/sdougbrown/cli-contract"
 )
 
-func runWorkflow(args []string) int {
-	return runDeclared(append([]string{"workflow"}, args...), os.Stdout, os.Stderr)
-}
-
 // runWorkflowTo is the testable form of runWorkflow.
 func runWorkflowTo(args []string, stdout, stderr io.Writer) int {
 	return runDeclared(append([]string{"workflow"}, args...), stdout, stderr)
@@ -89,12 +85,16 @@ func handleWorkflowInstantiate(ctx context.Context, inv clicontract.Invocation, 
 		return nil, err
 	}
 	defer c.Close()
+	instanceData, err := os.ReadFile(requestFile)
+	if err != nil {
+		return nil, fmt.Errorf("avenor workflow: instantiate: %w", err)
+	}
 	var instance struct {
 		Metadata map[string]any    `json:"metadata,omitempty"`
 		Params   map[string]string `json:"params,omitempty"`
 	}
-	if data, err := os.ReadFile(requestFile); err == nil {
-		_ = json.Unmarshal(data, &instance)
+	if err := json.Unmarshal(instanceData, &instance); err != nil {
+		return nil, usageErrorf("avenor workflow: instantiate: request file must be a JSON object: %v", err)
 	}
 	var metadata map[string]any
 	if len(instance.Metadata) > 0 {
@@ -127,6 +127,9 @@ func handleWorkflowStatus(ctx context.Context, inv clicontract.Invocation, stder
 
 // handleWorkflowWait blocks until one workflow instance settles.
 func handleWorkflowWait(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
+	if timeout := inv.Durations["timeout"]; timeout < 0 {
+		return nil, usageErrorf("avenor workflow: wait: --timeout must not be negative")
+	}
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err
@@ -314,6 +317,9 @@ func handleWorkflowUnblock(ctx context.Context, inv clicontract.Invocation, stde
 	defer c.Close()
 	req, err := workflowRequestFile("unblock", requestFile)
 	if err != nil {
+		return nil, err
+	}
+	if err := workflowRequireKeys("unblock", req, []string{"actor", "reason"}); err != nil {
 		return nil, err
 	}
 	fields := make(map[string]any, len(req)+1)
