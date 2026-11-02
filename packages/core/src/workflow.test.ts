@@ -106,9 +106,6 @@ describe('avenor_workflow numeric and timestamp bounds', () => {
     await expect(
       executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: 9223372036854775807 }),
     ).rejects.toThrow('property "after_seq" must be at most 9223372036854775807')
-    await expect(
-      executeWorkflow(provider, { action: 'events', workflow_id: 'wf-1', after_seq: 9223372036854775808 }),
-    ).rejects.toThrow('property "after_seq" must be at most 9223372036854775807')
   })
 
   it('refuses a JSON numeral too large for a JS number by naming the bound, like Go', async () => {
